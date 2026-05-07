@@ -261,6 +261,7 @@ export class ConsensusService {
       repoPath: request.repoPath ?? "",
       mode: request.diffMode,
       baseBranch: request.baseBranch,
+      compareBranch: request.compareBranch,
       commit: request.commit,
       pastedDiff: request.pastedDiff
     });

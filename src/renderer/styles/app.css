@@ -290,6 +290,14 @@ button {
   box-shadow: 0 0 0 3px rgba(61, 125, 104, 0.16);
 }
 
+.field input:disabled,
+.field textarea:disabled,
+.field select:disabled {
+  background: #f3eee6;
+  color: #8a8379;
+  cursor: not-allowed;
+}
+
 .repo-row,
 .key-row,
 .model-row {
@@ -338,6 +346,19 @@ button {
 .participant-pill.selected {
   border-color: #3d7d68;
   background: #e0f0e8;
+}
+
+.branch-compare-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.branch-select {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
 }
 
 .secondary-button {

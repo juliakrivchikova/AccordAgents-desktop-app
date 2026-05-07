@@ -8,6 +8,24 @@ function cleanLines(value: string): string[] {
     .filter(Boolean);
 }
 
+function cleanBranchRefs(value: string): string[] {
+  const seen = new Set<string>();
+  const branches: string[] = [];
+
+  for (const line of value.split(/\r?\n/)) {
+    const [fullRef = "", shortRef = "", symRef = ""] = line.split("\t").map((part) => part.trim());
+    if (!shortRef || symRef || fullRef.endsWith("/HEAD")) {
+      continue;
+    }
+    if (!seen.has(shortRef)) {
+      seen.add(shortRef);
+      branches.push(shortRef);
+    }
+  }
+
+  return branches;
+}
+
 function gitError(error: unknown): string {
   if (error instanceof CommandError) {
     return (error.result.stderr || error.result.stdout || error.message).trim();
@@ -21,7 +39,10 @@ export class GitService {
       await runCommand("git", ["rev-parse", "--is-inside-work-tree"], { cwd: repoPath, timeoutMs: 8000 });
       const [branch, branches, status] = await Promise.all([
         runCommand("git", ["branch", "--show-current"], { cwd: repoPath, timeoutMs: 8000 }).catch(() => ({ stdout: "" })),
-        runCommand("git", ["branch", "--format=%(refname:short)"], { cwd: repoPath, timeoutMs: 8000 }).catch(() => ({ stdout: "" })),
+        runCommand("git", ["for-each-ref", "--format=%(refname)%09%(refname:short)%09%(symref)", "refs/heads", "refs/remotes"], {
+          cwd: repoPath,
+          timeoutMs: 8000
+        }).catch(() => ({ stdout: "" })),
         runCommand("git", ["status", "--short"], { cwd: repoPath, timeoutMs: 8000 }).catch(() => ({ stdout: "" }))
       ]);
 
@@ -29,7 +50,7 @@ export class GitService {
         repoPath,
         isRepo: true,
         currentBranch: branch.stdout.trim() || undefined,
-        branches: cleanLines(branches.stdout),
+        branches: cleanBranchRefs(branches.stdout),
         statusLines: cleanLines(status.stdout)
       };
     } catch (error) {
@@ -74,12 +95,14 @@ export class GitService {
         .join("\n\n");
     } else if (request.mode === "base") {
       const baseBranch = request.baseBranch?.trim();
-      if (!baseBranch) {
-        throw new Error("Base branch is required for branch comparison.");
+      const compareBranch = request.compareBranch?.trim();
+      if (!baseBranch || !compareBranch) {
+        throw new Error("Base and compare branches are required for branch comparison.");
       }
-      title = `Changes against ${baseBranch}`;
+      title = `Changes from ${baseBranch} to ${compareBranch}`;
       metadata.baseBranch = baseBranch;
-      diff = await this.gitOutput(repoPath, ["diff", "--no-ext-diff", `${baseBranch}...HEAD`, "--"]);
+      metadata.compareBranch = compareBranch;
+      diff = await this.gitOutput(repoPath, ["diff", "--no-ext-diff", `${baseBranch}...${compareBranch}`, "--"]);
     } else if (request.mode === "commit") {
       const commit = request.commit?.trim();
       if (!commit) {

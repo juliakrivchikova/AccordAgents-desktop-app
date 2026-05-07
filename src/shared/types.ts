@@ -67,6 +67,7 @@ export interface GitDiffRequest {
   repoPath: string;
   mode: GitDiffMode;
   baseBranch?: string;
+  compareBranch?: string;
   commit?: string;
   pastedDiff?: string;
 }
@@ -86,6 +87,7 @@ export interface ReviewRequest {
   repoPath?: string;
   diffMode?: GitDiffMode;
   baseBranch?: string;
+  compareBranch?: string;
   commit?: string;
   pastedDiff?: string;
   participants: ParticipantConfig[];

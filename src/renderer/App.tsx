@@ -44,10 +44,12 @@ const DIFF_MODES: Array<{ value: GitDiffMode; label: string }> = [
   { value: "uncommitted", label: "Uncommitted" },
   { value: "working", label: "Unstaged" },
   { value: "staged", label: "Staged" },
-  { value: "base", label: "Base branch" },
+  { value: "base", label: "Branches" },
   { value: "commit", label: "Commit" },
   { value: "pasted", label: "Pasted diff" }
 ];
+
+const BRANCH_COMPARE_HELP = "Changes committed on the compare branch since it diverged from the base branch.";
 
 const POINT_SEVERITIES: FindingSeverity[] = ["Critical", "High", "Medium", "Low"];
 
@@ -74,6 +76,7 @@ function App(): JSX.Element {
   const [repoInfo, setRepoInfo] = useState<GitRepoInfo | undefined>();
   const [diffMode, setDiffMode] = useState<GitDiffMode>("uncommitted");
   const [baseBranch, setBaseBranch] = useState("main");
+  const [compareBranch, setCompareBranch] = useState("");
   const [commit, setCommit] = useState("");
   const [pastedDiff, setPastedDiff] = useState("");
   const [diffPreview, setDiffPreview] = useState("");
@@ -130,6 +133,18 @@ function App(): JSX.Element {
     });
   }, [agents, kind, repoPath, settings.providers]);
 
+  const branchOptions = useMemo(() => {
+    if (!repoInfo?.isRepo) {
+      return [];
+    }
+    return repoInfo.branches;
+  }, [repoInfo]);
+
+  const branchSelectDisabled = !repoInfo?.isRepo || branchOptions.length === 0;
+  const selectedBaseBranch = branchSelectDisabled || !branchOptions.includes(baseBranch) ? "" : baseBranch;
+  const selectedCompareBranch = branchSelectDisabled || !branchOptions.includes(compareBranch) ? "" : compareBranch;
+  const branchSelectPlaceholder = !repoInfo?.isRepo ? "Select a repository first" : branchOptions.length === 0 ? "No branches found" : "Select branch";
+
   async function refreshAll(): Promise<void> {
     setError(undefined);
     try {
@@ -177,8 +192,17 @@ function App(): JSX.Element {
     try {
       const info = await window.consensus.inspectRepo(path.trim());
       setRepoInfo(info);
-      if (info.currentBranch && !baseBranch) {
-        setBaseBranch(info.currentBranch);
+      if (info.isRepo && info.branches.length > 0) {
+        const currentBranch = info.currentBranch && info.branches.includes(info.currentBranch) ? info.currentBranch : undefined;
+        const defaultCompareBranch = currentBranch ?? info.branches[0];
+        const defaultBaseBranch =
+          info.branches.find((branch) => branch === "main" && branch !== defaultCompareBranch) ??
+          info.branches.find((branch) => branch === "master" && branch !== defaultCompareBranch) ??
+          info.branches.find((branch) => branch !== defaultCompareBranch) ??
+          defaultCompareBranch;
+
+        setCompareBranch((selected) => (info.branches.includes(selected) ? selected : defaultCompareBranch));
+        setBaseBranch((selected) => (info.branches.includes(selected) ? selected : defaultBaseBranch));
       }
     } catch (caught) {
       setError(errorText(caught));
@@ -192,6 +216,7 @@ function App(): JSX.Element {
         repoPath,
         mode: diffMode,
         baseBranch,
+        compareBranch,
         commit,
         pastedDiff
       });
@@ -254,6 +279,7 @@ function App(): JSX.Element {
         repoPath: repoPath.trim() || undefined,
         diffMode: kind === "code-review" ? diffMode : undefined,
         baseBranch,
+        compareBranch,
         commit,
         pastedDiff,
         participants,
@@ -495,7 +521,14 @@ function App(): JSX.Element {
                   <div className="repo-row">
                     <label className="field grow">
                       <span>Repository</span>
-                      <input value={repoPath} onChange={(event) => setRepoPath(event.target.value)} onBlur={() => void inspectRepo()} />
+                      <input
+                        value={repoPath}
+                        onChange={(event) => {
+                          setRepoPath(event.target.value);
+                          setRepoInfo(undefined);
+                        }}
+                        onBlur={() => void inspectRepo()}
+                      />
                     </label>
                     <button className="tool-button" onClick={() => void selectRepo()} title="Select repository">
                       <FolderOpen size={17} />
@@ -533,10 +566,52 @@ function App(): JSX.Element {
                   </div>
 
                   {diffMode === "base" && (
-                    <label className="field">
-                      <span>Base branch</span>
-                      <input value={baseBranch} onChange={(event) => setBaseBranch(event.target.value)} />
-                    </label>
+                    <div className="field">
+                      <span>Branches</span>
+                      <div className="branch-compare-row">
+                        <label className="branch-select">
+                          <span>Base branch</span>
+                          <select
+                            value={selectedBaseBranch}
+                            onChange={(event) => setBaseBranch(event.target.value)}
+                            aria-describedby="branch-compare-help"
+                            disabled={branchSelectDisabled}
+                            title={BRANCH_COMPARE_HELP}
+                          >
+                            <option value="" disabled>
+                              {branchSelectPlaceholder}
+                            </option>
+                            {branchOptions.map((branch) => (
+                              <option key={branch} value={branch}>
+                                {branch}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="branch-select">
+                          <span>Compare branch</span>
+                          <select
+                            value={selectedCompareBranch}
+                            onChange={(event) => setCompareBranch(event.target.value)}
+                            aria-describedby="branch-compare-help"
+                            disabled={branchSelectDisabled}
+                            title={BRANCH_COMPARE_HELP}
+                          >
+                            <option value="" disabled>
+                              {branchSelectPlaceholder}
+                            </option>
+                            {branchOptions.map((branch) => (
+                              <option key={branch} value={branch}>
+                                {branch}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                      <div className="inline-hint" id="branch-compare-help">
+                        {BRANCH_COMPARE_HELP}
+                      </div>
+                    </div>
                   )}
                   {diffMode === "commit" && (
                     <label className="field">
