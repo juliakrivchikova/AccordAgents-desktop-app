@@ -2,18 +2,24 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import type {
+  AddChatParticipantRequest,
+  ChatRoleConfigUpdate,
   ComposeImplementationPlanRequest,
   ContinueReviewRequest,
+  CreateChatConversationRequest,
   GitDiffRequest,
   PlanDecisionClarificationRequest,
   PlanItemReviewRequest,
   ProviderKind,
   ProviderSettingsUpdate,
+  RespondToChatMentionsRequest,
   RecoverImplementationPlanRequest,
   ReviseImplementationPlanRequest,
   RetryImplementationPlanSynthesisRequest,
-  ReviewRequest
+  ReviewRequest,
+  SendChatMessageRequest
 } from "../shared/types";
+import { ChatService } from "./services/chat";
 import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { DebugLogService } from "./services/debugLogs";
@@ -31,6 +37,9 @@ const providerRunner = new ProviderRunner(settingsService);
 const cliAgentRunner = new CliAgentRunner();
 const debugLogService = new DebugLogService();
 const consensusService = new ConsensusService(gitService, storageService, providerRunner, cliAgentRunner, debugLogService, (conversation) => {
+  mainWindow?.webContents.send("conversations:updated", conversation);
+});
+const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
 });
 const activeReviews = new Map<string, AbortController>();
@@ -63,6 +72,7 @@ function createWindow(): void {
 function registerIpc(): void {
   ipcMain.handle("settings:get", () => settingsService.getPublicSettings());
   ipcMain.handle("settings:update-provider", (_event, update: ProviderSettingsUpdate) => settingsService.updateProvider(update));
+  ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));
   ipcMain.handle("settings:update-last-repo-path", (_event, repoPath: string) => settingsService.updateLastRepoPath(repoPath));
   ipcMain.handle("settings:list-provider-models", (_event, kind: ProviderKind) => providerRunner.listModels(kind));
   ipcMain.handle("agents:detect", () => cliAgentRunner.detectAgents());
@@ -104,6 +114,60 @@ function registerIpc(): void {
   });
   ipcMain.handle("conversations:save-plan-item-review", async (_event, request: PlanItemReviewRequest) => {
     return consensusService.savePlanItemReview(request);
+  });
+  ipcMain.handle("chat:create", async (_event, request: CreateChatConversationRequest) => {
+    return chatService.createConversation(request);
+  });
+  ipcMain.handle("chat:add-participant", async (_event, request: AddChatParticipantRequest) => {
+    return chatService.addParticipant(request);
+  });
+  ipcMain.handle("chat:send", async (_event, request: SendChatMessageRequest) => {
+    const runId = request.runId ?? randomUUID();
+    const controller = new AbortController();
+    activeReviews.set(runId, controller);
+
+    try {
+      return await chatService.sendMessage(
+        { ...request, runId },
+        controller.signal,
+        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+      );
+    } catch (error) {
+      const phase = controller.signal.aborted ? "cancelled" : "error";
+      mainWindow?.webContents.send("conversations:review-progress", {
+        runId,
+        phase,
+        message: error instanceof Error ? error.message : String(error),
+        createdAt: new Date().toISOString()
+      });
+      throw error;
+    } finally {
+      activeReviews.delete(runId);
+    }
+  });
+  ipcMain.handle("chat:respond-to-mentions", async (_event, request: RespondToChatMentionsRequest) => {
+    const runId = request.runId ?? randomUUID();
+    const controller = new AbortController();
+    activeReviews.set(runId, controller);
+
+    try {
+      return await chatService.respondToMentions(
+        { ...request, runId },
+        controller.signal,
+        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+      );
+    } catch (error) {
+      const phase = controller.signal.aborted ? "cancelled" : "error";
+      mainWindow?.webContents.send("conversations:review-progress", {
+        runId,
+        phase,
+        message: error instanceof Error ? error.message : String(error),
+        createdAt: new Date().toISOString()
+      });
+      throw error;
+    } finally {
+      activeReviews.delete(runId);
+    }
   });
   ipcMain.handle("conversations:start-review", async (_event, request: ReviewRequest) => {
     const runId = request.runId ?? randomUUID();

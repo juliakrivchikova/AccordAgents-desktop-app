@@ -12,10 +12,12 @@ import {
   KeyRound,
   ListChecks,
   MessageSquare,
+  Plus,
   Play,
   RefreshCw,
   SendHorizontal,
   Settings,
+  Users,
   Maximize2,
   X,
   XCircle
@@ -23,6 +25,10 @@ import {
 import type {
   AgentHealth,
   AppSettings,
+  ChatParticipant,
+  ChatProviderKind,
+  ChatRoleConfig,
+  ChatRoleConfigUpdate,
   Conversation,
   ConversationKind,
   ConversationSummary,
@@ -46,7 +52,8 @@ import "./styles/app.css";
 
 const DEFAULT_SETTINGS: AppSettings = {
   roundLimitDefault: 2,
-  providers: []
+  providers: [],
+  chatRoleConfigs: []
 };
 
 const DIFF_MODES: Array<{ value: GitDiffMode; label: string }> = [
@@ -70,6 +77,13 @@ const CODEX_AVATAR_URL = new URL("./assets/codex-avatar.webp", import.meta.url).
 
 type ActiveView = "slack" | "points" | "settings";
 type AvatarKind = "user" | "arbiter" | "anthropic" | "codex" | "gemini" | "generic";
+
+interface ChatParticipantDraft {
+  handle: string;
+  roleConfigId: string;
+  kind: ChatProviderKind;
+  model?: string;
+}
 
 interface AvatarSpec {
   kind: AvatarKind;
@@ -123,6 +137,10 @@ function App(): JSX.Element {
   const [pendingClarifications, setPendingClarifications] = useState<Record<string, PlanDecisionReply>>({});
   const [planItemReviewDrafts, setPlanItemReviewDrafts] = useState<Record<string, string>>({});
   const [planCorrectionDraft, setPlanCorrectionDraft] = useState("");
+  const [chatParticipantDrafts, setChatParticipantDrafts] = useState<ChatParticipantDraft[]>([]);
+  const [chatMessageDraft, setChatMessageDraft] = useState("");
+  const [chatReplyTarget, setChatReplyTarget] = useState<{ threadId: string; parentMessageId: string } | undefined>();
+  const [chatAddParticipantDraft, setChatAddParticipantDraft] = useState<ChatParticipantDraft | undefined>();
   const [error, setError] = useState<string | undefined>();
 
   useEffect(() => {
@@ -155,6 +173,14 @@ function App(): JSX.Element {
   useEffect(() => {
     setSelectedParticipants(new Set(settings.providers.filter((provider) => provider.enabled).map(providerId)));
   }, [settings.providers]);
+
+  useEffect(() => {
+    setChatParticipantDrafts((current) => {
+      const drafts = current.length ? current : [defaultChatParticipantDraft(settings)];
+      return drafts.map((draft) => normalizeChatParticipantDraftForSettings(draft, settings));
+    });
+    setChatAddParticipantDraft((current) => normalizeChatParticipantDraftForSettings(current ?? defaultChatParticipantDraft(settings), settings));
+  }, [settings]);
 
   useEffect(() => {
     const firstRunnable = settings.providers.find((provider) => !providerDisabledForRun(provider));
@@ -234,6 +260,9 @@ function App(): JSX.Element {
       const nextPendingDecisions = pendingPlanDecisions(next);
       const nextPendingItem = firstPendingPlanItemReview(next);
       setConversation(next);
+      if (next) {
+        setKind(next.kind);
+      }
       progressLogRef.current = [];
       setProgressLog([]);
       setSelectedThreadId(nextPendingDecisions[0]?.id ?? nextPendingItem?.id);
@@ -244,6 +273,7 @@ function App(): JSX.Element {
       setPendingClarifications({});
       setPlanItemReviewDrafts({});
       setPlanCorrectionDraft("");
+      setChatReplyTarget(undefined);
       setActiveView("slack");
     } catch (caught) {
       setError(errorText(caught));
@@ -425,6 +455,142 @@ function App(): JSX.Element {
       return;
     }
     await window.consensus.cancelReview(currentRunId);
+  }
+
+  async function startChat(): Promise<void> {
+    setError(undefined);
+    setWarnings([]);
+    const participants = normalizedChatDrafts(chatParticipantDrafts);
+    const validation = validateChatParticipantDrafts(participants, settings.chatRoleConfigs) ?? validateChatCliAgents(participants, agents);
+    if (validation) {
+      setError(validation);
+      return;
+    }
+    const runId = crypto.randomUUID();
+    setCurrentRunId(runId);
+    setBusy(true);
+    try {
+      const result = await window.consensus.createChatConversation({
+        title: question.trim().slice(0, 80) || "Chat",
+        repoPath: repoPath.trim() || undefined,
+        participants
+      });
+      setConversation(result.conversation);
+      setWarnings(result.warnings);
+      setChatMessageDraft("");
+      setChatReplyTarget(undefined);
+      setActiveView("slack");
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      setError(errorText(caught));
+    } finally {
+      setBusy(false);
+      setCurrentRunId(undefined);
+    }
+  }
+
+  async function sendChatMessage(): Promise<void> {
+    if (!conversation || conversation.kind !== "chat") {
+      return;
+    }
+    const content = chatMessageDraft.trim();
+    if (!content) {
+      setError("Enter a chat message.");
+      return;
+    }
+    const runId = crypto.randomUUID();
+    setError(undefined);
+    setWarnings([]);
+    setCurrentRunId(runId);
+    progressLogRef.current = [];
+    setProgressLog([]);
+    setBusy(true);
+    const threadId = chatReplyTarget?.threadId;
+    const parentMessageId = chatReplyTarget?.parentMessageId;
+    setChatMessageDraft("");
+    setChatReplyTarget(undefined);
+    try {
+      const result = await window.consensus.sendChatMessage({
+        conversationId: conversation.id,
+        runId,
+        content,
+        threadId,
+        parentMessageId
+      });
+      setConversation(mergeProgressIntoConversation(result.conversation, progressLogRef.current.filter((item) => item.runId === runId)));
+      setWarnings(result.warnings);
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      const message = errorText(caught);
+      if (message.toLowerCase().includes("cancel")) {
+        setWarnings((current) => [...current, "Chat turn cancelled."]);
+      } else {
+        setError(message);
+      }
+    } finally {
+      setBusy(false);
+      setCurrentRunId(undefined);
+    }
+  }
+
+  async function respondToChatMentions(sourceMessageId: string, targetParticipantIds: string[], approve: boolean, continueRequester = false): Promise<void> {
+    if (!conversation || conversation.kind !== "chat") {
+      return;
+    }
+    const runId = crypto.randomUUID();
+    setError(undefined);
+    setWarnings([]);
+    setCurrentRunId(runId);
+    progressLogRef.current = [];
+    setProgressLog([]);
+    setBusy(true);
+    try {
+      const result = await window.consensus.respondToChatMentions({
+        conversationId: conversation.id,
+        sourceMessageId,
+        targetParticipantIds,
+        approve,
+        continueRequester,
+        runId
+      });
+      setConversation(mergeProgressIntoConversation(result.conversation, progressLogRef.current.filter((item) => item.runId === runId)));
+      setWarnings(result.warnings);
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      const message = errorText(caught);
+      if (message.toLowerCase().includes("cancel")) {
+        setWarnings((current) => [...current, "Mention approval run cancelled."]);
+      } else {
+        setError(message);
+      }
+    } finally {
+      setBusy(false);
+      setCurrentRunId(undefined);
+    }
+  }
+
+  async function addChatParticipant(): Promise<void> {
+    if (!conversation || conversation.kind !== "chat" || !chatAddParticipantDraft) {
+      return;
+    }
+    const participant = normalizedChatDrafts([chatAddParticipantDraft])[0];
+    const existingHandles = new Set(chatParticipants(conversation).map((item) => item.handle.toLowerCase()));
+    const validation = validateChatParticipantDrafts([participant], settings.chatRoleConfigs, existingHandles) ?? validateChatCliAgents([participant], agents);
+    if (validation) {
+      setError(validation);
+      return;
+    }
+    setError(undefined);
+    try {
+      const saved = await window.consensus.addChatParticipant({ conversationId: conversation.id, participant });
+      if (saved) {
+        setConversation(saved);
+      }
+      setChatAddParticipantDraft(defaultChatParticipantDraft(settings));
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      setError(errorText(caught));
+    }
   }
 
   async function continueReview(): Promise<void> {
@@ -957,6 +1123,9 @@ function App(): JSX.Element {
     setPendingClarifications({});
     setPlanItemReviewDrafts({});
     setPlanCorrectionDraft("");
+    setChatMessageDraft("");
+    setChatReplyTarget(undefined);
+    setChatAddParticipantDraft(defaultChatParticipantDraft(settings));
     setError(undefined);
     setActiveView("slack");
   }
@@ -1048,6 +1217,16 @@ function App(): JSX.Element {
     }
   }
 
+  async function saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<void> {
+    setError(undefined);
+    try {
+      const next = await window.consensus.saveChatRoleConfig(update);
+      setSettings(next);
+    } catch (caught) {
+      setError(errorText(caught));
+    }
+  }
+
   const hasResultContext = Boolean(conversation) || busy;
   const pendingDecisions = pendingPlanDecisions(conversation);
   const reviewablePlanItems = requiredPlanItemReviewFindings(conversation);
@@ -1059,8 +1238,8 @@ function App(): JSX.Element {
   const visibleDecisionResolutions = { ...pendingDecisionResolutions(conversation), ...resolvedDecisionThreads };
   const conversationKind = conversation?.kind ?? kind;
   const visibleWarnings = warnings.map((warning) => displayNoticeText(warning)).filter(Boolean);
-  const resultView: "slack" | "points" = activeView === "points" && conversationKind !== "implementation-plan" ? "points" : "slack";
-  const hasPoints = Boolean(conversation && conversation.metadata.running !== true && pendingDecisions.length === 0);
+  const resultView: "slack" | "points" = activeView === "points" && conversationKind !== "implementation-plan" && conversationKind !== "chat" ? "points" : "slack";
+  const hasPoints = Boolean(conversation && conversation.kind !== "chat" && conversation.metadata.running !== true && pendingDecisions.length === 0);
   const runnableParticipants = buildParticipants();
   const hasRequiredContext =
     kind === "code-review" ? diffMode === "pasted" || Boolean(repoPath.trim()) : kind !== "implementation-plan" || Boolean(repoPath.trim());
@@ -1101,7 +1280,7 @@ function App(): JSX.Element {
                 <MessageSquare size={15} />
                 Slack
               </button>
-              {hasPoints && conversationKind !== "implementation-plan" && (
+              {hasPoints && conversationKind !== "implementation-plan" && conversationKind !== "chat" && (
                 <button className={resultView === "points" && activeView !== "settings" ? "selected" : ""} onClick={() => setActiveView("points")}>
                   <ListChecks size={15} />
                   Points
@@ -1151,6 +1330,7 @@ function App(): JSX.Element {
             setApiKeyDrafts={setApiKeyDrafts}
             updateProvider={updateProvider}
             refreshProviderModels={refreshProviderModels}
+            saveChatRoleConfig={saveChatRoleConfig}
           />
         ) : (
           <div className={`content-area ${hasResultContext ? "result-layout" : "compose-layout"}`}>
@@ -1169,188 +1349,237 @@ function App(): JSX.Element {
                   <ListChecks size={15} />
                   Plan
                 </button>
+                <button className={kind === "chat" ? "selected" : ""} onClick={() => setKind("chat")}>
+                  <Users size={15} />
+                  Chat
+                </button>
               </div>
 
-              <label className="field">
-                <span>Prompt</span>
-                <textarea value={question} onChange={(event) => setQuestion(event.target.value)} rows={5} />
-              </label>
-
-              {requiresRepo(kind) && (
+              {kind === "chat" ? (
+                <ChatSetup
+                  title={question}
+                  repoPath={repoPath}
+                  repoInfo={repoInfo}
+                  drafts={chatParticipantDrafts}
+                  settings={settings}
+                  agents={agents}
+                  busy={busy}
+                  onTitleChange={setQuestion}
+                  onRepoPathChange={(value) => {
+                    setRepoPath(value);
+                    setRepoInfo(undefined);
+                  }}
+                  onRepoBlur={() => void inspectRepo()}
+                  onSelectRepo={() => void selectRepo()}
+                  onDraftsChange={setChatParticipantDrafts}
+                  onStart={() => void startChat()}
+                />
+              ) : (
                 <>
-                  <div className="repo-row">
-                    <label className="field grow">
-                      <span>Repository</span>
-                      <input
-                        value={repoPath}
-                        onChange={(event) => {
-                          setRepoPath(event.target.value);
-                          setRepoInfo(undefined);
-                        }}
-                        onBlur={() => void inspectRepo()}
-                      />
-                    </label>
-                    <button className="tool-button" onClick={() => void selectRepo()} title="Select repository">
-                      <FolderOpen size={17} />
-                    </button>
-                  </div>
-                  {repoInfo && (
-                    <div className={`repo-status ${repoInfo.isRepo ? "ok" : "bad"}`}>
-                      {repoInfo.isRepo ? (
-                        <>
-                          <CheckCircle2 size={16} />
-                          {repoInfo.currentBranch || "detached"} · {repoInfo.statusLines.length} changed paths
-                        </>
-                      ) : (
-                        <>
-                          <XCircle size={16} />
-                          {repoInfo.error || "Not a git repository"}
-                        </>
-                      )}
-                    </div>
-                  )}
+                  <label className="field">
+                    <span>Prompt</span>
+                    <AutoResizeTextarea value={question} onChange={(event) => setQuestion(event.target.value)} rows={5} maxHeight={360} />
+                  </label>
 
-                  {kind === "code-review" && (
+                  {requiresRepo(kind) && (
                     <>
-                      <div className="field">
-                        <span>Diff mode</span>
-                        <div className="diff-mode-grid">
-                          {DIFF_MODES.map((mode) => (
-                            <button
-                              key={mode.value}
-                              className={diffMode === mode.value ? "selected" : ""}
-                              onClick={() => setDiffMode(mode.value)}
-                            >
-                              {mode.label}
-                            </button>
-                          ))}
-                        </div>
+                      <div className="repo-row">
+                        <label className="field grow">
+                          <span>Repository</span>
+                          <input
+                            value={repoPath}
+                            onChange={(event) => {
+                              setRepoPath(event.target.value);
+                              setRepoInfo(undefined);
+                            }}
+                            onBlur={() => void inspectRepo()}
+                          />
+                        </label>
+                        <button className="tool-button" onClick={() => void selectRepo()} title="Select repository">
+                          <FolderOpen size={17} />
+                        </button>
                       </div>
-
-                      {diffMode === "base" && (
-                        <div className="field">
-                          <span>Branches</span>
-                          <div className="branch-compare-row">
-                            <label className="branch-select">
-                              <span>Base branch</span>
-                              <select
-                                value={selectedBaseBranch}
-                                onChange={(event) => setBaseBranch(event.target.value)}
-                                aria-describedby="branch-compare-help"
-                                disabled={branchSelectDisabled}
-                                title={BRANCH_COMPARE_HELP}
-                              >
-                                <option value="" disabled>
-                                  {branchSelectPlaceholder}
-                                </option>
-                                {branchOptions.map((branch) => (
-                                  <option key={branch} value={branch}>
-                                    {branch}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <label className="branch-select">
-                              <span>Compare branch</span>
-                              <select
-                                value={selectedCompareBranch}
-                                onChange={(event) => setCompareBranch(event.target.value)}
-                                aria-describedby="branch-compare-help"
-                                disabled={branchSelectDisabled}
-                                title={BRANCH_COMPARE_HELP}
-                              >
-                                <option value="" disabled>
-                                  {branchSelectPlaceholder}
-                                </option>
-                                {branchOptions.map((branch) => (
-                                  <option key={branch} value={branch}>
-                                    {branch}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                          </div>
-                          <div className="inline-hint" id="branch-compare-help">
-                            {BRANCH_COMPARE_HELP}
-                          </div>
+                      {repoInfo && (
+                        <div className={`repo-status ${repoInfo.isRepo ? "ok" : "bad"}`}>
+                          {repoInfo.isRepo ? (
+                            <>
+                              <CheckCircle2 size={16} />
+                              {repoInfo.currentBranch || "detached"} · {repoInfo.statusLines.length} changed paths
+                            </>
+                          ) : (
+                            <>
+                              <XCircle size={16} />
+                              {repoInfo.error || "Not a git repository"}
+                            </>
+                          )}
                         </div>
                       )}
-                      {diffMode === "commit" && (
-                        <label className="field">
-                          <span>Commit SHA</span>
-                          <input value={commit} onChange={(event) => setCommit(event.target.value)} />
-                        </label>
-                      )}
-                      {diffMode === "pasted" && (
-                        <label className="field">
-                          <span>Pasted diff</span>
-                          <textarea value={pastedDiff} onChange={(event) => setPastedDiff(event.target.value)} rows={7} />
-                        </label>
-                      )}
 
-                      <button className="secondary-button" onClick={() => void previewDiff()}>
-                        Preview diff
-                      </button>
-                      {diffPreview && <pre className="diff-preview">{diffPreview.slice(0, 6000)}</pre>}
+                      {kind === "code-review" && (
+                        <>
+                          <div className="field">
+                            <span>Diff mode</span>
+                            <div className="diff-mode-grid">
+                              {DIFF_MODES.map((mode) => (
+                                <button
+                                  key={mode.value}
+                                  className={diffMode === mode.value ? "selected" : ""}
+                                  onClick={() => setDiffMode(mode.value)}
+                                >
+                                  {mode.label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          {diffMode === "base" && (
+                            <div className="field">
+                              <span>Branches</span>
+                              <div className="branch-compare-row">
+                                <label className="branch-select">
+                                  <span>Base branch</span>
+                                  <select
+                                    value={selectedBaseBranch}
+                                    onChange={(event) => setBaseBranch(event.target.value)}
+                                    aria-describedby="branch-compare-help"
+                                    disabled={branchSelectDisabled}
+                                    title={BRANCH_COMPARE_HELP}
+                                  >
+                                    <option value="" disabled>
+                                      {branchSelectPlaceholder}
+                                    </option>
+                                    {branchOptions.map((branch) => (
+                                      <option key={branch} value={branch}>
+                                        {branch}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label className="branch-select">
+                                  <span>Compare branch</span>
+                                  <select
+                                    value={selectedCompareBranch}
+                                    onChange={(event) => setCompareBranch(event.target.value)}
+                                    aria-describedby="branch-compare-help"
+                                    disabled={branchSelectDisabled}
+                                    title={BRANCH_COMPARE_HELP}
+                                  >
+                                    <option value="" disabled>
+                                      {branchSelectPlaceholder}
+                                    </option>
+                                    {branchOptions.map((branch) => (
+                                      <option key={branch} value={branch}>
+                                        {branch}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                              </div>
+                              <div className="inline-hint" id="branch-compare-help">
+                                {BRANCH_COMPARE_HELP}
+                              </div>
+                            </div>
+                          )}
+                          {diffMode === "commit" && (
+                            <label className="field">
+                              <span>Commit SHA</span>
+                              <input value={commit} onChange={(event) => setCommit(event.target.value)} />
+                            </label>
+                          )}
+                          {diffMode === "pasted" && (
+                            <label className="field">
+                              <span>Pasted diff</span>
+                              <AutoResizeTextarea value={pastedDiff} onChange={(event) => setPastedDiff(event.target.value)} rows={7} maxHeight={420} />
+                            </label>
+                          )}
+
+                          <button className="secondary-button" onClick={() => void previewDiff()}>
+                            Preview diff
+                          </button>
+                          {diffPreview && <pre className="diff-preview">{diffPreview.slice(0, 6000)}</pre>}
+                        </>
+                      )}
                     </>
                   )}
+
+                  <div className="participant-picker">
+                    <span>Participants</span>
+                    {participantOptions.map(({ provider, disabled, health, disabledReason }) => {
+                      const selected = selectedParticipants.has(providerId(provider)) && !disabled;
+                      return (
+                        <button
+                          key={provider.kind}
+                          className={`participant-pill ${selected ? "selected" : ""}`}
+                          disabled={disabled}
+                          onClick={() => toggleParticipant(provider)}
+                          title={disabledReason ?? provider.model ?? provider.label}
+                        >
+                          {selected ? <CheckCircle2 size={15} /> : <Circle size={15} />}
+                          {provider.label}
+                          {providerId(provider) === selectedArbiterId && (
+                            <small>{selected ? `also ${arbiterRoleLabel.toLowerCase()}` : `${arbiterRoleLabel.toLowerCase()} only`}</small>
+                          )}
+                          {disabledReason ? <small>{disabledReason}</small> : isCli(provider.kind) && <small>{health?.installed ? "local" : "missing"}</small>}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <label className="field">
+                    <span>{arbiterRoleLabel}</span>
+                    <select
+                      value={arbiterSelectValue}
+                      onChange={(event) => setSelectedArbiterId(event.target.value)}
+                      disabled={arbiterOptions.length === 0}
+                    >
+                      <option value="" disabled>
+                        {arbiterPlaceholder}
+                      </option>
+                      {arbiterOptions.map(({ provider }) => (
+                        <option key={provider.kind} value={providerId(provider)}>
+                          {provider.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="inline-hint">
+                    The {arbiterRoleLabel.toLowerCase()} merge is a separate run. If the same provider is selected as a participant, it also gets an independent participant run.
+                  </div>
+
+                  <button className="run-button" disabled={!canStart} onClick={() => void startReview()}>
+                    {busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
+                    {busy ? "Running consensus..." : "Start consensus"}
+                  </button>
                 </>
               )}
-
-              <div className="participant-picker">
-                <span>Participants</span>
-                {participantOptions.map(({ provider, disabled, health, disabledReason }) => {
-                  const selected = selectedParticipants.has(providerId(provider)) && !disabled;
-                  return (
-                    <button
-                      key={provider.kind}
-                      className={`participant-pill ${selected ? "selected" : ""}`}
-                      disabled={disabled}
-                      onClick={() => toggleParticipant(provider)}
-                      title={disabledReason ?? provider.model ?? provider.label}
-                    >
-                      {selected ? <CheckCircle2 size={15} /> : <Circle size={15} />}
-                      {provider.label}
-                      {providerId(provider) === selectedArbiterId && (
-                        <small>{selected ? `also ${arbiterRoleLabel.toLowerCase()}` : `${arbiterRoleLabel.toLowerCase()} only`}</small>
-                      )}
-                      {disabledReason ? <small>{disabledReason}</small> : isCli(provider.kind) && <small>{health?.installed ? "local" : "missing"}</small>}
-                    </button>
-                  );
-                })}
-              </div>
-
-              <label className="field">
-                <span>{arbiterRoleLabel}</span>
-                <select
-                  value={arbiterSelectValue}
-                  onChange={(event) => setSelectedArbiterId(event.target.value)}
-                  disabled={arbiterOptions.length === 0}
-                >
-                  <option value="" disabled>
-                    {arbiterPlaceholder}
-                  </option>
-                  {arbiterOptions.map(({ provider }) => (
-                    <option key={provider.kind} value={providerId(provider)}>
-                      {provider.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="inline-hint">
-                The {arbiterRoleLabel.toLowerCase()} merge is a separate run. If the same provider is selected as a participant, it also gets an independent participant run.
-              </div>
-
-              <button className="run-button" disabled={!canStart} onClick={() => void startReview()}>
-                {busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
-                {busy ? "Running consensus..." : "Start consensus"}
-              </button>
             </section>
             )}
 
             {hasResultContext && (
               <section className="conversation-panel">
-                {resultView === "slack" && (
+                {conversationKind === "chat" && conversation ? (
+                  <ChatConversationView
+                    conversation={conversation}
+                    settings={settings}
+                    agents={agents}
+                    progress={progressLog}
+                    isRunning={busy}
+                    draft={chatMessageDraft}
+                    replyTarget={chatReplyTarget}
+                    addParticipantDraft={chatAddParticipantDraft ?? defaultChatParticipantDraft(settings)}
+                    onDraftChange={setChatMessageDraft}
+                    onReplyTargetChange={setChatReplyTarget}
+                    onSend={() => void sendChatMessage()}
+                    onApproveMentions={(sourceMessageId, targetParticipantIds, continueRequester) =>
+                      void respondToChatMentions(sourceMessageId, targetParticipantIds, true, continueRequester)
+                    }
+                    onRejectMentions={(sourceMessageId, targetParticipantIds) =>
+                      void respondToChatMentions(sourceMessageId, targetParticipantIds, false)
+                    }
+                    onAddParticipantDraftChange={setChatAddParticipantDraft}
+                    onAddParticipant={() => void addChatParticipant()}
+                  />
+                ) : resultView === "slack" && (
                   <SlackView
                     conversation={conversation}
                     progress={progressLog}
@@ -1419,10 +1648,28 @@ function SettingsView(props: {
   setApiKeyDrafts: React.Dispatch<React.SetStateAction<Record<string, string>>>;
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean; model?: string; apiKey?: string; clearApiKey?: boolean }) => Promise<void>;
   refreshProviderModels: (kind: ProviderKind) => Promise<void>;
+  saveChatRoleConfig: (update: ChatRoleConfigUpdate) => Promise<void>;
 }): JSX.Element {
   return (
     <section className="settings-view">
       <h1>Settings</h1>
+      <section className="settings-section">
+        <div className="settings-section-head">
+          <h2>Chat roles</h2>
+          <span>{props.settings.chatRoleConfigs.length} roles</span>
+        </div>
+        <div className="role-config-list">
+          {props.settings.chatRoleConfigs.map((role) => (
+            <ChatRoleEditor role={role} onSave={props.saveChatRoleConfig} key={role.id} />
+          ))}
+          <ChatRoleEditor onSave={props.saveChatRoleConfig} key={`new-role-${props.settings.chatRoleConfigs.length}`} />
+        </div>
+      </section>
+      <section className="settings-section">
+        <div className="settings-section-head">
+          <h2>Providers</h2>
+          <span>{props.settings.providers.length} providers</span>
+        </div>
       <div className="settings-grid">
         {props.settings.providers.map((provider) => {
           const health = props.agents.find((agent) => agent.kind === provider.kind);
@@ -1528,7 +1775,465 @@ function SettingsView(props: {
           );
         })}
       </div>
+      </section>
     </section>
+  );
+}
+
+function AutoResizeTextarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement> & { maxHeight?: number }): JSX.Element {
+  const { maxHeight = 280, onInput, style, ...textareaProps } = props;
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  const resize = (): void => {
+    const element = ref.current;
+    if (!element) {
+      return;
+    }
+    element.style.height = "auto";
+    const nextHeight = Math.min(maxHeight, element.scrollHeight);
+    element.style.height = `${nextHeight}px`;
+    element.style.overflowY = element.scrollHeight > maxHeight ? "auto" : "hidden";
+  };
+
+  useEffect(() => {
+    resize();
+  }, [textareaProps.value, maxHeight]);
+
+  return (
+    <textarea
+      {...textareaProps}
+      ref={ref}
+      style={{ ...style, overflowY: "hidden" }}
+      onInput={(event) => {
+        resize();
+        onInput?.(event);
+      }}
+    />
+  );
+}
+
+function ChatRoleEditor({ role, onSave }: { role?: ChatRoleConfig; onSave: (update: ChatRoleConfigUpdate) => Promise<void> }): JSX.Element {
+  const [label, setLabel] = useState(role?.label ?? "");
+  const [instructions, setInstructions] = useState(role?.instructions ?? "");
+  const changed = label.trim() !== (role?.label ?? "") || instructions.trim() !== (role?.instructions ?? "");
+  const canSave = Boolean(label.trim() && instructions.trim()) && (!role || changed);
+  return (
+    <article className="role-config-card">
+      <div className="settings-item-head">
+        <div>
+          <strong>{role ? role.label : "New role"}</strong>
+          <small>{role ? `v${role.version}${role.builtIn ? " built-in" : ""}` : "custom"}</small>
+        </div>
+        <button className="secondary-button" disabled={!canSave} onClick={() => void onSave({ id: role?.id, label, instructions })}>
+          <CheckCircle2 size={16} />
+          Save
+        </button>
+      </div>
+      <label className="field compact-field">
+        <span>Name</span>
+        <input value={label} onChange={(event) => setLabel(event.target.value)} />
+      </label>
+      <label className="field compact-field">
+        <span>Instructions</span>
+        <AutoResizeTextarea value={instructions} onChange={(event) => setInstructions(event.target.value)} rows={4} maxHeight={320} />
+      </label>
+    </article>
+  );
+}
+
+function ChatSetup(props: {
+  title: string;
+  repoPath: string;
+  repoInfo?: GitRepoInfo;
+  drafts: ChatParticipantDraft[];
+  settings: AppSettings;
+  agents: AgentHealth[];
+  busy: boolean;
+  onTitleChange: (value: string) => void;
+  onRepoPathChange: (value: string) => void;
+  onRepoBlur: () => void;
+  onSelectRepo: () => void;
+  onDraftsChange: React.Dispatch<React.SetStateAction<ChatParticipantDraft[]>>;
+  onStart: () => void;
+}): JSX.Element {
+  const normalizedDrafts = normalizedChatDrafts(props.drafts);
+  const validation = validateChatParticipantDrafts(normalizedDrafts, props.settings.chatRoleConfigs) ?? validateChatCliAgents(normalizedDrafts, props.agents);
+  return (
+    <div className="chat-setup">
+      <label className="field">
+        <span>Chat title</span>
+        <input value={props.title} onChange={(event) => props.onTitleChange(event.target.value)} />
+      </label>
+      <div className="repo-row">
+        <label className="field grow">
+          <span>Repository optional</span>
+          <input value={props.repoPath} onChange={(event) => props.onRepoPathChange(event.target.value)} onBlur={props.onRepoBlur} />
+        </label>
+        <button className="tool-button" onClick={props.onSelectRepo} title="Select repository">
+          <FolderOpen size={17} />
+        </button>
+      </div>
+      {props.repoInfo && (
+        <div className={`repo-status ${props.repoInfo.isRepo ? "ok" : "bad"}`}>
+          {props.repoInfo.isRepo ? (
+            <>
+              <CheckCircle2 size={16} />
+              {props.repoInfo.currentBranch || "detached"} · {props.repoInfo.statusLines.length} changed paths
+            </>
+          ) : (
+            <>
+              <XCircle size={16} />
+              {props.repoInfo.error || "Not a git repository"}
+            </>
+          )}
+        </div>
+      )}
+      <div className="chat-roster-editor">
+        <div className="settings-section-head">
+          <h2>Participants</h2>
+          <button
+            className="secondary-button"
+            onClick={() =>
+              props.onDraftsChange((current) => [
+                ...current,
+                defaultChatParticipantDraft(props.settings, new Set(current.map((draft) => draft.handle.toLowerCase())))
+              ])
+            }
+          >
+            <Plus size={16} />
+            Add
+          </button>
+        </div>
+        {props.drafts.map((draft, index) => (
+          <ChatParticipantDraftRow
+            draft={draft}
+            settings={props.settings}
+            agents={props.agents}
+            removable={props.drafts.length > 1}
+            onChange={(next) => props.onDraftsChange((current) => current.map((item, itemIndex) => itemIndex === index ? next : item))}
+            onRemove={() => props.onDraftsChange((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+            key={index}
+          />
+        ))}
+      </div>
+      {validation && <div className="inline-error">{validation}</div>}
+      <button className="run-button" disabled={props.busy || Boolean(validation)} onClick={props.onStart}>
+        {props.busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
+        {props.busy ? "Starting chat..." : "Start chat"}
+      </button>
+    </div>
+  );
+}
+
+function ChatParticipantDraftRow(props: {
+  draft: ChatParticipantDraft;
+  settings: AppSettings;
+  agents: AgentHealth[];
+  removable?: boolean;
+  onChange: (draft: ChatParticipantDraft) => void;
+  onRemove?: () => void;
+}): JSX.Element {
+  const cliProviders = props.settings.providers.filter((provider) => isCli(provider.kind));
+  return (
+    <div className="chat-participant-row">
+      <label className="field compact-field">
+        <span>Name</span>
+        <input
+          value={props.draft.handle}
+          onChange={(event) => props.onChange({ ...props.draft, handle: event.target.value })}
+          placeholder="eng1"
+        />
+      </label>
+      <label className="field compact-field">
+        <span>Role</span>
+        <select
+          value={props.draft.roleConfigId}
+          onChange={(event) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { roleConfigId: event.target.value }))}
+        >
+          {props.settings.chatRoleConfigs.map((role) => (
+            <option value={role.id} key={role.id}>
+              {role.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="field compact-field">
+        <span>CLI</span>
+        <select
+          value={props.draft.kind}
+          onChange={(event) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { kind: event.target.value as ChatProviderKind }))}
+        >
+          {cliProviders.map((provider) => {
+            const health = props.agents.find((agent) => agent.kind === provider.kind);
+            return (
+              <option value={provider.kind} disabled={!health?.installed} key={provider.kind}>
+                {provider.label}{health?.installed ? "" : " (missing)"}
+              </option>
+            );
+          })}
+        </select>
+      </label>
+      <label className="field compact-field">
+        <span>Model</span>
+        <input
+          value={props.draft.model ?? ""}
+          onChange={(event) => props.onChange({ ...props.draft, model: event.target.value })}
+          placeholder="CLI default"
+        />
+      </label>
+      {props.removable && (
+        <button className="icon-button chat-row-remove" title="Remove participant" onClick={props.onRemove}>
+          <X size={16} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ChatConversationView(props: {
+  conversation: Conversation;
+  settings: AppSettings;
+  agents: AgentHealth[];
+  progress: ReviewProgress[];
+  isRunning: boolean;
+  draft: string;
+  replyTarget?: { threadId: string; parentMessageId: string };
+  addParticipantDraft: ChatParticipantDraft;
+  onDraftChange: (value: string) => void;
+  onReplyTargetChange: (target: { threadId: string; parentMessageId: string } | undefined) => void;
+  onSend: () => void;
+  onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
+  onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
+  onAddParticipantDraftChange: (draft: ChatParticipantDraft) => void;
+  onAddParticipant: () => void;
+}): JSX.Element {
+  const participants = chatParticipants(props.conversation);
+  const [mentionQuery, setMentionQuery] = useState<string | undefined>();
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const latestProgress = props.progress[props.progress.length - 1];
+  const addDraft = normalizedChatDrafts([props.addParticipantDraft]);
+  const addValidation = validateChatParticipantDrafts(
+    addDraft,
+    props.settings.chatRoleConfigs,
+    new Set(participants.map((participant) => participant.handle.toLowerCase()))
+  ) ?? validateChatCliAgents(addDraft, props.agents);
+  const canSend = !props.isRunning && Boolean(props.draft.trim());
+  const mentionOptions = mentionQuery === undefined
+    ? []
+    : participants.filter((participant) => participant.handle.toLowerCase().includes(mentionQuery.toLowerCase()));
+
+  function updateDraft(value: string): void {
+    props.onDraftChange(value);
+    const query = activeMentionQuery(value);
+    setMentionQuery(query);
+    setMentionIndex(0);
+  }
+
+  function insertMention(participant: ChatParticipant): void {
+    const next = replaceActiveMention(props.draft, participant.handle);
+    props.onDraftChange(next);
+    setMentionQuery(undefined);
+    setMentionIndex(0);
+  }
+
+  return (
+    <div className="chat-view">
+      <section className="chat-main">
+        <header className="chat-header">
+          <div className="chat-title-block">
+            <h2>{props.conversation.title}</h2>
+            <span>{props.isRunning ? latestProgress?.message ?? "Running" : props.conversation.repoPath ? "Repo context" : "No repo"}</span>
+          </div>
+          <div className="chat-header-actions">
+            <details className="chat-participant-menu">
+              <summary>
+                <Users size={17} />
+                {participants.length}
+              </summary>
+              <div className="chat-participant-popover">
+                <div className="chat-participant-menu-list">
+                  {participants.map((participant) => (
+                    <button
+                      onClick={() => props.onDraftChange(`${props.draft}${props.draft.endsWith(" ") || !props.draft ? "" : " "}@${participant.handle} `)}
+                      key={participant.id}
+                    >
+                      <Avatar className="mini-avatar" spec={avatarForParticipant(`@${participant.handle}`, participant.id)} />
+                      <strong>@{participant.handle}</strong>
+                      <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="chat-menu-divider" />
+                <ChatParticipantDraftRow
+                  draft={props.addParticipantDraft}
+                  settings={props.settings}
+                  agents={props.agents}
+                  onChange={props.onAddParticipantDraftChange}
+                />
+                {addValidation && <div className="inline-error">{addValidation}</div>}
+                <button className="secondary-button" disabled={Boolean(addValidation) || props.isRunning} onClick={props.onAddParticipant}>
+                  <Plus size={16} />
+                  Add participant
+                </button>
+              </div>
+            </details>
+          </div>
+        </header>
+        <div className="chat-timeline">
+          {props.conversation.messages.map((message) => (
+            <ChatTimelineMessage
+              message={message}
+              busy={props.isRunning}
+              onReply={() => props.onReplyTargetChange({ threadId: message.metadata?.threadId ?? message.id, parentMessageId: message.id })}
+              onApproveMentions={props.onApproveMentions}
+              onRejectMentions={props.onRejectMentions}
+              key={message.id}
+            />
+          ))}
+          {props.isRunning && latestProgress && <RunStatusLine progress={latestProgress} showPhase={false} />}
+        </div>
+        <div className="chat-composer">
+          {props.replyTarget && (
+            <div className="reply-target">
+              Replying in thread
+              <button className="icon-button" title="Cancel reply" onClick={() => props.onReplyTargetChange(undefined)}>
+                <X size={15} />
+              </button>
+            </div>
+          )}
+          <div className="chat-input-wrap">
+            {mentionOptions.length > 0 && (
+              <div className="mention-menu" role="listbox">
+                {mentionOptions.map((participant, index) => (
+                  <button
+                    className={index === mentionIndex ? "selected" : ""}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      insertMention(participant);
+                    }}
+                    role="option"
+                    aria-selected={index === mentionIndex}
+                    key={participant.id}
+                  >
+                    <Avatar className="mini-avatar" spec={avatarForParticipant(`@${participant.handle}`, participant.id)} />
+                    <strong>@{participant.handle}</strong>
+                    <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)}</span>
+                    {index === 0 && <kbd>Enter</kbd>}
+                  </button>
+                ))}
+              </div>
+            )}
+            <AutoResizeTextarea
+              value={props.draft}
+              onChange={(event) => updateDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (mentionOptions.length > 0 && event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setMentionIndex((current) => (current + 1) % mentionOptions.length);
+                  return;
+                }
+                if (mentionOptions.length > 0 && event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setMentionIndex((current) => (current - 1 + mentionOptions.length) % mentionOptions.length);
+                  return;
+                }
+                if (mentionOptions.length > 0 && (event.key === "Enter" || event.key === "Tab")) {
+                  event.preventDefault();
+                  insertMention(mentionOptions[mentionIndex] ?? mentionOptions[0]);
+                  return;
+                }
+                if (event.key === "Escape") {
+                  setMentionQuery(undefined);
+                  return;
+                }
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  if (canSend) {
+                    props.onSend();
+                  }
+                }
+              }}
+              onBlur={() => window.setTimeout(() => setMentionQuery(undefined), 120)}
+              rows={3}
+              maxHeight={260}
+              placeholder="Mention participants with @name"
+              disabled={props.isRunning}
+            />
+          </div>
+          <button className="plan-correction-send" title="Send" disabled={!canSend} onClick={props.onSend}>
+            {props.isRunning ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ChatTimelineMessage(props: {
+  message: Conversation["messages"][number];
+  busy: boolean;
+  onReply: () => void;
+  onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
+  onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
+}): JSX.Element {
+  const { message } = props;
+  const author = authorForMessage(message, "chat");
+  const pending = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "pending");
+  const approved = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "approved");
+  const allPendingIds = pending.map((mention) => mention.targetParticipantId);
+  const displayContent = chatDisplayContent(message, author);
+  return (
+    <article className={`message chat-message ${message.role}`}>
+      <Avatar className="message-avatar" spec={avatarForMessage(message, author)} />
+      <div className="message-body">
+        <div className="message-meta">
+          <strong>{author}</strong>
+          <span>{new Date(message.createdAt).toLocaleString()}</span>
+          {message.status === "error" && <span className="status-error">error</span>}
+          {message.metadata?.parentMessageId && message.role === "user" && <span className="phase-badge">reply</span>}
+        </div>
+        <div className="message-content">
+          <MarkdownText content={displayContent} />
+        </div>
+        {approved.length > 0 && (
+          <div className="chat-approval-note">
+            Approved: {approved.map((mention) => `@${mention.targetHandle}`).join(", ")}
+          </div>
+        )}
+        {pending.length > 0 && (
+          <div className="chat-approval-box">
+            <strong>Pending mentions: {pending.map((mention) => `@${mention.targetHandle}`).join(", ")}</strong>
+            <div className="chat-approval-actions">
+              <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, true)}>
+                <CheckCircle2 size={16} />
+                Approve and continue
+              </button>
+              <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, false)}>
+                Approve mentions
+              </button>
+              <button className="secondary-button" disabled={props.busy} onClick={() => props.onRejectMentions(message.id, allPendingIds)}>
+                Reject
+              </button>
+              {pending.map((mention) => (
+                <button
+                  className="secondary-button"
+                  disabled={props.busy}
+                  onClick={() => props.onApproveMentions(message.id, [mention.targetParticipantId], false)}
+                  key={mention.targetParticipantId}
+                >
+                  Ask @{mention.targetHandle}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {message.role !== "system" && (
+          <button className="chat-reply-button" onClick={props.onReply}>
+            Reply
+          </button>
+        )}
+      </div>
+    </article>
   );
 }
 
@@ -1906,10 +2611,10 @@ function ProgressDots(): JSX.Element {
   );
 }
 
-function RunStatusLine({ progress }: { progress?: ReviewProgress }): JSX.Element {
+function RunStatusLine({ progress, showPhase = true }: { progress?: ReviewProgress; showPhase?: boolean }): JSX.Element {
   return (
     <div className="run-status-line" aria-live="polite">
-      {progress && <span className="phase-badge">{phaseLabel(progress.phase)}</span>}
+      {showPhase && progress && <span className="phase-badge">{phaseLabel(progress.phase)}</span>}
       <span className="run-status-text">{progress?.message ?? "Thinking"}</span>
       <ProgressDots />
     </div>
@@ -2169,7 +2874,7 @@ function PlanItemReviewComposer(props: {
         />
       )}
       <div className="decision-compose plan-item-review-compose">
-        <textarea
+        <AutoResizeTextarea
           value={draft}
           onChange={(event) => onDraftChange?.(event.target.value)}
           onKeyDown={(event) => {
@@ -2181,6 +2886,7 @@ function PlanItemReviewComposer(props: {
             }
           }}
           rows={3}
+          maxHeight={220}
           placeholder="Comment before final plan synthesis"
           disabled={busy}
         />
@@ -2212,7 +2918,7 @@ function PlanCorrectionComposer(props: {
   const disabledTitle = disabled && !busy ? placeholder : "Send correction";
   return (
     <div className="plan-correction-composer">
-      <textarea
+      <AutoResizeTextarea
         value={draft}
         onChange={(event) => onDraftChange(event.target.value)}
         onKeyDown={(event) => {
@@ -2224,6 +2930,7 @@ function PlanCorrectionComposer(props: {
           }
         }}
         rows={2}
+        maxHeight={220}
         placeholder={placeholder}
         disabled={busy || disabled}
       />
@@ -2356,7 +3063,7 @@ function DecisionThread(props: {
 
       {!readOnly && (
         <div className="decision-compose">
-          <textarea
+          <AutoResizeTextarea
             value={clarificationDraft}
             onChange={(event) => onDraftChange(event.target.value)}
             onKeyDown={(event) => {
@@ -2368,6 +3075,7 @@ function DecisionThread(props: {
               }
             }}
             rows={3}
+            maxHeight={240}
             placeholder="Send a message in this thread"
             disabled={busy}
           />
@@ -3059,7 +3767,8 @@ function conversationMatchesSnapshot(current: Conversation | undefined, updated:
 function threadExistsInConversation(conversation: Conversation, threadId: string): boolean {
   return (
     timelineFindings(conversation).some((finding) => finding.id === threadId) ||
-    visiblePlanDecisionRequests(conversation).some((decision) => decision.id === threadId)
+    visiblePlanDecisionRequests(conversation).some((decision) => decision.id === threadId) ||
+    conversation.messages.some((message) => message.metadata?.threadId === threadId || message.id === threadId)
   );
 }
 
@@ -3305,6 +4014,9 @@ function labelForKind(kind: ConversationKind): string {
   if (kind === "implementation-plan") {
     return "Implementation plan";
   }
+  if (kind === "chat") {
+    return "Chat";
+  }
   return "Question";
 }
 
@@ -3315,11 +4027,208 @@ function titleForKind(kind: ConversationKind): string {
   if (kind === "code-review") {
     return "Consensus review";
   }
+  if (kind === "chat") {
+    return "Chat";
+  }
   return "Consensus question";
 }
 
 function requiresRepo(kind: ConversationKind): boolean {
   return kind === "code-review" || kind === "implementation-plan";
+}
+
+const CHAT_NAME_POOL = ["alex", "blake", "casey", "drew", "ellis", "harper", "jamie", "jordan", "morgan", "quinn", "riley", "sam", "taylor"];
+
+function defaultChatParticipantDraft(settings: AppSettings, existingHandles: Set<string> = new Set()): ChatParticipantDraft {
+  const provider = settings.providers.find((item) => item.kind === "codex-cli") ?? settings.providers.find((item) => item.kind === "claude-code");
+  const roleConfigId = settings.chatRoleConfigs[0]?.id ?? "";
+  const kind = provider?.kind === "claude-code" ? "claude-code" : "codex-cli";
+  return {
+    handle: roleConfigId ? generatedChatHandle(settings, kind, roleConfigId, existingHandles) : "",
+    roleConfigId,
+    kind,
+    model: provider?.model
+  };
+}
+
+function normalizeChatParticipantDraftForSettings(draft: ChatParticipantDraft, settings: AppSettings): ChatParticipantDraft {
+  const fallback = defaultChatParticipantDraft(settings);
+  const roleConfigId = settings.chatRoleConfigs.some((role) => role.id === draft.roleConfigId)
+    ? draft.roleConfigId
+    : fallback.roleConfigId;
+  const provider = settings.providers.find((item) => item.kind === draft.kind) ?? settings.providers.find((item) => item.kind === fallback.kind);
+  const kind = provider?.kind === "claude-code" ? "claude-code" : "codex-cli";
+  return {
+    ...draft,
+    handle: draft.handle.trim() || (roleConfigId ? generatedChatHandle(settings, kind, roleConfigId) : ""),
+    roleConfigId,
+    kind,
+    model: draft.model ?? provider?.model
+  };
+}
+
+function updateChatParticipantDraft(
+  draft: ChatParticipantDraft,
+  settings: AppSettings,
+  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "kind">>
+): ChatParticipantDraft {
+  const next = { ...draft, ...patch };
+  if (!draft.handle.trim() || isGeneratedChatHandle(draft.handle)) {
+    return {
+      ...next,
+      handle: generatedChatHandle(settings, next.kind, next.roleConfigId)
+    };
+  }
+  return next;
+}
+
+function generatedChatHandle(settings: AppSettings, kind: ChatProviderKind, roleConfigId: string, existingHandles: Set<string> = new Set()): string {
+  const roleLabel = settings.chatRoleConfigs.find((role) => role.id === roleConfigId)?.label ?? roleConfigId;
+  const name = CHAT_NAME_POOL[Math.floor(Math.random() * CHAT_NAME_POOL.length)] ?? "alex";
+  const cli = kind === "claude-code" ? "claude" : "codex";
+  const role = compactRoleSlug(roleLabel);
+  const base = truncateHandle(`${name}-${cli}-${role}`, 32);
+  let candidate = base;
+  let suffix = 2;
+  while (existingHandles.has(candidate.toLowerCase())) {
+    const suffixText = `-${suffix}`;
+    candidate = `${truncateHandle(base, 32 - suffixText.length)}${suffixText}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
+function compactRoleSlug(label: string): string {
+  const normalized = slugHandle(label);
+  if (normalized.includes("synth")) {
+    return "synthesizer";
+  }
+  if (normalized.includes("arbiter")) {
+    return "arbiter";
+  }
+  if (normalized.includes("engineer")) {
+    return "engineer";
+  }
+  return truncateHandle(normalized || "agent", 14);
+}
+
+function slugHandle(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function truncateHandle(value: string, maxLength: number): string {
+  return value.slice(0, maxLength).replace(/-+$/g, "") || "agent";
+}
+
+function isGeneratedChatHandle(handle: string): boolean {
+  const [name, cli] = handle.toLowerCase().split("-");
+  return CHAT_NAME_POOL.includes(name) && (cli === "codex" || cli === "claude");
+}
+
+function normalizedChatDrafts(drafts: ChatParticipantDraft[]): ChatParticipantDraft[] {
+  return drafts.map((draft) => ({
+    handle: draft.handle.trim().replace(/^@/, ""),
+    roleConfigId: draft.roleConfigId,
+    kind: draft.kind,
+    model: draft.model?.trim() || undefined
+  }));
+}
+
+function validateChatParticipantDrafts(
+  drafts: ChatParticipantDraft[],
+  roles: ChatRoleConfig[],
+  existingHandles: Set<string> = new Set()
+): string | undefined {
+  if (drafts.length === 0) {
+    return "Add at least one participant.";
+  }
+  const handles = new Set(existingHandles);
+  for (const draft of drafts) {
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(draft.handle)) {
+      return "Participant names may use letters, numbers, underscores, and hyphens only.";
+    }
+    const normalized = draft.handle.toLowerCase();
+    if (handles.has(normalized)) {
+      return `Duplicate participant name: @${draft.handle}.`;
+    }
+    handles.add(normalized);
+    if (!roles.some((role) => role.id === draft.roleConfigId)) {
+      return "Select a role for every participant.";
+    }
+    if (draft.kind !== "codex-cli" && draft.kind !== "claude-code") {
+      return "Chat supports local CLI participants only.";
+    }
+  }
+  return undefined;
+}
+
+function validateChatCliAgents(drafts: ChatParticipantDraft[], agents: AgentHealth[]): string | undefined {
+  for (const draft of drafts) {
+    const health = agents.find((agent) => agent.kind === draft.kind);
+    if (!health?.installed) {
+      return `${draft.kind === "codex-cli" ? "Codex CLI" : "Claude Code"} is not installed.`;
+    }
+  }
+  return undefined;
+}
+
+function chatParticipants(conversation: Conversation | undefined): ChatParticipant[] {
+  const value = conversation?.metadata.participants;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is ChatParticipant => {
+    const participant = item as Partial<ChatParticipant>;
+    return (
+      typeof participant.id === "string" &&
+      typeof participant.handle === "string" &&
+      typeof participant.roleConfigId === "string" &&
+      (participant.kind === "codex-cli" || participant.kind === "claude-code")
+    );
+  });
+}
+
+function chatRoleLabel(roles: ChatRoleConfig[], participant: ChatParticipant): string {
+  return roles.find((role) => role.id === participant.roleConfigId)?.label ?? participant.roleConfigId;
+}
+
+function chatDisplayContent(message: Conversation["messages"][number], author: string): string {
+  if (message.role !== "participant") {
+    return message.content;
+  }
+  const lines = message.content.replace(/\r\n/g, "\n").split("\n");
+  const firstContentIndex = lines.findIndex((line) => line.trim());
+  if (firstContentIndex < 0) {
+    return "";
+  }
+  const firstLine = lines[firstContentIndex].trim();
+  const labels = [author, message.participantLabel].filter((value): value is string => Boolean(value));
+  if (!labels.some((label) => firstLine === label || firstLine === `@${label.replace(/^@/, "")}`)) {
+    return message.content;
+  }
+  const next = [...lines.slice(0, firstContentIndex), ...lines.slice(firstContentIndex + 1)];
+  while (next.length > 0 && !next[0].trim()) {
+    next.shift();
+  }
+  return next.join("\n");
+}
+
+function activeMentionQuery(value: string): string | undefined {
+  const match = value.match(/(?:^|\s)@([A-Za-z0-9_-]*)$/);
+  return match ? match[1] : undefined;
+}
+
+function replaceActiveMention(value: string, handle: string): string {
+  const match = value.match(/(?:^|\s)@([A-Za-z0-9_-]*)$/);
+  if (!match || match.index === undefined) {
+    return `${value}${value.endsWith(" ") || !value ? "" : " "}@${handle} `;
+  }
+  const prefix = value.slice(0, match.index);
+  const leadingSpace = match[0].startsWith(" ") ? " " : "";
+  return `${prefix}${leadingSpace}@${handle} `;
 }
 
 function pendingPlanDecisions(conversation: Conversation | undefined): PlanDecisionRequest[] {

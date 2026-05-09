@@ -1,6 +1,6 @@
 export type ProviderKind = "openai" | "anthropic" | "gemini" | "codex-cli" | "claude-code";
 
-export type ConversationKind = "general" | "code-review" | "implementation-plan";
+export type ConversationKind = "general" | "code-review" | "implementation-plan" | "chat";
 
 export type GitDiffMode = "working" | "staged" | "uncommitted" | "base" | "commit" | "pasted";
 
@@ -21,7 +21,103 @@ export interface ProviderSettings {
 export interface AppSettings {
   roundLimitDefault: number;
   providers: ProviderSettings[];
+  chatRoleConfigs: ChatRoleConfig[];
   lastRepoPath?: string;
+}
+
+export interface ChatRoleConfig {
+  id: string;
+  label: string;
+  instructions: string;
+  version: number;
+  builtIn?: boolean;
+  updatedAt: string;
+}
+
+export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code">;
+
+export interface ChatParticipant {
+  id: string;
+  handle: string;
+  roleConfigId: string;
+  roleConfigVersion?: number;
+  kind: ChatProviderKind;
+  model?: string;
+}
+
+export interface ChatParticipantSession {
+  participantId: string;
+  sessionId: string;
+  roleConfigId: string;
+  roleConfigVersion: number;
+  roleLabel: string;
+  roleInstructions: string;
+  lastSyncedMessageId?: string;
+  updatedAt: string;
+}
+
+export type ChatMentionApprovalStatus = "pending" | "approved" | "rejected";
+
+export interface ChatPendingMention {
+  targetParticipantId: string;
+  targetHandle: string;
+  status: ChatMentionApprovalStatus;
+  approvedAt?: string;
+}
+
+export interface ChatMessageMetadata {
+  threadId?: string;
+  parentMessageId?: string;
+  mentions?: string[];
+  pendingMentions?: ChatPendingMention[];
+  sourceMessageId?: string;
+  requesterParticipantId?: string;
+  approvedContinuation?: boolean;
+  syncedThroughMessageId?: string;
+}
+
+export interface ChatRoleConfigUpdate {
+  id?: string;
+  label: string;
+  instructions: string;
+}
+
+export interface CreateChatConversationRequest {
+  title?: string;
+  repoPath?: string;
+  participants: Array<{
+    handle: string;
+    roleConfigId: string;
+    kind: ChatProviderKind;
+    model?: string;
+  }>;
+}
+
+export interface AddChatParticipantRequest {
+  conversationId: string;
+  participant: {
+    handle: string;
+    roleConfigId: string;
+    kind: ChatProviderKind;
+    model?: string;
+  };
+}
+
+export interface SendChatMessageRequest {
+  conversationId: string;
+  runId?: string;
+  content: string;
+  threadId?: string;
+  parentMessageId?: string;
+}
+
+export interface RespondToChatMentionsRequest {
+  conversationId: string;
+  sourceMessageId: string;
+  targetParticipantIds: string[];
+  approve: boolean;
+  continueRequester?: boolean;
+  runId?: string;
 }
 
 export interface ProviderSettingsUpdate {
@@ -205,6 +301,7 @@ export interface ChatMessage {
   createdAt: string;
   status?: "pending" | "done" | "error";
   progressPhase?: ReviewProgress["phase"];
+  metadata?: ChatMessageMetadata;
 }
 
 export interface DebateRound {
@@ -273,6 +370,7 @@ export interface StartReviewResult {
 export interface AppBridge {
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
+  saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;
   updateLastRepoPath(repoPath: string): Promise<AppSettings>;
   listProviderModels(kind: ProviderKind): Promise<ProviderModel[]>;
   detectAgents(): Promise<AgentHealth[]>;
@@ -284,6 +382,10 @@ export interface AppBridge {
   saveDecisionSelections(conversationId: string, selections: Record<string, string>): Promise<Conversation | undefined>;
   saveDecisionResolutions(conversationId: string, resolutions: Record<string, boolean>): Promise<Conversation | undefined>;
   savePlanItemReview(request: PlanItemReviewRequest): Promise<Conversation | undefined>;
+  createChatConversation(request: CreateChatConversationRequest): Promise<StartReviewResult>;
+  addChatParticipant(request: AddChatParticipantRequest): Promise<Conversation | undefined>;
+  sendChatMessage(request: SendChatMessageRequest): Promise<StartReviewResult>;
+  respondToChatMentions(request: RespondToChatMentionsRequest): Promise<StartReviewResult>;
   startReview(request: ReviewRequest): Promise<StartReviewResult>;
   continueReview(request: ContinueReviewRequest): Promise<StartReviewResult>;
   askPlanDecisionClarification(request: PlanDecisionClarificationRequest): Promise<StartReviewResult>;

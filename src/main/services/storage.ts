@@ -5,7 +5,7 @@ import { runCommand } from "./command";
 import type { Conversation, ConversationSummary } from "../../shared/types";
 import { sanitizeConversationWarnings, sanitizeWarningList } from "../../shared/warnings";
 
-const INTERRUPTED_RUN_WARNING = "Previous run was interrupted before completion. Resume the plan to continue from the saved context.";
+const INTERRUPTED_RUN_WARNING = "Previous run was interrupted before completion. Continue from the saved context.";
 
 function sqlString(value: string | undefined | null): string {
   if (value === undefined || value === null) {

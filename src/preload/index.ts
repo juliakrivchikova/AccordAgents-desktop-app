@@ -1,23 +1,29 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AppBridge,
+  AddChatParticipantRequest,
+  ChatRoleConfigUpdate,
   ComposeImplementationPlanRequest,
   ContinueReviewRequest,
   Conversation,
+  CreateChatConversationRequest,
   GitDiffRequest,
   PlanDecisionClarificationRequest,
   PlanItemReviewRequest,
   ProviderSettingsUpdate,
+  RespondToChatMentionsRequest,
   RecoverImplementationPlanRequest,
   ReviseImplementationPlanRequest,
   RetryImplementationPlanSynthesisRequest,
   ReviewProgress,
-  ReviewRequest
+  ReviewRequest,
+  SendChatMessageRequest
 } from "../shared/types";
 
 const bridge: AppBridge = {
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateProviderSettings: (update: ProviderSettingsUpdate) => ipcRenderer.invoke("settings:update-provider", update),
+  saveChatRoleConfig: (update: ChatRoleConfigUpdate) => ipcRenderer.invoke("settings:save-chat-role", update),
   updateLastRepoPath: (repoPath: string) => ipcRenderer.invoke("settings:update-last-repo-path", repoPath),
   listProviderModels: (kind) => ipcRenderer.invoke("settings:list-provider-models", kind),
   detectAgents: () => ipcRenderer.invoke("agents:detect"),
@@ -31,6 +37,10 @@ const bridge: AppBridge = {
   saveDecisionResolutions: (conversationId: string, resolutions: Record<string, boolean>) =>
     ipcRenderer.invoke("conversations:save-decision-resolutions", conversationId, resolutions),
   savePlanItemReview: (request: PlanItemReviewRequest) => ipcRenderer.invoke("conversations:save-plan-item-review", request),
+  createChatConversation: (request: CreateChatConversationRequest) => ipcRenderer.invoke("chat:create", request),
+  addChatParticipant: (request: AddChatParticipantRequest) => ipcRenderer.invoke("chat:add-participant", request),
+  sendChatMessage: (request: SendChatMessageRequest) => ipcRenderer.invoke("chat:send", request),
+  respondToChatMentions: (request: RespondToChatMentionsRequest) => ipcRenderer.invoke("chat:respond-to-mentions", request),
   startReview: (request: ReviewRequest) => ipcRenderer.invoke("conversations:start-review", request),
   continueReview: (request: ContinueReviewRequest) => ipcRenderer.invoke("conversations:continue-review", request),
   askPlanDecisionClarification: (request: PlanDecisionClarificationRequest) => ipcRenderer.invoke("conversations:ask-plan-decision-clarification", request),

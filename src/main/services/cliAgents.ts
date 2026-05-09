@@ -100,13 +100,21 @@ export class CliAgentRunner {
             outputPath,
             "-"
           ];
+      if (participant.model && !resuming) {
+        args.splice(args.length - 1, 0, "--model", participant.model);
+      }
       if (repoPath && !resuming) {
         args.splice(1, 0, "--cd", repoPath);
+        if (kind === "chat") {
+          args.splice(1, 0, "--skip-git-repo-check");
+        }
       } else if (!repoPath && !resuming) {
         // Session persistence is only useful when a repository is selected. For free-form runs,
         // keep Codex ephemeral so unrelated conversations do not bleed together.
         args.splice(1, 0, "--skip-git-repo-check", "--ephemeral", "--ignore-rules");
       } else if (!repoPath && resuming) {
+        args.splice(2, 0, "--skip-git-repo-check");
+      } else if (kind === "chat" && resuming) {
         args.splice(2, 0, "--skip-git-repo-check");
       }
       const result = await runCommand("codex", args, {
@@ -160,6 +168,9 @@ export class CliAgentRunner {
       } else if (newSessionId) {
         args.push("--session-id", newSessionId);
       }
+      if (participant.model) {
+        args.push("--model", participant.model);
+      }
       if (repoPath) {
         args.push("--tools", "Read,Grep,Glob,LS");
       } else {
@@ -207,6 +218,15 @@ export class CliAgentRunner {
       ].join("\n\n");
     }
 
+    if (kind === "chat") {
+      return [
+        "You are running for AI Consensus Chat in read-only mode.",
+        "Use the generated chat history path and any selected repository context described in the prompt.",
+        "Do not edit files, run mutating commands, install dependencies, or wait for terminal confirmation.",
+        prompt
+      ].join("\n\n");
+    }
+
     const hasRepoContext = Boolean(repoPath) && (kind === "code-review" || Boolean(diffMode));
 
     return [
@@ -226,7 +246,7 @@ export class CliAgentRunner {
     if (!repoPath) {
       return undefined;
     }
-    return kind === "code-review" || kind === "implementation-plan" || Boolean(diffMode) ? repoPath : undefined;
+    return kind === "code-review" || kind === "implementation-plan" || kind === "chat" || Boolean(diffMode) ? repoPath : undefined;
   }
 
   private extractCodexText(stdout: string): string {
