@@ -7,6 +7,8 @@ export interface ParticipantRunResult {
   ok: boolean;
   error?: string;
   durationMs?: number;
+  sessionId?: string;
+  sessionRestarted?: boolean;
 }
 
 function textFromOpenAi(data: unknown): string {

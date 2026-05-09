@@ -3,6 +3,7 @@ import path from "node:path";
 import { app } from "electron";
 import { runCommand } from "./command";
 import type { Conversation, ConversationSummary } from "../../shared/types";
+import { sanitizeConversationWarnings } from "../../shared/warnings";
 
 function sqlString(value: string | undefined | null): string {
   if (value === undefined || value === null) {
@@ -70,7 +71,9 @@ export class StorageService {
     if (rows.length === 0) {
       return undefined;
     }
-    return JSON.parse(rows[0].payloadJson) as Conversation;
+    const conversation = JSON.parse(rows[0].payloadJson) as Conversation;
+    sanitizeConversationWarnings(conversation);
+    return conversation;
   }
 
   async saveConversation(conversation: Conversation): Promise<void> {

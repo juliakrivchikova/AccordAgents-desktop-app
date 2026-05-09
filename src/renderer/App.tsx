@@ -5,6 +5,7 @@ import {
   Bot,
   CheckCircle2,
   Circle,
+  Columns2,
   FolderOpen,
   GitPullRequest,
   HelpCircle,
@@ -14,6 +15,8 @@ import {
   Play,
   RefreshCw,
   Settings,
+  Maximize2,
+  X,
   XCircle
 } from "lucide-react";
 import type {
@@ -27,12 +30,17 @@ import type {
   FindingStatus,
   GitDiffMode,
   GitRepoInfo,
+  PlanDecisionAnswer,
+  PlanDecisionReply,
+  PlanDecisionRequest,
+  PlanItemReview,
   ParticipantConfig,
   ProviderKind,
   ProviderModel,
   ProviderSettings,
   ReviewProgress
 } from "../shared/types";
+import { DEFAULT_NOTICE_CHARS, sanitizeWarningText } from "../shared/warnings";
 import "./styles/app.css";
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -52,6 +60,24 @@ const DIFF_MODES: Array<{ value: GitDiffMode; label: string }> = [
 const BRANCH_COMPARE_HELP = "Changes committed on the compare branch since it diverged from the base branch.";
 
 const POINT_SEVERITIES: FindingSeverity[] = ["Critical", "High", "Medium", "Low"];
+const MAX_NOTICE_CHARS = DEFAULT_NOTICE_CHARS;
+// Judge icon by Freepik - Flaticon: https://www.flaticon.com/free-icon/judge_5452982
+const JUDGE_FLATICON_URL = new URL("./assets/judge-flaticon-5452982.png", import.meta.url).href;
+// Provider avatars by LobeHub Icons, MIT: https://lobehub.com/icons
+const CLAUDE_AVATAR_URL = new URL("./assets/claude-avatar.webp", import.meta.url).href;
+const CODEX_AVATAR_URL = new URL("./assets/codex-avatar.webp", import.meta.url).href;
+
+type ActiveView = "slack" | "points" | "plan" | "settings";
+type AvatarKind = "user" | "arbiter" | "anthropic" | "codex" | "gemini" | "generic";
+
+interface AvatarSpec {
+  kind: AvatarKind;
+  label: string;
+  initials?: string;
+}
+
+const USER_AVATAR: AvatarSpec = { kind: "user", label: "You" };
+const ARBITER_AVATAR: AvatarSpec = { kind: "arbiter", label: "Arbiter" };
 
 function providerId(provider: ProviderSettings): string {
   return provider.kind;
@@ -66,8 +92,9 @@ function App(): JSX.Element {
   const [agents, setAgents] = useState<AgentHealth[]>([]);
   const [summaries, setSummaries] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<Conversation | undefined>();
-  const [activeView, setActiveView] = useState<"slack" | "points" | "settings">("slack");
+  const [activeView, setActiveView] = useState<ActiveView>("slack");
   const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>();
+  const [focusedThreadId, setFocusedThreadId] = useState<string | undefined>();
   const [selectedParticipants, setSelectedParticipants] = useState<Set<string>>(new Set());
   const [selectedArbiterId, setSelectedArbiterId] = useState("");
   const [kind, setKind] = useState<ConversationKind>("code-review");
@@ -89,6 +116,11 @@ function App(): JSX.Element {
   const [currentRunId, setCurrentRunId] = useState<string | undefined>();
   const [progressLog, setProgressLog] = useState<ReviewProgress[]>([]);
   const progressLogRef = useRef<ReviewProgress[]>([]);
+  const [decisionAnswers, setDecisionAnswers] = useState<Record<string, string>>({});
+  const [resolvedDecisionThreads, setResolvedDecisionThreads] = useState<Record<string, boolean>>({});
+  const [clarificationDrafts, setClarificationDrafts] = useState<Record<string, string>>({});
+  const [pendingClarifications, setPendingClarifications] = useState<Record<string, PlanDecisionReply>>({});
+  const [planItemReviewDrafts, setPlanItemReviewDrafts] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | undefined>();
 
   useEffect(() => {
@@ -111,8 +143,10 @@ function App(): JSX.Element {
 
   useEffect(() => {
     const firstRunnable = settings.providers.find((provider) => !providerDisabledForRun(provider));
-    if ((!selectedArbiterId || !settings.providers.some((provider) => providerId(provider) === selectedArbiterId)) && firstRunnable) {
-      setSelectedArbiterId(providerId(firstRunnable));
+    const selectedProvider = settings.providers.find((provider) => providerId(provider) === selectedArbiterId);
+    const selectedIsRunnable = Boolean(selectedProvider && !providerDisabledForRun(selectedProvider));
+    if (!selectedIsRunnable) {
+      setSelectedArbiterId(firstRunnable ? providerId(firstRunnable) : "");
     }
   }, [agents, kind, repoPath, selectedArbiterId, settings.providers]);
 
@@ -120,15 +154,18 @@ function App(): JSX.Element {
     return settings.providers.map((provider) => {
       const health = agents.find((agent) => agent.kind === provider.kind);
       const cliWithoutRepo = isCli(provider.kind) && kind === "code-review" && !repoPath.trim();
+      const hostedPlanProvider = kind === "implementation-plan" && !isCli(provider.kind);
       return {
         provider,
         disabled: providerDisabledForRun(provider),
         health,
-        disabledReason: cliWithoutRepo
-          ? "Local CLI agents need a selected repo for code review"
-          : isCli(provider.kind) && !health?.installed
-            ? `${provider.label} is not installed`
-            : undefined
+        disabledReason: hostedPlanProvider
+          ? "Implementation plans require local repo-aware CLI agents"
+          : cliWithoutRepo
+            ? "Local CLI agents need a selected repo"
+            : isCli(provider.kind) && !health?.installed
+              ? `${provider.label} is not installed`
+              : undefined
       };
     });
   }, [agents, kind, repoPath, settings.providers]);
@@ -144,6 +181,13 @@ function App(): JSX.Element {
   const selectedBaseBranch = branchSelectDisabled || !branchOptions.includes(baseBranch) ? "" : baseBranch;
   const selectedCompareBranch = branchSelectDisabled || !branchOptions.includes(compareBranch) ? "" : compareBranch;
   const branchSelectPlaceholder = !repoInfo?.isRepo ? "Select a repository first" : branchOptions.length === 0 ? "No branches found" : "Select branch";
+  const arbiterOptions = participantOptions.filter((option) => !option.disabled);
+  const arbiterSelectValue = arbiterOptions.some(({ provider }) => providerId(provider) === selectedArbiterId) ? selectedArbiterId : "";
+  const arbiterPlaceholder = kind === "implementation-plan"
+    ? "No local CLI agents available"
+    : kind === "code-review" && !repoPath.trim()
+      ? "Select a repository first"
+      : "No runnable providers available";
 
   async function refreshAll(): Promise<void> {
     setError(undefined);
@@ -165,10 +209,18 @@ function App(): JSX.Element {
     setError(undefined);
     try {
       const next = await window.consensus.getConversation(id);
+      const nextPendingDecisions = pendingPlanDecisions(next);
+      const nextPendingItem = firstPendingPlanItemReview(next);
       setConversation(next);
       progressLogRef.current = [];
       setProgressLog([]);
-      setSelectedThreadId(undefined);
+      setSelectedThreadId(nextPendingDecisions[0]?.id ?? nextPendingItem?.id);
+      setFocusedThreadId(undefined);
+      setDecisionAnswers(pendingDecisionSelections(next));
+      setResolvedDecisionThreads(pendingDecisionResolutions(next));
+      setClarificationDrafts({});
+      setPendingClarifications({});
+      setPlanItemReviewDrafts({});
       setActiveView("slack");
     } catch (caught) {
       setError(errorText(caught));
@@ -239,25 +291,40 @@ function App(): JSX.Element {
       setError("Select at least one participant.");
       return;
     }
+    if (kind === "implementation-plan" && participants.length < 2) {
+      setError("Select at least two local CLI participants for an implementation plan.");
+      return;
+    }
     if (kind === "code-review" && diffMode !== "pasted" && !repoPath.trim()) {
+      setError("Select a local repository first.");
+      return;
+    }
+    if (kind === "implementation-plan" && !repoPath.trim()) {
       setError("Select a local repository first.");
       return;
     }
 
     const runId = crypto.randomUUID();
     const startedAt = new Date().toISOString();
+    const requestRepoPath = requiresRepo(kind) ? repoPath.trim() || undefined : undefined;
     setCurrentRunId(runId);
     progressLogRef.current = [];
     setProgressLog([]);
     setSelectedThreadId(undefined);
+    setFocusedThreadId(undefined);
+    setDecisionAnswers({});
+    setResolvedDecisionThreads({});
+    setClarificationDrafts({});
+    setPendingClarifications({});
+    setPlanItemReviewDrafts({});
     setActiveView("slack");
     setConversation({
       id: runId,
-      title: question.trim().slice(0, 80) || "Consensus review",
+      title: question.trim().slice(0, 80) || titleForKind(kind),
       kind,
       createdAt: startedAt,
       updatedAt: startedAt,
-      repoPath: repoPath.trim() || undefined,
+      repoPath: requestRepoPath,
       messages: [
         {
           id: crypto.randomUUID(),
@@ -276,7 +343,7 @@ function App(): JSX.Element {
         runId,
         kind,
         question,
-        repoPath: repoPath.trim() || undefined,
+        repoPath: requestRepoPath,
         diffMode: kind === "code-review" ? diffMode : undefined,
         baseBranch,
         compareBranch,
@@ -288,7 +355,16 @@ function App(): JSX.Element {
       });
       setConversation(mergeProgressIntoConversation(result.conversation, progressLogRef.current.filter((item) => item.runId === runId)));
       setWarnings(result.warnings);
-      setActiveView("slack");
+      setDecisionAnswers({});
+      setResolvedDecisionThreads({});
+      setClarificationDrafts({});
+      setPendingClarifications({});
+      setPlanItemReviewDrafts({});
+      const nextPendingDecisions = pendingPlanDecisions(result.conversation);
+      const nextPendingItem = firstPendingPlanItemReview(result.conversation);
+      setSelectedThreadId(nextPendingDecisions[0]?.id ?? nextPendingItem?.id);
+      setFocusedThreadId(undefined);
+      setActiveView(nextPendingDecisions.length || nextPendingItem ? "slack" : kind === "implementation-plan" ? "plan" : "slack");
       setSummaries(await window.consensus.listConversations());
     } catch (caught) {
       const message = errorText(caught);
@@ -310,6 +386,388 @@ function App(): JSX.Element {
     await window.consensus.cancelReview(currentRunId);
   }
 
+  async function continueReview(): Promise<void> {
+    const pendingDecisions = pendingPlanDecisions(conversation);
+    if (!conversation || pendingDecisions.length === 0) {
+      return;
+    }
+    const decisionReplies = planDecisionReplies(conversation);
+    const savedAnswers = implementationPlanAnswers(conversation);
+    const currentDecisionAnswers = { ...pendingDecisionSelections(conversation), ...decisionAnswers };
+    const currentDecisionResolutions = { ...pendingDecisionResolutions(conversation), ...resolvedDecisionThreads };
+    const hasAnyDecisionInput = pendingDecisions.some((decision) =>
+      decisionThreadIsReady(decision, currentDecisionAnswers, currentDecisionResolutions, savedAnswers)
+    );
+    if (!hasAnyDecisionInput) {
+      setError("Choose an option or resolve at least one decision thread.");
+      return;
+    }
+
+    const runId = crypto.randomUUID();
+    const answers: PlanDecisionAnswer[] = pendingDecisions.flatMap((decision) => {
+      const savedAnswer = decisionAnswerForDecision(decision, savedAnswers);
+      const selectedOptionId = currentDecisionAnswers[decision.id] ?? savedAnswer?.selectedOptionId;
+      const option = decision.options.find((item) => item.id === selectedOptionId);
+      const hasFreshInput = decisionThreadIsReady(decision, currentDecisionAnswers, currentDecisionResolutions);
+      if (!hasFreshInput && savedAnswer) {
+        return [savedAnswer];
+      }
+      if (!hasFreshInput) {
+        return [];
+      }
+      const answerSelection = selectedOptionId ? { ...currentDecisionAnswers, [decision.id]: selectedOptionId } : currentDecisionAnswers;
+      const generatedAnswer = decisionThreadAnswer(decision, answerSelection, decisionReplies);
+      return [{
+        decisionId: decision.id,
+        decisionKey: planDecisionKey(decision),
+        selectedOptionId: option ? selectedOptionId : undefined,
+        answer: generatedAnswer,
+        answerSource: "user"
+      }];
+    });
+    const optimisticAnswers = mergePlanDecisionAnswers(savedAnswers, answers);
+
+    setError(undefined);
+    setWarnings([]);
+    setCurrentRunId(runId);
+    progressLogRef.current = [];
+    setProgressLog([]);
+    setConversation((current) =>
+      current?.id === conversation.id
+        ? {
+            ...current,
+            metadata: {
+              ...current.metadata,
+              implementationPlanAnswers: optimisticAnswers,
+              pendingDecisionSelections: undefined,
+              pendingDecisionResolutions: undefined,
+              pendingDecisions: undefined,
+              running: true
+            }
+          }
+        : current
+    );
+    setBusy(true);
+    try {
+      const result = await window.consensus.continueReview({ conversationId: conversation.id, runId, answers });
+      setConversation(mergeProgressIntoConversation(result.conversation, progressLogRef.current.filter((item) => item.runId === runId)));
+      setWarnings(result.warnings);
+      setDecisionAnswers({});
+      setResolvedDecisionThreads({});
+      setClarificationDrafts({});
+      setPendingClarifications({});
+      setPlanItemReviewDrafts({});
+      const nextPendingDecisions = pendingPlanDecisions(result.conversation);
+      const nextPendingItem = firstPendingPlanItemReview(result.conversation);
+      setSelectedThreadId(nextPendingDecisions[0]?.id ?? nextPendingItem?.id);
+      setFocusedThreadId(undefined);
+      setActiveView(nextPendingDecisions.length || nextPendingItem ? "slack" : "plan");
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      const message = errorText(caught);
+      if (message.toLowerCase().includes("cancel")) {
+        setWarnings((current) => [...current, "Review cancelled."]);
+      } else {
+        setError(message);
+      }
+      setConversation((current) =>
+        current?.id === conversation.id
+          ? {
+              ...current,
+              metadata: {
+                ...current.metadata,
+                implementationPlanAnswers: optimisticAnswers,
+                pendingDecisionSelections: currentDecisionAnswers,
+                pendingDecisionResolutions: currentDecisionResolutions,
+                pendingDecisions,
+                running: false
+              }
+            }
+          : current
+      );
+    } finally {
+      setBusy(false);
+      setCurrentRunId(undefined);
+      setConversation((current) =>
+        current?.id === conversation.id && current.metadata.running === true
+          ? { ...current, metadata: { ...current.metadata, running: false } }
+          : current
+      );
+    }
+  }
+
+  async function selectDecisionAnswer(decisionId: string, optionId: string): Promise<void> {
+    if (!conversation) {
+      return;
+    }
+    const nextAnswers = { ...pendingDecisionSelections(conversation), ...decisionAnswers, [decisionId]: optionId };
+    setDecisionAnswers(nextAnswers);
+    setConversation((current) =>
+      current?.id === conversation.id
+        ? { ...current, metadata: { ...current.metadata, pendingDecisionSelections: nextAnswers } }
+        : current
+    );
+    try {
+      const saved = await window.consensus.saveDecisionSelections(conversation.id, nextAnswers);
+      if (saved) {
+        setConversation((current) => current?.id === saved.id ? { ...saved, messages: current.messages, findings: current.findings } : current);
+      }
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      setError(`Could not save decision selection: ${errorText(caught)}`);
+    }
+  }
+
+  async function resolveDecisionThread(decisionId: string): Promise<void> {
+    if (!conversation) {
+      return;
+    }
+    setError(undefined);
+    const nextResolutions = { ...pendingDecisionResolutions(conversation), ...resolvedDecisionThreads, [decisionId]: true };
+    setResolvedDecisionThreads(nextResolutions);
+    setConversation((current) =>
+      current?.id === conversation.id
+        ? { ...current, metadata: { ...current.metadata, pendingDecisionResolutions: nextResolutions } }
+        : current
+    );
+    try {
+      const saved = await window.consensus.saveDecisionResolutions(conversation.id, nextResolutions);
+      if (saved) {
+        setConversation((current) => current?.id === saved.id ? { ...saved, messages: current.messages, findings: current.findings } : current);
+      }
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      setError(`Could not save decision resolution: ${errorText(caught)}`);
+    }
+  }
+
+  async function askDecisionClarification(decisionId: string): Promise<void> {
+    if (!conversation) {
+      return;
+    }
+    const question = clarificationDrafts[decisionId]?.trim();
+    if (!question) {
+      setError("Enter a thread message.");
+      return;
+    }
+
+    const runId = crypto.randomUUID();
+    const pendingReply: PlanDecisionReply = {
+      id: `pending:${runId}`,
+      decisionId,
+      role: "user",
+      content: question,
+      createdAt: new Date().toISOString(),
+      status: "done"
+    };
+    setError(undefined);
+    setCurrentRunId(runId);
+    setSelectedThreadId(decisionId);
+    setFocusedThreadId(decisionId);
+    setClarificationDrafts((current) => ({ ...current, [decisionId]: "" }));
+    setPendingClarifications((current) => ({ ...current, [decisionId]: pendingReply }));
+    progressLogRef.current = [];
+    setProgressLog([]);
+    setBusy(true);
+    try {
+      const result = await window.consensus.askPlanDecisionClarification({
+        conversationId: conversation.id,
+        decisionId,
+        question,
+        runId
+      });
+      setConversation(mergeProgressIntoConversation(result.conversation, progressLogRef.current.filter((item) => item.runId === runId)));
+      setWarnings(result.warnings);
+      setClarificationDrafts((current) => ({ ...current, [decisionId]: "" }));
+      setPendingClarifications((current) => {
+        const next = { ...current };
+        delete next[decisionId];
+        return next;
+      });
+      setSelectedThreadId(decisionId);
+      setFocusedThreadId(decisionId);
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      const message = errorText(caught);
+      if (message.toLowerCase().includes("cancel")) {
+        setWarnings((current) => [...current, "Clarification cancelled."]);
+      } else {
+        setError(message);
+      }
+      setClarificationDrafts((current) => ({ ...current, [decisionId]: question }));
+    } finally {
+      setBusy(false);
+      setCurrentRunId(undefined);
+      setPendingClarifications((current) => {
+        const next = { ...current };
+        delete next[decisionId];
+        return next;
+      });
+    }
+  }
+
+  async function confirmPlanItem(findingId: string): Promise<void> {
+    if (!conversation) {
+      return;
+    }
+    setError(undefined);
+    try {
+      const saved = await window.consensus.savePlanItemReview({
+        conversationId: conversation.id,
+        findingId,
+        confirmed: true
+      });
+      if (saved) {
+        setConversation(saved);
+      }
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      setError(errorText(caught));
+    }
+  }
+
+  async function commentOnPlanItem(findingId: string): Promise<void> {
+    if (!conversation) {
+      return;
+    }
+    const comment = planItemReviewDrafts[findingId]?.trim();
+    if (!comment) {
+      setError("Enter an item comment.");
+      return;
+    }
+    setError(undefined);
+    try {
+      const saved = await window.consensus.savePlanItemReview({
+        conversationId: conversation.id,
+        findingId,
+        comment
+      });
+      if (saved) {
+        setConversation(saved);
+      }
+      setPlanItemReviewDrafts((current) => ({ ...current, [findingId]: "" }));
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      setError(errorText(caught));
+    }
+  }
+
+  async function composeImplementationPlan(): Promise<void> {
+    if (!conversation) {
+      return;
+    }
+    const runId = crypto.randomUUID();
+    setError(undefined);
+    setWarnings([]);
+    setCurrentRunId(runId);
+    progressLogRef.current = [];
+    setProgressLog([]);
+    setBusy(true);
+    setConversation((current) =>
+      current?.id === conversation.id
+        ? {
+            ...current,
+            metadata: {
+              ...current.metadata,
+              running: true
+            }
+          }
+        : current
+    );
+    try {
+      const result = await window.consensus.composeImplementationPlan({ conversationId: conversation.id, runId });
+      setConversation(mergeProgressIntoConversation(result.conversation, progressLogRef.current.filter((item) => item.runId === runId)));
+      setWarnings(result.warnings);
+      setSelectedThreadId(undefined);
+      setFocusedThreadId(undefined);
+      setActiveView("plan");
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      const message = errorText(caught);
+      if (message.toLowerCase().includes("cancel")) {
+        setWarnings((current) => [...current, "Plan composition cancelled."]);
+      } else {
+        setError(message);
+      }
+      setConversation((current) =>
+        current?.id === conversation.id
+          ? {
+              ...current,
+              metadata: {
+                ...current.metadata,
+                running: false
+              }
+            }
+          : current
+      );
+    } finally {
+      setBusy(false);
+      setCurrentRunId(undefined);
+      setConversation((current) =>
+        current?.id === conversation.id && current.metadata.running === true
+          ? { ...current, metadata: { ...current.metadata, running: false } }
+          : current
+      );
+    }
+  }
+
+  async function retryFinalPlanSynthesis(): Promise<void> {
+    if (!conversation) {
+      return;
+    }
+    const runId = crypto.randomUUID();
+    setError(undefined);
+    setWarnings([]);
+    setCurrentRunId(runId);
+    progressLogRef.current = [];
+    setProgressLog([]);
+    setBusy(true);
+    setActiveView("plan");
+    setConversation((current) =>
+      current?.id === conversation.id
+        ? {
+            ...current,
+            metadata: {
+              ...current.metadata,
+              running: true
+            }
+          }
+        : current
+    );
+    try {
+      const result = await window.consensus.retryImplementationPlanSynthesis({ conversationId: conversation.id, runId });
+      setConversation(mergeProgressIntoConversation(result.conversation, progressLogRef.current.filter((item) => item.runId === runId)));
+      setWarnings(result.warnings);
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      const message = errorText(caught);
+      if (message.toLowerCase().includes("cancel")) {
+        setWarnings((current) => [...current, "Final plan retry cancelled."]);
+      } else {
+        setError(message);
+      }
+      setConversation((current) =>
+        current?.id === conversation.id
+          ? {
+              ...current,
+              metadata: {
+                ...current.metadata,
+                running: false
+              }
+            }
+          : current
+      );
+    } finally {
+      setBusy(false);
+      setCurrentRunId(undefined);
+      setConversation((current) =>
+        current?.id === conversation.id && current.metadata.running === true
+          ? { ...current, metadata: { ...current.metadata, running: false } }
+          : current
+      );
+    }
+  }
+
   function newReview(): void {
     if (busy) {
       return;
@@ -318,7 +776,13 @@ function App(): JSX.Element {
     progressLogRef.current = [];
     setProgressLog([]);
     setSelectedThreadId(undefined);
+    setFocusedThreadId(undefined);
     setWarnings([]);
+    setDecisionAnswers({});
+    setResolvedDecisionThreads({});
+    setClarificationDrafts({});
+    setPendingClarifications({});
+    setPlanItemReviewDrafts({});
     setError(undefined);
     setActiveView("slack");
   }
@@ -327,7 +791,8 @@ function App(): JSX.Element {
     return settings.providers
       .filter((provider) => selectedParticipants.has(providerId(provider)))
       .filter((provider) => !providerDisabledForRun(provider))
-      .filter((provider) => !(isCli(provider.kind) && kind === "code-review" && !repoPath.trim()))
+      .filter((provider) => kind !== "implementation-plan" || isCli(provider.kind))
+      .filter((provider) => !(isCli(provider.kind) && requiresRepo(kind) && !repoPath.trim()))
       .map((provider) => ({
         id: provider.kind,
         kind: provider.kind,
@@ -351,6 +816,9 @@ function App(): JSX.Element {
 
   function providerDisabledForRun(provider: ProviderSettings): boolean {
     const health = agents.find((agent) => agent.kind === provider.kind);
+    if (kind === "implementation-plan" && !isCli(provider.kind)) {
+      return true;
+    }
     if (isCli(provider.kind)) {
       return !health?.installed || (kind === "code-review" && !repoPath.trim());
     }
@@ -358,7 +826,7 @@ function App(): JSX.Element {
   }
 
   function toggleParticipant(provider: ProviderSettings): void {
-    if (isCli(provider.kind) && kind === "code-review" && !repoPath.trim()) {
+    if (providerDisabledForRun(provider)) {
       return;
     }
     setSelectedParticipants((current) => {
@@ -407,8 +875,21 @@ function App(): JSX.Element {
   }
 
   const hasResultContext = Boolean(conversation) || busy;
-  const resultView = activeView === "points" ? "points" : "slack";
-  const hasPoints = Boolean(conversation && conversation.metadata.running !== true);
+  const pendingDecisions = pendingPlanDecisions(conversation);
+  const reviewablePlanItems = requiredPlanItemReviewFindings(conversation);
+  const reviewedPlanItemCount = reviewablePlanItems.filter((finding) => planItemReviewForFinding(finding, planItemReviews(conversation))).length;
+  const isPendingPlanItemReview = pendingPlanItemReview(conversation);
+  const canComposePlan = isPendingPlanItemReview && reviewedPlanItemCount === reviewablePlanItems.length;
+  const visibleDecisionAnswers = { ...pendingDecisionSelections(conversation), ...decisionAnswers };
+  const visibleDecisionResolutions = { ...pendingDecisionResolutions(conversation), ...resolvedDecisionThreads };
+  const conversationKind = conversation?.kind ?? kind;
+  const visibleWarnings = warnings.map((warning) => displayNoticeText(warning)).filter(Boolean);
+  const resultView: "slack" | "points" | "plan" = activeView === "points" ? "points" : activeView === "plan" ? "plan" : "slack";
+  const hasPoints = Boolean(conversation && conversation.metadata.running !== true && pendingDecisions.length === 0);
+  const runnableParticipants = buildParticipants();
+  const hasRequiredContext =
+    kind === "code-review" ? diffMode === "pasted" || Boolean(repoPath.trim()) : kind !== "implementation-plan" || Boolean(repoPath.trim());
+  const canStart = !busy && hasRequiredContext && Boolean(buildArbiter()) && runnableParticipants.length > 0 && (kind !== "implementation-plan" || runnableParticipants.length >= 2);
 
   return (
     <div className="app-shell">
@@ -430,7 +911,7 @@ function App(): JSX.Element {
               onClick={() => void openConversation(summary.id)}
             >
               <span>{summary.title}</span>
-              <small>{summary.kind === "code-review" ? "Code review" : "Question"}</small>
+              <small>{labelForKind(summary.kind)}</small>
             </button>
           ))}
           {summaries.length === 0 && <div className="empty-history">No conversations yet</div>}
@@ -445,7 +926,13 @@ function App(): JSX.Element {
                 <MessageSquare size={15} />
                 Slack
               </button>
-              {hasPoints && (
+              {hasPoints && conversationKind === "implementation-plan" && (
+                <button className={resultView === "plan" && activeView !== "settings" ? "selected" : ""} onClick={() => setActiveView("plan")}>
+                  <ListChecks size={15} />
+                  Plan
+                </button>
+              )}
+              {hasPoints && conversationKind !== "implementation-plan" && (
                 <button className={resultView === "points" && activeView !== "settings" ? "selected" : ""} onClick={() => setActiveView("points")}>
                   <ListChecks size={15} />
                   Points
@@ -474,13 +961,13 @@ function App(): JSX.Element {
         {error && (
           <div className="notice error">
             <AlertTriangle size={17} />
-            {error}
+            <span className="notice-text">{displayNoticeText(error)}</span>
           </div>
         )}
-        {warnings.map((warning) => (
-          <div className="notice" key={warning}>
+        {visibleWarnings.map((warning, index) => (
+          <div className="notice" key={`${index}:${warning.slice(0, 80)}`}>
             <AlertTriangle size={17} />
-            {warning}
+            <span className="notice-text">{warning}</span>
           </div>
         ))}
 
@@ -509,6 +996,10 @@ function App(): JSX.Element {
                   <MessageSquare size={15} />
                   Question
                 </button>
+                <button className={kind === "implementation-plan" ? "selected" : ""} onClick={() => setKind("implementation-plan")}>
+                  <ListChecks size={15} />
+                  Plan
+                </button>
               </div>
 
               <label className="field">
@@ -516,7 +1007,7 @@ function App(): JSX.Element {
                 <textarea value={question} onChange={(event) => setQuestion(event.target.value)} rows={5} />
               </label>
 
-              {kind === "code-review" && (
+              {requiresRepo(kind) && (
                 <>
                   <div className="repo-row">
                     <label className="field grow">
@@ -550,122 +1041,136 @@ function App(): JSX.Element {
                     </div>
                   )}
 
-                  <div className="field">
-                    <span>Diff mode</span>
-                    <div className="diff-mode-grid">
-                      {DIFF_MODES.map((mode) => (
-                        <button
-                          key={mode.value}
-                          className={diffMode === mode.value ? "selected" : ""}
-                          onClick={() => setDiffMode(mode.value)}
-                        >
-                          {mode.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {diffMode === "base" && (
-                    <div className="field">
-                      <span>Branches</span>
-                      <div className="branch-compare-row">
-                        <label className="branch-select">
-                          <span>Base branch</span>
-                          <select
-                            value={selectedBaseBranch}
-                            onChange={(event) => setBaseBranch(event.target.value)}
-                            aria-describedby="branch-compare-help"
-                            disabled={branchSelectDisabled}
-                            title={BRANCH_COMPARE_HELP}
-                          >
-                            <option value="" disabled>
-                              {branchSelectPlaceholder}
-                            </option>
-                            {branchOptions.map((branch) => (
-                              <option key={branch} value={branch}>
-                                {branch}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <label className="branch-select">
-                          <span>Compare branch</span>
-                          <select
-                            value={selectedCompareBranch}
-                            onChange={(event) => setCompareBranch(event.target.value)}
-                            aria-describedby="branch-compare-help"
-                            disabled={branchSelectDisabled}
-                            title={BRANCH_COMPARE_HELP}
-                          >
-                            <option value="" disabled>
-                              {branchSelectPlaceholder}
-                            </option>
-                            {branchOptions.map((branch) => (
-                              <option key={branch} value={branch}>
-                                {branch}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
+                  {kind === "code-review" && (
+                    <>
+                      <div className="field">
+                        <span>Diff mode</span>
+                        <div className="diff-mode-grid">
+                          {DIFF_MODES.map((mode) => (
+                            <button
+                              key={mode.value}
+                              className={diffMode === mode.value ? "selected" : ""}
+                              onClick={() => setDiffMode(mode.value)}
+                            >
+                              {mode.label}
+                            </button>
+                          ))}
+                        </div>
                       </div>
-                      <div className="inline-hint" id="branch-compare-help">
-                        {BRANCH_COMPARE_HELP}
-                      </div>
-                    </div>
-                  )}
-                  {diffMode === "commit" && (
-                    <label className="field">
-                      <span>Commit SHA</span>
-                      <input value={commit} onChange={(event) => setCommit(event.target.value)} />
-                    </label>
-                  )}
-                  {diffMode === "pasted" && (
-                    <label className="field">
-                      <span>Pasted diff</span>
-                      <textarea value={pastedDiff} onChange={(event) => setPastedDiff(event.target.value)} rows={7} />
-                    </label>
-                  )}
 
-                  <button className="secondary-button" onClick={() => void previewDiff()}>
-                    Preview diff
-                  </button>
-                  {diffPreview && <pre className="diff-preview">{diffPreview.slice(0, 6000)}</pre>}
+                      {diffMode === "base" && (
+                        <div className="field">
+                          <span>Branches</span>
+                          <div className="branch-compare-row">
+                            <label className="branch-select">
+                              <span>Base branch</span>
+                              <select
+                                value={selectedBaseBranch}
+                                onChange={(event) => setBaseBranch(event.target.value)}
+                                aria-describedby="branch-compare-help"
+                                disabled={branchSelectDisabled}
+                                title={BRANCH_COMPARE_HELP}
+                              >
+                                <option value="" disabled>
+                                  {branchSelectPlaceholder}
+                                </option>
+                                {branchOptions.map((branch) => (
+                                  <option key={branch} value={branch}>
+                                    {branch}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="branch-select">
+                              <span>Compare branch</span>
+                              <select
+                                value={selectedCompareBranch}
+                                onChange={(event) => setCompareBranch(event.target.value)}
+                                aria-describedby="branch-compare-help"
+                                disabled={branchSelectDisabled}
+                                title={BRANCH_COMPARE_HELP}
+                              >
+                                <option value="" disabled>
+                                  {branchSelectPlaceholder}
+                                </option>
+                                {branchOptions.map((branch) => (
+                                  <option key={branch} value={branch}>
+                                    {branch}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+                          <div className="inline-hint" id="branch-compare-help">
+                            {BRANCH_COMPARE_HELP}
+                          </div>
+                        </div>
+                      )}
+                      {diffMode === "commit" && (
+                        <label className="field">
+                          <span>Commit SHA</span>
+                          <input value={commit} onChange={(event) => setCommit(event.target.value)} />
+                        </label>
+                      )}
+                      {diffMode === "pasted" && (
+                        <label className="field">
+                          <span>Pasted diff</span>
+                          <textarea value={pastedDiff} onChange={(event) => setPastedDiff(event.target.value)} rows={7} />
+                        </label>
+                      )}
+
+                      <button className="secondary-button" onClick={() => void previewDiff()}>
+                        Preview diff
+                      </button>
+                      {diffPreview && <pre className="diff-preview">{diffPreview.slice(0, 6000)}</pre>}
+                    </>
+                  )}
                 </>
               )}
 
               <div className="participant-picker">
                 <span>Participants</span>
-                {participantOptions.map(({ provider, disabled, health, disabledReason }) => (
-                  <button
-                    key={provider.kind}
-                    className={`participant-pill ${selectedParticipants.has(providerId(provider)) ? "selected" : ""}`}
-                    disabled={disabled}
-                    onClick={() => toggleParticipant(provider)}
-                    title={disabledReason ?? provider.model ?? provider.label}
-                  >
-                    {selectedParticipants.has(providerId(provider)) ? <CheckCircle2 size={15} /> : <Circle size={15} />}
-                    {provider.label}
-                    {providerId(provider) === selectedArbiterId && (
-                      <small>{selectedParticipants.has(providerId(provider)) ? "also arbiter" : "arbiter only"}</small>
-                    )}
-                    {isCli(provider.kind) && <small>{health?.installed ? "local" : "missing"}</small>}
-                  </button>
-                ))}
+                {participantOptions.map(({ provider, disabled, health, disabledReason }) => {
+                  const selected = selectedParticipants.has(providerId(provider)) && !disabled;
+                  return (
+                    <button
+                      key={provider.kind}
+                      className={`participant-pill ${selected ? "selected" : ""}`}
+                      disabled={disabled}
+                      onClick={() => toggleParticipant(provider)}
+                      title={disabledReason ?? provider.model ?? provider.label}
+                    >
+                      {selected ? <CheckCircle2 size={15} /> : <Circle size={15} />}
+                      {provider.label}
+                      {providerId(provider) === selectedArbiterId && (
+                        <small>{selected ? "also arbiter" : "arbiter only"}</small>
+                      )}
+                      {disabledReason ? <small>{disabledReason}</small> : isCli(provider.kind) && <small>{health?.installed ? "local" : "missing"}</small>}
+                    </button>
+                  );
+                })}
               </div>
 
               <label className="field">
                 <span>Arbiter</span>
-                <select value={selectedArbiterId} onChange={(event) => setSelectedArbiterId(event.target.value)}>
-                  {participantOptions.map(({ provider, disabled, disabledReason }) => (
-                    <option key={provider.kind} value={providerId(provider)} disabled={disabled}>
-                      {provider.label}{disabledReason ? ` - ${disabledReason}` : ""}
+                <select
+                  value={arbiterSelectValue}
+                  onChange={(event) => setSelectedArbiterId(event.target.value)}
+                  disabled={arbiterOptions.length === 0}
+                >
+                  <option value="" disabled>
+                    {arbiterPlaceholder}
+                  </option>
+                  {arbiterOptions.map(({ provider }) => (
+                    <option key={provider.kind} value={providerId(provider)}>
+                      {provider.label}
                     </option>
                   ))}
                 </select>
               </label>
               <div className="inline-hint">The arbiter merge is a separate run. If the same provider is selected as a participant, it also gets an independent participant run.</div>
 
-              <button className="run-button" disabled={busy} onClick={() => void startReview()}>
+              <button className="run-button" disabled={!canStart} onClick={() => void startReview()}>
                 {busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
                 {busy ? "Running consensus..." : "Start consensus"}
               </button>
@@ -678,13 +1183,49 @@ function App(): JSX.Element {
                   <SlackView
                     conversation={conversation}
                     progress={progressLog}
-                    kind={conversation?.kind ?? kind}
+                    kind={conversationKind}
                     isRunning={busy}
                     selectedThreadId={selectedThreadId}
-                    onSelectThread={setSelectedThreadId}
+                    focusedThreadId={focusedThreadId}
+                    onSelectThread={(id) => {
+                      setSelectedThreadId(id);
+                      if (!id) {
+                        setFocusedThreadId(undefined);
+                      }
+                    }}
+                    onFocusThread={(id) => {
+                      setSelectedThreadId(id);
+                      setFocusedThreadId(id);
+                    }}
+                    onExitFocus={() => setFocusedThreadId(undefined)}
+                    onCloseThread={() => {
+                      setSelectedThreadId(undefined);
+                      setFocusedThreadId(undefined);
+                    }}
+                    pendingDecisions={pendingDecisions}
+                    decisionReplies={[...planDecisionReplies(conversation), ...Object.values(pendingClarifications)]}
+                    decisionAnswers={visibleDecisionAnswers}
+                    decisionResolutions={visibleDecisionResolutions}
+                    clarificationDrafts={clarificationDrafts}
+                    planItemReviewDrafts={planItemReviewDrafts}
+                    canComposePlan={canComposePlan}
+                    reviewedPlanItemCount={reviewedPlanItemCount}
+                    reviewablePlanItemCount={reviewablePlanItems.length}
+                    onDecisionAnswer={(decisionId, optionId) => void selectDecisionAnswer(decisionId, optionId)}
+                    onResolveDecision={(decisionId) => void resolveDecisionThread(decisionId)}
+                    onClarificationDraftChange={(decisionId, value) => setClarificationDrafts((current) => ({ ...current, [decisionId]: value }))}
+                    onAskClarification={(decisionId) => void askDecisionClarification(decisionId)}
+                    onPlanItemReviewDraftChange={(findingId, value) => setPlanItemReviewDrafts((current) => ({ ...current, [findingId]: value }))}
+                    onConfirmPlanItem={(findingId) => void confirmPlanItem(findingId)}
+                    onCommentPlanItem={(findingId) => void commentOnPlanItem(findingId)}
+                    onContinue={() => void continueReview()}
+                    onComposePlan={() => void composeImplementationPlan()}
                   />
                 )}
-                {resultView === "points" && <PointsView conversation={conversation} kind={conversation?.kind ?? kind} />}
+                {resultView === "points" && <PointsView conversation={conversation} kind={conversationKind} />}
+                {resultView === "plan" && (
+                  <PlanView conversation={conversation} isRunning={busy} onRetryFinalPlan={() => void retryFinalPlanSynthesis()} />
+                )}
               </section>
             )}
           </div>
@@ -819,7 +1360,8 @@ function SettingsView(props: {
 
 type TimelineItem =
   | { id: string; type: "message"; createdAt: string; message: Conversation["messages"][number] }
-  | { id: string; type: "finding"; createdAt: string; finding: Finding };
+  | { id: string; type: "finding"; createdAt: string; finding: Finding }
+  | { id: string; type: "decision"; createdAt: string; decision: PlanDecisionRequest };
 
 function SlackView(props: {
   conversation?: Conversation;
@@ -827,17 +1369,80 @@ function SlackView(props: {
   kind: ConversationKind;
   isRunning: boolean;
   selectedThreadId?: string;
+  focusedThreadId?: string;
   onSelectThread: (id: string | undefined) => void;
+  onFocusThread: (id: string) => void;
+  onExitFocus: () => void;
+  onCloseThread: () => void;
+  pendingDecisions: PlanDecisionRequest[];
+  decisionReplies: PlanDecisionReply[];
+  decisionAnswers: Record<string, string>;
+  decisionResolutions: Record<string, boolean>;
+  clarificationDrafts: Record<string, string>;
+  planItemReviewDrafts: Record<string, string>;
+  canComposePlan: boolean;
+  reviewedPlanItemCount: number;
+  reviewablePlanItemCount: number;
+  onDecisionAnswer: (decisionId: string, optionId: string) => void;
+  onResolveDecision: (decisionId: string) => void;
+  onClarificationDraftChange: (decisionId: string, value: string) => void;
+  onAskClarification: (decisionId: string) => void;
+  onPlanItemReviewDraftChange: (findingId: string, value: string) => void;
+  onConfirmPlanItem: (findingId: string) => void;
+  onCommentPlanItem: (findingId: string) => void;
+  onContinue: () => void;
+  onComposePlan: () => void;
 }): JSX.Element {
-  const { conversation, progress, kind, isRunning, selectedThreadId, onSelectThread } = props;
+  const {
+    conversation,
+    progress,
+    kind,
+    isRunning,
+    selectedThreadId,
+    focusedThreadId,
+    onSelectThread,
+    onFocusThread,
+    onExitFocus,
+    onCloseThread,
+    pendingDecisions,
+    decisionReplies,
+    decisionAnswers,
+    decisionResolutions,
+    clarificationDrafts,
+    planItemReviewDrafts,
+    canComposePlan,
+    reviewedPlanItemCount,
+    reviewablePlanItemCount,
+    onDecisionAnswer,
+    onResolveDecision,
+    onClarificationDraftChange,
+    onAskClarification,
+    onPlanItemReviewDraftChange,
+    onConfirmPlanItem,
+    onCommentPlanItem,
+    onContinue,
+    onComposePlan
+  } = props;
+  const [threadWidth, setThreadWidth] = useState(460);
+  const [isResizingThread, setIsResizingThread] = useState(false);
+  const viewRef = useRef<HTMLDivElement>(null);
 
   if (!conversation) {
     return <EmptyState title="No conversation selected" body="Start a new review or choose a previous conversation." />;
   }
 
-  const showLiveProgress = isRunning && conversation.metadata.running === true;
-  const liveProgressMessages = showLiveProgress ? progress.map(progressToMessage) : [];
-  const messageItems: TimelineItem[] = [...conversation.messages.filter((message) => message.role !== "summary"), ...liveProgressMessages].map(
+  const showLiveProgress = isRunning && (conversation.metadata.running === true || progress.length > 0);
+  const latestLiveProgress = showLiveProgress ? progress[progress.length - 1] : undefined;
+  const itemReviews = planItemReviews(conversation);
+  const isReviewingPlanItems = pendingPlanItemReview(conversation);
+  const reviewablePlanItems = requiredPlanItemReviewFindings(conversation);
+  const pendingReviewPlanItemIds = new Set(
+    reviewablePlanItems.filter((finding) => !planItemReviewForFinding(finding, itemReviews)).map((finding) => finding.id)
+  );
+  const visibleFindings = isReviewingPlanItems
+    ? conversation.findings.filter((finding) => pendingReviewPlanItemIds.has(finding.id))
+    : conversation.findings;
+  const messageItems: TimelineItem[] = conversation.messages.filter((message) => message.role !== "summary" && !message.progressPhase).map(
     (message) => ({
       id: message.id,
       type: "message",
@@ -845,82 +1450,239 @@ function SlackView(props: {
       message
     })
   );
-  const findingItems: TimelineItem[] = conversation.findings.map((finding) => ({
+  const findingItems: TimelineItem[] = visibleFindings.map((finding) => ({
     id: finding.id,
     type: "finding",
     createdAt: finding.createdAt ?? conversation.updatedAt,
     finding
   }));
-  const items = [...messageItems, ...findingItems].sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  const decisionItems: TimelineItem[] = pendingDecisions.map((decision) => ({
+    id: decision.id,
+    type: "decision",
+    createdAt: decision.createdAt,
+    decision
+  }));
+  const items = [...messageItems, ...decisionItems, ...findingItems].sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
   const selectedFinding = conversation.findings.find((finding) => finding.id === selectedThreadId);
+  const selectedDecision = pendingDecisions.find((decision) => decision.id === selectedThreadId);
+  const selectedFindingReview = selectedFinding ? planItemReviewForFinding(selectedFinding, itemReviews) : undefined;
+  const selectedFindingNeedsReview = Boolean(selectedFinding && pendingReviewPlanItemIds.has(selectedFinding.id));
+  const savedDecisionAnswers = implementationPlanAnswers(conversation);
+  const selectedDecisionAnswer = selectedDecision ? decisionAnswerForDecision(selectedDecision, savedDecisionAnswers) : undefined;
+  const readyDecisionCount = pendingDecisions.filter((decision) =>
+    decisionThreadIsReady(decision, decisionAnswers, decisionResolutions, savedDecisionAnswers)
+  ).length;
+  const hasAnyDecisionInput = readyDecisionCount > 0;
+  const pendingPlanReviewCount = Math.max(0, reviewablePlanItemCount - reviewedPlanItemCount);
+  const decisionActionTitle =
+    readyDecisionCount === 0
+      ? "No decisions ready"
+      : readyDecisionCount === pendingDecisions.length
+        ? "All decisions ready"
+        : "Decisions ready";
+  const isThreadFocused = Boolean(focusedThreadId && (selectedDecision || selectedFinding));
+  const hasThread = Boolean(selectedDecision || selectedFinding);
+
+  function startThreadResize(event: React.PointerEvent<HTMLDivElement>): void {
+    const view = viewRef.current;
+    if (!view) {
+      return;
+    }
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setIsResizingThread(true);
+    const rect = view.getBoundingClientRect();
+    const minThread = 320;
+    const maxThread = Math.max(minThread, Math.min(820, rect.width - 360));
+
+    const move = (moveEvent: PointerEvent): void => {
+      const nextWidth = Math.round(rect.right - moveEvent.clientX);
+      setThreadWidth(Math.min(maxThread, Math.max(minThread, nextWidth)));
+    };
+    const stop = (): void => {
+      setIsResizingThread(false);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop, { once: true });
+  }
 
   return (
-    <div className="slack-view">
-      <section className="slack-timeline" aria-label="Consensus timeline">
-        <div className="view-heading">
-          <h2>{kind === "code-review" ? "Review Timeline" : "Consensus Timeline"}</h2>
-          <span>{showLiveProgress ? "Running" : `${conversation.findings.length} points`}</span>
-        </div>
-        {items.map((item) =>
-          item.type === "message" ? (
-            <TimelineMessage message={item.message} key={item.id} />
-          ) : (
-            <PointTimelineMessage
-              finding={item.finding}
-              selected={item.finding.id === selectedThreadId}
-              onSelect={() => onSelectThread(item.finding.id)}
-              key={item.id}
-            />
-          )
-        )}
-        {showLiveProgress && progress.length === 0 && (
-          <article className="message system">
-            <div className="message-avatar">A</div>
-            <div className="message-body">
-              <div className="message-meta">
-                <strong>Arbiter</strong>
-                <span>Starting</span>
-              </div>
-              <pre>Preparing context.</pre>
+    <div
+      className={`slack-view ${hasThread ? "thread-open" : ""} ${isThreadFocused ? "thread-focused" : ""} ${isResizingThread ? "resizing-thread" : ""}`}
+      ref={viewRef}
+      style={{ "--thread-width": `${threadWidth}px` } as React.CSSProperties}
+    >
+      {!isThreadFocused && (
+        <section className="slack-timeline" aria-label="Consensus timeline">
+          <div className="view-heading">
+            <h2>{kind === "code-review" ? "Review Timeline" : kind === "implementation-plan" ? "Plan Timeline" : "Consensus Timeline"}</h2>
+            <div className="view-heading-actions">
+              <span>
+                {showLiveProgress
+                  ? liveProgressLabel(progress)
+                  : pendingDecisions.length
+                    ? `${pendingDecisions.length} decisions`
+                    : isReviewingPlanItems
+                      ? pendingPlanReviewCount > 0
+                        ? `${pendingPlanReviewCount} action${pendingPlanReviewCount === 1 ? "" : "s"} needed`
+                        : "No reviews needed"
+                    : `${conversation.findings.length} ${kind === "implementation-plan" ? "items" : "points"}`}
+              </span>
+              {pendingDecisions.length === 0 && isReviewingPlanItems && (
+                <button className="run-button compact-run" disabled={isRunning || !canComposePlan} onClick={onComposePlan}>
+                  {isRunning ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
+                  {isRunning ? "Composing..." : "Compose final plan"}
+                </button>
+              )}
             </div>
-          </article>
-        )}
-      </section>
-      <section className="slack-thread-panel" aria-label="Point thread">
-        {selectedFinding ? (
-          <PointThread finding={selectedFinding} />
-        ) : (
-          <div className="thread-empty-state">
-            <MessageSquare size={24} />
-            <h2>{kind === "code-review" ? "Finding thread" : "Point thread"}</h2>
-            <p>No point selected.</p>
           </div>
-        )}
-      </section>
+          {items.map((item) =>
+            item.type === "message" ? (
+              <TimelineMessage message={item.message} kind={kind} key={item.id} />
+            ) : item.type === "finding" ? (
+              <PointTimelineMessage
+                finding={item.finding}
+                selected={item.finding.id === selectedThreadId}
+                reviewRequired={pendingReviewPlanItemIds.has(item.finding.id)}
+                review={planItemReviewForFinding(item.finding, itemReviews)}
+                onSelect={() => onSelectThread(item.finding.id)}
+                key={item.id}
+              />
+            ) : (
+              <DecisionTimelineMessage
+                decision={item.decision}
+                selected={item.decision.id === selectedThreadId}
+                ready={decisionThreadIsReady(item.decision, decisionAnswers, decisionResolutions, savedDecisionAnswers)}
+                replyCount={decisionReplies.filter((reply) => reply.decisionId === item.decision.id).length}
+                onSelect={() => onSelectThread(item.decision.id)}
+                key={item.id}
+              />
+            )
+          )}
+        </section>
+      )}
+      {hasThread && !isThreadFocused && <div className="thread-resizer" role="separator" aria-orientation="vertical" onPointerDown={startThreadResize} />}
+      {hasThread && (
+        <section className="slack-thread-panel" aria-label="Point thread">
+          {selectedDecision ? (
+            <DecisionThread
+              decision={selectedDecision}
+              replies={decisionReplies.filter((reply) => reply.decisionId === selectedDecision.id)}
+              selectedOptionId={decisionAnswers[selectedDecision.id] ?? selectedDecisionAnswer?.selectedOptionId}
+              resolved={Boolean(decisionResolutions[selectedDecision.id])}
+              savedAnswer={selectedDecisionAnswer}
+              clarificationDraft={clarificationDrafts[selectedDecision.id] ?? ""}
+              typingLabels={decisionTypingLabels(selectedDecision, progress, isRunning)}
+              busy={isRunning}
+              focused={isThreadFocused}
+              onFocus={() => onFocusThread(selectedDecision.id)}
+              onExitFocus={onExitFocus}
+              onClose={onCloseThread}
+              onSelectOption={(optionId) => onDecisionAnswer(selectedDecision.id, optionId)}
+              onResolve={() => onResolveDecision(selectedDecision.id)}
+              onDraftChange={(value) => onClarificationDraftChange(selectedDecision.id, value)}
+              onAskClarification={() => onAskClarification(selectedDecision.id)}
+            />
+          ) : selectedFinding ? (
+            <PointThread
+              finding={selectedFinding}
+              focused={isThreadFocused}
+              reviewRequired={selectedFindingNeedsReview}
+              review={selectedFindingReview}
+              reviewDraft={planItemReviewDrafts[selectedFinding.id] ?? ""}
+              busy={isRunning}
+              onFocus={() => onFocusThread(selectedFinding.id)}
+              onExitFocus={onExitFocus}
+              onClose={onCloseThread}
+              onConfirmReview={() => onConfirmPlanItem(selectedFinding.id)}
+              onReviewDraftChange={(value) => onPlanItemReviewDraftChange(selectedFinding.id, value)}
+              onSubmitReviewComment={() => onCommentPlanItem(selectedFinding.id)}
+            />
+          ) : (
+            <div className="thread-empty-state">
+              <MessageSquare size={24} />
+              <h2>
+                {pendingDecisions.length
+                  ? "Decision thread"
+                  : kind === "code-review"
+                    ? "Finding thread"
+                    : kind === "implementation-plan"
+                      ? "Plan item thread"
+                      : "Point thread"}
+              </h2>
+              <p>No point selected.</p>
+            </div>
+          )}
+        </section>
+      )}
+      {(showLiveProgress || pendingDecisions.length > 0) && (
+        <div className="slack-action-bar" role="region" aria-label="Run status and actions">
+          {showLiveProgress ? <RunStatusLine progress={latestLiveProgress} /> : <span className="slack-action-spacer" />}
+          {pendingDecisions.length > 0 && (
+            <div className="decision-action-bar" aria-label="Decision actions">
+              <div className="decision-action-status" aria-live="polite">
+                <span>
+                  {readyDecisionCount}/{pendingDecisions.length} ready
+                </span>
+                <strong>{decisionActionTitle}</strong>
+              </div>
+              <button className="run-button compact-run" disabled={isRunning || !hasAnyDecisionInput} onClick={onContinue}>
+                {isRunning ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
+                {isRunning ? "Continuing..." : "Continue plan"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function TimelineMessage({ message }: { message: Conversation["messages"][number] }): JSX.Element {
+function TimelineMessage({ message, kind }: { message: Conversation["messages"][number]; kind: ConversationKind }): JSX.Element {
   const author = authorForMessage(message);
+  const isLiveProgress = Boolean(message.progressPhase && message.status === "pending");
+  const display = displayMessageContent(message, kind);
   return (
-    <article className={`message ${message.role}`}>
-      <div className="message-avatar">{avatarForMessage(message, author)}</div>
+    <article className={`message ${message.role} ${isLiveProgress ? "progress-active" : ""}`}>
+      <Avatar className="message-avatar" spec={avatarForMessage(message, author)} />
       <div className="message-body">
         <div className="message-meta">
           <strong>{author}</strong>
           <span>{new Date(message.createdAt).toLocaleString()}</span>
           {message.progressPhase && <span className="phase-badge">{message.progressPhase}</span>}
+          {isLiveProgress && <ProgressDots />}
           {message.status === "error" && <span className="status-error">error</span>}
         </div>
-        <pre>{displayMessageContent(message)}</pre>
+        <div className="message-content">{display.markdown ? <MarkdownText content={display.content} /> : <pre>{display.content}</pre>}</div>
       </div>
     </article>
   );
 }
 
-function PointTimelineMessage(props: { finding: Finding; selected: boolean; onSelect: () => void }): JSX.Element {
-  const { finding, selected, onSelect } = props;
+function ProgressDots(): JSX.Element {
+  return (
+    <span className="progress-dots" aria-label="In progress">
+      <i />
+      <i />
+      <i />
+    </span>
+  );
+}
+
+function RunStatusLine({ progress }: { progress?: ReviewProgress }): JSX.Element {
+  return (
+    <div className="run-status-line" aria-live="polite">
+      {progress && <span className="phase-badge">{phaseLabel(progress.phase)}</span>}
+      <span className="run-status-text">{progress?.message ?? "Thinking"}</span>
+      <ProgressDots />
+    </div>
+  );
+}
+
+function PointTimelineMessage(props: { finding: Finding; selected: boolean; reviewRequired?: boolean; review?: PlanItemReview; onSelect: () => void }): JSX.Element {
+  const { finding, selected, reviewRequired, review, onSelect } = props;
   return (
     <article
       className={`message system point-message ${selected ? "selected" : ""}`}
@@ -934,12 +1696,13 @@ function PointTimelineMessage(props: { finding: Finding; selected: boolean; onSe
         }
       }}
     >
-      <div className="message-avatar">A</div>
+      <Avatar className="message-avatar" spec={ARBITER_AVATAR} />
       <div className="message-body">
         <div className="message-meta">
           <strong>Arbiter</strong>
           <span>Point extracted</span>
           <PointStatusBadge finding={finding} />
+          {reviewRequired && <PlanItemReviewBadge review={review} />}
           <span className={`severity ${finding.severity.toLowerCase()}`}>{finding.severity}</span>
         </div>
         <h3>{finding.title}</h3>
@@ -950,8 +1713,73 @@ function PointTimelineMessage(props: { finding: Finding; selected: boolean; onSe
   );
 }
 
-function PointThread({ finding }: { finding: Finding }): JSX.Element {
+function DecisionTimelineMessage(props: {
+  decision: PlanDecisionRequest;
+  selected: boolean;
+  ready: boolean;
+  replyCount: number;
+  onSelect: () => void;
+}): JSX.Element {
+  const { decision, selected, ready, replyCount, onSelect } = props;
+  const author = sourceLabelForDecision(decision);
+  return (
+    <article
+      className={`message system point-message decision-message ${selected ? "selected" : ""}`}
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
+    >
+      <Avatar className="message-avatar" spec={avatarForParticipant(author, decision.sourceParticipantIds?.[0])} />
+      <div className="message-body">
+        <div className="message-meta">
+          <strong>{author}</strong>
+          <span>Decision needed</span>
+          <span className={`status-badge ${ready ? "confirmed" : "unresolved"}`}>{ready ? "ready" : "pending"}</span>
+        </div>
+        <h3>{decision.title}</h3>
+        <p>{decision.question}</p>
+        <small>{replyCount} thread {replyCount === 1 ? "reply" : "replies"}</small>
+      </div>
+    </article>
+  );
+}
+
+function PointThread(props: {
+  finding: Finding;
+  focused: boolean;
+  reviewRequired?: boolean;
+  review?: PlanItemReview;
+  reviewDraft?: string;
+  busy?: boolean;
+  onFocus: () => void;
+  onExitFocus: () => void;
+  onClose: () => void;
+  onConfirmReview?: () => void;
+  onReviewDraftChange?: (value: string) => void;
+  onSubmitReviewComment?: () => void;
+}): JSX.Element {
+  const {
+    finding,
+    focused,
+    reviewRequired,
+    review,
+    reviewDraft = "",
+    busy = false,
+    onFocus,
+    onExitFocus,
+    onClose,
+    onConfirmReview,
+    onReviewDraftChange,
+    onSubmitReviewComment
+  } = props;
   const replies = pointThreadReplies(finding);
+  const hasPlanSources = Boolean(finding.sourceItems?.length);
 
   return (
     <div className="point-thread">
@@ -960,42 +1788,313 @@ function PointThread({ finding }: { finding: Finding }): JSX.Element {
           <span>Thread</span>
           <h2>{finding.title}</h2>
         </div>
-        <PointStatusBadge finding={finding} />
+        <div className="thread-panel-actions">
+          <PointStatusBadge finding={finding} />
+          {reviewRequired && <PlanItemReviewBadge review={review} />}
+          <button className="icon-button" title={focused ? "Show timeline" : "Expand thread"} onClick={focused ? onExitFocus : onFocus}>
+            {focused ? <Columns2 size={16} /> : <Maximize2 size={16} />}
+          </button>
+          <button className="icon-button" title="Close thread" onClick={onClose}>
+            <X size={17} />
+          </button>
+        </div>
       </div>
 
       <ThreadMessage
-        avatar="A"
+        avatar={ARBITER_AVATAR}
         author="Arbiter"
-        meta="Parent point"
+        meta={hasPlanSources ? "Canonical plan item" : "Parent point"}
         createdAt={finding.createdAt}
-        content={`Searching for consensus on point "${finding.title}".`}
+        content={hasPlanSources ? canonicalPlanItemContent(finding) : pointSourceContent(finding)}
         title={finding.title}
         badges={
           <>
             <PointStatusBadge finding={finding} />
+            {reviewRequired && <PlanItemReviewBadge review={review} />}
             <span className={`severity ${finding.severity.toLowerCase()}`}>{finding.severity}</span>
           </>
         }
       />
 
-      <div className="thread-replies">
-        {replies.map((reply) => (
-          <ThreadMessage
-            avatar={initials(reply.author)}
-            author={reply.author}
-            meta={reply.meta}
-            createdAt={reply.createdAt}
-            content={reply.content}
-            key={reply.id}
-          />
+      {hasPlanSources && <PlanSourceSupport finding={finding} />}
+
+      {replies.length > 0 && (
+        <div className="thread-replies">
+          {replies.map((reply) => (
+            <ThreadMessage
+              avatar={avatarForParticipant(reply.author)}
+              author={reply.author}
+              meta={reply.meta}
+              createdAt={reply.createdAt}
+              content={reply.content}
+              key={reply.id}
+            />
+          ))}
+        </div>
+      )}
+
+      {reviewRequired && (
+        <PlanItemReviewComposer
+          review={review}
+          draft={reviewDraft}
+          busy={busy}
+          onConfirm={onConfirmReview}
+          onDraftChange={onReviewDraftChange}
+          onSubmitComment={onSubmitReviewComment}
+        />
+      )}
+    </div>
+  );
+}
+
+function PlanSourceSupport({ finding }: { finding: Finding }): JSX.Element | null {
+  const sourceItems = finding.sourceItems ?? [];
+  if (sourceItems.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="plan-source-support">
+      <div className="plan-source-support-head">
+        <span>Agent support</span>
+        <strong>{sourceItems.length} source{sourceItems.length === 1 ? "" : "s"}</strong>
+      </div>
+      <div className="plan-source-support-list">
+        {sourceItems.map((item, index) => (
+          <div className="plan-source-support-row" key={`${item.participantId}-${index}`}>
+            <Avatar className="thread-avatar support-avatar" spec={avatarForParticipant(item.participantLabel, item.participantId)} />
+            <div>
+              <strong>{item.participantLabel}</strong>
+              <span>Supported this canonical item</span>
+            </div>
+          </div>
         ))}
+      </div>
+      <details className="plan-source-details">
+        <summary>Original participant plan items</summary>
+        <div className="plan-source-detail-list">
+          {sourceItems.map((item, index) => (
+            <article className="plan-source-detail-card" key={`${item.participantId}-detail-${index}`}>
+              <div className="message-meta">
+                <strong>{item.participantLabel}</strong>
+                <span>Initial plan item</span>
+              </div>
+              <MarkdownText content={sourceItemContent(item)} />
+            </article>
+          ))}
+        </div>
+      </details>
+    </section>
+  );
+}
+
+function PlanItemReviewComposer(props: {
+  review?: PlanItemReview;
+  draft: string;
+  busy: boolean;
+  onConfirm?: () => void;
+  onDraftChange?: (value: string) => void;
+  onSubmitComment?: () => void;
+}): JSX.Element {
+  const { review, draft, busy, onConfirm, onDraftChange, onSubmitComment } = props;
+  return (
+    <div className="plan-item-review-box">
+      {review && (
+        <ThreadMessage
+          avatar={USER_AVATAR}
+          author="You"
+          meta={review.status === "commented" ? "Item comment" : "Item confirmation"}
+          createdAt={review.updatedAt}
+          content={review.status === "commented" ? review.comment ?? "" : "Confirmed as-is."}
+        />
+      )}
+      <div className="decision-compose plan-item-review-compose">
+        <textarea
+          value={draft}
+          onChange={(event) => onDraftChange?.(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              if (!busy && draft.trim()) {
+                onSubmitComment?.();
+              }
+            }
+          }}
+          rows={3}
+          placeholder="Comment before final plan synthesis"
+          disabled={busy}
+        />
+        <div className="plan-item-review-actions">
+          <button className="secondary-button" disabled={busy || !draft.trim()} onClick={onSubmitComment}>
+            <MessageSquare size={16} />
+            Comment
+          </button>
+          <button className="secondary-button" disabled={busy || review?.status === "confirmed"} onClick={onConfirm}>
+            <CheckCircle2 size={16} />
+            Confirm
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
+function DecisionThread(props: {
+  decision: PlanDecisionRequest;
+  replies: PlanDecisionReply[];
+  selectedOptionId?: string;
+  resolved: boolean;
+  savedAnswer?: PlanDecisionAnswer;
+  clarificationDraft: string;
+  typingLabels: string[];
+  busy: boolean;
+  focused: boolean;
+  onFocus: () => void;
+  onExitFocus: () => void;
+  onClose: () => void;
+  onSelectOption: (optionId: string) => void;
+  onResolve: () => void;
+  onDraftChange: (value: string) => void;
+  onAskClarification: () => void;
+}): JSX.Element {
+  const {
+    decision,
+    replies,
+    selectedOptionId,
+    resolved,
+    savedAnswer,
+    clarificationDraft,
+    typingLabels,
+    busy,
+    focused,
+    onFocus,
+    onExitFocus,
+    onClose,
+    onSelectOption,
+    onResolve,
+    onDraftChange,
+    onAskClarification
+  } = props;
+  const isAsking = busy && replies.some((reply) => reply.id.startsWith("pending:"));
+  const hasThreadContext = decisionThreadIsReady(
+    decision,
+    selectedOptionId ? { [decision.id]: selectedOptionId } : {},
+    resolved ? { [decision.id]: true } : {},
+    savedAnswer ? [savedAnswer] : []
+  );
+  const canResolve = !hasThreadContext && decisionThreadHasUserReply(decision, replies);
+  const decisionAuthor = sourceLabelForDecision(decision);
+
+  return (
+    <div className="point-thread decision-thread">
+      <div className="thread-panel-head">
+        <div>
+          <span>Decision</span>
+          <h2>{decision.title}</h2>
+        </div>
+        <div className="thread-panel-actions">
+          <span className={`status-badge ${hasThreadContext ? "confirmed" : "unresolved"}`}>{hasThreadContext ? "ready" : "pending"}</span>
+          <button className="icon-button" title={focused ? "Show timeline" : "Expand thread"} onClick={focused ? onExitFocus : onFocus}>
+            {focused ? <Columns2 size={16} /> : <Maximize2 size={16} />}
+          </button>
+          <button className="icon-button" title="Close thread" onClick={onClose}>
+            <X size={17} />
+          </button>
+        </div>
+      </div>
+
+      <ThreadMessage
+        avatar={avatarForParticipant(decisionAuthor, decision.sourceParticipantIds?.[0])}
+        author={decisionAuthor}
+        meta="Decision request"
+        createdAt={decision.createdAt}
+        title={decision.question}
+        content={decision.impact}
+      />
+
+      <div className="decision-options thread-decision-options">
+        {decision.options.map((option) => (
+          <label className={`decision-option ${selectedOptionId === option.id ? "selected" : ""}`} key={option.id}>
+            <input
+              type="radio"
+              name={decision.id}
+              checked={selectedOptionId === option.id}
+              onChange={() => onSelectOption(option.id)}
+            />
+            <span className="decision-option-body">
+              <span>{option.label}</span>
+              {decision.recommendedOptionId === option.id && <small>Recommended</small>}
+            </span>
+          </label>
+        ))}
+      </div>
+
+      <div className="thread-replies">
+        {replies.map((reply) => (
+          <ThreadMessage
+            avatar={reply.role === "user" ? USER_AVATAR : avatarForParticipant(reply.participantLabel ?? reply.role, reply.participantId)}
+            author={reply.role === "user" ? "You" : reply.participantLabel ?? "Participant"}
+            meta={reply.id.startsWith("pending:") ? "Message sent" : reply.status === "error" ? "Reply error" : reply.answerSource === "automatic" ? "automatic" : reply.role === "user" ? "Message" : "Reply"}
+            createdAt={reply.createdAt}
+            content={reply.content}
+            key={reply.id}
+          />
+        ))}
+        {isAsking && (
+          <TypingIndicator labels={typingLabels} />
+        )}
+      </div>
+
+      <div className="decision-compose">
+        <textarea
+          value={clarificationDraft}
+          onChange={(event) => onDraftChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              if (!busy && clarificationDraft.trim()) {
+                onAskClarification();
+              }
+            }
+          }}
+          rows={3}
+          placeholder="Send a message in this thread"
+          disabled={busy}
+        />
+        <div className="decision-compose-actions">
+          <button className="secondary-button" disabled={busy || !clarificationDraft.trim()} onClick={onAskClarification}>
+            {isAsking ? <RefreshCw size={16} className="spin" /> : <MessageSquare size={16} />}
+            {isAsking ? "Sending..." : "Send"}
+          </button>
+          <button className="secondary-button resolve-button" disabled={busy || !canResolve} onClick={onResolve}>
+            <CheckCircle2 size={16} />
+            Resolve
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TypingIndicator({ labels }: { labels: string[] }): JSX.Element {
+  const visibleLabels = labels.length ? labels : ["Models"];
+  return (
+    <article className="thread-typing" aria-live="polite">
+      <Avatar className="thread-avatar typing-avatar" spec={avatarForParticipant(visibleLabels[0])} />
+      <div className="typing-bubble">
+        <span>{typingText(visibleLabels)}</span>
+        <span className="typing-dots" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+        </span>
+      </div>
+    </article>
+  );
+}
+
 function ThreadMessage(props: {
-  avatar: string;
+  avatar: AvatarSpec;
   author: string;
   meta: string;
   createdAt?: string;
@@ -1005,7 +2104,7 @@ function ThreadMessage(props: {
 }): JSX.Element {
   return (
     <article className="thread-message">
-      <div className="thread-avatar">{props.avatar}</div>
+      <Avatar className="thread-avatar" spec={props.avatar} />
       <div className="thread-bubble">
         <div className="message-meta">
           <strong>{props.author}</strong>
@@ -1014,10 +2113,263 @@ function ThreadMessage(props: {
           {props.badges}
         </div>
         {props.title && <h3>{props.title}</h3>}
-        <pre>{props.content}</pre>
+        <MarkdownText content={props.content} />
       </div>
     </article>
   );
+}
+
+type MarkdownBlock =
+  | { type: "paragraph"; lines: string[] }
+  | { type: "heading"; text: string }
+  | { type: "code"; content: string; language?: string }
+  | { type: "ul" | "ol"; items: string[] }
+  | { type: "table"; headers: string[]; rows: string[][] };
+
+function MarkdownText({ content }: { content: string }): JSX.Element {
+  const blocks = markdownBlocks(content);
+  if (blocks.length === 0) {
+    return <div className="markdown-text" />;
+  }
+  return <div className="markdown-text">{blocks.map((block, index) => renderMarkdownBlock(block, index))}</div>;
+}
+
+function renderMarkdownBlock(block: MarkdownBlock, index: number): React.ReactNode {
+  if (block.type === "heading") {
+    return <h4 key={index}>{renderInlineWithBreaks(block.text, `h-${index}`)}</h4>;
+  }
+  if (block.type === "code") {
+    return (
+      <pre className="markdown-code" key={index}>
+        <code>{block.content}</code>
+      </pre>
+    );
+  }
+  if (block.type === "ul" || block.type === "ol") {
+    const ListTag = block.type;
+    return (
+      <ListTag className="markdown-list" key={index}>
+        {block.items.map((item, itemIndex) => (
+          <li key={itemIndex}>{renderInlineWithBreaks(item, `li-${index}-${itemIndex}`)}</li>
+        ))}
+      </ListTag>
+    );
+  }
+  if (block.type === "table") {
+    return (
+      <div className="markdown-table-wrap" key={index}>
+        <table className="markdown-table">
+          <thead>
+            <tr>
+              {block.headers.map((header, headerIndex) => (
+                <th key={headerIndex} scope="col">
+                  {renderInlineWithBreaks(header, `t-${index}-h-${headerIndex}`)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {block.rows.map((row, rowIndex) => (
+              <tr key={rowIndex}>
+                {block.headers.map((_, cellIndex) => (
+                  <td key={cellIndex}>{renderInlineWithBreaks(row[cellIndex] ?? "", `t-${index}-${rowIndex}-${cellIndex}`)}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+  if (block.type === "paragraph") {
+    return <p key={index}>{renderInlineWithBreaks(block.lines.join("\n"), `p-${index}`)}</p>;
+  }
+  return null;
+}
+
+function markdownBlocks(content: string): MarkdownBlock[] {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const blocks: MarkdownBlock[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    if (!trimmed) {
+      index += 1;
+      continue;
+    }
+
+    const fence = trimmed.match(/^```(\S*)/);
+    if (fence) {
+      const codeLines: string[] = [];
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) {
+        index += 1;
+      }
+      blocks.push({ type: "code", language: fence[1] || undefined, content: codeLines.join("\n") });
+      continue;
+    }
+
+    const heading = trimmed.match(/^#{1,3}\s+(.+)$/);
+    if (heading) {
+      blocks.push({ type: "heading", text: heading[1].trim() });
+      index += 1;
+      continue;
+    }
+
+    if (isMarkdownTableStart(lines, index)) {
+      const headers = parseMarkdownTableRow(lines[index]);
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length && isMarkdownTableRow(lines[index])) {
+        rows.push(normalizeMarkdownTableRow(parseMarkdownTableRow(lines[index]), headers.length));
+        index += 1;
+      }
+      blocks.push({ type: "table", headers, rows });
+      continue;
+    }
+
+    const listMatch = line.match(/^\s*(?:([-*])|(\d+)[.)])\s+(.+)$/);
+    if (listMatch) {
+      const ordered = Boolean(listMatch[2]);
+      const items: string[] = [];
+      while (index < lines.length) {
+        const current = lines[index];
+        const match = current.match(/^\s*(?:([-*])|(\d+)[.)])\s+(.+)$/);
+        if (!match || Boolean(match[2]) !== ordered) {
+          break;
+        }
+        items.push(match[3].trim());
+        index += 1;
+      }
+      blocks.push({ type: ordered ? "ol" : "ul", items });
+      continue;
+    }
+
+    const paragraphLines: string[] = [];
+    while (index < lines.length) {
+      const current = lines[index];
+      const currentTrimmed = current.trim();
+      if (
+        !currentTrimmed ||
+        currentTrimmed.startsWith("```") ||
+        /^#{1,3}\s+/.test(currentTrimmed) ||
+        isMarkdownTableStart(lines, index) ||
+        /^\s*(?:[-*]|\d+[.)])\s+/.test(current)
+      ) {
+        break;
+      }
+      paragraphLines.push(current);
+      index += 1;
+    }
+    blocks.push({ type: "paragraph", lines: paragraphLines });
+  }
+
+  return blocks;
+}
+
+function isMarkdownTableStart(lines: string[], index: number): boolean {
+  if (index + 1 >= lines.length || !isMarkdownTableRow(lines[index])) {
+    return false;
+  }
+  const headers = parseMarkdownTableRow(lines[index]);
+  if (headers.length < 2) {
+    return false;
+  }
+  const separator = parseMarkdownTableRow(lines[index + 1]);
+  return separator.length === headers.length && separator.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, "")));
+}
+
+function isMarkdownTableRow(line: string): boolean {
+  const trimmed = line.trim();
+  return trimmed.startsWith("|") && trimmed.endsWith("|") && parseMarkdownTableRow(line).length > 1;
+}
+
+function parseMarkdownTableRow(line: string): string[] {
+  const trimmed = line.trim();
+  const content = trimmed.startsWith("|") && trimmed.endsWith("|") ? trimmed.slice(1, -1) : trimmed;
+  const cells: string[] = [];
+  let current = "";
+
+  for (let index = 0; index < content.length; index += 1) {
+    const character = content[index];
+    if (character === "\\" && content[index + 1] === "|") {
+      current += "|";
+      index += 1;
+      continue;
+    }
+    if (character === "|") {
+      cells.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+function normalizeMarkdownTableRow(row: string[], columnCount: number): string[] {
+  if (row.length === columnCount) {
+    return row;
+  }
+  if (row.length > columnCount) {
+    return row.slice(0, columnCount);
+  }
+  return [...row, ...Array.from({ length: columnCount - row.length }, () => "")];
+}
+
+function renderInlineWithBreaks(text: string, keyPrefix: string): React.ReactNode[] {
+  return text.split("\n").flatMap((line, index, lines) => {
+    const nodes = renderInline(line, `${keyPrefix}-${index}`);
+    return index < lines.length - 1 ? [...nodes, <br key={`${keyPrefix}-br-${index}`} />] : nodes;
+  });
+}
+
+function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  let index = 0;
+  let key = 0;
+
+  while (index < text.length) {
+    if (text.startsWith("**", index)) {
+      const end = text.indexOf("**", index + 2);
+      if (end > index + 2) {
+        nodes.push(
+          <strong key={`${keyPrefix}-b-${key}`}>
+            {renderInline(text.slice(index + 2, end), `${keyPrefix}-b-${key}`)}
+          </strong>
+        );
+        key += 1;
+        index = end + 2;
+        continue;
+      }
+    }
+
+    if (text[index] === "`") {
+      const end = text.indexOf("`", index + 1);
+      if (end > index + 1) {
+        nodes.push(<code key={`${keyPrefix}-c-${key}`}>{text.slice(index + 1, end)}</code>);
+        key += 1;
+        index = end + 1;
+        continue;
+      }
+    }
+
+    const nextBold = text.indexOf("**", index + 1);
+    const nextCode = text.indexOf("`", index + 1);
+    const nextCandidates = [nextBold, nextCode].filter((candidate) => candidate > -1);
+    const next = nextCandidates.length ? Math.min(...nextCandidates) : text.length;
+    nodes.push(text.slice(index, next));
+    index = next;
+  }
+
+  return nodes;
 }
 
 function PointsView({ conversation, kind }: { conversation?: Conversation; kind: ConversationKind }): JSX.Element {
@@ -1060,6 +2412,151 @@ function PointsView({ conversation, kind }: { conversation?: Conversation; kind:
         </h3>
         <PointTable findings={filteredOut} emptyLabel="No filtered-out points" />
       </section>
+    </div>
+  );
+}
+
+function PlanView({
+  conversation,
+  isRunning,
+  onRetryFinalPlan
+}: {
+  conversation?: Conversation;
+  isRunning: boolean;
+  onRetryFinalPlan: () => void;
+}): JSX.Element {
+  if (!conversation) {
+    return <EmptyState title="No plan yet" body="The final approved plan appears after consensus finishes." />;
+  }
+
+  const approved = conversation.findings.filter((finding) => finding.status === "Confirmed");
+  const unresolved = conversation.findings.filter((finding) => finding.status === "Unresolved");
+  const rejected = conversation.findings.filter((finding) => finding.status === "Rejected");
+  const isReviewingItems = pendingPlanItemReview(conversation);
+  const storedFinalPlanMarkdown = metadataString(conversation.metadata.implementationPlanFinalMarkdown);
+  const storedDebateSummaryMarkdown = metadataString(conversation.metadata.implementationPlanDebateSummaryMarkdown);
+  const finalPlanMarkdown = storedFinalPlanMarkdown || (isReviewingItems ? "" : fallbackPlanMarkdown(conversation));
+  const debateSummaryMarkdown = storedDebateSummaryMarkdown || fallbackDebateSummaryMarkdown(conversation);
+  const hasSynthesizedPlan = Boolean(finalPlanMarkdown);
+  const canRetryFinalPlan = !isReviewingItems && approved.length > 0 && hasFallbackFinalPlan(conversation);
+  const itemReviews = planItemReviews(conversation);
+  const reviewableItems = requiredPlanItemReviewFindings(conversation);
+  const reviewedCount = reviewableItems.filter((finding) => planItemReviewForFinding(finding, itemReviews)).length;
+  const reviewStatus = reviewableItems.length > 0 ? `${reviewedCount}/${reviewableItems.length} reviewed` : "No reviews needed";
+
+  return (
+    <div className="plan-view">
+      <div className="view-heading">
+        <h2>Implementation Plan</h2>
+        <div className="view-heading-actions">
+          <span>{isReviewingItems ? reviewStatus : `${approved.length} approved items`}</span>
+          {canRetryFinalPlan && (
+            <button className="run-button compact-run" disabled={isRunning} onClick={onRetryFinalPlan}>
+              {isRunning ? <RefreshCw size={17} className="spin" /> : <RefreshCw size={17} />}
+              {isRunning ? "Retrying..." : "Retry final plan"}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {finalPlanMarkdown ? (
+        <PlanMarkdownSection title="Full Plan" content={finalPlanMarkdown} />
+      ) : approved.length === 0 ? (
+        <div className="section-empty">No plan items were approved by all healthy participants.</div>
+      ) : (
+        <div className="plan-item-list">
+          {approved.map((finding, index) => (
+            <PlanItemCard finding={finding} index={index + 1} key={finding.id} />
+          ))}
+        </div>
+      )}
+
+      {debateSummaryMarkdown && <PlanMarkdownSection title="Debate Summary" content={debateSummaryMarkdown} />}
+
+      {hasSynthesizedPlan && approved.length > 0 && (
+        <section className="plan-trace-section">
+          <div className="view-heading compact-heading">
+            <h2>Consensus Trace</h2>
+            <span>{conversation.findings.length} items</span>
+          </div>
+          <div className="plan-item-list">
+            {approved.map((finding, index) => (
+              <PlanItemCard finding={finding} index={index + 1} key={finding.id} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      <section className="severity-section filtered-section">
+        <h3>
+          <span className="status-badge unresolved">Unresolved differences</span>
+          {unresolved.length}
+        </h3>
+        <PlanDifferenceList findings={unresolved} emptyLabel="No unresolved differences" />
+      </section>
+
+      <section className="severity-section filtered-section">
+        <h3>
+          <span className="status-badge filtered-out">Rejected differences</span>
+          {rejected.length}
+        </h3>
+        <PlanDifferenceList findings={rejected} emptyLabel="No rejected differences" />
+      </section>
+    </div>
+  );
+}
+
+function PlanMarkdownSection({ title, content }: { title: string; content: string }): JSX.Element {
+  return (
+    <section className="plan-markdown-section">
+      <h3>{title}</h3>
+      <div className="plan-markdown-card">
+        <MarkdownText content={content} />
+      </div>
+    </section>
+  );
+}
+
+function PlanItemCard({ finding, index }: { finding: Finding; index: number }): JSX.Element {
+  return (
+    <article className="plan-item-card">
+      <div className="plan-item-index">{index}</div>
+      <div>
+        <div className="message-meta">
+          <PointStatusBadge finding={finding} />
+          <span>{sourceLabel(finding)}</span>
+        </div>
+        <h3>{finding.title}</h3>
+        <dl className="point-fields">
+          <div>
+            <dt>Goal</dt>
+            <dd>{finding.claim || finding.description}</dd>
+          </div>
+          {finding.evidence && (
+            <div>
+              <dt>Repo context</dt>
+              <dd>{finding.evidence}</dd>
+            </div>
+          )}
+          <div>
+            <dt>Implementation and tests</dt>
+            <dd>{finding.action || "No specific implementation guidance was provided."}</dd>
+          </div>
+        </dl>
+      </div>
+    </article>
+  );
+}
+
+function PlanDifferenceList({ findings, emptyLabel }: { findings: Finding[]; emptyLabel: string }): JSX.Element {
+  if (findings.length === 0) {
+    return <div className="section-empty">{emptyLabel}</div>;
+  }
+  return (
+    <div className="plan-difference-list">
+      {findings.map((finding) => (
+        <PointCard finding={finding} compact key={finding.id} />
+      ))}
     </div>
   );
 }
@@ -1159,6 +2656,23 @@ function PointStatusBadge({ finding }: { finding: Finding }): JSX.Element {
   );
 }
 
+function PlanItemReviewBadge({ review }: { review?: PlanItemReview }): JSX.Element {
+  if (review) {
+    return (
+      <span className="status-badge confirmed">
+        <CheckCircle2 size={15} />
+        reviewed
+      </span>
+    );
+  }
+  return (
+    <span className="status-badge unresolved">
+      <Circle size={15} />
+      pending
+    </span>
+  );
+}
+
 function pointStatus(finding: Finding): { kind: "confirmed" | "disputed" | "unresolved" | "filtered-out"; label: string } {
   if (finding.status === "Confirmed") {
     return { kind: "confirmed", label: "confirmed" };
@@ -1170,21 +2684,146 @@ function pointStatus(finding: Finding): { kind: "confirmed" | "disputed" | "unre
   return hasDispute ? { kind: "disputed", label: "disputed" } : { kind: "unresolved", label: "unresolved" };
 }
 
-function progressToMessage(progress: ReviewProgress): Conversation["messages"][number] {
-  return {
-    id: `${progress.runId}:${progress.createdAt}:${progress.phase}:${progress.message}`,
-    role: "system",
-    participantId: "arbiter",
-    participantLabel: "Arbiter",
-    content: progress.message,
-    createdAt: progress.createdAt,
-    status: progress.phase === "error" || progress.phase === "cancelled" ? "error" : "done",
-    progressPhase: progress.phase
-  };
+function liveProgressLabel(progress: ReviewProgress[]): string {
+  const latest = progress[progress.length - 1];
+  if (!latest) {
+    return "Running";
+  }
+  const phase = phaseLabel(latest.phase);
+  if (typeof latest.completed === "number" && typeof latest.total === "number" && latest.total > 0) {
+    return `${phase}: ${latest.completed}/${latest.total} done`;
+  }
+  return phase;
 }
 
-function displayMessageContent(message: Conversation["messages"][number]): string {
-  return summarizeRawProviderJson(message.content) ?? message.content;
+function phaseLabel(phase: ReviewProgress["phase"]): string {
+  return phase
+    .split("-")
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+interface TimelineMessageDisplay {
+  content: string;
+  markdown: boolean;
+}
+
+interface LineProtocolItem {
+  title: string;
+  severity?: string;
+  claim?: string;
+  evidence?: string;
+  action?: string;
+}
+
+function displayMessageContent(message: Conversation["messages"][number], kind: ConversationKind): TimelineMessageDisplay {
+  const content = summarizeRawProviderJson(message.content) ?? message.content;
+  const protocolSummary = formatLineProtocolForTimeline(message, kind, content);
+  const displayContent = protocolSummary ?? content;
+  return { content: displayContent, markdown: Boolean(protocolSummary) };
+}
+
+function formatLineProtocolForTimeline(
+  message: Conversation["messages"][number],
+  kind: ConversationKind,
+  content: string
+): string | undefined {
+  if (message.role !== "participant" || message.status === "error") {
+    return undefined;
+  }
+  const items = parseLineProtocolItems(content);
+  if (!items.length) {
+    return undefined;
+  }
+
+  const labels =
+    kind === "implementation-plan"
+      ? { claim: "Goal", evidence: "Context", action: "Implementation" }
+      : { claim: "Claim", evidence: "Evidence", action: "Action" };
+
+  return items
+    .map((item, index) =>
+      [
+        `### ${index + 1}. ${item.title || "Untitled item"}`,
+        item.claim ? `**${labels.claim}:** ${item.claim}` : "",
+        item.evidence ? `**${labels.evidence}:** ${item.evidence}` : "",
+        item.action ? `**${labels.action}:** ${item.action}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    )
+    .join("\n\n");
+}
+
+function parseLineProtocolItems(content: string): LineProtocolItem[] {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const items: LineProtocolItem[] = [];
+  let current: LineProtocolItem | undefined;
+  let currentField: "claim" | "evidence" | "action" | undefined;
+
+  const appendField = (field: "claim" | "evidence" | "action", value: string): void => {
+    if (!current) {
+      return;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return;
+    }
+    current[field] = current[field] ? `${current[field]}\n${trimmed}` : trimmed;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      currentField = undefined;
+      continue;
+    }
+
+    const header = trimmed.match(/^[PK]\d+\|(.+)$/i);
+    if (header) {
+      current = parseLineProtocolHeader(header[1]);
+      items.push(current);
+      currentField = undefined;
+      continue;
+    }
+
+    const field = trimmed.match(/^([CEA]):\s*(.*)$/i);
+    if (field && current) {
+      const key = field[1].toUpperCase();
+      currentField = key === "C" ? "claim" : key === "E" ? "evidence" : "action";
+      appendField(currentField, field[2]);
+      continue;
+    }
+
+    if (current && currentField && !/^[A-Z][A-Z0-9_ -]{0,24}:/i.test(trimmed)) {
+      appendField(currentField, trimmed);
+    }
+  }
+
+  return items.filter((item) => item.title || item.claim || item.evidence || item.action);
+}
+
+function parseLineProtocolHeader(header: string): LineProtocolItem {
+  const fields = header.split("|");
+  const item: LineProtocolItem = { title: "" };
+  for (const field of fields) {
+    const match = field.match(/^([A-Z]+):\s*(.*)$/i);
+    if (!match) {
+      continue;
+    }
+    const key = match[1].toUpperCase();
+    const value = match[2].trim();
+    if (key === "T") {
+      item.title = value;
+    } else if (key === "S") {
+      item.severity = value;
+    }
+  }
+  return item;
+}
+
+function displayNoticeText(content: string): string {
+  return sanitizeWarningText(content, MAX_NOTICE_CHARS);
 }
 
 function summarizeRawProviderJson(content: string): string | undefined {
@@ -1214,41 +2853,13 @@ function summarizeRawProviderJson(content: string): string | undefined {
   }
 }
 
-function mergeProgressIntoConversation(conversation: Conversation, progress: ReviewProgress[]): Conversation {
-  if (progress.length === 0) {
+function mergeProgressIntoConversation(conversation: Conversation, _progress: ReviewProgress[]): Conversation {
+  const messages = conversation.messages.filter((message) => !message.progressPhase);
+  if (messages.length === conversation.messages.length) {
     return conversation;
   }
 
-  const existing = new Set(conversation.messages.map(messageKey));
-  const missing = progress
-    .map(progressToMessage)
-    .filter((message) => {
-      const key = messageKey(message);
-      if (existing.has(key)) {
-        return false;
-      }
-      existing.add(key);
-      return true;
-    });
-
-  if (missing.length === 0) {
-    return conversation;
-  }
-
-  const [firstMessage, ...rest] = [...conversation.messages, ...missing].sort(
-    (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
-  );
-  const userMessages = [firstMessage, ...rest].filter((message) => message.role === "user");
-  const otherMessages = [firstMessage, ...rest].filter((message) => message.role !== "user");
-
-  return {
-    ...conversation,
-    messages: [...userMessages, ...otherMessages]
-  };
-}
-
-function messageKey(message: Conversation["messages"][number]): string {
-  return `${message.progressPhase ?? ""}|${message.createdAt}|${message.content}`;
+  return { ...conversation, messages };
 }
 
 function authorForMessage(message: Conversation["messages"][number]): string {
@@ -1264,19 +2875,67 @@ function authorForMessage(message: Conversation["messages"][number]): string {
   return message.participantLabel || labelForRole(message.role);
 }
 
-function avatarForMessage(message: Conversation["messages"][number], author: string): string {
+function Avatar({ className, spec }: { className: string; spec: AvatarSpec }): JSX.Element {
+  return (
+    <div className={`${className} avatar-icon avatar-${spec.kind}`} title={spec.label} aria-label={spec.label}>
+      {avatarGraphic(spec)}
+    </div>
+  );
+}
+
+function avatarGraphic(spec: AvatarSpec): React.ReactNode {
+  if (spec.kind === "user") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="8.2" r="5.1" />
+        <path d="M3.6 22.2c1.3-5.1 4.2-7.6 8.4-7.6s7.1 2.5 8.4 7.6z" />
+      </svg>
+    );
+  }
+  if (spec.kind === "arbiter") {
+    return <img src={JUDGE_FLATICON_URL} alt="" aria-hidden="true" />;
+  }
+  if (spec.kind === "anthropic") {
+    return <img className="provider-avatar-image" src={CLAUDE_AVATAR_URL} alt="" aria-hidden="true" />;
+  }
+  if (spec.kind === "codex") {
+    return <img className="provider-avatar-image" src={CODEX_AVATAR_URL} alt="" aria-hidden="true" />;
+  }
+  if (spec.kind === "gemini") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 2.8c1 5 4.2 8.2 9.2 9.2-5 1-8.2 4.2-9.2 9.2-1-5-4.2-8.2-9.2-9.2 5-1 8.2-4.2 9.2-9.2Z" />
+      </svg>
+    );
+  }
+  return <span>{spec.initials || initials(spec.label)}</span>;
+}
+
+function avatarForMessage(message: Conversation["messages"][number], author: string): AvatarSpec {
   if (message.role === "user") {
-    return "You";
+    return USER_AVATAR;
   }
-  if (message.role === "system") {
-    return "A";
+  if (message.role === "system" || message.role === "summary" || message.participantId?.startsWith("arbiter:")) {
+    return ARBITER_AVATAR;
   }
-  return author
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("") || "M";
+  return avatarForParticipant(author, message.participantId);
+}
+
+function avatarForParticipant(label: string, participantId?: string): AvatarSpec {
+  const text = `${participantId ?? ""} ${label}`.toLowerCase();
+  if (text.includes("arbiter")) {
+    return ARBITER_AVATAR;
+  }
+  if (text.includes("claude") || text.includes("anthropic")) {
+    return { kind: "anthropic", label };
+  }
+  if (text.includes("codex") || text.includes("openai")) {
+    return { kind: "codex", label };
+  }
+  if (text.includes("gemini")) {
+    return { kind: "gemini", label };
+  }
+  return { kind: "generic", label, initials: initials(label) };
 }
 
 function stanceLabel(stance: string): string {
@@ -1287,16 +2946,20 @@ function stanceLabel(stance: string): string {
 }
 
 function pointThreadReplies(finding: Finding): Array<{ id: string; author: string; meta: string; createdAt?: string; content: string; order: number }> {
-  const sourceLabels = finding.sourceParticipantLabels?.length ? finding.sourceParticipantLabels : [finding.sourceParticipantLabel];
-  const sourceIds = finding.sourceParticipantIds?.length ? finding.sourceParticipantIds : [finding.sourceParticipantId];
-  const sourceReplies = sourceLabels.map((label, index) => ({
-    id: `source-${sourceIds[index] ?? label}-${index}`,
-    author: label,
-    meta: "Initial point",
-    createdAt: finding.createdAt,
-    content: pointSourceContent(finding),
-    order: index
-  }));
+  const sourceReplies = finding.sourceItems?.length
+    ? []
+    : (() => {
+        const sourceLabels = finding.sourceParticipantLabels?.length ? finding.sourceParticipantLabels : [finding.sourceParticipantLabel];
+        const sourceIds = finding.sourceParticipantIds?.length ? finding.sourceParticipantIds : [finding.sourceParticipantId];
+        return sourceLabels.map((label, index) => ({
+          id: `source-${sourceIds[index] ?? label}-${index}`,
+          author: label,
+          meta: "Initial point",
+          createdAt: finding.createdAt,
+          content: pointSourceContent(finding),
+          order: index
+        }));
+      })();
   const roundReplies = finding.rounds.map((round, index) => ({
     id: round.id,
     author: round.participantLabel,
@@ -1311,6 +2974,27 @@ function pointThreadReplies(finding: Finding): Array<{ id: string; author: strin
     const rightTime = right.createdAt ? Date.parse(right.createdAt) : 0;
     return leftTime - rightTime || left.order - right.order;
   });
+}
+
+function canonicalPlanItemContent(finding: Finding): string {
+  return [
+    `**Claim:** ${finding.claim || finding.description}`,
+    finding.evidence ? `**Repo context:** ${finding.evidence}` : "",
+    finding.action ? `**Implementation and tests:** ${finding.action}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function sourceItemContent(item: NonNullable<Finding["sourceItems"]>[number]): string {
+  return [
+    item.title ? `Title: ${item.title}` : "",
+    item.claim ? `Claim: ${item.claim}` : "",
+    item.evidence ? `Evidence: ${item.evidence}` : "",
+    item.action ? `Recommended action: ${item.action}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function pointSourceContent(finding: Finding): string {
@@ -1338,6 +3022,10 @@ function sourceLabel(finding: Finding): string {
   return finding.sourceParticipantLabels?.length ? finding.sourceParticipantLabels.join(", ") : finding.sourceParticipantLabel;
 }
 
+function sourceLabelForDecision(decision: PlanDecisionRequest): string {
+  return decision.sourceParticipantLabels?.length ? decision.sourceParticipantLabels.join(", ") : "Agent";
+}
+
 function confirmedByLabel(finding: Finding): string {
   const labels = new Set<string>();
   const sourceLabels = finding.sourceParticipantLabels?.length ? finding.sourceParticipantLabels : [finding.sourceParticipantLabel];
@@ -1362,6 +3050,66 @@ function consensusLine(finding: Finding): string {
   return `${status}; ${included} initial source${included === 1 ? "" : "s"}, ${missing} verification target${missing === 1 ? "" : "s"}, ${replies} thread ${replies === 1 ? "reply" : "replies"}.`;
 }
 
+function fallbackPlanMarkdown(conversation: Conversation): string {
+  if (conversation.kind !== "implementation-plan") {
+    return "";
+  }
+  const approved = conversation.findings.filter((finding) => finding.status === "Confirmed");
+  if (approved.length === 0) {
+    return "";
+  }
+  return approved
+    .map((finding, index) =>
+      [
+        `${index + 1}. **${finding.title}**`,
+        `Goal: ${finding.claim || finding.description}`,
+        finding.evidence ? `Repo context: ${finding.evidence}` : "",
+        `Implementation and tests: ${finding.action || "No specific implementation guidance was provided."}`
+      ]
+        .filter(Boolean)
+        .join("\n")
+    )
+    .join("\n\n");
+}
+
+function fallbackDebateSummaryMarkdown(conversation: Conversation): string {
+  if (conversation.kind !== "implementation-plan" || conversation.findings.length === 0) {
+    return "";
+  }
+  const debated = conversation.findings.filter((finding) => finding.rounds.length > 0 || finding.status !== "Confirmed");
+  if (debated.length === 0) {
+    return "All approved items were common across the healthy participants; no non-common plan items required debate.";
+  }
+  return debated
+    .map((finding) => {
+      const latestRound = finding.rounds[finding.rounds.length - 1];
+      const reason = latestRound?.content || finding.action || finding.claim || finding.description;
+      return `- **${finding.title}** (${finding.status.toLowerCase()}): ${reason}`;
+    })
+    .join("\n");
+}
+
+function metadataString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function hasFallbackFinalPlan(conversation: Conversation): boolean {
+  const source = metadataString(conversation.metadata.implementationPlanSynthesisSource);
+  if (source === "fallback") {
+    return true;
+  }
+  if (source === "arbiter") {
+    return false;
+  }
+  const warnings = Array.isArray(conversation.metadata.warnings)
+    ? conversation.metadata.warnings.filter((item): item is string => typeof item === "string")
+    : [];
+  return warnings.some((warning) => {
+    const normalized = warning.toLowerCase();
+    return normalized.includes("used local summary fallback") || normalized.includes("could not synthesize the final implementation plan");
+  });
+}
+
 function EmptyState({ title, body }: { title: string; body: string }): JSX.Element {
   return (
     <div className="empty-state">
@@ -1380,6 +3128,241 @@ function labelForRole(role: string): string {
     return "Final summary";
   }
   return role;
+}
+
+function labelForKind(kind: ConversationKind): string {
+  if (kind === "code-review") {
+    return "Code review";
+  }
+  if (kind === "implementation-plan") {
+    return "Implementation plan";
+  }
+  return "Question";
+}
+
+function titleForKind(kind: ConversationKind): string {
+  if (kind === "implementation-plan") {
+    return "Implementation plan";
+  }
+  if (kind === "code-review") {
+    return "Consensus review";
+  }
+  return "Consensus question";
+}
+
+function requiresRepo(kind: ConversationKind): boolean {
+  return kind === "code-review" || kind === "implementation-plan";
+}
+
+function pendingPlanDecisions(conversation: Conversation | undefined): PlanDecisionRequest[] {
+  const value = conversation?.metadata.pendingDecisions;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is PlanDecisionRequest => {
+    const decision = item as Partial<PlanDecisionRequest>;
+    return (
+      typeof decision.id === "string" &&
+      typeof decision.title === "string" &&
+      typeof decision.question === "string" &&
+      Array.isArray(decision.options)
+    );
+  });
+}
+
+function pendingPlanItemReview(conversation: Conversation | undefined): boolean {
+  return conversation?.kind === "implementation-plan" && conversation.metadata.pendingPlanItemReview === true;
+}
+
+function planItemReviews(conversation: Conversation | undefined): PlanItemReview[] {
+  const value = conversation?.metadata.planItemReviews;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is PlanItemReview => {
+    const review = item as Partial<PlanItemReview>;
+    return (
+      typeof review.findingId === "string" &&
+      (review.status === "confirmed" || review.status === "commented") &&
+      typeof review.createdAt === "string" &&
+      typeof review.updatedAt === "string" &&
+      (review.comment === undefined || typeof review.comment === "string")
+    );
+  });
+}
+
+function requiredPlanItemReviewFindings(conversation: Conversation | undefined): Finding[] {
+  if (!conversation || !pendingPlanItemReview(conversation)) {
+    return [];
+  }
+  return conversation.findings.filter((finding) => finding.status === "Confirmed" && planItemRequiresReview(finding));
+}
+
+function planItemRequiresReview(finding: Finding): boolean {
+  return finding.rounds.some((round) => round.stance !== "confirmed");
+}
+
+function planItemReviewForFinding(finding: Finding, reviews: PlanItemReview[]): PlanItemReview | undefined {
+  const review = reviews.find((item) => item.findingId === finding.id);
+  if (!review) {
+    return undefined;
+  }
+  if (review.status === "confirmed") {
+    return review;
+  }
+  return review.comment?.trim() ? review : undefined;
+}
+
+function firstPendingPlanItemReview(conversation: Conversation | undefined): Finding | undefined {
+  const reviews = planItemReviews(conversation);
+  return requiredPlanItemReviewFindings(conversation).find((finding) => !planItemReviewForFinding(finding, reviews));
+}
+
+function decisionTypingLabels(decision: PlanDecisionRequest, progress: ReviewProgress[], isRunning: boolean): string[] {
+  if (!isRunning) {
+    return [];
+  }
+  const relevant = progress
+    .filter((item) => item.phase === "decisions" && item.findingTitle === decision.title && item.participantLabel)
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  const latest = relevant[relevant.length - 1];
+  return latest?.participantLabel ? [latest.participantLabel] : [];
+}
+
+function typingText(labels: string[]): string {
+  if (labels.length === 0 || labels[0] === "Models") {
+    return "Models are typing";
+  }
+  if (labels.length === 1) {
+    return `${labels[0]} is typing`;
+  }
+  if (labels.length === 2) {
+    return `${labels[0]} and ${labels[1]} are typing`;
+  }
+  return `${labels[0]} and ${labels.length - 1} others are typing`;
+}
+
+function planDecisionReplies(conversation: Conversation | undefined): PlanDecisionReply[] {
+  const value = conversation?.metadata.planDecisionReplies;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is PlanDecisionReply => {
+    const reply = item as Partial<PlanDecisionReply>;
+    return (
+      typeof reply.id === "string" &&
+      typeof reply.decisionId === "string" &&
+      typeof reply.role === "string" &&
+      typeof reply.content === "string" &&
+      typeof reply.createdAt === "string"
+    );
+  });
+}
+
+function implementationPlanAnswers(conversation: Conversation | undefined): PlanDecisionAnswer[] {
+  const value = conversation?.metadata.implementationPlanAnswers;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is PlanDecisionAnswer => {
+    const answer = item as Partial<PlanDecisionAnswer>;
+    return typeof answer.decisionId === "string" && typeof answer.answer === "string";
+  });
+}
+
+function pendingDecisionSelections(conversation: Conversation | undefined): Record<string, string> {
+  const value = conversation?.metadata.pendingDecisionSelections;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string")
+  );
+}
+
+function pendingDecisionResolutions(conversation: Conversation | undefined): Record<string, boolean> {
+  const value = conversation?.metadata.pendingDecisionResolutions;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, boolean] => typeof entry[0] === "string" && entry[1] === true)
+  );
+}
+
+function decisionThreadIsReady(
+  decision: PlanDecisionRequest,
+  selectedAnswers: Record<string, string>,
+  resolvedThreads: Record<string, boolean>,
+  savedAnswers: PlanDecisionAnswer[] = []
+): boolean {
+  return (
+    Boolean(selectedAnswers[decision.id]?.trim()) ||
+    resolvedThreads[decision.id] === true ||
+    Boolean(decisionAnswerForDecision(decision, savedAnswers))
+  );
+}
+
+function decisionThreadHasUserReply(decision: PlanDecisionRequest, replies: PlanDecisionReply[]): boolean {
+  return replies.some((reply) => reply.decisionId === decision.id && reply.role === "user" && reply.content.trim());
+}
+
+function decisionThreadAnswer(
+  decision: PlanDecisionRequest,
+  selectedAnswers: Record<string, string>,
+  replies: PlanDecisionReply[]
+): string {
+  const selectedOptionId = selectedAnswers[decision.id]?.trim();
+  const selectedOption = decision.options.find((option) => option.id === selectedOptionId);
+  const threadReplies = replies
+    .filter((reply) => reply.decisionId === decision.id && reply.content.trim())
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  const lines = [
+    `Decision: ${decision.title}`,
+    `Question: ${decision.question}`,
+    selectedOption ? `Selected option: ${selectedOption.label}` : "",
+    "Thread transcript:",
+    ...threadReplies.map((reply) => `${reply.role === "user" ? "User" : reply.participantLabel ?? "Participant"}: ${reply.content.trim()}`)
+  ].filter(Boolean);
+  return lines.join("\n");
+}
+
+function decisionAnswerForDecision(decision: PlanDecisionRequest, answers: PlanDecisionAnswer[]): PlanDecisionAnswer | undefined {
+  return answers.find((answer) => answer.decisionId === decision.id);
+}
+
+function mergePlanDecisionAnswers(existing: PlanDecisionAnswer[], next: PlanDecisionAnswer[]): PlanDecisionAnswer[] {
+  const merged = new Map<string, PlanDecisionAnswer>();
+  for (const answer of [...existing, ...next]) {
+    const key = answer.decisionId;
+    if (key && answer.answer.trim()) {
+      merged.set(key, answer);
+    }
+  }
+  return Array.from(merged.values());
+}
+
+function planDecisionKey(decision: PlanDecisionRequest): string {
+  return normalizeDecisionText(`${decision.title} ${decision.question}`).split(/\s+/).slice(0, 12).join(" ");
+}
+
+function planDecisionAnswerKey(answer: PlanDecisionAnswer): string {
+  if (answer.decisionKey?.trim()) {
+    return answer.decisionKey.trim();
+  }
+  const title = answer.answer.match(/^Decision:\s*(.+)$/m)?.[1] ?? "";
+  const question = answer.answer.match(/^Question:\s*(.+)$/m)?.[1] ?? "";
+  return title || question ? normalizeDecisionText(`${title} ${question}`).split(/\s+/).slice(0, 12).join(" ") : "";
+}
+
+function normalizeDecisionText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/`[^`]+`/g, "")
+    .replace(/[^a-z0-9\s-]/gi, " ")
+    .split(/\s+/)
+    .filter((word) => word.length > 2 && !["critical", "high", "medium", "low", "info", "severity"].includes(word))
+    .join(" ");
 }
 
 function healthLine(health: AgentHealth | undefined): string {

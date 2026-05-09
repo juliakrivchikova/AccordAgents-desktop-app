@@ -1,5 +1,16 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { AppBridge, GitDiffRequest, ProviderSettingsUpdate, ReviewProgress, ReviewRequest } from "../shared/types";
+import type {
+  AppBridge,
+  ComposeImplementationPlanRequest,
+  ContinueReviewRequest,
+  GitDiffRequest,
+  PlanDecisionClarificationRequest,
+  PlanItemReviewRequest,
+  ProviderSettingsUpdate,
+  RetryImplementationPlanSynthesisRequest,
+  ReviewProgress,
+  ReviewRequest
+} from "../shared/types";
 
 const bridge: AppBridge = {
   getSettings: () => ipcRenderer.invoke("settings:get"),
@@ -11,7 +22,17 @@ const bridge: AppBridge = {
   getDiff: (request: GitDiffRequest) => ipcRenderer.invoke("git:get-diff", request),
   listConversations: () => ipcRenderer.invoke("conversations:list"),
   getConversation: (id: string) => ipcRenderer.invoke("conversations:get", id),
+  saveDecisionSelections: (conversationId: string, selections: Record<string, string>) =>
+    ipcRenderer.invoke("conversations:save-decision-selections", conversationId, selections),
+  saveDecisionResolutions: (conversationId: string, resolutions: Record<string, boolean>) =>
+    ipcRenderer.invoke("conversations:save-decision-resolutions", conversationId, resolutions),
+  savePlanItemReview: (request: PlanItemReviewRequest) => ipcRenderer.invoke("conversations:save-plan-item-review", request),
   startReview: (request: ReviewRequest) => ipcRenderer.invoke("conversations:start-review", request),
+  continueReview: (request: ContinueReviewRequest) => ipcRenderer.invoke("conversations:continue-review", request),
+  askPlanDecisionClarification: (request: PlanDecisionClarificationRequest) => ipcRenderer.invoke("conversations:ask-plan-decision-clarification", request),
+  composeImplementationPlan: (request: ComposeImplementationPlanRequest) => ipcRenderer.invoke("conversations:compose-implementation-plan", request),
+  retryImplementationPlanSynthesis: (request: RetryImplementationPlanSynthesisRequest) =>
+    ipcRenderer.invoke("conversations:retry-implementation-plan-synthesis", request),
   cancelReview: (runId: string) => ipcRenderer.invoke("conversations:cancel-review", runId),
   onReviewProgress: (callback: (progress: ReviewProgress) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, progress: ReviewProgress) => callback(progress);

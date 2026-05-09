@@ -1,6 +1,6 @@
 export type ProviderKind = "openai" | "anthropic" | "gemini" | "codex-cli" | "claude-code";
 
-export type ConversationKind = "general" | "code-review";
+export type ConversationKind = "general" | "code-review" | "implementation-plan";
 
 export type GitDiffMode = "working" | "staged" | "uncommitted" | "base" | "commit" | "pasted";
 
@@ -95,9 +95,87 @@ export interface ReviewRequest {
   roundLimit: number;
 }
 
+export interface PlanDecisionOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface PlanDecisionRequest {
+  id: string;
+  title: string;
+  question: string;
+  impact: string;
+  options: PlanDecisionOption[];
+  recommendedOptionId?: string;
+  sourceParticipantIds: string[];
+  sourceParticipantLabels: string[];
+  createdAt: string;
+}
+
+export interface PlanDecisionAnswer {
+  decisionId: string;
+  decisionKey?: string;
+  selectedOptionId?: string;
+  answer: string;
+  answerSource?: "user" | "automatic";
+  sourceDecisionId?: string;
+}
+
+export interface PlanDecisionReply {
+  id: string;
+  decisionId: string;
+  role: "user" | "participant" | "system";
+  participantId?: string;
+  participantLabel?: string;
+  content: string;
+  createdAt: string;
+  status?: "done" | "error";
+  answerSource?: "automatic";
+  sourceDecisionId?: string;
+}
+
+export interface PlanItemReview {
+  findingId: string;
+  status: "confirmed" | "commented";
+  comment?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlanItemReviewRequest {
+  conversationId: string;
+  findingId: string;
+  confirmed?: boolean;
+  comment?: string;
+}
+
+export interface ComposeImplementationPlanRequest {
+  conversationId: string;
+  runId?: string;
+}
+
+export interface RetryImplementationPlanSynthesisRequest {
+  conversationId: string;
+  runId?: string;
+}
+
+export interface ContinueReviewRequest {
+  conversationId: string;
+  runId?: string;
+  answers: PlanDecisionAnswer[];
+}
+
+export interface PlanDecisionClarificationRequest {
+  conversationId: string;
+  decisionId: string;
+  question: string;
+  runId?: string;
+}
+
 export interface ReviewProgress {
   runId: string;
-  phase: "initial" | "extract" | "arbiter" | "debate" | "summary" | "done" | "cancelled" | "error";
+  phase: "initial" | "extract" | "arbiter" | "decisions" | "debate" | "summary" | "done" | "cancelled" | "error";
   message: string;
   participantLabel?: string;
   findingTitle?: string;
@@ -128,6 +206,15 @@ export interface DebateRound {
   createdAt: string;
 }
 
+export interface FindingSourceItem {
+  participantId: string;
+  participantLabel: string;
+  title: string;
+  claim: string;
+  evidence: string;
+  action: string;
+}
+
 export interface Finding {
   id: string;
   title: string;
@@ -141,6 +228,7 @@ export interface Finding {
   claim?: string;
   evidence?: string;
   action?: string;
+  sourceItems?: FindingSourceItem[];
   severity: FindingSeverity;
   status: FindingStatus;
   rounds: DebateRound[];
@@ -166,6 +254,7 @@ export interface Conversation extends ConversationSummary {
 export interface StartReviewResult {
   conversation: Conversation;
   warnings: string[];
+  pendingDecisions?: PlanDecisionRequest[];
 }
 
 export interface AppBridge {
@@ -178,7 +267,14 @@ export interface AppBridge {
   getDiff(request: GitDiffRequest): Promise<GitDiffResult>;
   listConversations(): Promise<ConversationSummary[]>;
   getConversation(id: string): Promise<Conversation | undefined>;
+  saveDecisionSelections(conversationId: string, selections: Record<string, string>): Promise<Conversation | undefined>;
+  saveDecisionResolutions(conversationId: string, resolutions: Record<string, boolean>): Promise<Conversation | undefined>;
+  savePlanItemReview(request: PlanItemReviewRequest): Promise<Conversation | undefined>;
   startReview(request: ReviewRequest): Promise<StartReviewResult>;
+  continueReview(request: ContinueReviewRequest): Promise<StartReviewResult>;
+  askPlanDecisionClarification(request: PlanDecisionClarificationRequest): Promise<StartReviewResult>;
+  composeImplementationPlan(request: ComposeImplementationPlanRequest): Promise<StartReviewResult>;
+  retryImplementationPlanSynthesis(request: RetryImplementationPlanSynthesisRequest): Promise<StartReviewResult>;
   cancelReview(runId: string): Promise<void>;
   onReviewProgress(callback: (progress: ReviewProgress) => void): () => void;
 }
