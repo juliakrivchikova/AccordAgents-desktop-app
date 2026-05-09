@@ -138,6 +138,19 @@ function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
+    return window.consensus.onConversationUpdated((updated) => {
+      setConversation((current) => {
+        if (!conversationMatchesSnapshot(current, updated, currentRunId)) {
+          return current;
+        }
+        setSelectedThreadId((selected) => (selected && !threadExistsInConversation(updated, selected) ? undefined : selected));
+        setFocusedThreadId((focused) => (focused && !threadExistsInConversation(updated, focused) ? undefined : focused));
+        return mergeProgressIntoConversation(updated, progressLogRef.current.filter((item) => item.runId === conversationRunId(updated)));
+      });
+    });
+  }, [currentRunId]);
+
+  useEffect(() => {
     setSelectedParticipants(new Set(settings.providers.filter((provider) => provider.enabled).map(providerId)));
   }, [settings.providers]);
 
@@ -426,6 +439,7 @@ function App(): JSX.Element {
       }];
     });
     const optimisticAnswers = mergePlanDecisionAnswers(savedAnswers, answers);
+    const optimisticDecisionRequests = mergePlanDecisionRequests(planDecisionRequests(conversation), pendingDecisions);
 
     setError(undefined);
     setWarnings([]);
@@ -439,6 +453,7 @@ function App(): JSX.Element {
             metadata: {
               ...current.metadata,
               implementationPlanAnswers: optimisticAnswers,
+              planDecisionRequests: optimisticDecisionRequests,
               pendingDecisionSelections: undefined,
               pendingDecisionResolutions: undefined,
               pendingDecisions: undefined,
@@ -477,6 +492,7 @@ function App(): JSX.Element {
               metadata: {
                 ...current.metadata,
                 implementationPlanAnswers: optimisticAnswers,
+                planDecisionRequests: optimisticDecisionRequests,
                 pendingDecisionSelections: currentDecisionAnswers,
                 pendingDecisionResolutions: currentDecisionResolutions,
                 pendingDecisions,
@@ -1442,21 +1458,23 @@ function SlackView(props: {
   const visibleFindings = isReviewingPlanItems
     ? conversation.findings.filter((finding) => pendingReviewPlanItemIds.has(finding.id))
     : conversation.findings;
-  const messageItems: TimelineItem[] = conversation.messages.filter((message) => message.role !== "summary" && !message.progressPhase).map(
-    (message) => ({
+  const visibleDecisions = visiblePlanDecisionRequests(conversation);
+  const pendingDecisionIds = new Set(pendingDecisions.map((decision) => decision.id));
+  const messageItems: TimelineItem[] = conversation.messages
+    .filter((message) => message.role !== "summary" && !message.progressPhase && !isHiddenImplementationPlanInternalMessage(message, kind))
+    .map((message) => ({
       id: message.id,
       type: "message",
       createdAt: message.createdAt,
       message
-    })
-  );
+    }));
   const findingItems: TimelineItem[] = visibleFindings.map((finding) => ({
     id: finding.id,
     type: "finding",
     createdAt: finding.createdAt ?? conversation.updatedAt,
     finding
   }));
-  const decisionItems: TimelineItem[] = pendingDecisions.map((decision) => ({
+  const decisionItems: TimelineItem[] = visibleDecisions.map((decision) => ({
     id: decision.id,
     type: "decision",
     createdAt: decision.createdAt,
@@ -1464,7 +1482,8 @@ function SlackView(props: {
   }));
   const items = [...messageItems, ...decisionItems, ...findingItems].sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
   const selectedFinding = conversation.findings.find((finding) => finding.id === selectedThreadId);
-  const selectedDecision = pendingDecisions.find((decision) => decision.id === selectedThreadId);
+  const selectedDecision = visibleDecisions.find((decision) => decision.id === selectedThreadId);
+  const selectedDecisionIsPending = Boolean(selectedDecision && pendingDecisionIds.has(selectedDecision.id));
   const selectedFindingReview = selectedFinding ? planItemReviewForFinding(selectedFinding, itemReviews) : undefined;
   const selectedFindingNeedsReview = Boolean(selectedFinding && pendingReviewPlanItemIds.has(selectedFinding.id));
   const savedDecisionAnswers = implementationPlanAnswers(conversation);
@@ -1554,6 +1573,7 @@ function SlackView(props: {
               <DecisionTimelineMessage
                 decision={item.decision}
                 selected={item.decision.id === selectedThreadId}
+                pending={pendingDecisionIds.has(item.decision.id)}
                 ready={decisionThreadIsReady(item.decision, decisionAnswers, decisionResolutions, savedDecisionAnswers)}
                 replyCount={decisionReplies.filter((reply) => reply.decisionId === item.decision.id).length}
                 onSelect={() => onSelectThread(item.decision.id)}
@@ -1572,6 +1592,7 @@ function SlackView(props: {
               replies={decisionReplies.filter((reply) => reply.decisionId === selectedDecision.id)}
               selectedOptionId={decisionAnswers[selectedDecision.id] ?? selectedDecisionAnswer?.selectedOptionId}
               resolved={Boolean(decisionResolutions[selectedDecision.id])}
+              readOnly={!selectedDecisionIsPending}
               savedAnswer={selectedDecisionAnswer}
               clarificationDraft={clarificationDrafts[selectedDecision.id] ?? ""}
               typingLabels={decisionTypingLabels(selectedDecision, progress, isRunning)}
@@ -1716,12 +1737,14 @@ function PointTimelineMessage(props: { finding: Finding; selected: boolean; revi
 function DecisionTimelineMessage(props: {
   decision: PlanDecisionRequest;
   selected: boolean;
+  pending: boolean;
   ready: boolean;
   replyCount: number;
   onSelect: () => void;
 }): JSX.Element {
-  const { decision, selected, ready, replyCount, onSelect } = props;
+  const { decision, selected, pending, ready, replyCount, onSelect } = props;
   const author = sourceLabelForDecision(decision);
+  const statusLabel = pending ? (ready ? "ready" : "pending") : "answered";
   return (
     <article
       className={`message system point-message decision-message ${selected ? "selected" : ""}`}
@@ -1739,8 +1762,8 @@ function DecisionTimelineMessage(props: {
       <div className="message-body">
         <div className="message-meta">
           <strong>{author}</strong>
-          <span>Decision needed</span>
-          <span className={`status-badge ${ready ? "confirmed" : "unresolved"}`}>{ready ? "ready" : "pending"}</span>
+          <span>{pending ? "Decision needed" : "Decision answered"}</span>
+          <span className={`status-badge ${ready || !pending ? "confirmed" : "unresolved"}`}>{statusLabel}</span>
         </div>
         <h3>{decision.title}</h3>
         <p>{decision.question}</p>
@@ -1852,6 +1875,7 @@ function PlanSourceSupport({ finding }: { finding: Finding }): JSX.Element | nul
   if (sourceItems.length === 0) {
     return null;
   }
+  const hasRawPlans = sourceItems.some((item) => Boolean(item.rawContent?.trim()));
 
   return (
     <section className="plan-source-support">
@@ -1871,13 +1895,13 @@ function PlanSourceSupport({ finding }: { finding: Finding }): JSX.Element | nul
         ))}
       </div>
       <details className="plan-source-details">
-        <summary>Original participant plan items</summary>
+        <summary>{hasRawPlans ? "Original participant plans" : "Original participant plan items"}</summary>
         <div className="plan-source-detail-list">
           {sourceItems.map((item, index) => (
             <article className="plan-source-detail-card" key={`${item.participantId}-detail-${index}`}>
               <div className="message-meta">
                 <strong>{item.participantLabel}</strong>
-                <span>Initial plan item</span>
+                <span>{item.rawContent?.trim() ? "Initial plan" : "Initial plan item"}</span>
               </div>
               <MarkdownText content={sourceItemContent(item)} />
             </article>
@@ -1944,6 +1968,7 @@ function DecisionThread(props: {
   replies: PlanDecisionReply[];
   selectedOptionId?: string;
   resolved: boolean;
+  readOnly: boolean;
   savedAnswer?: PlanDecisionAnswer;
   clarificationDraft: string;
   typingLabels: string[];
@@ -1962,6 +1987,7 @@ function DecisionThread(props: {
     replies,
     selectedOptionId,
     resolved,
+    readOnly,
     savedAnswer,
     clarificationDraft,
     typingLabels,
@@ -1984,6 +2010,7 @@ function DecisionThread(props: {
   );
   const canResolve = !hasThreadContext && decisionThreadHasUserReply(decision, replies);
   const decisionAuthor = sourceLabelForDecision(decision);
+  const statusLabel = readOnly ? "answered" : hasThreadContext ? "ready" : "pending";
 
   return (
     <div className="point-thread decision-thread">
@@ -1993,7 +2020,7 @@ function DecisionThread(props: {
           <h2>{decision.title}</h2>
         </div>
         <div className="thread-panel-actions">
-          <span className={`status-badge ${hasThreadContext ? "confirmed" : "unresolved"}`}>{hasThreadContext ? "ready" : "pending"}</span>
+          <span className={`status-badge ${hasThreadContext || readOnly ? "confirmed" : "unresolved"}`}>{statusLabel}</span>
           <button className="icon-button" title={focused ? "Show timeline" : "Expand thread"} onClick={focused ? onExitFocus : onFocus}>
             {focused ? <Columns2 size={16} /> : <Maximize2 size={16} />}
           </button>
@@ -2012,24 +2039,35 @@ function DecisionThread(props: {
         content={decision.impact}
       />
 
-      <div className="decision-options thread-decision-options">
-        {decision.options.map((option) => (
-          <label className={`decision-option ${selectedOptionId === option.id ? "selected" : ""}`} key={option.id}>
-            <input
-              type="radio"
-              name={decision.id}
-              checked={selectedOptionId === option.id}
-              onChange={() => onSelectOption(option.id)}
-            />
-            <span className="decision-option-body">
-              <span>{option.label}</span>
-              {decision.recommendedOptionId === option.id && <small>Recommended</small>}
-            </span>
-          </label>
-        ))}
-      </div>
+      {decision.options.length > 0 && (
+        <div className="decision-options thread-decision-options">
+          {decision.options.map((option) => (
+            <label className={`decision-option ${selectedOptionId === option.id ? "selected" : ""}`} key={option.id}>
+              <input
+                type="radio"
+                name={decision.id}
+                checked={selectedOptionId === option.id}
+                disabled={busy || readOnly}
+                onChange={() => onSelectOption(option.id)}
+              />
+              <span className="decision-option-body">
+                <span>{option.label}</span>
+                {decision.recommendedOptionId === option.id && <small>Recommended</small>}
+              </span>
+            </label>
+          ))}
+        </div>
+      )}
 
       <div className="thread-replies">
+        {readOnly && savedAnswer && (
+          <ThreadMessage
+            avatar={savedAnswer.answerSource === "automatic" ? ARBITER_AVATAR : USER_AVATAR}
+            author={savedAnswer.answerSource === "automatic" ? "Arbiter" : "You"}
+            meta={savedAnswer.answerSource === "automatic" ? "Automatic answer" : "Answer"}
+            content={savedAnswer.answer}
+          />
+        )}
         {replies.map((reply) => (
           <ThreadMessage
             avatar={reply.role === "user" ? USER_AVATAR : avatarForParticipant(reply.participantLabel ?? reply.role, reply.participantId)}
@@ -2045,33 +2083,35 @@ function DecisionThread(props: {
         )}
       </div>
 
-      <div className="decision-compose">
-        <textarea
-          value={clarificationDraft}
-          onChange={(event) => onDraftChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              if (!busy && clarificationDraft.trim()) {
-                onAskClarification();
+      {!readOnly && (
+        <div className="decision-compose">
+          <textarea
+            value={clarificationDraft}
+            onChange={(event) => onDraftChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                if (!busy && clarificationDraft.trim()) {
+                  onAskClarification();
+                }
               }
-            }
-          }}
-          rows={3}
-          placeholder="Send a message in this thread"
-          disabled={busy}
-        />
-        <div className="decision-compose-actions">
-          <button className="secondary-button" disabled={busy || !clarificationDraft.trim()} onClick={onAskClarification}>
-            {isAsking ? <RefreshCw size={16} className="spin" /> : <MessageSquare size={16} />}
-            {isAsking ? "Sending..." : "Send"}
-          </button>
-          <button className="secondary-button resolve-button" disabled={busy || !canResolve} onClick={onResolve}>
-            <CheckCircle2 size={16} />
-            Resolve
-          </button>
+            }}
+            rows={3}
+            placeholder="Send a message in this thread"
+            disabled={busy}
+          />
+          <div className="decision-compose-actions">
+            <button className="secondary-button" disabled={busy || !clarificationDraft.trim()} onClick={onAskClarification}>
+              {isAsking ? <RefreshCw size={16} className="spin" /> : <MessageSquare size={16} />}
+              {isAsking ? "Sending..." : "Send"}
+            </button>
+            <button className="secondary-button resolve-button" disabled={busy || !canResolve} onClick={onResolve}>
+              <CheckCircle2 size={16} />
+              Resolve
+            </button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -2460,7 +2500,7 @@ function PlanView({
       </div>
 
       {finalPlanMarkdown ? (
-        <PlanMarkdownSection title="Full Plan" content={finalPlanMarkdown} />
+        <PlanMarkdownSection title="Plan" content={finalPlanMarkdown} />
       ) : approved.length === 0 ? (
         <div className="section-empty">No plan items were approved by all healthy participants.</div>
       ) : (
@@ -2529,17 +2569,17 @@ function PlanItemCard({ finding, index }: { finding: Finding; index: number }): 
         <h3>{finding.title}</h3>
         <dl className="point-fields">
           <div>
-            <dt>Goal</dt>
+            <dt>Decision</dt>
             <dd>{finding.claim || finding.description}</dd>
           </div>
           {finding.evidence && (
             <div>
-              <dt>Repo context</dt>
+              <dt>Context</dt>
               <dd>{finding.evidence}</dd>
             </div>
           )}
           <div>
-            <dt>Implementation and tests</dt>
+            <dt>Next steps</dt>
             <dd>{finding.action || "No specific implementation guidance was provided."}</dd>
           </div>
         </dl>
@@ -2718,9 +2758,16 @@ interface LineProtocolItem {
 
 function displayMessageContent(message: Conversation["messages"][number], kind: ConversationKind): TimelineMessageDisplay {
   const content = summarizeRawProviderJson(message.content) ?? message.content;
+  if (kind === "implementation-plan" && message.role === "participant") {
+    return { content, markdown: true };
+  }
   const protocolSummary = formatLineProtocolForTimeline(message, kind, content);
   const displayContent = protocolSummary ?? content;
   return { content: displayContent, markdown: Boolean(protocolSummary) };
+}
+
+function isHiddenImplementationPlanInternalMessage(message: Conversation["messages"][number], kind: ConversationKind): boolean {
+  return kind === "implementation-plan" && message.role === "participant" && Boolean(message.participantId?.startsWith("arbiter:"));
 }
 
 function formatLineProtocolForTimeline(
@@ -2736,10 +2783,7 @@ function formatLineProtocolForTimeline(
     return undefined;
   }
 
-  const labels =
-    kind === "implementation-plan"
-      ? { claim: "Goal", evidence: "Context", action: "Implementation" }
-      : { claim: "Claim", evidence: "Evidence", action: "Action" };
+  const labels = { claim: "Claim", evidence: "Evidence", action: "Action" };
 
   return items
     .map((item, index) =>
@@ -2862,6 +2906,31 @@ function mergeProgressIntoConversation(conversation: Conversation, _progress: Re
   return { ...conversation, messages };
 }
 
+function conversationRunId(conversation: Conversation): string {
+  return metadataString(conversation.metadata.runId) || conversation.id;
+}
+
+function conversationMatchesSnapshot(current: Conversation | undefined, updated: Conversation, currentRunId: string | undefined): boolean {
+  if (!current) {
+    return false;
+  }
+  const currentRun = metadataString(current.metadata.runId);
+  const updatedRun = metadataString(updated.metadata.runId);
+  return (
+    current.id === updated.id ||
+    Boolean(currentRun && updatedRun && currentRun === updatedRun) ||
+    Boolean(currentRunId && updatedRun && currentRunId === updatedRun) ||
+    Boolean(updatedRun && current.id === updatedRun)
+  );
+}
+
+function threadExistsInConversation(conversation: Conversation, threadId: string): boolean {
+  return (
+    conversation.findings.some((finding) => finding.id === threadId) ||
+    visiblePlanDecisionRequests(conversation).some((decision) => decision.id === threadId)
+  );
+}
+
 function authorForMessage(message: Conversation["messages"][number]): string {
   if (message.role === "user") {
     return "You";
@@ -2978,15 +3047,18 @@ function pointThreadReplies(finding: Finding): Array<{ id: string; author: strin
 
 function canonicalPlanItemContent(finding: Finding): string {
   return [
-    `**Claim:** ${finding.claim || finding.description}`,
-    finding.evidence ? `**Repo context:** ${finding.evidence}` : "",
-    finding.action ? `**Implementation and tests:** ${finding.action}` : ""
+    `**Decision:** ${finding.claim || finding.description}`,
+    finding.evidence ? `**Context:** ${finding.evidence}` : "",
+    finding.action ? `**Next steps:** ${finding.action}` : ""
   ]
     .filter(Boolean)
     .join("\n\n");
 }
 
 function sourceItemContent(item: NonNullable<Finding["sourceItems"]>[number]): string {
+  if (item.rawContent?.trim()) {
+    return item.rawContent.trim();
+  }
   return [
     item.title ? `Title: ${item.title}` : "",
     item.claim ? `Claim: ${item.claim}` : "",
@@ -3061,10 +3133,10 @@ function fallbackPlanMarkdown(conversation: Conversation): string {
   return approved
     .map((finding, index) =>
       [
-        `${index + 1}. **${finding.title}**`,
-        `Goal: ${finding.claim || finding.description}`,
-        finding.evidence ? `Repo context: ${finding.evidence}` : "",
-        `Implementation and tests: ${finding.action || "No specific implementation guidance was provided."}`
+        `### ${index + 1}. ${finding.title}`,
+        finding.claim || finding.description,
+        finding.evidence ? `Context: ${finding.evidence}` : "",
+        finding.action || "No specific implementation guidance was provided."
       ]
         .filter(Boolean)
         .join("\n")
@@ -3168,6 +3240,80 @@ function pendingPlanDecisions(conversation: Conversation | undefined): PlanDecis
       Array.isArray(decision.options)
     );
   });
+}
+
+function planDecisionRequests(conversation: Conversation | undefined): PlanDecisionRequest[] {
+  const value = conversation?.metadata.planDecisionRequests;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter(isPlanDecisionRequest);
+}
+
+function visiblePlanDecisionRequests(conversation: Conversation | undefined): PlanDecisionRequest[] {
+  if (!conversation) {
+    return [];
+  }
+  const merged = mergePlanDecisionRequests(planDecisionRequests(conversation), pendingPlanDecisions(conversation));
+  const byId = new Map(merged.map((decision) => [decision.id, decision]));
+  implementationPlanAnswers(conversation).forEach((answer, index) => {
+    if (!byId.has(answer.decisionId)) {
+      const fallback = fallbackDecisionRequestFromAnswer(answer, conversation.updatedAt, index);
+      if (fallback) {
+        byId.set(fallback.id, fallback);
+      }
+    }
+  });
+  return Array.from(byId.values());
+}
+
+function isPlanDecisionRequest(item: unknown): item is PlanDecisionRequest {
+  const decision = item as Partial<PlanDecisionRequest>;
+  return (
+    typeof decision.id === "string" &&
+    typeof decision.title === "string" &&
+    typeof decision.question === "string" &&
+    Array.isArray(decision.options)
+  );
+}
+
+function mergePlanDecisionRequests(existing: PlanDecisionRequest[], next: PlanDecisionRequest[]): PlanDecisionRequest[] {
+  const merged = new Map<string, PlanDecisionRequest>();
+  for (const decision of [...existing, ...next]) {
+    if (decision.id.trim() && decision.question.trim()) {
+      merged.set(decision.id, decision);
+    }
+  }
+  return Array.from(merged.values());
+}
+
+function fallbackDecisionRequestFromAnswer(answer: PlanDecisionAnswer, createdAt: string, index: number): PlanDecisionRequest | undefined {
+  if (!answer.decisionId.trim() || !answer.answer.trim()) {
+    return undefined;
+  }
+  const title = answer.answer.match(/^Decision:\s*(.+)$/m)?.[1]?.trim();
+  const question = answer.answer.match(/^Question:\s*(.+)$/m)?.[1]?.trim();
+  const selectedLabel = answer.answer.match(/^Selected option:\s*(.+)$/m)?.[1]?.trim();
+  const optionId = answer.selectedOptionId?.trim();
+  const optionLabel = selectedLabel || optionId;
+  const firstContentLine = answer.answer
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !/^(Decision|Question|Selected option|Thread transcript|Automatic answer|Reason):/i.test(line));
+  const option = optionLabel
+    ? [{ id: optionId || "answered", label: optionLabel }]
+    : [];
+  return {
+    id: answer.decisionId,
+    title: title || `Decision answer ${index + 1}`,
+    question: question || firstContentLine || "Saved decision answer",
+    impact: "Saved answer from a previous decision thread.",
+    options: option,
+    recommendedOptionId: optionId && option.some((item) => item.id === optionId) ? optionId : undefined,
+    sourceParticipantIds: [],
+    sourceParticipantLabels: ["Agent"],
+    createdAt
+  };
 }
 
 function pendingPlanItemReview(conversation: Conversation | undefined): boolean {

@@ -213,6 +213,7 @@ export interface FindingSourceItem {
   claim: string;
   evidence: string;
   action: string;
+  rawContent?: string;
 }
 
 export interface Finding {
@@ -277,4 +278,5 @@ export interface AppBridge {
   retryImplementationPlanSynthesis(request: RetryImplementationPlanSynthesisRequest): Promise<StartReviewResult>;
   cancelReview(runId: string): Promise<void>;
   onReviewProgress(callback: (progress: ReviewProgress) => void): () => void;
+  onConversationUpdated(callback: (conversation: Conversation) => void): () => void;
 }

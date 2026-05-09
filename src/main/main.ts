@@ -28,7 +28,9 @@ const storageService = new StorageService();
 const providerRunner = new ProviderRunner(settingsService);
 const cliAgentRunner = new CliAgentRunner();
 const debugLogService = new DebugLogService();
-const consensusService = new ConsensusService(gitService, storageService, providerRunner, cliAgentRunner, debugLogService);
+const consensusService = new ConsensusService(gitService, storageService, providerRunner, cliAgentRunner, debugLogService, (conversation) => {
+  mainWindow?.webContents.send("conversations:updated", conversation);
+});
 const activeReviews = new Map<string, AbortController>();
 
 function createWindow(): void {

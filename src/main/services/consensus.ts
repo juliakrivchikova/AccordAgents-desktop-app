@@ -52,6 +52,13 @@ interface LinePoint {
   sourceParticipantIds: string[];
 }
 
+interface RawImplementationPlan {
+  participantId: string;
+  participantLabel: string;
+  content: string;
+  createdAt: string;
+}
+
 interface ParsedVerification {
   stance: "confirmed" | "rejected" | "unclear";
   severity?: FindingSeverity;
@@ -106,7 +113,8 @@ export class ConsensusService {
     private readonly storage: StorageService,
     private readonly providerRunner: ProviderRunner,
     private readonly cliRunner: CliAgentRunner,
-    private readonly debugLogs: DebugLogService
+    private readonly debugLogs: DebugLogService,
+    private readonly onConversationSnapshot?: (conversation: Conversation) => void
   ) {}
 
   async startReview(request: ReviewRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
@@ -155,6 +163,7 @@ export class ConsensusService {
       ],
       findings: [],
       metadata: {
+        runId,
         diffMode: request.diffMode,
         participantCount: request.participants.length,
         arbiter: { id: arbiter.id, kind: arbiter.kind, label: arbiter.label, model: arbiter.model },
@@ -284,6 +293,7 @@ export class ConsensusService {
     const runId = request.runId ?? originalRequest.runId ?? randomUUID();
     const warnings = this.metadataWarnings(conversation);
     const pendingDecisions = this.pendingDecisionsFromMetadata(conversation);
+    const decisionRequests = this.mergePlanDecisionRequests(this.planDecisionRequestsFromMetadata(conversation), pendingDecisions);
     const arbiter = originalRequest.arbiter ?? originalRequest.participants[0];
     const recordProgress: ProgressCallback = (event) => {
       void this.debugLogs.write("progress", {
@@ -316,6 +326,7 @@ export class ConsensusService {
         conversation.metadata = {
           ...conversation.metadata,
           implementationPlanAnswers: answers,
+          planDecisionRequests: this.mergePlanDecisionRequests(decisionRequests, automatic.pendingDecisions),
           pendingDecisionSelections: undefined,
           pendingDecisionResolutions: undefined,
           pendingDecisions: automatic.pendingDecisions,
@@ -334,6 +345,7 @@ export class ConsensusService {
       conversation.metadata = {
         ...conversation.metadata,
         implementationPlanAnswers: answers,
+        planDecisionRequests: this.mergePlanDecisionRequests(decisionRequests, stillPendingDecisions),
         pendingDecisionSelections: undefined,
         pendingDecisionResolutions: undefined,
         pendingDecisions: stillPendingDecisions,
@@ -353,6 +365,7 @@ export class ConsensusService {
       latest.metadata = {
         ...latest.metadata,
         implementationPlanAnswers: answers,
+        planDecisionRequests: this.mergePlanDecisionRequests(this.planDecisionRequestsFromMetadata(latest), pendingDecisions),
         running: false
       };
       latest.updatedAt = new Date().toISOString();
@@ -378,6 +391,7 @@ export class ConsensusService {
       throw new Error("The saved implementation-plan request is missing.");
     }
     const pendingDecisions = this.pendingDecisionsFromMetadata(conversation);
+    const decisionRequests = this.mergePlanDecisionRequests(this.planDecisionRequestsFromMetadata(conversation), pendingDecisions);
     const decision = pendingDecisions.find((item) => item.id === request.decisionId);
     if (!decision) {
       throw new Error("The plan decision was not found.");
@@ -406,6 +420,7 @@ export class ConsensusService {
     replies.push(this.planDecisionReply(decision.id, "user", question));
     conversation.metadata = {
       ...conversation.metadata,
+      planDecisionRequests: decisionRequests,
       pendingDecisions,
       planDecisionReplies: replies,
       warnings,
@@ -442,6 +457,7 @@ export class ConsensusService {
       );
       conversation.metadata = {
         ...conversation.metadata,
+        planDecisionRequests: decisionRequests,
         pendingDecisions,
         planDecisionReplies: replies,
         warnings,
@@ -456,6 +472,7 @@ export class ConsensusService {
 
     conversation.metadata = {
       ...conversation.metadata,
+      planDecisionRequests: decisionRequests,
       pendingDecisions,
       planDecisionReplies: replies,
       warnings,
@@ -769,6 +786,7 @@ export class ConsensusService {
           ],
           findings: [],
           metadata: {
+            runId,
             repoPath: request.repoPath,
             participantCount: participants.length,
             arbiter: { id: arbiter.id, kind: arbiter.kind, label: arbiter.label, model: arbiter.model },
@@ -776,17 +794,24 @@ export class ConsensusService {
             implementationPlanRequest: this.serializeReviewRequest(request),
             implementationPlanAnswers: [],
             implementationPlanDecisionGateCount: 0,
+            planDecisionRequests: [],
             running: true
           }
         };
         this.queueConversationSnapshot(conversation);
       } else {
+        const decisionRequests = this.mergePlanDecisionRequests(
+          this.planDecisionRequestsFromMetadata(conversation),
+          this.pendingDecisionsFromMetadata(conversation)
+        );
         conversation.messages.push(this.message("user", this.formatDecisionAnswersForTimeline(answers)));
         conversation.metadata = {
           ...conversation.metadata,
           implementationPlanAnswers: answers,
+          planDecisionRequests: decisionRequests,
           pendingDecisionSelections: undefined,
           pendingDecisionResolutions: undefined,
+          pendingDecisions: undefined,
           running: true
         };
         conversation.updatedAt = now;
@@ -814,6 +839,10 @@ export class ConsensusService {
             implementationPlanRequest: this.serializeReviewRequest(request),
             implementationPlanAnswers: answers,
             implementationPlanDecisionGateCount: decisionGateCount + 1,
+            planDecisionRequests: this.mergePlanDecisionRequests(
+              this.planDecisionRequestsFromMetadata(conversation),
+              decisionResult.pendingDecisions
+            ),
             pendingDecisionSelections: undefined,
             pendingDecisionResolutions: undefined,
             pendingDecisions: decisionResult.pendingDecisions,
@@ -892,21 +921,16 @@ export class ConsensusService {
         return { conversation, warnings };
       }
 
-      const participantPoints = await this.collectParticipantPoints(
-        request,
-        arbiter,
-        undefined,
-        initialResults,
-        healthyParticipants,
-        warnings,
-        signal,
-        recordProgress,
-        runId,
-        { conversation, warnings, arbiterSessionKey: this.arbiterSessionKey(arbiter) }
-      );
+      const rawPlans = this.rawImplementationPlansFromResults(initialResults, healthyParticipants);
+      conversation.metadata = {
+        ...conversation.metadata,
+        implementationPlanRawPlans: rawPlans
+      };
+      conversation.updatedAt = new Date().toISOString();
+      this.queueConversationSnapshot(conversation);
 
-      this.emitProgress(runId, recordProgress, "arbiter", `Arbiter ${arbiter.label} is merging implementation-plan items.`);
-      const arbiterPrompt = this.buildArbiterPrompt(request, undefined, healthyParticipants, participantPoints, warnings);
+      this.emitProgress(runId, recordProgress, "arbiter", `Arbiter ${arbiter.label} is extracting implementation-plan items.`);
+      const arbiterPrompt = this.buildImplementationPlanExtractionPrompt(request, healthyParticipants, rawPlans, warnings);
       const arbiterResult = await this.runParticipant(
         arbiter,
         arbiterPrompt,
@@ -914,20 +938,18 @@ export class ConsensusService {
         signal,
         this.sessionContext(conversation, warnings, this.arbiterSessionKey(arbiter))
       );
-      conversation.messages.push(this.message("participant", arbiterResult.content, this.asArbiterParticipant(arbiter), arbiterResult.ok ? "done" : "error"));
 
       let canonicalPoints = arbiterResult.ok
         ? this.parseLineProtocol(arbiterResult.content, undefined, healthyParticipants)
         : [];
       if (!arbiterResult.ok) {
-        warnings.push(`${arbiter.label} arbiter failed: ${arbiterResult.error ?? "unknown error"}. Falling back to local implementation-plan merge.`);
+        warnings.push(`${arbiter.label} arbiter failed while extracting implementation-plan items: ${arbiterResult.error ?? "unknown error"}.`);
       }
       if (canonicalPoints.length === 0) {
-        canonicalPoints = this.localMergePoints(participantPoints);
-        warnings.push("Arbiter did not return canonical plan items; used local merge fallback.");
+        warnings.push("Arbiter did not return parseable canonical plan items, so no implementation-plan consensus threads were opened.");
       }
 
-      canonicalPoints = this.selectImplementationPlanPoints(canonicalPoints, participantPoints, healthyParticipants, warnings);
+      canonicalPoints = this.selectImplementationPlanExtractionPoints(canonicalPoints, healthyParticipants, warnings);
 
       this.emitProgress(runId, recordProgress, "debate", `Opening ${canonicalPoints.length} implementation-plan consensus threads.`, {
         completed: 0,
@@ -937,7 +959,7 @@ export class ConsensusService {
       for (let index = 0; index < canonicalPoints.length; index += 1) {
         this.throwIfAborted(signal);
         const point = canonicalPoints[index];
-        const sourceItems = this.sourceItemsForPoint(point, participantPoints, healthyParticipants);
+        const sourceItems = this.sourceItemsForRawPlans(point, rawPlans, healthyParticipants);
         const finding = this.createFinding(point, healthyParticipants, sourceItems);
         if (finding.status !== "Confirmed") {
           await this.debatePoint(
@@ -1107,6 +1129,19 @@ export class ConsensusService {
     return pointsByParticipant;
   }
 
+  private rawImplementationPlansFromResults(initialResults: ParticipantRunResult[], healthyParticipants: ParticipantConfig[]): RawImplementationPlan[] {
+    const healthyIds = new Set(healthyParticipants.map((participant) => participant.id));
+    const createdAt = new Date().toISOString();
+    return initialResults
+      .filter((result) => result.ok && healthyIds.has(result.participant.id) && result.content.trim())
+      .map((result) => ({
+        participantId: result.participant.id,
+        participantLabel: result.participant.label,
+        content: result.content.trim(),
+        createdAt
+      }));
+  }
+
   private async collectImplementationPlanDecisions(
     request: ReviewRequest,
     conversation: Conversation,
@@ -1183,7 +1218,7 @@ export class ConsensusService {
 
     const synthesis = this.parseImplementationPlanSynthesis(result.content, conversation);
     if (synthesis.source === "fallback" && options.fallbackWarning !== false) {
-      warnings.push("Arbiter synthesis did not include a Full Plan section; used local summary fallback.");
+      warnings.push("Arbiter synthesis did not include a usable final plan; used local summary fallback.");
     }
     return synthesis;
   }
@@ -1270,6 +1305,7 @@ export class ConsensusService {
       conversation.metadata = {
         ...conversation.metadata,
         implementationPlanAnswers: mergedAnswers,
+        planDecisionRequests: this.mergePlanDecisionRequests(this.planDecisionRequestsFromMetadata(conversation), pendingDecisions),
         planDecisionReplies: replies,
         pendingDecisionSelections: undefined,
         pendingDecisionResolutions: undefined,
@@ -1562,16 +1598,11 @@ export class ConsensusService {
       "You are one independent participant in an implementation-plan consensus workflow.",
       "You are in plan mode. Inspect the repository read-only as needed. Do not edit files, run mutating commands, or ask interactive questions.",
       "Produce an engineer-ready implementation plan for the user's requested feature, bug, or error log.",
-      "Return only compact plan-item blocks. Do not add prose before or after.",
-      "IMPORTANT: The output format is mandatory. Do not return JSON, Markdown, bullets, explanations, or any text outside the blocks.",
-      "Return all concrete, non-duplicate, ordered plan items. Each item must be practical, repo-specific where possible, and directly useful to an implementer.",
-      "If an unresolved blocker remains, include it as an item whose action explicitly says what cannot be decided yet.",
-      "Format:",
-      "P1|S:Info|T:short implementation step title",
-      "C:goal or decision for this step",
-      "E:repo evidence, likely files/modules, dependencies, or reasoning",
-      "A:concrete implementation guidance plus tests/verification",
-      "Severity S should usually be Info; use Medium or High only for risky migration, compatibility, or data-loss concerns.",
+      "Return the plan as natural Markdown in whatever structure best fits the task. Do not use a required template or machine protocol.",
+      "Make it decision-complete for another engineer: include the intended approach, important interfaces/data flow, edge cases, and focused verification.",
+      "Use repo-specific file names, modules, commands, and constraints where inspection supports them.",
+      "Keep the plan concise enough to be scanned in the timeline, but do not omit important implementation decisions.",
+      "If an unresolved blocker remains, state it clearly in the plan and explain what cannot be decided yet.",
       `Repository: ${request.repoPath}`,
       answers.length ? `User decision-thread context:\n${this.formatDecisionAnswers(answers)}` : "User decision-thread context: none",
       request.question ? `User request:\n${request.question}` : "User request:\nCreate an implementation plan.",
@@ -1684,6 +1715,32 @@ export class ConsensusService {
       .join("\n\n");
   }
 
+  private buildImplementationPlanExtractionPrompt(
+    request: ReviewRequest,
+    participants: ParticipantConfig[],
+    rawPlans: RawImplementationPlan[],
+    warnings: string[]
+  ): string {
+    return [
+      "You are the private arbiter for implementation-plan consensus extraction.",
+      "Compare the independent participant plans below and extract only the canonical items needed for confirmation or debate.",
+      "Classify work by source coverage before emitting items: common items appear in every healthy participant plan, needs-confirmation items appear in only a subset, and conflict items cover the same area with incompatible recommendations.",
+      "Do not write the final plan. Do not add new facts beyond the participant plans and user request.",
+      "Merge equivalent work into one item. Preserve practical needs-confirmation items and each incompatible conflict alternative so other participants can evaluate them.",
+      "Use participant ids exactly in SRC. Put all participant ids in SRC only when equivalent work appears in every healthy participant plan. Put only actual source participant ids in SRC for subset or conflict items.",
+      "Return only this internal protocol. No Markdown, prose, JSON, or text outside the blocks:",
+      "K1|S:Info|T:short implementation item title|SRC:codex-cli,claude-code",
+      "C:canonical goal or decision for this item",
+      "E:repo evidence, source-plan evidence, likely files/modules, dependencies, or reasoning",
+      "A:concrete implementation guidance plus tests/verification",
+      "Severity S should usually be Info; use Medium or High only for risky migration, compatibility, or data-loss concerns.",
+      `Participants: ${participants.map((participant) => `${participant.id}=${participant.label}`).join(", ")}`,
+      `Repository: ${request.repoPath}`,
+      request.question ? `User request:\n${request.question}` : "User request:\nCreate an implementation plan.",
+      this.limitText(`Participant plans:\n${this.formatRawImplementationPlansForPrompt(rawPlans)}`, warnings)
+    ].join("\n\n");
+  }
+
   private buildArbiterPrompt(
     request: ReviewRequest,
     diff: GitDiffResult | undefined,
@@ -1691,38 +1748,6 @@ export class ConsensusService {
     pointsByParticipant: Map<string, LinePoint[]>,
     warnings: string[]
   ): string {
-    if (request.kind === "implementation-plan") {
-      const participantItemCounts = participants
-        .map((participant) => `${participant.id}:${pointsByParticipant.get(participant.id)?.length ?? 0}`)
-        .join(", ");
-      const largestParticipantPlanItemCount = Math.max(0, ...participants.map((participant) => pointsByParticipant.get(participant.id)?.length ?? 0));
-      return [
-        "You are the arbiter. Compare the independent participant implementation plans before merging.",
-        "Classify work by source coverage before merging: common items appear in every healthy participant plan, needs-confirmation items appear in only a subset, and conflict items cover the same area with incompatible recommendations.",
-        "Do not add new facts. Merge duplicates, but preserve every practical needs-confirmation item and every conflict so missing participants can debate them.",
-        "Do not explode one participant item into several canonical items just because it contains multiple implementation details. Keep those details together in C/E/A unless there is a real incompatible alternative.",
-        "Return each common item once with all source ids. Do not split common work into separate confirmation items when both participants agree on the same implementation area.",
-        "The canonical item count should normally be no greater than the largest participant plan item count plus explicit conflict alternatives. If you exceed that, every extra item must correspond to a true incompatible alternative that needs debate.",
-        "Preserve order from setup/foundation through implementation, verification, and rollout.",
-        "Use participant ids exactly in SRC. Put all participant ids in SRC only when equivalent work appears in every healthy participant plan. Put only the actual source participant ids in SRC for needs-confirmation items.",
-        "For conflicts, do not combine incompatible alternatives into one all-source item. Emit one item per alternative with SRC only for the participants that proposed that alternative, so opposing or missing participants can debate it.",
-        "IMPORTANT: The output format is mandatory. If you return prose, JSON, Markdown, bullets, or any text outside the blocks, the result will be rejected.",
-        "Canonical plan items must be concise, practical, repo-specific where possible, and directly useful to an implementer.",
-        "Return only canonical blocks:",
-        "K1|S:Info|T:short implementation step title|SRC:codex-cli,claude-code",
-        "C:canonical goal or decision for this step",
-        "E:repo evidence, likely files/modules, dependencies, or reasoning",
-        "A:concrete implementation guidance plus tests/verification",
-        `Participants: ${participants.map((participant) => `${participant.id}=${participant.label}`).join(", ")}`,
-        `Participant item counts: ${participantItemCounts}. Largest participant plan has ${largestParticipantPlanItemCount} items.`,
-        request.question ? `User request:\n${request.question}` : "",
-        `Repository: ${request.repoPath}`,
-        `Participant plan items:\n${this.formatParticipantPoints(pointsByParticipant)}`
-      ]
-        .filter(Boolean)
-        .join("\n\n");
-    }
-
     return [
       "You are the arbiter. Merge participant point lists into canonical consensus points.",
       "Do not add new facts. Merge duplicates. Remove source/citation-only and meta points.",
@@ -1748,14 +1773,11 @@ export class ConsensusService {
     const answers = this.implementationPlanAnswersFromMetadata(conversation);
     return [
       "You are the arbiter for the final implementation-plan synthesis.",
-      "Use the consensus item threads below to produce one engineer-ready implementation plan and one separate debate summary.",
-      "Return Markdown only with exactly these two H2 headings:",
-      "## Full Plan",
-      "## Debate Summary",
-      "Full Plan must include only confirmed/common items and confirmed-after-debate items. Do not include rejected or unresolved items as implementation steps.",
+      "Use the consensus item threads below to produce one engineer-ready implementation plan.",
+      "Return only the final plan as natural Markdown. Do not use a required template and do not include a debate summary.",
+      "The plan must include only confirmed/common items and confirmed-after-debate items. Do not include rejected or unresolved items as implementation steps.",
       "Apply user item-review comments as final guidance for wording, caveats, ordering, and refinements.",
-      "Debate Summary must summarize the non-common debated items, their outcome, and the reason they were included, rejected, or left unresolved.",
-      "Keep the full plan decision-complete and concise enough to hand to another engineer.",
+      "Keep the plan decision-complete and concise enough to hand to another engineer.",
       `Repository: ${request.repoPath}`,
       request.question ? `User request:\n${request.question}` : "User request:\nCreate an implementation plan.",
       answers.length ? `User decision-thread context:\n${this.formatDecisionAnswers(answers)}` : "User decision-thread context: none",
@@ -2195,6 +2217,22 @@ export class ConsensusService {
     return normalizedPoints.filter((point) => point.sourceParticipantIds.length > 0);
   }
 
+  private selectImplementationPlanExtractionPoints(points: LinePoint[], participants: ParticipantConfig[], warnings: string[]): LinePoint[] {
+    const participantIds = new Set(participants.map((participant) => participant.id));
+    const normalizedPoints = points
+      .filter((point) => !this.isMetaPoint(point))
+      .map((point) => ({
+        ...point,
+        sourceParticipantIds: Array.from(new Set(point.sourceParticipantIds.filter((id) => participantIds.has(id))))
+      }));
+    const untraceablePointCount = normalizedPoints.filter((point) => point.sourceParticipantIds.length === 0).length;
+    if (untraceablePointCount > 0) {
+      warnings.push(`${untraceablePointCount} implementation-plan item${untraceablePointCount === 1 ? "" : "s"} had no valid participant source and were filtered out.`);
+    }
+
+    return normalizedPoints.filter((point) => point.sourceParticipantIds.length > 0);
+  }
+
   private withInferredSources(
     point: LinePoint,
     pointsByParticipant: Map<string, LinePoint[]>,
@@ -2259,6 +2297,33 @@ export class ConsensusService {
         claim: sourcePoint.claim,
         evidence: sourcePoint.evidence,
         action: sourcePoint.action
+      });
+    }
+    return sourceItems;
+  }
+
+  private sourceItemsForRawPlans(
+    point: LinePoint,
+    rawPlans: RawImplementationPlan[],
+    participants: ParticipantConfig[]
+  ): FindingSourceItem[] {
+    const participantById = new Map(participants.map((participant) => [participant.id, participant]));
+    const rawPlanByParticipantId = new Map(rawPlans.map((plan) => [plan.participantId, plan]));
+    const sourceItems: FindingSourceItem[] = [];
+    for (const participantId of point.sourceParticipantIds) {
+      const participant = participantById.get(participantId);
+      const rawPlan = rawPlanByParticipantId.get(participantId);
+      if (!participant || !rawPlan) {
+        continue;
+      }
+      sourceItems.push({
+        participantId,
+        participantLabel: participant.label,
+        title: "Initial implementation plan",
+        claim: "",
+        evidence: "",
+        action: "",
+        rawContent: rawPlan.content
       });
     }
     return sourceItems;
@@ -2449,7 +2514,8 @@ export class ConsensusService {
 
   private parseImplementationPlanSynthesis(content: string, conversation: Conversation): ImplementationPlanSynthesis {
     const fallback = this.fallbackImplementationPlanSynthesis(conversation);
-    const fullPlan = this.markdownSection(content, "Full Plan");
+    const legacyFullPlan = this.markdownSection(content, "Full Plan");
+    const fullPlan = legacyFullPlan || this.removeMarkdownSection(content, "Debate Summary");
     if (!fullPlan.trim()) {
       return fallback;
     }
@@ -2471,7 +2537,7 @@ export class ConsensusService {
     return {
       fullPlan: cleanFullPlan,
       debateSummary: cleanDebateSummary,
-      combined: [`## Full Plan\n${cleanFullPlan}`, `## Debate Summary\n${cleanDebateSummary}`].join("\n\n"),
+      combined: [cleanFullPlan, cleanDebateSummary ? `## Debate Summary\n${cleanDebateSummary}` : ""].filter(Boolean).join("\n\n"),
       source
     };
   }
@@ -2498,6 +2564,30 @@ export class ConsensusService {
       }
     }
     return lines.slice(start + 1, end).join("\n").trim();
+  }
+
+  private removeMarkdownSection(content: string, title: string): string {
+    const lines = content.replace(/\r\n/g, "\n").split("\n");
+    const normalizedTitle = title.trim().toLowerCase();
+    let start = -1;
+    for (const [index, line] of lines.entries()) {
+      const heading = line.match(/^#{1,3}\s+(.+?)\s*$/);
+      if (heading?.[1].trim().toLowerCase() === normalizedTitle) {
+        start = index;
+        break;
+      }
+    }
+    if (start < 0) {
+      return content.trim();
+    }
+    let end = lines.length;
+    for (let index = start + 1; index < lines.length; index += 1) {
+      if (/^#{1,3}\s+/.test(lines[index])) {
+        end = index;
+        break;
+      }
+    }
+    return [...lines.slice(0, start), ...lines.slice(end)].join("\n").trim();
   }
 
   private localImplementationPlanDebateSummary(conversation: Conversation): string {
@@ -2600,6 +2690,21 @@ export class ConsensusService {
       }
     }
     return lines.join("\n");
+  }
+
+  private formatRawImplementationPlansForPrompt(rawPlans: RawImplementationPlan[]): string {
+    if (rawPlans.length === 0) {
+      return "No participant plans were available.";
+    }
+
+    return rawPlans
+      .map((plan) =>
+        [
+          `--- PARTICIPANT ${plan.participantId} (${plan.participantLabel}) ---`,
+          plan.content || "(empty plan)"
+        ].join("\n")
+      )
+      .join("\n\n");
   }
 
   private formatDecisionAnswers(answers: PlanDecisionAnswer[]): string {
@@ -2820,8 +2925,34 @@ export class ConsensusService {
     }
     return value.filter((item): item is PlanDecisionRequest => {
       const candidate = item as Partial<PlanDecisionRequest>;
+      return (
+        typeof candidate.id === "string" &&
+        typeof candidate.title === "string" &&
+        typeof candidate.question === "string" &&
+        Array.isArray(candidate.options)
+      );
+    });
+  }
+
+  private planDecisionRequestsFromMetadata(conversation: Conversation): PlanDecisionRequest[] {
+    const value = conversation.metadata.planDecisionRequests;
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return value.filter((item): item is PlanDecisionRequest => {
+      const candidate = item as Partial<PlanDecisionRequest>;
       return typeof candidate.id === "string" && typeof candidate.question === "string" && Array.isArray(candidate.options);
     });
+  }
+
+  private mergePlanDecisionRequests(existing: PlanDecisionRequest[], next: PlanDecisionRequest[]): PlanDecisionRequest[] {
+    const merged = new Map<string, PlanDecisionRequest>();
+    for (const decision of [...existing, ...next]) {
+      if (decision.id && decision.question.trim()) {
+        merged.set(decision.id, decision);
+      }
+    }
+    return Array.from(merged.values());
   }
 
   private planDecisionRepliesFromMetadata(conversation: Conversation): PlanDecisionReply[] {
@@ -2969,6 +3100,7 @@ export class ConsensusService {
 
   private queueConversationSnapshot(conversation: Conversation): void {
     const snapshot = this.cloneConversation(conversation);
+    this.onConversationSnapshot?.(snapshot);
     const previous = this.conversationSaveQueues.get(conversation.id) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
@@ -2992,7 +3124,9 @@ export class ConsensusService {
     if (pending) {
       await pending.catch(() => undefined);
     }
-    await this.storage.saveConversation(conversation);
+    const snapshot = this.cloneConversation(conversation);
+    await this.storage.saveConversation(snapshot);
+    this.onConversationSnapshot?.(snapshot);
   }
 
   private cloneConversation(conversation: Conversation): Conversation {

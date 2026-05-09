@@ -3,6 +3,7 @@ import type {
   AppBridge,
   ComposeImplementationPlanRequest,
   ContinueReviewRequest,
+  Conversation,
   GitDiffRequest,
   PlanDecisionClarificationRequest,
   PlanItemReviewRequest,
@@ -38,6 +39,11 @@ const bridge: AppBridge = {
     const listener = (_event: Electron.IpcRendererEvent, progress: ReviewProgress) => callback(progress);
     ipcRenderer.on("conversations:review-progress", listener);
     return () => ipcRenderer.removeListener("conversations:review-progress", listener);
+  },
+  onConversationUpdated: (callback: (conversation: Conversation) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, conversation: Conversation) => callback(conversation);
+    ipcRenderer.on("conversations:updated", listener);
+    return () => ipcRenderer.removeListener("conversations:updated", listener);
   }
 };
 
