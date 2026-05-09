@@ -21,6 +21,7 @@ export interface ProviderSettings {
 export interface AppSettings {
   roundLimitDefault: number;
   providers: ProviderSettings[];
+  lastRepoPath?: string;
 }
 
 export interface ProviderSettingsUpdate {
@@ -160,6 +161,17 @@ export interface RetryImplementationPlanSynthesisRequest {
   runId?: string;
 }
 
+export interface RecoverImplementationPlanRequest {
+  conversationId: string;
+  runId?: string;
+}
+
+export interface ReviseImplementationPlanRequest {
+  conversationId: string;
+  instruction: string;
+  runId?: string;
+}
+
 export interface ContinueReviewRequest {
   conversationId: string;
   runId?: string;
@@ -261,6 +273,7 @@ export interface StartReviewResult {
 export interface AppBridge {
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
+  updateLastRepoPath(repoPath: string): Promise<AppSettings>;
   listProviderModels(kind: ProviderKind): Promise<ProviderModel[]>;
   detectAgents(): Promise<AgentHealth[]>;
   selectRepoDirectory(): Promise<string | undefined>;
@@ -276,6 +289,8 @@ export interface AppBridge {
   askPlanDecisionClarification(request: PlanDecisionClarificationRequest): Promise<StartReviewResult>;
   composeImplementationPlan(request: ComposeImplementationPlanRequest): Promise<StartReviewResult>;
   retryImplementationPlanSynthesis(request: RetryImplementationPlanSynthesisRequest): Promise<StartReviewResult>;
+  recoverImplementationPlan(request: RecoverImplementationPlanRequest): Promise<StartReviewResult>;
+  reviseImplementationPlan(request: ReviseImplementationPlanRequest): Promise<StartReviewResult>;
   cancelReview(runId: string): Promise<void>;
   onReviewProgress(callback: (progress: ReviewProgress) => void): () => void;
   onConversationUpdated(callback: (conversation: Conversation) => void): () => void;

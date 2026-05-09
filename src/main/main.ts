@@ -9,6 +9,8 @@ import type {
   PlanItemReviewRequest,
   ProviderKind,
   ProviderSettingsUpdate,
+  RecoverImplementationPlanRequest,
+  ReviseImplementationPlanRequest,
   RetryImplementationPlanSynthesisRequest,
   ReviewRequest
 } from "../shared/types";
@@ -61,6 +63,7 @@ function createWindow(): void {
 function registerIpc(): void {
   ipcMain.handle("settings:get", () => settingsService.getPublicSettings());
   ipcMain.handle("settings:update-provider", (_event, update: ProviderSettingsUpdate) => settingsService.updateProvider(update));
+  ipcMain.handle("settings:update-last-repo-path", (_event, repoPath: string) => settingsService.updateLastRepoPath(repoPath));
   ipcMain.handle("settings:list-provider-models", (_event, kind: ProviderKind) => providerRunner.listModels(kind));
   ipcMain.handle("agents:detect", () => cliAgentRunner.detectAgents());
   ipcMain.handle("git:inspect-repo", (_event, repoPath: string) => gitService.inspectRepo(repoPath));
@@ -181,6 +184,54 @@ function registerIpc(): void {
 
     try {
       return await consensusService.retryImplementationPlanSynthesis(
+        { ...request, runId },
+        controller.signal,
+        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+      );
+    } catch (error) {
+      const phase = controller.signal.aborted ? "cancelled" : "error";
+      mainWindow?.webContents.send("conversations:review-progress", {
+        runId,
+        phase,
+        message: error instanceof Error ? error.message : String(error),
+        createdAt: new Date().toISOString()
+      });
+      throw error;
+    } finally {
+      activeReviews.delete(runId);
+    }
+  });
+  ipcMain.handle("conversations:recover-implementation-plan", async (_event, request: RecoverImplementationPlanRequest) => {
+    const runId = request.runId ?? randomUUID();
+    const controller = new AbortController();
+    activeReviews.set(runId, controller);
+
+    try {
+      return await consensusService.recoverImplementationPlan(
+        { ...request, runId },
+        controller.signal,
+        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+      );
+    } catch (error) {
+      const phase = controller.signal.aborted ? "cancelled" : "error";
+      mainWindow?.webContents.send("conversations:review-progress", {
+        runId,
+        phase,
+        message: error instanceof Error ? error.message : String(error),
+        createdAt: new Date().toISOString()
+      });
+      throw error;
+    } finally {
+      activeReviews.delete(runId);
+    }
+  });
+  ipcMain.handle("conversations:revise-implementation-plan", async (_event, request: ReviseImplementationPlanRequest) => {
+    const runId = request.runId ?? randomUUID();
+    const controller = new AbortController();
+    activeReviews.set(runId, controller);
+
+    try {
+      return await consensusService.reviseImplementationPlan(
         { ...request, runId },
         controller.signal,
         (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)

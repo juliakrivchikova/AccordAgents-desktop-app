@@ -8,6 +8,8 @@ import type {
   PlanDecisionClarificationRequest,
   PlanItemReviewRequest,
   ProviderSettingsUpdate,
+  RecoverImplementationPlanRequest,
+  ReviseImplementationPlanRequest,
   RetryImplementationPlanSynthesisRequest,
   ReviewProgress,
   ReviewRequest
@@ -16,6 +18,7 @@ import type {
 const bridge: AppBridge = {
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateProviderSettings: (update: ProviderSettingsUpdate) => ipcRenderer.invoke("settings:update-provider", update),
+  updateLastRepoPath: (repoPath: string) => ipcRenderer.invoke("settings:update-last-repo-path", repoPath),
   listProviderModels: (kind) => ipcRenderer.invoke("settings:list-provider-models", kind),
   detectAgents: () => ipcRenderer.invoke("agents:detect"),
   selectRepoDirectory: () => ipcRenderer.invoke("dialog:select-repo"),
@@ -34,6 +37,10 @@ const bridge: AppBridge = {
   composeImplementationPlan: (request: ComposeImplementationPlanRequest) => ipcRenderer.invoke("conversations:compose-implementation-plan", request),
   retryImplementationPlanSynthesis: (request: RetryImplementationPlanSynthesisRequest) =>
     ipcRenderer.invoke("conversations:retry-implementation-plan-synthesis", request),
+  recoverImplementationPlan: (request: RecoverImplementationPlanRequest) =>
+    ipcRenderer.invoke("conversations:recover-implementation-plan", request),
+  reviseImplementationPlan: (request: ReviseImplementationPlanRequest) =>
+    ipcRenderer.invoke("conversations:revise-implementation-plan", request),
   cancelReview: (runId: string) => ipcRenderer.invoke("conversations:cancel-review", runId),
   onReviewProgress: (callback: (progress: ReviewProgress) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, progress: ReviewProgress) => callback(progress);

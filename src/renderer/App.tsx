@@ -14,6 +14,7 @@ import {
   MessageSquare,
   Play,
   RefreshCw,
+  SendHorizontal,
   Settings,
   Maximize2,
   X,
@@ -67,7 +68,7 @@ const JUDGE_FLATICON_URL = new URL("./assets/judge-flaticon-5452982.png", import
 const CLAUDE_AVATAR_URL = new URL("./assets/claude-avatar.webp", import.meta.url).href;
 const CODEX_AVATAR_URL = new URL("./assets/codex-avatar.webp", import.meta.url).href;
 
-type ActiveView = "slack" | "points" | "plan" | "settings";
+type ActiveView = "slack" | "points" | "settings";
 type AvatarKind = "user" | "arbiter" | "anthropic" | "codex" | "gemini" | "generic";
 
 interface AvatarSpec {
@@ -121,6 +122,7 @@ function App(): JSX.Element {
   const [clarificationDrafts, setClarificationDrafts] = useState<Record<string, string>>({});
   const [pendingClarifications, setPendingClarifications] = useState<Record<string, PlanDecisionReply>>({});
   const [planItemReviewDrafts, setPlanItemReviewDrafts] = useState<Record<string, string>>({});
+  const [planCorrectionDraft, setPlanCorrectionDraft] = useState("");
   const [error, setError] = useState<string | undefined>();
 
   useEffect(() => {
@@ -196,6 +198,7 @@ function App(): JSX.Element {
   const branchSelectPlaceholder = !repoInfo?.isRepo ? "Select a repository first" : branchOptions.length === 0 ? "No branches found" : "Select branch";
   const arbiterOptions = participantOptions.filter((option) => !option.disabled);
   const arbiterSelectValue = arbiterOptions.some(({ provider }) => providerId(provider) === selectedArbiterId) ? selectedArbiterId : "";
+  const arbiterRoleLabel = kind === "implementation-plan" ? "Planner" : "Arbiter";
   const arbiterPlaceholder = kind === "implementation-plan"
     ? "No local CLI agents available"
     : kind === "code-review" && !repoPath.trim()
@@ -213,6 +216,12 @@ function App(): JSX.Element {
       setSettings(nextSettings);
       setAgents(nextAgents);
       setSummaries(nextSummaries);
+      const explicitRepoPath = nextSettings.lastRepoPath?.trim();
+      const rememberedRepoPath = explicitRepoPath || nextSummaries.find((summary) => summary.repoPath?.trim())?.repoPath?.trim();
+      if (!repoPath.trim() && rememberedRepoPath) {
+        setRepoPath(rememberedRepoPath);
+        await inspectRepo(rememberedRepoPath, { remember: !explicitRepoPath });
+      }
     } catch (caught) {
       setError(errorText(caught));
     }
@@ -234,6 +243,7 @@ function App(): JSX.Element {
       setClarificationDrafts({});
       setPendingClarifications({});
       setPlanItemReviewDrafts({});
+      setPlanCorrectionDraft("");
       setActiveView("slack");
     } catch (caught) {
       setError(errorText(caught));
@@ -249,7 +259,7 @@ function App(): JSX.Element {
     await inspectRepo(selected);
   }
 
-  async function inspectRepo(path: string = repoPath): Promise<void> {
+  async function inspectRepo(path: string = repoPath, options: { remember?: boolean } = {}): Promise<void> {
     if (!path.trim()) {
       return;
     }
@@ -257,6 +267,9 @@ function App(): JSX.Element {
     try {
       const info = await window.consensus.inspectRepo(path.trim());
       setRepoInfo(info);
+      if (info.isRepo && options.remember !== false) {
+        await rememberRepoPath(info.repoPath || path.trim());
+      }
       if (info.isRepo && info.branches.length > 0) {
         const currentBranch = info.currentBranch && info.branches.includes(info.currentBranch) ? info.currentBranch : undefined;
         const defaultCompareBranch = currentBranch ?? info.branches[0];
@@ -269,6 +282,19 @@ function App(): JSX.Element {
         setCompareBranch((selected) => (info.branches.includes(selected) ? selected : defaultCompareBranch));
         setBaseBranch((selected) => (info.branches.includes(selected) ? selected : defaultBaseBranch));
       }
+    } catch (caught) {
+      setError(errorText(caught));
+    }
+  }
+
+  async function rememberRepoPath(path: string): Promise<void> {
+    const normalized = path.trim();
+    if (!normalized) {
+      return;
+    }
+    try {
+      await window.consensus.updateLastRepoPath(normalized);
+      setSettings((current) => ({ ...current, lastRepoPath: normalized }));
     } catch (caught) {
       setError(errorText(caught));
     }
@@ -296,7 +322,7 @@ function App(): JSX.Element {
     setWarnings([]);
     const arbiter = buildArbiter();
     if (!arbiter) {
-      setError("Select an arbiter.");
+      setError(`Select a ${arbiterRoleLabel.toLowerCase()}.`);
       return;
     }
     const participants = buildParticipants();
@@ -330,6 +356,7 @@ function App(): JSX.Element {
     setClarificationDrafts({});
     setPendingClarifications({});
     setPlanItemReviewDrafts({});
+    setPlanCorrectionDraft("");
     setActiveView("slack");
     setConversation({
       id: runId,
@@ -373,11 +400,12 @@ function App(): JSX.Element {
       setClarificationDrafts({});
       setPendingClarifications({});
       setPlanItemReviewDrafts({});
+      setPlanCorrectionDraft("");
       const nextPendingDecisions = pendingPlanDecisions(result.conversation);
       const nextPendingItem = firstPendingPlanItemReview(result.conversation);
       setSelectedThreadId(nextPendingDecisions[0]?.id ?? nextPendingItem?.id);
       setFocusedThreadId(undefined);
-      setActiveView(nextPendingDecisions.length || nextPendingItem ? "slack" : kind === "implementation-plan" ? "plan" : "slack");
+      setActiveView("slack");
       setSummaries(await window.consensus.listConversations());
     } catch (caught) {
       const message = errorText(caught);
@@ -472,11 +500,12 @@ function App(): JSX.Element {
       setClarificationDrafts({});
       setPendingClarifications({});
       setPlanItemReviewDrafts({});
+      setPlanCorrectionDraft("");
       const nextPendingDecisions = pendingPlanDecisions(result.conversation);
       const nextPendingItem = firstPendingPlanItemReview(result.conversation);
       setSelectedThreadId(nextPendingDecisions[0]?.id ?? nextPendingItem?.id);
       setFocusedThreadId(undefined);
-      setActiveView(nextPendingDecisions.length || nextPendingItem ? "slack" : "plan");
+      setActiveView("slack");
       setSummaries(await window.consensus.listConversations());
     } catch (caught) {
       const message = errorText(caught);
@@ -696,7 +725,7 @@ function App(): JSX.Element {
       setWarnings(result.warnings);
       setSelectedThreadId(undefined);
       setFocusedThreadId(undefined);
-      setActiveView("plan");
+      setActiveView("slack");
       setSummaries(await window.consensus.listConversations());
     } catch (caught) {
       const message = errorText(caught);
@@ -738,7 +767,7 @@ function App(): JSX.Element {
     progressLogRef.current = [];
     setProgressLog([]);
     setBusy(true);
-    setActiveView("plan");
+    setActiveView("slack");
     setConversation((current) =>
       current?.id === conversation.id
         ? {
@@ -784,6 +813,134 @@ function App(): JSX.Element {
     }
   }
 
+  async function recoverImplementationPlan(): Promise<void> {
+    if (!conversation) {
+      return;
+    }
+    const runId = crypto.randomUUID();
+    setError(undefined);
+    setWarnings([]);
+    setCurrentRunId(runId);
+    progressLogRef.current = [];
+    setProgressLog([]);
+    setBusy(true);
+    setActiveView("slack");
+    setConversation((current) =>
+      current?.id === conversation.id
+        ? {
+            ...current,
+            metadata: {
+              ...current.metadata,
+              running: true
+            }
+          }
+        : current
+    );
+    try {
+      const result = await window.consensus.recoverImplementationPlan({ conversationId: conversation.id, runId });
+      setConversation(mergeProgressIntoConversation(result.conversation, progressLogRef.current.filter((item) => item.runId === runId)));
+      setWarnings(result.warnings);
+      const nextPendingDecisions = pendingPlanDecisions(result.conversation);
+      const nextPendingItem = firstPendingPlanItemReview(result.conversation);
+      setSelectedThreadId(nextPendingDecisions[0]?.id ?? nextPendingItem?.id);
+      setFocusedThreadId(undefined);
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      const message = errorText(caught);
+      if (message.toLowerCase().includes("cancel")) {
+        setWarnings((current) => [...current, "Plan recovery cancelled."]);
+      } else {
+        setError(message);
+      }
+      setConversation((current) =>
+        current?.id === conversation.id
+          ? {
+              ...current,
+              metadata: {
+                ...current.metadata,
+                running: false
+              }
+            }
+          : current
+      );
+    } finally {
+      setBusy(false);
+      setCurrentRunId(undefined);
+      setConversation((current) =>
+        current?.id === conversation.id && current.metadata.running === true
+          ? { ...current, metadata: { ...current.metadata, running: false } }
+          : current
+      );
+    }
+  }
+
+  async function reviseImplementationPlan(): Promise<void> {
+    if (!conversation) {
+      return;
+    }
+    const instruction = planCorrectionDraft.trim();
+    if (!instruction) {
+      setError("Enter a plan correction.");
+      return;
+    }
+    const runId = crypto.randomUUID();
+    setError(undefined);
+    setWarnings([]);
+    setCurrentRunId(runId);
+    progressLogRef.current = [];
+    setProgressLog([]);
+    setBusy(true);
+    setActiveView("slack");
+    setConversation((current) =>
+      current?.id === conversation.id
+        ? {
+            ...current,
+            metadata: {
+              ...current.metadata,
+              running: true
+            }
+          }
+        : current
+    );
+    try {
+      const result = await window.consensus.reviseImplementationPlan({
+        conversationId: conversation.id,
+        instruction,
+        runId
+      });
+      setConversation(mergeProgressIntoConversation(result.conversation, progressLogRef.current.filter((item) => item.runId === runId)));
+      setWarnings(result.warnings);
+      setPlanCorrectionDraft("");
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      const message = errorText(caught);
+      if (message.toLowerCase().includes("cancel")) {
+        setWarnings((current) => [...current, "Final plan revision cancelled."]);
+      } else {
+        setError(message);
+      }
+      setConversation((current) =>
+        current?.id === conversation.id
+          ? {
+              ...current,
+              metadata: {
+                ...current.metadata,
+                running: false
+              }
+            }
+          : current
+      );
+    } finally {
+      setBusy(false);
+      setCurrentRunId(undefined);
+      setConversation((current) =>
+        current?.id === conversation.id && current.metadata.running === true
+          ? { ...current, metadata: { ...current.metadata, running: false } }
+          : current
+      );
+    }
+  }
+
   function newReview(): void {
     if (busy) {
       return;
@@ -799,6 +956,7 @@ function App(): JSX.Element {
     setClarificationDrafts({});
     setPendingClarifications({});
     setPlanItemReviewDrafts({});
+    setPlanCorrectionDraft("");
     setError(undefined);
     setActiveView("slack");
   }
@@ -896,11 +1054,12 @@ function App(): JSX.Element {
   const reviewedPlanItemCount = reviewablePlanItems.filter((finding) => planItemReviewForFinding(finding, planItemReviews(conversation))).length;
   const isPendingPlanItemReview = pendingPlanItemReview(conversation);
   const canComposePlan = isPendingPlanItemReview && reviewedPlanItemCount === reviewablePlanItems.length;
+  const canRecoverPlan = canRecoverImplementationPlan(conversation, busy);
   const visibleDecisionAnswers = { ...pendingDecisionSelections(conversation), ...decisionAnswers };
   const visibleDecisionResolutions = { ...pendingDecisionResolutions(conversation), ...resolvedDecisionThreads };
   const conversationKind = conversation?.kind ?? kind;
   const visibleWarnings = warnings.map((warning) => displayNoticeText(warning)).filter(Boolean);
-  const resultView: "slack" | "points" | "plan" = activeView === "points" ? "points" : activeView === "plan" ? "plan" : "slack";
+  const resultView: "slack" | "points" = activeView === "points" && conversationKind !== "implementation-plan" ? "points" : "slack";
   const hasPoints = Boolean(conversation && conversation.metadata.running !== true && pendingDecisions.length === 0);
   const runnableParticipants = buildParticipants();
   const hasRequiredContext =
@@ -916,7 +1075,7 @@ function App(): JSX.Element {
         </div>
         <button className="new-button" disabled={busy} onClick={newReview}>
           <MessageSquare size={16} />
-          New review
+          New session
         </button>
         <div className="sidebar-section-title">History</div>
         <div className="history-list">
@@ -942,12 +1101,6 @@ function App(): JSX.Element {
                 <MessageSquare size={15} />
                 Slack
               </button>
-              {hasPoints && conversationKind === "implementation-plan" && (
-                <button className={resultView === "plan" && activeView !== "settings" ? "selected" : ""} onClick={() => setActiveView("plan")}>
-                  <ListChecks size={15} />
-                  Plan
-                </button>
-              )}
               {hasPoints && conversationKind !== "implementation-plan" && (
                 <button className={resultView === "points" && activeView !== "settings" ? "selected" : ""} onClick={() => setActiveView("points")}>
                   <ListChecks size={15} />
@@ -956,7 +1109,7 @@ function App(): JSX.Element {
               )}
             </div>
           ) : (
-            <div className="topbar-title">New review</div>
+            <div className="topbar-title">New session</div>
           )}
           <div className="topbar-actions">
             {busy && (
@@ -1159,7 +1312,7 @@ function App(): JSX.Element {
                       {selected ? <CheckCircle2 size={15} /> : <Circle size={15} />}
                       {provider.label}
                       {providerId(provider) === selectedArbiterId && (
-                        <small>{selected ? "also arbiter" : "arbiter only"}</small>
+                        <small>{selected ? `also ${arbiterRoleLabel.toLowerCase()}` : `${arbiterRoleLabel.toLowerCase()} only`}</small>
                       )}
                       {disabledReason ? <small>{disabledReason}</small> : isCli(provider.kind) && <small>{health?.installed ? "local" : "missing"}</small>}
                     </button>
@@ -1168,7 +1321,7 @@ function App(): JSX.Element {
               </div>
 
               <label className="field">
-                <span>Arbiter</span>
+                <span>{arbiterRoleLabel}</span>
                 <select
                   value={arbiterSelectValue}
                   onChange={(event) => setSelectedArbiterId(event.target.value)}
@@ -1184,7 +1337,9 @@ function App(): JSX.Element {
                   ))}
                 </select>
               </label>
-              <div className="inline-hint">The arbiter merge is a separate run. If the same provider is selected as a participant, it also gets an independent participant run.</div>
+              <div className="inline-hint">
+                The {arbiterRoleLabel.toLowerCase()} merge is a separate run. If the same provider is selected as a participant, it also gets an independent participant run.
+              </div>
 
               <button className="run-button" disabled={!canStart} onClick={() => void startReview()}>
                 {busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
@@ -1224,9 +1379,11 @@ function App(): JSX.Element {
                     decisionResolutions={visibleDecisionResolutions}
                     clarificationDrafts={clarificationDrafts}
                     planItemReviewDrafts={planItemReviewDrafts}
+                    planCorrectionDraft={planCorrectionDraft}
                     canComposePlan={canComposePlan}
                     reviewedPlanItemCount={reviewedPlanItemCount}
                     reviewablePlanItemCount={reviewablePlanItems.length}
+                    canRecoverPlan={canRecoverPlan}
                     onDecisionAnswer={(decisionId, optionId) => void selectDecisionAnswer(decisionId, optionId)}
                     onResolveDecision={(decisionId) => void resolveDecisionThread(decisionId)}
                     onClarificationDraftChange={(decisionId, value) => setClarificationDrafts((current) => ({ ...current, [decisionId]: value }))}
@@ -1234,14 +1391,15 @@ function App(): JSX.Element {
                     onPlanItemReviewDraftChange={(findingId, value) => setPlanItemReviewDrafts((current) => ({ ...current, [findingId]: value }))}
                     onConfirmPlanItem={(findingId) => void confirmPlanItem(findingId)}
                     onCommentPlanItem={(findingId) => void commentOnPlanItem(findingId)}
+                    onPlanCorrectionDraftChange={setPlanCorrectionDraft}
                     onContinue={() => void continueReview()}
                     onComposePlan={() => void composeImplementationPlan()}
+                    onRetryFinalPlan={() => void retryFinalPlanSynthesis()}
+                    onRecoverPlan={() => void recoverImplementationPlan()}
+                    onRevisePlan={() => void reviseImplementationPlan()}
                   />
                 )}
                 {resultView === "points" && <PointsView conversation={conversation} kind={conversationKind} />}
-                {resultView === "plan" && (
-                  <PlanView conversation={conversation} isRunning={busy} onRetryFinalPlan={() => void retryFinalPlanSynthesis()} />
-                )}
               </section>
             )}
           </div>
@@ -1396,9 +1554,11 @@ function SlackView(props: {
   decisionResolutions: Record<string, boolean>;
   clarificationDrafts: Record<string, string>;
   planItemReviewDrafts: Record<string, string>;
+  planCorrectionDraft: string;
   canComposePlan: boolean;
   reviewedPlanItemCount: number;
   reviewablePlanItemCount: number;
+  canRecoverPlan: boolean;
   onDecisionAnswer: (decisionId: string, optionId: string) => void;
   onResolveDecision: (decisionId: string) => void;
   onClarificationDraftChange: (decisionId: string, value: string) => void;
@@ -1406,8 +1566,12 @@ function SlackView(props: {
   onPlanItemReviewDraftChange: (findingId: string, value: string) => void;
   onConfirmPlanItem: (findingId: string) => void;
   onCommentPlanItem: (findingId: string) => void;
+  onPlanCorrectionDraftChange: (value: string) => void;
   onContinue: () => void;
   onComposePlan: () => void;
+  onRetryFinalPlan: () => void;
+  onRecoverPlan: () => void;
+  onRevisePlan: () => void;
 }): JSX.Element {
   const {
     conversation,
@@ -1426,9 +1590,11 @@ function SlackView(props: {
     decisionResolutions,
     clarificationDrafts,
     planItemReviewDrafts,
+    planCorrectionDraft,
     canComposePlan,
     reviewedPlanItemCount,
     reviewablePlanItemCount,
+    canRecoverPlan,
     onDecisionAnswer,
     onResolveDecision,
     onClarificationDraftChange,
@@ -1436,8 +1602,12 @@ function SlackView(props: {
     onPlanItemReviewDraftChange,
     onConfirmPlanItem,
     onCommentPlanItem,
+    onPlanCorrectionDraftChange,
     onContinue,
-    onComposePlan
+    onComposePlan,
+    onRetryFinalPlan,
+    onRecoverPlan,
+    onRevisePlan
   } = props;
   const [threadWidth, setThreadWidth] = useState(460);
   const [isResizingThread, setIsResizingThread] = useState(false);
@@ -1452,16 +1622,15 @@ function SlackView(props: {
   const itemReviews = planItemReviews(conversation);
   const isReviewingPlanItems = pendingPlanItemReview(conversation);
   const reviewablePlanItems = requiredPlanItemReviewFindings(conversation);
+  const planActionItemIds = new Set(reviewablePlanItems.map((finding) => finding.id));
   const pendingReviewPlanItemIds = new Set(
     reviewablePlanItems.filter((finding) => !planItemReviewForFinding(finding, itemReviews)).map((finding) => finding.id)
   );
-  const visibleFindings = isReviewingPlanItems
-    ? conversation.findings.filter((finding) => pendingReviewPlanItemIds.has(finding.id))
-    : conversation.findings;
+  const visibleFindings = timelineFindings(conversation);
   const visibleDecisions = visiblePlanDecisionRequests(conversation);
   const pendingDecisionIds = new Set(pendingDecisions.map((decision) => decision.id));
   const messageItems: TimelineItem[] = conversation.messages
-    .filter((message) => message.role !== "summary" && !message.progressPhase && !isHiddenImplementationPlanInternalMessage(message, kind))
+    .filter((message) => (kind === "implementation-plan" || message.role !== "summary") && !message.progressPhase && !isHiddenImplementationPlanInternalMessage(message, kind))
     .map((message) => ({
       id: message.id,
       type: "message",
@@ -1481,10 +1650,11 @@ function SlackView(props: {
     decision
   }));
   const items = [...messageItems, ...decisionItems, ...findingItems].sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
-  const selectedFinding = conversation.findings.find((finding) => finding.id === selectedThreadId);
+  const selectedFinding = visibleFindings.find((finding) => finding.id === selectedThreadId);
   const selectedDecision = visibleDecisions.find((decision) => decision.id === selectedThreadId);
   const selectedDecisionIsPending = Boolean(selectedDecision && pendingDecisionIds.has(selectedDecision.id));
   const selectedFindingReview = selectedFinding ? planItemReviewForFinding(selectedFinding, itemReviews) : undefined;
+  const selectedFindingIsPlanActionItem = Boolean(selectedFinding && planActionItemIds.has(selectedFinding.id));
   const selectedFindingNeedsReview = Boolean(selectedFinding && pendingReviewPlanItemIds.has(selectedFinding.id));
   const savedDecisionAnswers = implementationPlanAnswers(conversation);
   const selectedDecisionAnswer = selectedDecision ? decisionAnswerForDecision(selectedDecision, savedDecisionAnswers) : undefined;
@@ -1501,6 +1671,17 @@ function SlackView(props: {
         : "Decisions ready";
   const isThreadFocused = Boolean(focusedThreadId && (selectedDecision || selectedFinding));
   const hasThread = Boolean(selectedDecision || selectedFinding);
+  const hasFinalPlan = hasFinalImplementationPlan(conversation);
+  const canRetryFinalPlan = kind === "implementation-plan" && !isReviewingPlanItems && conversation.findings.some((finding) => finding.status === "Confirmed") && hasFallbackFinalPlan(conversation);
+  const showPlanFollowupComposer = kind === "implementation-plan" && !isReviewingPlanItems && pendingDecisions.length === 0;
+  const planFollowupDisabled = isRunning || !hasFinalPlan;
+  const planFollowupPlaceholder = isRunning
+    ? "Wait for the current plan run to finish"
+    : hasFinalPlan
+      ? "Ask for follow-up changes"
+      : canRecoverPlan
+        ? "Resume the plan before follow-up changes"
+        : "Final plan needed before follow-up changes";
 
   function startThreadResize(event: React.PointerEvent<HTMLDivElement>): void {
     const view = viewRef.current;
@@ -1547,8 +1728,26 @@ function SlackView(props: {
                       ? pendingPlanReviewCount > 0
                         ? `${pendingPlanReviewCount} action${pendingPlanReviewCount === 1 ? "" : "s"} needed`
                         : "No reviews needed"
-                    : `${conversation.findings.length} ${kind === "implementation-plan" ? "items" : "points"}`}
+                    : kind === "implementation-plan"
+                      ? canRecoverPlan
+                        ? "Interrupted"
+                        : hasFinalPlan
+                        ? "Final plan"
+                        : "No actions needed"
+                      : `${conversation.findings.length} points`}
               </span>
+              {canRecoverPlan && (
+                <button className="run-button compact-run" disabled={isRunning} onClick={onRecoverPlan}>
+                  {isRunning ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
+                  {isRunning ? "Resuming..." : "Resume plan"}
+                </button>
+              )}
+              {canRetryFinalPlan && (
+                <button className="run-button compact-run" disabled={isRunning} onClick={onRetryFinalPlan}>
+                  {isRunning ? <RefreshCw size={17} className="spin" /> : <RefreshCw size={17} />}
+                  {isRunning ? "Retrying..." : "Retry final plan"}
+                </button>
+              )}
               {pendingDecisions.length === 0 && isReviewingPlanItems && (
                 <button className="run-button compact-run" disabled={isRunning || !canComposePlan} onClick={onComposePlan}>
                   {isRunning ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
@@ -1563,8 +1762,9 @@ function SlackView(props: {
             ) : item.type === "finding" ? (
               <PointTimelineMessage
                 finding={item.finding}
+                kind={kind}
                 selected={item.finding.id === selectedThreadId}
-                reviewRequired={pendingReviewPlanItemIds.has(item.finding.id)}
+                reviewRequired={planActionItemIds.has(item.finding.id)}
                 review={planItemReviewForFinding(item.finding, itemReviews)}
                 onSelect={() => onSelectThread(item.finding.id)}
                 key={item.id}
@@ -1609,8 +1809,10 @@ function SlackView(props: {
           ) : selectedFinding ? (
             <PointThread
               finding={selectedFinding}
+              kind={kind}
               focused={isThreadFocused}
-              reviewRequired={selectedFindingNeedsReview}
+              reviewRequired={selectedFindingIsPlanActionItem}
+              reviewReadOnly={!selectedFindingNeedsReview}
               review={selectedFindingReview}
               reviewDraft={planItemReviewDrafts[selectedFinding.id] ?? ""}
               busy={isRunning}
@@ -1638,9 +1840,9 @@ function SlackView(props: {
           )}
         </section>
       )}
-      {(showLiveProgress || pendingDecisions.length > 0) && (
-        <div className="slack-action-bar" role="region" aria-label="Run status and actions">
-          {showLiveProgress ? <RunStatusLine progress={latestLiveProgress} /> : <span className="slack-action-spacer" />}
+      {(showLiveProgress || pendingDecisions.length > 0 || showPlanFollowupComposer) && (
+        <div className={`slack-action-bar ${showPlanFollowupComposer ? "with-composer" : ""}`} role="region" aria-label="Run status and actions">
+          {showLiveProgress ? <RunStatusLine progress={latestLiveProgress} /> : pendingDecisions.length > 0 ? <span className="slack-action-spacer" /> : null}
           {pendingDecisions.length > 0 && (
             <div className="decision-action-bar" aria-label="Decision actions">
               <div className="decision-action-status" aria-live="polite">
@@ -1655,6 +1857,16 @@ function SlackView(props: {
               </button>
             </div>
           )}
+          {showPlanFollowupComposer && (
+            <PlanCorrectionComposer
+              draft={planCorrectionDraft}
+              busy={isRunning}
+              disabled={planFollowupDisabled}
+              placeholder={planFollowupPlaceholder}
+              onDraftChange={onPlanCorrectionDraftChange}
+              onSubmit={onRevisePlan}
+            />
+          )}
         </div>
       )}
     </div>
@@ -1662,15 +1874,17 @@ function SlackView(props: {
 }
 
 function TimelineMessage({ message, kind }: { message: Conversation["messages"][number]; kind: ConversationKind }): JSX.Element {
-  const author = authorForMessage(message);
+  const author = authorForMessage(message, kind);
   const isLiveProgress = Boolean(message.progressPhase && message.status === "pending");
+  const isFinalPlan = kind === "implementation-plan" && message.role === "summary";
   const display = displayMessageContent(message, kind);
   return (
-    <article className={`message ${message.role} ${isLiveProgress ? "progress-active" : ""}`}>
+    <article className={`message ${message.role} ${isLiveProgress ? "progress-active" : ""} ${isFinalPlan ? "final-plan-message" : ""}`}>
       <Avatar className="message-avatar" spec={avatarForMessage(message, author)} />
       <div className="message-body">
         <div className="message-meta">
           <strong>{author}</strong>
+          {isFinalPlan && <span>Final plan</span>}
           <span>{new Date(message.createdAt).toLocaleString()}</span>
           {message.progressPhase && <span className="phase-badge">{message.progressPhase}</span>}
           {isLiveProgress && <ProgressDots />}
@@ -1702,8 +1916,10 @@ function RunStatusLine({ progress }: { progress?: ReviewProgress }): JSX.Element
   );
 }
 
-function PointTimelineMessage(props: { finding: Finding; selected: boolean; reviewRequired?: boolean; review?: PlanItemReview; onSelect: () => void }): JSX.Element {
-  const { finding, selected, reviewRequired, review, onSelect } = props;
+function PointTimelineMessage(props: { finding: Finding; kind: ConversationKind; selected: boolean; reviewRequired?: boolean; review?: PlanItemReview; onSelect: () => void }): JSX.Element {
+  const { finding, kind, selected, reviewRequired, review, onSelect } = props;
+  const ownerLabel = kind === "implementation-plan" ? "Planner" : "Arbiter";
+  const metaLabel = kind === "implementation-plan" ? "Plan item extracted" : "Point extracted";
   return (
     <article
       className={`message system point-message ${selected ? "selected" : ""}`}
@@ -1720,8 +1936,8 @@ function PointTimelineMessage(props: { finding: Finding; selected: boolean; revi
       <Avatar className="message-avatar" spec={ARBITER_AVATAR} />
       <div className="message-body">
         <div className="message-meta">
-          <strong>Arbiter</strong>
-          <span>Point extracted</span>
+          <strong>{ownerLabel}</strong>
+          <span>{metaLabel}</span>
           <PointStatusBadge finding={finding} />
           {reviewRequired && <PlanItemReviewBadge review={review} />}
           <span className={`severity ${finding.severity.toLowerCase()}`}>{finding.severity}</span>
@@ -1775,8 +1991,10 @@ function DecisionTimelineMessage(props: {
 
 function PointThread(props: {
   finding: Finding;
+  kind: ConversationKind;
   focused: boolean;
   reviewRequired?: boolean;
+  reviewReadOnly?: boolean;
   review?: PlanItemReview;
   reviewDraft?: string;
   busy?: boolean;
@@ -1789,8 +2007,10 @@ function PointThread(props: {
 }): JSX.Element {
   const {
     finding,
+    kind,
     focused,
     reviewRequired,
+    reviewReadOnly = false,
     review,
     reviewDraft = "",
     busy = false,
@@ -1803,6 +2023,7 @@ function PointThread(props: {
   } = props;
   const replies = pointThreadReplies(finding);
   const hasPlanSources = Boolean(finding.sourceItems?.length);
+  const ownerLabel = kind === "implementation-plan" ? "Planner" : "Arbiter";
 
   return (
     <div className="point-thread">
@@ -1825,7 +2046,7 @@ function PointThread(props: {
 
       <ThreadMessage
         avatar={ARBITER_AVATAR}
-        author="Arbiter"
+        author={ownerLabel}
         meta={hasPlanSources ? "Canonical plan item" : "Parent point"}
         createdAt={finding.createdAt}
         content={hasPlanSources ? canonicalPlanItemContent(finding) : pointSourceContent(finding)}
@@ -1859,6 +2080,7 @@ function PointThread(props: {
       {reviewRequired && (
         <PlanItemReviewComposer
           review={review}
+          readOnly={reviewReadOnly}
           draft={reviewDraft}
           busy={busy}
           onConfirm={onConfirmReview}
@@ -1914,13 +2136,27 @@ function PlanSourceSupport({ finding }: { finding: Finding }): JSX.Element | nul
 
 function PlanItemReviewComposer(props: {
   review?: PlanItemReview;
+  readOnly?: boolean;
   draft: string;
   busy: boolean;
   onConfirm?: () => void;
   onDraftChange?: (value: string) => void;
   onSubmitComment?: () => void;
 }): JSX.Element {
-  const { review, draft, busy, onConfirm, onDraftChange, onSubmitComment } = props;
+  const { review, readOnly = false, draft, busy, onConfirm, onDraftChange, onSubmitComment } = props;
+  if (readOnly) {
+    return review ? (
+      <div className="plan-item-review-box">
+        <ThreadMessage
+          avatar={USER_AVATAR}
+          author="You"
+          meta={review.status === "commented" ? "Item comment" : "Item confirmation"}
+          createdAt={review.updatedAt}
+          content={review.status === "commented" ? review.comment ?? "" : "Confirmed as-is."}
+        />
+      </div>
+    ) : <div className="plan-item-review-box" />;
+  }
   return (
     <div className="plan-item-review-box">
       {review && (
@@ -1959,6 +2195,41 @@ function PlanItemReviewComposer(props: {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function PlanCorrectionComposer(props: {
+  draft: string;
+  busy: boolean;
+  disabled?: boolean;
+  placeholder?: string;
+  onDraftChange: (value: string) => void;
+  onSubmit: () => void;
+}): JSX.Element {
+  const { draft, busy, disabled = false, placeholder = "Ask for follow-up changes", onDraftChange, onSubmit } = props;
+  const canSubmit = !busy && !disabled && Boolean(draft.trim());
+  const disabledTitle = disabled && !busy ? placeholder : "Send correction";
+  return (
+    <div className="plan-correction-composer">
+      <textarea
+        value={draft}
+        onChange={(event) => onDraftChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            if (canSubmit) {
+              onSubmit();
+            }
+          }
+        }}
+        rows={2}
+        placeholder={placeholder}
+        disabled={busy || disabled}
+      />
+      <button className="plan-correction-send" title={disabledTitle} disabled={!canSubmit} onClick={onSubmit}>
+        {busy ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
+      </button>
     </div>
   );
 }
@@ -2063,7 +2334,7 @@ function DecisionThread(props: {
         {readOnly && savedAnswer && (
           <ThreadMessage
             avatar={savedAnswer.answerSource === "automatic" ? ARBITER_AVATAR : USER_AVATAR}
-            author={savedAnswer.answerSource === "automatic" ? "Arbiter" : "You"}
+            author={savedAnswer.answerSource === "automatic" ? "Planner" : "You"}
             meta={savedAnswer.answerSource === "automatic" ? "Automatic answer" : "Answer"}
             content={savedAnswer.answer}
           />
@@ -2456,151 +2727,6 @@ function PointsView({ conversation, kind }: { conversation?: Conversation; kind:
   );
 }
 
-function PlanView({
-  conversation,
-  isRunning,
-  onRetryFinalPlan
-}: {
-  conversation?: Conversation;
-  isRunning: boolean;
-  onRetryFinalPlan: () => void;
-}): JSX.Element {
-  if (!conversation) {
-    return <EmptyState title="No plan yet" body="The final approved plan appears after consensus finishes." />;
-  }
-
-  const approved = conversation.findings.filter((finding) => finding.status === "Confirmed");
-  const unresolved = conversation.findings.filter((finding) => finding.status === "Unresolved");
-  const rejected = conversation.findings.filter((finding) => finding.status === "Rejected");
-  const isReviewingItems = pendingPlanItemReview(conversation);
-  const storedFinalPlanMarkdown = metadataString(conversation.metadata.implementationPlanFinalMarkdown);
-  const storedDebateSummaryMarkdown = metadataString(conversation.metadata.implementationPlanDebateSummaryMarkdown);
-  const finalPlanMarkdown = storedFinalPlanMarkdown || (isReviewingItems ? "" : fallbackPlanMarkdown(conversation));
-  const debateSummaryMarkdown = storedDebateSummaryMarkdown || fallbackDebateSummaryMarkdown(conversation);
-  const hasSynthesizedPlan = Boolean(finalPlanMarkdown);
-  const canRetryFinalPlan = !isReviewingItems && approved.length > 0 && hasFallbackFinalPlan(conversation);
-  const itemReviews = planItemReviews(conversation);
-  const reviewableItems = requiredPlanItemReviewFindings(conversation);
-  const reviewedCount = reviewableItems.filter((finding) => planItemReviewForFinding(finding, itemReviews)).length;
-  const reviewStatus = reviewableItems.length > 0 ? `${reviewedCount}/${reviewableItems.length} reviewed` : "No reviews needed";
-
-  return (
-    <div className="plan-view">
-      <div className="view-heading">
-        <h2>Implementation Plan</h2>
-        <div className="view-heading-actions">
-          <span>{isReviewingItems ? reviewStatus : `${approved.length} approved items`}</span>
-          {canRetryFinalPlan && (
-            <button className="run-button compact-run" disabled={isRunning} onClick={onRetryFinalPlan}>
-              {isRunning ? <RefreshCw size={17} className="spin" /> : <RefreshCw size={17} />}
-              {isRunning ? "Retrying..." : "Retry final plan"}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {finalPlanMarkdown ? (
-        <PlanMarkdownSection title="Plan" content={finalPlanMarkdown} />
-      ) : approved.length === 0 ? (
-        <div className="section-empty">No plan items were approved by all healthy participants.</div>
-      ) : (
-        <div className="plan-item-list">
-          {approved.map((finding, index) => (
-            <PlanItemCard finding={finding} index={index + 1} key={finding.id} />
-          ))}
-        </div>
-      )}
-
-      {debateSummaryMarkdown && <PlanMarkdownSection title="Debate Summary" content={debateSummaryMarkdown} />}
-
-      {hasSynthesizedPlan && approved.length > 0 && (
-        <section className="plan-trace-section">
-          <div className="view-heading compact-heading">
-            <h2>Consensus Trace</h2>
-            <span>{conversation.findings.length} items</span>
-          </div>
-          <div className="plan-item-list">
-            {approved.map((finding, index) => (
-              <PlanItemCard finding={finding} index={index + 1} key={finding.id} />
-            ))}
-          </div>
-        </section>
-      )}
-
-      <section className="severity-section filtered-section">
-        <h3>
-          <span className="status-badge unresolved">Unresolved differences</span>
-          {unresolved.length}
-        </h3>
-        <PlanDifferenceList findings={unresolved} emptyLabel="No unresolved differences" />
-      </section>
-
-      <section className="severity-section filtered-section">
-        <h3>
-          <span className="status-badge filtered-out">Rejected differences</span>
-          {rejected.length}
-        </h3>
-        <PlanDifferenceList findings={rejected} emptyLabel="No rejected differences" />
-      </section>
-    </div>
-  );
-}
-
-function PlanMarkdownSection({ title, content }: { title: string; content: string }): JSX.Element {
-  return (
-    <section className="plan-markdown-section">
-      <h3>{title}</h3>
-      <div className="plan-markdown-card">
-        <MarkdownText content={content} />
-      </div>
-    </section>
-  );
-}
-
-function PlanItemCard({ finding, index }: { finding: Finding; index: number }): JSX.Element {
-  return (
-    <article className="plan-item-card">
-      <div className="plan-item-index">{index}</div>
-      <div>
-        <div className="message-meta">
-          <PointStatusBadge finding={finding} />
-          <span>{sourceLabel(finding)}</span>
-        </div>
-        <h3>{finding.title}</h3>
-        <dl className="point-fields">
-          <div>
-            <dt>Decision</dt>
-            <dd>{finding.claim || finding.description}</dd>
-          </div>
-          {finding.evidence && (
-            <div>
-              <dt>Context</dt>
-              <dd>{finding.evidence}</dd>
-            </div>
-          )}
-          <div>
-            <dt>Next steps</dt>
-            <dd>{finding.action || "No specific implementation guidance was provided."}</dd>
-          </div>
-        </dl>
-      </div>
-    </article>
-  );
-}
-
-function PlanDifferenceList({ findings, emptyLabel }: { findings: Finding[]; emptyLabel: string }): JSX.Element {
-  if (findings.length === 0) {
-    return <div className="section-empty">{emptyLabel}</div>;
-  }
-  return (
-    <div className="plan-difference-list">
-      {findings.map((finding) => (
-        <PointCard finding={finding} compact key={finding.id} />
-      ))}
-    </div>
-  );
-}
-
 function PointTable({ findings, emptyLabel }: { findings: Finding[]; emptyLabel: string }): JSX.Element {
   if (findings.length === 0) {
     return <div className="section-empty">{emptyLabel}</div>;
@@ -2758,7 +2884,7 @@ interface LineProtocolItem {
 
 function displayMessageContent(message: Conversation["messages"][number], kind: ConversationKind): TimelineMessageDisplay {
   const content = summarizeRawProviderJson(message.content) ?? message.content;
-  if (kind === "implementation-plan" && message.role === "participant") {
+  if (kind === "implementation-plan" && (message.role === "participant" || message.role === "summary")) {
     return { content, markdown: true };
   }
   const protocolSummary = formatLineProtocolForTimeline(message, kind, content);
@@ -2767,7 +2893,13 @@ function displayMessageContent(message: Conversation["messages"][number], kind: 
 }
 
 function isHiddenImplementationPlanInternalMessage(message: Conversation["messages"][number], kind: ConversationKind): boolean {
-  return kind === "implementation-plan" && message.role === "participant" && Boolean(message.participantId?.startsWith("arbiter:"));
+  if (kind !== "implementation-plan") {
+    return false;
+  }
+  if (message.role === "participant" && message.participantId?.startsWith("arbiter:")) {
+    return true;
+  }
+  return message.role === "user" && message.content.trimStart().startsWith("Implementation-plan decision threads continued:");
 }
 
 function formatLineProtocolForTimeline(
@@ -2926,19 +3058,22 @@ function conversationMatchesSnapshot(current: Conversation | undefined, updated:
 
 function threadExistsInConversation(conversation: Conversation, threadId: string): boolean {
   return (
-    conversation.findings.some((finding) => finding.id === threadId) ||
+    timelineFindings(conversation).some((finding) => finding.id === threadId) ||
     visiblePlanDecisionRequests(conversation).some((decision) => decision.id === threadId)
   );
 }
 
-function authorForMessage(message: Conversation["messages"][number]): string {
+function authorForMessage(message: Conversation["messages"][number], kind: ConversationKind): string {
   if (message.role === "user") {
     return "You";
+  }
+  if (kind === "implementation-plan" && (message.role === "system" || message.role === "summary" || message.participantId?.startsWith("arbiter:"))) {
+    return "Planner";
   }
   if (message.role === "system") {
     return "Arbiter";
   }
-  if (message.participantLabel?.toLowerCase().includes("(arbiter)")) {
+  if (message.participantLabel?.toLowerCase().includes("(arbiter)") || message.participantLabel?.toLowerCase().includes("(planner)")) {
     return "Arbiter";
   }
   return message.participantLabel || labelForRole(message.role);
@@ -2985,14 +3120,14 @@ function avatarForMessage(message: Conversation["messages"][number], author: str
     return USER_AVATAR;
   }
   if (message.role === "system" || message.role === "summary" || message.participantId?.startsWith("arbiter:")) {
-    return ARBITER_AVATAR;
+    return { ...ARBITER_AVATAR, label: author };
   }
   return avatarForParticipant(author, message.participantId);
 }
 
 function avatarForParticipant(label: string, participantId?: string): AvatarSpec {
   const text = `${participantId ?? ""} ${label}`.toLowerCase();
-  if (text.includes("arbiter")) {
+  if (text.includes("arbiter") || text.includes("planner")) {
     return ARBITER_AVATAR;
   }
   if (text.includes("claude") || text.includes("anthropic")) {
@@ -3120,45 +3255,6 @@ function consensusLine(finding: Finding): string {
   const replies = finding.rounds.length;
   const status = pointStatus(finding).label;
   return `${status}; ${included} initial source${included === 1 ? "" : "s"}, ${missing} verification target${missing === 1 ? "" : "s"}, ${replies} thread ${replies === 1 ? "reply" : "replies"}.`;
-}
-
-function fallbackPlanMarkdown(conversation: Conversation): string {
-  if (conversation.kind !== "implementation-plan") {
-    return "";
-  }
-  const approved = conversation.findings.filter((finding) => finding.status === "Confirmed");
-  if (approved.length === 0) {
-    return "";
-  }
-  return approved
-    .map((finding, index) =>
-      [
-        `### ${index + 1}. ${finding.title}`,
-        finding.claim || finding.description,
-        finding.evidence ? `Context: ${finding.evidence}` : "",
-        finding.action || "No specific implementation guidance was provided."
-      ]
-        .filter(Boolean)
-        .join("\n")
-    )
-    .join("\n\n");
-}
-
-function fallbackDebateSummaryMarkdown(conversation: Conversation): string {
-  if (conversation.kind !== "implementation-plan" || conversation.findings.length === 0) {
-    return "";
-  }
-  const debated = conversation.findings.filter((finding) => finding.rounds.length > 0 || finding.status !== "Confirmed");
-  if (debated.length === 0) {
-    return "All approved items were common across the healthy participants; no non-common plan items required debate.";
-  }
-  return debated
-    .map((finding) => {
-      const latestRound = finding.rounds[finding.rounds.length - 1];
-      const reason = latestRound?.content || finding.action || finding.claim || finding.description;
-      return `- **${finding.title}** (${finding.status.toLowerCase()}): ${reason}`;
-    })
-    .join("\n");
 }
 
 function metadataString(value: unknown): string {
@@ -3318,6 +3414,47 @@ function fallbackDecisionRequestFromAnswer(answer: PlanDecisionAnswer, createdAt
 
 function pendingPlanItemReview(conversation: Conversation | undefined): boolean {
   return conversation?.kind === "implementation-plan" && conversation.metadata.pendingPlanItemReview === true;
+}
+
+function timelineFindings(conversation: Conversation): Finding[] {
+  if (conversation.kind === "implementation-plan") {
+    const actionIds = new Set(requiredPlanItemReviewFindings(conversation).map((finding) => finding.id));
+    return conversation.findings.filter((finding) => actionIds.has(finding.id));
+  }
+  return conversation.findings;
+}
+
+function hasFinalImplementationPlan(conversation: Conversation | undefined): boolean {
+  if (!conversation || conversation.kind !== "implementation-plan") {
+    return false;
+  }
+  if (!conversation.findings.some((finding) => finding.status === "Confirmed")) {
+    return false;
+  }
+  return Boolean(
+    metadataString(conversation.metadata.implementationPlanFinalMarkdown) ||
+    conversation.finalSummary?.trim() ||
+    conversation.messages.some((message) => message.role === "summary" && message.content.trim())
+  );
+}
+
+function canRecoverImplementationPlan(conversation: Conversation | undefined, busy: boolean): boolean {
+  if (busy || !conversation || conversation.kind !== "implementation-plan") {
+    return false;
+  }
+  if (pendingPlanDecisions(conversation).length > 0 || pendingPlanItemReview(conversation)) {
+    return false;
+  }
+  const hasStoredPlan = Boolean(
+    metadataString(conversation.metadata.implementationPlanFinalMarkdown) ||
+    conversation.finalSummary?.trim() ||
+    conversation.messages.some((message) => message.role === "summary" && message.content.trim())
+  );
+  if (hasStoredPlan) {
+    return false;
+  }
+  const request = conversation.metadata.implementationPlanRequest;
+  return Boolean(request && typeof request === "object");
 }
 
 function planItemReviews(conversation: Conversation | undefined): PlanItemReview[] {

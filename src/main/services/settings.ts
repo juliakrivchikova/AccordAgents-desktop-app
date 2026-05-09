@@ -6,6 +6,7 @@ import type { AppSettings, ProviderKind, ProviderSettings, ProviderSettingsUpdat
 interface StoredSettings {
   settingsVersion?: number;
   roundLimitDefault: number;
+  lastRepoPath?: string;
   providers: Array<Omit<ProviderSettings, "hasApiKey"> & { encryptedApiKey?: string }>;
 }
 
@@ -28,6 +29,7 @@ export class SettingsService {
     const stored = await this.readStored();
     return {
       roundLimitDefault: stored.roundLimitDefault,
+      lastRepoPath: stored.lastRepoPath,
       providers: stored.providers.map((provider) => ({
         kind: provider.kind,
         label: provider.label,
@@ -58,6 +60,14 @@ export class SettingsService {
       provider.encryptedApiKey = this.encryptSecret(update.apiKey.trim());
     }
 
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
+  async updateLastRepoPath(repoPath: string): Promise<AppSettings> {
+    const stored = await this.readStored();
+    const normalized = repoPath.trim();
+    stored.lastRepoPath = normalized || undefined;
     await this.writeStored(stored);
     return this.getPublicSettings();
   }
@@ -94,6 +104,7 @@ export class SettingsService {
     return {
       settingsVersion: 1,
       roundLimitDefault: this.defaultRoundLimit(settings),
+      lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
       providers
     };
   }

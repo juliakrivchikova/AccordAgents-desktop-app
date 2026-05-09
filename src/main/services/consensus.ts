@@ -4,6 +4,7 @@ import type {
   ComposeImplementationPlanRequest,
   ContinueReviewRequest,
   Conversation,
+  ConversationKind,
   DebateRound,
   DebateStance,
   Finding,
@@ -19,6 +20,8 @@ import type {
   PlanDecisionRequest,
   PlanItemReview,
   PlanItemReviewRequest,
+  RecoverImplementationPlanRequest,
+  ReviseImplementationPlanRequest,
   RetryImplementationPlanSynthesisRequest,
   ReviewProgress,
   ReviewRequest,
@@ -159,7 +162,7 @@ export class ConsensusService {
       repoPath: request.repoPath,
       messages: [
         this.message("user", request.question || "Review the selected changes."),
-        this.message("system", this.systemIntro(request, diff, arbiter), this.asArbiterParticipant(arbiter))
+        this.message("system", this.systemIntro(request, diff, arbiter), this.asArbiterParticipant(arbiter, request.kind))
       ],
       findings: [],
       metadata: {
@@ -217,7 +220,7 @@ export class ConsensusService {
     this.emitProgress(runId, recordProgress, "arbiter", `Arbiter ${arbiter.label} is merging points.`);
     const arbiterPrompt = this.buildArbiterPrompt(request, diff, healthyParticipants, participantPoints, warnings);
     const arbiterResult = await this.runParticipant(arbiter, arbiterPrompt, request, signal);
-    conversation.messages.push(this.message("participant", arbiterResult.content, this.asArbiterParticipant(arbiter), arbiterResult.ok ? "done" : "error"));
+    conversation.messages.push(this.message("participant", arbiterResult.content, this.asArbiterParticipant(arbiter, request.kind), arbiterResult.ok ? "done" : "error"));
 
     let canonicalPoints = arbiterResult.ok
       ? this.parseLineProtocol(arbiterResult.content, undefined, healthyParticipants)
@@ -545,7 +548,7 @@ export class ConsensusService {
     }
     const arbiter = originalRequest.arbiter ?? originalRequest.participants[0];
     if (!arbiter || !this.isCliParticipant(arbiter)) {
-      throw new Error("The saved implementation-plan arbiter is missing or unavailable.");
+      throw new Error("The saved implementation-plan planner is missing or unavailable.");
     }
 
     const warnings = this.metadataWarnings(conversation);
@@ -642,7 +645,7 @@ export class ConsensusService {
     }
     const arbiter = originalRequest.arbiter ?? originalRequest.participants[0];
     if (!arbiter || !this.isCliParticipant(arbiter)) {
-      throw new Error("The saved implementation-plan arbiter is missing or unavailable.");
+      throw new Error("The saved implementation-plan planner is missing or unavailable.");
     }
     if (!conversation.findings.some((finding) => finding.status === "Confirmed")) {
       throw new Error("There are no approved plan items to synthesize.");
@@ -731,6 +734,272 @@ export class ConsensusService {
     }
   }
 
+  async recoverImplementationPlan(
+    request: RecoverImplementationPlanRequest,
+    signal?: AbortSignal,
+    progress?: ProgressCallback
+  ): Promise<StartReviewResult> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation) {
+      throw new Error("Conversation was not found.");
+    }
+    if (conversation.kind !== "implementation-plan") {
+      throw new Error("Only implementation-plan conversations can be recovered.");
+    }
+    if (this.pendingDecisionsFromMetadata(conversation).length > 0) {
+      throw new Error("Resolve pending plan decisions before recovering the implementation plan.");
+    }
+    if (conversation.metadata.pendingPlanItemReview === true) {
+      throw new Error("Review confirmed plan items before recovering the implementation plan.");
+    }
+    if (this.hasStoredImplementationPlan(conversation)) {
+      throw new Error("This conversation already has a final implementation plan.");
+    }
+
+    const originalRequest = this.implementationPlanRequestFromMetadata(conversation);
+    if (!originalRequest) {
+      throw new Error("The saved implementation-plan request is missing.");
+    }
+    const arbiter = originalRequest.arbiter ?? originalRequest.participants[0];
+    if (!arbiter || !this.isCliParticipant(arbiter)) {
+      throw new Error("The saved implementation-plan planner is missing or unavailable.");
+    }
+    const answers = this.implementationPlanAnswersFromMetadata(conversation);
+    const rawPlans = this.rawImplementationPlansFromMetadata(conversation);
+    const runId = request.runId ?? randomUUID();
+    const recoveredRequest = { ...originalRequest, runId };
+    const warnings = this.metadataWarnings(conversation);
+    const warning = "Recovering interrupted implementation-plan run from saved context.";
+    if (!warnings.includes(warning)) {
+      warnings.push(warning);
+    }
+    const recordProgress: ProgressCallback = (event) => {
+      void this.debugLogs.write("progress", {
+        runId: event.runId,
+        conversationId: conversation.id,
+        phase: event.phase,
+        message: event.message,
+        participantLabel: event.participantLabel,
+        findingTitle: event.findingTitle,
+        completed: event.completed,
+        total: event.total
+      });
+      progress?.(event);
+    };
+
+    try {
+      if (rawPlans.length >= 2) {
+        const healthyParticipantIds = new Set(rawPlans.map((plan) => plan.participantId));
+        const healthyParticipants = originalRequest.participants.filter((participant) => healthyParticipantIds.has(participant.id));
+        if (healthyParticipants.length < 2) {
+          throw new Error("Fewer than two saved participant plans are available for recovery.");
+        }
+        conversation.findings = [];
+        conversation.finalSummary = undefined;
+        conversation.metadata = {
+          ...conversation.metadata,
+          implementationPlanRequest: this.serializeReviewRequest(recoveredRequest),
+          implementationPlanAnswers: answers,
+          implementationPlanRawPlans: rawPlans,
+          implementationPlanFinalMarkdown: undefined,
+          implementationPlanDebateSummaryMarkdown: undefined,
+          implementationPlanSynthesisSource: undefined,
+          pendingDecisionSelections: undefined,
+          pendingDecisionResolutions: undefined,
+          pendingDecisions: undefined,
+          pendingPlanItemReview: undefined,
+          warnings,
+          running: true
+        };
+        conversation.updatedAt = new Date().toISOString();
+        this.queueConversationSnapshot(conversation);
+        this.emitProgress(runId, recordProgress, "initial", "Recovering implementation plan from saved participant plans.");
+        return await this.processImplementationPlanRawPlans(
+          recoveredRequest,
+          conversation,
+          healthyParticipants,
+          rawPlans,
+          arbiter,
+          answers,
+          warnings,
+          signal,
+          recordProgress,
+          runId
+        );
+      }
+
+      this.emitProgress(runId, recordProgress, "initial", "Recovering implementation plan by rerunning saved request.");
+      return await this.startImplementationPlan(recoveredRequest, signal, progress, { conversation, answers });
+    } catch (error) {
+      const latest = (await this.storage.getConversation(request.conversationId)) ?? conversation;
+      latest.metadata = {
+        ...latest.metadata,
+        warnings,
+        running: false
+      };
+      latest.updatedAt = new Date().toISOString();
+      await this.flushAndSaveConversation(latest);
+      throw error;
+    }
+  }
+
+  async reviseImplementationPlan(
+    request: ReviseImplementationPlanRequest,
+    signal?: AbortSignal,
+    progress?: ProgressCallback
+  ): Promise<StartReviewResult> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation) {
+      throw new Error("Conversation was not found.");
+    }
+    if (conversation.kind !== "implementation-plan") {
+      throw new Error("Only implementation-plan conversations can revise a final plan.");
+    }
+    if (conversation.metadata.pendingPlanItemReview === true) {
+      throw new Error("Review all confirmed plan items before revising the final plan.");
+    }
+    if (this.pendingDecisionsFromMetadata(conversation).length > 0) {
+      throw new Error("Resolve pending plan decisions before revising the final plan.");
+    }
+    if (!conversation.findings.some((finding) => finding.status === "Confirmed")) {
+      throw new Error("There is no approved final plan to revise.");
+    }
+    const instruction = request.instruction.trim();
+    if (!instruction) {
+      throw new Error("Enter a plan correction.");
+    }
+    const originalRequest = this.implementationPlanRequestFromMetadata(conversation);
+    if (!originalRequest) {
+      throw new Error("The saved implementation-plan request is missing.");
+    }
+    const planner = originalRequest.arbiter ?? originalRequest.participants[0];
+    if (!planner || !this.isCliParticipant(planner)) {
+      throw new Error("The saved implementation-plan planner is missing or unavailable.");
+    }
+
+    const previousPlan =
+      this.metadataText(conversation.metadata.implementationPlanFinalMarkdown) ||
+      this.markdownSection(conversation.finalSummary ?? "", "Plan") ||
+      this.removeMarkdownSection(conversation.finalSummary ?? "", "Debate Summary") ||
+      this.fallbackImplementationPlanSynthesis(conversation).fullPlan;
+    if (!previousPlan.trim()) {
+      throw new Error("There is no final implementation plan to revise.");
+    }
+
+    const existingDebateSummary =
+      this.metadataText(conversation.metadata.implementationPlanDebateSummaryMarkdown) ||
+      this.markdownSection(conversation.finalSummary ?? "", "Debate Summary") ||
+      this.localImplementationPlanDebateSummary(conversation);
+    const warnings = this.metadataWarnings(conversation);
+    const runId = request.runId ?? originalRequest.runId ?? randomUUID();
+    const recordProgress: ProgressCallback = (event) => {
+      void this.debugLogs.write("progress", {
+        runId: event.runId,
+        conversationId: conversation.id,
+        phase: event.phase,
+        message: event.message,
+        participantLabel: event.participantLabel,
+        findingTitle: event.findingTitle,
+        completed: event.completed,
+        total: event.total
+      });
+      progress?.(event);
+    };
+
+    conversation.messages.push(this.message("user", instruction));
+    conversation.metadata = {
+      ...conversation.metadata,
+      pendingPlanItemReview: undefined,
+      warnings,
+      running: true
+    };
+    conversation.updatedAt = new Date().toISOString();
+    await this.flushAndSaveConversation(conversation);
+
+    try {
+      this.emitProgress(runId, recordProgress, "summary", `Planner ${planner.label} is revising the final plan.`);
+      const result = await this.runParticipant(
+        planner,
+        this.buildImplementationPlanRevisionPrompt(
+          { ...originalRequest, runId },
+          conversation,
+          previousPlan,
+          existingDebateSummary,
+          instruction,
+          warnings
+        ),
+        { ...originalRequest, runId },
+        signal,
+        this.sessionContext(conversation, warnings, this.arbiterSessionKey(planner))
+      );
+      this.throwIfAborted(signal);
+
+      if (!result.ok) {
+        const warning = `${planner.label} could not revise the final implementation plan: ${result.error ?? "unknown error"}. Keeping the existing plan.`;
+        if (!warnings.includes(warning)) {
+          warnings.push(warning);
+        }
+        this.emitProgress(runId, recordProgress, "done", "Final plan revision kept the existing plan.");
+        conversation.metadata = {
+          ...conversation.metadata,
+          pendingPlanItemReview: undefined,
+          warnings,
+          running: false
+        };
+        conversation.updatedAt = new Date().toISOString();
+        await this.flushAndSaveConversation(conversation);
+        return { conversation, warnings };
+      }
+
+      const parsed = this.parseImplementationPlanSynthesis(result.content, conversation);
+      if (parsed.source === "fallback") {
+        const warning = `${planner.label} did not return a usable revised implementation plan. Keeping the existing plan.`;
+        if (!warnings.includes(warning)) {
+          warnings.push(warning);
+        }
+        this.emitProgress(runId, recordProgress, "done", "Final plan revision kept the existing plan.");
+        conversation.metadata = {
+          ...conversation.metadata,
+          pendingPlanItemReview: undefined,
+          warnings,
+          running: false
+        };
+        conversation.updatedAt = new Date().toISOString();
+        await this.flushAndSaveConversation(conversation);
+        return { conversation, warnings };
+      }
+
+      const synthesis = this.implementationPlanSynthesis(parsed.fullPlan, parsed.debateSummary || existingDebateSummary, "arbiter");
+      conversation.finalSummary = synthesis.combined;
+      conversation.messages.push(this.message("summary", conversation.finalSummary));
+      this.emitProgress(runId, recordProgress, "done", "Final plan revision finished.");
+      conversation.metadata = {
+        ...conversation.metadata,
+        implementationPlanFinalMarkdown: synthesis.fullPlan,
+        implementationPlanDebateSummaryMarkdown: synthesis.debateSummary,
+        implementationPlanSynthesisSource: synthesis.source,
+        implementationPlanRevisionCount: this.metadataNumber(conversation.metadata.implementationPlanRevisionCount) + 1,
+        pendingPlanItemReview: undefined,
+        warnings,
+        running: false
+      };
+      conversation.updatedAt = new Date().toISOString();
+      await this.flushAndSaveConversation(conversation);
+      return { conversation, warnings };
+    } catch (error) {
+      const latest = (await this.storage.getConversation(request.conversationId)) ?? conversation;
+      latest.metadata = {
+        ...latest.metadata,
+        pendingPlanItemReview: undefined,
+        warnings,
+        running: false
+      };
+      latest.updatedAt = new Date().toISOString();
+      await this.flushAndSaveConversation(latest);
+      throw error;
+    }
+  }
+
   private async startImplementationPlan(
     request: ReviewRequest,
     signal?: AbortSignal,
@@ -761,7 +1030,7 @@ export class ConsensusService {
       throw new Error("Select a repository for an implementation plan.");
     }
     if (!arbiter || !this.isCliParticipant(arbiter)) {
-      throw new Error("Select a local CLI arbiter for implementation plans.");
+      throw new Error("Select a local CLI planner for implementation plans.");
     }
     if (participants.length < 2) {
       throw new Error("Select at least two local CLI participants for an implementation plan.");
@@ -782,7 +1051,7 @@ export class ConsensusService {
           repoPath: request.repoPath,
           messages: [
             this.message("user", request.question || "Create an implementation plan for this repository."),
-            this.message("system", this.systemIntro(request, undefined, arbiter), this.asArbiterParticipant(arbiter))
+            this.message("system", this.systemIntro(request, undefined, arbiter), this.asArbiterParticipant(arbiter, request.kind))
           ],
           findings: [],
           metadata: {
@@ -929,144 +1198,19 @@ export class ConsensusService {
       conversation.updatedAt = new Date().toISOString();
       this.queueConversationSnapshot(conversation);
 
-      this.emitProgress(runId, recordProgress, "arbiter", `Arbiter ${arbiter.label} is extracting implementation-plan items.`);
-      const arbiterPrompt = this.buildImplementationPlanExtractionPrompt(request, healthyParticipants, rawPlans, warnings);
-      const arbiterResult = await this.runParticipant(
-        arbiter,
-        arbiterPrompt,
-        request,
-        signal,
-        this.sessionContext(conversation, warnings, this.arbiterSessionKey(arbiter))
-      );
-
-      let canonicalPoints = arbiterResult.ok
-        ? this.parseLineProtocol(arbiterResult.content, undefined, healthyParticipants)
-        : [];
-      if (!arbiterResult.ok) {
-        warnings.push(`${arbiter.label} arbiter failed while extracting implementation-plan items: ${arbiterResult.error ?? "unknown error"}.`);
-      }
-      if (canonicalPoints.length === 0) {
-        warnings.push("Arbiter did not return parseable canonical plan items, so no implementation-plan consensus threads were opened.");
-      }
-
-      canonicalPoints = this.selectImplementationPlanExtractionPoints(canonicalPoints, healthyParticipants, warnings);
-
-      this.emitProgress(runId, recordProgress, "debate", `Opening ${canonicalPoints.length} implementation-plan consensus threads.`, {
-        completed: 0,
-        total: canonicalPoints.length
-      });
-
-      for (let index = 0; index < canonicalPoints.length; index += 1) {
-        this.throwIfAborted(signal);
-        const point = canonicalPoints[index];
-        const sourceItems = this.sourceItemsForRawPlans(point, rawPlans, healthyParticipants);
-        const finding = this.createFinding(point, healthyParticipants, sourceItems);
-        if (finding.status !== "Confirmed") {
-          await this.debatePoint(
-            finding,
-            request,
-            undefined,
-            warnings,
-            signal,
-            recordProgress,
-            runId,
-            index,
-            canonicalPoints.length,
-            failedParticipantIds,
-            { conversation, warnings }
-          );
-        }
-        conversation.findings.push(finding);
-        this.emitProgress(runId, recordProgress, "debate", `Finished plan item ${index + 1} of ${canonicalPoints.length}.`, {
-          findingTitle: finding.title,
-          completed: index + 1,
-          total: canonicalPoints.length
-        });
-      }
-
-      if (!conversation.findings.some((finding) => finding.status === "Confirmed")) {
-        conversation.finalSummary = this.finalSummary(conversation);
-        conversation.messages.push(this.message("summary", conversation.finalSummary));
-        this.emitProgress(runId, recordProgress, "done", "No implementation-plan items were approved.");
-        conversation.metadata = {
-          ...conversation.metadata,
-          implementationPlanRequest: this.serializeReviewRequest(request),
-          implementationPlanAnswers: answers,
-          implementationPlanFinalMarkdown: undefined,
-          implementationPlanDebateSummaryMarkdown: undefined,
-          implementationPlanSynthesisSource: undefined,
-          pendingDecisionSelections: undefined,
-          pendingDecisionResolutions: undefined,
-          pendingDecisions: undefined,
-          pendingPlanItemReview: undefined,
-          warnings,
-          running: false
-        };
-        conversation.updatedAt = new Date().toISOString();
-        await this.flushAndSaveConversation(conversation);
-        return { conversation, warnings };
-      }
-
-      const reviewableItems = this.requiredPlanItemReviewFindings(conversation);
-      if (reviewableItems.length > 0) {
-        conversation.finalSummary = undefined;
-        conversation.metadata = {
-          ...conversation.metadata,
-          implementationPlanRequest: this.serializeReviewRequest(request),
-          implementationPlanAnswers: answers,
-          implementationPlanFinalMarkdown: undefined,
-          implementationPlanDebateSummaryMarkdown: undefined,
-          implementationPlanSynthesisSource: undefined,
-          pendingDecisionSelections: undefined,
-          pendingDecisionResolutions: undefined,
-          pendingDecisions: undefined,
-          pendingPlanItemReview: true,
-          planItemReviews: this.planItemReviewsFromMetadata(conversation).filter((review) =>
-            reviewableItems.some((finding) => finding.id === review.findingId)
-          ),
-          warnings,
-          running: false
-        };
-        conversation.updatedAt = new Date().toISOString();
-        this.emitProgress(runId, recordProgress, "decisions", "Implementation plan paused for item review.", {
-          completed: 0,
-          total: reviewableItems.length
-        });
-        await this.flushAndSaveConversation(conversation);
-        return { conversation, warnings };
-      }
-
-      this.emitProgress(runId, recordProgress, "summary", "Building final approved implementation plan.");
-      const synthesis = await this.synthesizeImplementationPlan(
+      return await this.processImplementationPlanRawPlans(
         request,
         conversation,
+        healthyParticipants,
+        rawPlans,
         arbiter,
+        answers,
         warnings,
         signal,
         recordProgress,
-        runId
+        runId,
+        failedParticipantIds
       );
-      conversation.finalSummary = synthesis.combined;
-      conversation.messages.push(this.message("summary", conversation.finalSummary));
-      this.emitProgress(runId, recordProgress, "done", "Implementation-plan consensus finished.");
-      conversation.metadata = {
-        ...conversation.metadata,
-        implementationPlanRequest: this.serializeReviewRequest(request),
-        implementationPlanAnswers: answers,
-        implementationPlanFinalMarkdown: synthesis.fullPlan,
-        implementationPlanDebateSummaryMarkdown: synthesis.debateSummary,
-        implementationPlanSynthesisSource: synthesis.source,
-        pendingDecisionSelections: undefined,
-        pendingDecisionResolutions: undefined,
-        pendingDecisions: undefined,
-        pendingPlanItemReview: undefined,
-        warnings,
-        running: false
-      };
-      conversation.updatedAt = new Date().toISOString();
-      await this.flushAndSaveConversation(conversation);
-
-      return { conversation, warnings };
     } catch (error) {
       if (conversation?.metadata.running === true) {
         conversation.metadata = {
@@ -1079,6 +1223,161 @@ export class ConsensusService {
       }
       throw error;
     }
+  }
+
+  private async processImplementationPlanRawPlans(
+    request: ReviewRequest,
+    conversation: Conversation,
+    healthyParticipants: ParticipantConfig[],
+    rawPlans: RawImplementationPlan[],
+    arbiter: ParticipantConfig,
+    answers: PlanDecisionAnswer[],
+    warnings: string[],
+    signal: AbortSignal | undefined,
+    progress: ProgressCallback | undefined,
+    runId: string,
+    failedParticipantIds = new Set<string>(
+      request.participants.filter((participant) => !healthyParticipants.some((healthy) => healthy.id === participant.id)).map((participant) => participant.id)
+    )
+  ): Promise<StartReviewResult> {
+    this.emitProgress(runId, progress, "arbiter", `Planner ${arbiter.label} is extracting implementation-plan items.`);
+    const arbiterPrompt = this.buildImplementationPlanExtractionPrompt(request, healthyParticipants, rawPlans, warnings);
+    const arbiterResult = await this.runParticipant(
+      arbiter,
+      arbiterPrompt,
+      request,
+      signal,
+      this.sessionContext(conversation, warnings, this.arbiterSessionKey(arbiter))
+    );
+
+    let canonicalPoints = arbiterResult.ok
+      ? this.parseLineProtocol(arbiterResult.content, undefined, healthyParticipants)
+      : [];
+    if (!arbiterResult.ok) {
+      warnings.push(`${arbiter.label} planner failed while extracting implementation-plan items: ${arbiterResult.error ?? "unknown error"}.`);
+    }
+    if (canonicalPoints.length === 0) {
+      warnings.push("Planner did not return parseable canonical plan items, so no implementation-plan consensus threads were opened.");
+    }
+
+    canonicalPoints = this.selectImplementationPlanExtractionPoints(canonicalPoints, healthyParticipants, warnings);
+
+    this.emitProgress(runId, progress, "debate", `Opening ${canonicalPoints.length} implementation-plan consensus threads.`, {
+      completed: 0,
+      total: canonicalPoints.length
+    });
+
+    for (let index = 0; index < canonicalPoints.length; index += 1) {
+      this.throwIfAborted(signal);
+      const point = canonicalPoints[index];
+      const sourceItems = this.sourceItemsForRawPlans(point, rawPlans, healthyParticipants);
+      const finding = this.createFinding(point, healthyParticipants, sourceItems);
+      if (finding.status !== "Confirmed") {
+        await this.debatePoint(
+          finding,
+          request,
+          undefined,
+          warnings,
+          signal,
+          progress,
+          runId,
+          index,
+          canonicalPoints.length,
+          failedParticipantIds,
+          { conversation, warnings }
+        );
+      }
+      conversation.findings.push(finding);
+      this.emitProgress(runId, progress, "debate", `Finished plan item ${index + 1} of ${canonicalPoints.length}.`, {
+        findingTitle: finding.title,
+        completed: index + 1,
+        total: canonicalPoints.length
+      });
+    }
+
+    if (!conversation.findings.some((finding) => finding.status === "Confirmed")) {
+      conversation.finalSummary = this.finalSummary(conversation);
+      conversation.messages.push(this.message("summary", conversation.finalSummary));
+      this.emitProgress(runId, progress, "done", "No implementation-plan items were approved.");
+      conversation.metadata = {
+        ...conversation.metadata,
+        implementationPlanRequest: this.serializeReviewRequest(request),
+        implementationPlanAnswers: answers,
+        implementationPlanFinalMarkdown: undefined,
+        implementationPlanDebateSummaryMarkdown: undefined,
+        implementationPlanSynthesisSource: undefined,
+        pendingDecisionSelections: undefined,
+        pendingDecisionResolutions: undefined,
+        pendingDecisions: undefined,
+        pendingPlanItemReview: undefined,
+        warnings,
+        running: false
+      };
+      conversation.updatedAt = new Date().toISOString();
+      await this.flushAndSaveConversation(conversation);
+      return { conversation, warnings };
+    }
+
+    const reviewableItems = this.requiredPlanItemReviewFindings(conversation);
+    if (reviewableItems.length > 0) {
+      conversation.finalSummary = undefined;
+      conversation.metadata = {
+        ...conversation.metadata,
+        implementationPlanRequest: this.serializeReviewRequest(request),
+        implementationPlanAnswers: answers,
+        implementationPlanFinalMarkdown: undefined,
+        implementationPlanDebateSummaryMarkdown: undefined,
+        implementationPlanSynthesisSource: undefined,
+        pendingDecisionSelections: undefined,
+        pendingDecisionResolutions: undefined,
+        pendingDecisions: undefined,
+        pendingPlanItemReview: true,
+        planItemReviews: this.planItemReviewsFromMetadata(conversation).filter((review) =>
+          reviewableItems.some((finding) => finding.id === review.findingId)
+        ),
+        warnings,
+        running: false
+      };
+      conversation.updatedAt = new Date().toISOString();
+      this.emitProgress(runId, progress, "decisions", "Implementation plan paused for item review.", {
+        completed: 0,
+        total: reviewableItems.length
+      });
+      await this.flushAndSaveConversation(conversation);
+      return { conversation, warnings };
+    }
+
+    this.emitProgress(runId, progress, "summary", "Building final approved implementation plan.");
+    const synthesis = await this.synthesizeImplementationPlan(
+      request,
+      conversation,
+      arbiter,
+      warnings,
+      signal,
+      progress,
+      runId
+    );
+    conversation.finalSummary = synthesis.combined;
+    conversation.messages.push(this.message("summary", conversation.finalSummary));
+    this.emitProgress(runId, progress, "done", "Implementation-plan consensus finished.");
+    conversation.metadata = {
+      ...conversation.metadata,
+      implementationPlanRequest: this.serializeReviewRequest(request),
+      implementationPlanAnswers: answers,
+      implementationPlanFinalMarkdown: synthesis.fullPlan,
+      implementationPlanDebateSummaryMarkdown: synthesis.debateSummary,
+      implementationPlanSynthesisSource: synthesis.source,
+      pendingDecisionSelections: undefined,
+      pendingDecisionResolutions: undefined,
+      pendingDecisions: undefined,
+      pendingPlanItemReview: undefined,
+      warnings,
+      running: false
+    };
+    conversation.updatedAt = new Date().toISOString();
+    await this.flushAndSaveConversation(conversation);
+
+    return { conversation, warnings };
   }
 
   private async collectParticipantPoints(
@@ -1101,7 +1400,8 @@ export class ConsensusService {
       }
       let points = this.parseLineProtocol(result.content, result.participant, healthyParticipants);
       if (points.length === 0) {
-        this.emitProgress(runId, progress, "arbiter", `Arbiter ${arbiter.label} is repairing ${result.participant.label}'s answer.`);
+        const arbiterRole = request.kind === "implementation-plan" ? "Planner" : "Arbiter";
+        this.emitProgress(runId, progress, "arbiter", `${arbiterRole} ${arbiter.label} is repairing ${result.participant.label}'s answer.`);
         const repair = await this.runParticipant(
           arbiter,
           this.buildRepairPrompt(request, diff, result.participant, result.content, warnings),
@@ -1201,7 +1501,7 @@ export class ConsensusService {
     options: { fallbackWarning?: boolean } = {}
   ): Promise<ImplementationPlanSynthesis> {
     this.throwIfAborted(signal);
-    this.emitProgress(runId, progress, "summary", `Arbiter ${arbiter.label} is synthesizing the final plan.`);
+    this.emitProgress(runId, progress, "summary", `Planner ${arbiter.label} is synthesizing the final plan.`);
     const result = await this.runParticipant(
       arbiter,
       this.buildImplementationPlanSynthesisPrompt(request, conversation, warnings),
@@ -1218,7 +1518,7 @@ export class ConsensusService {
 
     const synthesis = this.parseImplementationPlanSynthesis(result.content, conversation);
     if (synthesis.source === "fallback" && options.fallbackWarning !== false) {
-      warnings.push("Arbiter synthesis did not include a usable final plan; used local summary fallback.");
+      warnings.push("Planner synthesis did not include a usable final plan; used local summary fallback.");
     }
     return synthesis;
   }
@@ -1297,7 +1597,7 @@ export class ConsensusService {
             parsed.answer,
             parsed.reason ? `Reason: ${parsed.reason}` : ""
           ].filter(Boolean).join("\n\n"),
-          this.asArbiterParticipant(arbiter),
+          this.asArbiterParticipant(arbiter, request.kind),
           "done",
           { answerSource: "automatic", sourceDecisionId: parsed.sourceDecisionId }
         )
@@ -1578,7 +1878,7 @@ export class ConsensusService {
 
   private buildAutomaticDecisionAnswerPrompt(decision: PlanDecisionRequest, answers: PlanDecisionAnswer[]): string {
     return [
-      "You are the arbiter for implementation-plan decision threads.",
+      "You are the planner for implementation-plan decision threads.",
       "Decide whether the user's previous answers fully answer this separate agent decision request.",
       "Do not merge or rewrite the decision. Return YES only if the previous answer is enough for the agent to proceed without asking the user again.",
       "Return only this protocol:",
@@ -1722,7 +2022,7 @@ export class ConsensusService {
     warnings: string[]
   ): string {
     return [
-      "You are the private arbiter for implementation-plan consensus extraction.",
+      "You are the private planner for implementation-plan consensus extraction.",
       "Compare the independent participant plans below and extract only the canonical items needed for confirmation or debate.",
       "Classify work by source coverage before emitting items: common items appear in every healthy participant plan, needs-confirmation items appear in only a subset, and conflict items cover the same area with incompatible recommendations.",
       "Do not write the final plan. Do not add new facts beyond the participant plans and user request.",
@@ -1772,7 +2072,7 @@ export class ConsensusService {
   private buildImplementationPlanSynthesisPrompt(request: ReviewRequest, conversation: Conversation, warnings: string[]): string {
     const answers = this.implementationPlanAnswersFromMetadata(conversation);
     return [
-      "You are the arbiter for the final implementation-plan synthesis.",
+      "You are the planner for the final implementation-plan synthesis.",
       "Use the consensus item threads below to produce one engineer-ready implementation plan.",
       "Return only the final plan as natural Markdown. Do not use a required template and do not include a debate summary.",
       "The plan must include only confirmed/common items and confirmed-after-debate items. Do not include rejected or unresolved items as implementation steps.",
@@ -1782,6 +2082,32 @@ export class ConsensusService {
       request.question ? `User request:\n${request.question}` : "User request:\nCreate an implementation plan.",
       answers.length ? `User decision-thread context:\n${this.formatDecisionAnswers(answers)}` : "User decision-thread context: none",
       `User item review context:\n${this.formatPlanItemReviewsForPrompt(conversation)}`,
+      this.limitText(`Consensus item threads:\n${this.formatImplementationPlanThreadsForPrompt(conversation.findings)}`, warnings)
+    ].join("\n\n");
+  }
+
+  private buildImplementationPlanRevisionPrompt(
+    request: ReviewRequest,
+    conversation: Conversation,
+    previousPlan: string,
+    debateSummary: string,
+    instruction: string,
+    warnings: string[]
+  ): string {
+    const answers = this.implementationPlanAnswersFromMetadata(conversation);
+    return [
+      "You are the planner revising an existing final implementation plan.",
+      "Use the user's correction plus the saved consensus context to produce a complete replacement final plan.",
+      "Return only the revised final plan as natural Markdown. Do not include a debate summary, acknowledgements, or commentary outside the plan.",
+      "Keep the plan compatible with confirmed consensus items and explicit user decisions. If the correction conflicts with saved consensus, include the feasible correction and state the remaining blocker in the plan.",
+      "Do not edit files or run mutating commands.",
+      `Repository: ${request.repoPath}`,
+      request.question ? `Original user request:\n${request.question}` : "Original user request:\nCreate an implementation plan.",
+      `User correction:\n${instruction}`,
+      answers.length ? `User decision-thread context:\n${this.formatDecisionAnswers(answers)}` : "User decision-thread context: none",
+      `User item review context:\n${this.formatPlanItemReviewsForPrompt(conversation)}`,
+      debateSummary ? `Existing debate summary for context:\n${debateSummary}` : "Existing debate summary for context: none",
+      this.limitText(`Previous final plan:\n${previousPlan}`, warnings),
       this.limitText(`Consensus item threads:\n${this.formatImplementationPlanThreadsForPrompt(conversation.findings)}`, warnings)
     ].join("\n\n");
   }
@@ -1911,9 +2237,10 @@ export class ConsensusService {
 
   private systemIntro(request: ReviewRequest, diff: GitDiffResult | undefined, arbiter: ParticipantConfig): string {
     const participantNames = request.participants.map((participant) => participant.label).join(", ");
+    const arbiterRole = request.kind === "implementation-plan" ? "Planner" : "Arbiter";
     return [
       `Participants: ${participantNames || "none"}.`,
-      `Arbiter: ${arbiter.label}.`,
+      `${arbiterRole}: ${arbiter.label}.`,
       `Round limit per point: ${request.roundLimit}.`,
       request.kind === "implementation-plan"
         ? `Implementation-plan repository: ${request.repoPath}.`
@@ -2756,8 +3083,9 @@ export class ConsensusService {
       .join("\n");
   }
 
-  private asArbiterParticipant(arbiter: ParticipantConfig): ParticipantConfig {
-    return { ...arbiter, id: `arbiter:${arbiter.id}`, label: `${arbiter.label} (arbiter)` };
+  private asArbiterParticipant(arbiter: ParticipantConfig, kind: ConversationKind = "code-review"): ParticipantConfig {
+    const role = kind === "implementation-plan" ? "planner" : "arbiter";
+    return { ...arbiter, id: `arbiter:${arbiter.id}`, label: `${arbiter.label} (${role})` };
   }
 
   private isMetaPoint(point: LinePoint): boolean {
@@ -2918,6 +3246,23 @@ export class ConsensusService {
     });
   }
 
+  private rawImplementationPlansFromMetadata(conversation: Conversation): RawImplementationPlan[] {
+    const value = conversation.metadata.implementationPlanRawPlans;
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return value.filter((item): item is RawImplementationPlan => {
+      const candidate = item as Partial<RawImplementationPlan>;
+      return (
+        typeof candidate.participantId === "string" &&
+        typeof candidate.participantLabel === "string" &&
+        typeof candidate.content === "string" &&
+        candidate.content.trim().length > 0 &&
+        typeof candidate.createdAt === "string"
+      );
+    });
+  }
+
   private pendingDecisionsFromMetadata(conversation: Conversation): PlanDecisionRequest[] {
     const value = conversation.metadata.pendingDecisions;
     if (!Array.isArray(value)) {
@@ -3055,12 +3400,24 @@ export class ConsensusService {
     return Array.from(merged.values());
   }
 
+  private metadataText(value: unknown): string {
+    return typeof value === "string" ? value.trim() : "";
+  }
+
   private metadataWarnings(conversation: Conversation): string[] {
     return sanitizeWarningList(conversation.metadata.warnings, MAX_STORED_WARNING_CHARS);
   }
 
   private metadataNumber(value: unknown): number {
     return Number.isFinite(value) ? Math.max(0, Math.floor(value as number)) : 0;
+  }
+
+  private hasStoredImplementationPlan(conversation: Conversation): boolean {
+    return Boolean(
+      this.metadataText(conversation.metadata.implementationPlanFinalMarkdown) ||
+      conversation.finalSummary?.trim() ||
+      conversation.messages.some((message) => message.role === "summary" && message.content.trim())
+    );
   }
 
   private limitText(text: string, warnings: string[]): string {

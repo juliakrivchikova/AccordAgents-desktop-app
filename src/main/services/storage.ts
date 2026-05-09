@@ -3,7 +3,9 @@ import path from "node:path";
 import { app } from "electron";
 import { runCommand } from "./command";
 import type { Conversation, ConversationSummary } from "../../shared/types";
-import { sanitizeConversationWarnings } from "../../shared/warnings";
+import { sanitizeConversationWarnings, sanitizeWarningList } from "../../shared/warnings";
+
+const INTERRUPTED_RUN_WARNING = "Previous run was interrupted before completion. Resume the plan to continue from the saved context.";
 
 function sqlString(value: string | undefined | null): string {
   if (value === undefined || value === null) {
@@ -39,6 +41,7 @@ export class StorageService {
       create index if not exists idx_conversations_updated_at on conversations(updated_at);
     `);
     this.initialized = true;
+    await this.clearInterruptedRuns();
   }
 
   async listConversations(): Promise<ConversationSummary[]> {
@@ -97,6 +100,34 @@ export class StorageService {
         repo_path = excluded.repo_path,
         payload_json = excluded.payload_json;
     `);
+  }
+
+  private async clearInterruptedRuns(): Promise<void> {
+    const rows = await this.queryJson<{ payloadJson: string }>(
+      "select payload_json as payloadJson from conversations where payload_json like '%\"running\":true%';"
+    );
+    for (const row of rows) {
+      let conversation: Conversation;
+      try {
+        conversation = JSON.parse(row.payloadJson) as Conversation;
+      } catch {
+        continue;
+      }
+      if (conversation.metadata.running !== true) {
+        continue;
+      }
+      const warnings = sanitizeWarningList(conversation.metadata.warnings);
+      if (!warnings.includes(INTERRUPTED_RUN_WARNING)) {
+        warnings.push(INTERRUPTED_RUN_WARNING);
+      }
+      conversation.metadata = {
+        ...conversation.metadata,
+        warnings,
+        running: false
+      };
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+    }
   }
 
   private async queryJson<T>(sql: string): Promise<T[]> {

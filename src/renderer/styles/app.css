@@ -762,6 +762,11 @@ button {
   background: rgba(255, 250, 242, 0.96);
 }
 
+.slack-action-bar.with-composer {
+  align-items: stretch;
+  flex-direction: column;
+}
+
 .run-status-line {
   display: flex;
   align-items: center;
@@ -807,6 +812,58 @@ button {
   font-size: 13px;
 }
 
+.plan-correction-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  align-items: end;
+  gap: 10px;
+  width: min(100%, 960px);
+  margin: 0 auto;
+}
+
+.plan-correction-composer textarea {
+  width: 100%;
+  min-height: 54px;
+  max-height: 180px;
+  resize: vertical;
+  border: 1px solid #d7cfc1;
+  border-radius: 8px;
+  padding: 12px 13px;
+  background: #ffffff;
+  color: #20201d;
+  line-height: 1.42;
+  outline: none;
+}
+
+.plan-correction-composer textarea:focus {
+  border-color: #3d7d68;
+  box-shadow: 0 0 0 3px rgba(61, 125, 104, 0.16);
+}
+
+.plan-correction-composer textarea:disabled {
+  background: #f6f3ee;
+  color: #7d756b;
+  cursor: not-allowed;
+}
+
+.plan-correction-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border: 0;
+  border-radius: 8px;
+  background: #20201d;
+  color: #fffaf2;
+  cursor: pointer;
+}
+
+.plan-correction-send:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
 .message {
   display: grid;
   grid-template-columns: 42px 1fr;
@@ -834,6 +891,15 @@ button {
 .message.summary .message-avatar,
 .message.system .message-avatar {
   background: #8c5e2f;
+}
+
+.message.final-plan-message .message-body {
+  border-color: #b7c8be;
+  background: #ffffff;
+}
+
+.message.final-plan-message .message-content {
+  max-height: none;
 }
 
 .message-body,
