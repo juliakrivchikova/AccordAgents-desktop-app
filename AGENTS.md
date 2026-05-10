@@ -25,6 +25,10 @@ Use strict TypeScript and keep types explicit at IPC, service, and shared bounda
 
 No automated test framework is currently configured. Until one is added, run `make typecheck` and `make build` before submitting changes. For behavior that touches Electron IPC, provider integrations, git diff handling, or conversation storage, include manual verification notes in the PR. If adding tests, colocate them near the code under test or use `*.test.ts` / `*.test.tsx`, and add the command to `package.json`.
 
+## Inspecting the running desktop app
+
+Whenever the user asks an agent to **see**, **screenshot**, **scroll**, **click**, **type into**, or **read DOM/CSS state in** the live desktop app — for reproducing UI bugs, verifying a renderer fix, or any UI-driven check — follow `docs/inspecting-the-desktop-app.md`. It uses the Chrome DevTools Protocol against Electron's renderer (port 9222). Do not use macOS `screencapture`, AppleScript, `CGWindowList`, or any window-focus tricks, and do not curl `http://127.0.0.1:5173/` directly — that's Vite's bundle without the Electron preload, so the React app crashes when loaded outside Electron.
+
 ## Commit & Pull Request Guidelines
 
 Existing commits use short, imperative summaries such as `Add Makefile for app commands` and `Compare selected branches in diff mode`. Follow that style: describe the user-visible or technical change in one sentence.
