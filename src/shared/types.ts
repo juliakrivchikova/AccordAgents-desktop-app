@@ -22,6 +22,7 @@ export interface AppSettings {
   roundLimitDefault: number;
   providers: ProviderSettings[];
   chatRoleConfigs: ChatRoleConfig[];
+  chatParticipantConfigs: ChatParticipantConfig[];
   lastRepoPath?: string;
 }
 
@@ -80,6 +81,23 @@ export interface ChatRoleConfigUpdate {
   id?: string;
   label: string;
   instructions: string;
+}
+
+export interface ChatParticipantConfig {
+  id: string;
+  handle: string;
+  roleConfigId: string;
+  kind: ChatProviderKind;
+  model?: string;
+  updatedAt: string;
+}
+
+export interface ChatParticipantConfigUpdate {
+  id?: string;
+  handle: string;
+  roleConfigId: string;
+  kind: ChatProviderKind;
+  model?: string;
 }
 
 export interface CreateChatConversationRequest {
@@ -371,6 +389,8 @@ export interface AppBridge {
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;
+  saveChatParticipantConfig(update: ChatParticipantConfigUpdate): Promise<AppSettings>;
+  deleteChatParticipantConfig(id: string): Promise<AppSettings>;
   updateLastRepoPath(repoPath: string): Promise<AppSettings>;
   listProviderModels(kind: ProviderKind): Promise<ProviderModel[]>;
   detectAgents(): Promise<AgentHealth[]>;

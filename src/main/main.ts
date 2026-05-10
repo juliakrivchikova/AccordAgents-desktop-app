@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import type {
   AddChatParticipantRequest,
+  ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
   ComposeImplementationPlanRequest,
   ContinueReviewRequest,
@@ -73,6 +74,12 @@ function registerIpc(): void {
   ipcMain.handle("settings:get", () => settingsService.getPublicSettings());
   ipcMain.handle("settings:update-provider", (_event, update: ProviderSettingsUpdate) => settingsService.updateProvider(update));
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));
+  ipcMain.handle("settings:save-chat-participant", (_event, update: ChatParticipantConfigUpdate) => {
+    return settingsService.saveChatParticipantConfig(update);
+  });
+  ipcMain.handle("settings:delete-chat-participant", (_event, id: string) => {
+    return settingsService.deleteChatParticipantConfig(id);
+  });
   ipcMain.handle("settings:update-last-repo-path", (_event, repoPath: string) => settingsService.updateLastRepoPath(repoPath));
   ipcMain.handle("settings:list-provider-models", (_event, kind: ProviderKind) => providerRunner.listModels(kind));
   ipcMain.handle("agents:detect", () => cliAgentRunner.detectAgents());

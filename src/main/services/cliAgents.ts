@@ -9,6 +9,7 @@ import type { ParticipantRunResult } from "./providers";
 const MAX_CLI_ERROR_CHARS = 500;
 const MAX_CLI_ERROR_LINES = 8;
 const MAX_CLI_EVENT_SUMMARIES = 2;
+const CLI_AGENT_RUN_TIMEOUT_MS = 15 * 60_000;
 
 export interface CliAgentRunOptions {
   persistSession?: boolean;
@@ -120,7 +121,7 @@ export class CliAgentRunner {
       const result = await runCommand("codex", args, {
         cwd: repoPath,
         input: this.codexPrompt(prompt, repoPath, diffMode, kind),
-        timeoutMs: 4 * 60_000,
+        timeoutMs: CLI_AGENT_RUN_TIMEOUT_MS,
         signal
       });
       const lastMessage = await this.readOptionalFile(outputPath);
@@ -183,7 +184,7 @@ export class CliAgentRunner {
         {
           cwd: repoPath,
           input: prompt,
-          timeoutMs: 4 * 60_000,
+          timeoutMs: CLI_AGENT_RUN_TIMEOUT_MS,
           signal
         }
       );

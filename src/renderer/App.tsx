@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   AlertTriangle,
@@ -25,7 +25,10 @@ import {
 import type {
   AgentHealth,
   AppSettings,
+  AppBridge,
   ChatParticipant,
+  ChatParticipantConfig,
+  ChatParticipantConfigUpdate,
   ChatProviderKind,
   ChatRoleConfig,
   ChatRoleConfigUpdate,
@@ -53,7 +56,8 @@ import "./styles/app.css";
 const DEFAULT_SETTINGS: AppSettings = {
   roundLimitDefault: 2,
   providers: [],
-  chatRoleConfigs: []
+  chatRoleConfigs: [],
+  chatParticipantConfigs: []
 };
 
 const DIFF_MODES: Array<{ value: GitDiffMode; label: string }> = [
@@ -76,6 +80,7 @@ const CLAUDE_AVATAR_URL = new URL("./assets/claude-avatar.webp", import.meta.url
 const CODEX_AVATAR_URL = new URL("./assets/codex-avatar.webp", import.meta.url).href;
 
 type ActiveView = "slack" | "points" | "settings";
+type SettingsSection = "providers" | "roles" | "participants";
 type AvatarKind = "user" | "arbiter" | "anthropic" | "codex" | "gemini" | "generic";
 
 interface ChatParticipantDraft {
@@ -108,6 +113,8 @@ function App(): JSX.Element {
   const [summaries, setSummaries] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<Conversation | undefined>();
   const [activeView, setActiveView] = useState<ActiveView>("slack");
+  const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("providers");
+  const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>();
   const [focusedThreadId, setFocusedThreadId] = useState<string | undefined>();
   const [selectedParticipants, setSelectedParticipants] = useState<Set<string>>(new Set());
@@ -137,7 +144,7 @@ function App(): JSX.Element {
   const [pendingClarifications, setPendingClarifications] = useState<Record<string, PlanDecisionReply>>({});
   const [planItemReviewDrafts, setPlanItemReviewDrafts] = useState<Record<string, string>>({});
   const [planCorrectionDraft, setPlanCorrectionDraft] = useState("");
-  const [chatParticipantDrafts, setChatParticipantDrafts] = useState<ChatParticipantDraft[]>([]);
+  const [selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds] = useState<Set<string>>(new Set());
   const [chatMessageDraft, setChatMessageDraft] = useState("");
   const [chatReplyTarget, setChatReplyTarget] = useState<{ threadId: string; parentMessageId: string } | undefined>();
   const [chatAddParticipantDraft, setChatAddParticipantDraft] = useState<ChatParticipantDraft | undefined>();
@@ -175,12 +182,13 @@ function App(): JSX.Element {
   }, [settings.providers]);
 
   useEffect(() => {
-    setChatParticipantDrafts((current) => {
-      const drafts = current.length ? current : [defaultChatParticipantDraft(settings)];
-      return drafts.map((draft) => normalizeChatParticipantDraftForSettings(draft, settings));
-    });
     setChatAddParticipantDraft((current) => normalizeChatParticipantDraftForSettings(current ?? defaultChatParticipantDraft(settings), settings));
   }, [settings]);
+
+  useEffect(() => {
+    const availableIds = new Set(settings.chatParticipantConfigs.map((participant) => participant.id));
+    setSelectedChatParticipantConfigIds((current) => new Set([...current].filter((id) => availableIds.has(id))));
+  }, [settings.chatParticipantConfigs]);
 
   useEffect(() => {
     const firstRunnable = settings.providers.find((provider) => !providerDisabledForRun(provider));
@@ -274,6 +282,7 @@ function App(): JSX.Element {
       setPlanItemReviewDrafts({});
       setPlanCorrectionDraft("");
       setChatReplyTarget(undefined);
+      setSettingsMenuOpen(false);
       setActiveView("slack");
     } catch (caught) {
       setError(errorText(caught));
@@ -460,7 +469,7 @@ function App(): JSX.Element {
   async function startChat(): Promise<void> {
     setError(undefined);
     setWarnings([]);
-    const participants = normalizedChatDrafts(chatParticipantDrafts);
+    const participants = selectedChatParticipantDrafts(settings.chatParticipantConfigs, selectedChatParticipantConfigIds);
     const validation = validateChatParticipantDrafts(participants, settings.chatRoleConfigs) ?? validateChatCliAgents(participants, agents);
     if (validation) {
       setError(validation);
@@ -1127,6 +1136,7 @@ function App(): JSX.Element {
     setChatReplyTarget(undefined);
     setChatAddParticipantDraft(defaultChatParticipantDraft(settings));
     setError(undefined);
+    setSettingsMenuOpen(false);
     setActiveView("slack");
   }
 
@@ -1227,6 +1237,37 @@ function App(): JSX.Element {
     }
   }
 
+  async function saveChatParticipantConfig(update: ChatParticipantConfigUpdate): Promise<void> {
+    setError(undefined);
+    try {
+      const next = await window.consensus.saveChatParticipantConfig(update);
+      setSettings(next);
+      if (!update.id) {
+        const created = next.chatParticipantConfigs.find((participant) => participant.handle.toLowerCase() === update.handle.trim().replace(/^@/, "").toLowerCase());
+        if (created) {
+          setSelectedChatParticipantConfigIds((current) => new Set([...current, created.id]));
+        }
+      }
+    } catch (caught) {
+      setError(errorText(caught));
+    }
+  }
+
+  async function deleteChatParticipantConfig(id: string): Promise<void> {
+    setError(undefined);
+    try {
+      const next = await window.consensus.deleteChatParticipantConfig(id);
+      setSettings(next);
+      setSelectedChatParticipantConfigIds((current) => {
+        const nextIds = new Set(current);
+        nextIds.delete(id);
+        return nextIds;
+      });
+    } catch (caught) {
+      setError(errorText(caught));
+    }
+  }
+
   const hasResultContext = Boolean(conversation) || busy;
   const pendingDecisions = pendingPlanDecisions(conversation);
   const reviewablePlanItems = requiredPlanItemReviewFindings(conversation);
@@ -1297,9 +1338,49 @@ function App(): JSX.Element {
                 Stop
               </button>
             )}
-            <button className={`icon-button ${activeView === "settings" ? "selected" : ""}`} title="Settings" onClick={() => setActiveView("settings")}>
-              <Settings size={15} />
-            </button>
+            <div className="settings-menu-wrap">
+              <button
+                className={`icon-button ${activeView === "settings" || settingsMenuOpen ? "selected" : ""}`}
+                title="Settings"
+                onClick={() => setSettingsMenuOpen((open) => !open)}
+              >
+                <Settings size={15} />
+              </button>
+              {settingsMenuOpen && (
+                <div className="settings-menu">
+                  <button
+                    onClick={() => {
+                      setActiveSettingsSection("providers");
+                      setActiveView("settings");
+                      setSettingsMenuOpen(false);
+                    }}
+                  >
+                    <KeyRound size={15} />
+                    Providers
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveSettingsSection("roles");
+                      setActiveView("settings");
+                      setSettingsMenuOpen(false);
+                    }}
+                  >
+                    <Circle size={15} />
+                    Roles
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveSettingsSection("participants");
+                      setActiveView("settings");
+                      setSettingsMenuOpen(false);
+                    }}
+                  >
+                    <Users size={15} />
+                    Participants
+                  </button>
+                </div>
+              )}
+            </div>
             <button className="icon-button" title="Refresh" onClick={() => void refreshAll()}>
               <RefreshCw size={17} />
             </button>
@@ -1321,6 +1402,7 @@ function App(): JSX.Element {
 
         {activeView === "settings" ? (
           <SettingsView
+            section={activeSettingsSection}
             settings={settings}
             agents={agents}
             apiKeyDrafts={apiKeyDrafts}
@@ -1331,6 +1413,8 @@ function App(): JSX.Element {
             updateProvider={updateProvider}
             refreshProviderModels={refreshProviderModels}
             saveChatRoleConfig={saveChatRoleConfig}
+            saveChatParticipantConfig={saveChatParticipantConfig}
+            deleteChatParticipantConfig={deleteChatParticipantConfig}
           />
         ) : (
           <div className={`content-area ${hasResultContext ? "result-layout" : "compose-layout"}`}>
@@ -1360,7 +1444,7 @@ function App(): JSX.Element {
                   title={question}
                   repoPath={repoPath}
                   repoInfo={repoInfo}
-                  drafts={chatParticipantDrafts}
+                  selectedParticipantIds={selectedChatParticipantConfigIds}
                   settings={settings}
                   agents={agents}
                   busy={busy}
@@ -1371,7 +1455,12 @@ function App(): JSX.Element {
                   }}
                   onRepoBlur={() => void inspectRepo()}
                   onSelectRepo={() => void selectRepo()}
-                  onDraftsChange={setChatParticipantDrafts}
+                  onSelectedParticipantIdsChange={setSelectedChatParticipantConfigIds}
+                  onOpenParticipantsSettings={() => {
+                    setActiveSettingsSection("participants");
+                    setActiveView("settings");
+                    setSettingsMenuOpen(false);
+                  }}
                   onStart={() => void startChat()}
                 />
               ) : (
@@ -1556,7 +1645,7 @@ function App(): JSX.Element {
             )}
 
             {hasResultContext && (
-              <section className="conversation-panel">
+              <section className={`conversation-panel ${conversationKind === "chat" ? "chat-conversation-panel" : ""}`}>
                 {conversationKind === "chat" && conversation ? (
                   <ChatConversationView
                     conversation={conversation}
@@ -1639,6 +1728,7 @@ function App(): JSX.Element {
 }
 
 function SettingsView(props: {
+  section: SettingsSection;
   settings: AppSettings;
   agents: AgentHealth[];
   apiKeyDrafts: Record<string, string>;
@@ -1649,134 +1739,238 @@ function SettingsView(props: {
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean; model?: string; apiKey?: string; clearApiKey?: boolean }) => Promise<void>;
   refreshProviderModels: (kind: ProviderKind) => Promise<void>;
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => Promise<void>;
+  saveChatParticipantConfig: (update: ChatParticipantConfigUpdate) => Promise<void>;
+  deleteChatParticipantConfig: (id: string) => Promise<void>;
 }): JSX.Element {
+  const title = props.section === "providers" ? "Providers" : props.section === "roles" ? "Roles" : "Participants";
   return (
     <section className="settings-view">
-      <h1>Settings</h1>
-      <section className="settings-section">
-        <div className="settings-section-head">
-          <h2>Chat roles</h2>
-          <span>{props.settings.chatRoleConfigs.length} roles</span>
-        </div>
-        <div className="role-config-list">
-          {props.settings.chatRoleConfigs.map((role) => (
-            <ChatRoleEditor role={role} onSave={props.saveChatRoleConfig} key={role.id} />
-          ))}
-          <ChatRoleEditor onSave={props.saveChatRoleConfig} key={`new-role-${props.settings.chatRoleConfigs.length}`} />
-        </div>
-      </section>
-      <section className="settings-section">
-        <div className="settings-section-head">
-          <h2>Providers</h2>
-          <span>{props.settings.providers.length} providers</span>
-        </div>
-      <div className="settings-grid">
-        {props.settings.providers.map((provider) => {
-          const health = props.agents.find((agent) => agent.kind === provider.kind);
-          const models = props.providerModels[provider.kind] ?? [];
-          const isLoadingModels = Boolean(props.modelLoading[provider.kind]);
-          const modelError = props.modelErrors[provider.kind];
-          const hasDraftKey = Boolean(props.apiKeyDrafts[provider.kind]?.trim());
-          return (
-            <div className="settings-item" key={provider.kind}>
-              <div className="settings-item-head">
-                <div>
-                  <strong>{provider.label}</strong>
-                  <small>{isCli(provider.kind) ? healthLine(health) : provider.hasApiKey ? "API key saved" : "No API key saved"}</small>
-                </div>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={provider.enabled}
-                    onChange={(event) => void props.updateProvider(provider, { enabled: event.target.checked })}
-                  />
-                  <span />
-                </label>
-              </div>
+      <h1>{title}</h1>
+      {props.section === "roles" && (
+        <section className="settings-section">
+          <div className="settings-section-head">
+            <h2>Chat roles</h2>
+            <span>{props.settings.chatRoleConfigs.length} roles</span>
+          </div>
+          <div className="role-config-list">
+            {props.settings.chatRoleConfigs.map((role) => (
+              <ChatRoleEditor role={role} onSave={props.saveChatRoleConfig} key={role.id} />
+            ))}
+            <ChatRoleEditor onSave={props.saveChatRoleConfig} key={`new-role-${props.settings.chatRoleConfigs.length}`} />
+          </div>
+        </section>
+      )}
+      {props.section === "participants" && (
+        <ParticipantSettingsSection
+          settings={props.settings}
+          agents={props.agents}
+          onSave={props.saveChatParticipantConfig}
+          onDelete={props.deleteChatParticipantConfig}
+        />
+      )}
+      {props.section === "providers" && (
+        <section className="settings-section">
+          <div className="settings-section-head">
+            <h2>Providers</h2>
+            <span>{props.settings.providers.length} providers</span>
+          </div>
+          <div className="settings-grid">
+            {props.settings.providers.map((provider) => {
+              const health = props.agents.find((agent) => agent.kind === provider.kind);
+              const models = props.providerModels[provider.kind] ?? [];
+              const isLoadingModels = Boolean(props.modelLoading[provider.kind]);
+              const modelError = props.modelErrors[provider.kind];
+              const hasDraftKey = Boolean(props.apiKeyDrafts[provider.kind]?.trim());
+              return (
+                <div className="settings-item" key={provider.kind}>
+                  <div className="settings-item-head">
+                    <div>
+                      <strong>{provider.label}</strong>
+                      <small>{isCli(provider.kind) ? healthLine(health) : provider.hasApiKey ? "API key saved" : "No API key saved"}</small>
+                    </div>
+                    <label className="toggle">
+                      <input
+                        type="checkbox"
+                        checked={provider.enabled}
+                        onChange={(event) => void props.updateProvider(provider, { enabled: event.target.checked })}
+                      />
+                      <span />
+                    </label>
+                  </div>
 
-              {!isCli(provider.kind) && (
-                <>
-                  <div className="model-row">
-                    <label className="field grow">
-                      <span>Model</span>
-                      {models.length > 0 ? (
-                        <select
-                          value={models.some((model) => model.id === provider.model) ? provider.model : "__custom__"}
-                          onChange={(event) => {
-                            if (event.target.value !== "__custom__") {
-                              void props.updateProvider(provider, { model: event.target.value });
-                            }
-                          }}
+                  {!isCli(provider.kind) && (
+                    <>
+                      <div className="model-row">
+                        <label className="field grow">
+                          <span>Model</span>
+                          {models.length > 0 ? (
+                            <select
+                              value={models.some((model) => model.id === provider.model) ? provider.model : "__custom__"}
+                              onChange={(event) => {
+                                if (event.target.value !== "__custom__") {
+                                  void props.updateProvider(provider, { model: event.target.value });
+                                }
+                              }}
+                            >
+                              {models.map((model) => (
+                                <option key={model.id} value={model.id}>
+                                  {model.label}
+                                </option>
+                              ))}
+                              <option value="__custom__">Custom model ID...</option>
+                            </select>
+                          ) : (
+                            <input
+                              value={provider.model ?? ""}
+                              onChange={(event) => void props.updateProvider(provider, { model: event.target.value })}
+                              placeholder={provider.hasApiKey ? "Fetch models or enter a custom model id" : "Save an API key first"}
+                            />
+                          )}
+                        </label>
+                        <button
+                          className="tool-button"
+                          title="Fetch available models"
+                          disabled={!provider.hasApiKey || isLoadingModels}
+                          onClick={() => void props.refreshProviderModels(provider.kind)}
                         >
-                          {models.map((model) => (
-                            <option key={model.id} value={model.id}>
-                              {model.label}
-                            </option>
-                          ))}
-                          <option value="__custom__">Custom model ID...</option>
-                        </select>
-                      ) : (
-                        <input
-                          value={provider.model ?? ""}
-                          onChange={(event) => void props.updateProvider(provider, { model: event.target.value })}
-                          placeholder={provider.hasApiKey ? "Fetch models or enter a custom model id" : "Save an API key first"}
-                        />
+                          <RefreshCw size={17} className={isLoadingModels ? "spin" : ""} />
+                        </button>
+                      </div>
+                      {models.length > 0 && !models.some((model) => model.id === provider.model) && (
+                        <label className="field compact-field">
+                          <span>Custom model ID</span>
+                          <input
+                            value={provider.model ?? ""}
+                            onChange={(event) => void props.updateProvider(provider, { model: event.target.value })}
+                          />
+                        </label>
                       )}
-                    </label>
-                    <button
-                      className="tool-button"
-                      title="Fetch available models"
-                      disabled={!provider.hasApiKey || isLoadingModels}
-                      onClick={() => void props.refreshProviderModels(provider.kind)}
-                    >
-                      <RefreshCw size={17} className={isLoadingModels ? "spin" : ""} />
-                    </button>
-                  </div>
-                  {models.length > 0 && !models.some((model) => model.id === provider.model) && (
-                    <label className="field compact-field">
-                      <span>Custom model ID</span>
-                      <input
-                        value={provider.model ?? ""}
-                        onChange={(event) => void props.updateProvider(provider, { model: event.target.value })}
-                      />
-                    </label>
+                      {modelError && <div className="inline-error">{modelError}</div>}
+                      <div className="key-row">
+                        <label className="field grow">
+                          <span>API key</span>
+                          <input
+                            type="password"
+                            value={props.apiKeyDrafts[provider.kind] ?? ""}
+                            onChange={(event) =>
+                              props.setApiKeyDrafts((current) => ({ ...current, [provider.kind]: event.target.value }))
+                            }
+                          />
+                        </label>
+                        <button
+                          className="save-key-button"
+                          title="Save API key"
+                          disabled={!hasDraftKey}
+                          onClick={() => void props.updateProvider(provider, { apiKey: props.apiKeyDrafts[provider.kind] ?? "" })}
+                        >
+                          <KeyRound size={17} />
+                          Save key
+                        </button>
+                      </div>
+                      {hasDraftKey && <div className="inline-warning">Unsaved API key entered.</div>}
+                      {provider.hasApiKey && (
+                        <button className="secondary-button" onClick={() => void props.updateProvider(provider, { clearApiKey: true })}>
+                          Clear saved key
+                        </button>
+                      )}
+                    </>
                   )}
-                  {modelError && <div className="inline-error">{modelError}</div>}
-                  <div className="key-row">
-                    <label className="field grow">
-                      <span>API key</span>
-                      <input
-                        type="password"
-                        value={props.apiKeyDrafts[provider.kind] ?? ""}
-                        onChange={(event) =>
-                          props.setApiKeyDrafts((current) => ({ ...current, [provider.kind]: event.target.value }))
-                        }
-                      />
-                    </label>
-                    <button
-                      className="save-key-button"
-                      title="Save API key"
-                      disabled={!hasDraftKey}
-                      onClick={() => void props.updateProvider(provider, { apiKey: props.apiKeyDrafts[provider.kind] ?? "" })}
-                    >
-                      <KeyRound size={17} />
-                      Save key
-                    </button>
-                  </div>
-                  {hasDraftKey && <div className="inline-warning">Unsaved API key entered.</div>}
-                  {provider.hasApiKey && (
-                    <button className="secondary-button" onClick={() => void props.updateProvider(provider, { clearApiKey: true })}>
-                      Clear saved key
-                    </button>
-                  )}
-                </>
-              )}
+                </div>
+              );
+            })}
             </div>
-          );
-        })}
-      </div>
-      </section>
+        </section>
+      )}
     </section>
+  );
+}
+
+function ParticipantSettingsSection(props: {
+  settings: AppSettings;
+  agents: AgentHealth[];
+  onSave: (update: ChatParticipantConfigUpdate) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+}): JSX.Element {
+  return (
+    <section className="settings-section">
+      <div className="settings-section-head">
+        <h2>Chat participants</h2>
+        <span>{props.settings.chatParticipantConfigs.length} saved</span>
+      </div>
+      <div className="role-config-list">
+        {props.settings.chatParticipantConfigs.map((participant) => (
+          <ChatParticipantConfigEditor
+            participant={participant}
+            settings={props.settings}
+            agents={props.agents}
+            onSave={props.onSave}
+            onDelete={props.onDelete}
+            key={participant.id}
+          />
+        ))}
+        <ChatParticipantConfigEditor
+          settings={props.settings}
+          agents={props.agents}
+          onSave={props.onSave}
+          onDelete={props.onDelete}
+          key={`new-participant-${props.settings.chatParticipantConfigs.length}`}
+        />
+      </div>
+    </section>
+  );
+}
+
+function ChatParticipantConfigEditor(props: {
+  participant?: ChatParticipantConfig;
+  settings: AppSettings;
+  agents: AgentHealth[];
+  onSave: (update: ChatParticipantConfigUpdate) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+}): JSX.Element {
+  const existingHandles = new Set(
+    props.settings.chatParticipantConfigs
+      .filter((participant) => participant.id !== props.participant?.id)
+      .map((participant) => participant.handle.toLowerCase())
+  );
+  const [draft, setDraft] = useState<ChatParticipantDraft>(
+    props.participant ? chatParticipantConfigToDraft(props.participant) : defaultChatParticipantDraft(props.settings, existingHandles)
+  );
+  const normalized = normalizedChatDrafts([draft])[0];
+  const changed = !props.participant || !sameParticipantDraft(normalized, props.participant);
+  const validation = validateChatParticipantDrafts([normalized], props.settings.chatRoleConfigs, existingHandles) ?? validateChatCliAgents([normalized], props.agents);
+  const canSave = changed && !validation;
+
+  useEffect(() => {
+    setDraft(props.participant ? chatParticipantConfigToDraft(props.participant) : defaultChatParticipantDraft(props.settings, existingHandles));
+  }, [props.participant, props.settings]);
+
+  return (
+    <article className="role-config-card participant-config-card">
+      <div className="settings-item-head">
+        <div>
+          <strong>{props.participant ? `@${props.participant.handle}` : "New participant"}</strong>
+          <small>{props.participant ? chatRoleLabel(props.settings.chatRoleConfigs, props.participant) : "saved chat template"}</small>
+        </div>
+        <div className="settings-item-actions">
+          {props.participant && (
+            <button className="secondary-button" onClick={() => void props.onDelete(props.participant!.id)}>
+              <X size={16} />
+              Delete
+            </button>
+          )}
+          <button
+            className="secondary-button"
+            disabled={!canSave}
+            onClick={() => void props.onSave({ id: props.participant?.id, ...normalized })}
+          >
+            <CheckCircle2 size={16} />
+            Save
+          </button>
+        </div>
+      </div>
+      <ChatParticipantDraftRow draft={draft} settings={props.settings} agents={props.agents} onChange={setDraft} />
+      {validation && <div className="inline-error">{validation}</div>}
+    </article>
   );
 }
 
@@ -1845,7 +2039,7 @@ function ChatSetup(props: {
   title: string;
   repoPath: string;
   repoInfo?: GitRepoInfo;
-  drafts: ChatParticipantDraft[];
+  selectedParticipantIds: Set<string>;
   settings: AppSettings;
   agents: AgentHealth[];
   busy: boolean;
@@ -1853,11 +2047,18 @@ function ChatSetup(props: {
   onRepoPathChange: (value: string) => void;
   onRepoBlur: () => void;
   onSelectRepo: () => void;
-  onDraftsChange: React.Dispatch<React.SetStateAction<ChatParticipantDraft[]>>;
+  onSelectedParticipantIdsChange: React.Dispatch<React.SetStateAction<Set<string>>>;
+  onOpenParticipantsSettings: () => void;
   onStart: () => void;
 }): JSX.Element {
-  const normalizedDrafts = normalizedChatDrafts(props.drafts);
+  const normalizedDrafts = selectedChatParticipantDrafts(props.settings.chatParticipantConfigs, props.selectedParticipantIds);
   const validation = validateChatParticipantDrafts(normalizedDrafts, props.settings.chatRoleConfigs) ?? validateChatCliAgents(normalizedDrafts, props.agents);
+  const allParticipantIds = props.settings.chatParticipantConfigs
+    .filter((participant) => {
+      const draft = chatParticipantConfigToDraft(participant);
+      return !(validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs) ?? validateChatCliAgents([draft], props.agents));
+    })
+    .map((participant) => participant.id);
   return (
     <div className="chat-setup">
       <label className="field">
@@ -1891,30 +2092,58 @@ function ChatSetup(props: {
       <div className="chat-roster-editor">
         <div className="settings-section-head">
           <h2>Participants</h2>
-          <button
-            className="secondary-button"
-            onClick={() =>
-              props.onDraftsChange((current) => [
-                ...current,
-                defaultChatParticipantDraft(props.settings, new Set(current.map((draft) => draft.handle.toLowerCase())))
-              ])
-            }
-          >
-            <Plus size={16} />
-            Add
-          </button>
+          <div className="settings-item-actions">
+            <button className="secondary-button" onClick={() => props.onSelectedParticipantIdsChange(new Set(allParticipantIds))}>
+              <Users size={16} />
+              Select all
+            </button>
+            <button className="secondary-button" onClick={() => props.onSelectedParticipantIdsChange(new Set())}>
+              <X size={16} />
+              Clear
+            </button>
+            <button className="secondary-button" onClick={props.onOpenParticipantsSettings}>
+              <Plus size={16} />
+              New participant
+            </button>
+          </div>
         </div>
-        {props.drafts.map((draft, index) => (
-          <ChatParticipantDraftRow
-            draft={draft}
-            settings={props.settings}
-            agents={props.agents}
-            removable={props.drafts.length > 1}
-            onChange={(next) => props.onDraftsChange((current) => current.map((item, itemIndex) => itemIndex === index ? next : item))}
-            onRemove={() => props.onDraftsChange((current) => current.filter((_, itemIndex) => itemIndex !== index))}
-            key={index}
-          />
-        ))}
+        {props.settings.chatParticipantConfigs.length === 0 ? (
+          <div className="empty-state">
+            No saved participants yet. Create participants in Settings, then select them here for each chat.
+          </div>
+        ) : (
+          <div className="chat-participant-select-list">
+            {props.settings.chatParticipantConfigs.map((participant) => {
+              const draft = chatParticipantConfigToDraft(participant);
+              const invalidReason = validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs) ?? validateChatCliAgents([draft], props.agents);
+              const selected = props.selectedParticipantIds.has(participant.id);
+              return (
+                <label className={`saved-participant-option ${selected ? "selected" : ""} ${invalidReason ? "disabled" : ""}`} key={participant.id}>
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    disabled={Boolean(invalidReason)}
+                    onChange={(event) => {
+                      props.onSelectedParticipantIdsChange((current) => {
+                        const next = new Set(current);
+                        if (event.target.checked) {
+                          next.add(participant.id);
+                        } else {
+                          next.delete(participant.id);
+                        }
+                        return next;
+                      });
+                    }}
+                  />
+                  <Avatar className="mini-avatar" spec={avatarForParticipant(`@${participant.handle}`, participant.id)} />
+                  <strong>@{participant.handle}</strong>
+                  <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)} · {labelForProviderKind(props.settings.providers, participant.kind)}</span>
+                  {invalidReason && <small>{invalidReason}</small>}
+                </label>
+              );
+            })}
+          </div>
+        )}
       </div>
       {validation && <div className="inline-error">{validation}</div>}
       <button className="run-button" disabled={props.busy || Boolean(validation)} onClick={props.onStart}>
@@ -2010,7 +2239,13 @@ function ChatConversationView(props: {
   const participants = chatParticipants(props.conversation);
   const [mentionQuery, setMentionQuery] = useState<string | undefined>();
   const [mentionIndex, setMentionIndex] = useState(0);
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const timelineBottomRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+  const forceStickToBottomRef = useRef(false);
+  const previousMessageCountRef = useRef(props.conversation.messages.length);
   const latestProgress = props.progress[props.progress.length - 1];
+  const latestMessage = props.conversation.messages[props.conversation.messages.length - 1];
   const addDraft = normalizedChatDrafts([props.addParticipantDraft]);
   const addValidation = validateChatParticipantDrafts(
     addDraft,
@@ -2036,135 +2271,193 @@ function ChatConversationView(props: {
     setMentionIndex(0);
   }
 
+  function updateStickToBottom(): void {
+    const timeline = timelineRef.current;
+    if (!timeline) {
+      return;
+    }
+    stickToBottomRef.current = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 96;
+  }
+
+  function sendDraft(): void {
+    forceStickToBottomRef.current = true;
+    props.onSend();
+  }
+
+  useLayoutEffect(() => {
+    const timeline = timelineRef.current;
+    const messageCountChanged = previousMessageCountRef.current !== props.conversation.messages.length;
+    previousMessageCountRef.current = props.conversation.messages.length;
+    const shouldFollowBottom = stickToBottomRef.current || forceStickToBottomRef.current || messageCountChanged;
+    if (!timeline || !shouldFollowBottom) {
+      return;
+    }
+    const scrollToBottom = (): void => {
+      timeline.scrollTo({ top: timeline.scrollHeight });
+      timelineBottomRef.current?.scrollIntoView({ block: "end" });
+      stickToBottomRef.current = true;
+      if (messageCountChanged) {
+        forceStickToBottomRef.current = false;
+      }
+    };
+    scrollToBottom();
+    window.requestAnimationFrame(scrollToBottom);
+    window.setTimeout(scrollToBottom, 50);
+  }, [
+    props.conversation.messages.length,
+    latestMessage?.content,
+    latestMessage?.status,
+    latestProgress?.message,
+    props.draft,
+    props.replyTarget?.parentMessageId,
+    props.isRunning
+  ]);
+
+  useLayoutEffect(() => {
+    const timeline = timelineRef.current;
+    if (!timeline) {
+      return;
+    }
+    const scrollToBottom = (): void => {
+      timeline.scrollTo({ top: timeline.scrollHeight });
+      timelineBottomRef.current?.scrollIntoView({ block: "end" });
+      stickToBottomRef.current = true;
+    };
+    window.requestAnimationFrame(scrollToBottom);
+    window.setTimeout(scrollToBottom, 50);
+  }, [props.conversation.messages.length]);
+
   return (
     <div className="chat-view">
-      <section className="chat-main">
-        <header className="chat-header">
-          <div className="chat-title-block">
-            <h2>{props.conversation.title}</h2>
-            <span>{props.isRunning ? latestProgress?.message ?? "Running" : props.conversation.repoPath ? "Repo context" : "No repo"}</span>
-          </div>
-          <div className="chat-header-actions">
-            <details className="chat-participant-menu">
-              <summary>
-                <Users size={17} />
-                {participants.length}
-              </summary>
-              <div className="chat-participant-popover">
-                <div className="chat-participant-menu-list">
-                  {participants.map((participant) => (
-                    <button
-                      onClick={() => props.onDraftChange(`${props.draft}${props.draft.endsWith(" ") || !props.draft ? "" : " "}@${participant.handle} `)}
-                      key={participant.id}
-                    >
-                      <Avatar className="mini-avatar" spec={avatarForParticipant(`@${participant.handle}`, participant.id)} />
-                      <strong>@{participant.handle}</strong>
-                      <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)}</span>
-                    </button>
-                  ))}
-                </div>
-                <div className="chat-menu-divider" />
-                <ChatParticipantDraftRow
-                  draft={props.addParticipantDraft}
-                  settings={props.settings}
-                  agents={props.agents}
-                  onChange={props.onAddParticipantDraftChange}
-                />
-                {addValidation && <div className="inline-error">{addValidation}</div>}
-                <button className="secondary-button" disabled={Boolean(addValidation) || props.isRunning} onClick={props.onAddParticipant}>
-                  <Plus size={16} />
-                  Add participant
-                </button>
-              </div>
-            </details>
-          </div>
-        </header>
-        <div className="chat-timeline">
-          {props.conversation.messages.map((message) => (
-            <ChatTimelineMessage
-              message={message}
-              busy={props.isRunning}
-              onReply={() => props.onReplyTargetChange({ threadId: message.metadata?.threadId ?? message.id, parentMessageId: message.id })}
-              onApproveMentions={props.onApproveMentions}
-              onRejectMentions={props.onRejectMentions}
-              key={message.id}
-            />
-          ))}
-          {props.isRunning && latestProgress && <RunStatusLine progress={latestProgress} showPhase={false} />}
+      <header className="chat-header">
+        <div className="chat-title-block">
+          <h2>{props.conversation.title}</h2>
+          <span>{props.isRunning ? latestProgress?.message ?? "Running" : props.conversation.repoPath ? "Repo context" : "No repo"}</span>
         </div>
-        <div className="chat-composer">
-          {props.replyTarget && (
-            <div className="reply-target">
-              Replying in thread
-              <button className="icon-button" title="Cancel reply" onClick={() => props.onReplyTargetChange(undefined)}>
-                <X size={15} />
-              </button>
-            </div>
-          )}
-          <div className="chat-input-wrap">
-            {mentionOptions.length > 0 && (
-              <div className="mention-menu" role="listbox">
-                {mentionOptions.map((participant, index) => (
+        <div className="chat-header-actions">
+          <details className="chat-participant-menu">
+            <summary>
+              <Users size={17} />
+              {participants.length}
+            </summary>
+            <div className="chat-participant-popover">
+              <div className="chat-participant-menu-list">
+                {participants.map((participant) => (
                   <button
-                    className={index === mentionIndex ? "selected" : ""}
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      insertMention(participant);
-                    }}
-                    role="option"
-                    aria-selected={index === mentionIndex}
+                    onClick={() => props.onDraftChange(`${props.draft}${props.draft.endsWith(" ") || !props.draft ? "" : " "}@${participant.handle} `)}
                     key={participant.id}
                   >
                     <Avatar className="mini-avatar" spec={avatarForParticipant(`@${participant.handle}`, participant.id)} />
                     <strong>@{participant.handle}</strong>
                     <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)}</span>
-                    {index === 0 && <kbd>Enter</kbd>}
                   </button>
                 ))}
               </div>
-            )}
-            <AutoResizeTextarea
-              value={props.draft}
-              onChange={(event) => updateDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (mentionOptions.length > 0 && event.key === "ArrowDown") {
-                  event.preventDefault();
-                  setMentionIndex((current) => (current + 1) % mentionOptions.length);
-                  return;
-                }
-                if (mentionOptions.length > 0 && event.key === "ArrowUp") {
-                  event.preventDefault();
-                  setMentionIndex((current) => (current - 1 + mentionOptions.length) % mentionOptions.length);
-                  return;
-                }
-                if (mentionOptions.length > 0 && (event.key === "Enter" || event.key === "Tab")) {
-                  event.preventDefault();
-                  insertMention(mentionOptions[mentionIndex] ?? mentionOptions[0]);
-                  return;
-                }
-                if (event.key === "Escape") {
-                  setMentionQuery(undefined);
-                  return;
-                }
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  if (canSend) {
-                    props.onSend();
-                  }
-                }
-              }}
-              onBlur={() => window.setTimeout(() => setMentionQuery(undefined), 120)}
-              rows={3}
-              maxHeight={260}
-              placeholder="Mention participants with @name"
-              disabled={props.isRunning}
-            />
-          </div>
-          <button className="plan-correction-send" title="Send" disabled={!canSend} onClick={props.onSend}>
-            {props.isRunning ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
-          </button>
+              <div className="chat-menu-divider" />
+              <ChatParticipantDraftRow
+                draft={props.addParticipantDraft}
+                settings={props.settings}
+                agents={props.agents}
+                onChange={props.onAddParticipantDraftChange}
+              />
+              {addValidation && <div className="inline-error">{addValidation}</div>}
+              <button className="secondary-button" disabled={Boolean(addValidation) || props.isRunning} onClick={props.onAddParticipant}>
+                <Plus size={16} />
+                Add participant
+              </button>
+            </div>
+          </details>
         </div>
-      </section>
+      </header>
+      <div className="chat-timeline" ref={timelineRef} onScroll={updateStickToBottom}>
+        {props.conversation.messages.map((message) => (
+          <ChatTimelineMessage
+            message={message}
+            busy={props.isRunning}
+            onReply={() => props.onReplyTargetChange({ threadId: message.metadata?.threadId ?? message.id, parentMessageId: message.id })}
+            onApproveMentions={props.onApproveMentions}
+            onRejectMentions={props.onRejectMentions}
+            key={message.id}
+          />
+        ))}
+        <div className="chat-timeline-bottom" ref={timelineBottomRef} />
+      </div>
+      <div className="chat-composer">
+        {props.isRunning && latestProgress && (
+          <div className="chat-composer-status">
+            <RunStatusLine progress={latestProgress} />
+          </div>
+        )}
+        {props.replyTarget && (
+          <div className="reply-target">
+            Replying in thread
+            <button className="icon-button" title="Cancel reply" onClick={() => props.onReplyTargetChange(undefined)}>
+              <X size={15} />
+            </button>
+          </div>
+        )}
+        <div className="chat-input-wrap">
+          {mentionOptions.length > 0 && (
+            <div className="mention-menu" role="listbox">
+              {mentionOptions.map((participant, index) => (
+                <button
+                  className={index === mentionIndex ? "selected" : ""}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    insertMention(participant);
+                  }}
+                  role="option"
+                  aria-selected={index === mentionIndex}
+                  key={participant.id}
+                >
+                  <Avatar className="mini-avatar" spec={avatarForParticipant(`@${participant.handle}`, participant.id)} />
+                  <strong>@{participant.handle}</strong>
+                  <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)}</span>
+                  {index === 0 && <kbd>Enter</kbd>}
+                </button>
+              ))}
+            </div>
+          )}
+          <AutoResizeTextarea
+            value={props.draft}
+            onChange={(event) => updateDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (mentionOptions.length > 0 && event.key === "ArrowDown") {
+                event.preventDefault();
+                setMentionIndex((current) => (current + 1) % mentionOptions.length);
+                return;
+              }
+              if (mentionOptions.length > 0 && event.key === "ArrowUp") {
+                event.preventDefault();
+                setMentionIndex((current) => (current - 1 + mentionOptions.length) % mentionOptions.length);
+                return;
+              }
+              if (mentionOptions.length > 0 && (event.key === "Enter" || event.key === "Tab")) {
+                event.preventDefault();
+                insertMention(mentionOptions[mentionIndex] ?? mentionOptions[0]);
+                return;
+              }
+              if (event.key === "Escape") {
+                setMentionQuery(undefined);
+                return;
+              }
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                if (canSend) {
+                  sendDraft();
+                }
+              }
+            }}
+            onBlur={() => window.setTimeout(() => setMentionQuery(undefined), 120)}
+            rows={3}
+            maxHeight={260}
+            placeholder="Mention participants with @name"
+          />
+        </div>
+        <button className="plan-correction-send" title="Send" disabled={!canSend} onClick={sendDraft}>
+          {props.isRunning ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
+        </button>
+      </div>
     </div>
   );
 }
@@ -4051,6 +4344,32 @@ function defaultChatParticipantDraft(settings: AppSettings, existingHandles: Set
   };
 }
 
+function chatParticipantConfigToDraft(participant: ChatParticipantConfig): ChatParticipantDraft {
+  return {
+    handle: participant.handle,
+    roleConfigId: participant.roleConfigId,
+    kind: participant.kind,
+    model: participant.model
+  };
+}
+
+function selectedChatParticipantDrafts(participants: ChatParticipantConfig[], selectedIds: Set<string>): ChatParticipantDraft[] {
+  return participants.filter((participant) => selectedIds.has(participant.id)).map(chatParticipantConfigToDraft);
+}
+
+function sameParticipantDraft(draft: ChatParticipantDraft, participant: ChatParticipantConfig): boolean {
+  return (
+    draft.handle === participant.handle &&
+    draft.roleConfigId === participant.roleConfigId &&
+    draft.kind === participant.kind &&
+    (draft.model ?? "") === (participant.model ?? "")
+  );
+}
+
+function labelForProviderKind(providers: ProviderSettings[], kind: ProviderKind): string {
+  return providers.find((provider) => provider.kind === kind)?.label ?? kind;
+}
+
 function normalizeChatParticipantDraftForSettings(draft: ChatParticipantDraft, settings: AppSettings): ChatParticipantDraft {
   const fallback = defaultChatParticipantDraft(settings);
   const roleConfigId = settings.chatRoleConfigs.some((role) => role.id === draft.roleConfigId)
@@ -4191,7 +4510,7 @@ function chatParticipants(conversation: Conversation | undefined): ChatParticipa
   });
 }
 
-function chatRoleLabel(roles: ChatRoleConfig[], participant: ChatParticipant): string {
+function chatRoleLabel(roles: ChatRoleConfig[], participant: Pick<ChatParticipant, "roleConfigId">): string {
   return roles.find((role) => role.id === participant.roleConfigId)?.label ?? participant.roleConfigId;
 }
 
@@ -4570,6 +4889,197 @@ function healthLine(health: AgentHealth | undefined): string {
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+function installDevMockBridge(): void {
+  if (!import.meta.env.DEV || window.consensus || new URLSearchParams(window.location.search).get("mock") !== "chat-layout") {
+    return;
+  }
+
+  const createdAt = new Date().toISOString();
+  const longResponse = [
+    "The deploy noise is consistent with the producer being initialized on first real TSCE traffic rather than during application startup.",
+    "",
+    "## Proposed Plan",
+    "",
+    "1. Add a startup warm-up path that initializes the Kafka producer before traffic is admitted.",
+    "2. Run the warm-up from the application runner so it executes before readiness is advertised.",
+    "3. Keep the direct TSCE gRPC fallback and failed-record persistence behavior unchanged.",
+    "4. Add clear logging around warm-up success, timeout, and fallback activation.",
+    "",
+    "## Verification",
+    "",
+    ...Array.from({ length: 28 }, (_, index) =>
+      `- Verification detail ${index + 1}: this line exists to keep the final chat message tall enough to require timeline scrolling while the composer remains visible at the bottom.`
+    ),
+    "",
+    "The important UI condition is that this final paragraph remains fully reachable above the composer when the timeline is scrolled to the bottom."
+  ].join("\n");
+  const settings: AppSettings = {
+    roundLimitDefault: 2,
+    providers: [
+      { kind: "codex-cli", label: "Codex CLI", enabled: true, model: "gpt-5.5" },
+      { kind: "claude-code", label: "Claude Code", enabled: true, model: "sonnet" }
+    ],
+    chatRoleConfigs: [
+      {
+        id: "engineer",
+        label: "Engineer",
+        instructions: "Evaluate the request and propose concrete implementation steps.",
+        version: 1,
+        builtIn: true,
+        updatedAt: createdAt
+      }
+    ],
+    chatParticipantConfigs: [
+      {
+        id: "mock-codex-engineer",
+        handle: "drew-codex-engineer",
+        roleConfigId: "engineer",
+        kind: "codex-cli",
+        model: "gpt-5.5",
+        updatedAt: createdAt
+      },
+      {
+        id: "mock-claude-engineer",
+        handle: "taylor-claude-engineer",
+        roleConfigId: "engineer",
+        kind: "claude-code",
+        model: "sonnet",
+        updatedAt: createdAt
+      }
+    ]
+  };
+  let sequence = 0;
+  const nextId = (prefix: string): string => `${prefix}-${++sequence}`;
+  let conversation: Conversation = {
+    id: "mock-chat-layout",
+    title: "Chat Layout Fixture",
+    kind: "chat",
+    repoPath: "/tmp/mock-repo",
+    createdAt,
+    updatedAt: createdAt,
+    findings: [],
+    metadata: {
+      participants: [
+        {
+          id: "mock-user",
+          handle: "user",
+          roleConfigId: "engineer",
+          kind: "codex-cli"
+        },
+        {
+          id: "mock-codex-engineer",
+          handle: "drew-codex-engineer",
+          roleConfigId: "engineer",
+          kind: "codex-cli",
+          model: "gpt-5.5"
+        },
+        {
+          id: "mock-claude-engineer",
+          handle: "taylor-claude-engineer",
+          roleConfigId: "engineer",
+          kind: "claude-code",
+          model: "sonnet"
+        }
+      ]
+    },
+    messages: [
+      {
+        id: "mock-start",
+        role: "system",
+        content: "Chat started.\\nParticipants:\\n\\n- User\\n- @drew-codex-engineer\\n- @taylor-claude-engineer",
+        createdAt
+      },
+      {
+        id: "mock-user-prompt",
+        role: "user",
+        content:
+          "In the deploy logs from May 7, 2026, Viper starts successfully, then the first TSCE sends happen soon after traffic begins. @drew-codex-engineer @taylor-claude-engineer create plan how to fix",
+        createdAt
+      },
+      {
+        id: "mock-long-response",
+        role: "participant",
+        participantId: "mock-codex-engineer",
+        participantLabel: "@drew-codex-engineer",
+        content: longResponse,
+        createdAt,
+        status: "done"
+      }
+    ]
+  };
+  const conversationListeners = new Set<(updated: Conversation) => void>();
+  const emitConversation = (): void => {
+    const updated = { ...conversation, messages: [...conversation.messages], updatedAt: new Date().toISOString() };
+    conversation = updated;
+    conversationListeners.forEach((callback) => callback(updated));
+  };
+  const bridge: AppBridge = {
+    getSettings: async () => settings,
+    updateProviderSettings: async () => settings,
+    saveChatRoleConfig: async () => settings,
+    saveChatParticipantConfig: async () => settings,
+    deleteChatParticipantConfig: async () => settings,
+    updateLastRepoPath: async (repoPath) => ({ ...settings, lastRepoPath: repoPath }),
+    listProviderModels: async () => [],
+    detectAgents: async () => [
+      { kind: "codex-cli", label: "Codex CLI", installed: true, version: "mock" },
+      { kind: "claude-code", label: "Claude Code", installed: true, version: "mock" }
+    ],
+    selectRepoDirectory: async () => undefined,
+    inspectRepo: async (repoPath) => ({ repoPath, isRepo: true, currentBranch: "mock", branches: ["mock"], statusLines: [] }),
+    getDiff: async () => ({ mode: "working", title: "Mock diff", diff: "", metadata: {} }),
+    listConversations: async () => [conversation],
+    getConversation: async (id) => id === conversation.id ? conversation : undefined,
+    saveDecisionSelections: async () => conversation,
+    saveDecisionResolutions: async () => conversation,
+    savePlanItemReview: async () => conversation,
+    createChatConversation: async () => ({ conversation, warnings: [] }),
+    addChatParticipant: async () => {
+      emitConversation();
+      return conversation;
+    },
+    sendChatMessage: async (request) => {
+      const now = new Date().toISOString();
+      conversation = {
+        ...conversation,
+        updatedAt: now,
+        messages: [
+          ...conversation.messages,
+          { id: nextId("mock-user"), role: "user", content: request.content, createdAt: now },
+          {
+            id: nextId("mock-response"),
+            role: "participant",
+            participantId: "mock-claude-engineer",
+            participantLabel: "@taylor-claude-engineer",
+            content: longResponse,
+            createdAt: now,
+            status: "done"
+          }
+        ]
+      };
+      emitConversation();
+      return { conversation, warnings: [] };
+    },
+    respondToChatMentions: async () => ({ conversation, warnings: [] }),
+    startReview: async () => ({ conversation, warnings: [] }),
+    continueReview: async () => ({ conversation, warnings: [] }),
+    askPlanDecisionClarification: async () => ({ conversation, warnings: [] }),
+    composeImplementationPlan: async () => ({ conversation, warnings: [] }),
+    retryImplementationPlanSynthesis: async () => ({ conversation, warnings: [] }),
+    recoverImplementationPlan: async () => ({ conversation, warnings: [] }),
+    reviseImplementationPlan: async () => ({ conversation, warnings: [] }),
+    cancelReview: async () => undefined,
+    onReviewProgress: () => () => undefined,
+    onConversationUpdated: (callback) => {
+      conversationListeners.add(callback);
+      return () => conversationListeners.delete(callback);
+    }
+  };
+  window.consensus = bridge;
+}
+
+installDevMockBridge();
 
 createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

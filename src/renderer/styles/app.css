@@ -16,12 +16,12 @@ html,
 body,
 #root {
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 body {
   margin: 0;
-  min-width: 1080px;
-  min-height: 720px;
   background: #f5f2ec;
 }
 
@@ -39,7 +39,8 @@ button {
 .app-shell {
   display: grid;
   grid-template-columns: 280px 1fr;
-  height: 100vh;
+  height: 100%;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -150,6 +151,7 @@ button {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -201,6 +203,43 @@ button {
   color: #fffaf2;
 }
 
+.settings-menu-wrap {
+  position: relative;
+}
+
+.settings-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 10;
+  display: grid;
+  min-width: 190px;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid #d7cfc1;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 14px 34px rgba(32, 32, 29, 0.18);
+}
+
+.settings-menu button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 38px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: transparent;
+  color: #20201d;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-menu button:hover {
+  background: #f1ece4;
+}
+
 .tool-button:disabled,
 .save-key-button:disabled {
   opacity: 0.48;
@@ -226,7 +265,7 @@ button {
 }
 
 .content-area {
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
 }
 
@@ -237,6 +276,7 @@ button {
 
 .result-layout {
   display: flex;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -248,9 +288,13 @@ button {
 }
 
 .conversation-panel {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
+  overflow: auto;
+}
+
+.chat-conversation-panel {
   overflow: hidden;
 }
 
@@ -939,13 +983,75 @@ button {
   align-self: end;
 }
 
-.chat-view {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  max-height: 100%;
-  min-height: 0;
+.participant-config-card .chat-participant-row {
+  margin-top: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.chat-participant-select-list {
+  display: grid;
+  gap: 8px;
+}
+
+.saved-participant-option {
+  display: grid;
+  grid-template-columns: 18px 28px minmax(120px, max-content) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 10px 12px;
+  border: 1px solid #ded8cc;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #20201d;
+  cursor: pointer;
+}
+
+.saved-participant-option.selected {
+  border-color: #3d7d68;
+  background: #edf7f2;
+}
+
+.saved-participant-option.disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+}
+
+.saved-participant-option input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.saved-participant-option strong,
+.saved-participant-option span,
+.saved-participant-option small {
+  min-width: 0;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-participant-option span,
+.saved-participant-option small {
+  color: #6a655e;
+  font-size: 12px;
+}
+
+.saved-participant-option small {
+  grid-column: 4;
+}
+
+.chat-view {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+  height: 100%;
+  max-height: none;
+  overflow: hidden;
+  padding: 0;
   background: #ffffff;
 }
 
@@ -956,17 +1062,6 @@ button {
   font-size: 10px;
 }
 
-.chat-main {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  min-width: 0;
-  max-height: 100%;
-  min-height: 0;
-  overflow: hidden;
-  padding: 24px;
-}
-
 .chat-header {
   position: relative;
   display: flex;
@@ -974,7 +1069,7 @@ button {
   align-items: start;
   justify-content: space-between;
   gap: 16px;
-  padding-bottom: 12px;
+  padding: 24px 24px 12px;
   border-bottom: 1px solid #ded8cc;
 }
 
@@ -1098,11 +1193,15 @@ button {
 }
 
 .chat-timeline {
-  flex: 1 1 0;
   min-height: 0;
   overflow: auto;
-  padding: 18px 8px 18px 0;
+  overflow-anchor: none;
+  padding: 18px 32px 24px 24px;
   background: #ffffff;
+}
+
+.chat-timeline-bottom {
+  height: 1px;
 }
 
 .chat-message {
@@ -1111,6 +1210,12 @@ button {
 
 .chat-message .message-body {
   background: #ffffff;
+  overflow: visible;
+}
+
+.chat-message .message-content {
+  max-height: none !important;
+  overflow: visible !important;
 }
 
 .chat-approval-box {
@@ -1152,16 +1257,20 @@ button {
 
 .chat-composer {
   display: grid;
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
-  flex: 0 0 auto;
+  position: relative;
+  z-index: 20;
   grid-template-columns: minmax(0, 1fr) 42px;
   align-items: end;
   gap: 10px;
-  padding-top: 12px;
+  padding: 12px 24px 24px;
   border-top: 1px solid #ded8cc;
   background: #ffffff;
+  box-shadow: 0 -10px 24px rgba(31, 35, 48, 0.08);
+}
+
+.chat-composer-status {
+  grid-column: 1 / -1;
+  min-height: 28px;
 }
 
 .chat-input-wrap {
@@ -2191,6 +2300,15 @@ button {
   display: flex;
   flex-direction: column;
   gap: 3px;
+}
+
+.settings-item-head .settings-item-actions,
+.settings-item-actions {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .settings-item-head small {
