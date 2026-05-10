@@ -9,6 +9,7 @@ import type {
   ChatParticipantSession,
   ChatPendingMention,
   ChatProviderKind,
+  ChatRoleRuntime,
   ChatRoleConfig,
   Conversation,
   CreateChatConversationRequest,
@@ -19,14 +20,16 @@ import type {
   StartReviewResult
 } from "../../shared/types";
 import { CliAgentRunner } from "./cliAgents";
+import type { CliAgentRoleOptions } from "./cliAgents";
 import { DebugLogService } from "./debugLogs";
+import type { ParticipantRunResult } from "./providers";
 import { SettingsService } from "./settings";
 import { StorageService } from "./storage";
 
 type ProgressCallback = (progress: ReviewProgress) => void;
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const MAX_PROMPT_DELTA_MESSAGES = 80;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 3;
 
 export class ChatService {
   private readonly saveQueues = new Map<string, Promise<void>>();
@@ -95,10 +98,12 @@ export class ChatService {
     if (!content) {
       throw new Error("Message is required.");
     }
+    const chatThreadRootId = request.chatThreadRootId?.trim() || undefined;
     const threadId = request.threadId?.trim() || randomUUID();
     const userMessage = this.message("user", content, undefined, {
       threadId,
-      parentMessageId: request.parentMessageId
+      parentMessageId: request.parentMessageId,
+      chatThreadRootId
     });
     if (!request.threadId?.trim()) {
       userMessage.metadata = { ...userMessage.metadata, threadId: userMessage.id };
@@ -112,7 +117,11 @@ export class ChatService {
     for (const unknown of dispatch.unknownHandles) {
       const warning = `No participant named @${unknown}.`;
       warnings.push(warning);
-      conversation.messages.push(this.message("system", warning, undefined, { threadId: userMessage.metadata?.threadId ?? threadId, parentMessageId: userMessage.id }));
+      conversation.messages.push(this.message("system", warning, undefined, {
+        threadId: userMessage.metadata?.threadId ?? threadId,
+        parentMessageId: userMessage.id,
+        chatThreadRootId
+      }));
     }
     if (dispatch.targets.length === 0) {
       conversation.metadata = { ...conversation.metadata, running: false };
@@ -146,7 +155,8 @@ export class ChatService {
     const pendingMentions = sourceMessage.metadata?.pendingMentions ?? [];
     const requestedIds = new Set(request.targetParticipantIds);
     const selectedMentions = pendingMentions.filter((mention) => requestedIds.has(mention.targetParticipantId));
-    if (selectedMentions.length === 0 && request.approve) {
+    const continuationOnly = request.approve && request.continueRequester && selectedMentions.length === 0 && Boolean(sourceMessage.participantId);
+    if (selectedMentions.length === 0 && request.approve && !continuationOnly) {
       throw new Error("Select at least one pending mention.");
     }
 
@@ -157,7 +167,9 @@ export class ChatService {
       return { conversation, warnings };
     }
 
-    this.updatePendingMentionStatus(sourceMessage, requestedIds, "approved");
+    if (selectedMentions.length > 0) {
+      this.updatePendingMentionStatus(sourceMessage, requestedIds, "approved");
+    }
     conversation.metadata = { ...conversation.metadata, running: true, runId };
     conversation.updatedAt = new Date().toISOString();
     this.queueSnapshot(conversation);
@@ -166,11 +178,13 @@ export class ChatService {
     const targets = selectedMentions
       .map((mention) => participants.find((participant) => participant.id === mention.targetParticipantId))
       .filter((participant): participant is ChatParticipant => Boolean(participant));
-    this.emitProgress(runId, progress, "initial", `Running ${targets.length} approved mention${targets.length === 1 ? "" : "s"}.`, {
-      total: targets.length,
-      completed: 0
-    });
-    await this.runParticipantBatch(conversation, targets, sourceMessage, runId, signal, progress, warnings);
+    if (targets.length > 0) {
+      this.emitProgress(runId, progress, "initial", `Running ${targets.length} approved mention${targets.length === 1 ? "" : "s"}.`, {
+        total: targets.length,
+        completed: 0
+      });
+      await this.runParticipantBatch(conversation, targets, sourceMessage, runId, signal, progress, warnings);
+    }
 
     if (request.continueRequester && sourceMessage.participantId) {
       const requester = participants.find((participant) => participant.id === sourceMessage.participantId);
@@ -178,10 +192,14 @@ export class ChatService {
         this.emitProgress(runId, progress, "debate", `Returning to @${requester.handle}.`, {
           participantLabel: `@${requester.handle}`
         });
-        await this.runParticipantTurn(conversation, requester, sourceMessage, runId, signal, progress, {
+        const messages = await this.runParticipantTurn(conversation, requester, sourceMessage, runId, signal, progress, {
           continuation: true,
           warnings
         });
+        conversation.messages.push(...messages);
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+        await this.ensureHistoryFiles(conversation);
       }
     }
 
@@ -230,6 +248,7 @@ export class ChatService {
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
     }
+    await this.ensureHistoryFiles(conversation);
   }
 
   private async runParticipantTurn(
@@ -241,10 +260,23 @@ export class ChatService {
     progress: ProgressCallback | undefined,
     options: { continuation?: boolean; warnings: string[]; promptConversation?: Conversation; workspacePath?: string }
   ): Promise<ChatMessage[]> {
-    const session = await this.sessionForParticipant(conversation, participant);
+    let session = await this.sessionForParticipant(conversation, participant);
     const promptConversation = options.promptConversation ?? conversation;
     const workspacePath = options.workspacePath ?? await this.ensureHistoryFiles(promptConversation);
-    const prompt = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation));
+    const isResumingSession = Boolean(session.sessionId);
+    const usePromptRole = session.roleRuntime === "prompt-fallback";
+    const prompt = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+      includeRoleInstructions: usePromptRole && !isResumingSession
+    });
+    const promptFallbackPrompt = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+      includeRoleInstructions: true
+    });
+    const resumeFallbackPrompt = isResumingSession
+      ? this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+          includeRoleInstructions: usePromptRole
+        })
+      : undefined;
+    const role = usePromptRole ? undefined : this.cliRoleOptions(participant, session, promptFallbackPrompt);
     const runPath = conversation.repoPath || workspacePath;
     const cliParticipant: ParticipantConfig = {
       id: participant.id,
@@ -255,10 +287,47 @@ export class ChatService {
     this.emitProgress(runId, progress, "debate", `@${participant.handle} is responding.`, {
       participantLabel: `@${participant.handle}`
     });
-    const result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
+    let result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
       persistSession: true,
-      sessionId: session.sessionId
+      sessionId: session.sessionId,
+      extraReadableDirs: [workspacePath],
+      resumeFallbackPrompt,
+      role
     });
+    this.applyCliRunMetadata(session, result, options.warnings);
+    const guardViolation = result.ok ? this.chatResponseGuardViolation(result.content, triggerMessage) : undefined;
+    if (guardViolation) {
+      options.warnings.push(`@${participant.handle}: rejected response that mentioned ${guardViolation}; restarted the chat session and retried.`);
+      session = await this.newSessionForParticipant(participant);
+      const retryUsesPromptRole = session.roleRuntime === "prompt-fallback";
+      const retryPromptBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+        includeRoleInstructions: retryUsesPromptRole
+      });
+      const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+        includeRoleInstructions: true
+      });
+      const retryPrompt = this.chatGuardRetryPrompt(retryPromptBase, guardViolation);
+      const retryRole = retryUsesPromptRole
+        ? undefined
+        : this.cliRoleOptions(participant, session, this.chatGuardRetryPrompt(retryPromptFallbackBase, guardViolation));
+      result = await this.cliRunner.run(cliParticipant, retryPrompt, runPath, undefined, "chat", signal, {
+        persistSession: true,
+        extraReadableDirs: [workspacePath],
+        role: retryRole
+      });
+      this.applyCliRunMetadata(session, result, options.warnings);
+      const retryViolation = result.ok ? this.chatResponseGuardViolation(result.content, triggerMessage) : undefined;
+      if (retryViolation) {
+        const error = `Blocked chat response because it mentioned ${retryViolation}.`;
+        options.warnings.push(`@${participant.handle}: ${error}`);
+        result = {
+          ...result,
+          ok: false,
+          content: `@${participant.handle} response was blocked because it discussed internal CLI mechanics instead of answering in chat.`,
+          error
+        };
+      }
+    }
     const now = new Date().toISOString();
     session.updatedAt = now;
     if (result.sessionId) {
@@ -271,6 +340,7 @@ export class ChatService {
       {
         threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
         parentMessageId: triggerMessage.id,
+        chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
         sourceMessageId: triggerMessage.id,
         requesterParticipantId: options.continuation ? triggerMessage.participantId : undefined,
         approvedContinuation: options.continuation || undefined
@@ -289,8 +359,8 @@ export class ChatService {
           pendingMentions
         };
       }
+      session.lastSyncedMessageId = participantMessage.id;
     }
-    session.lastSyncedMessageId = participantMessage.id;
     this.upsertSession(conversation, session);
     this.lockParticipantRoleVersion(conversation, participant, session.roleConfigVersion);
     return [participantMessage];
@@ -302,54 +372,157 @@ export class ChatService {
     session: ChatParticipantSession,
     triggerMessage: ChatMessage,
     workspacePath: string,
-    continuation: boolean
+    continuation: boolean,
+    options: { includeRoleInstructions: boolean }
   ): string {
     const participants = this.chatParticipants(conversation);
-    const deltaMessages = this.messagesSince(conversation, session.lastSyncedMessageId);
-    const threadMessages = conversation.messages.filter((message) => message.metadata?.threadId === (triggerMessage.metadata?.threadId ?? triggerMessage.id));
+    const historyMarkdownPath = path.join(workspacePath, "history.md");
+    const historyJsonPath = path.join(workspacePath, "history.json");
     const sections = [
       [
         `You are @${participant.handle}. Continue the same chat session.`,
         `Role: ${session.roleLabel}.`,
-        "Role instructions:",
-        session.roleInstructions,
+        options.includeRoleInstructions
+          ? ["Role instructions:", session.roleInstructions].join("\n")
+          : "Use your configured role instructions for this participant.",
         conversation.repoPath ? `Repository: ${conversation.repoPath} (read-only).` : "Repository: none selected.",
-        `Internal chat history file: ${path.join(workspacePath, "history.md")}.`,
+        `Readable chat history Markdown: ${historyMarkdownPath}.`,
+        `Readable chat history JSON: ${historyJsonPath}.`,
+        "Read the history files when you need prior conversation context. Do not ask User to grant access to these app-managed history files.",
         "Participants:",
         "- User: human conversation owner, requirements authority, and clarification source. User messages appear as `User` in the transcript.",
         ...participants.map((item) => {
           const role = this.roleLabelForParticipant(conversation, item);
           return `- @${item.handle}: ${role} agent`;
         }),
-        "Mention policy: you may mention another agent when you need independent technical analysis, review, or source comparison, but mentioned agents will not run until the user approves the mention.",
+        "Mention policy: you may cite participant handles in normal prose for attribution; those citations do not request dispatch. To ask another participant to respond, include a dedicated `Participant requests:` block with one bullet per requested participant. Use `Participant requests: none` when you cite or identify participants but do not need follow-up. Mentioned agents will not run until User approves the requests.",
         "Clarification policy: if you need clarification about goals, requirements, preferences, acceptance criteria, or user intent, ask User directly in your reply. Do not mention another agent for user-owned clarification.",
-        "Thread policy: answer in the active thread. Do not assume a mentioned participant has answered until their reply appears in the transcript."
+        "Thread policy: answer in the active thread. Do not assume a mentioned participant has answered until their reply appears in the transcript.",
+        "Chat response guard: answer only in this chat message. Do not mention ExitPlanMode, plan files, tool availability, or recording/writing outside the chat unless User directly asks about those mechanics. If you make a decision, arbitration, plan, or summary, include it in this reply. Do not say it is posted above or recorded elsewhere unless you cite the exact existing chat message."
       ].join("\n"),
-      "Messages since your last turn:",
-      this.formatMessages(deltaMessages.length > 0 ? deltaMessages : conversation.messages.slice(-MAX_PROMPT_DELTA_MESSAGES)),
-      "Active thread:",
-      this.formatMessages(threadMessages),
-      continuation ? "Current request: continue after the approved participant replies and produce your next answer." : `Current request:\n${this.formatMessage(triggerMessage)}`,
+      "Triggering message identifiers:",
+      this.triggeringMessageIdentifiers(triggerMessage),
+      "Triggering message:",
+      this.formatMessage(triggerMessage),
+      continuation
+        ? "Current request: continue after the approved participant replies and produce your next answer."
+        : "Current request: answer the triggering message above.",
       "Write your next message in this chat."
     ];
     return sections.join("\n\n");
   }
 
+  private triggeringMessageIdentifiers(message: ChatMessage): string {
+    return [
+      `Message ID: ${message.id}`,
+      message.metadata?.threadId ? `Thread ID: ${message.metadata.threadId}` : "",
+      message.metadata?.parentMessageId ? `Parent message ID: ${message.metadata.parentMessageId}` : "",
+      message.metadata?.chatThreadRootId ? `Chat thread root ID: ${message.metadata.chatThreadRootId}` : ""
+    ].filter(Boolean).join("\n");
+  }
+
+  private cliRoleOptions(participant: ChatParticipant, session: ChatParticipantSession, promptFallbackPrompt: string): CliAgentRoleOptions {
+    return {
+      name: this.roleRuntimeName(participant, session),
+      description: `${session.roleLabel} participant @${participant.handle} in AI Consensus Chat.`,
+      instructions: this.nativeRoleInstructions(participant, session),
+      promptFallbackPrompt
+    };
+  }
+
+  private nativeRoleInstructions(participant: ChatParticipant, session: ChatParticipantSession): string {
+    return [
+      `You are @${participant.handle} in AI Consensus Chat.`,
+      `Role: ${session.roleLabel}.`,
+      "Use this role for the whole CLI session.",
+      "",
+      "Role instructions:",
+      session.roleInstructions,
+      "",
+      "Chat participant boundaries:",
+      "- You are one participant in a multi-participant chat.",
+      "- User is the human conversation owner, requirements authority, and clarification source.",
+      "- Ask User directly when goals, requirements, preferences, acceptance criteria, or user intent are unclear.",
+      "- Do not ask another participant for user-owned clarification.",
+      "- Answer in the active chat message; do not claim to write, record, or post work elsewhere.",
+      "- Follow each turn's chat prompt for history paths, the triggering message, participants, and dispatch rules."
+    ].join("\n");
+  }
+
+  private roleRuntimeName(participant: ChatParticipant, session: ChatParticipantSession): string {
+    const base = `ai-consensus-${participant.handle}-${session.roleConfigId}-${participant.id.slice(0, 8)}`
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80)
+      .replace(/-+$/g, "");
+    return base || `ai-consensus-${participant.id.slice(0, 8)}`;
+  }
+
+  private applyCliRunMetadata(session: ChatParticipantSession, result: ParticipantRunResult, warnings: string[]): void {
+    if (this.isKnownRoleRuntime(result.roleRuntime)) {
+      session.roleRuntime = result.roleRuntime;
+    }
+    for (const warning of result.warnings ?? []) {
+      warnings.push(warning);
+    }
+  }
+
   private async sessionForParticipant(conversation: Conversation, participant: ChatParticipant): Promise<ChatParticipantSession> {
     const existing = this.chatSessions(conversation).find((session) => session.participantId === participant.id);
-    if (existing) {
+    const role = await this.roleForParticipant(participant);
+    const runtimeConfigVersion = this.runtimeConfigVersionFor(participant);
+    if (
+      existing &&
+      existing.roleConfigId === role.id &&
+      existing.roleConfigVersion >= role.version &&
+      existing.participantKind === participant.kind &&
+      this.normalizedModel(existing.participantModel) === this.normalizedModel(participant.model) &&
+      this.isKnownRoleRuntime(existing.roleRuntime) &&
+      existing.runtimeConfigVersion === runtimeConfigVersion
+    ) {
       return existing;
     }
-    const role = await this.roleForParticipant(participant);
+    return this.newSessionForParticipant(participant, role, runtimeConfigVersion);
+  }
+
+  private async newSessionForParticipant(
+    participant: ChatParticipant,
+    knownRole?: ChatRoleConfig,
+    knownRuntimeConfigVersion?: number
+  ): Promise<ChatParticipantSession> {
+    const role = knownRole ?? await this.roleForParticipant(participant);
+    const runtimeConfigVersion = knownRuntimeConfigVersion ?? this.runtimeConfigVersionFor(participant);
     return {
       participantId: participant.id,
       sessionId: "",
       roleConfigId: role.id,
       roleConfigVersion: role.version,
+      roleRuntime: this.preferredRoleRuntimeFor(participant),
+      participantKind: participant.kind,
+      participantModel: participant.model?.trim() || undefined,
+      runtimeConfigVersion,
       roleLabel: role.label,
       roleInstructions: role.instructions,
       updatedAt: new Date().toISOString()
     };
+  }
+
+  private runtimeConfigVersionFor(_participant: ChatParticipant): number {
+    return CHAT_ROLE_RUNTIME_CONFIG_VERSION;
+  }
+
+  private preferredRoleRuntimeFor(participant: ChatParticipant): ChatRoleRuntime {
+    return participant.kind === "claude-code" ? "claude-agent" : "codex-developer-instructions";
+  }
+
+  private isKnownRoleRuntime(value: ChatRoleRuntime | undefined): value is ChatRoleRuntime {
+    return value === "claude-agent" || value === "codex-developer-instructions" || value === "prompt-fallback";
+  }
+
+  private normalizedModel(value: string | undefined): string {
+    return value?.trim() ?? "";
   }
 
   private async roleForParticipant(participant: ChatParticipant): Promise<ChatRoleConfig> {
@@ -361,9 +534,37 @@ export class ChatService {
     return role;
   }
 
+  private chatResponseGuardViolation(content: string, triggerMessage: ChatMessage): string | undefined {
+    if (this.chatMechanicsWereRequested(triggerMessage.content)) {
+      return undefined;
+    }
+    const searchable = this.withoutFencedCode(content);
+    const forbidden: Array<{ label: string; pattern: RegExp }> = [
+      { label: "ExitPlanMode", pattern: /\bExitPlanMode\b/i },
+      { label: "Plan Mode", pattern: /\bplan mode\b/i },
+      { label: "plan files", pattern: /\bplan file\b/i },
+      { label: "tool availability", pattern: /\b(?:write|edit|bash|read|grep|glob|ls)\s+tool\b|\btools?\s+(?:is|are|was|were)\s+not\s+enabled\b|\bnot\s+enabled\s+in\s+this\s+context\b/i },
+      { label: "out-of-chat writing", pattern: /\b(?:recorded|written|saved)\s+(?:in|to)\s+(?:the\s+)?(?:plan|file|elsewhere)\b/i },
+      { label: "posted-above deflection", pattern: /\bposted above\b/i }
+    ];
+    return forbidden.find((item) => item.pattern.test(searchable))?.label;
+  }
+
+  private chatMechanicsWereRequested(content: string): boolean {
+    return /\b(?:ExitPlanMode|plan mode|plan file|write tool|edit tool|bash tool|tool availability|permission mode|enabled tools?)\b/i.test(content);
+  }
+
+  private chatGuardRetryPrompt(prompt: string, violation: string): string {
+    return [
+      `Your previous draft was rejected because it mentioned ${violation}, which is forbidden for AI Consensus chat participants unless User directly asks about app or CLI mechanics.`,
+      "Rewrite the response as a normal chat message. Do not mention tools, permission modes, plan files, ExitPlanMode, or writing/recording outside the chat. Include the actual answer, decision, or request in this reply.",
+      prompt
+    ].join("\n\n");
+  }
+
   private lockParticipantRoleVersion(conversation: Conversation, participant: ChatParticipant, version: number): void {
     const participants = this.chatParticipants(conversation).map((item) =>
-      item.id === participant.id ? { ...item, roleConfigVersion: item.roleConfigVersion ?? version } : item
+      item.id === participant.id ? { ...item, roleConfigVersion: version } : item
     );
     conversation.metadata = { ...conversation.metadata, participants };
   }
@@ -413,7 +614,7 @@ export class ChatService {
 
   private pendingMentionsFromAgentReply(conversation: Conversation, sourceParticipant: ChatParticipant, content: string): ChatPendingMention[] {
     const participants = this.chatParticipants(conversation);
-    const handles = this.extractMentions(content);
+    const handles = this.extractParticipantRequestMentions(content);
     const mentions = new Map<string, ChatPendingMention>();
     for (const handle of handles) {
       const target = participants.find((participant) => participant.handle.toLowerCase() === handle.toLowerCase());
@@ -427,6 +628,50 @@ export class ChatService {
       });
     }
     return Array.from(mentions.values());
+  }
+
+  private extractParticipantRequestMentions(content: string): string[] {
+    const lines = this.withoutFencedCode(content).split(/\r?\n/);
+    const requestLines: string[] = [];
+    for (let index = 0; index < lines.length; index += 1) {
+      const match = lines[index].match(/^\s*participant requests\s*:\s*(.*)$/i);
+      if (!match) {
+        continue;
+      }
+      const inline = match[1].trim();
+      if (inline) {
+        if (/^none\.?$/i.test(inline)) {
+          return [];
+        }
+        requestLines.push(inline);
+      }
+      for (let next = index + 1; next < lines.length; next += 1) {
+        const line = lines[next];
+        const trimmed = line.trim();
+        if (!trimmed) {
+          if (requestLines.length > 0) {
+            break;
+          }
+          continue;
+        }
+        if (/^#{1,6}\s+/.test(trimmed)) {
+          break;
+        }
+        if (/^participant requests\s*:/i.test(trimmed)) {
+          break;
+        }
+        if (/^(?:[-*]|\d+[.)])\s+/.test(trimmed)) {
+          if (/^(?:[-*]|\d+[.)])\s+none\.?$/i.test(trimmed)) {
+            return [];
+          }
+          requestLines.push(trimmed);
+          continue;
+        }
+        break;
+      }
+      break;
+    }
+    return this.extractMentions(requestLines.join("\n"));
   }
 
   private resolveMentionTargets(conversation: Conversation, content: string): { targets: ChatParticipant[]; unknownHandles: string[] } {
@@ -445,9 +690,12 @@ export class ChatService {
   }
 
   private extractMentions(content: string): string[] {
-    const withoutCode = content.replace(/```[\s\S]*?```/g, "");
-    const matches = withoutCode.matchAll(/@([A-Za-z0-9_-]{1,32})/g);
+    const matches = this.withoutFencedCode(content).matchAll(/@([A-Za-z0-9_-]{1,32})/g);
     return Array.from(matches, (match) => match[1]);
+  }
+
+  private withoutFencedCode(content: string): string {
+    return content.replace(/```[\s\S]*?```/g, "");
   }
 
   private updatePendingMentionStatus(sourceMessage: ChatMessage, targetIds: Set<string>, status: ChatPendingMention["status"]): void {
@@ -495,6 +743,7 @@ export class ChatService {
         `Message ID: ${message.id}`,
         message.metadata?.threadId ? `Thread ID: ${message.metadata.threadId}` : "",
         message.metadata?.parentMessageId ? `Parent message ID: ${message.metadata.parentMessageId}` : "",
+        message.metadata?.chatThreadRootId ? `Chat thread root ID: ${message.metadata.chatThreadRootId}` : "",
         "",
         message.content.trim(),
         ""
@@ -507,29 +756,12 @@ export class ChatService {
     return session?.roleLabel ?? participant.roleConfigId;
   }
 
-  private messagesSince(conversation: Conversation, messageId: string | undefined): ChatMessage[] {
-    if (!messageId) {
-      return conversation.messages.slice(-MAX_PROMPT_DELTA_MESSAGES);
-    }
-    const index = conversation.messages.findIndex((message) => message.id === messageId);
-    if (index < 0) {
-      return conversation.messages.slice(-MAX_PROMPT_DELTA_MESSAGES);
-    }
-    return conversation.messages.slice(index + 1).slice(-MAX_PROMPT_DELTA_MESSAGES);
-  }
-
-  private formatMessages(messages: ChatMessage[]): string {
-    if (messages.length === 0) {
-      return "(none)";
-    }
-    return messages.map((message) => this.formatMessage(message)).join("\n\n");
-  }
-
   private formatMessage(message: ChatMessage): string {
     return [
       `[${message.createdAt}] ${this.messageAuthor(message)} (${message.id})`,
       message.metadata?.threadId ? `Thread: ${message.metadata.threadId}` : "",
       message.metadata?.parentMessageId ? `Parent: ${message.metadata.parentMessageId}` : "",
+      message.metadata?.chatThreadRootId ? `Chat thread root: ${message.metadata.chatThreadRootId}` : "",
       message.content.trim()
     ].filter(Boolean).join("\n");
   }

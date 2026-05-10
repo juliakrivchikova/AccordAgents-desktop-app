@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Circle,
   Columns2,
+  Copy,
   FolderOpen,
   GitPullRequest,
   HelpCircle,
@@ -146,7 +147,6 @@ function App(): JSX.Element {
   const [planCorrectionDraft, setPlanCorrectionDraft] = useState("");
   const [selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds] = useState<Set<string>>(new Set());
   const [chatMessageDraft, setChatMessageDraft] = useState("");
-  const [chatReplyTarget, setChatReplyTarget] = useState<{ threadId: string; parentMessageId: string } | undefined>();
   const [chatAddParticipantDraft, setChatAddParticipantDraft] = useState<ChatParticipantDraft | undefined>();
   const [error, setError] = useState<string | undefined>();
 
@@ -281,7 +281,6 @@ function App(): JSX.Element {
       setPendingClarifications({});
       setPlanItemReviewDrafts({});
       setPlanCorrectionDraft("");
-      setChatReplyTarget(undefined);
       setSettingsMenuOpen(false);
       setActiveView("slack");
     } catch (caught) {
@@ -487,7 +486,6 @@ function App(): JSX.Element {
       setConversation(result.conversation);
       setWarnings(result.warnings);
       setChatMessageDraft("");
-      setChatReplyTarget(undefined);
       setActiveView("slack");
       setSummaries(await window.consensus.listConversations());
     } catch (caught) {
@@ -498,14 +496,19 @@ function App(): JSX.Element {
     }
   }
 
-  async function sendChatMessage(): Promise<void> {
+  async function sendChatMessage(options: {
+    content?: string;
+    threadId?: string;
+    parentMessageId?: string;
+    chatThreadRootId?: string;
+  } = {}): Promise<boolean> {
     if (!conversation || conversation.kind !== "chat") {
-      return;
+      return false;
     }
-    const content = chatMessageDraft.trim();
+    const content = (options.content ?? chatMessageDraft).trim();
     if (!content) {
       setError("Enter a chat message.");
-      return;
+      return false;
     }
     const runId = crypto.randomUUID();
     setError(undefined);
@@ -514,21 +517,22 @@ function App(): JSX.Element {
     progressLogRef.current = [];
     setProgressLog([]);
     setBusy(true);
-    const threadId = chatReplyTarget?.threadId;
-    const parentMessageId = chatReplyTarget?.parentMessageId;
-    setChatMessageDraft("");
-    setChatReplyTarget(undefined);
+    if (!options.chatThreadRootId) {
+      setChatMessageDraft("");
+    }
     try {
       const result = await window.consensus.sendChatMessage({
         conversationId: conversation.id,
         runId,
         content,
-        threadId,
-        parentMessageId
+        threadId: options.threadId,
+        parentMessageId: options.parentMessageId,
+        chatThreadRootId: options.chatThreadRootId
       });
       setConversation(mergeProgressIntoConversation(result.conversation, progressLogRef.current.filter((item) => item.runId === runId)));
       setWarnings(result.warnings);
       setSummaries(await window.consensus.listConversations());
+      return true;
     } catch (caught) {
       const message = errorText(caught);
       if (message.toLowerCase().includes("cancel")) {
@@ -536,6 +540,7 @@ function App(): JSX.Element {
       } else {
         setError(message);
       }
+      return false;
     } finally {
       setBusy(false);
       setCurrentRunId(undefined);
@@ -1133,7 +1138,6 @@ function App(): JSX.Element {
     setPlanItemReviewDrafts({});
     setPlanCorrectionDraft("");
     setChatMessageDraft("");
-    setChatReplyTarget(undefined);
     setChatAddParticipantDraft(defaultChatParticipantDraft(settings));
     setError(undefined);
     setSettingsMenuOpen(false);
@@ -1654,11 +1658,15 @@ function App(): JSX.Element {
                     progress={progressLog}
                     isRunning={busy}
                     draft={chatMessageDraft}
-                    replyTarget={chatReplyTarget}
                     addParticipantDraft={chatAddParticipantDraft ?? defaultChatParticipantDraft(settings)}
                     onDraftChange={setChatMessageDraft}
-                    onReplyTargetChange={setChatReplyTarget}
-                    onSend={() => void sendChatMessage()}
+                    onSend={() => sendChatMessage()}
+                    onSendThread={(rootMessage, content) => sendChatMessage({
+                      content,
+                      threadId: rootMessage.metadata?.threadId ?? rootMessage.id,
+                      parentMessageId: rootMessage.id,
+                      chatThreadRootId: rootMessage.id
+                    })}
                     onApproveMentions={(sourceMessageId, targetParticipantIds, continueRequester) =>
                       void respondToChatMentions(sourceMessageId, targetParticipantIds, true, continueRequester)
                     }
@@ -2226,50 +2234,42 @@ function ChatConversationView(props: {
   progress: ReviewProgress[];
   isRunning: boolean;
   draft: string;
-  replyTarget?: { threadId: string; parentMessageId: string };
   addParticipantDraft: ChatParticipantDraft;
   onDraftChange: (value: string) => void;
-  onReplyTargetChange: (target: { threadId: string; parentMessageId: string } | undefined) => void;
-  onSend: () => void;
+  onSend: () => Promise<boolean>;
+  onSendThread: (rootMessage: Conversation["messages"][number], content: string) => Promise<boolean>;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onAddParticipantDraftChange: (draft: ChatParticipantDraft) => void;
   onAddParticipant: () => void;
 }): JSX.Element {
   const participants = chatParticipants(props.conversation);
-  const [mentionQuery, setMentionQuery] = useState<string | undefined>();
-  const [mentionIndex, setMentionIndex] = useState(0);
+  const topLevelMessages = useMemo(() => chatTopLevelMessages(props.conversation), [props.conversation.messages]);
+  const threadSummaries = useMemo(() => chatThreadSummaryMap(props.conversation), [props.conversation.messages]);
+  const continuedMentionRequestIds = useMemo(() => chatContinuedMentionRequestIds(props.conversation), [props.conversation.messages]);
+  const [selectedThreadRootId, setSelectedThreadRootId] = useState<string | undefined>();
+  const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
+  const [threadWidth, setThreadWidth] = useState(460);
+  const [isResizingThread, setIsResizingThread] = useState(false);
+  const viewRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelineBottomRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const forceStickToBottomRef = useRef(false);
-  const previousMessageCountRef = useRef(props.conversation.messages.length);
+  const previousMessageCountRef = useRef(topLevelMessages.length);
   const latestProgress = props.progress[props.progress.length - 1];
-  const latestMessage = props.conversation.messages[props.conversation.messages.length - 1];
+  const latestMessage = topLevelMessages[topLevelMessages.length - 1];
   const addDraft = normalizedChatDrafts([props.addParticipantDraft]);
   const addValidation = validateChatParticipantDrafts(
     addDraft,
     props.settings.chatRoleConfigs,
     new Set(participants.map((participant) => participant.handle.toLowerCase()))
   ) ?? validateChatCliAgents(addDraft, props.agents);
-  const canSend = !props.isRunning && Boolean(props.draft.trim());
-  const mentionOptions = mentionQuery === undefined
-    ? []
-    : participants.filter((participant) => participant.handle.toLowerCase().includes(mentionQuery.toLowerCase()));
-
-  function updateDraft(value: string): void {
-    props.onDraftChange(value);
-    const query = activeMentionQuery(value);
-    setMentionQuery(query);
-    setMentionIndex(0);
-  }
-
-  function insertMention(participant: ChatParticipant): void {
-    const next = replaceActiveMention(props.draft, participant.handle);
-    props.onDraftChange(next);
-    setMentionQuery(undefined);
-    setMentionIndex(0);
-  }
+  const selectedThreadRoot = selectedThreadRootId
+    ? topLevelMessages.find((message) => message.id === selectedThreadRootId)
+    : undefined;
+  const selectedThreadSummary = selectedThreadRoot ? threadSummaries.get(selectedThreadRoot.id) : undefined;
+  const hasThread = Boolean(selectedThreadRoot);
 
   function updateStickToBottom(): void {
     const timeline = timelineRef.current;
@@ -2281,13 +2281,60 @@ function ChatConversationView(props: {
 
   function sendDraft(): void {
     forceStickToBottomRef.current = true;
-    props.onSend();
+    void props.onSend();
   }
+
+  async function sendThreadDraft(rootMessage: Conversation["messages"][number]): Promise<void> {
+    const content = (threadDrafts[rootMessage.id] ?? "").trim();
+    if (!content) {
+      return;
+    }
+    const sent = await props.onSendThread(rootMessage, content);
+    if (sent) {
+      setThreadDrafts((current) => ({ ...current, [rootMessage.id]: "" }));
+    }
+  }
+
+  function startThreadResize(event: React.PointerEvent<HTMLDivElement>): void {
+    const view = viewRef.current;
+    if (!view) {
+      return;
+    }
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setIsResizingThread(true);
+    const rect = view.getBoundingClientRect();
+    const minThread = 320;
+    const maxThread = Math.max(minThread, Math.min(820, rect.width - 360));
+
+    const move = (moveEvent: PointerEvent): void => {
+      const nextWidth = Math.round(rect.right - moveEvent.clientX);
+      setThreadWidth(Math.min(maxThread, Math.max(minThread, nextWidth)));
+    };
+    const stop = (): void => {
+      setIsResizingThread(false);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop, { once: true });
+  }
+
+  useEffect(() => {
+    setSelectedThreadRootId(undefined);
+    setThreadDrafts({});
+  }, [props.conversation.id]);
+
+  useEffect(() => {
+    if (selectedThreadRootId && !topLevelMessages.some((message) => message.id === selectedThreadRootId)) {
+      setSelectedThreadRootId(undefined);
+    }
+  }, [selectedThreadRootId, topLevelMessages]);
 
   useLayoutEffect(() => {
     const timeline = timelineRef.current;
-    const messageCountChanged = previousMessageCountRef.current !== props.conversation.messages.length;
-    previousMessageCountRef.current = props.conversation.messages.length;
+    const messageCountChanged = previousMessageCountRef.current !== topLevelMessages.length;
+    previousMessageCountRef.current = topLevelMessages.length;
     const shouldFollowBottom = stickToBottomRef.current || forceStickToBottomRef.current || messageCountChanged;
     if (!timeline || !shouldFollowBottom) {
       return;
@@ -2304,12 +2351,11 @@ function ChatConversationView(props: {
     window.requestAnimationFrame(scrollToBottom);
     window.setTimeout(scrollToBottom, 50);
   }, [
-    props.conversation.messages.length,
+    topLevelMessages.length,
     latestMessage?.content,
     latestMessage?.status,
     latestProgress?.message,
     props.draft,
-    props.replyTarget?.parentMessageId,
     props.isRunning
   ]);
 
@@ -2325,172 +2371,275 @@ function ChatConversationView(props: {
     };
     window.requestAnimationFrame(scrollToBottom);
     window.setTimeout(scrollToBottom, 50);
-  }, [props.conversation.messages.length]);
+  }, [topLevelMessages.length]);
 
   return (
-    <div className="chat-view">
-      <header className="chat-header">
-        <div className="chat-title-block">
-          <h2>{props.conversation.title}</h2>
-          <span>{props.isRunning ? latestProgress?.message ?? "Running" : props.conversation.repoPath ? "Repo context" : "No repo"}</span>
-        </div>
-        <div className="chat-header-actions">
-          <details className="chat-participant-menu">
-            <summary>
-              <Users size={17} />
-              {participants.length}
-            </summary>
-            <div className="chat-participant-popover">
-              <div className="chat-participant-menu-list">
-                {participants.map((participant) => (
-                  <button
-                    onClick={() => props.onDraftChange(`${props.draft}${props.draft.endsWith(" ") || !props.draft ? "" : " "}@${participant.handle} `)}
-                    key={participant.id}
-                  >
-                    <Avatar className="mini-avatar" spec={avatarForParticipant(`@${participant.handle}`, participant.id)} />
-                    <strong>@{participant.handle}</strong>
-                    <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)}</span>
-                  </button>
-                ))}
-              </div>
-              <div className="chat-menu-divider" />
-              <ChatParticipantDraftRow
-                draft={props.addParticipantDraft}
-                settings={props.settings}
-                agents={props.agents}
-                onChange={props.onAddParticipantDraftChange}
-              />
-              {addValidation && <div className="inline-error">{addValidation}</div>}
-              <button className="secondary-button" disabled={Boolean(addValidation) || props.isRunning} onClick={props.onAddParticipant}>
-                <Plus size={16} />
-                Add participant
-              </button>
-            </div>
-          </details>
-        </div>
-      </header>
-      <div className="chat-timeline" ref={timelineRef} onScroll={updateStickToBottom}>
-        {props.conversation.messages.map((message) => (
-          <ChatTimelineMessage
-            message={message}
-            busy={props.isRunning}
-            onReply={() => props.onReplyTargetChange({ threadId: message.metadata?.threadId ?? message.id, parentMessageId: message.id })}
-            onApproveMentions={props.onApproveMentions}
-            onRejectMentions={props.onRejectMentions}
-            key={message.id}
-          />
-        ))}
-        <div className="chat-timeline-bottom" ref={timelineBottomRef} />
-      </div>
-      <div className="chat-composer">
-        {props.isRunning && latestProgress && (
-          <div className="chat-composer-status">
-            <RunStatusLine progress={latestProgress} />
+    <div
+      className={`chat-view ${hasThread ? "thread-open" : ""} ${isResizingThread ? "resizing-thread" : ""}`}
+      data-testid="chat-view"
+      ref={viewRef}
+      style={{ "--chat-thread-width": `${threadWidth}px` } as React.CSSProperties}
+    >
+      <div className="chat-main">
+        <header className="chat-header">
+          <div className="chat-title-block">
+            <h2>{props.conversation.title}</h2>
+            <span>{props.isRunning ? latestProgress?.message ?? "Running" : props.conversation.repoPath ? "Repo context" : "No repo"}</span>
           </div>
-        )}
-        {props.replyTarget && (
-          <div className="reply-target">
-            Replying in thread
-            <button className="icon-button" title="Cancel reply" onClick={() => props.onReplyTargetChange(undefined)}>
-              <X size={15} />
-            </button>
-          </div>
-        )}
-        <div className="chat-input-wrap">
-          {mentionOptions.length > 0 && (
-            <div className="mention-menu" role="listbox">
-              {mentionOptions.map((participant, index) => (
-                <button
-                  className={index === mentionIndex ? "selected" : ""}
-                  onMouseDown={(event) => {
-                    event.preventDefault();
-                    insertMention(participant);
-                  }}
-                  role="option"
-                  aria-selected={index === mentionIndex}
-                  key={participant.id}
-                >
-                  <Avatar className="mini-avatar" spec={avatarForParticipant(`@${participant.handle}`, participant.id)} />
-                  <strong>@{participant.handle}</strong>
-                  <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)}</span>
-                  {index === 0 && <kbd>Enter</kbd>}
+          <div className="chat-header-actions">
+            <details className="chat-participant-menu">
+              <summary>
+                <Users size={17} />
+                {participants.length}
+              </summary>
+              <div className="chat-participant-popover">
+                <div className="chat-participant-menu-list">
+                  {participants.map((participant) => (
+                    <button
+                      onClick={() => props.onDraftChange(`${props.draft}${props.draft.endsWith(" ") || !props.draft ? "" : " "}@${participant.handle} `)}
+                      key={participant.id}
+                    >
+                      <Avatar className="mini-avatar" spec={avatarForParticipant(`@${participant.handle}`, participant.id)} />
+                      <strong>@{participant.handle}</strong>
+                      <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="chat-menu-divider" />
+                <ChatParticipantDraftRow
+                  draft={props.addParticipantDraft}
+                  settings={props.settings}
+                  agents={props.agents}
+                  onChange={props.onAddParticipantDraftChange}
+                />
+                {addValidation && <div className="inline-error">{addValidation}</div>}
+                <button className="secondary-button" disabled={Boolean(addValidation) || props.isRunning} onClick={props.onAddParticipant}>
+                  <Plus size={16} />
+                  Add participant
                 </button>
-              ))}
-            </div>
-          )}
-          <AutoResizeTextarea
-            value={props.draft}
-            onChange={(event) => updateDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (mentionOptions.length > 0 && event.key === "ArrowDown") {
-                event.preventDefault();
-                setMentionIndex((current) => (current + 1) % mentionOptions.length);
-                return;
-              }
-              if (mentionOptions.length > 0 && event.key === "ArrowUp") {
-                event.preventDefault();
-                setMentionIndex((current) => (current - 1 + mentionOptions.length) % mentionOptions.length);
-                return;
-              }
-              if (mentionOptions.length > 0 && (event.key === "Enter" || event.key === "Tab")) {
-                event.preventDefault();
-                insertMention(mentionOptions[mentionIndex] ?? mentionOptions[0]);
-                return;
-              }
-              if (event.key === "Escape") {
-                setMentionQuery(undefined);
-                return;
-              }
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                if (canSend) {
-                  sendDraft();
-                }
-              }
-            }}
-            onBlur={() => window.setTimeout(() => setMentionQuery(undefined), 120)}
-            rows={3}
-            maxHeight={260}
-            placeholder="Mention participants with @name"
-          />
+              </div>
+            </details>
+          </div>
+        </header>
+        <div className="chat-timeline" ref={timelineRef} onScroll={updateStickToBottom}>
+          {topLevelMessages.map((message) => {
+            const summary = threadSummaries.get(message.id);
+            return (
+              <ChatMessageItem
+                message={message}
+                busy={props.isRunning}
+                selected={message.id === selectedThreadRoot?.id}
+                replyCount={summary?.replies.length ?? 0}
+                latestReplyAt={summary?.latestReplyAt}
+                hasContinuationReply={continuedMentionRequestIds.has(message.id)}
+                onOpenThread={() => setSelectedThreadRootId(message.id)}
+                onApproveMentions={props.onApproveMentions}
+                onRejectMentions={props.onRejectMentions}
+                key={message.id}
+              />
+            );
+          })}
+          <div className="chat-timeline-bottom" ref={timelineBottomRef} />
         </div>
-        <button className="plan-correction-send" title="Send" disabled={!canSend} onClick={sendDraft}>
-          {props.isRunning ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
-        </button>
+        <ChatComposer
+          participants={participants}
+          settings={props.settings}
+          draft={props.draft}
+          onDraftChange={props.onDraftChange}
+          onSend={sendDraft}
+          isRunning={props.isRunning}
+          placeholder="Mention participants with @name"
+          status={props.isRunning && latestProgress ? <RunStatusLine progress={latestProgress} /> : undefined}
+          testId="chat-main-composer"
+        />
       </div>
+      {selectedThreadRoot && <div className="thread-resizer" role="separator" aria-orientation="vertical" onPointerDown={startThreadResize} />}
+      {selectedThreadRoot && (
+        <ChatThreadPanel
+          rootMessage={selectedThreadRoot}
+          replies={selectedThreadSummary?.replies ?? []}
+          participants={participants}
+          settings={props.settings}
+          draft={threadDrafts[selectedThreadRoot.id] ?? ""}
+          busy={props.isRunning}
+          onDraftChange={(value) => setThreadDrafts((current) => ({ ...current, [selectedThreadRoot.id]: value }))}
+          onSend={() => sendThreadDraft(selectedThreadRoot)}
+          onClose={() => setSelectedThreadRootId(undefined)}
+          onApproveMentions={props.onApproveMentions}
+          onRejectMentions={props.onRejectMentions}
+          continuedMentionRequestIds={continuedMentionRequestIds}
+        />
+      )}
     </div>
   );
 }
 
-function ChatTimelineMessage(props: {
+function ChatComposer(props: {
+  participants: ChatParticipant[];
+  settings: AppSettings;
+  draft: string;
+  placeholder: string;
+  isRunning: boolean;
+  status?: React.ReactNode;
+  className?: string;
+  rows?: number;
+  maxHeight?: number;
+  testId?: string;
+  onDraftChange: (value: string) => void;
+  onSend: () => void | Promise<void>;
+}): JSX.Element {
+  const [mentionQuery, setMentionQuery] = useState<string | undefined>();
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const canSend = !props.isRunning && Boolean(props.draft.trim());
+  const mentionOptions = mentionQuery === undefined
+    ? []
+    : props.participants.filter((participant) => participant.handle.toLowerCase().includes(mentionQuery.toLowerCase()));
+
+  function updateDraft(value: string): void {
+    props.onDraftChange(value);
+    setMentionQuery(activeMentionQuery(value));
+    setMentionIndex(0);
+  }
+
+  function insertMention(participant: ChatParticipant): void {
+    props.onDraftChange(replaceActiveMention(props.draft, participant.handle));
+    setMentionQuery(undefined);
+    setMentionIndex(0);
+  }
+
+  function sendDraft(): void {
+    if (canSend) {
+      void props.onSend();
+    }
+  }
+
+  return (
+    <div className={`chat-composer ${props.className ?? ""}`} data-testid={props.testId}>
+      {props.status && <div className="chat-composer-status">{props.status}</div>}
+      <div className="chat-input-wrap">
+        {mentionOptions.length > 0 && (
+          <div className="mention-menu" role="listbox">
+            {mentionOptions.map((participant, index) => (
+              <button
+                className={index === mentionIndex ? "selected" : ""}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  insertMention(participant);
+                }}
+                role="option"
+                aria-selected={index === mentionIndex}
+                key={participant.id}
+              >
+                <Avatar className="mini-avatar" spec={avatarForParticipant(`@${participant.handle}`, participant.id)} />
+                <strong>@{participant.handle}</strong>
+                <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)}</span>
+                {index === 0 && <kbd>Enter</kbd>}
+              </button>
+            ))}
+          </div>
+        )}
+        <AutoResizeTextarea
+          value={props.draft}
+          onChange={(event) => updateDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (mentionOptions.length > 0 && event.key === "ArrowDown") {
+              event.preventDefault();
+              setMentionIndex((current) => (current + 1) % mentionOptions.length);
+              return;
+            }
+            if (mentionOptions.length > 0 && event.key === "ArrowUp") {
+              event.preventDefault();
+              setMentionIndex((current) => (current - 1 + mentionOptions.length) % mentionOptions.length);
+              return;
+            }
+            if (mentionOptions.length > 0 && (event.key === "Enter" || event.key === "Tab")) {
+              event.preventDefault();
+              insertMention(mentionOptions[mentionIndex] ?? mentionOptions[0]);
+              return;
+            }
+            if (event.key === "Escape") {
+              setMentionQuery(undefined);
+              return;
+            }
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              sendDraft();
+            }
+          }}
+          onBlur={() => window.setTimeout(() => setMentionQuery(undefined), 120)}
+          rows={props.rows ?? 3}
+          maxHeight={props.maxHeight ?? 260}
+          placeholder={props.placeholder}
+        />
+      </div>
+      <button className="plan-correction-send" title="Send" disabled={!canSend} onClick={sendDraft}>
+        {props.isRunning ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
+      </button>
+    </div>
+  );
+}
+
+function ChatMessageItem(props: {
   message: Conversation["messages"][number];
   busy: boolean;
-  onReply: () => void;
+  selected?: boolean;
+  inThread?: boolean;
+  replyCount?: number;
+  latestReplyAt?: string;
+  hasContinuationReply?: boolean;
+  onOpenThread?: () => void;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
 }): JSX.Element {
   const { message } = props;
+  const [copied, setCopied] = useState(false);
   const author = authorForMessage(message, "chat");
   const pending = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "pending");
   const approved = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "approved");
   const allPendingIds = pending.map((mention) => mention.targetParticipantId);
   const displayContent = chatDisplayContent(message, author);
+  const showThreadActions = !props.inThread && message.role !== "system" && Boolean(props.onOpenThread);
+  const canContinueRequester = message.role === "participant" && approved.length > 0 && pending.length === 0 && !props.hasContinuationReply;
+  const replyCount = props.replyCount ?? 0;
+  const canCopy = Boolean(displayContent.trim());
+  async function copyMessage(): Promise<void> {
+    if (!canCopy) {
+      return;
+    }
+    await navigator.clipboard.writeText(displayContent);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1400);
+  }
   return (
-    <article className={`message chat-message ${message.role}`}>
+    <article className={`message chat-message ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""}`}>
       <Avatar className="message-avatar" spec={avatarForMessage(message, author)} />
       <div className="message-body">
+        <button
+          className="icon-button message-copy-button"
+          title={copied ? "Copied" : "Copy message"}
+          disabled={!canCopy}
+          onClick={() => void copyMessage()}
+        >
+          {copied ? <CheckCircle2 size={16} /> : <Copy size={16} />}
+        </button>
         <div className="message-meta">
           <strong>{author}</strong>
           <span>{new Date(message.createdAt).toLocaleString()}</span>
           {message.status === "error" && <span className="status-error">error</span>}
-          {message.metadata?.parentMessageId && message.role === "user" && <span className="phase-badge">reply</span>}
+          {!props.inThread && message.metadata?.parentMessageId && message.role === "user" && <span className="phase-badge">reply</span>}
         </div>
         <div className="message-content">
           <MarkdownText content={displayContent} />
         </div>
         {approved.length > 0 && (
           <div className="chat-approval-note">
-            Approved: {approved.map((mention) => `@${mention.targetHandle}`).join(", ")}
+            <span>Approved: {approved.map((mention) => `@${mention.targetHandle}`).join(", ")}</span>
+            {canContinueRequester && (
+              <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, [], true)}>
+                <RefreshCw size={15} />
+                Continue {author}
+              </button>
+            )}
           </div>
         )}
         {pending.length > 0 && (
@@ -2520,13 +2669,89 @@ function ChatTimelineMessage(props: {
             </div>
           </div>
         )}
-        {message.role !== "system" && (
-          <button className="chat-reply-button" onClick={props.onReply}>
+        {showThreadActions && replyCount > 0 && (
+          <button className="chat-thread-link" onClick={props.onOpenThread}>
+            <span>{replyCount} {replyCount === 1 ? "reply" : "replies"}</span>
+            {props.latestReplyAt && <small>Last reply {formatChatReplyDate(props.latestReplyAt)}</small>}
+          </button>
+        )}
+        {showThreadActions && (
+          <button className="chat-reply-button" onClick={props.onOpenThread}>
             Reply
           </button>
         )}
       </div>
     </article>
+  );
+}
+
+function ChatThreadPanel(props: {
+  rootMessage: Conversation["messages"][number];
+  replies: Conversation["messages"][number][];
+  participants: ChatParticipant[];
+  settings: AppSettings;
+  draft: string;
+  busy: boolean;
+  onDraftChange: (value: string) => void;
+  onSend: () => void | Promise<void>;
+  onClose: () => void;
+  onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
+  onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
+  continuedMentionRequestIds: Set<string>;
+}): JSX.Element {
+  const rootAuthor = authorForMessage(props.rootMessage, "chat");
+  return (
+    <section className="chat-thread-panel" aria-label="Chat thread" data-testid="chat-thread-panel">
+      <header className="thread-panel-head chat-thread-head">
+        <div>
+          <h2>Thread</h2>
+          <span>{rootAuthor}</span>
+        </div>
+        <div className="thread-panel-actions">
+          <button className="icon-button" title="Close thread" onClick={props.onClose}>
+            <X size={17} />
+          </button>
+        </div>
+      </header>
+      <div className="chat-thread-body">
+        <ChatMessageItem
+          message={props.rootMessage}
+          busy={props.busy}
+          inThread
+          hasContinuationReply={props.continuedMentionRequestIds.has(props.rootMessage.id)}
+          onApproveMentions={props.onApproveMentions}
+          onRejectMentions={props.onRejectMentions}
+        />
+        {props.replies.length > 0 && (
+          <div className="chat-thread-replies">
+            {props.replies.map((message) => (
+              <ChatMessageItem
+                message={message}
+                busy={props.busy}
+                inThread
+                hasContinuationReply={props.continuedMentionRequestIds.has(message.id)}
+                onApproveMentions={props.onApproveMentions}
+                onRejectMentions={props.onRejectMentions}
+                key={message.id}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+      <ChatComposer
+        className="chat-thread-composer"
+        participants={props.participants}
+        settings={props.settings}
+        draft={props.draft}
+        onDraftChange={props.onDraftChange}
+        onSend={props.onSend}
+        isRunning={props.busy}
+        placeholder="Reply..."
+        rows={3}
+        maxHeight={180}
+        testId="chat-thread-composer"
+      />
+    </section>
   );
 }
 
@@ -2904,10 +3129,9 @@ function ProgressDots(): JSX.Element {
   );
 }
 
-function RunStatusLine({ progress, showPhase = true }: { progress?: ReviewProgress; showPhase?: boolean }): JSX.Element {
+function RunStatusLine({ progress }: { progress?: ReviewProgress }): JSX.Element {
   return (
     <div className="run-status-line" aria-live="polite">
-      {showPhase && progress && <span className="phase-badge">{phaseLabel(progress.phase)}</span>}
       <span className="run-status-text">{progress?.message ?? "Thinking"}</span>
       <ProgressDots />
     </div>
@@ -4510,6 +4734,52 @@ function chatParticipants(conversation: Conversation | undefined): ChatParticipa
   });
 }
 
+function chatTopLevelMessages(conversation: Conversation): Conversation["messages"] {
+  return conversation.messages.filter((message) => !chatVisualThreadRootId(message));
+}
+
+function chatThreadSummaryMap(conversation: Conversation): Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }> {
+  const summaries = new Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }>();
+  for (const message of conversation.messages) {
+    const rootId = chatVisualThreadRootId(message);
+    if (!rootId) {
+      continue;
+    }
+    const summary = summaries.get(rootId) ?? { replies: [] };
+    summary.replies.push(message);
+    if (!summary.latestReplyAt || Date.parse(message.createdAt) > Date.parse(summary.latestReplyAt)) {
+      summary.latestReplyAt = message.createdAt;
+    }
+    summaries.set(rootId, summary);
+  }
+  for (const summary of summaries.values()) {
+    summary.replies.sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  }
+  return summaries;
+}
+
+function chatContinuedMentionRequestIds(conversation: Conversation): Set<string> {
+  return new Set(
+    conversation.messages
+      .filter((message) => message.metadata?.approvedContinuation && message.metadata.sourceMessageId)
+      .map((message) => message.metadata?.sourceMessageId as string)
+  );
+}
+
+function chatVisualThreadRootId(message: Conversation["messages"][number]): string | undefined {
+  if (message.metadata?.chatThreadRootId) {
+    return message.metadata.chatThreadRootId;
+  }
+  if (message.role === "user" && message.metadata?.parentMessageId) {
+    return message.metadata.threadId ?? message.metadata.parentMessageId;
+  }
+  return undefined;
+}
+
+function formatChatReplyDate(value: string): string {
+  return new Date(value).toLocaleString();
+}
+
 function chatRoleLabel(roles: ChatRoleConfig[], participant: Pick<ChatParticipant, "roleConfigId">): string {
   return roles.find((role) => role.id === participant.roleConfigId)?.label ?? participant.roleConfigId;
 }
@@ -4526,13 +4796,34 @@ function chatDisplayContent(message: Conversation["messages"][number], author: s
   const firstLine = lines[firstContentIndex].trim();
   const labels = [author, message.participantLabel].filter((value): value is string => Boolean(value));
   if (!labels.some((label) => firstLine === label || firstLine === `@${label.replace(/^@/, "")}`)) {
-    return message.content;
+    return stripNoParticipantRequests(message.content);
   }
   const next = [...lines.slice(0, firstContentIndex), ...lines.slice(firstContentIndex + 1)];
   while (next.length > 0 && !next[0].trim()) {
     next.shift();
   }
-  return next.join("\n");
+  return stripNoParticipantRequests(next.join("\n"));
+}
+
+function stripNoParticipantRequests(content: string): string {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const next: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    if (/^participant requests\s*:\s*none\.?$/i.test(trimmed)) {
+      continue;
+    }
+    if (/^participant requests\s*:\s*$/i.test(trimmed)) {
+      const following = lines[index + 1]?.trim();
+      if (following && /^(?:[-*]|\d+[.)])\s+none\.?$/i.test(following)) {
+        index += 1;
+        continue;
+      }
+    }
+    next.push(line);
+  }
+  return next.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
 }
 
 function activeMentionQuery(value: string): string | undefined {

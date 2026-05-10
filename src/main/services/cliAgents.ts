@@ -14,6 +14,16 @@ const CLI_AGENT_RUN_TIMEOUT_MS = 15 * 60_000;
 export interface CliAgentRunOptions {
   persistSession?: boolean;
   sessionId?: string;
+  extraReadableDirs?: string[];
+  resumeFallbackPrompt?: string;
+  role?: CliAgentRoleOptions;
+}
+
+export interface CliAgentRoleOptions {
+  name: string;
+  description: string;
+  instructions: string;
+  promptFallbackPrompt: string;
 }
 
 export class CliAgentRunner {
@@ -36,7 +46,7 @@ export class CliAgentRunner {
       return this.runCodex(participant, prompt, effectiveRepoPath, diffMode, kind, signal, options);
     }
     if (participant.kind === "claude-code") {
-      return this.runClaude(participant, prompt, effectiveRepoPath, signal, options);
+      return this.runClaude(participant, prompt, effectiveRepoPath, kind, signal, options);
     }
     return { participant, ok: false, content: "", error: `${participant.label} is not a CLI agent.` };
   }
@@ -82,6 +92,7 @@ export class CliAgentRunner {
       outputDir = await mkdtemp(path.join(tmpdir(), "ai-consensus-codex-"));
       const outputPath = path.join(outputDir, "last-message.txt");
       const resuming = Boolean(options.sessionId);
+      const extraReadableDirs = this.normalizedExtraReadableDirs(options.extraReadableDirs);
       const args = resuming
         ? [
             "exec",
@@ -104,6 +115,11 @@ export class CliAgentRunner {
       if (participant.model && !resuming) {
         args.splice(args.length - 1, 0, "--model", participant.model);
       }
+      if (!resuming) {
+        for (const dir of extraReadableDirs) {
+          args.splice(args.length - 1, 0, "--add-dir", dir);
+        }
+      }
       if (repoPath && !resuming) {
         args.splice(1, 0, "--cd", repoPath);
         if (kind === "chat") {
@@ -118,6 +134,9 @@ export class CliAgentRunner {
       } else if (kind === "chat" && resuming) {
         args.splice(2, 0, "--skip-git-repo-check");
       }
+      if (options.role) {
+        this.insertCodexOptionBeforePrompt(args, resuming, "-c", `developer_instructions=${this.tomlString(options.role.instructions)}`);
+      }
       const result = await runCommand("codex", args, {
         cwd: repoPath,
         input: this.codexPrompt(prompt, repoPath, diffMode, kind),
@@ -130,11 +149,40 @@ export class CliAgentRunner {
         ok: true,
         content: lastMessage.trim() || this.extractCodexText(result.stdout),
         durationMs: Date.now() - startedAt,
-        sessionId: this.extractCodexSessionId(result.stdout) ?? options.sessionId
+        sessionId: this.extractCodexSessionId(result.stdout) ?? options.sessionId,
+        roleRuntime: options.role ? "codex-developer-instructions" : undefined
       };
     } catch (error) {
+      if (options.role && this.isCodexDeveloperInstructionsUnsupported(error)) {
+        const fallback = await this.runCodex(
+          participant,
+          options.role.promptFallbackPrompt,
+          repoPath,
+          diffMode,
+          kind,
+          signal,
+          {
+            persistSession: options.persistSession,
+            sessionId: options.sessionId,
+            extraReadableDirs: options.extraReadableDirs,
+            resumeFallbackPrompt: options.resumeFallbackPrompt
+          }
+        );
+        return {
+          ...fallback,
+          roleRuntime: "prompt-fallback",
+          warnings: [
+            ...(fallback.warnings ?? []),
+            `${participant.label}: Codex rejected developer_instructions config; used prompt fallback for role instructions.`
+          ]
+        };
+      }
       if (options.sessionId && this.isResumeMiss(error)) {
-        const restarted = await this.runCodex(participant, prompt, repoPath, diffMode, kind, signal, { persistSession: options.persistSession });
+        const restarted = await this.runCodex(participant, options.resumeFallbackPrompt ?? prompt, repoPath, diffMode, kind, signal, {
+          persistSession: options.persistSession,
+          extraReadableDirs: options.extraReadableDirs,
+          role: options.role
+        });
         return { ...restarted, sessionRestarted: true };
       }
       return this.failed(participant, error, Date.now() - startedAt);
@@ -149,18 +197,20 @@ export class CliAgentRunner {
     participant: ParticipantConfig,
     prompt: string,
     repoPath: string | undefined,
+    kind: ConversationKind,
     signal?: AbortSignal,
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
     const startedAt = Date.now();
     const newSessionId = options.persistSession && !options.sessionId ? randomUUID() : undefined;
+    const extraReadableDirs = this.normalizedExtraReadableDirs(options.extraReadableDirs);
     try {
       const args = [
         "-p",
         "--output-format",
         "json",
         "--permission-mode",
-        "plan",
+        kind === "chat" ? "default" : "plan",
         "--disallowedTools",
         "Edit,Write,MultiEdit,NotebookEdit,Bash"
       ];
@@ -172,7 +222,13 @@ export class CliAgentRunner {
       if (participant.model) {
         args.push("--model", participant.model);
       }
-      if (repoPath) {
+      if (options.role && !options.sessionId) {
+        args.push("--agents", this.claudeAgentsJson(options.role), "--agent", options.role.name);
+      }
+      if (extraReadableDirs.length > 0) {
+        args.push("--add-dir", ...extraReadableDirs);
+      }
+      if (repoPath || extraReadableDirs.length > 0) {
         args.push("--tools", "Read,Grep,Glob,LS");
       } else {
         args.push("--tools", "");
@@ -193,11 +249,38 @@ export class CliAgentRunner {
         ok: true,
         content: this.extractClaudeText(result.stdout),
         durationMs: Date.now() - startedAt,
-        sessionId: this.extractClaudeSessionId(result.stdout) ?? newSessionId ?? options.sessionId
+        sessionId: this.extractClaudeSessionId(result.stdout) ?? newSessionId ?? options.sessionId,
+        roleRuntime: options.role && !options.sessionId ? "claude-agent" : undefined
       };
     } catch (error) {
+      if (options.role && !options.sessionId && this.isClaudeAgentFlagUnsupported(error)) {
+        const fallback = await this.runClaude(
+          participant,
+          options.role.promptFallbackPrompt,
+          repoPath,
+          kind,
+          signal,
+          {
+            persistSession: options.persistSession,
+            extraReadableDirs: options.extraReadableDirs,
+            resumeFallbackPrompt: options.resumeFallbackPrompt
+          }
+        );
+        return {
+          ...fallback,
+          roleRuntime: "prompt-fallback",
+          warnings: [
+            ...(fallback.warnings ?? []),
+            `${participant.label}: Claude Code rejected --agent/--agents; used prompt fallback for role instructions.`
+          ]
+        };
+      }
       if (options.sessionId && this.isResumeMiss(error)) {
-        const restarted = await this.runClaude(participant, prompt, repoPath, signal, { persistSession: options.persistSession });
+        const restarted = await this.runClaude(participant, options.resumeFallbackPrompt ?? prompt, repoPath, kind, signal, {
+          persistSession: options.persistSession,
+          extraReadableDirs: options.extraReadableDirs,
+          role: options.role
+        });
         return { ...restarted, sessionRestarted: true };
       }
       return this.failed(participant, error, Date.now() - startedAt);
@@ -248,6 +331,54 @@ export class CliAgentRunner {
       return undefined;
     }
     return kind === "code-review" || kind === "implementation-plan" || kind === "chat" || Boolean(diffMode) ? repoPath : undefined;
+  }
+
+  private normalizedExtraReadableDirs(dirs: string[] | undefined): string[] {
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    for (const dir of dirs ?? []) {
+      const trimmed = dir.trim();
+      if (!trimmed || seen.has(trimmed)) {
+        continue;
+      }
+      seen.add(trimmed);
+      normalized.push(trimmed);
+    }
+    return normalized;
+  }
+
+  private insertCodexOptionBeforePrompt(args: string[], resuming: boolean, ...items: string[]): void {
+    const promptIndex = resuming ? Math.max(args.length - 2, 2) : Math.max(args.length - 1, 1);
+    args.splice(promptIndex, 0, ...items);
+  }
+
+  private tomlString(value: string): string {
+    return JSON.stringify(value);
+  }
+
+  private claudeAgentsJson(role: CliAgentRoleOptions): string {
+    return JSON.stringify({
+      [role.name]: {
+        description: role.description,
+        prompt: role.instructions
+      }
+    });
+  }
+
+  private isCodexDeveloperInstructionsUnsupported(error: unknown): boolean {
+    const message = this.errorText(error).toLowerCase();
+    return (
+      message.includes("developer_instructions") &&
+      /unknown|invalid|unrecognized|unsupported|unexpected|failed to parse|configuration|config/.test(message)
+    );
+  }
+
+  private isClaudeAgentFlagUnsupported(error: unknown): boolean {
+    const message = this.errorText(error).toLowerCase();
+    return (
+      /(?:unknown|unrecognized|invalid|unsupported).{0,80}--agents?/.test(message) ||
+      /--agents?.{0,80}(?:unknown|unrecognized|invalid|unsupported)/.test(message)
+    );
   }
 
   private extractCodexText(stdout: string): string {

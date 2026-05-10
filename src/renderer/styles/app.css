@@ -1047,13 +1047,39 @@ button {
 
 .chat-view {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   height: 100%;
   max-height: none;
   overflow: hidden;
   padding: 0;
   background: #ffffff;
+}
+
+.chat-view.thread-open {
+  grid-template-columns: minmax(360px, 1fr) 10px minmax(320px, var(--chat-thread-width, 460px));
+}
+
+.chat-view.resizing-thread {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.chat-main {
+  display: grid;
+  grid-column: 1;
+  grid-row: 1;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.chat-view > .thread-resizer {
+  grid-column: 2;
+  grid-row: 1;
 }
 
 .mini-avatar {
@@ -1209,6 +1235,19 @@ button {
   margin-left: 0;
 }
 
+.chat-message.selected-thread-root .message-body {
+  border-color: #5a9cf8;
+  background: #f7fbff;
+}
+
+.chat-message.in-thread {
+  gap: 10px;
+}
+
+.chat-message.in-thread + .chat-message.in-thread {
+  margin-top: 8px;
+}
+
 .chat-message .message-body {
   background: #ffffff;
   overflow: visible;
@@ -1240,10 +1279,18 @@ button {
 }
 
 .chat-approval-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
   margin-top: 10px;
   color: #276d58;
   font-size: 12px;
   font-weight: 700;
+}
+
+.chat-approval-note .secondary-button {
+  margin-top: 0;
 }
 
 .chat-reply-button {
@@ -1254,6 +1301,26 @@ button {
   cursor: pointer;
   font-size: 12px;
   font-weight: 700;
+}
+
+.chat-thread-link {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: fit-content;
+  margin-top: 12px;
+  padding: 0;
+  background: transparent;
+  color: #1f6fb2;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.chat-thread-link small {
+  color: #707078;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .chat-composer {
@@ -1267,6 +1334,46 @@ button {
   border-top: 1px solid #ded8cc;
   background: #ffffff;
   box-shadow: 0 -10px 24px rgba(31, 35, 48, 0.08);
+}
+
+.chat-thread-panel {
+  display: grid;
+  grid-column: 3;
+  grid-row: 1;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid #ececef;
+  background: #ffffff;
+}
+
+.chat-thread-head {
+  padding: 18px 18px 12px;
+  border-bottom: 1px solid #ececef;
+}
+
+.chat-thread-head h2 {
+  margin: 0;
+}
+
+.chat-thread-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+}
+
+.chat-thread-replies {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #ececef;
+}
+
+.chat-thread-composer {
+  padding: 12px 18px 18px;
+  box-shadow: none;
 }
 
 .chat-composer-status {
@@ -1423,8 +1530,29 @@ button {
 .message-body {
   position: relative;
   min-width: 0;
-  padding: 14px;
+  padding: 14px 52px 14px 14px;
   overflow: hidden;
+}
+
+.message-copy-button {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #e1e1e5;
+  background: #ffffff;
+  color: #5c5c63;
+}
+
+.message-copy-button:hover {
+  background: #f6f6f8;
+  color: #202124;
+}
+
+.message-copy-button:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .message-meta {
@@ -2493,6 +2621,7 @@ body {
 .topbar,
 .compose-layout,
 .slack-thread-panel,
+.chat-thread-panel,
 .slack-action-bar {
   border-color: #ececef;
   background: #ffffff;

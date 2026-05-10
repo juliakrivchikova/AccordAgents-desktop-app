@@ -37,6 +37,8 @@ export interface ChatRoleConfig {
 
 export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code">;
 
+export type ChatRoleRuntime = "claude-agent" | "codex-developer-instructions" | "prompt-fallback";
+
 export interface ChatParticipant {
   id: string;
   handle: string;
@@ -51,6 +53,10 @@ export interface ChatParticipantSession {
   sessionId: string;
   roleConfigId: string;
   roleConfigVersion: number;
+  roleRuntime?: ChatRoleRuntime;
+  participantKind?: ChatProviderKind;
+  participantModel?: string;
+  runtimeConfigVersion?: number;
   roleLabel: string;
   roleInstructions: string;
   lastSyncedMessageId?: string;
@@ -69,6 +75,7 @@ export interface ChatPendingMention {
 export interface ChatMessageMetadata {
   threadId?: string;
   parentMessageId?: string;
+  chatThreadRootId?: string;
   mentions?: string[];
   pendingMentions?: ChatPendingMention[];
   sourceMessageId?: string;
@@ -127,6 +134,7 @@ export interface SendChatMessageRequest {
   content: string;
   threadId?: string;
   parentMessageId?: string;
+  chatThreadRootId?: string;
 }
 
 export interface RespondToChatMentionsRequest {

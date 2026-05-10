@@ -1,4 +1,4 @@
-import type { ParticipantConfig, ProviderKind, ProviderModel } from "../../shared/types";
+import type { ChatRoleRuntime, ParticipantConfig, ProviderKind, ProviderModel } from "../../shared/types";
 import { SettingsService } from "./settings";
 
 export interface ParticipantRunResult {
@@ -9,6 +9,8 @@ export interface ParticipantRunResult {
   durationMs?: number;
   sessionId?: string;
   sessionRestarted?: boolean;
+  roleRuntime?: ChatRoleRuntime;
+  warnings?: string[];
 }
 
 function textFromOpenAi(data: unknown): string {
