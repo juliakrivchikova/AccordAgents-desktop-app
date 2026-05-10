@@ -11,7 +11,6 @@ Prefer the Makefile aliases; they wrap the npm scripts in `package.json`.
 - `make start` — Build, then run Electron from `dist`.
 - `make typecheck` — Strict TS checks for both main and renderer projects (`tsc --noEmit` against each tsconfig).
 - `make clean` — Remove `dist`.
-- `npm run test:chat-layout` — Boots Vite + Electron headlessly against a fixture and asserts chat layout. There is no general test framework; this is the only automated check beyond typecheck.
 
 There is no lint or test runner configured. Before submitting changes, run `make typecheck` and (for renderer changes) `make build`. Manual verification notes are expected in PRs whenever IPC, provider integrations, git diff handling, or conversation storage are touched.
 
