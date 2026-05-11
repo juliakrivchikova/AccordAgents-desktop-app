@@ -20,7 +20,7 @@ import type {
   StartReviewResult
 } from "../../shared/types";
 import { CliAgentRunner } from "./cliAgents";
-import type { CliAgentRoleOptions } from "./cliAgents";
+import type { CliAgentOutputEvent, CliAgentRoleOptions } from "./cliAgents";
 import { DebugLogService } from "./debugLogs";
 import type { ParticipantRunResult } from "./providers";
 import { SettingsService } from "./settings";
@@ -30,6 +30,7 @@ type ProgressCallback = (progress: ReviewProgress) => void;
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 3;
+const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 
 export class ChatService {
   private readonly saveQueues = new Map<string, Promise<void>>();
@@ -229,7 +230,7 @@ export class ChatService {
     });
     const results = await Promise.all(
       participants.map(async (participant) => {
-        const messages = await this.runParticipantTurn(conversation, participant, triggerMessage, runId, signal, undefined, {
+        const messages = await this.runParticipantTurn(conversation, participant, triggerMessage, runId, signal, progress, {
           warnings,
           promptConversation: turnSnapshot,
           workspacePath
@@ -287,13 +288,22 @@ export class ChatService {
     this.emitProgress(runId, progress, "debate", `@${participant.handle} is responding.`, {
       participantLabel: `@${participant.handle}`
     });
+    const outputSink = this.createAgentOutputSink(runId, progress, participant);
     let result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
       persistSession: true,
       sessionId: session.sessionId,
       extraReadableDirs: [workspacePath],
       resumeFallbackPrompt,
-      role
+      role,
+      onOutput: outputSink.emit,
+      warm: {
+        conversationId: conversation.id,
+        participantId: participant.id,
+        contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath),
+        idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
+      }
     });
+    outputSink.flush();
     this.applyCliRunMetadata(session, result, options.warnings);
     const guardViolation = result.ok ? this.chatResponseGuardViolation(result.content, triggerMessage) : undefined;
     if (guardViolation) {
@@ -313,8 +323,16 @@ export class ChatService {
       result = await this.cliRunner.run(cliParticipant, retryPrompt, runPath, undefined, "chat", signal, {
         persistSession: true,
         extraReadableDirs: [workspacePath],
-        role: retryRole
+        role: retryRole,
+        onOutput: outputSink.emit,
+        warm: {
+          conversationId: conversation.id,
+          participantId: participant.id,
+          contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath),
+          idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
+        }
       });
+      outputSink.flush();
       this.applyCliRunMetadata(session, result, options.warnings);
       const retryViolation = result.ok ? this.chatResponseGuardViolation(result.content, triggerMessage) : undefined;
       if (retryViolation) {
@@ -353,10 +371,12 @@ export class ChatService {
     if (result.ok) {
       const pendingMentions = this.pendingMentionsFromAgentReply(conversation, participant, result.content);
       if (pendingMentions.length > 0) {
+        const requesterContinuationRequested = this.requesterContinuationRequested(result.content);
         participantMessage.metadata = {
           ...participantMessage.metadata,
           mentions: pendingMentions.map((mention) => mention.targetHandle),
-          pendingMentions
+          pendingMentions,
+          requesterContinuationRequested: requesterContinuationRequested || undefined
         };
       }
       session.lastSyncedMessageId = participantMessage.id;
@@ -395,7 +415,7 @@ export class ChatService {
           const role = this.roleLabelForParticipant(conversation, item);
           return `- @${item.handle}: ${role} agent`;
         }),
-        "Mention policy: you may cite participant handles in normal prose for attribution; those citations do not request dispatch. To ask another participant to respond, include a dedicated `Participant requests:` block with one bullet per requested participant. Use `Participant requests: none` when you cite or identify participants but do not need follow-up. Mentioned agents will not run until User approves the requests.",
+        "Mention policy: you may cite participant handles in normal prose for attribution; those citations do not request dispatch. To ask another participant to respond, include a dedicated `Participant requests:` block with one bullet per requested participant. Use `Participant requests: none` when you cite or identify participants but do not need follow-up. If you need to synthesize after the requested participants reply, add the exact line `Return to requester after replies: yes`. Mentioned agents and requester continuations will not run until User approves them.",
         "Clarification policy: if you need clarification about goals, requirements, preferences, acceptance criteria, or user intent, ask User directly in your reply. Do not mention another agent for user-owned clarification.",
         "Thread policy: answer in the active thread. Do not assume a mentioned participant has answered until their reply appears in the transcript.",
         "Chat response guard: answer only in this chat message. Do not mention ExitPlanMode, plan files, tool availability, or recording/writing outside the chat unless User directly asks about those mechanics. If you make a decision, arbitration, plan, or summary, include it in this reply. Do not say it is posted above or recorded elsewhere unless you cite the exact existing chat message."
@@ -523,6 +543,27 @@ export class ChatService {
 
   private normalizedModel(value: string | undefined): string {
     return value?.trim() ?? "";
+  }
+
+  private warmAgentContextKey(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    session: ChatParticipantSession,
+    runPath: string,
+    workspacePath: string
+  ): string {
+    return JSON.stringify({
+      conversationId: conversation.id,
+      participantId: participant.id,
+      participantKind: participant.kind,
+      participantModel: participant.model?.trim() || "",
+      roleConfigId: session.roleConfigId,
+      roleConfigVersion: session.roleConfigVersion,
+      roleRuntime: session.roleRuntime ?? "",
+      runtimeConfigVersion: session.runtimeConfigVersion ?? 0,
+      runPath,
+      workspacePath
+    });
   }
 
   private async roleForParticipant(participant: ChatParticipant): Promise<ChatRoleConfig> {
@@ -672,6 +713,12 @@ export class ChatService {
       break;
     }
     return this.extractMentions(requestLines.join("\n"));
+  }
+
+  private requesterContinuationRequested(content: string): boolean {
+    return this.withoutFencedCode(content)
+      .split(/\r?\n/)
+      .some((line) => /^\s*return to requester after replies\s*:\s*(?:yes|true)\s*$/i.test(line));
   }
 
   private resolveMentionTargets(conversation: Conversation, content: string): { targets: ChatParticipant[]; unknownHandles: string[] } {
@@ -877,6 +924,69 @@ export class ChatService {
 
   private clone(conversation: Conversation): Conversation {
     return JSON.parse(JSON.stringify(conversation)) as Conversation;
+  }
+
+  private createAgentOutputSink(
+    runId: string,
+    progress: ProgressCallback | undefined,
+    participant: ChatParticipant
+  ): { emit: (event: CliAgentOutputEvent) => void; flush: () => void } {
+    if (!progress) {
+      return { emit: () => undefined, flush: () => undefined };
+    }
+    const participantLabel = `@${participant.handle}`;
+    let assistantBuffer = "";
+    let assistantTimer: NodeJS.Timeout | undefined;
+
+    const emitNow = (event: CliAgentOutputEvent): void => {
+      if (!progress || !event.text) {
+        return;
+      }
+      this.emitProgress(runId, progress, "debate", `${participantLabel} is responding.`, {
+        participantLabel,
+        agentOutput: {
+          participantId: participant.id,
+          participantLabel,
+          kind: event.kind,
+          text: event.text,
+          append: event.append
+        }
+      });
+    };
+
+    const flush = (): void => {
+      if (assistantTimer) {
+        clearTimeout(assistantTimer);
+        assistantTimer = undefined;
+      }
+      if (!assistantBuffer) {
+        return;
+      }
+      const text = assistantBuffer;
+      assistantBuffer = "";
+      emitNow({ kind: "assistant", text, append: true });
+    };
+
+    const scheduleFlush = (): void => {
+      if (assistantTimer) {
+        return;
+      }
+      assistantTimer = setTimeout(flush, 120);
+      assistantTimer.unref();
+    };
+
+    return {
+      emit: (event) => {
+        if (event.kind === "assistant" && event.append !== false) {
+          assistantBuffer += event.text;
+          scheduleFlush();
+          return;
+        }
+        flush();
+        emitNow(event);
+      },
+      flush
+    };
   }
 
   private emitProgress(

@@ -35,8 +35,8 @@ const gitService = new GitService();
 const settingsService = new SettingsService();
 const storageService = new StorageService();
 const providerRunner = new ProviderRunner(settingsService);
-const cliAgentRunner = new CliAgentRunner();
 const debugLogService = new DebugLogService();
+const cliAgentRunner = new CliAgentRunner(debugLogService);
 const consensusService = new ConsensusService(gitService, storageService, providerRunner, cliAgentRunner, debugLogService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
 });
@@ -373,4 +373,8 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
   }
+});
+
+app.on("before-quit", () => {
+  void cliAgentRunner.shutdownWarmAgents();
 });

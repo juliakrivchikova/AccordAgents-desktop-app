@@ -80,6 +80,7 @@ export interface ChatMessageMetadata {
   pendingMentions?: ChatPendingMention[];
   sourceMessageId?: string;
   requesterParticipantId?: string;
+  requesterContinuationRequested?: boolean;
   approvedContinuation?: boolean;
   syncedThroughMessageId?: string;
 }
@@ -312,10 +313,19 @@ export interface ReviewProgress {
   phase: "initial" | "extract" | "arbiter" | "decisions" | "debate" | "summary" | "done" | "cancelled" | "error";
   message: string;
   participantLabel?: string;
+  agentOutput?: AgentLiveOutput;
   findingTitle?: string;
   completed?: number;
   total?: number;
   createdAt: string;
+}
+
+export interface AgentLiveOutput {
+  participantId?: string;
+  participantLabel: string;
+  kind: "assistant" | "tool";
+  text: string;
+  append?: boolean;
 }
 
 export interface ChatMessage {

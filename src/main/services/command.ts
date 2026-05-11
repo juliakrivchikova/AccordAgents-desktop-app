@@ -15,6 +15,8 @@ export interface CommandOptions {
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  onStdout?: (chunk: string) => void;
+  onStderr?: (chunk: string) => void;
 }
 
 export class CommandError extends Error {
@@ -72,10 +74,12 @@ export function runCommand(command: string, args: string[], options: CommandOpti
 
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
+      options.onStdout?.(chunk);
     });
 
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
+      options.onStderr?.(chunk);
     });
 
     child.on("error", (error) => {

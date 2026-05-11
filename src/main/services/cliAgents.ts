@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -10,6 +12,7 @@ const MAX_CLI_ERROR_CHARS = 500;
 const MAX_CLI_ERROR_LINES = 8;
 const MAX_CLI_EVENT_SUMMARIES = 2;
 const CLI_AGENT_RUN_TIMEOUT_MS = 15 * 60_000;
+const WARM_AGENT_KILL_GRACE_MS = 1500;
 
 export interface CliAgentRunOptions {
   persistSession?: boolean;
@@ -17,6 +20,25 @@ export interface CliAgentRunOptions {
   extraReadableDirs?: string[];
   resumeFallbackPrompt?: string;
   role?: CliAgentRoleOptions;
+  warm?: CliAgentWarmOptions;
+  onOutput?: CliAgentOutputCallback;
+}
+
+export type CliAgentOutputKind = "assistant" | "tool";
+
+export interface CliAgentOutputEvent {
+  kind: CliAgentOutputKind;
+  text: string;
+  append?: boolean;
+}
+
+export type CliAgentOutputCallback = (event: CliAgentOutputEvent) => void;
+
+export interface CliAgentWarmOptions {
+  conversationId: string;
+  participantId: string;
+  contextKey: string;
+  idleTimeoutMs: number;
 }
 
 export interface CliAgentRoleOptions {
@@ -26,7 +48,39 @@ export interface CliAgentRoleOptions {
   promptFallbackPrompt: string;
 }
 
+interface CliAgentDebugLogger {
+  write(event: string, payload: Record<string, unknown>): Promise<void>;
+}
+
+interface WarmAgentEntry {
+  key: string;
+  scopeKey: string;
+  providerKind: ParticipantConfig["kind"];
+  process: ChildProcessWithoutNullStreams;
+  run: (prompt: string, signal?: AbortSignal, onOutput?: CliAgentOutputCallback) => Promise<ParticipantRunResult>;
+  queue: Promise<void>;
+  idleTimer?: NodeJS.Timeout;
+  closed: boolean;
+}
+
+interface ClaudeWarmPendingTurn {
+  startedAt: number;
+  messages: string[];
+  lastAssistantText?: string;
+  sessionId?: string;
+  timer: NodeJS.Timeout;
+  abort?: () => void;
+  onOutput?: CliAgentOutputCallback;
+  resolve: (result: ParticipantRunResult) => void;
+  reject: (error: Error) => void;
+}
+
 export class CliAgentRunner {
+  private readonly warmAgents = new Map<string, WarmAgentEntry>();
+  private readonly warmUnsupportedLogged = new Set<ParticipantConfig["kind"]>();
+
+  constructor(private readonly debugLogs?: CliAgentDebugLogger) {}
+
   async detectAgents(): Promise<AgentHealth[]> {
     const [codex, claude] = await Promise.all([this.detectCodex(), this.detectClaude()]);
     return [codex, claude];
@@ -49,6 +103,12 @@ export class CliAgentRunner {
       return this.runClaude(participant, prompt, effectiveRepoPath, kind, signal, options);
     }
     return { participant, ok: false, content: "", error: `${participant.label} is not a CLI agent.` };
+  }
+
+  async shutdownWarmAgents(): Promise<void> {
+    const entries = Array.from(this.warmAgents.values());
+    this.warmAgents.clear();
+    await Promise.all(entries.map((entry) => this.closeWarmAgent(entry, "shutdown")));
   }
 
   private async detectCodex(): Promise<AgentHealth> {
@@ -78,6 +138,21 @@ export class CliAgentRunner {
   }
 
   private async runCodex(
+    participant: ParticipantConfig,
+    prompt: string,
+    repoPath: string | undefined,
+    diffMode: GitDiffMode | undefined,
+    kind: ConversationKind,
+    signal?: AbortSignal,
+    options: CliAgentRunOptions = {}
+  ): Promise<ParticipantRunResult> {
+    if (options.warm && kind === "chat") {
+      this.logWarmUnsupportedOnce(participant.kind, "Codex exec-server warm protocol is not wired; using one-shot resume fallback.");
+    }
+    return this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, options);
+  }
+
+  private async runCodexOneShot(
     participant: ParticipantConfig,
     prompt: string,
     repoPath: string | undefined,
@@ -137,11 +212,13 @@ export class CliAgentRunner {
       if (options.role) {
         this.insertCodexOptionBeforePrompt(args, resuming, "-c", `developer_instructions=${this.tomlString(options.role.instructions)}`);
       }
+      const stdoutLines = this.createLineHandler((line) => this.emitCodexLiveOutput(line, options.onOutput));
       const result = await runCommand("codex", args, {
         cwd: repoPath,
         input: this.codexPrompt(prompt, repoPath, diffMode, kind),
         timeoutMs: CLI_AGENT_RUN_TIMEOUT_MS,
-        signal
+        signal,
+        onStdout: options.onOutput ? stdoutLines : undefined
       });
       const lastMessage = await this.readOptionalFile(outputPath);
       return {
@@ -154,7 +231,7 @@ export class CliAgentRunner {
       };
     } catch (error) {
       if (options.role && this.isCodexDeveloperInstructionsUnsupported(error)) {
-        const fallback = await this.runCodex(
+        const fallback = await this.runCodexOneShot(
           participant,
           options.role.promptFallbackPrompt,
           repoPath,
@@ -178,7 +255,7 @@ export class CliAgentRunner {
         };
       }
       if (options.sessionId && this.isResumeMiss(error)) {
-        const restarted = await this.runCodex(participant, options.resumeFallbackPrompt ?? prompt, repoPath, diffMode, kind, signal, {
+        const restarted = await this.runCodexOneShot(participant, options.resumeFallbackPrompt ?? prompt, repoPath, diffMode, kind, signal, {
           persistSession: options.persistSession,
           extraReadableDirs: options.extraReadableDirs,
           role: options.role
@@ -194,6 +271,20 @@ export class CliAgentRunner {
   }
 
   private async runClaude(
+    participant: ParticipantConfig,
+    prompt: string,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    signal?: AbortSignal,
+    options: CliAgentRunOptions = {}
+  ): Promise<ParticipantRunResult> {
+    if (options.warm && kind === "chat") {
+      return this.runClaudeWarmOrOneShot(participant, prompt, repoPath, kind, signal, options);
+    }
+    return this.runClaudeOneShot(participant, prompt, repoPath, kind, signal, options);
+  }
+
+  private async runClaudeOneShot(
     participant: ParticipantConfig,
     prompt: string,
     repoPath: string | undefined,
@@ -254,7 +345,7 @@ export class CliAgentRunner {
       };
     } catch (error) {
       if (options.role && !options.sessionId && this.isClaudeAgentFlagUnsupported(error)) {
-        const fallback = await this.runClaude(
+        const fallback = await this.runClaudeOneShot(
           participant,
           options.role.promptFallbackPrompt,
           repoPath,
@@ -276,7 +367,7 @@ export class CliAgentRunner {
         };
       }
       if (options.sessionId && this.isResumeMiss(error)) {
-        const restarted = await this.runClaude(participant, options.resumeFallbackPrompt ?? prompt, repoPath, kind, signal, {
+        const restarted = await this.runClaudeOneShot(participant, options.resumeFallbackPrompt ?? prompt, repoPath, kind, signal, {
           persistSession: options.persistSession,
           extraReadableDirs: options.extraReadableDirs,
           role: options.role
@@ -285,6 +376,537 @@ export class CliAgentRunner {
       }
       return this.failed(participant, error, Date.now() - startedAt);
     }
+  }
+
+  private async runClaudeWarmOrOneShot(
+    participant: ParticipantConfig,
+    prompt: string,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    signal: AbortSignal | undefined,
+    options: CliAgentRunOptions
+  ): Promise<ParticipantRunResult> {
+    const warm = options.warm;
+    if (!warm) {
+      return this.runClaudeOneShot(participant, prompt, repoPath, kind, signal, options);
+    }
+    const key = this.warmAgentKey(participant, repoPath, kind, options);
+    const scopeKey = this.warmAgentScopeKey(warm);
+    await this.closeStaleWarmAgents(scopeKey, key);
+    let entry = this.warmAgents.get(key);
+    if (!entry || entry.closed || entry.process.exitCode !== null) {
+      if (entry) {
+        this.warmAgents.delete(key);
+        await this.closeWarmAgent(entry, "stale");
+      }
+      try {
+        entry = this.createClaudeWarmAgent(key, scopeKey, participant, repoPath, kind, options);
+        this.warmAgents.set(key, entry);
+        void this.writeDebugLog("cli-agent-warm-started", {
+          providerKind: participant.kind,
+          participantId: participant.id,
+          conversationId: warm.conversationId
+        });
+      } catch (error) {
+        void this.writeDebugLog("cli-agent-warm-start-failed", {
+          providerKind: participant.kind,
+          participantId: participant.id,
+          conversationId: warm.conversationId,
+          error: this.errorText(error)
+        });
+        return this.runClaudeOneShot(participant, prompt, repoPath, kind, signal, this.withoutWarm(options));
+      }
+    }
+
+    return this.enqueueWarmRun(entry, async () => {
+      this.clearWarmIdleTimer(entry as WarmAgentEntry);
+      try {
+        const result = await (entry as WarmAgentEntry).run(prompt, signal, options.onOutput);
+        this.scheduleWarmIdleTimer(entry as WarmAgentEntry, warm.idleTimeoutMs);
+        return result;
+      } catch (error) {
+        this.warmAgents.delete(key);
+        await this.closeWarmAgent(entry as WarmAgentEntry, signal?.aborted ? "aborted" : "failed");
+        if (signal?.aborted) {
+          return this.failed(participant, error);
+        }
+        void this.writeDebugLog("cli-agent-warm-fallback", {
+          providerKind: participant.kind,
+          participantId: participant.id,
+          conversationId: warm.conversationId,
+          error: this.errorText(error)
+        });
+        return this.runClaudeOneShot(participant, prompt, repoPath, kind, signal, this.withoutWarm(options));
+      }
+    });
+  }
+
+  private createClaudeWarmAgent(
+    key: string,
+    scopeKey: string,
+    participant: ParticipantConfig,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    options: CliAgentRunOptions
+  ): WarmAgentEntry {
+    const newSessionId = options.persistSession && !options.sessionId ? randomUUID() : undefined;
+    const extraReadableDirs = this.normalizedExtraReadableDirs(options.extraReadableDirs);
+    const args = [
+      "-p",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--permission-mode",
+      kind === "chat" ? "default" : "plan",
+      "--disallowedTools",
+      "Edit,Write,MultiEdit,NotebookEdit,Bash"
+    ];
+    if (options.sessionId) {
+      args.push("--resume", options.sessionId);
+    } else if (newSessionId) {
+      args.push("--session-id", newSessionId);
+    }
+    if (participant.model) {
+      args.push("--model", participant.model);
+    }
+    if (options.role && !options.sessionId) {
+      args.push("--agents", this.claudeAgentsJson(options.role), "--agent", options.role.name);
+    }
+    if (extraReadableDirs.length > 0) {
+      args.push("--add-dir", ...extraReadableDirs);
+    }
+    if (repoPath || extraReadableDirs.length > 0) {
+      args.push("--tools", "Read,Grep,Glob,LS");
+    } else {
+      args.push("--tools", "");
+    }
+
+    const child = spawn("claude", args, {
+      cwd: repoPath,
+      env: { ...process.env },
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+
+    let stdoutBuffer = "";
+    let stderr = "";
+    let closed = false;
+    let pending: ClaudeWarmPendingTurn | undefined;
+
+    const cleanupPending = (): ClaudeWarmPendingTurn | undefined => {
+      const current = pending;
+      if (!current) {
+        return undefined;
+      }
+      clearTimeout(current.timer);
+      if (current.abort) {
+        current.abort();
+      }
+      pending = undefined;
+      return current;
+    };
+
+    const rejectPending = (error: Error): void => {
+      const current = cleanupPending();
+      current?.reject(error);
+    };
+
+    child.stderr.on("data", (chunk: string) => {
+      stderr = this.truncateText(`${stderr}${chunk}`, MAX_CLI_ERROR_CHARS);
+    });
+
+    child.stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+      let newline = stdoutBuffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = stdoutBuffer.slice(0, newline).trim();
+        stdoutBuffer = stdoutBuffer.slice(newline + 1);
+        if (line) {
+          this.handleClaudeWarmLine(line, participant, options, newSessionId, pending, cleanupPending, rejectPending);
+        }
+        newline = stdoutBuffer.indexOf("\n");
+      }
+    });
+
+    child.on("error", (error) => {
+      closed = true;
+      rejectPending(error);
+    });
+    child.on("close", (exitCode) => {
+      closed = true;
+      rejectPending(new Error(`claude warm process exited${exitCode === null ? "" : ` with code ${exitCode}`}${stderr ? `: ${stderr}` : ""}`));
+    });
+
+    return {
+      key,
+      scopeKey,
+      providerKind: participant.kind,
+      process: child,
+      queue: Promise.resolve(),
+      closed: false,
+      run: (turnPrompt: string, signal?: AbortSignal, onOutput?: CliAgentOutputCallback) => {
+        if (closed || child.exitCode !== null || child.killed) {
+          return Promise.reject(new Error("claude warm process is not running"));
+        }
+        if (pending) {
+          return Promise.reject(new Error("claude warm process already has an active turn"));
+        }
+        return new Promise<ParticipantRunResult>((resolve, reject) => {
+          const startedAt = Date.now();
+          const timer = setTimeout(() => {
+            rejectPending(new Error(`claude warm process timed out after ${CLI_AGENT_RUN_TIMEOUT_MS}ms`));
+          }, CLI_AGENT_RUN_TIMEOUT_MS);
+          timer.unref();
+          const abort = (): void => {
+            rejectPending(new Error("claude warm process was cancelled"));
+          };
+          pending = {
+            startedAt,
+            messages: [],
+            sessionId: options.sessionId ?? newSessionId,
+            timer,
+            abort: signal ? () => signal.removeEventListener("abort", abort) : undefined,
+            onOutput,
+            resolve,
+            reject
+          };
+          if (signal?.aborted) {
+            abort();
+            return;
+          }
+          signal?.addEventListener("abort", abort, { once: true });
+          child.stdin.write(`${JSON.stringify(this.claudeWarmUserMessage(turnPrompt))}\n`, (error) => {
+            if (error) {
+              rejectPending(error);
+            }
+          });
+        });
+      }
+    };
+  }
+
+  private handleClaudeWarmLine(
+    line: string,
+    participant: ParticipantConfig,
+    options: CliAgentRunOptions,
+    fallbackSessionId: string | undefined,
+    pending: ClaudeWarmPendingTurn | undefined,
+    cleanupPending: () => ClaudeWarmPendingTurn | undefined,
+    rejectPending: (error: Error) => void
+  ): void {
+    if (!pending) {
+      return;
+    }
+    let event: unknown;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      rejectPending(new Error(`claude warm process emitted invalid JSON: ${line.slice(0, 120)}`));
+      return;
+    }
+    pending.sessionId = this.findSessionId(event) ?? pending.sessionId ?? fallbackSessionId;
+    const streamError = this.claudeWarmStreamError(event);
+    if (streamError) {
+      rejectPending(new Error(streamError));
+      return;
+    }
+    const toolSummary = this.claudeWarmToolSummary(event);
+    if (toolSummary) {
+      this.emitLiveOutput(pending.onOutput, "tool", `${toolSummary}\n`, false);
+    }
+    const assistantText = this.extractClaudeWarmAssistantText(event);
+    if (assistantText) {
+      pending.messages.push(assistantText);
+      const liveText = this.assistantLiveDelta(pending.lastAssistantText, assistantText);
+      pending.lastAssistantText = assistantText;
+      this.emitLiveOutput(pending.onOutput, "assistant", liveText, true);
+    }
+    if (!this.isClaudeWarmResult(event)) {
+      return;
+    }
+    const current = cleanupPending();
+    if (!current) {
+      return;
+    }
+    const content = this.extractClaudeWarmResultText(event) ?? current.messages.at(-1) ?? "";
+    current.resolve({
+      participant,
+      ok: true,
+      content: content.trim(),
+      durationMs: Date.now() - current.startedAt,
+      sessionId: this.findSessionId(event) ?? current.sessionId ?? fallbackSessionId,
+      roleRuntime: options.role && !options.sessionId ? "claude-agent" : undefined
+    });
+  }
+
+  private claudeWarmUserMessage(prompt: string): Record<string, unknown> {
+    return {
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: prompt }]
+      },
+      parent_tool_use_id: null
+    };
+  }
+
+  private isClaudeWarmResult(event: unknown): boolean {
+    return this.stringField(this.asRecord(event) ?? {}, "type") === "result";
+  }
+
+  private claudeWarmStreamError(event: unknown): string | undefined {
+    const record = this.asRecord(event);
+    if (!record) {
+      return undefined;
+    }
+    const type = this.stringField(record, "type");
+    if (type === "error") {
+      const error = record.error;
+      if (typeof error === "string") {
+        return error;
+      }
+      const errorRecord = this.asRecord(error);
+      return this.stringField(errorRecord ?? {}, "message") ?? this.stringField(record, "message") ?? "claude warm process reported an error";
+    }
+    if (type === "result" && record.is_error === true) {
+      return this.stringField(record, "result") ?? this.stringField(record, "error") ?? "claude warm process returned an error result";
+    }
+    return undefined;
+  }
+
+  private extractClaudeWarmResultText(event: unknown): string | undefined {
+    const record = this.asRecord(event);
+    if (!record) {
+      return undefined;
+    }
+    return this.stringField(record, "result") ?? this.stringField(record, "content") ?? this.stringField(record, "message");
+  }
+
+  private extractClaudeWarmAssistantText(event: unknown): string | undefined {
+    const record = this.asRecord(event);
+    if (!record) {
+      return undefined;
+    }
+    const type = this.stringField(record, "type");
+    if (type !== "assistant") {
+      return undefined;
+    }
+    const message = this.asRecord(record.message);
+    if (message) {
+      return this.textFromAssistantMessageItem(message);
+    }
+    return this.textFromAssistantMessageItem(record);
+  }
+
+  private enqueueWarmRun(entry: WarmAgentEntry, task: () => Promise<ParticipantRunResult>): Promise<ParticipantRunResult> {
+    const run = entry.queue.catch(() => undefined).then(task);
+    entry.queue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private warmAgentKey(
+    participant: ParticipantConfig,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    options: CliAgentRunOptions
+  ): string {
+    return JSON.stringify({
+      conversationId: options.warm?.conversationId,
+      participantId: options.warm?.participantId,
+      providerKind: participant.kind,
+      model: participant.model ?? "",
+      repoPath: repoPath ?? "",
+      kind,
+      extraReadableDirs: this.normalizedExtraReadableDirs(options.extraReadableDirs),
+      contextKey: options.warm?.contextKey ?? ""
+    });
+  }
+
+  private warmAgentScopeKey(warm: CliAgentWarmOptions): string {
+    return `${warm.conversationId}:${warm.participantId}`;
+  }
+
+  private async closeStaleWarmAgents(scopeKey: string, nextKey: string): Promise<void> {
+    const stale = Array.from(this.warmAgents.values()).filter((entry) => entry.scopeKey === scopeKey && entry.key !== nextKey);
+    for (const entry of stale) {
+      this.warmAgents.delete(entry.key);
+      await this.closeWarmAgent(entry, "context-changed");
+    }
+  }
+
+  private scheduleWarmIdleTimer(entry: WarmAgentEntry, idleTimeoutMs: number): void {
+    this.clearWarmIdleTimer(entry);
+    entry.idleTimer = setTimeout(() => {
+      this.warmAgents.delete(entry.key);
+      void this.closeWarmAgent(entry, "idle-timeout");
+    }, idleTimeoutMs);
+    entry.idleTimer.unref();
+  }
+
+  private clearWarmIdleTimer(entry: WarmAgentEntry): void {
+    if (entry.idleTimer) {
+      clearTimeout(entry.idleTimer);
+      entry.idleTimer = undefined;
+    }
+  }
+
+  private async closeWarmAgent(entry: WarmAgentEntry, reason: string): Promise<void> {
+    if (entry.closed) {
+      return;
+    }
+    entry.closed = true;
+    this.clearWarmIdleTimer(entry);
+    void this.writeDebugLog("cli-agent-warm-closed", {
+      providerKind: entry.providerKind,
+      reason
+    });
+    if (entry.process.exitCode !== null || entry.process.signalCode !== null || entry.process.killed) {
+      return;
+    }
+    entry.process.kill("SIGTERM");
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        if (entry.process.exitCode === null && entry.process.signalCode === null) {
+          entry.process.kill("SIGKILL");
+        }
+        resolve();
+      }, WARM_AGENT_KILL_GRACE_MS);
+      timer.unref();
+      entry.process.once("close", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
+  private createLineHandler(onLine: (line: string) => void): (chunk: string) => void {
+    let buffer = "";
+    return (chunk: string) => {
+      buffer += chunk;
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line) {
+          onLine(line);
+        }
+        newline = buffer.indexOf("\n");
+      }
+    };
+  }
+
+  private emitCodexLiveOutput(line: string, onOutput: CliAgentOutputCallback | undefined): void {
+    if (!onOutput) {
+      return;
+    }
+    try {
+      const event = JSON.parse(line) as unknown;
+      const delta = this.extractCodexAssistantDelta(event);
+      if (delta) {
+        this.emitLiveOutput(onOutput, "assistant", delta, true);
+        return;
+      }
+      const toolSummary = this.codexToolSummary(event);
+      if (toolSummary) {
+        this.emitLiveOutput(onOutput, "tool", `${toolSummary}\n`, false);
+      }
+    } catch {
+      // Ignore non-JSON CLI output in the live chat panel; stderr/stdout diagnostics
+      // are still captured by the final command result and debug logs.
+    }
+  }
+
+  private emitLiveOutput(
+    onOutput: CliAgentOutputCallback | undefined,
+    kind: CliAgentOutputKind,
+    text: string,
+    append = true
+  ): void {
+    const clean = this.cleanLiveOutputText(text);
+    if (!onOutput || !clean) {
+      return;
+    }
+    onOutput({ kind, text: clean, append });
+  }
+
+  private cleanLiveOutputText(text: string): string {
+    return text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+  }
+
+  private assistantLiveDelta(previous: string | undefined, next: string): string {
+    if (!previous) {
+      return next;
+    }
+    if (next.startsWith(previous)) {
+      return next.slice(previous.length);
+    }
+    if (previous.startsWith(next)) {
+      return "";
+    }
+    return `\n${next}`;
+  }
+
+  private codexToolSummary(event: unknown): string | undefined {
+    const record = this.asRecord(event);
+    if (!record) {
+      return undefined;
+    }
+    const item = this.asRecord(record.item) ?? record;
+    const type = `${this.stringField(record, "type") ?? ""} ${this.stringField(item, "type") ?? ""}`.toLowerCase();
+    const name = this.stringField(item, "name") ?? this.stringField(item, "tool_name");
+    const command = this.stringField(item, "command") ?? this.stringField(item, "cmd");
+    if (command && /command|exec|shell|bash/.test(type)) {
+      return `Running ${this.truncateText(command, 160)}`;
+    }
+    if (name && /tool|function|call/.test(type)) {
+      return `Using ${name}`;
+    }
+    if (/read|grep|glob|ls/.test(type) && name) {
+      return `Using ${name}`;
+    }
+    return undefined;
+  }
+
+  private claudeWarmToolSummary(event: unknown): string | undefined {
+    const record = this.asRecord(event);
+    if (!record) {
+      return undefined;
+    }
+    const message = this.asRecord(record.message) ?? record;
+    const content = message.content;
+    if (!Array.isArray(content)) {
+      return undefined;
+    }
+    for (const block of content) {
+      const blockRecord = this.asRecord(block);
+      if (!blockRecord || this.stringField(blockRecord, "type") !== "tool_use") {
+        continue;
+      }
+      const name = this.stringField(blockRecord, "name");
+      if (name) {
+        return `Using ${name}`;
+      }
+    }
+    return undefined;
+  }
+
+  private withoutWarm(options: CliAgentRunOptions): CliAgentRunOptions {
+    const { warm: _warm, ...next } = options;
+    return next;
+  }
+
+  private logWarmUnsupportedOnce(providerKind: ParticipantConfig["kind"], reason: string): void {
+    if (this.warmUnsupportedLogged.has(providerKind)) {
+      return;
+    }
+    this.warmUnsupportedLogged.add(providerKind);
+    void this.writeDebugLog("cli-agent-warm-unsupported", { providerKind, reason });
+  }
+
+  private async writeDebugLog(event: string, payload: Record<string, unknown>): Promise<void> {
+    await this.debugLogs?.write(event, payload);
   }
 
   private codexPrompt(

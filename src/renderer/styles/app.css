@@ -1244,6 +1244,32 @@ button {
   gap: 10px;
 }
 
+.chat-message.live-output-message .message-body {
+  background: #fbfffd;
+  border-color: #b7d5c8;
+}
+
+.chat-message.live-output-message .message-meta svg {
+  color: #3d7d68;
+  flex: 0 0 auto;
+}
+
+.live-output-pre {
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #dbe8e1;
+  border-radius: 8px;
+  background: #f6faf8;
+  color: #2c3531;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .chat-message.in-thread + .chat-message.in-thread {
   margin-top: 8px;
 }

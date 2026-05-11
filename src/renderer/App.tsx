@@ -18,6 +18,7 @@ import {
   RefreshCw,
   SendHorizontal,
   Settings,
+  Terminal,
   Users,
   Maximize2,
   X,
@@ -69,6 +70,16 @@ const DIFF_MODES: Array<{ value: GitDiffMode; label: string }> = [
   { value: "commit", label: "Commit" },
   { value: "pasted", label: "Pasted diff" }
 ];
+
+const MAX_CHAT_LIVE_OUTPUT_CHARS = 12000;
+
+interface ChatLiveOutput {
+  key: string;
+  participantId?: string;
+  participantLabel: string;
+  content: string;
+  updatedAt: string;
+}
 
 const BRANCH_COMPARE_HELP = "Changes committed on the compare branch since it diverged from the base branch.";
 
@@ -2258,6 +2269,8 @@ function ChatConversationView(props: {
   const forceStickToBottomRef = useRef(false);
   const previousMessageCountRef = useRef(topLevelMessages.length);
   const latestProgress = props.progress[props.progress.length - 1];
+  const liveOutputs = useMemo(() => chatLiveOutputs(props.progress), [props.progress]);
+  const liveOutputSignature = liveOutputs.map((output) => `${output.key}:${output.content.length}:${output.updatedAt}`).join("|");
   const latestMessage = topLevelMessages[topLevelMessages.length - 1];
   const addDraft = normalizedChatDrafts([props.addParticipantDraft]);
   const addValidation = validateChatParticipantDrafts(
@@ -2355,6 +2368,7 @@ function ChatConversationView(props: {
     latestMessage?.content,
     latestMessage?.status,
     latestProgress?.message,
+    liveOutputSignature,
     props.draft,
     props.isRunning
   ]);
@@ -2439,6 +2453,9 @@ function ChatConversationView(props: {
               />
             );
           })}
+          {props.isRunning && liveOutputs.map((output) => (
+            <ChatLiveOutputItem output={output} key={output.key} />
+          ))}
           <div className="chat-timeline-bottom" ref={timelineBottomRef} />
         </div>
         <ChatComposer
@@ -2579,6 +2596,25 @@ function ChatComposer(props: {
   );
 }
 
+function ChatLiveOutputItem({ output }: { output: ChatLiveOutput }): JSX.Element {
+  const content = output.content.trimEnd() || "Waiting for terminal output...";
+  return (
+    <article className="message chat-message live-output-message progress-active">
+      <Avatar className="message-avatar" spec={avatarForParticipant(output.participantLabel, output.participantId ?? output.key)} />
+      <div className="message-body">
+        <div className="message-meta">
+          <strong>{output.participantLabel}</strong>
+          <span>Agent activity</span>
+          <span>{new Date(output.updatedAt).toLocaleTimeString()}</span>
+          <Terminal size={15} />
+          <ProgressDots />
+        </div>
+        <pre className="live-output-pre">{content}</pre>
+      </div>
+    </article>
+  );
+}
+
 function ChatMessageItem(props: {
   message: Conversation["messages"][number];
   busy: boolean;
@@ -2599,7 +2635,10 @@ function ChatMessageItem(props: {
   const allPendingIds = pending.map((mention) => mention.targetParticipantId);
   const displayContent = chatDisplayContent(message, author);
   const showThreadActions = !props.inThread && message.role !== "system" && Boolean(props.onOpenThread);
-  const canContinueRequester = message.role === "participant" && approved.length > 0 && pending.length === 0 && !props.hasContinuationReply;
+  const continuationRequested = Boolean(message.metadata?.requesterContinuationRequested);
+  const canContinueRequester = message.role === "participant" && continuationRequested && approved.length > 0 && pending.length === 0 && !props.hasContinuationReply;
+  const pendingMentionTargetLabel = pending.length === 1 ? `@${pending[0].targetHandle}` : `${pending.length} participants`;
+  const approvePendingLabel = continuationRequested ? `Ask ${pendingMentionTargetLabel}, then return to ${author}` : "Approve mentions";
   const replyCount = props.replyCount ?? 0;
   const canCopy = Boolean(displayContent.trim());
   async function copyMessage(): Promise<void> {
@@ -2646,13 +2685,15 @@ function ChatMessageItem(props: {
           <div className="chat-approval-box">
             <strong>Pending mentions: {pending.map((mention) => `@${mention.targetHandle}`).join(", ")}</strong>
             <div className="chat-approval-actions">
-              <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, true)}>
+              <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, continuationRequested)}>
                 <CheckCircle2 size={16} />
-                Approve and continue
+                {approvePendingLabel}
               </button>
-              <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, false)}>
-                Approve mentions
-              </button>
+              {continuationRequested && (
+                <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, false)}>
+                  Approve mentions
+                </button>
+              )}
               <button className="secondary-button" disabled={props.busy} onClick={() => props.onRejectMentions(message.id, allPendingIds)}>
                 Reject
               </button>
@@ -3659,7 +3700,8 @@ type MarkdownBlock =
   | { type: "paragraph"; lines: string[] }
   | { type: "heading"; text: string }
   | { type: "code"; content: string; language?: string }
-  | { type: "ul" | "ol"; items: string[] }
+  | { type: "ul"; items: string[]; indent: number }
+  | { type: "ol"; items: string[]; start?: number; indent: number }
   | { type: "table"; headers: string[]; rows: string[][] };
 
 function MarkdownText({ content }: { content: string }): JSX.Element {
@@ -3681,14 +3723,22 @@ function renderMarkdownBlock(block: MarkdownBlock, index: number): React.ReactNo
       </pre>
     );
   }
-  if (block.type === "ul" || block.type === "ol") {
-    const ListTag = block.type;
+  if (block.type === "ol") {
     return (
-      <ListTag className="markdown-list" key={index}>
+      <ol className="markdown-list" key={index} start={block.start}>
         {block.items.map((item, itemIndex) => (
           <li key={itemIndex}>{renderInlineWithBreaks(item, `li-${index}-${itemIndex}`)}</li>
         ))}
-      </ListTag>
+      </ol>
+    );
+  }
+  if (block.type === "ul") {
+    return (
+      <ul className="markdown-list" key={index}>
+        {block.items.map((item, itemIndex) => (
+          <li key={itemIndex}>{renderInlineWithBreaks(item, `li-${index}-${itemIndex}`)}</li>
+        ))}
+      </ul>
     );
   }
   if (block.type === "table") {
@@ -3770,20 +3820,22 @@ function markdownBlocks(content: string): MarkdownBlock[] {
       continue;
     }
 
-    const listMatch = line.match(/^\s*(?:([-*])|(\d+)[.)])\s+(.+)$/);
+    const listMatch = line.match(/^(\s*)(?:([-*])|(\d+)[.)])\s+(.+)$/);
     if (listMatch) {
-      const ordered = Boolean(listMatch[2]);
+      const indent = markdownIndent(listMatch[1]);
+      const ordered = Boolean(listMatch[3]);
+      const start = ordered ? Number.parseInt(listMatch[3], 10) : undefined;
       const items: string[] = [];
       while (index < lines.length) {
         const current = lines[index];
-        const match = current.match(/^\s*(?:([-*])|(\d+)[.)])\s+(.+)$/);
-        if (!match || Boolean(match[2]) !== ordered) {
+        const match = current.match(/^(\s*)(?:([-*])|(\d+)[.)])\s+(.+)$/);
+        if (!match || Boolean(match[3]) !== ordered || markdownIndent(match[1]) !== indent) {
           break;
         }
-        items.push(match[3].trim());
+        items.push(match[4].trim());
         index += 1;
       }
-      blocks.push({ type: ordered ? "ol" : "ul", items });
+      blocks.push(ordered ? { type: "ol", items, start, indent } : { type: "ul", items, indent });
       continue;
     }
 
@@ -3806,7 +3858,40 @@ function markdownBlocks(content: string): MarkdownBlock[] {
     blocks.push({ type: "paragraph", lines: paragraphLines });
   }
 
-  return blocks;
+  return normalizeOrderedListStarts(blocks);
+}
+
+function normalizeOrderedListStarts(blocks: MarkdownBlock[]): MarkdownBlock[] {
+  const nextOrderedStarts = new Map<number, number>();
+  const continuableOrderedIndents = new Set<number>();
+
+  return blocks.map((block) => {
+    if (block.type === "heading") {
+      nextOrderedStarts.clear();
+      continuableOrderedIndents.clear();
+      return block;
+    }
+
+    if (block.type === "ol") {
+      const requestedStart = block.start ?? 1;
+      const nextStart = nextOrderedStarts.get(block.indent);
+      const start = continuableOrderedIndents.has(block.indent) && requestedStart === 1 && nextStart !== undefined ? nextStart : requestedStart;
+      nextOrderedStarts.set(block.indent, start + block.items.length);
+      continuableOrderedIndents.add(block.indent);
+      return { ...block, start };
+    }
+
+    if (block.type !== "ul") {
+      nextOrderedStarts.clear();
+      continuableOrderedIndents.clear();
+    }
+
+    return block;
+  });
+}
+
+function markdownIndent(value: string): number {
+  return value.replace(/\t/g, "    ").length;
 }
 
 function isMarkdownTableStart(lines: string[], index: number): boolean {
@@ -4261,6 +4346,48 @@ function mergeProgressIntoConversation(conversation: Conversation, _progress: Re
   }
 
   return { ...conversation, messages };
+}
+
+function chatLiveOutputs(progress: ReviewProgress[]): ChatLiveOutput[] {
+  const outputs = new Map<string, ChatLiveOutput>();
+  for (const item of progress) {
+    const agentOutput = item.agentOutput;
+    if (!agentOutput || !agentOutput.text) {
+      continue;
+    }
+    const participantLabel = agentOutput.participantLabel || item.participantLabel || "Agent";
+    const key = agentOutput.participantId || participantLabel;
+    const current = outputs.get(key) ?? {
+      key,
+      participantId: agentOutput.participantId,
+      participantLabel,
+      content: "",
+      updatedAt: item.createdAt
+    };
+    const nextContent = agentOutput.append === false
+      ? appendLiveOutputLine(current.content, agentOutput.text)
+      : current.content + agentOutput.text;
+    outputs.set(key, {
+      ...current,
+      participantId: agentOutput.participantId ?? current.participantId,
+      participantLabel,
+      content: trimLiveOutput(nextContent),
+      updatedAt: item.createdAt
+    });
+  }
+  return Array.from(outputs.values()).sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+}
+
+function appendLiveOutputLine(current: string, text: string): string {
+  const separator = current && !current.endsWith("\n") ? "\n" : "";
+  return `${current}${separator}${text}`;
+}
+
+function trimLiveOutput(content: string): string {
+  if (content.length <= MAX_CHAT_LIVE_OUTPUT_CHARS) {
+    return content;
+  }
+  return `...\n${content.slice(content.length - MAX_CHAT_LIVE_OUTPUT_CHARS)}`;
 }
 
 function conversationRunId(conversation: Conversation): string {
