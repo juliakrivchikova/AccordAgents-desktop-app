@@ -1240,6 +1240,7 @@ export class SettingsService {
       roleConfigId: update.roleConfigId,
       kind: update.kind,
       model: update.model?.trim() || undefined,
+      avatarId: update.avatarId?.trim() || undefined,
       updatedAt: now
     };
     stored.chatParticipantConfigs = participants.some((participant) => participant.id === nextParticipant.id)
@@ -1340,6 +1341,7 @@ export class SettingsService {
         roleConfigId: participant.roleConfigId,
         kind: participant.kind,
         model: participant.model?.trim() || undefined,
+        avatarId: participant.avatarId?.trim() || undefined,
         updatedAt: participant.updatedAt || new Date().toISOString()
       }));
   }

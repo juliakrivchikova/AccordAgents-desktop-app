@@ -980,6 +980,46 @@ button {
   margin-top: 0;
 }
 
+.avatar-picker-field {
+  grid-column: 1 / -1;
+}
+
+.avatar-choice-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.avatar-choice {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  padding: 2px;
+  border: 1px solid #d7cfc1;
+  border-radius: 8px;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.avatar-choice:hover {
+  border-color: #9fbfaf;
+  background: #f4faf7;
+}
+
+.avatar-choice.selected {
+  border-color: #3d7d68;
+  background: #edf7f2;
+  box-shadow: 0 0 0 3px rgba(61, 125, 104, 0.14);
+}
+
+.avatar-choice-preview {
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+}
+
 .chat-row-remove {
   align-self: end;
 }
@@ -1223,7 +1263,7 @@ button {
   min-height: 0;
   overflow: auto;
   overflow-anchor: none;
-  padding: 18px 32px 24px 24px;
+  padding: 12px 24px 18px 18px;
   background: #ffffff;
 }
 
@@ -1231,8 +1271,18 @@ button {
   height: 1px;
 }
 
-.chat-message {
+.message.chat-message {
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 10px;
+  margin-bottom: 12px;
   margin-left: 0;
+}
+
+.chat-message .message-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+  font-size: 11px;
 }
 
 .chat-message.selected-thread-root .message-body {
@@ -1241,47 +1291,96 @@ button {
 }
 
 .chat-message.in-thread {
-  gap: 10px;
+  gap: 8px;
 }
 
-.chat-message.live-output-message .message-body {
-  background: #fbfffd;
-  border-color: #b7d5c8;
+.chat-thinking-row {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 10px 44px;
+  color: #7c7d85;
 }
 
-.chat-message.live-output-message .message-meta svg {
-  color: #3d7d68;
-  flex: 0 0 auto;
+.chat-thinking-primary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  font-size: 14px;
 }
 
-.live-output-pre {
-  max-height: 260px;
-  overflow: auto;
-  margin: 0;
-  padding: 12px;
-  border: 1px solid #dbe8e1;
-  border-radius: 8px;
-  background: #f6faf8;
-  color: #2c3531;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+.chat-thinking-primary strong {
+  overflow: hidden;
+  color: #303038;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-thinking-primary span {
+  color: #7f8088;
+}
+
+.chat-thinking-activity {
+  max-width: min(720px, 100%);
+  overflow: hidden;
+  color: #8d8e96;
   font-size: 13px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-message.in-thread + .chat-message.in-thread {
-  margin-top: 8px;
+  margin-top: 6px;
 }
 
 .chat-message .message-body {
+  padding: 10px 44px 10px 12px;
   background: #ffffff;
   overflow: visible;
+}
+
+.chat-message .message-copy-button {
+  top: 7px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+}
+
+.chat-message .message-meta {
+  gap: 8px;
+  margin-bottom: 5px;
+  line-height: 1.25;
 }
 
 .chat-message .message-content {
   max-height: none !important;
   overflow: visible !important;
+}
+
+.chat-message .markdown-text {
+  gap: 8px;
+  font-size: 15px;
+  line-height: 1.34;
+}
+
+.chat-message .markdown-text h4 {
+  font-size: 14px;
+  line-height: 1.28;
+}
+
+.chat-message .markdown-list {
+  padding-left: 20px;
+}
+
+.chat-message .markdown-list li + li {
+  margin-top: 3px;
+}
+
+.chat-message .markdown-code {
+  padding: 8px 9px;
+  line-height: 1.34;
 }
 
 .chat-approval-box {
@@ -1356,7 +1455,7 @@ button {
   grid-template-columns: minmax(0, 1fr) 42px;
   align-items: end;
   gap: 10px;
-  padding: 12px 24px 24px;
+  padding: 10px 18px 18px;
   border-top: 1px solid #ded8cc;
   background: #ffffff;
   box-shadow: 0 -10px 24px rgba(31, 35, 48, 0.08);
@@ -2868,23 +2967,36 @@ body {
   box-shadow: 0 1px 3px rgba(31, 35, 48, 0.14);
 }
 
+.avatar-custom {
+  border: 1px solid #e2e2e5;
+  background: #ffffff;
+  color: #202124;
+  box-shadow: 0 1px 3px rgba(31, 35, 48, 0.12);
+}
+
 .avatar-gemini {
   background: #eef5ff;
   color: #3976d8;
 }
 
 .avatar-anthropic,
-.avatar-codex {
+.avatar-codex,
+.avatar-custom {
   padding: 0;
   overflow: hidden;
 }
 
 .avatar-anthropic .provider-avatar-image,
-.avatar-codex .provider-avatar-image {
+.avatar-codex .provider-avatar-image,
+.avatar-custom .custom-avatar-image {
   width: 100%;
   height: 100%;
   border-radius: inherit;
   object-fit: cover;
+}
+
+.avatar-custom .custom-avatar-image {
+  transform: scale(1.2);
 }
 
 .thread-avatar.typing-avatar,

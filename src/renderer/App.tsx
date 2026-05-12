@@ -18,7 +18,6 @@ import {
   RefreshCw,
   SendHorizontal,
   Settings,
-  Terminal,
   Users,
   Maximize2,
   X,
@@ -71,13 +70,12 @@ const DIFF_MODES: Array<{ value: GitDiffMode; label: string }> = [
   { value: "pasted", label: "Pasted diff" }
 ];
 
-const MAX_CHAT_LIVE_OUTPUT_CHARS = 12000;
-
-interface ChatLiveOutput {
+interface ChatThinkingRow {
   key: string;
   participantId?: string;
   participantLabel: string;
-  content: string;
+  activity?: string;
+  startedAt: string;
   updatedAt: string;
 }
 
@@ -90,23 +88,62 @@ const JUDGE_FLATICON_URL = new URL("./assets/judge-flaticon-5452982.png", import
 // Provider avatars by LobeHub Icons, MIT: https://lobehub.com/icons
 const CLAUDE_AVATAR_URL = new URL("./assets/claude-avatar.webp", import.meta.url).href;
 const CODEX_AVATAR_URL = new URL("./assets/codex-avatar.webp", import.meta.url).href;
+const CHAT_AVATAR_URLS = {
+  "codex-human": new URL("./assets/participant-codex-human.png", import.meta.url).href,
+  "codex-bunny": new URL("./assets/participant-codex-bunny.png", import.meta.url).href,
+  "codex-cat": new URL("./assets/participant-codex-cat.png", import.meta.url).href,
+  "codex-dog": new URL("./assets/participant-codex-dog.png", import.meta.url).href,
+  "codex-frog": new URL("./assets/participant-codex-frog.png", import.meta.url).href,
+  "codex-hamster": new URL("./assets/participant-codex-hamster.png", import.meta.url).href,
+  "claude-human": new URL("./assets/participant-claude-human.png", import.meta.url).href,
+  "claude-bunny": new URL("./assets/participant-claude-bunny.png", import.meta.url).href,
+  "claude-cat": new URL("./assets/participant-claude-cat.png", import.meta.url).href,
+  "claude-dog": new URL("./assets/participant-claude-dog.png", import.meta.url).href,
+  "claude-frog": new URL("./assets/participant-claude-frog.png", import.meta.url).href,
+  "claude-hamster": new URL("./assets/participant-claude-hamster.png", import.meta.url).href
+} as const;
 
 type ActiveView = "slack" | "points" | "settings";
 type SettingsSection = "providers" | "roles" | "participants";
-type AvatarKind = "user" | "arbiter" | "anthropic" | "codex" | "gemini" | "generic";
+type AvatarKind = "user" | "arbiter" | "anthropic" | "codex" | "gemini" | "generic" | "custom";
+type ChatAvatarId = keyof typeof CHAT_AVATAR_URLS;
 
 interface ChatParticipantDraft {
   handle: string;
   roleConfigId: string;
   kind: ChatProviderKind;
   model?: string;
+  avatarId?: string;
 }
 
 interface AvatarSpec {
   kind: AvatarKind;
   label: string;
   initials?: string;
+  imageUrl?: string;
 }
+
+interface ChatAvatarOption {
+  id: ChatAvatarId;
+  kind: ChatProviderKind;
+  label: string;
+  imageUrl: string;
+}
+
+const CHAT_AVATAR_OPTIONS: ChatAvatarOption[] = [
+  { id: "codex-human", kind: "codex-cli", label: "Codex human", imageUrl: CHAT_AVATAR_URLS["codex-human"] },
+  { id: "codex-bunny", kind: "codex-cli", label: "Codex bunny", imageUrl: CHAT_AVATAR_URLS["codex-bunny"] },
+  { id: "codex-cat", kind: "codex-cli", label: "Codex cat", imageUrl: CHAT_AVATAR_URLS["codex-cat"] },
+  { id: "codex-dog", kind: "codex-cli", label: "Codex dog", imageUrl: CHAT_AVATAR_URLS["codex-dog"] },
+  { id: "codex-frog", kind: "codex-cli", label: "Codex frog", imageUrl: CHAT_AVATAR_URLS["codex-frog"] },
+  { id: "codex-hamster", kind: "codex-cli", label: "Codex hamster", imageUrl: CHAT_AVATAR_URLS["codex-hamster"] },
+  { id: "claude-human", kind: "claude-code", label: "Claude human", imageUrl: CHAT_AVATAR_URLS["claude-human"] },
+  { id: "claude-bunny", kind: "claude-code", label: "Claude bunny", imageUrl: CHAT_AVATAR_URLS["claude-bunny"] },
+  { id: "claude-cat", kind: "claude-code", label: "Claude cat", imageUrl: CHAT_AVATAR_URLS["claude-cat"] },
+  { id: "claude-dog", kind: "claude-code", label: "Claude dog", imageUrl: CHAT_AVATAR_URLS["claude-dog"] },
+  { id: "claude-frog", kind: "claude-code", label: "Claude frog", imageUrl: CHAT_AVATAR_URLS["claude-frog"] },
+  { id: "claude-hamster", kind: "claude-code", label: "Claude hamster", imageUrl: CHAT_AVATAR_URLS["claude-hamster"] }
+];
 
 const USER_AVATAR: AvatarSpec = { kind: "user", label: "You" };
 const ARBITER_AVATAR: AvatarSpec = { kind: "arbiter", label: "Arbiter" };
@@ -2154,7 +2191,7 @@ function ChatSetup(props: {
                       });
                     }}
                   />
-                  <Avatar className="mini-avatar" spec={avatarForParticipant(`@${participant.handle}`, participant.id)} />
+                  <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />
                   <strong>@{participant.handle}</strong>
                   <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)} · {labelForProviderKind(props.settings.providers, participant.kind)}</span>
                   {invalidReason && <small>{invalidReason}</small>}
@@ -2182,6 +2219,8 @@ function ChatParticipantDraftRow(props: {
   onRemove?: () => void;
 }): JSX.Element {
   const cliProviders = props.settings.providers.filter((provider) => isCli(provider.kind));
+  const avatarId = normalizedChatAvatarId(props.draft.kind, props.draft.avatarId, props.draft.handle);
+  const avatarOptions = chatAvatarOptionsForKind(props.draft.kind);
   return (
     <div className="chat-participant-row">
       <label className="field compact-field">
@@ -2229,6 +2268,27 @@ function ChatParticipantDraftRow(props: {
           placeholder="CLI default"
         />
       </label>
+      <div className="field compact-field avatar-picker-field">
+        <span>Avatar</span>
+        <div className="avatar-choice-grid" role="radiogroup" aria-label="Participant avatar">
+          {avatarOptions.map((option) => {
+            const selected = option.id === avatarId;
+            return (
+              <button
+                type="button"
+                className={`avatar-choice ${selected ? "selected" : ""}`}
+                title={option.label}
+                aria-label={option.label}
+                aria-pressed={selected}
+                onClick={() => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { avatarId: option.id }))}
+                key={option.id}
+              >
+                <Avatar className="avatar-choice-preview" spec={avatarForChatAvatarOption(option)} />
+              </button>
+            );
+          })}
+        </div>
+      </div>
       {props.removable && (
         <button className="icon-button chat-row-remove" title="Remove participant" onClick={props.onRemove}>
           <X size={16} />
@@ -2269,8 +2329,8 @@ function ChatConversationView(props: {
   const forceStickToBottomRef = useRef(false);
   const previousMessageCountRef = useRef(topLevelMessages.length);
   const latestProgress = props.progress[props.progress.length - 1];
-  const liveOutputs = useMemo(() => chatLiveOutputs(props.progress), [props.progress]);
-  const liveOutputSignature = liveOutputs.map((output) => `${output.key}:${output.content.length}:${output.updatedAt}`).join("|");
+  const thinkingRows = useMemo(() => chatThinkingRows(props.progress), [props.progress]);
+  const thinkingSignature = thinkingRows.map((row) => `${row.key}:${row.activity ?? ""}:${row.updatedAt}`).join("|");
   const latestMessage = topLevelMessages[topLevelMessages.length - 1];
   const addDraft = normalizedChatDrafts([props.addParticipantDraft]);
   const addValidation = validateChatParticipantDrafts(
@@ -2368,7 +2428,7 @@ function ChatConversationView(props: {
     latestMessage?.content,
     latestMessage?.status,
     latestProgress?.message,
-    liveOutputSignature,
+    thinkingSignature,
     props.draft,
     props.isRunning
   ]);
@@ -2413,7 +2473,7 @@ function ChatConversationView(props: {
                       onClick={() => props.onDraftChange(`${props.draft}${props.draft.endsWith(" ") || !props.draft ? "" : " "}@${participant.handle} `)}
                       key={participant.id}
                     >
-                      <Avatar className="mini-avatar" spec={avatarForParticipant(`@${participant.handle}`, participant.id)} />
+                      <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />
                       <strong>@{participant.handle}</strong>
                       <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)}</span>
                     </button>
@@ -2441,6 +2501,7 @@ function ChatConversationView(props: {
             return (
               <ChatMessageItem
                 message={message}
+                participants={participants}
                 busy={props.isRunning}
                 selected={message.id === selectedThreadRoot?.id}
                 replyCount={summary?.replies.length ?? 0}
@@ -2453,8 +2514,8 @@ function ChatConversationView(props: {
               />
             );
           })}
-          {props.isRunning && liveOutputs.map((output) => (
-            <ChatLiveOutputItem output={output} key={output.key} />
+          {props.isRunning && thinkingRows.map((row) => (
+            <ChatThinkingRowItem row={row} key={row.key} />
           ))}
           <div className="chat-timeline-bottom" ref={timelineBottomRef} />
         </div>
@@ -2547,7 +2608,7 @@ function ChatComposer(props: {
                 aria-selected={index === mentionIndex}
                 key={participant.id}
               >
-                <Avatar className="mini-avatar" spec={avatarForParticipant(`@${participant.handle}`, participant.id)} />
+                <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />
                 <strong>@{participant.handle}</strong>
                 <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)}</span>
                 {index === 0 && <kbd>Enter</kbd>}
@@ -2584,7 +2645,7 @@ function ChatComposer(props: {
             }
           }}
           onBlur={() => window.setTimeout(() => setMentionQuery(undefined), 120)}
-          rows={props.rows ?? 3}
+          rows={props.rows ?? 2}
           maxHeight={props.maxHeight ?? 260}
           placeholder={props.placeholder}
         />
@@ -2596,27 +2657,22 @@ function ChatComposer(props: {
   );
 }
 
-function ChatLiveOutputItem({ output }: { output: ChatLiveOutput }): JSX.Element {
-  const content = output.content.trimEnd() || "Waiting for terminal output...";
+function ChatThinkingRowItem({ row }: { row: ChatThinkingRow }): JSX.Element {
   return (
-    <article className="message chat-message live-output-message progress-active">
-      <Avatar className="message-avatar" spec={avatarForParticipant(output.participantLabel, output.participantId ?? output.key)} />
-      <div className="message-body">
-        <div className="message-meta">
-          <strong>{output.participantLabel}</strong>
-          <span>Agent activity</span>
-          <span>{new Date(output.updatedAt).toLocaleTimeString()}</span>
-          <Terminal size={15} />
-          <ProgressDots />
-        </div>
-        <pre className="live-output-pre">{content}</pre>
+    <div className="chat-thinking-row" aria-live="polite">
+      <div className="chat-thinking-primary">
+        <strong>{row.participantLabel}</strong>
+        <span>Thinking</span>
+        <ProgressDots />
       </div>
-    </article>
+      {row.activity && <div className="chat-thinking-activity">{row.activity}</div>}
+    </div>
   );
 }
 
 function ChatMessageItem(props: {
   message: Conversation["messages"][number];
+  participants?: ChatParticipant[];
   busy: boolean;
   selected?: boolean;
   inThread?: boolean;
@@ -2630,6 +2686,7 @@ function ChatMessageItem(props: {
   const { message } = props;
   const [copied, setCopied] = useState(false);
   const author = authorForMessage(message, "chat");
+  const participant = message.participantId ? props.participants?.find((item) => item.id === message.participantId) : undefined;
   const pending = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "pending");
   const approved = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "approved");
   const allPendingIds = pending.map((mention) => mention.targetParticipantId);
@@ -2651,7 +2708,7 @@ function ChatMessageItem(props: {
   }
   return (
     <article className={`message chat-message ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""}`}>
-      <Avatar className="message-avatar" spec={avatarForMessage(message, author)} />
+      <Avatar className="message-avatar" spec={avatarForMessage(message, author, participant)} />
       <div className="message-body">
         <button
           className="icon-button message-copy-button"
@@ -2757,6 +2814,7 @@ function ChatThreadPanel(props: {
       <div className="chat-thread-body">
         <ChatMessageItem
           message={props.rootMessage}
+          participants={props.participants}
           busy={props.busy}
           inThread
           hasContinuationReply={props.continuedMentionRequestIds.has(props.rootMessage.id)}
@@ -2768,6 +2826,7 @@ function ChatThreadPanel(props: {
             {props.replies.map((message) => (
               <ChatMessageItem
                 message={message}
+                participants={props.participants}
                 busy={props.busy}
                 inThread
                 hasContinuationReply={props.continuedMentionRequestIds.has(message.id)}
@@ -4348,46 +4407,34 @@ function mergeProgressIntoConversation(conversation: Conversation, _progress: Re
   return { ...conversation, messages };
 }
 
-function chatLiveOutputs(progress: ReviewProgress[]): ChatLiveOutput[] {
-  const outputs = new Map<string, ChatLiveOutput>();
+function chatThinkingRows(progress: ReviewProgress[]): ChatThinkingRow[] {
+  const rows = new Map<string, ChatThinkingRow>();
   for (const item of progress) {
-    const agentOutput = item.agentOutput;
-    if (!agentOutput || !agentOutput.text) {
+    if (item.phase === "done" || item.phase === "cancelled" || item.phase === "error") {
+      rows.clear();
       continue;
     }
-    const participantLabel = agentOutput.participantLabel || item.participantLabel || "Agent";
-    const key = agentOutput.participantId || participantLabel;
-    const current = outputs.get(key) ?? {
+    const agentProgress = item.agentProgress;
+    if (!agentProgress) {
+      continue;
+    }
+    const participantLabel = agentProgress.participantLabel || item.participantLabel || "Agent";
+    const key = agentProgress.participantId || participantLabel;
+    if (agentProgress.state === "finished") {
+      rows.delete(key);
+      continue;
+    }
+    const current = rows.get(key);
+    rows.set(key, {
       key,
-      participantId: agentOutput.participantId,
+      participantId: agentProgress.participantId ?? current?.participantId,
       participantLabel,
-      content: "",
-      updatedAt: item.createdAt
-    };
-    const nextContent = agentOutput.append === false
-      ? appendLiveOutputLine(current.content, agentOutput.text)
-      : current.content + agentOutput.text;
-    outputs.set(key, {
-      ...current,
-      participantId: agentOutput.participantId ?? current.participantId,
-      participantLabel,
-      content: trimLiveOutput(nextContent),
+      activity: agentProgress.activity?.trim() || current?.activity,
+      startedAt: current?.startedAt ?? item.createdAt,
       updatedAt: item.createdAt
     });
   }
-  return Array.from(outputs.values()).sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
-}
-
-function appendLiveOutputLine(current: string, text: string): string {
-  const separator = current && !current.endsWith("\n") ? "\n" : "";
-  return `${current}${separator}${text}`;
-}
-
-function trimLiveOutput(content: string): string {
-  if (content.length <= MAX_CHAT_LIVE_OUTPUT_CHARS) {
-    return content;
-  }
-  return `...\n${content.slice(content.length - MAX_CHAT_LIVE_OUTPUT_CHARS)}`;
+  return Array.from(rows.values()).sort((left, right) => left.startedAt.localeCompare(right.startedAt));
 }
 
 function conversationRunId(conversation: Conversation): string {
@@ -4458,6 +4505,9 @@ function avatarGraphic(spec: AvatarSpec): React.ReactNode {
   if (spec.kind === "codex") {
     return <img className="provider-avatar-image" src={CODEX_AVATAR_URL} alt="" aria-hidden="true" />;
   }
+  if (spec.kind === "custom" && spec.imageUrl) {
+    return <img className="custom-avatar-image" src={spec.imageUrl} alt="" aria-hidden="true" />;
+  }
   if (spec.kind === "gemini") {
     return (
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -4468,12 +4518,64 @@ function avatarGraphic(spec: AvatarSpec): React.ReactNode {
   return <span>{spec.initials || initials(spec.label)}</span>;
 }
 
-function avatarForMessage(message: Conversation["messages"][number], author: string): AvatarSpec {
+function chatAvatarOptionsForKind(kind: ChatProviderKind): ChatAvatarOption[] {
+  return CHAT_AVATAR_OPTIONS.filter((option) => option.kind === kind);
+}
+
+function chatAvatarOption(avatarId: string | undefined): ChatAvatarOption | undefined {
+  return CHAT_AVATAR_OPTIONS.find((option) => option.id === avatarId);
+}
+
+function isChatAvatarIdForKind(avatarId: string | undefined, kind: ChatProviderKind): boolean {
+  return chatAvatarOption(avatarId)?.kind === kind;
+}
+
+function defaultChatAvatarId(kind: ChatProviderKind, seed = ""): ChatAvatarId {
+  const options = chatAvatarOptionsForKind(kind);
+  const fallback = kind === "claude-code" ? "claude-human" : "codex-human";
+  if (options.length === 0) {
+    return fallback;
+  }
+  const normalizedSeed = seed.trim().toLowerCase();
+  const index = normalizedSeed ? stableHash(normalizedSeed) % options.length : 0;
+  return options[index]?.id ?? fallback;
+}
+
+function normalizedChatAvatarId(kind: ChatProviderKind, avatarId: string | undefined, seed = ""): ChatAvatarId {
+  const option = chatAvatarOption(avatarId);
+  if (option?.kind === kind) {
+    return option.id;
+  }
+  return defaultChatAvatarId(kind, seed);
+}
+
+function avatarForChatAvatarOption(option: ChatAvatarOption, label = option.label): AvatarSpec {
+  return { kind: "custom", label, imageUrl: option.imageUrl };
+}
+
+function avatarForChatParticipant(participant: Pick<ChatParticipant, "id" | "handle" | "kind" | "avatarId">, label = `@${participant.handle}`): AvatarSpec {
+  const avatarId = normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle);
+  const option = chatAvatarOption(avatarId);
+  return option ? avatarForChatAvatarOption(option, label) : avatarForParticipant(label, participant.id);
+}
+
+function stableHash(value: string): number {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+  return hash;
+}
+
+function avatarForMessage(message: Conversation["messages"][number], author: string, participant?: ChatParticipant): AvatarSpec {
   if (message.role === "user") {
     return USER_AVATAR;
   }
   if (message.role === "system" || message.role === "summary" || message.participantId?.startsWith("arbiter:")) {
     return { ...ARBITER_AVATAR, label: author };
+  }
+  if (participant) {
+    return avatarForChatParticipant(participant, author);
   }
   return avatarForParticipant(author, message.participantId);
 }
@@ -4687,11 +4789,13 @@ function defaultChatParticipantDraft(settings: AppSettings, existingHandles: Set
   const provider = settings.providers.find((item) => item.kind === "codex-cli") ?? settings.providers.find((item) => item.kind === "claude-code");
   const roleConfigId = settings.chatRoleConfigs[0]?.id ?? "";
   const kind = provider?.kind === "claude-code" ? "claude-code" : "codex-cli";
+  const handle = roleConfigId ? generatedChatHandle(settings, kind, roleConfigId, existingHandles) : "";
   return {
-    handle: roleConfigId ? generatedChatHandle(settings, kind, roleConfigId, existingHandles) : "",
+    handle,
     roleConfigId,
     kind,
-    model: provider?.model
+    model: provider?.model,
+    avatarId: defaultChatAvatarId(kind, handle || roleConfigId)
   };
 }
 
@@ -4700,7 +4804,8 @@ function chatParticipantConfigToDraft(participant: ChatParticipantConfig): ChatP
     handle: participant.handle,
     roleConfigId: participant.roleConfigId,
     kind: participant.kind,
-    model: participant.model
+    model: participant.model,
+    avatarId: normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle)
   };
 }
 
@@ -4713,7 +4818,8 @@ function sameParticipantDraft(draft: ChatParticipantDraft, participant: ChatPart
     draft.handle === participant.handle &&
     draft.roleConfigId === participant.roleConfigId &&
     draft.kind === participant.kind &&
-    (draft.model ?? "") === (participant.model ?? "")
+    (draft.model ?? "") === (participant.model ?? "") &&
+    normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle) === normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle)
   );
 }
 
@@ -4728,25 +4834,32 @@ function normalizeChatParticipantDraftForSettings(draft: ChatParticipantDraft, s
     : fallback.roleConfigId;
   const provider = settings.providers.find((item) => item.kind === draft.kind) ?? settings.providers.find((item) => item.kind === fallback.kind);
   const kind = provider?.kind === "claude-code" ? "claude-code" : "codex-cli";
+  const handle = draft.handle.trim() || (roleConfigId ? generatedChatHandle(settings, kind, roleConfigId) : "");
   return {
     ...draft,
-    handle: draft.handle.trim() || (roleConfigId ? generatedChatHandle(settings, kind, roleConfigId) : ""),
+    handle,
     roleConfigId,
     kind,
-    model: draft.model ?? provider?.model
+    model: draft.model ?? provider?.model,
+    avatarId: normalizedChatAvatarId(kind, draft.avatarId, handle || roleConfigId)
   };
 }
 
 function updateChatParticipantDraft(
   draft: ChatParticipantDraft,
   settings: AppSettings,
-  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "kind">>
+  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "kind" | "avatarId">>
 ): ChatParticipantDraft {
-  const next = { ...draft, ...patch };
+  let next = { ...draft, ...patch };
+  if (!isChatAvatarIdForKind(next.avatarId, next.kind)) {
+    next = { ...next, avatarId: defaultChatAvatarId(next.kind, next.handle || next.roleConfigId) };
+  }
   if (!draft.handle.trim() || isGeneratedChatHandle(draft.handle)) {
+    const handle = generatedChatHandle(settings, next.kind, next.roleConfigId);
     return {
       ...next,
-      handle: generatedChatHandle(settings, next.kind, next.roleConfigId)
+      handle,
+      avatarId: normalizedChatAvatarId(next.kind, next.avatarId, handle)
     };
   }
   return next;
@@ -4803,7 +4916,8 @@ function normalizedChatDrafts(drafts: ChatParticipantDraft[]): ChatParticipantDr
     handle: draft.handle.trim().replace(/^@/, ""),
     roleConfigId: draft.roleConfigId,
     kind: draft.kind,
-    model: draft.model?.trim() || undefined
+    model: draft.model?.trim() || undefined,
+    avatarId: normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle)
   }));
 }
 
@@ -4830,6 +4944,9 @@ function validateChatParticipantDrafts(
     }
     if (draft.kind !== "codex-cli" && draft.kind !== "claude-code") {
       return "Chat supports local CLI participants only.";
+    }
+    if (draft.avatarId && !isChatAvatarIdForKind(draft.avatarId, draft.kind)) {
+      return "Select an avatar that matches the participant CLI.";
     }
   }
   return undefined;

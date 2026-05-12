@@ -46,6 +46,7 @@ export interface ChatParticipant {
   roleConfigVersion?: number;
   kind: ChatProviderKind;
   model?: string;
+  avatarId?: string;
 }
 
 export interface ChatParticipantSession {
@@ -97,6 +98,7 @@ export interface ChatParticipantConfig {
   roleConfigId: string;
   kind: ChatProviderKind;
   model?: string;
+  avatarId?: string;
   updatedAt: string;
 }
 
@@ -106,6 +108,7 @@ export interface ChatParticipantConfigUpdate {
   roleConfigId: string;
   kind: ChatProviderKind;
   model?: string;
+  avatarId?: string;
 }
 
 export interface CreateChatConversationRequest {
@@ -116,6 +119,7 @@ export interface CreateChatConversationRequest {
     roleConfigId: string;
     kind: ChatProviderKind;
     model?: string;
+    avatarId?: string;
   }>;
 }
 
@@ -126,6 +130,7 @@ export interface AddChatParticipantRequest {
     roleConfigId: string;
     kind: ChatProviderKind;
     model?: string;
+    avatarId?: string;
   };
 }
 
@@ -313,19 +318,18 @@ export interface ReviewProgress {
   phase: "initial" | "extract" | "arbiter" | "decisions" | "debate" | "summary" | "done" | "cancelled" | "error";
   message: string;
   participantLabel?: string;
-  agentOutput?: AgentLiveOutput;
+  agentProgress?: AgentRunProgress;
   findingTitle?: string;
   completed?: number;
   total?: number;
   createdAt: string;
 }
 
-export interface AgentLiveOutput {
+export interface AgentRunProgress {
   participantId?: string;
   participantLabel: string;
-  kind: "assistant" | "tool";
-  text: string;
-  append?: boolean;
+  state: "running" | "finished";
+  activity?: string;
 }
 
 export interface ChatMessage {

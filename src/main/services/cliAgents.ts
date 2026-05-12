@@ -24,12 +24,11 @@ export interface CliAgentRunOptions {
   onOutput?: CliAgentOutputCallback;
 }
 
-export type CliAgentOutputKind = "assistant" | "tool";
+export type CliAgentOutputKind = "tool";
 
 export interface CliAgentOutputEvent {
   kind: CliAgentOutputKind;
   text: string;
-  append?: boolean;
 }
 
 export type CliAgentOutputCallback = (event: CliAgentOutputEvent) => void;
@@ -66,7 +65,6 @@ interface WarmAgentEntry {
 interface ClaudeWarmPendingTurn {
   startedAt: number;
   messages: string[];
-  lastAssistantText?: string;
   sessionId?: string;
   timer: NodeJS.Timeout;
   abort?: () => void;
@@ -614,14 +612,11 @@ export class CliAgentRunner {
     }
     const toolSummary = this.claudeWarmToolSummary(event);
     if (toolSummary) {
-      this.emitLiveOutput(pending.onOutput, "tool", `${toolSummary}\n`, false);
+      this.emitLiveOutput(pending.onOutput, "tool", `${toolSummary}\n`);
     }
     const assistantText = this.extractClaudeWarmAssistantText(event);
     if (assistantText) {
       pending.messages.push(assistantText);
-      const liveText = this.assistantLiveDelta(pending.lastAssistantText, assistantText);
-      pending.lastAssistantText = assistantText;
-      this.emitLiveOutput(pending.onOutput, "assistant", liveText, true);
     }
     if (!this.isClaudeWarmResult(event)) {
       return;
@@ -803,14 +798,9 @@ export class CliAgentRunner {
     }
     try {
       const event = JSON.parse(line) as unknown;
-      const delta = this.extractCodexAssistantDelta(event);
-      if (delta) {
-        this.emitLiveOutput(onOutput, "assistant", delta, true);
-        return;
-      }
       const toolSummary = this.codexToolSummary(event);
       if (toolSummary) {
-        this.emitLiveOutput(onOutput, "tool", `${toolSummary}\n`, false);
+        this.emitLiveOutput(onOutput, "tool", `${toolSummary}\n`);
       }
     } catch {
       // Ignore non-JSON CLI output in the live chat panel; stderr/stdout diagnostics
@@ -821,31 +811,17 @@ export class CliAgentRunner {
   private emitLiveOutput(
     onOutput: CliAgentOutputCallback | undefined,
     kind: CliAgentOutputKind,
-    text: string,
-    append = true
+    text: string
   ): void {
     const clean = this.cleanLiveOutputText(text);
     if (!onOutput || !clean) {
       return;
     }
-    onOutput({ kind, text: clean, append });
+    onOutput({ kind, text: clean });
   }
 
   private cleanLiveOutputText(text: string): string {
     return text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
-  }
-
-  private assistantLiveDelta(previous: string | undefined, next: string): string {
-    if (!previous) {
-      return next;
-    }
-    if (next.startsWith(previous)) {
-      return next.slice(previous.length);
-    }
-    if (previous.startsWith(next)) {
-      return "";
-    }
-    return `\n${next}`;
   }
 
   private codexToolSummary(event: unknown): string | undefined {
@@ -858,15 +834,32 @@ export class CliAgentRunner {
     const name = this.stringField(item, "name") ?? this.stringField(item, "tool_name");
     const command = this.stringField(item, "command") ?? this.stringField(item, "cmd");
     if (command && /command|exec|shell|bash/.test(type)) {
-      return `Running ${this.truncateText(command, 160)}`;
+      return "Running command";
     }
     if (name && /tool|function|call/.test(type)) {
-      return `Using ${name}`;
+      return this.toolActivityLabel(name);
     }
     if (/read|grep|glob|ls/.test(type) && name) {
-      return `Using ${name}`;
+      return this.toolActivityLabel(name);
     }
     return undefined;
+  }
+
+  private toolActivityLabel(name: string): string {
+    const normalized = name.toLowerCase();
+    if (normalized === "read") {
+      return "Reading file";
+    }
+    if (normalized === "grep") {
+      return "Searching files";
+    }
+    if (normalized === "glob") {
+      return "Scanning files";
+    }
+    if (normalized === "ls") {
+      return "Listing files";
+    }
+    return `Using ${name}`;
   }
 
   private claudeWarmToolSummary(event: unknown): string | undefined {
@@ -886,7 +879,7 @@ export class CliAgentRunner {
       }
       const name = this.stringField(blockRecord, "name");
       if (name) {
-        return `Using ${name}`;
+        return this.toolActivityLabel(name);
       }
     }
     return undefined;

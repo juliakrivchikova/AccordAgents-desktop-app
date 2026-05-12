@@ -285,46 +285,23 @@ export class ChatService {
       label: `@${participant.handle}`,
       model: participant.model
     };
+    const progressSink = this.createAgentProgressSink(runId, progress, participant);
     this.emitProgress(runId, progress, "debate", `@${participant.handle} is responding.`, {
-      participantLabel: `@${participant.handle}`
-    });
-    const outputSink = this.createAgentOutputSink(runId, progress, participant);
-    let result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
-      persistSession: true,
-      sessionId: session.sessionId,
-      extraReadableDirs: [workspacePath],
-      resumeFallbackPrompt,
-      role,
-      onOutput: outputSink.emit,
-      warm: {
-        conversationId: conversation.id,
+      participantLabel: `@${participant.handle}`,
+      agentProgress: {
         participantId: participant.id,
-        contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath),
-        idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
+        participantLabel: `@${participant.handle}`,
+        state: "running"
       }
     });
-    outputSink.flush();
-    this.applyCliRunMetadata(session, result, options.warnings);
-    const guardViolation = result.ok ? this.chatResponseGuardViolation(result.content, triggerMessage) : undefined;
-    if (guardViolation) {
-      options.warnings.push(`@${participant.handle}: rejected response that mentioned ${guardViolation}; restarted the chat session and retried.`);
-      session = await this.newSessionForParticipant(participant);
-      const retryUsesPromptRole = session.roleRuntime === "prompt-fallback";
-      const retryPromptBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
-        includeRoleInstructions: retryUsesPromptRole
-      });
-      const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
-        includeRoleInstructions: true
-      });
-      const retryPrompt = this.chatGuardRetryPrompt(retryPromptBase, guardViolation);
-      const retryRole = retryUsesPromptRole
-        ? undefined
-        : this.cliRoleOptions(participant, session, this.chatGuardRetryPrompt(retryPromptFallbackBase, guardViolation));
-      result = await this.cliRunner.run(cliParticipant, retryPrompt, runPath, undefined, "chat", signal, {
+    try {
+      let result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
         persistSession: true,
+        sessionId: session.sessionId,
         extraReadableDirs: [workspacePath],
-        role: retryRole,
-        onOutput: outputSink.emit,
+        resumeFallbackPrompt,
+        role,
+        onOutput: progressSink.emit,
         warm: {
           conversationId: conversation.id,
           participantId: participant.id,
@@ -332,58 +309,88 @@ export class ChatService {
           idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
         }
       });
-      outputSink.flush();
       this.applyCliRunMetadata(session, result, options.warnings);
-      const retryViolation = result.ok ? this.chatResponseGuardViolation(result.content, triggerMessage) : undefined;
-      if (retryViolation) {
-        const error = `Blocked chat response because it mentioned ${retryViolation}.`;
-        options.warnings.push(`@${participant.handle}: ${error}`);
-        result = {
-          ...result,
-          ok: false,
-          content: `@${participant.handle} response was blocked because it discussed internal CLI mechanics instead of answering in chat.`,
-          error
-        };
+      const guardViolation = result.ok ? this.chatResponseGuardViolation(result.content, triggerMessage) : undefined;
+      if (guardViolation) {
+        options.warnings.push(`@${participant.handle}: rejected response that mentioned ${guardViolation}; restarted the chat session and retried.`);
+        session = await this.newSessionForParticipant(participant);
+        const retryUsesPromptRole = session.roleRuntime === "prompt-fallback";
+        const retryPromptBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+          includeRoleInstructions: retryUsesPromptRole
+        });
+        const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+          includeRoleInstructions: true
+        });
+        const retryPrompt = this.chatGuardRetryPrompt(retryPromptBase, guardViolation);
+        const retryRole = retryUsesPromptRole
+          ? undefined
+          : this.cliRoleOptions(participant, session, this.chatGuardRetryPrompt(retryPromptFallbackBase, guardViolation));
+        result = await this.cliRunner.run(cliParticipant, retryPrompt, runPath, undefined, "chat", signal, {
+          persistSession: true,
+          extraReadableDirs: [workspacePath],
+          role: retryRole,
+          onOutput: progressSink.emit,
+          warm: {
+            conversationId: conversation.id,
+            participantId: participant.id,
+            contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath),
+            idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
+          }
+        });
+        this.applyCliRunMetadata(session, result, options.warnings);
+        const retryViolation = result.ok ? this.chatResponseGuardViolation(result.content, triggerMessage) : undefined;
+        if (retryViolation) {
+          const error = `Blocked chat response because it mentioned ${retryViolation}.`;
+          options.warnings.push(`@${participant.handle}: ${error}`);
+          result = {
+            ...result,
+            ok: false,
+            content: `@${participant.handle} response was blocked because it discussed internal CLI mechanics instead of answering in chat.`,
+            error
+          };
+        }
       }
-    }
-    const now = new Date().toISOString();
-    session.updatedAt = now;
-    if (result.sessionId) {
-      session.sessionId = result.sessionId;
-    }
-    const participantMessage = this.message(
-      "participant",
-      result.content,
-      cliParticipant,
-      {
-        threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
-        parentMessageId: triggerMessage.id,
-        chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
-        sourceMessageId: triggerMessage.id,
-        requesterParticipantId: options.continuation ? triggerMessage.participantId : undefined,
-        approvedContinuation: options.continuation || undefined
-      },
-      result.ok ? "done" : "error"
-    );
-    if (!result.ok && result.error) {
-      options.warnings.push(`@${participant.handle}: ${result.error}`);
-    }
-    if (result.ok) {
-      const pendingMentions = this.pendingMentionsFromAgentReply(conversation, participant, result.content);
-      if (pendingMentions.length > 0) {
-        const requesterContinuationRequested = this.requesterContinuationRequested(result.content);
-        participantMessage.metadata = {
-          ...participantMessage.metadata,
-          mentions: pendingMentions.map((mention) => mention.targetHandle),
-          pendingMentions,
-          requesterContinuationRequested: requesterContinuationRequested || undefined
-        };
+      const now = new Date().toISOString();
+      session.updatedAt = now;
+      if (result.sessionId) {
+        session.sessionId = result.sessionId;
       }
-      session.lastSyncedMessageId = participantMessage.id;
+      const participantMessage = this.message(
+        "participant",
+        result.content,
+        cliParticipant,
+        {
+          threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
+          parentMessageId: triggerMessage.id,
+          chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
+          sourceMessageId: triggerMessage.id,
+          requesterParticipantId: options.continuation ? triggerMessage.participantId : undefined,
+          approvedContinuation: options.continuation || undefined
+        },
+        result.ok ? "done" : "error"
+      );
+      if (!result.ok && result.error) {
+        options.warnings.push(`@${participant.handle}: ${result.error}`);
+      }
+      if (result.ok) {
+        const pendingMentions = this.pendingMentionsFromAgentReply(conversation, participant, result.content);
+        if (pendingMentions.length > 0) {
+          const requesterContinuationRequested = this.requesterContinuationRequested(result.content);
+          participantMessage.metadata = {
+            ...participantMessage.metadata,
+            mentions: pendingMentions.map((mention) => mention.targetHandle),
+            pendingMentions,
+            requesterContinuationRequested: requesterContinuationRequested || undefined
+          };
+        }
+        session.lastSyncedMessageId = participantMessage.id;
+      }
+      this.upsertSession(conversation, session);
+      this.lockParticipantRoleVersion(conversation, participant, session.roleConfigVersion);
+      return [participantMessage];
+    } finally {
+      progressSink.finish();
     }
-    this.upsertSession(conversation, session);
-    this.lockParticipantRoleVersion(conversation, participant, session.roleConfigVersion);
-    return [participantMessage];
   }
 
   private buildPrompt(
@@ -648,7 +655,8 @@ export class ChatService {
         handle,
         roleConfigId: item.roleConfigId,
         kind: item.kind as ChatProviderKind,
-        model: item.model?.trim() || undefined
+        model: item.model?.trim() || undefined,
+        avatarId: item.avatarId?.trim() || undefined
       };
     });
   }
@@ -926,66 +934,51 @@ export class ChatService {
     return JSON.parse(JSON.stringify(conversation)) as Conversation;
   }
 
-  private createAgentOutputSink(
+  private createAgentProgressSink(
     runId: string,
     progress: ProgressCallback | undefined,
     participant: ChatParticipant
-  ): { emit: (event: CliAgentOutputEvent) => void; flush: () => void } {
+  ): { emit: (event: CliAgentOutputEvent) => void; finish: () => void } {
     if (!progress) {
-      return { emit: () => undefined, flush: () => undefined };
+      return { emit: () => undefined, finish: () => undefined };
     }
     const participantLabel = `@${participant.handle}`;
-    let assistantBuffer = "";
-    let assistantTimer: NodeJS.Timeout | undefined;
+    let finished = false;
 
     const emitNow = (event: CliAgentOutputEvent): void => {
-      if (!progress || !event.text) {
+      const activity = event.text.trim();
+      if (!progress || finished || !activity) {
         return;
       }
       this.emitProgress(runId, progress, "debate", `${participantLabel} is responding.`, {
         participantLabel,
-        agentOutput: {
+        agentProgress: {
           participantId: participant.id,
           participantLabel,
-          kind: event.kind,
-          text: event.text,
-          append: event.append
+          state: "running",
+          activity
         }
       });
     };
 
-    const flush = (): void => {
-      if (assistantTimer) {
-        clearTimeout(assistantTimer);
-        assistantTimer = undefined;
-      }
-      if (!assistantBuffer) {
+    const finish = (): void => {
+      if (finished) {
         return;
       }
-      const text = assistantBuffer;
-      assistantBuffer = "";
-      emitNow({ kind: "assistant", text, append: true });
-    };
-
-    const scheduleFlush = (): void => {
-      if (assistantTimer) {
-        return;
-      }
-      assistantTimer = setTimeout(flush, 120);
-      assistantTimer.unref();
+      finished = true;
+      this.emitProgress(runId, progress, "debate", `${participantLabel} finished.`, {
+        participantLabel,
+        agentProgress: {
+          participantId: participant.id,
+          participantLabel,
+          state: "finished"
+        }
+      });
     };
 
     return {
-      emit: (event) => {
-        if (event.kind === "assistant" && event.append !== false) {
-          assistantBuffer += event.text;
-          scheduleFlush();
-          return;
-        }
-        flush();
-        emitNow(event);
-      },
-      flush
+      emit: emitNow,
+      finish
     };
   }
 
