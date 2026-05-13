@@ -73,12 +73,34 @@ export interface ChatPendingMention {
   approvedAt?: string;
 }
 
+export type ChatChoiceStatus = "pending" | "selected";
+
+export interface ChatChoiceOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface ChatPendingChoice {
+  id: string;
+  title: string;
+  question: string;
+  options: ChatChoiceOption[];
+  recommendedOptionId?: string;
+  status: ChatChoiceStatus;
+  selectedOptionId?: string;
+  customAnswer?: string;
+  note?: string;
+  selectedAt?: string;
+}
+
 export interface ChatMessageMetadata {
   threadId?: string;
   parentMessageId?: string;
   chatThreadRootId?: string;
   mentions?: string[];
   pendingMentions?: ChatPendingMention[];
+  pendingChoice?: ChatPendingChoice;
   sourceMessageId?: string;
   requesterParticipantId?: string;
   requesterContinuationRequested?: boolean;
@@ -149,6 +171,16 @@ export interface RespondToChatMentionsRequest {
   targetParticipantIds: string[];
   approve: boolean;
   continueRequester?: boolean;
+  runId?: string;
+}
+
+export interface RespondToChatChoiceRequest {
+  conversationId: string;
+  sourceMessageId: string;
+  choiceId: string;
+  selectedOptionId?: string;
+  customAnswer?: string;
+  note?: string;
   runId?: string;
 }
 
@@ -428,6 +460,7 @@ export interface AppBridge {
   addChatParticipant(request: AddChatParticipantRequest): Promise<Conversation | undefined>;
   sendChatMessage(request: SendChatMessageRequest): Promise<StartReviewResult>;
   respondToChatMentions(request: RespondToChatMentionsRequest): Promise<StartReviewResult>;
+  respondToChatChoice(request: RespondToChatChoiceRequest): Promise<StartReviewResult>;
   startReview(request: ReviewRequest): Promise<StartReviewResult>;
   continueReview(request: ContinueReviewRequest): Promise<StartReviewResult>;
   askPlanDecisionClarification(request: PlanDecisionClarificationRequest): Promise<StartReviewResult>;

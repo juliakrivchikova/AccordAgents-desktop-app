@@ -13,6 +13,7 @@ import type {
   PlanItemReviewRequest,
   ProviderKind,
   ProviderSettingsUpdate,
+  RespondToChatChoiceRequest,
   RespondToChatMentionsRequest,
   RecoverImplementationPlanRequest,
   ReviseImplementationPlanRequest,
@@ -159,6 +160,30 @@ function registerIpc(): void {
 
     try {
       return await chatService.respondToMentions(
+        { ...request, runId },
+        controller.signal,
+        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+      );
+    } catch (error) {
+      const phase = controller.signal.aborted ? "cancelled" : "error";
+      mainWindow?.webContents.send("conversations:review-progress", {
+        runId,
+        phase,
+        message: error instanceof Error ? error.message : String(error),
+        createdAt: new Date().toISOString()
+      });
+      throw error;
+    } finally {
+      activeReviews.delete(runId);
+    }
+  });
+  ipcMain.handle("chat:respond-to-choice", async (_event, request: RespondToChatChoiceRequest) => {
+    const runId = request.runId ?? randomUUID();
+    const controller = new AbortController();
+    activeReviews.set(runId, controller);
+
+    try {
+      return await chatService.respondToChoice(
         { ...request, runId },
         controller.signal,
         (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)

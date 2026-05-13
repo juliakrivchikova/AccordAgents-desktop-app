@@ -13,6 +13,7 @@ import {
   KeyRound,
   ListChecks,
   MessageSquare,
+  PencilLine,
   Plus,
   Play,
   RefreshCw,
@@ -30,6 +31,7 @@ import type {
   ChatParticipant,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
+  ChatPendingChoice,
   ChatProviderKind,
   ChatRoleConfig,
   ChatRoleConfigUpdate,
@@ -80,6 +82,7 @@ interface ChatThinkingRow {
 }
 
 const BRANCH_COMPARE_HELP = "Changes committed on the compare branch since it diverged from the base branch.";
+const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 
 const POINT_SEVERITIES: FindingSeverity[] = ["Critical", "High", "Medium", "Low"];
 const MAX_NOTICE_CHARS = DEFAULT_NOTICE_CHARS;
@@ -622,6 +625,45 @@ function App(): JSX.Element {
       const message = errorText(caught);
       if (message.toLowerCase().includes("cancel")) {
         setWarnings((current) => [...current, "Mention approval run cancelled."]);
+      } else {
+        setError(message);
+      }
+    } finally {
+      setBusy(false);
+      setCurrentRunId(undefined);
+    }
+  }
+
+  async function respondToChatChoice(
+    sourceMessageId: string,
+    choiceId: string,
+    response: { selectedOptionId?: string; customAnswer?: string; note?: string }
+  ): Promise<void> {
+    if (!conversation || conversation.kind !== "chat") {
+      return;
+    }
+    const runId = crypto.randomUUID();
+    setError(undefined);
+    setWarnings([]);
+    setCurrentRunId(runId);
+    progressLogRef.current = [];
+    setProgressLog([]);
+    setBusy(true);
+    try {
+      const result = await window.consensus.respondToChatChoice({
+        conversationId: conversation.id,
+        sourceMessageId,
+        choiceId,
+        ...response,
+        runId
+      });
+      setConversation(mergeProgressIntoConversation(result.conversation, progressLogRef.current.filter((item) => item.runId === runId)));
+      setWarnings(result.warnings);
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      const message = errorText(caught);
+      if (message.toLowerCase().includes("cancel")) {
+        setWarnings((current) => [...current, "Choice response cancelled."]);
       } else {
         setError(message);
       }
@@ -1721,6 +1763,9 @@ function App(): JSX.Element {
                     onRejectMentions={(sourceMessageId, targetParticipantIds) =>
                       void respondToChatMentions(sourceMessageId, targetParticipantIds, false)
                     }
+                    onRespondToChoice={(sourceMessageId, choiceId, response) =>
+                      void respondToChatChoice(sourceMessageId, choiceId, response)
+                    }
                     onAddParticipantDraftChange={setChatAddParticipantDraft}
                     onAddParticipant={() => void addChatParticipant()}
                   />
@@ -2311,6 +2356,7 @@ function ChatConversationView(props: {
   onSendThread: (rootMessage: Conversation["messages"][number], content: string) => Promise<boolean>;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
+  onRespondToChoice: (sourceMessageId: string, choiceId: string, response: { selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
   onAddParticipantDraftChange: (draft: ChatParticipantDraft) => void;
   onAddParticipant: () => void;
 }): JSX.Element {
@@ -2510,6 +2556,7 @@ function ChatConversationView(props: {
                 onOpenThread={() => setSelectedThreadRootId(message.id)}
                 onApproveMentions={props.onApproveMentions}
                 onRejectMentions={props.onRejectMentions}
+                onRespondToChoice={props.onRespondToChoice}
                 key={message.id}
               />
             );
@@ -2545,6 +2592,7 @@ function ChatConversationView(props: {
           onClose={() => setSelectedThreadRootId(undefined)}
           onApproveMentions={props.onApproveMentions}
           onRejectMentions={props.onRejectMentions}
+          onRespondToChoice={props.onRespondToChoice}
           continuedMentionRequestIds={continuedMentionRequestIds}
         />
       )}
@@ -2682,6 +2730,7 @@ function ChatMessageItem(props: {
   onOpenThread?: () => void;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
+  onRespondToChoice: (sourceMessageId: string, choiceId: string, response: { selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
 }): JSX.Element {
   const { message } = props;
   const [copied, setCopied] = useState(false);
@@ -2689,6 +2738,7 @@ function ChatMessageItem(props: {
   const participant = message.participantId ? props.participants?.find((item) => item.id === message.participantId) : undefined;
   const pending = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "pending");
   const approved = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "approved");
+  const choice = message.metadata?.pendingChoice;
   const allPendingIds = pending.map((mention) => mention.targetParticipantId);
   const displayContent = chatDisplayContent(message, author);
   const showThreadActions = !props.inThread && message.role !== "system" && Boolean(props.onOpenThread);
@@ -2706,80 +2756,277 @@ function ChatMessageItem(props: {
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1400);
   }
-  return (
-    <article className={`message chat-message ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""}`}>
-      <Avatar className="message-avatar" spec={avatarForMessage(message, author, participant)} />
-      <div className="message-body">
-        <button
-          className="icon-button message-copy-button"
-          title={copied ? "Copied" : "Copy message"}
-          disabled={!canCopy}
-          onClick={() => void copyMessage()}
-        >
-          {copied ? <CheckCircle2 size={16} /> : <Copy size={16} />}
+  const threadActions = showThreadActions ? (
+    <>
+      {replyCount > 0 && (
+        <button className="chat-thread-link" onClick={props.onOpenThread}>
+          <span>{replyCount} {replyCount === 1 ? "reply" : "replies"}</span>
+          {props.latestReplyAt && <small>Last reply {formatChatReplyDate(props.latestReplyAt)}</small>}
         </button>
-        <div className="message-meta">
-          <strong>{author}</strong>
-          <span>{new Date(message.createdAt).toLocaleString()}</span>
-          {message.status === "error" && <span className="status-error">error</span>}
-          {!props.inThread && message.metadata?.parentMessageId && message.role === "user" && <span className="phase-badge">reply</span>}
-        </div>
-        <div className="message-content">
-          <MarkdownText content={displayContent} />
-        </div>
-        {approved.length > 0 && (
-          <div className="chat-approval-note">
-            <span>Approved: {approved.map((mention) => `@${mention.targetHandle}`).join(", ")}</span>
-            {canContinueRequester && (
-              <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, [], true)}>
-                <RefreshCw size={15} />
-                Continue {author}
-              </button>
-            )}
+      )}
+      <button className="chat-reply-button" onClick={props.onOpenThread}>
+        Reply
+      </button>
+    </>
+  ) : null;
+
+  return (
+    <>
+      <article className={`message chat-message ${choice ? "has-choice" : ""} ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""}`}>
+        <Avatar className="message-avatar" spec={avatarForMessage(message, author, participant)} />
+        <div className="message-body">
+          <button
+            className="icon-button message-copy-button"
+            title={copied ? "Copied" : "Copy message"}
+            disabled={!canCopy}
+            onClick={() => void copyMessage()}
+          >
+            {copied ? <CheckCircle2 size={16} /> : <Copy size={16} />}
+          </button>
+          <div className="message-meta">
+            <strong>{author}</strong>
+            <span>{new Date(message.createdAt).toLocaleString()}</span>
+            {message.status === "error" && <span className="status-error">error</span>}
+            {!props.inThread && message.metadata?.parentMessageId && message.role === "user" && <span className="phase-badge">reply</span>}
           </div>
-        )}
-        {pending.length > 0 && (
-          <div className="chat-approval-box">
-            <strong>Pending mentions: {pending.map((mention) => `@${mention.targetHandle}`).join(", ")}</strong>
-            <div className="chat-approval-actions">
-              <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, continuationRequested)}>
-                <CheckCircle2 size={16} />
-                {approvePendingLabel}
-              </button>
-              {continuationRequested && (
-                <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, false)}>
-                  Approve mentions
+          <div className="message-content">
+            <MarkdownText content={displayContent} />
+          </div>
+          {approved.length > 0 && (
+            <div className="chat-approval-note">
+              <span>Approved: {approved.map((mention) => `@${mention.targetHandle}`).join(", ")}</span>
+              {canContinueRequester && (
+                <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, [], true)}>
+                  <RefreshCw size={15} />
+                  Continue {author}
                 </button>
               )}
-              <button className="secondary-button" disabled={props.busy} onClick={() => props.onRejectMentions(message.id, allPendingIds)}>
-                Reject
-              </button>
-              {pending.map((mention) => (
-                <button
-                  className="secondary-button"
-                  disabled={props.busy}
-                  onClick={() => props.onApproveMentions(message.id, [mention.targetParticipantId], false)}
-                  key={mention.targetParticipantId}
-                >
-                  Ask @{mention.targetHandle}
-                </button>
-              ))}
             </div>
+          )}
+          {pending.length > 0 && (
+            <div className="chat-approval-box">
+              <strong>Pending mentions: {pending.map((mention) => `@${mention.targetHandle}`).join(", ")}</strong>
+              <div className="chat-approval-actions">
+                <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, continuationRequested)}>
+                  <CheckCircle2 size={16} />
+                  {approvePendingLabel}
+                </button>
+                {continuationRequested && (
+                  <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, false)}>
+                    Approve mentions
+                  </button>
+                )}
+                <button className="secondary-button" disabled={props.busy} onClick={() => props.onRejectMentions(message.id, allPendingIds)}>
+                  Reject
+                </button>
+                {pending.map((mention) => (
+                  <button
+                    className="secondary-button"
+                    disabled={props.busy}
+                    onClick={() => props.onApproveMentions(message.id, [mention.targetParticipantId], false)}
+                    key={mention.targetParticipantId}
+                  >
+                    Ask @{mention.targetHandle}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {!choice && threadActions}
+        </div>
+      </article>
+      {choice && (
+        <div className={`chat-choice-row ${props.inThread ? "in-thread" : ""}`}>
+          <span aria-hidden="true" />
+          <div className="chat-choice-row-body">
+            <ChatChoiceCard
+              choice={choice}
+              requesterLabel={author}
+              busy={props.busy}
+              onConfirm={(response) => props.onRespondToChoice(message.id, choice.id, response)}
+            />
+            {threadActions}
           </div>
-        )}
-        {showThreadActions && replyCount > 0 && (
-          <button className="chat-thread-link" onClick={props.onOpenThread}>
-            <span>{replyCount} {replyCount === 1 ? "reply" : "replies"}</span>
-            {props.latestReplyAt && <small>Last reply {formatChatReplyDate(props.latestReplyAt)}</small>}
-          </button>
-        )}
-        {showThreadActions && (
-          <button className="chat-reply-button" onClick={props.onOpenThread}>
-            Reply
-          </button>
-        )}
+        </div>
+      )}
+    </>
+  );
+}
+
+function ChatChoiceCard(props: {
+  choice: ChatPendingChoice;
+  requesterLabel: string;
+  busy: boolean;
+  onConfirm: (response: { selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
+}): JSX.Element {
+  const { choice, requesterLabel, busy, onConfirm } = props;
+  const [draftSelection, setDraftSelection] = useState(choice.selectedOptionId ?? "");
+  const [customAnswer, setCustomAnswer] = useState(choice.customAnswer ?? "");
+  const [note, setNote] = useState(choice.note ?? "");
+  const isAnswered = choice.status === "selected";
+  const selectedOptionId = choice.selectedOptionId ?? draftSelection;
+  const isCustomSelected = selectedOptionId === CHAT_CUSTOM_CHOICE_OPTION_ID;
+  const selectedOption = choice.options.find((option) => option.id === selectedOptionId);
+  const requesterMention = requesterLabel.startsWith("@") ? requesterLabel : requesterLabel === "You" ? "User" : requesterLabel;
+  const selectedOverridesRecommendation = isAnswered && Boolean(choice.recommendedOptionId) && selectedOptionId !== choice.recommendedOptionId;
+  const receiptTime = formatChatChoiceReceiptTime(choice.selectedAt);
+  const canConfirm = !busy && !isAnswered && (isCustomSelected ? Boolean(customAnswer.trim()) : Boolean(selectedOption));
+  const selectedLabel = isCustomSelected
+    ? customAnswer.trim() || "Write your own answer"
+    : selectedOption?.label;
+  const trimmedCustomAnswer = customAnswer.trim();
+  const trimmedNote = note.trim();
+  const showCustomAnswerPanel = isCustomSelected && (!isAnswered || Boolean(trimmedCustomAnswer));
+  const showNotePanel = !isCustomSelected && Boolean(selectedOption) && (!isAnswered || Boolean(trimmedNote));
+
+  useEffect(() => {
+    setDraftSelection(choice.selectedOptionId ?? "");
+    setCustomAnswer(choice.customAnswer ?? "");
+    setNote(choice.note ?? "");
+  }, [choice.id, choice.selectedOptionId, choice.customAnswer, choice.note]);
+
+  function confirmChoice(): void {
+    if (!canConfirm) {
+      return;
+    }
+    if (isCustomSelected) {
+      onConfirm({
+        selectedOptionId: CHAT_CUSTOM_CHOICE_OPTION_ID,
+        customAnswer: customAnswer.trim()
+      });
+      return;
+    }
+    if (selectedOption) {
+      onConfirm({
+        selectedOptionId: selectedOption.id,
+        note: note.trim() || undefined
+      });
+    }
+  }
+
+  return (
+    <section className={`chat-choice-card ${isAnswered ? "answered" : ""}`} aria-label={choice.title}>
+      <div className="chat-choice-head">
+        <div className="chat-choice-title-block">
+          <span className="chat-choice-kicker">{isAnswered ? "Answered" : "Decision"} · {requesterLabel}</span>
+          <h3>{choice.title}</h3>
+        </div>
+        <span className={`chat-choice-status ${isAnswered ? "answered" : ""}`}>
+          {isAnswered && <CheckCircle2 size={14} aria-hidden="true" />}
+          {isAnswered ? `Sent${receiptTime ? ` · ${receiptTime}` : ""}` : "Awaiting answer"}
+        </span>
       </div>
-    </article>
+      <p>{choice.question}</p>
+      <div className="chat-choice-options" role="radiogroup" aria-label={choice.question}>
+        {choice.options.map((option) => {
+          const selected = selectedOptionId === option.id;
+          return (
+            <label className={`chat-choice-option ${selected ? "selected" : ""} ${isAnswered && !selected ? "collapsed" : ""}`} key={option.id}>
+              <input
+                type="radio"
+                name={choice.id}
+                checked={selected}
+                disabled={busy || isAnswered}
+                onChange={() => setDraftSelection(option.id)}
+              />
+              <span className="chat-choice-radio" aria-hidden="true" />
+              <span className="chat-choice-option-body">
+                <span className="chat-choice-option-title">
+                  <strong>{option.label}</strong>
+                  {isAnswered && selected && selectedOverridesRecommendation && <small className="chat-choice-override-chip">≠ recommendation</small>}
+                  {choice.recommendedOptionId === option.id && <small className="chat-choice-recommended-chip">Recommended</small>}
+                </span>
+                {option.description && (!isAnswered || selected) && <span className="chat-choice-option-description">{option.description}</span>}
+              </span>
+            </label>
+          );
+        })}
+        <label className={`chat-choice-option custom-answer-option ${isCustomSelected ? "selected" : ""} ${isAnswered && !isCustomSelected ? "collapsed" : ""}`}>
+          <input
+            type="radio"
+            name={choice.id}
+            checked={isCustomSelected}
+            disabled={busy || isAnswered}
+            onChange={() => setDraftSelection(CHAT_CUSTOM_CHOICE_OPTION_ID)}
+          />
+          <span className="chat-choice-radio" aria-hidden="true" />
+          <span className="chat-choice-option-body">
+            <span className="chat-choice-option-title">
+              <span className="chat-choice-custom-icon" aria-hidden="true">
+                <PencilLine size={14} />
+              </span>
+              <strong>Write your own answer</strong>
+              {isAnswered && isCustomSelected && selectedOverridesRecommendation && <small className="chat-choice-override-chip">≠ recommendation</small>}
+            </span>
+            {(!isAnswered || isCustomSelected) && (
+              <span className="chat-choice-option-description">None of the suggestions fit — type your own direction for {requesterMention}.</span>
+            )}
+          </span>
+        </label>
+      </div>
+      {showCustomAnswerPanel && isAnswered && (
+        <div className="chat-choice-text-panel locked">
+          <span>
+            <strong>Your answer</strong>
+            <small>sent to {requesterMention}</small>
+          </span>
+          <blockquote>{trimmedCustomAnswer}</blockquote>
+        </div>
+      )}
+      {showCustomAnswerPanel && !isAnswered && (
+        <label className="chat-choice-text-panel">
+          <span>
+            <strong>Your answer</strong>
+            <small>required · sent verbatim to {requesterMention}</small>
+          </span>
+          <textarea
+            value={customAnswer}
+            onChange={(event) => setCustomAnswer(event.target.value)}
+            placeholder={'e.g. "Use session cookies for web, but issue short-lived JWTs to native clients"'}
+            rows={3}
+            disabled={busy || isAnswered}
+          />
+        </label>
+      )}
+      {showNotePanel && isAnswered && (
+        <div className="chat-choice-text-panel locked">
+          <span>
+            <strong>Your note</strong>
+            <small>sent with your pick</small>
+          </span>
+          <blockquote>{trimmedNote}</blockquote>
+        </div>
+      )}
+      {showNotePanel && !isAnswered && (
+        <label className="chat-choice-text-panel">
+          <span>
+            <strong>Add a note</strong>
+            <small>optional · {requesterMention} will see it alongside your pick</small>
+          </span>
+          <textarea
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder={`Constraints, caveats, or follow-up questions for ${requesterMention}...`}
+            rows={2}
+            disabled={busy || isAnswered}
+          />
+        </label>
+      )}
+      {!isAnswered && (
+        <div className="chat-choice-actions">
+          {isCustomSelected && !customAnswer.trim() ? (
+            <span>Type your answer to enable send.</span>
+          ) : selectedLabel ? (
+            <span>Selected: <strong>{selectedLabel}</strong></span>
+          ) : (
+            <span>Select one option to continue.</span>
+          )}
+          <button className="chat-choice-submit" disabled={!canConfirm} onClick={confirmChoice}>
+            {`Send to ${requesterMention}`}
+          </button>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -2795,6 +3042,7 @@ function ChatThreadPanel(props: {
   onClose: () => void;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
+  onRespondToChoice: (sourceMessageId: string, choiceId: string, response: { selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
   continuedMentionRequestIds: Set<string>;
 }): JSX.Element {
   const rootAuthor = authorForMessage(props.rootMessage, "chat");
@@ -2820,6 +3068,7 @@ function ChatThreadPanel(props: {
           hasContinuationReply={props.continuedMentionRequestIds.has(props.rootMessage.id)}
           onApproveMentions={props.onApproveMentions}
           onRejectMentions={props.onRejectMentions}
+          onRespondToChoice={props.onRespondToChoice}
         />
         {props.replies.length > 0 && (
           <div className="chat-thread-replies">
@@ -2832,6 +3081,7 @@ function ChatThreadPanel(props: {
                 hasContinuationReply={props.continuedMentionRequestIds.has(message.id)}
                 onApproveMentions={props.onApproveMentions}
                 onRejectMentions={props.onRejectMentions}
+                onRespondToChoice={props.onRespondToChoice}
                 key={message.id}
               />
             ))}
@@ -5024,6 +5274,17 @@ function formatChatReplyDate(value: string): string {
   return new Date(value).toLocaleString();
 }
 
+function formatChatChoiceReceiptTime(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return undefined;
+  }
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true }).toUpperCase();
+}
+
 function chatRoleLabel(roles: ChatRoleConfig[], participant: Pick<ChatParticipant, "roleConfigId">): string {
   return roles.find((role) => role.id === participant.roleConfigId)?.label ?? participant.roleConfigId;
 }
@@ -5040,13 +5301,17 @@ function chatDisplayContent(message: Conversation["messages"][number], author: s
   const firstLine = lines[firstContentIndex].trim();
   const labels = [author, message.participantLabel].filter((value): value is string => Boolean(value));
   if (!labels.some((label) => firstLine === label || firstLine === `@${label.replace(/^@/, "")}`)) {
-    return stripNoParticipantRequests(message.content);
+    return stripChatControlBlocks(message.content);
   }
   const next = [...lines.slice(0, firstContentIndex), ...lines.slice(firstContentIndex + 1)];
   while (next.length > 0 && !next[0].trim()) {
     next.shift();
   }
-  return stripNoParticipantRequests(next.join("\n"));
+  return stripChatControlBlocks(next.join("\n"));
+}
+
+function stripChatControlBlocks(content: string): string {
+  return stripUserChoiceBlocks(stripNoParticipantRequests(content)).trimEnd();
 }
 
 function stripNoParticipantRequests(content: string): string {
@@ -5068,6 +5333,42 @@ function stripNoParticipantRequests(content: string): string {
     next.push(line);
   }
   return next.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+}
+
+function stripUserChoiceBlocks(content: string): string {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const nextLines: string[] = [];
+  let inFence = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+    if (/^```/.test(trimmed)) {
+      inFence = !inFence;
+      nextLines.push(lines[index]);
+      continue;
+    }
+    if (inFence || !/^user choice\s*:/i.test(trimmed)) {
+      nextLines.push(lines[index]);
+      continue;
+    }
+    for (let blockIndex = index + 1; blockIndex < lines.length; blockIndex += 1) {
+      const blockTrimmed = lines[blockIndex].trim();
+      if (!blockTrimmed) {
+        index = blockIndex;
+        continue;
+      }
+      if (isUserChoiceDisplayProtocolLine(blockTrimmed)) {
+        index = blockIndex;
+        continue;
+      }
+      break;
+    }
+  }
+  return nextLines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+}
+
+function isUserChoiceDisplayProtocolLine(line: string): boolean {
+  const normalized = line.replace(/^\s*(?:[-*]|\d+[.)])\s+/, "").trim();
+  return /^(?:T|TITLE|Q|QUESTION|R|RECOMMENDED|O\d+)\s*[:|]/i.test(normalized);
 }
 
 function activeMentionQuery(value: string): string | undefined {
@@ -5533,6 +5834,53 @@ function installDevMockBridge(): void {
         createdAt
       },
       {
+        id: "mock-choice-response",
+        role: "participant",
+        participantId: "mock-codex-engineer",
+        participantLabel: "@drew-codex-engineer",
+        content: [
+          "Before I write any session code I want a call from you on the token approach. There is no clean default here, just three trade-offs.",
+          "Decision card below.",
+          "",
+          "User choice:",
+          "T: Pick an auth token strategy",
+          "Q: We need a token approach before I scaffold the session layer. Three credible options each shift revocability, infra cost, and complexity.",
+          "O1: Session cookies (server-side) | Opaque IDs, state in Postgres. Easy to revoke per device, but every request hits the session store.",
+          "O2: JWT access + refresh tokens | Stateless verify, refresh token rotates. Scales horizontally, but revocation needs a denylist.",
+          "O3: Hybrid session + short JWT | Keeps fast auth checks while centralizing revocation, but adds coordination complexity.",
+          "R: O2"
+        ].join("\n"),
+        createdAt,
+        status: "done",
+        metadata: {
+          pendingChoice: {
+            id: "mock-token-choice",
+            title: "Pick an auth token strategy",
+            question:
+              "We need a token approach before I scaffold the session layer. Three credible options each shift revocability, infra cost, and complexity.",
+            options: [
+              {
+                id: "O1",
+                label: "Session cookies (server-side)",
+                description: "Opaque IDs, state in Postgres. Easy to revoke per device, but every request hits the session store."
+              },
+              {
+                id: "O2",
+                label: "JWT access + refresh tokens",
+                description: "Stateless verify, refresh token rotates. Scales horizontally, but revocation needs a denylist."
+              },
+              {
+                id: "O3",
+                label: "Hybrid session + short JWT",
+                description: "Keeps fast auth checks while centralizing revocation, but adds coordination complexity."
+              }
+            ],
+            recommendedOptionId: "O2",
+            status: "pending"
+          }
+        }
+      },
+      {
         id: "mock-long-response",
         role: "participant",
         participantId: "mock-codex-engineer",
@@ -5597,6 +5945,74 @@ function installDevMockBridge(): void {
       return { conversation, warnings: [] };
     },
     respondToChatMentions: async () => ({ conversation, warnings: [] }),
+    respondToChatChoice: async (request) => {
+      const now = new Date().toISOString();
+      const source = conversation.messages.find((message) => message.id === request.sourceMessageId);
+      const choice = source?.metadata?.pendingChoice;
+      const selectedOption = choice?.options.find((option) => option.id === request.selectedOptionId);
+      const customAnswer = request.customAnswer?.trim();
+      const note = request.note?.trim();
+      const isCustomAnswer = request.selectedOptionId === CHAT_CUSTOM_CHOICE_OPTION_ID;
+      if (source && choice && (selectedOption || (isCustomAnswer && customAnswer))) {
+        const selectedLabel = selectedOption?.label ?? customAnswer ?? "Write your own answer";
+        source.metadata = {
+          ...source.metadata,
+          pendingChoice: {
+            ...choice,
+            status: "selected",
+            selectedOptionId: selectedOption?.id ?? CHAT_CUSTOM_CHOICE_OPTION_ID,
+            customAnswer: customAnswer || undefined,
+            note: note || undefined,
+            selectedAt: now
+          }
+        };
+        conversation = {
+          ...conversation,
+          updatedAt: now,
+          messages: [
+            ...conversation.messages,
+            {
+              id: nextId("mock-choice-user"),
+              role: "user",
+              content: [
+                "Choice selected for @drew-codex-engineer.",
+                "",
+                `Choice: ${choice.title}`,
+                `Question: ${choice.question}`,
+                selectedOption ? `Selected option: ${selectedOption.label}` : "Selected option: Write your own answer",
+                customAnswer ? `Custom answer: ${customAnswer}` : "",
+                note ? `Note: ${note}` : ""
+              ].filter(Boolean).join("\n"),
+              createdAt: now,
+              metadata: {
+                threadId: source.metadata?.threadId ?? source.id,
+                parentMessageId: source.id,
+                chatThreadRootId: source.id,
+                sourceMessageId: source.id
+              }
+            },
+            {
+              id: nextId("mock-choice-response"),
+              role: "participant",
+              participantId: "mock-codex-engineer",
+              participantLabel: "@drew-codex-engineer",
+              content: `Proceeding with ${selectedLabel}. I will use that as the session-layer constraint.`,
+              createdAt: now,
+              status: "done",
+              metadata: {
+                threadId: source.metadata?.threadId ?? source.id,
+                parentMessageId: source.id,
+                chatThreadRootId: source.id,
+                sourceMessageId: source.id,
+                approvedContinuation: true
+              }
+            }
+          ]
+        };
+      }
+      emitConversation();
+      return { conversation, warnings: [] };
+    },
     startReview: async () => ({ conversation, warnings: [] }),
     continueReview: async () => ({ conversation, warnings: [] }),
     askPlanDecisionClarification: async () => ({ conversation, warnings: [] }),

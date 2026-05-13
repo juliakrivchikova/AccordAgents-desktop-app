@@ -4,9 +4,11 @@ import path from "node:path";
 import { app } from "electron";
 import type {
   AddChatParticipantRequest,
+  ChatChoiceOption,
   ChatMessage,
   ChatParticipant,
   ChatParticipantSession,
+  ChatPendingChoice,
   ChatPendingMention,
   ChatProviderKind,
   ChatRoleRuntime,
@@ -14,6 +16,7 @@ import type {
   Conversation,
   CreateChatConversationRequest,
   ParticipantConfig,
+  RespondToChatChoiceRequest,
   RespondToChatMentionsRequest,
   ReviewProgress,
   SendChatMessageRequest,
@@ -29,8 +32,16 @@ import { StorageService } from "./storage";
 type ProgressCallback = (progress: ReviewProgress) => void;
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 3;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 4;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
+const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
+
+interface ChatChoiceDraft {
+  title?: string;
+  question?: string;
+  recommendedOptionId?: string;
+  options: ChatChoiceOption[];
+}
 
 export class ChatService {
   private readonly saveQueues = new Map<string, Promise<void>>();
@@ -211,6 +222,70 @@ export class ChatService {
     return { conversation, warnings };
   }
 
+  async respondToChoice(request: RespondToChatChoiceRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
+    const runId = request.runId ?? randomUUID();
+    const warnings: string[] = [];
+    const conversation = await this.requireChat(request.conversationId);
+    const sourceMessage = conversation.messages.find((message) => message.id === request.sourceMessageId);
+    if (!sourceMessage) {
+      throw new Error("Source message was not found.");
+    }
+    const choice = sourceMessage.metadata?.pendingChoice;
+    if (!choice || choice.id !== request.choiceId) {
+      throw new Error("Choice request was not found.");
+    }
+    if (choice.status !== "pending") {
+      throw new Error("Choice request has already been answered.");
+    }
+    const selectedOptionId = request.selectedOptionId?.trim();
+    const customAnswer = request.customAnswer?.trim();
+    const note = request.note?.trim();
+    const isCustomAnswer = selectedOptionId === CHAT_CUSTOM_CHOICE_OPTION_ID;
+    const selectedOption = isCustomAnswer ? undefined : choice.options.find((option) => option.id === selectedOptionId);
+    if (isCustomAnswer && !customAnswer) {
+      throw new Error("Custom choice answer is required.");
+    }
+    if (!isCustomAnswer && !selectedOption) {
+      throw new Error("Selected option was not found.");
+    }
+    if (!sourceMessage.participantId) {
+      throw new Error("Choice request is not attached to a chat participant.");
+    }
+    const requester = this.chatParticipants(conversation).find((participant) => participant.id === sourceMessage.participantId);
+    if (!requester) {
+      throw new Error("Choice requester is no longer in this chat.");
+    }
+
+    this.updatePendingChoiceSelection(sourceMessage, choice.id, selectedOption?.id ?? CHAT_CUSTOM_CHOICE_OPTION_ID, customAnswer, note);
+    const rootId = sourceMessage.metadata?.chatThreadRootId ?? sourceMessage.id;
+    const userMessage = this.message("user", this.formatChoiceSelectionForChat(sourceMessage, choice, selectedOption, customAnswer, note), undefined, {
+      threadId: sourceMessage.metadata?.threadId ?? rootId,
+      parentMessageId: sourceMessage.id,
+      chatThreadRootId: rootId,
+      sourceMessageId: sourceMessage.id
+    });
+    conversation.messages.push(userMessage);
+    conversation.metadata = { ...conversation.metadata, running: true, runId };
+    conversation.updatedAt = new Date().toISOString();
+    this.queueSnapshot(conversation);
+
+    this.emitProgress(runId, progress, "debate", `Returning choice to @${requester.handle}.`, {
+      participantLabel: `@${requester.handle}`
+    });
+    const messages = await this.runParticipantTurn(conversation, requester, userMessage, runId, signal, progress, {
+      continuation: true,
+      warnings
+    });
+    conversation.messages.push(...messages);
+    conversation.metadata = { ...conversation.metadata, running: false };
+    conversation.updatedAt = new Date().toISOString();
+    this.queueSnapshot(conversation);
+    await this.ensureHistoryFiles(conversation);
+    await this.saveConversation(conversation);
+    this.emitProgress(runId, progress, "done", "Choice response finished.");
+    return { conversation, warnings };
+  }
+
   private async runParticipantBatch(
     conversation: Conversation,
     participants: ChatParticipant[],
@@ -374,12 +449,14 @@ export class ChatService {
       }
       if (result.ok) {
         const pendingMentions = this.pendingMentionsFromAgentReply(conversation, participant, result.content);
-        if (pendingMentions.length > 0) {
-          const requesterContinuationRequested = this.requesterContinuationRequested(result.content);
+        const pendingChoice = this.pendingChoiceFromAgentReply(result.content);
+        const requesterContinuationRequested = pendingMentions.length > 0 ? this.requesterContinuationRequested(result.content) : false;
+        if (pendingMentions.length > 0 || pendingChoice) {
           participantMessage.metadata = {
             ...participantMessage.metadata,
-            mentions: pendingMentions.map((mention) => mention.targetHandle),
-            pendingMentions,
+            mentions: pendingMentions.length > 0 ? pendingMentions.map((mention) => mention.targetHandle) : undefined,
+            pendingMentions: pendingMentions.length > 0 ? pendingMentions : undefined,
+            pendingChoice,
             requesterContinuationRequested: requesterContinuationRequested || undefined
           };
         }
@@ -423,6 +500,7 @@ export class ChatService {
           return `- @${item.handle}: ${role} agent`;
         }),
         "Mention policy: you may cite participant handles in normal prose for attribution; those citations do not request dispatch. To ask another participant to respond, include a dedicated `Participant requests:` block with one bullet per requested participant. Use `Participant requests: none` when you cite or identify participants but do not need follow-up. If you need to synthesize after the requested participants reply, add the exact line `Return to requester after replies: yes`. Mentioned agents and requester continuations will not run until User approves them.",
+        "User choice policy: when User must pick one option before you can continue, include one dedicated `User choice:` block after your explanation. Format it as lines `T: short title`, `Q: question`, `O1: option label | optional description`, `O2: option label | optional description`, and optionally `R: O1`. Use at least two options. Ask at most one user choice in a message. The UI also lets User write a custom answer instead of choosing your suggestions. After User confirms, the app will send the selected option or custom answer back to you in this chat.",
         "Clarification policy: if you need clarification about goals, requirements, preferences, acceptance criteria, or user intent, ask User directly in your reply. Do not mention another agent for user-owned clarification.",
         "Thread policy: answer in the active thread. Do not assume a mentioned participant has answered until their reply appears in the transcript.",
         "Chat response guard: answer only in this chat message. Do not mention ExitPlanMode, plan files, tool availability, or recording/writing outside the chat unless User directly asks about those mechanics. If you make a decision, arbitration, plan, or summary, include it in this reply. Do not say it is posted above or recorded elsewhere unless you cite the exact existing chat message."
@@ -471,6 +549,7 @@ export class ChatService {
       "- User is the human conversation owner, requirements authority, and clarification source.",
       "- Ask User directly when goals, requirements, preferences, acceptance criteria, or user intent are unclear.",
       "- Do not ask another participant for user-owned clarification.",
+      "- When User must choose between concrete options, include one `User choice:` block with `T:`, `Q:`, `O1:`, `O2:`, and optional `R:` lines so the app can render choice buttons plus a custom-answer path.",
       "- Answer in the active chat message; do not claim to write, record, or post work elsewhere.",
       "- Follow each turn's chat prompt for history paths, the triggering message, participants, and dispatch rules."
     ].join("\n");
@@ -679,6 +758,160 @@ export class ChatService {
     return Array.from(mentions.values());
   }
 
+  private pendingChoiceFromAgentReply(content: string): ChatPendingChoice | undefined {
+    const draft = this.extractUserChoiceDraft(content);
+    if (!draft) {
+      return undefined;
+    }
+    return {
+      id: `choice-${randomUUID()}`,
+      title: (draft.title || draft.question || "Choose an option").trim().slice(0, 120),
+      question: (draft.question || draft.title || "Choose an option.").trim(),
+      options: draft.options,
+      recommendedOptionId: draft.recommendedOptionId,
+      status: "pending",
+      selectedAt: undefined
+    };
+  }
+
+  private extractUserChoiceDraft(content: string): ChatChoiceDraft | undefined {
+    const lines = this.withoutFencedCode(content).replace(/\r\n/g, "\n").split("\n");
+    for (let index = 0; index < lines.length; index += 1) {
+      const match = lines[index].match(/^\s*user choice\s*:\s*(.*)$/i);
+      if (!match) {
+        continue;
+      }
+      const blockLines: string[] = [];
+      const inline = match[1].trim();
+      if (inline && !/^none\.?$/i.test(inline)) {
+        blockLines.push(`Q: ${inline}`);
+      }
+      for (let next = index + 1; next < lines.length; next += 1) {
+        const trimmed = lines[next].trim();
+        if (!trimmed) {
+          if (blockLines.length > 0) {
+            break;
+          }
+          continue;
+        }
+        if (/^#{1,6}\s+/.test(trimmed) || /^participant requests\s*:/i.test(trimmed) || /^return to requester after replies\s*:/i.test(trimmed)) {
+          break;
+        }
+        if (/^user choice\s*:/i.test(trimmed)) {
+          break;
+        }
+        if (this.isUserChoiceProtocolLine(trimmed)) {
+          blockLines.push(trimmed);
+          continue;
+        }
+        break;
+      }
+      const draft = this.parseUserChoiceBlock(blockLines);
+      if (draft) {
+        return draft;
+      }
+    }
+    return undefined;
+  }
+
+  private isUserChoiceProtocolLine(line: string): boolean {
+    const normalized = this.stripListMarker(line);
+    return /^(?:T|TITLE|Q|QUESTION|R|RECOMMENDED|O\d+)\s*[:|]/i.test(normalized) || /^(?:[-*]|\d+[.)])\s+\S/.test(line);
+  }
+
+  private parseUserChoiceBlock(lines: string[]): ChatChoiceDraft | undefined {
+    const draft: ChatChoiceDraft = { options: [] };
+    let nextOptionIndex = 1;
+    const usedOptionIds = new Set<string>();
+
+    for (const line of lines) {
+      const normalized = this.stripListMarker(line);
+      if (!normalized) {
+        continue;
+      }
+      const field = normalized.match(/^([A-Za-z][A-Za-z0-9_-]*)\s*[:|]\s*(.*)$/);
+      if (field) {
+        const key = field[1].toUpperCase();
+        const value = field[2].trim();
+        if (!value) {
+          continue;
+        }
+        if (key === "T" || key === "TITLE") {
+          draft.title = value;
+          continue;
+        }
+        if (key === "Q" || key === "QUESTION") {
+          draft.question = value;
+          continue;
+        }
+        if (key === "R" || key === "RECOMMENDED") {
+          draft.recommendedOptionId = value;
+          continue;
+        }
+        if (/^O\d+$/i.test(key)) {
+          this.addChoiceOption(draft, key.toUpperCase(), value, usedOptionIds);
+          nextOptionIndex = Math.max(nextOptionIndex, Number(key.slice(1)) + 1 || nextOptionIndex);
+          continue;
+        }
+      }
+      while (usedOptionIds.has(`O${nextOptionIndex}`)) {
+        nextOptionIndex += 1;
+      }
+      this.addChoiceOption(draft, `O${nextOptionIndex}`, normalized, usedOptionIds);
+      nextOptionIndex += 1;
+    }
+
+    if (draft.options.length < 2 || !(draft.question?.trim() || draft.title?.trim())) {
+      return undefined;
+    }
+    draft.recommendedOptionId = this.resolveRecommendedChoiceOptionId(draft.recommendedOptionId, draft.options);
+    return draft;
+  }
+
+  private addChoiceOption(draft: ChatChoiceDraft, optionId: string, value: string, usedOptionIds: Set<string>): void {
+    const parsed = this.parseChoiceOptionText(value);
+    if (!parsed.label) {
+      return;
+    }
+    let id = optionId.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+    if (!id || usedOptionIds.has(id)) {
+      let index = draft.options.length + 1;
+      while (usedOptionIds.has(`O${index}`)) {
+        index += 1;
+      }
+      id = `O${index}`;
+    }
+    usedOptionIds.add(id);
+    draft.options.push({ id, ...parsed });
+  }
+
+  private parseChoiceOptionText(value: string): { label: string; description?: string } {
+    const parts = value.split(/\s+\|\s+/);
+    const label = parts.shift()?.trim() ?? "";
+    const description = parts.join(" | ").trim();
+    return {
+      label,
+      description: description || undefined
+    };
+  }
+
+  private resolveRecommendedChoiceOptionId(value: string | undefined, options: ChatChoiceOption[]): string | undefined {
+    const normalized = value?.trim();
+    if (!normalized) {
+      return undefined;
+    }
+    const byId = options.find((option) => option.id.toLowerCase() === normalized.toLowerCase());
+    if (byId) {
+      return byId.id;
+    }
+    const byLabel = options.find((option) => option.label.toLowerCase() === normalized.toLowerCase());
+    return byLabel?.id;
+  }
+
+  private stripListMarker(line: string): string {
+    return line.replace(/^\s*(?:[-*]|\d+[.)])\s+/, "").trim();
+  }
+
   private extractParticipantRequestMentions(content: string): string[] {
     const lines = this.withoutFencedCode(content).split(/\r?\n/);
     const requestLines: string[] = [];
@@ -767,6 +1000,52 @@ export class ChatService {
           : mention
       )
     };
+  }
+
+  private updatePendingChoiceSelection(
+    sourceMessage: ChatMessage,
+    choiceId: string,
+    selectedOptionId: string,
+    customAnswer?: string,
+    note?: string
+  ): void {
+    const choice = sourceMessage.metadata?.pendingChoice;
+    if (!choice || choice.id !== choiceId) {
+      return;
+    }
+    sourceMessage.metadata = {
+      ...sourceMessage.metadata,
+      pendingChoice: {
+        ...choice,
+        status: "selected",
+        selectedOptionId,
+        customAnswer: customAnswer || undefined,
+        note: note || undefined,
+        selectedAt: new Date().toISOString()
+      }
+    };
+  }
+
+  private formatChoiceSelectionForChat(
+    sourceMessage: ChatMessage,
+    choice: ChatPendingChoice,
+    selectedOption: ChatChoiceOption | undefined,
+    customAnswer?: string,
+    note?: string
+  ): string {
+    const requester = sourceMessage.participantLabel ?? "the requester";
+    const isCustomAnswer = !selectedOption && Boolean(customAnswer?.trim());
+    return [
+      `Choice selected for ${requester}.`,
+      "",
+      `Choice: ${choice.title}`,
+      `Question: ${choice.question}`,
+      selectedOption ? `Selected option: ${selectedOption.label}` : "",
+      selectedOption?.description ? `Option context: ${selectedOption.description}` : "",
+      isCustomAnswer ? "Selected option: Write your own answer" : "",
+      customAnswer?.trim() ? `Custom answer: ${customAnswer.trim()}` : "",
+      note?.trim() ? `Note: ${note.trim()}` : ""
+    ].filter(Boolean).join("\n");
   }
 
   private async ensureHistoryFiles(conversation: Conversation): Promise<string> {
