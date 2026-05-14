@@ -549,15 +549,15 @@
   width: 44px;
   height: 44px;
   padding: 3px;
-  border: 1px solid #d7cfc1;
+  border: 1px solid var(--app-border-strong);
   border-radius: 8px;
-  background: #ffffff;
+  background: transparent;
   cursor: pointer;
 }
 
 .avatar-choice:hover {
-  border-color: #9fbfaf;
-  background: #f4faf7;
+  border-color: var(--app-accent-border);
+  background: color-mix(in srgb, var(--app-surface-hover) 58%, transparent);
 }
 
 .avatar-choice.selected {
