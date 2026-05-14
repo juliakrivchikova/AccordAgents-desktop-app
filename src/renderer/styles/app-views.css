@@ -3007,15 +3007,46 @@
 
 .plan-correction-input-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 38px;
+  grid-template-columns: minmax(0, 1fr) 40px;
   align-items: end;
   gap: 8px;
 }
 
 .plan-correction-input-row textarea {
-  min-height: 48px;
+  min-height: 52px;
   max-height: 160px;
-  border-radius: 8px;
+  border-radius: 10px;
+}
+
+.plan-correction-submit {
+  width: 40px;
+  height: 40px;
+  align-self: end;
+  border-color: var(--app-border-strong);
+  border-radius: 10px;
+  background: var(--app-surface);
+  color: var(--app-muted);
+  box-shadow:
+    0 1px 1px color-mix(in srgb, #000 6%, transparent),
+    inset 0 1px 0 color-mix(in srgb, #fff 20%, transparent);
+}
+
+.plan-correction-submit:not(:disabled) {
+  border-color: var(--app-accent-border);
+  background: color-mix(in srgb, var(--app-accent-soft) 72%, var(--app-surface));
+  color: var(--app-accent);
+}
+
+.plan-correction-submit:not(:disabled):hover {
+  border-color: var(--app-accent);
+  background: var(--app-accent);
+  color: #ffffff;
+}
+
+.plan-correction-submit:disabled {
+  opacity: 1;
+  background: var(--app-surface-subtle);
+  color: var(--app-muted-subtle);
 }
 
 .thread-resizer {

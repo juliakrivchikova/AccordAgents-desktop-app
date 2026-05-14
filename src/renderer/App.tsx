@@ -4149,7 +4149,15 @@ function PlanCorrectionComposer(props: {
           placeholder={placeholder}
           disabled={busy || disabled}
         />
-        <Button size="sm" title={disabledTitle} disabled={!canSubmit} onClick={onSubmit}>
+        <Button
+          variant="outline"
+          size="icon-lg"
+          className="plan-correction-submit"
+          title={disabledTitle}
+          aria-label={disabledTitle}
+          disabled={!canSubmit}
+          onClick={onSubmit}
+        >
           {busy ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
         </Button>
       </div>
