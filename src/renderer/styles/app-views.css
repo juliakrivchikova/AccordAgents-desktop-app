@@ -2908,6 +2908,17 @@
   line-height: 1.42;
 }
 
+.chat-message .message-body {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.chat-message.selected-thread-root .message-body {
+  border-color: var(--app-accent-border);
+  background: color-mix(in srgb, var(--app-accent-soft) 42%, var(--app-surface));
+}
+
 .markdown-text {
   gap: 10px;
 }
