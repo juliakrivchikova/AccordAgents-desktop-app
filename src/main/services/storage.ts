@@ -15,6 +15,9 @@ import { sanitizeConversationWarnings, sanitizeWarningList } from "../../shared/
 const INTERRUPTED_RUN_WARNING = "Previous run was interrupted before completion. Continue from the saved context.";
 const DEFAULT_MESSAGE_PAGE_LIMIT = 80;
 const MAX_MESSAGE_PAGE_LIMIT = 200;
+const SQLITE_BUSY_TIMEOUT_MS = 30_000;
+const SQLITE_COMMAND_TIMEOUT_MS = 45_000;
+const SQLITE_MIGRATION_TIMEOUT_MS = 120_000;
 
 function sqlString(value: string | undefined | null): string {
   if (value === undefined || value === null) {
@@ -61,8 +64,8 @@ export class StorageService {
       create index if not exists idx_conversation_messages_conversation_sequence on conversation_messages(conversation_id, sequence);
     `);
     await this.ensureColumn("conversations", "body_json", "text");
-    this.initialized = true;
     await this.backfillConversationBodiesAndMessages();
+    this.initialized = true;
     await this.clearInterruptedRuns();
   }
 
@@ -201,29 +204,40 @@ export class StorageService {
   }
 
   private async backfillConversationBodiesAndMessages(): Promise<void> {
-    const rows = await this.queryJson<{ id: string; payloadJson: string; bodyJson?: string; messageCount: number }>(`
+    await this.runSql(`
+      begin;
+      update conversations
+      set body_json = json_set(payload_json, '$.messages', json_array())
+      where (body_json is null or body_json = '')
+        and json_valid(payload_json);
+
+      with valid_conversations as (
+        select c.id, c.payload_json as payload_json
+        from conversations c
+        where json_valid(c.payload_json)
+      ),
+      target_conversations as (
+        select c.id, c.payload_json as payload_json
+        from valid_conversations c
+        where json_type(c.payload_json, '$.messages') = 'array'
+          and not exists (
+            select 1
+            from conversation_messages m
+            where m.conversation_id = c.id
+          )
+      )
+      insert or ignore into conversation_messages (conversation_id, sequence, message_id, created_at, payload_json)
       select
         c.id,
-        c.payload_json as payloadJson,
-        c.body_json as bodyJson,
-        count(m.message_id) as messageCount
-      from conversations c
-      left join conversation_messages m on m.conversation_id = c.id
-      group by c.id
-      having c.body_json is null or c.body_json = '' or messageCount = 0;
-    `);
-    for (const row of rows) {
-      let conversation: Conversation;
-      try {
-        conversation = JSON.parse(row.payloadJson) as Conversation;
-      } catch {
-        continue;
-      }
-      if (row.bodyJson?.trim() && row.messageCount > 0) {
-        continue;
-      }
-      await this.saveConversation(conversation);
-    }
+        cast(message.key as integer),
+        json_extract(message.value, '$.id'),
+        json_extract(message.value, '$.createdAt'),
+        message.value
+      from target_conversations c, json_each(c.payload_json, '$.messages') as message
+      where json_extract(message.value, '$.id') is not null
+        and json_extract(message.value, '$.createdAt') is not null;
+      commit;
+    `, SQLITE_MIGRATION_TIMEOUT_MS);
   }
 
   private async clearInterruptedRuns(): Promise<void> {
@@ -255,18 +269,24 @@ export class StorageService {
   }
 
   private async queryJson<T>(sql: string): Promise<T[]> {
-    const result = await runCommand("sqlite3", ["-json", this.dbPath, sql], { timeoutMs: 10_000 });
+    const result = await runCommand("sqlite3", this.sqliteArgs(["-json", this.dbPath, sql]), { timeoutMs: SQLITE_COMMAND_TIMEOUT_MS });
     const text = result.stdout.trim();
     return text ? (JSON.parse(text) as T[]) : [];
   }
 
   private async queryText(sql: string): Promise<string> {
-    const result = await runCommand("sqlite3", ["-batch", "-noheader", this.dbPath, sql], { timeoutMs: 10_000 });
+    const result = await runCommand("sqlite3", this.sqliteArgs(["-batch", "-noheader", this.dbPath, sql]), {
+      timeoutMs: SQLITE_COMMAND_TIMEOUT_MS
+    });
     return result.stdout.trim();
   }
 
-  private async runSql(sql: string): Promise<void> {
-    await runCommand("sqlite3", [this.dbPath], { input: sql, timeoutMs: 10_000 });
+  private async runSql(sql: string, timeoutMs = SQLITE_COMMAND_TIMEOUT_MS): Promise<void> {
+    await runCommand("sqlite3", this.sqliteArgs([this.dbPath]), { input: sql, timeoutMs });
+  }
+
+  private sqliteArgs(args: string[]): string[] {
+    return ["-cmd", `.timeout ${SQLITE_BUSY_TIMEOUT_MS}`, ...args];
   }
 }
 

@@ -385,7 +385,7 @@ function registerIpc(): void {
   });
 }
 
-app.whenReady().then(async () => {
+void app.whenReady().then(async () => {
   registerIpc();
   await storageService.init();
   createWindow();
@@ -395,6 +395,11 @@ app.whenReady().then(async () => {
       createWindow();
     }
   });
+}).catch((error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error("Failed to start AI Consensus:", error);
+  dialog.showErrorBox("AI Consensus failed to start", message);
+  app.quit();
 });
 
 app.on("window-all-closed", () => {

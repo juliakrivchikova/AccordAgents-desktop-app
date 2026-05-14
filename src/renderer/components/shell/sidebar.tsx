@@ -60,7 +60,7 @@ export const Sidebar = ({
       History
     </div>
 
-    <ScrollArea className="min-w-0 flex-1 px-2 pb-2">
+    <ScrollArea className="min-h-0 min-w-0 flex-1 px-2 pb-2">
       <div className="flex min-w-0 flex-col gap-0.5">
         {loading ? (
           <HistoryLoadingState />
