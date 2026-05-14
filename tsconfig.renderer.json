@@ -16,7 +16,19 @@
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
   },
-  "include": ["src/renderer/**/*.ts", "src/renderer/**/*.tsx", "src/preload/global.d.ts", "src/shared/**/*.ts"]
+  "include": [
+    "src/components/**/*.ts",
+    "src/components/**/*.tsx",
+    "src/lib/**/*.ts",
+    "src/renderer/**/*.ts",
+    "src/renderer/**/*.tsx",
+    "src/preload/global.d.ts",
+    "src/shared/**/*.ts"
+  ]
 }

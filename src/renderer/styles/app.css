@@ -1,3 +1,10 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+
+@custom-variant dark (&:is(.dark *));
+
 :root {
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -6,6 +13,70 @@
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+  --background:
+    oklch(1 0 0);
+  --foreground:
+    oklch(0.145 0 0);
+  --card:
+    oklch(1 0 0);
+  --card-foreground:
+    oklch(0.145 0 0);
+  --popover:
+    oklch(1 0 0);
+  --popover-foreground:
+    oklch(0.145 0 0);
+  --primary:
+    oklch(0.205 0 0);
+  --primary-foreground:
+    oklch(0.985 0 0);
+  --secondary:
+    oklch(0.97 0 0);
+  --secondary-foreground:
+    oklch(0.205 0 0);
+  --muted:
+    oklch(0.97 0 0);
+  --muted-foreground:
+    oklch(0.556 0 0);
+  --accent:
+    oklch(0.97 0 0);
+  --accent-foreground:
+    oklch(0.205 0 0);
+  --destructive:
+    oklch(0.577 0.245 27.325);
+  --border:
+    oklch(0.922 0 0);
+  --input:
+    oklch(0.922 0 0);
+  --ring:
+    oklch(0.708 0 0);
+  --chart-1:
+    oklch(0.87 0 0);
+  --chart-2:
+    oklch(0.556 0 0);
+  --chart-3:
+    oklch(0.439 0 0);
+  --chart-4:
+    oklch(0.371 0 0);
+  --chart-5:
+    oklch(0.269 0 0);
+  --radius:
+    0.625rem;
+  --sidebar:
+    oklch(0.985 0 0);
+  --sidebar-foreground:
+    oklch(0.145 0 0);
+  --sidebar-primary:
+    oklch(0.205 0 0);
+  --sidebar-primary-foreground:
+    oklch(0.985 0 0);
+  --sidebar-accent:
+    oklch(0.97 0 0);
+  --sidebar-accent-foreground:
+    oklch(0.205 0 0);
+  --sidebar-border:
+    oklch(0.922 0 0);
+  --sidebar-ring:
+    oklch(0.708 0 0);
 }
 
 * {
@@ -3504,4 +3575,893 @@ body {
 .notice.error {
   background: #fff0f0;
   color: #a33a2d;
+}
+
+/* UI kit alignment layer: compact Linear-like desktop chrome on top of shadcn tokens. */
+:root {
+  --app-header-height: 56px;
+  --app-sidebar-width: 280px;
+  --app-bg: #ffffff;
+  --app-surface: #ffffff;
+  --app-surface-subtle: #f7f7f8;
+  --app-surface-hover: #ededf0;
+  --app-surface-active: #ececef;
+  --app-text: #2f2f33;
+  --app-text-strong: #202124;
+  --app-muted: #707078;
+  --app-muted-subtle: #9b9ba1;
+  --app-border: #e5e5e7;
+  --app-border-strong: #d9d9dd;
+  --app-primary: #202124;
+  --app-primary-hover: #111113;
+  --app-primary-fg: #ffffff;
+  --app-accent: #5a9cf8;
+  --app-accent-soft: #eef5ff;
+  --app-success: #12805c;
+  --app-success-soft: #e8f5ef;
+  --app-warning: #7a5a00;
+  --app-warning-soft: #fff7d6;
+  --app-danger: #a33a2d;
+  --app-danger-soft: #fff0f0;
+  --background: #ffffff;
+  --foreground: #2f2f33;
+  --card: #ffffff;
+  --card-foreground: #2f2f33;
+  --popover: #ffffff;
+  --popover-foreground: #2f2f33;
+  --primary: #202124;
+  --primary-foreground: #ffffff;
+  --secondary: #f1f1f3;
+  --secondary-foreground: #2f2f33;
+  --muted: #f1f1f3;
+  --muted-foreground: #707078;
+  --accent: #ededf0;
+  --accent-foreground: #202124;
+  --destructive: #a33a2d;
+  --border: #e5e5e7;
+  --input: #dddddf;
+  --ring: #5a9cf8;
+  --radius: 0.5rem;
+}
+
+.dark {
+  color-scheme: dark;
+  --app-bg: #111113;
+  --app-surface: #161619;
+  --app-surface-subtle: #1b1b1f;
+  --app-surface-hover: #242429;
+  --app-surface-active: #292a30;
+  --app-text: #e7e7ea;
+  --app-text-strong: #f4f4f5;
+  --app-muted: #a0a0a8;
+  --app-muted-subtle: #74747d;
+  --app-border: #2b2c31;
+  --app-border-strong: #3a3b42;
+  --app-primary: #f4f4f5;
+  --app-primary-hover: #ffffff;
+  --app-primary-fg: #111113;
+  --app-accent: #78aaff;
+  --app-accent-soft: #17233a;
+  --app-success: #5ac89a;
+  --app-success-soft: #123326;
+  --app-warning: #f0c45f;
+  --app-warning-soft: #342913;
+  --app-danger: #f27c69;
+  --app-danger-soft: #371b18;
+  --background: #111113;
+  --foreground: #e7e7ea;
+  --card: #161619;
+  --card-foreground: #e7e7ea;
+  --popover: #1b1b1f;
+  --popover-foreground: #e7e7ea;
+  --primary: #f4f4f5;
+  --primary-foreground: #111113;
+  --secondary: #242429;
+  --secondary-foreground: #e7e7ea;
+  --muted: #242429;
+  --muted-foreground: #a0a0a8;
+  --accent: #292a30;
+  --accent-foreground: #f4f4f5;
+  --destructive: #f27c69;
+  --border: #2b2c31;
+  --input: #3a3b42;
+  --ring: #78aaff;
+  --sidebar: #111113;
+  --sidebar-foreground: #e7e7ea;
+  --sidebar-border: #2b2c31;
+}
+
+html,
+body {
+  background: var(--app-bg);
+  color: var(--app-text);
+}
+
+.app-shell {
+  grid-template-columns: var(--app-sidebar-width) 1fr;
+  background: var(--app-bg);
+}
+
+.sidebar {
+  border-right-color: var(--app-border);
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
+}
+
+.brand,
+.topbar {
+  height: var(--app-header-height);
+  border-bottom: 1px solid var(--app-border);
+}
+
+.brand {
+  padding: 0 18px;
+  color: var(--app-text-strong);
+  font-size: 15px;
+}
+
+.topbar {
+  min-height: 60px;
+  height: 60px;
+  padding: 10px 20px;
+  background: var(--app-surface);
+}
+
+.topbar-title {
+  color: var(--app-text-strong);
+  font-size: 14px;
+}
+
+.topbar-actions,
+.tabs,
+.segmented {
+  align-items: center;
+  gap: 8px;
+}
+
+.topbar .tabs {
+  height: 100%;
+}
+
+.topbar-actions {
+  height: 100%;
+}
+
+.topbar .tabs .topbar-tab {
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.topbar .tabs .topbar-tab[data-variant="default"] {
+  border-color: var(--app-primary);
+  background: var(--app-primary);
+  color: var(--app-primary-fg);
+}
+
+.topbar .tabs .topbar-tab[data-variant="ghost"] {
+  border-color: transparent;
+  background: transparent;
+  color: var(--app-muted);
+}
+
+.topbar .tabs .topbar-tab[data-variant="ghost"]:hover {
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+}
+
+.segmented button {
+  height: 34px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.topbar-icon-button {
+  width: 36px;
+  height: 36px;
+  border-color: var(--app-border);
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
+}
+
+.topbar .topbar-icon-button {
+  width: 36px;
+  height: 36px;
+}
+
+.topbar-icon-button:hover {
+  background: var(--app-surface-hover);
+}
+
+.topbar-icon-button.selected,
+.topbar-icon-button[data-variant="default"] {
+  border-color: var(--app-primary);
+  background: var(--app-primary);
+  color: var(--app-primary-fg);
+}
+
+.settings-menu-content {
+  min-width: 190px;
+}
+
+.settings-menu-content [data-slot="dropdown-menu-item"] {
+  min-height: 34px;
+  gap: 9px;
+  font-weight: 600;
+}
+
+.new-button {
+  height: 36px;
+  margin: 14px 14px 12px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.new-button:hover,
+.history-item:hover,
+.history-item.active {
+  background: var(--app-surface-active);
+}
+
+.sidebar-section-title {
+  padding: 10px 16px 7px;
+  color: var(--app-muted-subtle);
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.history-list {
+  padding: 0 10px 12px;
+}
+
+.history-item {
+  gap: 3px;
+  min-height: 54px;
+  padding: 9px 10px;
+  color: var(--app-text);
+}
+
+.history-item small,
+.empty-history {
+  color: var(--app-muted-subtle);
+}
+
+.compose-layout,
+.chat-view,
+.chat-main,
+.chat-timeline,
+.conversation-panel,
+.settings-view,
+.points-view,
+.plan-view {
+  background: var(--app-bg);
+}
+
+.field {
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.field span,
+.participant-picker > span {
+  color: var(--app-muted);
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.field input,
+.field textarea,
+.decision-compose textarea,
+.chat-composer textarea,
+.plan-correction-composer textarea {
+  border-color: var(--app-border-strong);
+  background: var(--app-surface);
+  color: var(--app-text);
+  font-size: 13px;
+}
+
+.field input {
+  height: 36px;
+  padding: 0 10px;
+}
+
+.field textarea,
+.decision-compose textarea,
+.chat-composer textarea,
+.plan-correction-composer textarea {
+  padding: 9px 10px;
+  line-height: 1.42;
+}
+
+.field input:focus,
+.field textarea:focus,
+.decision-compose textarea:focus,
+.chat-composer textarea:focus,
+.plan-correction-composer textarea:focus {
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 18%, transparent);
+}
+
+.field input:disabled,
+.field textarea:disabled,
+.decision-compose textarea:disabled,
+.chat-composer textarea:disabled,
+.plan-correction-composer textarea:disabled {
+  background: var(--app-surface-subtle);
+  color: var(--app-muted-subtle);
+  cursor: not-allowed;
+}
+
+.app-select-trigger {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  border-color: var(--app-border-strong);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.app-select-trigger:focus-visible {
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 18%, transparent);
+}
+
+.secondary-button,
+.tool-button,
+.icon-button,
+.stop-button,
+.cancel-button,
+.save-key-button,
+.run-button,
+.participant-pill,
+.diff-mode-grid button {
+  min-height: 34px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.icon-button,
+.tool-button {
+  width: 34px;
+  height: 34px;
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
+}
+
+.secondary-button,
+.stop-button,
+.cancel-button,
+.diff-mode-grid button,
+.participant-pill {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.secondary-button:hover,
+.tool-button:hover,
+.icon-button:hover,
+.diff-mode-grid button:hover,
+.participant-pill:hover {
+  background: var(--app-surface-hover);
+}
+
+.run-button,
+.save-key-button {
+  background: var(--app-primary);
+  color: var(--app-primary-fg);
+}
+
+.run-button:hover,
+.save-key-button:hover {
+  background: var(--app-primary-hover);
+}
+
+.diff-mode-grid button.selected,
+.participant-pill.selected,
+.decision-option.selected {
+  border-color: var(--app-accent);
+  background: var(--app-accent-soft);
+}
+
+.notice {
+  border-bottom-color: var(--app-border);
+  background: var(--app-warning-soft);
+  color: var(--app-warning);
+}
+
+.notice.error {
+  background: var(--app-danger-soft);
+  color: var(--app-danger);
+}
+
+.slack-timeline,
+.points-view,
+.settings-view {
+  padding: 20px 24px;
+}
+
+.view-heading {
+  margin-bottom: 12px;
+}
+
+.view-heading h2,
+.settings-view h1 {
+  color: var(--app-text-strong);
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.view-heading span,
+.settings-section-head span,
+.message-meta,
+.message-meta span,
+.inline-hint,
+.point-message small,
+.thread-empty,
+.round-empty,
+.section-empty {
+  color: var(--app-muted);
+}
+
+.message {
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.message-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+}
+
+.message-body,
+.point-card,
+.settings-item,
+.progress-panel,
+.plan-source-support,
+.plan-source-detail-card,
+.points-table-wrap,
+.plan-markdown-card,
+.markdown-table-wrap,
+.markdown-code {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.message-body {
+  padding: 12px 46px 12px 12px;
+}
+
+.message-meta {
+  gap: 8px;
+  margin-bottom: 7px;
+  font-size: 12px;
+}
+
+.message-meta strong,
+.chat-title-block h2,
+.thread-panel-head h2,
+.point-message h3,
+.point-card h3,
+.markdown-text strong {
+  color: var(--app-text-strong);
+}
+
+.message-content,
+.markdown-text {
+  color: var(--app-text);
+  font-size: 14px;
+  line-height: 1.42;
+}
+
+.markdown-text {
+  gap: 10px;
+}
+
+.markdown-text code {
+  background: var(--app-surface-subtle);
+  color: var(--app-text-strong);
+}
+
+.markdown-code,
+.markdown-table th {
+  background: var(--app-surface-subtle);
+}
+
+.markdown-table th,
+.markdown-table td,
+.points-table th,
+.points-table td {
+  border-color: var(--app-border);
+}
+
+.status-badge.confirmed,
+.severity.low,
+.severity.info,
+.decision-option-body small {
+  background: var(--app-success-soft);
+  color: var(--app-success);
+}
+
+.status-badge.unresolved,
+.status-badge.disputed,
+.severity.medium {
+  background: var(--app-warning-soft);
+  color: var(--app-warning);
+}
+
+.status-badge.rejected,
+.status-badge.filtered-out,
+.severity.critical,
+.severity.high {
+  background: var(--app-danger-soft);
+  color: var(--app-danger);
+}
+
+.message-copy-button {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease,
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.message-body:hover .message-copy-button,
+.message-copy-button:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+@media (hover: none) {
+  .message-copy-button {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+}
+
+.message-copy-button,
+.chat-message .message-copy-button {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-muted);
+}
+
+.message-copy-button:hover,
+.chat-message .message-copy-button:hover {
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+}
+
+.slack-action-bar {
+  min-height: 54px;
+  border-top-color: var(--app-border);
+  background: color-mix(in srgb, var(--app-surface) 96%, transparent);
+}
+
+.slack-action-bar.with-composer {
+  align-items: stretch;
+  gap: 8px;
+  padding: 10px 18px 14px;
+}
+
+.run-status-line {
+  color: var(--app-muted);
+  font-size: 13px;
+}
+
+.progress-dots i,
+.typing-dots i,
+.progress-active .message-body::before {
+  background: var(--app-accent);
+}
+
+.progress-active .message-body,
+.point-message.selected .message-body,
+.point-message:hover .message-body {
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 14%, transparent);
+}
+
+.progress-active .message-body::after {
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--app-accent) 10%, transparent), transparent);
+}
+
+.plan-correction-composer {
+  display: grid;
+  width: min(100%, 960px);
+  gap: 8px;
+  margin: 0 auto;
+}
+
+.plan-correction-status {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  padding: 0 2px;
+}
+
+.plan-correction-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  align-items: end;
+  gap: 8px;
+}
+
+.plan-correction-input-row textarea {
+  min-height: 48px;
+  max-height: 160px;
+  border-radius: 8px;
+}
+
+.plan-correction-send {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  background: var(--app-primary);
+  color: var(--app-primary-fg);
+}
+
+.plan-correction-send:disabled {
+  background: var(--app-surface-hover);
+  color: var(--app-muted-subtle);
+  opacity: 1;
+}
+
+.thread-resizer {
+  background: var(--app-bg);
+}
+
+.thread-resizer::before,
+.chat-menu-divider {
+  background: var(--app-border);
+}
+
+.thread-replies,
+.filtered-section,
+.plan-source-details,
+.chat-thread-replies {
+  border-color: var(--app-border);
+}
+
+.slack-thread-panel,
+.chat-thread-panel,
+.chat-header,
+.chat-composer,
+.chat-thread-head {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+}
+
+.chat-composer {
+  box-shadow: 0 -8px 20px color-mix(in srgb, #000 7%, transparent);
+}
+
+.mention-menu,
+.chat-participant-popover {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.mention-menu button:hover,
+.mention-menu button.selected,
+.chat-participant-menu-list button:hover {
+  background: var(--app-surface-hover);
+}
+
+.settings-grid {
+  gap: 12px;
+}
+
+.settings-item,
+.role-config-card,
+.chat-participant-row,
+.saved-participant-option {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+}
+
+.saved-participant-option.selected,
+.avatar-choice.selected {
+  border-color: var(--app-accent);
+  background: var(--app-accent-soft);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 12%, transparent);
+}
+
+.avatar-codex,
+.message-avatar.avatar-codex,
+.thread-avatar.avatar-codex,
+.message.system .message-avatar.avatar-codex,
+.message.summary .message-avatar.avatar-codex {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: #586eff;
+}
+
+.avatar-codex .provider-avatar-image,
+.message-avatar.avatar-codex .provider-avatar-image,
+.thread-avatar.avatar-codex .provider-avatar-image {
+  width: 88%;
+  height: 88%;
+  object-fit: contain;
+  transform: none;
+}
+
+@theme inline {
+  --font-heading:
+    var(--font-sans);
+  --font-sans:
+    'Geist Variable', sans-serif;
+  --color-sidebar-ring:
+    var(--sidebar-ring);
+  --color-sidebar-border:
+    var(--sidebar-border);
+  --color-sidebar-accent-foreground:
+    var(--sidebar-accent-foreground);
+  --color-sidebar-accent:
+    var(--sidebar-accent);
+  --color-sidebar-primary-foreground:
+    var(--sidebar-primary-foreground);
+  --color-sidebar-primary:
+    var(--sidebar-primary);
+  --color-sidebar-foreground:
+    var(--sidebar-foreground);
+  --color-sidebar:
+    var(--sidebar);
+  --color-chart-5:
+    var(--chart-5);
+  --color-chart-4:
+    var(--chart-4);
+  --color-chart-3:
+    var(--chart-3);
+  --color-chart-2:
+    var(--chart-2);
+  --color-chart-1:
+    var(--chart-1);
+  --color-ring:
+    var(--ring);
+  --color-input:
+    var(--input);
+  --color-border:
+    var(--border);
+  --color-destructive:
+    var(--destructive);
+  --color-accent-foreground:
+    var(--accent-foreground);
+  --color-accent:
+    var(--accent);
+  --color-muted-foreground:
+    var(--muted-foreground);
+  --color-muted:
+    var(--muted);
+  --color-secondary-foreground:
+    var(--secondary-foreground);
+  --color-secondary:
+    var(--secondary);
+  --color-primary-foreground:
+    var(--primary-foreground);
+  --color-primary:
+    var(--primary);
+  --color-popover-foreground:
+    var(--popover-foreground);
+  --color-popover:
+    var(--popover);
+  --color-card-foreground:
+    var(--card-foreground);
+  --color-card:
+    var(--card);
+  --color-foreground:
+    var(--foreground);
+  --color-background:
+    var(--background);
+  --radius-sm:
+    calc(var(--radius) * 0.6);
+  --radius-md:
+    calc(var(--radius) * 0.8);
+  --radius-lg:
+    var(--radius);
+  --radius-xl:
+    calc(var(--radius) * 1.4);
+  --radius-2xl:
+    calc(var(--radius) * 1.8);
+  --radius-3xl:
+    calc(var(--radius) * 2.2);
+  --radius-4xl:
+    calc(var(--radius) * 2.6);
+}
+
+.dark {
+  --background:
+    oklch(0.145 0 0);
+  --foreground:
+    oklch(0.985 0 0);
+  --card:
+    oklch(0.205 0 0);
+  --card-foreground:
+    oklch(0.985 0 0);
+  --popover:
+    oklch(0.205 0 0);
+  --popover-foreground:
+    oklch(0.985 0 0);
+  --primary:
+    oklch(0.922 0 0);
+  --primary-foreground:
+    oklch(0.205 0 0);
+  --secondary:
+    oklch(0.269 0 0);
+  --secondary-foreground:
+    oklch(0.985 0 0);
+  --muted:
+    oklch(0.269 0 0);
+  --muted-foreground:
+    oklch(0.708 0 0);
+  --accent:
+    oklch(0.269 0 0);
+  --accent-foreground:
+    oklch(0.985 0 0);
+  --destructive:
+    oklch(0.704 0.191 22.216);
+  --border:
+    oklch(1 0 0 / 10%);
+  --input:
+    oklch(1 0 0 / 15%);
+  --ring:
+    oklch(0.556 0 0);
+  --chart-1:
+    oklch(0.87 0 0);
+  --chart-2:
+    oklch(0.556 0 0);
+  --chart-3:
+    oklch(0.439 0 0);
+  --chart-4:
+    oklch(0.371 0 0);
+  --chart-5:
+    oklch(0.269 0 0);
+  --sidebar:
+    oklch(0.205 0 0);
+  --sidebar-foreground:
+    oklch(0.985 0 0);
+  --sidebar-primary:
+    oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground:
+    oklch(0.985 0 0);
+  --sidebar-accent:
+    oklch(0.269 0 0);
+  --sidebar-accent-foreground:
+    oklch(0.985 0 0);
+  --sidebar-border:
+    oklch(1 0 0 / 10%);
+  --sidebar-ring:
+    oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  button:not(:disabled), [role="button"]:not(:disabled) {
+    cursor:
+    pointer;
+  }
+  html {
+    @apply font-sans;
+  }
 }

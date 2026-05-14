@@ -24,6 +24,23 @@ import {
   X,
   XCircle
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from "@/components/ui/dropdown-menu";
+import {
+  Select as UiSelect,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from "@/components/ui/select";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import type {
   AgentHealth,
   AppSettings,
@@ -54,6 +71,8 @@ import type {
   ReviewProgress
 } from "../shared/types";
 import { DEFAULT_NOTICE_CHARS, sanitizeWarningText } from "../shared/warnings";
+import { ModeToggle } from "./components/mode-toggle";
+import { ThemeProvider } from "./components/theme-provider";
 import "./styles/app.css";
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -90,7 +109,7 @@ const MAX_NOTICE_CHARS = DEFAULT_NOTICE_CHARS;
 const JUDGE_FLATICON_URL = new URL("./assets/judge-flaticon-5452982.png", import.meta.url).href;
 // Provider avatars by LobeHub Icons, MIT: https://lobehub.com/icons
 const CLAUDE_AVATAR_URL = new URL("./assets/claude-avatar.webp", import.meta.url).href;
-const CODEX_AVATAR_URL = new URL("./assets/codex-avatar.webp", import.meta.url).href;
+const CODEX_AVATAR_URL = new URL("./assets/codex-cli.svg", import.meta.url).href;
 const CHAT_AVATAR_URLS = {
   "codex-human": new URL("./assets/participant-codex-human.png", import.meta.url).href,
   "codex-bunny": new URL("./assets/participant-codex-bunny.png", import.meta.url).href,
@@ -131,6 +150,45 @@ interface ChatAvatarOption {
   kind: ChatProviderKind;
   label: string;
   imageUrl: string;
+}
+
+interface AppSelectOption {
+  value: string;
+  label: string;
+  disabled?: boolean;
+}
+
+function AppSelect(props: {
+  value: string;
+  options: AppSelectOption[];
+  placeholder: string;
+  disabled?: boolean;
+  className?: string;
+  ariaLabel?: string;
+  testId?: string;
+  onValueChange: (value: string) => void;
+}): JSX.Element {
+  const selectedValue = props.value || undefined;
+  return (
+    <UiSelect
+      value={selectedValue}
+      disabled={props.disabled}
+      onValueChange={props.onValueChange}
+    >
+      <SelectTrigger className={`app-select-trigger ${props.className ?? ""}`} aria-label={props.ariaLabel ?? props.placeholder} data-testid={props.testId}>
+        <SelectValue placeholder={props.placeholder} />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectGroup>
+          {props.options.map((option) => (
+            <SelectItem value={option.value} disabled={option.disabled} key={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </UiSelect>
+  );
 }
 
 const CHAT_AVATAR_OPTIONS: ChatAvatarOption[] = [
@@ -1411,15 +1469,25 @@ function App(): JSX.Element {
         <header className="topbar">
           {hasResultContext ? (
             <div className="tabs" role="tablist">
-              <button className={resultView === "slack" && activeView !== "settings" ? "selected" : ""} onClick={() => setActiveView("slack")}>
+              <Button
+                className="topbar-tab"
+                variant={resultView === "slack" && activeView !== "settings" ? "default" : "ghost"}
+                size="sm"
+                onClick={() => setActiveView("slack")}
+              >
                 <MessageSquare size={15} />
                 Slack
-              </button>
+              </Button>
               {hasPoints && conversationKind !== "implementation-plan" && conversationKind !== "chat" && (
-                <button className={resultView === "points" && activeView !== "settings" ? "selected" : ""} onClick={() => setActiveView("points")}>
+                <Button
+                  className="topbar-tab"
+                  variant={resultView === "points" && activeView !== "settings" ? "default" : "ghost"}
+                  size="sm"
+                  onClick={() => setActiveView("points")}
+                >
                   <ListChecks size={15} />
                   Points
-                </button>
+                </Button>
               )}
             </div>
           ) : (
@@ -1427,22 +1495,28 @@ function App(): JSX.Element {
           )}
           <div className="topbar-actions">
             {busy && (
-              <button className="stop-button" onClick={() => void cancelReview()}>
+              <Button className="stop-button" variant="outline" size="sm" onClick={() => void cancelReview()}>
                 <XCircle size={17} />
                 Stop
-              </button>
+              </Button>
             )}
-            <div className="settings-menu-wrap">
-              <button
-                className={`icon-button ${activeView === "settings" || settingsMenuOpen ? "selected" : ""}`}
-                title="Settings"
-                onClick={() => setSettingsMenuOpen((open) => !open)}
-              >
-                <Settings size={15} />
-              </button>
-              {settingsMenuOpen && (
-                <div className="settings-menu">
-                  <button
+            <ModeToggle />
+            <DropdownMenu open={settingsMenuOpen} onOpenChange={setSettingsMenuOpen}>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  className={`topbar-icon-button ${activeView === "settings" || settingsMenuOpen ? "selected" : ""}`}
+                  variant={activeView === "settings" || settingsMenuOpen ? "default" : "outline"}
+                  size="icon-lg"
+                  title="Settings"
+                  data-testid="settings-menu-trigger"
+                >
+                  <Settings size={15} />
+                  <span className="sr-only">Settings</span>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="settings-menu-content">
+                <DropdownMenuGroup>
+                  <DropdownMenuItem
                     onClick={() => {
                       setActiveSettingsSection("providers");
                       setActiveView("settings");
@@ -1451,8 +1525,8 @@ function App(): JSX.Element {
                   >
                     <KeyRound size={15} />
                     Providers
-                  </button>
-                  <button
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
                     onClick={() => {
                       setActiveSettingsSection("roles");
                       setActiveView("settings");
@@ -1461,8 +1535,8 @@ function App(): JSX.Element {
                   >
                     <Circle size={15} />
                     Roles
-                  </button>
-                  <button
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
                     onClick={() => {
                       setActiveSettingsSection("participants");
                       setActiveView("settings");
@@ -1471,13 +1545,14 @@ function App(): JSX.Element {
                   >
                     <Users size={15} />
                     Participants
-                  </button>
-                </div>
-              )}
-            </div>
-            <button className="icon-button" title="Refresh" onClick={() => void refreshAll()}>
+                  </DropdownMenuItem>
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Button className="topbar-icon-button" variant="outline" size="icon-lg" title="Refresh" onClick={() => void refreshAll()}>
               <RefreshCw size={17} />
-            </button>
+              <span className="sr-only">Refresh</span>
+            </Button>
           </div>
         </header>
 
@@ -1621,41 +1696,27 @@ function App(): JSX.Element {
                               <div className="branch-compare-row">
                                 <label className="branch-select">
                                   <span>Base branch</span>
-                                  <select
+                                  <AppSelect
                                     value={selectedBaseBranch}
-                                    onChange={(event) => setBaseBranch(event.target.value)}
-                                    aria-describedby="branch-compare-help"
                                     disabled={branchSelectDisabled}
-                                    title={BRANCH_COMPARE_HELP}
-                                  >
-                                    <option value="" disabled>
-                                      {branchSelectPlaceholder}
-                                    </option>
-                                    {branchOptions.map((branch) => (
-                                      <option key={branch} value={branch}>
-                                        {branch}
-                                      </option>
-                                    ))}
-                                  </select>
+                                    placeholder={branchSelectPlaceholder}
+                                    ariaLabel="Base branch"
+                                    testId="base-branch-select"
+                                    options={branchOptions.map((branch) => ({ value: branch, label: branch }))}
+                                    onValueChange={setBaseBranch}
+                                  />
                                 </label>
                                 <label className="branch-select">
                                   <span>Compare branch</span>
-                                  <select
+                                  <AppSelect
                                     value={selectedCompareBranch}
-                                    onChange={(event) => setCompareBranch(event.target.value)}
-                                    aria-describedby="branch-compare-help"
                                     disabled={branchSelectDisabled}
-                                    title={BRANCH_COMPARE_HELP}
-                                  >
-                                    <option value="" disabled>
-                                      {branchSelectPlaceholder}
-                                    </option>
-                                    {branchOptions.map((branch) => (
-                                      <option key={branch} value={branch}>
-                                        {branch}
-                                      </option>
-                                    ))}
-                                  </select>
+                                    placeholder={branchSelectPlaceholder}
+                                    ariaLabel="Compare branch"
+                                    testId="compare-branch-select"
+                                    options={branchOptions.map((branch) => ({ value: branch, label: branch }))}
+                                    onValueChange={setCompareBranch}
+                                  />
                                 </label>
                               </div>
                               <div className="inline-hint" id="branch-compare-help">
@@ -1710,20 +1771,15 @@ function App(): JSX.Element {
 
                   <label className="field">
                     <span>{arbiterRoleLabel}</span>
-                    <select
+                    <AppSelect
                       value={arbiterSelectValue}
-                      onChange={(event) => setSelectedArbiterId(event.target.value)}
                       disabled={arbiterOptions.length === 0}
-                    >
-                      <option value="" disabled>
-                        {arbiterPlaceholder}
-                      </option>
-                      {arbiterOptions.map(({ provider }) => (
-                        <option key={provider.kind} value={providerId(provider)}>
-                          {provider.label}
-                        </option>
-                      ))}
-                    </select>
+                      placeholder={arbiterPlaceholder}
+                      ariaLabel={arbiterRoleLabel}
+                      testId="arbiter-select"
+                      options={arbiterOptions.map(({ provider }) => ({ value: providerId(provider), label: provider.label }))}
+                      onValueChange={setSelectedArbiterId}
+                    />
                   </label>
                   <div className="inline-hint">
                     The {arbiterRoleLabel.toLowerCase()} merge is a separate run. If the same provider is selected as a participant, it also gets an independent participant run.
@@ -1905,21 +1961,21 @@ function SettingsView(props: {
                         <label className="field grow">
                           <span>Model</span>
                           {models.length > 0 ? (
-                            <select
-                              value={models.some((model) => model.id === provider.model) ? provider.model : "__custom__"}
-                              onChange={(event) => {
-                                if (event.target.value !== "__custom__") {
-                                  void props.updateProvider(provider, { model: event.target.value });
+                            <AppSelect
+                              value={provider.model && models.some((model) => model.id === provider.model) ? provider.model : "__custom__"}
+                              placeholder="Select model"
+                              ariaLabel={`${provider.label} model`}
+                              testId={`${provider.kind}-model-select`}
+                              options={[
+                                ...models.map((model) => ({ value: model.id, label: model.label })),
+                                { value: "__custom__", label: "Custom model ID..." }
+                              ]}
+                              onValueChange={(value) => {
+                                if (value !== "__custom__") {
+                                  void props.updateProvider(provider, { model: value });
                                 }
                               }}
-                            >
-                              {models.map((model) => (
-                                <option key={model.id} value={model.id}>
-                                  {model.label}
-                                </option>
-                              ))}
-                              <option value="__custom__">Custom model ID...</option>
-                            </select>
+                            />
                           ) : (
                             <input
                               value={provider.model ?? ""}
@@ -2278,32 +2334,30 @@ function ChatParticipantDraftRow(props: {
       </label>
       <label className="field compact-field">
         <span>Role</span>
-        <select
+        <AppSelect
           value={props.draft.roleConfigId}
-          onChange={(event) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { roleConfigId: event.target.value }))}
-        >
-          {props.settings.chatRoleConfigs.map((role) => (
-            <option value={role.id} key={role.id}>
-              {role.label}
-            </option>
-          ))}
-        </select>
+          placeholder="Select role"
+          ariaLabel="Participant role"
+          options={props.settings.chatRoleConfigs.map((role) => ({ value: role.id, label: role.label }))}
+          onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { roleConfigId: value }))}
+        />
       </label>
       <label className="field compact-field">
         <span>CLI</span>
-        <select
+        <AppSelect
           value={props.draft.kind}
-          onChange={(event) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { kind: event.target.value as ChatProviderKind }))}
-        >
-          {cliProviders.map((provider) => {
+          placeholder="Select CLI"
+          ariaLabel="Participant CLI"
+          options={cliProviders.map((provider) => {
             const health = props.agents.find((agent) => agent.kind === provider.kind);
-            return (
-              <option value={provider.kind} disabled={!health?.installed} key={provider.kind}>
-                {provider.label}{health?.installed ? "" : " (missing)"}
-              </option>
-            );
+            return {
+              value: provider.kind,
+              label: `${provider.label}${health?.installed ? "" : " (missing)"}`,
+              disabled: !health?.installed
+            };
           })}
-        </select>
+          onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { kind: value as ChatProviderKind }))}
+        />
       </label>
       <label className="field compact-field">
         <span>Model</span>
@@ -3415,7 +3469,7 @@ function SlackView(props: {
       )}
       {(showLiveProgress || pendingDecisions.length > 0 || showPlanFollowupComposer) && (
         <div className={`slack-action-bar ${showPlanFollowupComposer ? "with-composer" : ""}`} role="region" aria-label="Run status and actions">
-          {showLiveProgress ? <RunStatusLine progress={latestLiveProgress} /> : pendingDecisions.length > 0 ? <span className="slack-action-spacer" /> : null}
+          {showLiveProgress && !showPlanFollowupComposer ? <RunStatusLine progress={latestLiveProgress} /> : pendingDecisions.length > 0 ? <span className="slack-action-spacer" /> : null}
           {pendingDecisions.length > 0 && (
             <div className="decision-action-bar" aria-label="Decision actions">
               <div className="decision-action-status" aria-live="polite">
@@ -3436,6 +3490,7 @@ function SlackView(props: {
               busy={isRunning}
               disabled={planFollowupDisabled}
               placeholder={planFollowupPlaceholder}
+              status={showLiveProgress ? <RunStatusLine progress={latestLiveProgress} /> : undefined}
               onDraftChange={onPlanCorrectionDraftChange}
               onSubmit={onRevisePlan}
             />
@@ -3447,14 +3502,35 @@ function SlackView(props: {
 }
 
 function TimelineMessage({ message, kind }: { message: Conversation["messages"][number]; kind: ConversationKind }): JSX.Element {
+  const [copied, setCopied] = useState(false);
   const author = authorForMessage(message, kind);
   const isLiveProgress = Boolean(message.progressPhase && message.status === "pending");
   const isFinalPlan = kind === "implementation-plan" && message.role === "summary";
   const display = displayMessageContent(message, kind);
+  const canCopy = Boolean(display.content.trim());
+
+  async function copyMessage(): Promise<void> {
+    if (!canCopy) {
+      return;
+    }
+    await navigator.clipboard.writeText(display.content);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1400);
+  }
+
   return (
     <article className={`message ${message.role} ${isLiveProgress ? "progress-active" : ""} ${isFinalPlan ? "final-plan-message" : ""}`}>
       <Avatar className="message-avatar" spec={avatarForMessage(message, author)} />
       <div className="message-body">
+        <button
+          className="icon-button message-copy-button"
+          title={copied ? "Copied" : "Copy markdown"}
+          disabled={!canCopy}
+          data-testid={isFinalPlan ? "final-plan-copy-button" : undefined}
+          onClick={() => void copyMessage()}
+        >
+          {copied ? <CheckCircle2 size={16} /> : <Copy size={16} />}
+        </button>
         <div className="message-meta">
           <strong>{author}</strong>
           {isFinalPlan && <span>Final plan</span>}
@@ -3777,33 +3853,37 @@ function PlanCorrectionComposer(props: {
   busy: boolean;
   disabled?: boolean;
   placeholder?: string;
+  status?: React.ReactNode;
   onDraftChange: (value: string) => void;
   onSubmit: () => void;
 }): JSX.Element {
-  const { draft, busy, disabled = false, placeholder = "Ask for follow-up changes", onDraftChange, onSubmit } = props;
+  const { draft, busy, disabled = false, placeholder = "Ask for follow-up changes", status, onDraftChange, onSubmit } = props;
   const canSubmit = !busy && !disabled && Boolean(draft.trim());
   const disabledTitle = disabled && !busy ? placeholder : "Send correction";
   return (
-    <div className="plan-correction-composer">
-      <AutoResizeTextarea
-        value={draft}
-        onChange={(event) => onDraftChange(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey) {
-            event.preventDefault();
-            if (canSubmit) {
-              onSubmit();
+    <div className={`plan-correction-composer ${busy ? "is-running" : ""}`} data-testid="plan-followup-composer">
+      {status && <div className="plan-correction-status">{status}</div>}
+      <div className="plan-correction-input-row">
+        <AutoResizeTextarea
+          value={draft}
+          onChange={(event) => onDraftChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              if (canSubmit) {
+                onSubmit();
+              }
             }
-          }
-        }}
-        rows={2}
-        maxHeight={220}
-        placeholder={placeholder}
-        disabled={busy || disabled}
-      />
-      <button className="plan-correction-send" title={disabledTitle} disabled={!canSubmit} onClick={onSubmit}>
-        {busy ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
-      </button>
+          }}
+          rows={2}
+          maxHeight={220}
+          placeholder={placeholder}
+          disabled={busy || disabled}
+        />
+        <button className="plan-correction-send" title={disabledTitle} disabled={!canSubmit} onClick={onSubmit}>
+          {busy ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
+        </button>
+      </div>
     </div>
   );
 }
@@ -6034,6 +6114,10 @@ installDevMockBridge();
 
 createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    <ThemeProvider>
+      <TooltipProvider>
+        <App />
+      </TooltipProvider>
+    </ThemeProvider>
   </React.StrictMode>
 );
