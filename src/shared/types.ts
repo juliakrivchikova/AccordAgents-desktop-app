@@ -433,6 +433,28 @@ export interface Conversation extends ConversationSummary {
   metadata: Record<string, unknown>;
 }
 
+export interface ConversationMessagePageRequest {
+  conversationId: string;
+  beforeSequence?: number;
+  limit?: number;
+}
+
+export interface ConversationMessagePageInfo {
+  oldestSequence?: number;
+  newestSequence?: number;
+  hasMoreBefore: boolean;
+  totalMessages: number;
+}
+
+export interface ConversationMessagePage extends ConversationMessagePageInfo {
+  messages: ChatMessage[];
+}
+
+export interface ConversationOpenResult {
+  conversation: Conversation;
+  messagePage: ConversationMessagePageInfo;
+}
+
 export interface StartReviewResult {
   conversation: Conversation;
   warnings: string[];
@@ -453,6 +475,8 @@ export interface AppBridge {
   getDiff(request: GitDiffRequest): Promise<GitDiffResult>;
   listConversations(): Promise<ConversationSummary[]>;
   getConversation(id: string): Promise<Conversation | undefined>;
+  openConversation(id: string, limit?: number): Promise<ConversationOpenResult | undefined>;
+  listConversationMessages(request: ConversationMessagePageRequest): Promise<ConversationMessagePage>;
   saveDecisionSelections(conversationId: string, selections: Record<string, string>): Promise<Conversation | undefined>;
   saveDecisionResolutions(conversationId: string, resolutions: Record<string, boolean>): Promise<Conversation | undefined>;
   savePlanItemReview(request: PlanItemReviewRequest): Promise<Conversation | undefined>;

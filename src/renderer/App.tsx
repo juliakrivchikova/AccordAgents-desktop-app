@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   AlertTriangle,
   Bot,
@@ -61,11 +62,14 @@ import type {
   ChatParticipant,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
+  ChatMessage,
   ChatPendingChoice,
   ChatProviderKind,
   ChatRoleConfig,
   ChatRoleConfigUpdate,
   Conversation,
+  ConversationMessagePage,
+  ConversationMessagePageInfo,
   ConversationKind,
   ConversationSummary,
   Finding,
@@ -109,6 +113,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   chatRoleConfigs: [],
   chatParticipantConfigs: []
 };
+const CONVERSATION_MESSAGE_PAGE_SIZE = 80;
 
 interface ChatThinkingRow {
   key: string;
@@ -118,6 +123,11 @@ interface ChatThinkingRow {
   startedAt: string;
   updatedAt: string;
 }
+
+type ChatTimelineRow =
+  | { type: "load-older"; id: string }
+  | { type: "message"; id: string; message: ChatMessage }
+  | { type: "thinking"; id: string; row: ChatThinkingRow };
 
 const BRANCH_COMPARE_HELP = "Changes committed on the compare branch since it diverged from the base branch.";
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
@@ -248,6 +258,8 @@ function App(): JSX.Element {
   const [agents, setAgents] = useState<AgentHealth[]>([]);
   const [summaries, setSummaries] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<Conversation | undefined>();
+  const [messagePage, setMessagePage] = useState<ConversationMessagePageInfo | undefined>();
+  const [olderMessagesLoading, setOlderMessagesLoading] = useState(false);
   const [activeView, setActiveView] = useState<ActiveView>("slack");
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("providers");
   const [settingsReturnView, setSettingsReturnView] = useState<ResultView>("slack");
@@ -312,10 +324,19 @@ function App(): JSX.Element {
         }
         setSelectedThreadId((selected) => (selected && !threadExistsInConversation(updated, selected) ? undefined : selected));
         setFocusedThreadId((focused) => (focused && !threadExistsInConversation(updated, focused) ? undefined : focused));
-        return mergeProgressIntoConversation(updated, progressLogRef.current.filter((item) => item.runId === conversationRunId(updated)));
+        const merged = mergeProgressIntoConversation(updated, progressLogRef.current.filter((item) => item.runId === conversationRunId(updated)));
+        setMessagePage(fullConversationMessagePageInfo(merged));
+        return merged;
       });
     });
   }, [currentRunId]);
+
+  useEffect(() => {
+    if (!conversation || !messagePage?.hasMoreBefore || conversation.messages.length < messagePage.totalMessages) {
+      return;
+    }
+    setMessagePage(fullConversationMessagePageInfo(conversation));
+  }, [conversation?.id, conversation?.messages.length, messagePage?.hasMoreBefore, messagePage?.totalMessages]);
 
   useEffect(() => {
     setSelectedParticipants(new Set(settings.providers.filter((provider) => provider.enabled).map(providerId)));
@@ -418,13 +439,15 @@ function App(): JSX.Element {
     setOpeningConversationId(id);
     try {
       await waitForNextFrame();
-      const next = await window.consensus.getConversation(id);
+      const result = await window.consensus.openConversation(id, CONVERSATION_MESSAGE_PAGE_SIZE);
       if (requestId !== openConversationRequestRef.current) {
         return;
       }
+      const next = result?.conversation;
       const nextPendingDecisions = pendingPlanDecisions(next);
       const nextPendingItem = firstPendingPlanItemReview(next);
       setConversation(next);
+      setMessagePage(result?.messagePage);
       if (next) {
         setKind(next.kind);
       }
@@ -448,6 +471,36 @@ function App(): JSX.Element {
       if (requestId === openConversationRequestRef.current) {
         setOpeningConversationId(undefined);
       }
+    }
+  }
+
+  async function loadOlderConversationMessages(): Promise<void> {
+    if (!conversation || !messagePage?.hasMoreBefore || olderMessagesLoading || messagePage.oldestSequence === undefined) {
+      return;
+    }
+    const conversationId = conversation.id;
+    setOlderMessagesLoading(true);
+    setError(undefined);
+    try {
+      const page = await window.consensus.listConversationMessages({
+        conversationId,
+        beforeSequence: messagePage.oldestSequence,
+        limit: CONVERSATION_MESSAGE_PAGE_SIZE
+      });
+      setConversation((current) => {
+        if (!current || current.id !== conversationId) {
+          return current;
+        }
+        return {
+          ...current,
+          messages: prependMissingMessages(current.messages, page.messages)
+        };
+      });
+      setMessagePage((current) => mergeLoadedMessagePage(current, page));
+    } catch (caught) {
+      setError(errorText(caught));
+    } finally {
+      setOlderMessagesLoading(false);
     }
   }
 
@@ -1328,6 +1381,8 @@ function App(): JSX.Element {
       return;
     }
     setConversation(undefined);
+    setMessagePage(undefined);
+    setOlderMessagesLoading(false);
     progressLogRef.current = [];
     setProgressLog([]);
     setSelectedThreadId(undefined);
@@ -1836,9 +1891,12 @@ function App(): JSX.Element {
                     agents={agents}
                     progress={progressLog}
                     isRunning={busy}
+                    hasOlderMessages={Boolean(messagePage?.hasMoreBefore)}
+                    olderMessagesLoading={olderMessagesLoading}
                     draft={chatMessageDraft}
                     addParticipantDraft={chatAddParticipantDraft ?? defaultChatParticipantDraft(settings)}
                     onDraftChange={setChatMessageDraft}
+                    onLoadOlderMessages={() => void loadOlderConversationMessages()}
                     onSend={() => sendChatMessage()}
                     onSendThread={(rootMessage, content) => sendChatMessage({
                       content,
@@ -1864,6 +1922,9 @@ function App(): JSX.Element {
                     progress={progressLog}
                     kind={conversationKind}
                     isRunning={busy}
+                    hasOlderMessages={Boolean(messagePage?.hasMoreBefore)}
+                    olderMessagesLoading={olderMessagesLoading}
+                    onLoadOlderMessages={() => void loadOlderConversationMessages()}
                     selectedThreadId={selectedThreadId}
                     focusedThreadId={focusedThreadId}
                     onSelectThread={(id) => {
@@ -2471,9 +2532,12 @@ function ChatConversationView(props: {
   agents: AgentHealth[];
   progress: ReviewProgress[];
   isRunning: boolean;
+  hasOlderMessages: boolean;
+  olderMessagesLoading: boolean;
   draft: string;
   addParticipantDraft: ChatParticipantDraft;
   onDraftChange: (value: string) => void;
+  onLoadOlderMessages: () => void;
   onSend: () => Promise<boolean>;
   onSendThread: (rootMessage: Conversation["messages"][number], content: string) => Promise<boolean>;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
@@ -2492,7 +2556,6 @@ function ChatConversationView(props: {
   const [isResizingThread, setIsResizingThread] = useState(false);
   const viewRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
-  const timelineBottomRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const forceStickToBottomRef = useRef(false);
   const previousMessageCountRef = useRef(topLevelMessages.length);
@@ -2511,6 +2574,33 @@ function ChatConversationView(props: {
     : undefined;
   const selectedThreadSummary = selectedThreadRoot ? threadSummaries.get(selectedThreadRoot.id) : undefined;
   const hasThread = Boolean(selectedThreadRoot);
+  const chatTimelineRows = useMemo(() => {
+    const rows: ChatTimelineRow[] = [];
+    if (props.hasOlderMessages || props.olderMessagesLoading) {
+      rows.push({ type: "load-older", id: "load-older" });
+    }
+    for (const message of topLevelMessages) {
+      rows.push({ type: "message", id: message.id, message });
+    }
+    if (props.isRunning) {
+      for (const row of thinkingRows) {
+        rows.push({ type: "thinking", id: row.key, row });
+      }
+    }
+    return rows;
+  }, [props.hasOlderMessages, props.isRunning, props.olderMessagesLoading, thinkingRows, topLevelMessages]);
+  const chatVirtualizer = useVirtualizer({
+    count: chatTimelineRows.length,
+    getScrollElement: () => timelineRef.current,
+    estimateSize: (index) => {
+      const row = chatTimelineRows[index];
+      return row?.type === "message" ? 170 : 56;
+    },
+    getItemKey: (index) => chatTimelineRows[index]?.id ?? index,
+    overscan: 8,
+    useFlushSync: false
+  });
+  const chatVirtualItems = chatVirtualizer.getVirtualItems();
 
   function updateStickToBottom(): void {
     const timeline = timelineRef.current;
@@ -2518,6 +2608,9 @@ function ChatConversationView(props: {
       return;
     }
     stickToBottomRef.current = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 96;
+    if (timeline.scrollTop < 96 && props.hasOlderMessages && !props.olderMessagesLoading) {
+      props.onLoadOlderMessages();
+    }
   }
 
   function sendDraft(): void {
@@ -2581,8 +2674,7 @@ function ChatConversationView(props: {
       return;
     }
     const scrollToBottom = (): void => {
-      timeline.scrollTo({ top: timeline.scrollHeight });
-      timelineBottomRef.current?.scrollIntoView({ block: "end" });
+      chatVirtualizer.scrollToIndex(Math.max(0, chatTimelineRows.length - 1), { align: "end" });
       stickToBottomRef.current = true;
       if (messageCountChanged) {
         forceStickToBottomRef.current = false;
@@ -2598,22 +2690,19 @@ function ChatConversationView(props: {
     latestProgress?.message,
     thinkingSignature,
     props.draft,
-    props.isRunning
+    props.isRunning,
+    chatTimelineRows.length,
+    chatVirtualizer
   ]);
 
   useLayoutEffect(() => {
-    const timeline = timelineRef.current;
-    if (!timeline) {
-      return;
-    }
     const scrollToBottom = (): void => {
-      timeline.scrollTo({ top: timeline.scrollHeight });
-      timelineBottomRef.current?.scrollIntoView({ block: "end" });
+      chatVirtualizer.scrollToIndex(Math.max(0, chatTimelineRows.length - 1), { align: "end" });
       stickToBottomRef.current = true;
     };
     window.requestAnimationFrame(scrollToBottom);
     window.setTimeout(scrollToBottom, 50);
-  }, [topLevelMessages.length]);
+  }, [chatTimelineRows.length, chatVirtualizer, topLevelMessages.length]);
 
   return (
     <div
@@ -2663,30 +2752,48 @@ function ChatConversationView(props: {
             </details>
           </div>
         </header>
-        <div className="chat-timeline" ref={timelineRef} onScroll={updateStickToBottom}>
-          {topLevelMessages.map((message) => {
-            const summary = threadSummaries.get(message.id);
-            return (
-              <ChatMessageItem
-                message={message}
-                participants={participants}
-                busy={props.isRunning}
-                selected={message.id === selectedThreadRoot?.id}
-                replyCount={summary?.replies.length ?? 0}
-                latestReplyAt={summary?.latestReplyAt}
-                hasContinuationReply={continuedMentionRequestIds.has(message.id)}
-                onOpenThread={() => setSelectedThreadRootId(message.id)}
-                onApproveMentions={props.onApproveMentions}
-                onRejectMentions={props.onRejectMentions}
-                onRespondToChoice={props.onRespondToChoice}
-                key={message.id}
-              />
-            );
-          })}
-          {props.isRunning && thinkingRows.map((row) => (
-            <ChatThinkingRowItem row={row} key={row.key} />
-          ))}
-          <div className="chat-timeline-bottom" ref={timelineBottomRef} />
+        <div className="chat-timeline virtual-timeline" ref={timelineRef} onScroll={updateStickToBottom}>
+          <div className="virtual-timeline-inner" style={{ height: `${chatVirtualizer.getTotalSize()}px` }}>
+            {chatVirtualItems.map((virtualItem) => {
+              const row = chatTimelineRows[virtualItem.index];
+              if (!row) {
+                return null;
+              }
+              return (
+                <div
+                  className="virtual-timeline-item"
+                  data-index={virtualItem.index}
+                  key={virtualItem.key}
+                  ref={chatVirtualizer.measureElement}
+                  style={{ transform: `translateY(${virtualItem.start}px)` }}
+                >
+                  {row.type === "load-older" ? (
+                    <TimelineLoadMoreRow
+                      loading={props.olderMessagesLoading}
+                      disabled={!props.hasOlderMessages || props.olderMessagesLoading}
+                      onClick={props.onLoadOlderMessages}
+                    />
+                  ) : row.type === "thinking" ? (
+                    <ChatThinkingRowItem row={row.row} />
+                  ) : (
+                    <ChatMessageItem
+                      message={row.message}
+                      participants={participants}
+                      busy={props.isRunning}
+                      selected={row.message.id === selectedThreadRoot?.id}
+                      replyCount={threadSummaries.get(row.message.id)?.replies.length ?? 0}
+                      latestReplyAt={threadSummaries.get(row.message.id)?.latestReplyAt}
+                      hasContinuationReply={continuedMentionRequestIds.has(row.message.id)}
+                      onOpenThread={() => setSelectedThreadRootId(row.message.id)}
+                      onApproveMentions={props.onApproveMentions}
+                      onRejectMentions={props.onRejectMentions}
+                      onRespondToChoice={props.onRespondToChoice}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
         <ChatComposer
           participants={participants}
@@ -3233,11 +3340,16 @@ type TimelineItem =
   | { id: string; type: "finding"; createdAt: string; finding: Finding }
   | { id: string; type: "decision"; createdAt: string; decision: PlanDecisionRequest };
 
+type SlackTimelineRow = { id: string; type: "load-older" } | TimelineItem;
+
 function SlackView(props: {
   conversation?: Conversation;
   progress: ReviewProgress[];
   kind: ConversationKind;
   isRunning: boolean;
+  hasOlderMessages: boolean;
+  olderMessagesLoading: boolean;
+  onLoadOlderMessages: () => void;
   selectedThreadId?: string;
   focusedThreadId?: string;
   onSelectThread: (id: string | undefined) => void;
@@ -3274,6 +3386,9 @@ function SlackView(props: {
     progress,
     kind,
     isRunning,
+    hasOlderMessages,
+    olderMessagesLoading,
+    onLoadOlderMessages,
     selectedThreadId,
     focusedThreadId,
     onSelectThread,
@@ -3411,8 +3526,9 @@ function SlackView(props: {
       style={{ "--thread-width": `${threadWidth}px` } as React.CSSProperties}
     >
       {!isThreadFocused && (
-        <section className="slack-timeline" aria-label="Consensus timeline">
-          <div className="view-heading">
+        <VirtualSlackTimeline
+          header={(
+            <div className="view-heading">
             <h2>{kind === "code-review" ? "Review Timeline" : kind === "implementation-plan" ? "Plan Timeline" : "Consensus Timeline"}</h2>
             <div className="view-heading-actions">
               <span>
@@ -3452,9 +3568,14 @@ function SlackView(props: {
               )}
             </div>
           </div>
-          {items.map((item) =>
+          )}
+          items={items}
+          hasOlderMessages={hasOlderMessages}
+          olderMessagesLoading={olderMessagesLoading}
+          onLoadOlderMessages={onLoadOlderMessages}
+          renderItem={(item) =>
             item.type === "message" ? (
-              <TimelineMessage message={item.message} kind={kind} key={item.id} />
+              <TimelineMessage message={item.message} kind={kind} />
             ) : item.type === "finding" ? (
               <PointTimelineMessage
                 finding={item.finding}
@@ -3463,7 +3584,6 @@ function SlackView(props: {
                 reviewRequired={planActionItemIds.has(item.finding.id)}
                 review={planItemReviewForFinding(item.finding, itemReviews)}
                 onSelect={() => onSelectThread(item.finding.id)}
-                key={item.id}
               />
             ) : (
               <DecisionTimelineMessage
@@ -3473,11 +3593,10 @@ function SlackView(props: {
                 ready={decisionThreadIsReady(item.decision, decisionAnswers, decisionResolutions, savedDecisionAnswers)}
                 replyCount={decisionReplies.filter((reply) => reply.decisionId === item.decision.id).length}
                 onSelect={() => onSelectThread(item.decision.id)}
-                key={item.id}
               />
             )
-          )}
-        </section>
+          }
+        />
       )}
       {hasThread && !isThreadFocused && <div className="thread-resizer" role="separator" aria-orientation="vertical" onPointerDown={startThreadResize} />}
       {hasThread && (
@@ -3570,6 +3689,74 @@ function SlackView(props: {
   );
 }
 
+function VirtualSlackTimeline(props: {
+  header: React.ReactNode;
+  items: TimelineItem[];
+  hasOlderMessages: boolean;
+  olderMessagesLoading: boolean;
+  onLoadOlderMessages: () => void;
+  renderItem: (item: TimelineItem) => React.ReactNode;
+}): JSX.Element {
+  const timelineRef = useRef<HTMLElement>(null);
+  const rows = useMemo<SlackTimelineRow[]>(() => {
+    return props.hasOlderMessages || props.olderMessagesLoading
+      ? [{ id: "load-older", type: "load-older" }, ...props.items]
+      : props.items;
+  }, [props.hasOlderMessages, props.items, props.olderMessagesLoading]);
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => timelineRef.current,
+    estimateSize: (index) => {
+      const row = rows[index];
+      return row?.type === "message" ? 190 : row?.type === "load-older" ? 56 : 150;
+    },
+    getItemKey: (index) => rows[index]?.id ?? index,
+    overscan: 8,
+    useFlushSync: false
+  });
+  const virtualItems = virtualizer.getVirtualItems();
+
+  function handleScroll(): void {
+    const timeline = timelineRef.current;
+    if (timeline && timeline.scrollTop < 96 && props.hasOlderMessages && !props.olderMessagesLoading) {
+      props.onLoadOlderMessages();
+    }
+  }
+
+  return (
+    <section className="slack-timeline virtual-timeline" aria-label="Consensus timeline" ref={timelineRef} onScroll={handleScroll}>
+      {props.header}
+      <div className="virtual-timeline-inner" style={{ height: `${virtualizer.getTotalSize()}px` }}>
+        {virtualItems.map((virtualItem) => {
+          const row = rows[virtualItem.index];
+          if (!row) {
+            return null;
+          }
+          return (
+            <div
+              className="virtual-timeline-item"
+              data-index={virtualItem.index}
+              key={virtualItem.key}
+              ref={virtualizer.measureElement}
+              style={{ transform: `translateY(${virtualItem.start}px)` }}
+            >
+              {row.type === "load-older" ? (
+                <TimelineLoadMoreRow
+                  loading={props.olderMessagesLoading}
+                  disabled={!props.hasOlderMessages || props.olderMessagesLoading}
+                  onClick={props.onLoadOlderMessages}
+                />
+              ) : (
+                props.renderItem(row)
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function TimelineMessage({ message, kind }: { message: Conversation["messages"][number]; kind: ConversationKind }): JSX.Element {
   const [copied, setCopied] = useState(false);
   const author = authorForMessage(message, kind);
@@ -3629,6 +3816,17 @@ function RunStatusLine({ progress }: { progress?: ReviewProgress }): JSX.Element
     <div className="run-status-line" aria-live="polite">
       <span className="run-status-text">{progress?.message ?? "Thinking"}</span>
       <LoadingDot label="In progress" />
+    </div>
+  );
+}
+
+function TimelineLoadMoreRow(props: { loading: boolean; disabled: boolean; onClick: () => void }): JSX.Element {
+  return (
+    <div className="timeline-load-more-row">
+      <Button variant="outline" size="sm" disabled={props.disabled} onClick={props.onClick}>
+        {props.loading ? <RefreshCw size={15} className="spin" /> : <MessageSquare size={15} />}
+        {props.loading ? "Loading older messages..." : "Load older messages"}
+      </Button>
     </div>
   );
 }
@@ -4006,7 +4204,7 @@ function DecisionThread(props: {
   );
   const canResolve = !hasThreadContext && decisionThreadHasUserReply(decision, replies);
   const decisionAuthor = sourceLabelForDecision(decision);
-  const statusLabel = readOnly ? "answered" : hasThreadContext ? "ready" : "pending";
+  const statusLabel = readOnly ? "Answered" : hasThreadContext ? "Ready" : "Pending";
 
   return (
     <div className="point-thread decision-thread">
@@ -4824,6 +5022,30 @@ function mergeProgressIntoConversation(conversation: Conversation, _progress: Re
   }
 
   return { ...conversation, messages };
+}
+
+function fullConversationMessagePageInfo(conversation: Conversation): ConversationMessagePageInfo {
+  return {
+    oldestSequence: conversation.messages.length > 0 ? 0 : undefined,
+    newestSequence: conversation.messages.length > 0 ? conversation.messages.length - 1 : undefined,
+    hasMoreBefore: false,
+    totalMessages: conversation.messages.length
+  };
+}
+
+function prependMissingMessages(currentMessages: ChatMessage[], olderMessages: ChatMessage[]): ChatMessage[] {
+  const currentIds = new Set(currentMessages.map((message) => message.id));
+  const missingOlderMessages = olderMessages.filter((message) => !currentIds.has(message.id));
+  return [...missingOlderMessages, ...currentMessages];
+}
+
+function mergeLoadedMessagePage(current: ConversationMessagePageInfo | undefined, page: ConversationMessagePage): ConversationMessagePageInfo {
+  return {
+    oldestSequence: page.oldestSequence ?? current?.oldestSequence,
+    newestSequence: current?.newestSequence ?? page.newestSequence,
+    hasMoreBefore: page.hasMoreBefore,
+    totalMessages: page.totalMessages
+  };
 }
 
 function chatThinkingRows(progress: ReviewProgress[]): ChatThinkingRow[] {
@@ -6083,6 +6305,11 @@ function installDevMockBridge(): void {
     getDiff: async () => ({ mode: "working", title: "Mock diff", diff: "", metadata: {} }),
     listConversations: async () => [conversation],
     getConversation: async (id) => id === conversation.id ? conversation : undefined,
+    openConversation: async (id) => id === conversation.id ? { conversation, messagePage: fullConversationMessagePageInfo(conversation) } : undefined,
+    listConversationMessages: async () => ({
+      messages: conversation.messages,
+      ...fullConversationMessagePageInfo(conversation)
+    }),
     saveDecisionSelections: async () => conversation,
     saveDecisionResolutions: async () => conversation,
     savePlanItemReview: async () => conversation,

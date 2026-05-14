@@ -345,6 +345,37 @@
   padding: 24px;
 }
 
+.virtual-timeline {
+  contain: strict;
+  overflow-anchor: none;
+}
+
+.virtual-timeline-inner {
+  position: relative;
+  width: 100%;
+}
+
+.virtual-timeline-item {
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  width: 100%;
+  padding-bottom: 14px;
+}
+
+.virtual-timeline-item > .message,
+.virtual-timeline-item > .chat-message,
+.virtual-timeline-item > .chat-thinking-row {
+  margin-bottom: 0;
+}
+
+.timeline-load-more-row {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 10px;
+}
+
 .thread-resizer {
   grid-row: 1;
   position: relative;
@@ -3329,10 +3360,19 @@
 .status-badge,
 .message-meta .status-badge,
 .message-meta span.status-badge,
+.thread-panel-head .status-badge,
+.thread-panel-head span.status-badge,
 .view-heading span.status-badge {
   border-color: var(--status-badge-border);
   background: var(--status-badge-bg);
   color: var(--status-badge-text);
+}
+
+.thread-panel-head .status-badge,
+.thread-panel-head span.status-badge {
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .status-badge svg {

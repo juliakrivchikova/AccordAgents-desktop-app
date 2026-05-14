@@ -7,6 +7,7 @@ import type {
   ChatRoleConfigUpdate,
   ComposeImplementationPlanRequest,
   ContinueReviewRequest,
+  ConversationMessagePageRequest,
   CreateChatConversationRequest,
   GitDiffRequest,
   PlanDecisionClarificationRequest,
@@ -88,6 +89,8 @@ function registerIpc(): void {
   ipcMain.handle("git:get-diff", (_event, request: GitDiffRequest) => gitService.getDiff(request));
   ipcMain.handle("conversations:list", () => storageService.listConversations());
   ipcMain.handle("conversations:get", (_event, id: string) => storageService.getConversation(id));
+  ipcMain.handle("conversations:open", (_event, id: string, limit?: number) => storageService.openConversation(id, limit));
+  ipcMain.handle("conversations:list-messages", (_event, request: ConversationMessagePageRequest) => storageService.listConversationMessages(request));
   ipcMain.handle("conversations:save-decision-selections", async (_event, conversationId: string, selections: Record<string, string>) => {
     const conversation = await storageService.getConversation(conversationId);
     if (!conversation || conversation.kind !== "implementation-plan") {
