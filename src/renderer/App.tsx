@@ -41,6 +41,8 @@ import {
   SelectValue
 } from "@/components/ui/select";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { Toaster } from "@/components/ui/sonner";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import type {
   AgentHealth,
   AppSettings,
@@ -73,6 +75,15 @@ import type {
 import { DEFAULT_NOTICE_CHARS, sanitizeWarningText } from "../shared/warnings";
 import { ModeToggle } from "./components/mode-toggle";
 import { ThemeProvider } from "./components/theme-provider";
+import { AppShell, Sidebar, TopBar } from "./components/shell";
+import {
+  IconButton,
+  LoadingDot,
+  Notice,
+  SeverityBadge,
+  StatusBadge,
+  type StatusBadgeTone
+} from "./components/primitives";
 import "./styles/app.css";
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -1438,134 +1449,117 @@ function App(): JSX.Element {
     kind === "code-review" ? diffMode === "pasted" || Boolean(repoPath.trim()) : kind !== "implementation-plan" || Boolean(repoPath.trim());
   const canStart = !busy && hasRequiredContext && Boolean(buildArbiter()) && runnableParticipants.length > 0 && (kind !== "implementation-plan" || runnableParticipants.length >= 2);
 
-  return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <Bot size={22} />
-          <span>AI Consensus</span>
-        </div>
-        <button className="new-button" disabled={busy} onClick={newReview}>
-          <MessageSquare size={16} />
-          New session
-        </button>
-        <div className="sidebar-section-title">History</div>
-        <div className="history-list">
-          {summaries.map((summary) => (
-            <button
-              key={summary.id}
-              className={`history-item ${conversation?.id === summary.id ? "active" : ""}`}
-              onClick={() => void openConversation(summary.id)}
-            >
-              <span>{summary.title}</span>
-              <small>{labelForKind(summary.kind)}</small>
-            </button>
-          ))}
-          {summaries.length === 0 && <div className="empty-history">No conversations yet</div>}
-        </div>
-      </aside>
+  const topBarTabs = hasResultContext ? (
+    <div className="flex items-center gap-1" role="tablist">
+      <Button
+        variant={resultView === "slack" && activeView !== "settings" ? "default" : "ghost"}
+        size="sm"
+        onClick={() => setActiveView("slack")}
+      >
+        <MessageSquare aria-hidden />
+        Slack
+      </Button>
+      {hasPoints && conversationKind !== "implementation-plan" && conversationKind !== "chat" && (
+        <Button
+          variant={resultView === "points" && activeView !== "settings" ? "default" : "ghost"}
+          size="sm"
+          onClick={() => setActiveView("points")}
+        >
+          <ListChecks aria-hidden />
+          Points
+        </Button>
+      )}
+    </div>
+  ) : null;
 
-      <main className="workspace">
-        <header className="topbar">
-          {hasResultContext ? (
-            <div className="tabs" role="tablist">
-              <Button
-                className="topbar-tab"
-                variant={resultView === "slack" && activeView !== "settings" ? "default" : "ghost"}
-                size="sm"
-                onClick={() => setActiveView("slack")}
-              >
-                <MessageSquare size={15} />
-                Slack
-              </Button>
-              {hasPoints && conversationKind !== "implementation-plan" && conversationKind !== "chat" && (
-                <Button
-                  className="topbar-tab"
-                  variant={resultView === "points" && activeView !== "settings" ? "default" : "ghost"}
-                  size="sm"
-                  onClick={() => setActiveView("points")}
-                >
-                  <ListChecks size={15} />
-                  Points
-                </Button>
-              )}
-            </div>
-          ) : (
-            <div className="topbar-title">New session</div>
-          )}
-          <div className="topbar-actions">
-            {busy && (
-              <Button className="stop-button" variant="outline" size="sm" onClick={() => void cancelReview()}>
-                <XCircle size={17} />
-                Stop
-              </Button>
-            )}
-            <ModeToggle />
-            <DropdownMenu open={settingsMenuOpen} onOpenChange={setSettingsMenuOpen}>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  className={`topbar-icon-button ${activeView === "settings" || settingsMenuOpen ? "selected" : ""}`}
-                  variant={activeView === "settings" || settingsMenuOpen ? "default" : "outline"}
-                  size="icon-lg"
-                  title="Settings"
-                  data-testid="settings-menu-trigger"
-                >
-                  <Settings size={15} />
-                  <span className="sr-only">Settings</span>
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="settings-menu-content">
-                <DropdownMenuGroup>
-                  <DropdownMenuItem
-                    onClick={() => {
-                      setActiveSettingsSection("providers");
-                      setActiveView("settings");
-                      setSettingsMenuOpen(false);
-                    }}
-                  >
-                    <KeyRound size={15} />
-                    Providers
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onClick={() => {
-                      setActiveSettingsSection("roles");
-                      setActiveView("settings");
-                      setSettingsMenuOpen(false);
-                    }}
-                  >
-                    <Circle size={15} />
-                    Roles
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onClick={() => {
-                      setActiveSettingsSection("participants");
-                      setActiveView("settings");
-                      setSettingsMenuOpen(false);
-                    }}
-                  >
-                    <Users size={15} />
-                    Participants
-                  </DropdownMenuItem>
-                </DropdownMenuGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            <Button className="topbar-icon-button" variant="outline" size="icon-lg" title="Refresh" onClick={() => void refreshAll()}>
-              <RefreshCw size={17} />
-              <span className="sr-only">Refresh</span>
-            </Button>
-          </div>
-        </header>
+  const topBarActions = (
+    <>
+      {busy && (
+        <Button variant="outline" size="sm" onClick={() => void cancelReview()}>
+          <XCircle aria-hidden />
+          Stop
+        </Button>
+      )}
+      <ModeToggle />
+      <DropdownMenu open={settingsMenuOpen} onOpenChange={setSettingsMenuOpen}>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant={activeView === "settings" || settingsMenuOpen ? "default" : "outline"}
+            size="icon-sm"
+            title="Settings"
+            aria-label="Settings"
+            data-testid="settings-menu-trigger"
+          >
+            <Settings aria-hidden />
+            <span className="sr-only">Settings</span>
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuGroup>
+            <DropdownMenuItem
+              onClick={() => {
+                setActiveSettingsSection("providers");
+                setActiveView("settings");
+                setSettingsMenuOpen(false);
+              }}
+            >
+              <KeyRound aria-hidden />
+              Providers
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
+                setActiveSettingsSection("roles");
+                setActiveView("settings");
+                setSettingsMenuOpen(false);
+              }}
+            >
+              <Circle aria-hidden />
+              Roles
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
+                setActiveSettingsSection("participants");
+                setActiveView("settings");
+                setSettingsMenuOpen(false);
+              }}
+            >
+              <Users aria-hidden />
+              Participants
+            </DropdownMenuItem>
+          </DropdownMenuGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <Button variant="outline" size="icon-sm" title="Refresh" aria-label="Refresh" onClick={() => void refreshAll()}>
+        <RefreshCw aria-hidden />
+        <span className="sr-only">Refresh</span>
+      </Button>
+    </>
+  );
+
+  return (
+    <AppShell
+      sidebar={
+        <Sidebar
+          conversations={summaries}
+          activeId={conversation?.id}
+          busy={busy}
+          onSelect={(id) => void openConversation(id)}
+          onNewSession={newReview}
+        />
+      }
+      topBar={
+        <TopBar tabs={topBarTabs} title={hasResultContext ? undefined : "New session"} actions={topBarActions} />
+      }
+    >
 
         {error && (
-          <div className="notice error">
-            <AlertTriangle size={17} />
-            <span className="notice-text">{displayNoticeText(error)}</span>
+          <div className="mx-3 mt-2">
+            <Notice tone="error">{displayNoticeText(error)}</Notice>
           </div>
         )}
         {visibleWarnings.map((warning, index) => (
-          <div className="notice" key={`${index}:${warning.slice(0, 80)}`}>
-            <AlertTriangle size={17} />
-            <span className="notice-text">{warning}</span>
+          <div className="mx-3 mt-2" key={`${index}:${warning.slice(0, 80)}`}>
+            <Notice tone="warning">{warning}</Notice>
           </div>
         ))}
 
@@ -1589,24 +1583,35 @@ function App(): JSX.Element {
           <div className={`content-area ${hasResultContext ? "result-layout" : "compose-layout"}`}>
             {!hasResultContext && (
             <section className="composer">
-              <div className="segmented">
-                <button className={kind === "code-review" ? "selected" : ""} onClick={() => setKind("code-review")}>
-                  <GitPullRequest size={15} />
+              <ToggleGroup
+                type="single"
+                value={kind}
+                onValueChange={(value) => {
+                  if (value) {
+                    setKind(value as ConversationKind);
+                  }
+                }}
+                variant="outline"
+                size="sm"
+                className="w-full"
+              >
+                <ToggleGroupItem value="code-review" className="flex-1 gap-1.5">
+                  <GitPullRequest aria-hidden />
                   Code review
-                </button>
-                <button className={kind === "general" ? "selected" : ""} onClick={() => setKind("general")}>
-                  <MessageSquare size={15} />
+                </ToggleGroupItem>
+                <ToggleGroupItem value="general" className="flex-1 gap-1.5">
+                  <MessageSquare aria-hidden />
                   Question
-                </button>
-                <button className={kind === "implementation-plan" ? "selected" : ""} onClick={() => setKind("implementation-plan")}>
-                  <ListChecks size={15} />
+                </ToggleGroupItem>
+                <ToggleGroupItem value="implementation-plan" className="flex-1 gap-1.5">
+                  <ListChecks aria-hidden />
                   Plan
-                </button>
-                <button className={kind === "chat" ? "selected" : ""} onClick={() => setKind("chat")}>
-                  <Users size={15} />
+                </ToggleGroupItem>
+                <ToggleGroupItem value="chat" className="flex-1 gap-1.5">
+                  <Users aria-hidden />
                   Chat
-                </button>
-              </div>
+                </ToggleGroupItem>
+              </ToggleGroup>
 
               {kind === "chat" ? (
                 <ChatSetup
@@ -1785,10 +1790,15 @@ function App(): JSX.Element {
                     The {arbiterRoleLabel.toLowerCase()} merge is a separate run. If the same provider is selected as a participant, it also gets an independent participant run.
                   </div>
 
-                  <button className="run-button" disabled={!canStart} onClick={() => void startReview()}>
-                    {busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
+                  <Button
+                    type="button"
+                    disabled={!canStart}
+                    onClick={() => void startReview()}
+                    className="mt-2 w-full"
+                  >
+                    {busy ? <RefreshCw className="animate-spin" aria-hidden /> : <Play aria-hidden />}
                     {busy ? "Running consensus..." : "Start consensus"}
-                  </button>
+                  </Button>
                 </>
               )}
             </section>
@@ -1879,8 +1889,7 @@ function App(): JSX.Element {
             )}
           </div>
         )}
-      </main>
-    </div>
+    </AppShell>
   );
 }
 
@@ -2765,7 +2774,7 @@ function ChatThinkingRowItem({ row }: { row: ChatThinkingRow }): JSX.Element {
       <div className="chat-thinking-primary">
         <strong>{row.participantLabel}</strong>
         <span>Thinking</span>
-        <ProgressDots />
+        <LoadingDot label="In progress" />
       </div>
       {row.activity && <div className="chat-thinking-activity">{row.activity}</div>}
     </div>
@@ -2829,19 +2838,22 @@ function ChatMessageItem(props: {
       <article className={`message chat-message ${choice ? "has-choice" : ""} ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""}`}>
         <Avatar className="message-avatar" spec={avatarForMessage(message, author, participant)} />
         <div className="message-body">
-          <button
-            className="icon-button message-copy-button"
-            title={copied ? "Copied" : "Copy message"}
+          <IconButton
+            className="message-copy-button"
+            size="xs"
+            icon={copied ? CheckCircle2 : Copy}
+            label={copied ? "Copied" : "Copy message"}
+            tooltip={copied ? "Copied" : "Copy message"}
             disabled={!canCopy}
             onClick={() => void copyMessage()}
-          >
-            {copied ? <CheckCircle2 size={16} /> : <Copy size={16} />}
-          </button>
+          />
           <div className="message-meta">
             <strong>{author}</strong>
             <span>{new Date(message.createdAt).toLocaleString()}</span>
-            {message.status === "error" && <span className="status-error">error</span>}
-            {!props.inThread && message.metadata?.parentMessageId && message.role === "user" && <span className="phase-badge">reply</span>}
+            {message.status === "error" && <StatusBadge tone="danger">error</StatusBadge>}
+            {!props.inThread && message.metadata?.parentMessageId && message.role === "user" && (
+              <StatusBadge tone="neutral">reply</StatusBadge>
+            )}
           </div>
           <div className="message-content">
             <MarkdownText content={displayContent} />
@@ -3519,25 +3531,35 @@ function TimelineMessage({ message, kind }: { message: Conversation["messages"][
   }
 
   return (
-    <article className={`message ${message.role} ${isLiveProgress ? "progress-active" : ""} ${isFinalPlan ? "final-plan-message" : ""}`}>
+    <article
+      className={`message ${message.role} ${isLiveProgress ? "progress-active" : ""} ${isFinalPlan ? "final-plan-message" : ""}`}
+      data-final-plan={isFinalPlan ? "true" : undefined}
+    >
       <Avatar className="message-avatar" spec={avatarForMessage(message, author)} />
       <div className="message-body">
-        <button
-          className="icon-button message-copy-button"
-          title={copied ? "Copied" : "Copy markdown"}
+        <IconButton
+          className="message-copy-button"
+          size="xs"
+          icon={copied ? CheckCircle2 : Copy}
+          label={copied ? "Copied" : "Copy markdown"}
+          tooltip={copied ? "Copied" : "Copy markdown"}
           disabled={!canCopy}
           data-testid={isFinalPlan ? "final-plan-copy-button" : undefined}
           onClick={() => void copyMessage()}
-        >
-          {copied ? <CheckCircle2 size={16} /> : <Copy size={16} />}
-        </button>
+        />
         <div className="message-meta">
           <strong>{author}</strong>
-          {isFinalPlan && <span>Final plan</span>}
+          {isFinalPlan && (
+            <StatusBadge tone="success" icon={CheckCircle2} uppercase>
+              Final plan
+            </StatusBadge>
+          )}
           <span>{new Date(message.createdAt).toLocaleString()}</span>
-          {message.progressPhase && <span className="phase-badge">{message.progressPhase}</span>}
-          {isLiveProgress && <ProgressDots />}
-          {message.status === "error" && <span className="status-error">error</span>}
+          {message.progressPhase && (
+            <StatusBadge tone="neutral">{message.progressPhase}</StatusBadge>
+          )}
+          {isLiveProgress && <LoadingDot label="In progress" />}
+          {message.status === "error" && <StatusBadge tone="danger">error</StatusBadge>}
         </div>
         <div className="message-content">{display.markdown ? <MarkdownText content={display.content} /> : <pre>{display.content}</pre>}</div>
       </div>
@@ -3545,21 +3567,11 @@ function TimelineMessage({ message, kind }: { message: Conversation["messages"][
   );
 }
 
-function ProgressDots(): JSX.Element {
-  return (
-    <span className="progress-dots" aria-label="In progress">
-      <i />
-      <i />
-      <i />
-    </span>
-  );
-}
-
 function RunStatusLine({ progress }: { progress?: ReviewProgress }): JSX.Element {
   return (
     <div className="run-status-line" aria-live="polite">
       <span className="run-status-text">{progress?.message ?? "Thinking"}</span>
-      <ProgressDots />
+      <LoadingDot label="In progress" />
     </div>
   );
 }
@@ -3588,7 +3600,7 @@ function PointTimelineMessage(props: { finding: Finding; kind: ConversationKind;
           <span>{metaLabel}</span>
           <PointStatusBadge finding={finding} />
           {reviewRequired && <PlanItemReviewBadge review={review} />}
-          <span className={`severity ${finding.severity.toLowerCase()}`}>{finding.severity}</span>
+          <SeverityBadge severity={finding.severity} />
         </div>
         <h3>{finding.title}</h3>
         <p>{finding.claim || finding.description}</p>
@@ -3627,7 +3639,7 @@ function DecisionTimelineMessage(props: {
         <div className="message-meta">
           <strong>{author}</strong>
           <span>{pending ? "Decision needed" : "Decision answered"}</span>
-          <span className={`status-badge ${ready || !pending ? "confirmed" : "unresolved"}`}>{statusLabel}</span>
+          <StatusBadge tone={ready || !pending ? "success" : "neutral"}>{statusLabel}</StatusBadge>
         </div>
         <h3>{decision.title}</h3>
         <p>{decision.question}</p>
@@ -3703,7 +3715,7 @@ function PointThread(props: {
           <>
             <PointStatusBadge finding={finding} />
             {reviewRequired && <PlanItemReviewBadge review={review} />}
-            <span className={`severity ${finding.severity.toLowerCase()}`}>{finding.severity}</span>
+            <SeverityBadge severity={finding.severity} />
           </>
         }
       />
@@ -3945,7 +3957,7 @@ function DecisionThread(props: {
           <h2>{decision.title}</h2>
         </div>
         <div className="thread-panel-actions">
-          <span className={`status-badge ${hasThreadContext || readOnly ? "confirmed" : "unresolved"}`}>{statusLabel}</span>
+          <StatusBadge tone={hasThreadContext || readOnly ? "success" : "neutral"}>{statusLabel}</StatusBadge>
           <button className="icon-button" title={focused ? "Show timeline" : "Expand thread"} onClick={focused ? onExitFocus : onFocus}>
             {focused ? <Columns2 size={16} /> : <Maximize2 size={16} />}
           </button>
@@ -4408,7 +4420,7 @@ function PointsView({ conversation, kind }: { conversation?: Conversation; kind:
         return (
           <section className="severity-section" key={severity}>
             <h3>
-              <span className={`severity ${severity.toLowerCase()}`}>{severity}</span>
+              <SeverityBadge severity={severity} />
               {items.length}
             </h3>
             <PointTable findings={items} emptyLabel="No points" />
@@ -4417,7 +4429,7 @@ function PointsView({ conversation, kind }: { conversation?: Conversation; kind:
       })}
       <section className="severity-section filtered-section">
         <h3>
-          <span className="status-badge filtered-out">Filtered out</span>
+          <StatusBadge tone="muted">Filtered out</StatusBadge>
           {filteredOut.length}
         </h3>
         <PointTable findings={filteredOut} emptyLabel="No filtered-out points" />
@@ -4485,7 +4497,7 @@ function PointCard({ finding, compact = false }: { finding: Finding; compact?: b
     <article className={`point-card ${compact ? "compact" : ""}`}>
       <div className="point-card-head">
         <PointStatusBadge finding={finding} />
-        <span className={`severity ${finding.severity.toLowerCase()}`}>{finding.severity}</span>
+        <SeverityBadge severity={finding.severity} />
       </div>
       <h3>{finding.title}</h3>
       <dl className="point-fields">
@@ -4510,31 +4522,35 @@ function PointCard({ finding, compact = false }: { finding: Finding; compact?: b
   );
 }
 
+const POINT_STATUS_TONE: Record<"confirmed" | "disputed" | "unresolved" | "filtered-out", StatusBadgeTone> = {
+  confirmed: "success",
+  disputed: "warning",
+  unresolved: "neutral",
+  "filtered-out": "muted"
+};
+
 function PointStatusBadge({ finding }: { finding: Finding }): JSX.Element {
   const status = pointStatus(finding);
   const Icon = status.kind === "confirmed" ? CheckCircle2 : status.kind === "filtered-out" ? XCircle : HelpCircle;
   return (
-    <span className={`status-badge ${status.kind}`}>
-      <Icon size={15} />
+    <StatusBadge tone={POINT_STATUS_TONE[status.kind]} icon={Icon}>
       {status.label}
-    </span>
+    </StatusBadge>
   );
 }
 
 function PlanItemReviewBadge({ review }: { review?: PlanItemReview }): JSX.Element {
   if (review) {
     return (
-      <span className="status-badge confirmed">
-        <CheckCircle2 size={15} />
+      <StatusBadge tone="success" icon={CheckCircle2}>
         reviewed
-      </span>
+      </StatusBadge>
     );
   }
   return (
-    <span className="status-badge unresolved">
-      <Circle size={15} />
+    <StatusBadge tone="neutral" icon={Circle}>
       pending
-    </span>
+    </StatusBadge>
   );
 }
 
@@ -6117,6 +6133,7 @@ createRoot(document.getElementById("root") as HTMLElement).render(
     <ThemeProvider>
       <TooltipProvider>
         <App />
+        <Toaster richColors position="bottom-right" />
       </TooltipProvider>
     </ThemeProvider>
   </React.StrictMode>

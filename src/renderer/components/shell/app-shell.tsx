@@ -1,0 +1,29 @@
+import * as React from "react";
+
+import { cn } from "@/lib/utils";
+
+export interface AppShellProps {
+  sidebar: React.ReactNode;
+  topBar: React.ReactNode;
+  children: React.ReactNode;
+  className?: string;
+}
+
+export const AppShell = ({ sidebar, topBar, children, className }: AppShellProps): JSX.Element => (
+  <div
+    data-shell="root"
+    className={cn(
+      "grid h-full min-h-0 grid-cols-[260px_minmax(0,1fr)] bg-background text-foreground",
+      className
+    )}
+  >
+    {sidebar}
+    <main
+      data-shell="workspace"
+      className="flex min-h-0 min-w-0 flex-col overflow-hidden"
+    >
+      {topBar}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
+    </main>
+  </div>
+);
