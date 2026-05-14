@@ -13,7 +13,7 @@ export const TopBar = ({ title, tabs, actions, className }: TopBarProps): JSX.El
   <header
     data-shell="topbar"
     className={cn(
-      "flex h-12 shrink-0 items-center justify-between gap-2 border-b border-border bg-[var(--app-surface)] px-3",
+      "flex h-12 shrink-0 items-center justify-between gap-2 border-b border-[var(--app-shell-border)] bg-[var(--app-header-bg)] px-3",
       className
     )}
   >

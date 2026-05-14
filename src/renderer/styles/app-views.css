@@ -546,9 +546,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 42px;
-  height: 42px;
-  padding: 1px;
+  width: 44px;
+  height: 44px;
+  padding: 3px;
   border: 1px solid #d7cfc1;
   border-radius: 8px;
   background: #ffffff;
@@ -567,9 +567,13 @@
 }
 
 .avatar-choice-preview {
-  width: 38px;
-  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
   border-radius: 0;
+  overflow: visible;
 }
 
 .chat-row-remove {
@@ -2721,10 +2725,15 @@
 .app-select-trigger {
   width: 100%;
   min-width: 0;
-  height: 36px;
+  height: 32px;
+  min-height: 32px;
+  padding-top: 0;
+  padding-bottom: 0;
   border: 1px solid var(--app-border-strong);
   background: var(--app-surface);
   color: var(--app-text);
+  font-size: 14px;
+  line-height: 20px;
 }
 
 .app-select-trigger:focus-visible {
@@ -3086,11 +3095,14 @@
   border: 0;
   background: transparent;
   box-shadow: none;
+  overflow: visible;
 }
 
 .avatar-custom .custom-avatar-image {
-  width: 100%;
-  height: 100%;
+  display: block;
+  width: 96%;
+  height: 96%;
+  margin: auto;
   border-radius: 0;
   object-fit: contain;
   transform: none;

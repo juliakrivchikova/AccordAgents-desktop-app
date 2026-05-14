@@ -26,11 +26,11 @@ export const Sidebar = ({
 }: SidebarProps): JSX.Element => (
   <aside
     data-shell="sidebar"
-    className="flex min-h-0 flex-col border-r border-border bg-[var(--app-surface-subtle)] text-foreground"
+    className="flex min-h-0 flex-col border-r border-[var(--app-shell-border)] bg-[var(--app-sidebar-bg)] text-foreground"
   >
     <div
       data-shell="sidebar-brand"
-      className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3 text-sm font-semibold text-[var(--app-text-strong)]"
+      className="flex h-12 shrink-0 items-center gap-2 border-b border-[var(--app-shell-border)] px-3 text-sm font-semibold text-[var(--app-text-strong)]"
     >
       <Bot className="size-4" aria-hidden />
       <span>AI Consensus</span>

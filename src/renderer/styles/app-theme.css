@@ -9,7 +9,10 @@
 
   --app-header-height: 56px;
   --app-sidebar-width: 280px;
-  --app-bg: #f7f8fb;
+  --app-bg: #f6f8fb;
+  --app-workspace-bg: #f7f9fc;
+  --app-sidebar-bg: #eef2f7;
+  --app-header-bg: #ffffff;
   --app-surface: #ffffff;
   --app-surface-subtle: #f1f3f7;
   --app-surface-hover: #e9edf3;
@@ -18,8 +21,9 @@
   --app-text-strong: #151820;
   --app-muted: #667085;
   --app-muted-subtle: #8a93a3;
-  --app-border: #dfe3eb;
-  --app-border-strong: #cad1dd;
+  --app-border: #d9e0eb;
+  --app-border-strong: #c5cfdd;
+  --app-shell-border: #d2dae7;
   --app-primary: #171923;
   --app-primary-hover: #0b0d13;
   --app-primary-fg: #ffffff;
@@ -73,6 +77,9 @@
 .dark {
   color-scheme: dark;
   --app-bg: #0e1016;
+  --app-workspace-bg: #0e1016;
+  --app-sidebar-bg: #181c25;
+  --app-header-bg: #141720;
   --app-surface: #141720;
   --app-surface-subtle: #181c25;
   --app-surface-hover: #212633;
@@ -83,6 +90,7 @@
   --app-muted-subtle: #777f8f;
   --app-border: #2b313d;
   --app-border-strong: #3a4353;
+  --app-shell-border: #2b313d;
   --app-primary: #f4f6fb;
   --app-primary-hover: #ffffff;
   --app-primary-fg: #0e1016;
