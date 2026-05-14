@@ -1,6 +1,7 @@
 import { Bot, MessageSquare } from "lucide-react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { HistoryLoadingState } from "@/renderer/components/loading-states";
 import { EmptyState } from "@/renderer/components/primitives";
 import { labelForKind } from "@/renderer/lib/conversation-labels";
 import { cn } from "@/lib/utils";
@@ -10,6 +11,7 @@ export interface SidebarProps {
   conversations: ConversationSummary[];
   activeId?: string;
   busy?: boolean;
+  loading?: boolean;
   onSelect: (id: string) => void;
   onNewSession: () => void;
 }
@@ -18,6 +20,7 @@ export const Sidebar = ({
   conversations,
   activeId,
   busy,
+  loading,
   onSelect,
   onNewSession
 }: SidebarProps): JSX.Element => (
@@ -57,7 +60,9 @@ export const Sidebar = ({
 
     <ScrollArea className="flex-1 px-2 pb-2">
       <div className="flex flex-col gap-0.5">
-        {conversations.length === 0 ? (
+        {loading ? (
+          <HistoryLoadingState />
+        ) : conversations.length === 0 ? (
           <EmptyState size="sm">
             <EmptyState.Body>No conversations yet</EmptyState.Body>
           </EmptyState>

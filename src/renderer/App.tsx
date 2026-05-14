@@ -8,7 +8,6 @@ import {
   Columns2,
   Copy,
   FolderOpen,
-  GitPullRequest,
   HelpCircle,
   KeyRound,
   ListChecks,
@@ -78,6 +77,8 @@ import type {
 import { DEFAULT_NOTICE_CHARS, sanitizeWarningText } from "../shared/warnings";
 import { ModeToggle } from "./components/mode-toggle";
 import { ThemeProvider } from "./components/theme-provider";
+import { AppLoadingState, ChartLoadingState } from "./components/loading-states";
+import { SessionModeTabs } from "./components/session-mode-tabs";
 import { AppShell, Sidebar, TopBar } from "./components/shell";
 import {
   FormRow,
@@ -260,6 +261,8 @@ function App(): JSX.Element {
   const [modelLoading, setModelLoading] = useState<Record<string, boolean>>({});
   const [modelErrors, setModelErrors] = useState<Record<string, string | undefined>>({});
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [initializing, setInitializing] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [currentRunId, setCurrentRunId] = useState<string | undefined>();
   const [progressLog, setProgressLog] = useState<ReviewProgress[]>([]);
@@ -366,6 +369,7 @@ function App(): JSX.Element {
 
   async function refreshAll(): Promise<void> {
     setError(undefined);
+    setHistoryLoading(true);
     try {
       const [nextSettings, nextAgents, nextSummaries] = await Promise.all([
         window.consensus.getSettings(),
@@ -383,6 +387,9 @@ function App(): JSX.Element {
       }
     } catch (caught) {
       setError(errorText(caught));
+    } finally {
+      setInitializing(false);
+      setHistoryLoading(false);
     }
   }
 
@@ -1548,6 +1555,7 @@ function App(): JSX.Element {
           conversations={summaries}
           activeId={conversation?.id}
           busy={busy}
+          loading={historyLoading}
           onSelect={(id) => void openConversation(id)}
           onNewSession={newReview}
         />
@@ -1584,39 +1592,15 @@ function App(): JSX.Element {
             saveChatParticipantConfig={saveChatParticipantConfig}
             deleteChatParticipantConfig={deleteChatParticipantConfig}
           />
+        ) : initializing ? (
+          <div className="content-area compose-layout">
+            <AppLoadingState />
+          </div>
         ) : (
           <div className={`content-area ${hasResultContext ? "result-layout" : "compose-layout"}`}>
             {!hasResultContext && (
             <section className="composer">
-              <ToggleGroup
-                type="single"
-                value={kind}
-                onValueChange={(value) => {
-                  if (value) {
-                    setKind(value as ConversationKind);
-                  }
-                }}
-                variant="outline"
-                size="sm"
-                className="w-full"
-              >
-                <ToggleGroupItem value="code-review" className="flex-1 gap-1.5">
-                  <GitPullRequest aria-hidden />
-                  Code review
-                </ToggleGroupItem>
-                <ToggleGroupItem value="general" className="flex-1 gap-1.5">
-                  <MessageSquare aria-hidden />
-                  Question
-                </ToggleGroupItem>
-                <ToggleGroupItem value="implementation-plan" className="flex-1 gap-1.5">
-                  <ListChecks aria-hidden />
-                  Plan
-                </ToggleGroupItem>
-                <ToggleGroupItem value="chat" className="flex-1 gap-1.5">
-                  <Users aria-hidden />
-                  Chat
-                </ToggleGroupItem>
-              </ToggleGroup>
+              <SessionModeTabs value={kind} onValueChange={setKind} />
 
               {kind === "chat" ? (
                 <ChatSetup
@@ -1903,7 +1887,7 @@ function App(): JSX.Element {
                     onRevisePlan={() => void reviseImplementationPlan()}
                   />
                 )}
-                {resultView === "points" && <PointsView conversation={conversation} kind={conversationKind} />}
+                {resultView === "points" && <PointsView conversation={conversation} kind={conversationKind} isRunning={busy} />}
               </section>
             )}
           </div>
@@ -4388,7 +4372,19 @@ function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
   return nodes;
 }
 
-function PointsView({ conversation, kind }: { conversation?: Conversation; kind: ConversationKind }): JSX.Element {
+function PointsView({
+  conversation,
+  kind,
+  isRunning
+}: {
+  conversation?: Conversation;
+  kind: ConversationKind;
+  isRunning: boolean;
+}): JSX.Element {
+  if (isRunning && (!conversation || conversation.findings.length === 0)) {
+    return <ChartLoadingState />;
+  }
+
   if (!conversation) {
     return <EmptyState title="No points yet" body="The final points appear after a consensus run finishes." />;
   }

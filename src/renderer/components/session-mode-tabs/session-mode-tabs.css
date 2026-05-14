@@ -1,0 +1,61 @@
+.session-mode-tabs {
+  width: 100%;
+}
+
+.session-mode-tabs__list {
+  display: grid;
+  width: 100%;
+  height: 42px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--app-border);
+  border-radius: calc(var(--radius) + 2px);
+  background: color-mix(in srgb, var(--app-surface-subtle) 92%, var(--app-surface));
+}
+
+.session-mode-tabs__trigger {
+  min-width: 0;
+  height: 36px;
+  gap: 6px;
+  border: 0;
+  border-radius: var(--radius);
+  color: var(--app-muted);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.session-mode-tabs__trigger::after {
+  display: none;
+}
+
+.session-mode-tabs__trigger span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-mode-tabs__trigger svg {
+  width: 15px;
+  height: 15px;
+}
+
+.session-mode-tabs__trigger:hover {
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+}
+
+.session-mode-tabs__trigger[data-state="active"] {
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  box-shadow:
+    0 1px 2px color-mix(in srgb, #000 8%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--app-border-strong) 78%, transparent);
+}
+
+@media (max-width: 720px) {
+  .session-mode-tabs__trigger {
+    padding-inline: 6px;
+  }
+}
