@@ -308,6 +308,8 @@
 }
 
 .role-config-card {
+  display: grid;
+  gap: 12px;
   padding: 14px;
   border: 1px solid #ded8cc;
   border-radius: 8px;
@@ -522,7 +524,8 @@
   display: grid;
   grid-template-columns: 1fr 1fr 1fr 1fr 38px;
   align-items: end;
-  gap: 8px;
+  column-gap: 8px;
+  row-gap: 10px;
   padding: 12px;
   border: 1px solid #ded8cc;
   border-radius: 8px;
@@ -545,7 +548,7 @@
   justify-content: center;
   width: 42px;
   height: 42px;
-  padding: 2px;
+  padding: 1px;
   border: 1px solid #d7cfc1;
   border-radius: 8px;
   background: #ffffff;
@@ -564,9 +567,9 @@
 }
 
 .avatar-choice-preview {
-  width: 34px;
-  height: 34px;
-  border-radius: 7px;
+  width: 38px;
+  height: 38px;
+  border-radius: 0;
 }
 
 .chat-row-remove {
@@ -587,7 +590,7 @@
 
 .saved-participant-option {
   display: grid;
-  grid-template-columns: 18px 28px minmax(120px, max-content) minmax(0, 1fr);
+  grid-template-columns: 18px 32px minmax(120px, max-content) minmax(0, 1fr);
   align-items: center;
   gap: 10px;
   min-height: 48px;
@@ -672,10 +675,10 @@
 }
 
 .mini-avatar {
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   border-radius: 6px;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .chat-header {
@@ -2719,7 +2722,7 @@
   width: 100%;
   min-width: 0;
   height: 36px;
-  border-color: var(--app-border-strong);
+  border: 1px solid var(--app-border-strong);
   background: var(--app-surface);
   color: var(--app-text);
 }
@@ -2744,7 +2747,7 @@
 }
 
 .participant-pill {
-  border-color: var(--app-border);
+  border: 1px solid var(--app-border);
   background: var(--app-surface);
   color: var(--app-text);
 }
@@ -3025,7 +3028,7 @@
 .role-config-card,
 .chat-participant-row,
 .saved-participant-option {
-  border-color: var(--app-border);
+  border: 1px solid var(--app-border);
   background: var(--app-surface);
   color: var(--app-text);
 }
@@ -3077,6 +3080,38 @@
   height: 88%;
   object-fit: contain;
   transform: none;
+}
+
+.avatar-custom {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.avatar-custom .custom-avatar-image {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  object-fit: contain;
+  transform: none;
+}
+
+.avatar-choice .avatar-custom {
+  width: 100%;
+  height: 100%;
+}
+
+.role-config-card .settings-item-head {
+  margin-bottom: 2px;
+}
+
+.role-config-card [data-slot="form-row"] {
+  gap: 6px;
+}
+
+.role-config-card [data-slot="textarea"] {
+  font-size: 14px;
+  line-height: 1.45;
 }
 
 .repo-status.ok {

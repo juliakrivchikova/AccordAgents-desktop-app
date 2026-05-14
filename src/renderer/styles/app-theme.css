@@ -160,7 +160,7 @@ select {
   font: inherit;
 }
 
-button {
+button:not([class]):not([data-slot="button"]) {
   border: 0;
 }
 
