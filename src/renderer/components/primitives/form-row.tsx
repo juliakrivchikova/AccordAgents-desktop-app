@@ -24,7 +24,7 @@ export const FormRow = ({
   <div
     data-slot="form-row"
     className={cn(
-      orientation === "vertical" ? "flex flex-col gap-1.5" : "flex items-center gap-3",
+      orientation === "vertical" ? "flex flex-col gap-2" : "flex items-center gap-3",
       className
     )}
     {...rest}
@@ -32,7 +32,7 @@ export const FormRow = ({
     {label !== undefined && (
       <Label
         htmlFor={htmlFor}
-        className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+        className="text-[11px] font-medium uppercase leading-none tracking-wide text-muted-foreground"
       >
         <span>{label}</span>
         {optional ? (

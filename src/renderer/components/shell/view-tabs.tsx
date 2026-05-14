@@ -1,7 +1,7 @@
 import * as React from "react";
 import type { LucideIcon } from "lucide-react";
 
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { SegmentedTabs } from "@/renderer/components/segmented-tabs";
 
 export interface ViewTabItem<TValue extends string> {
   value: TValue;
@@ -13,6 +13,7 @@ export interface ViewTabsProps<TValue extends string> {
   value: TValue;
   onChange: (value: TValue) => void;
   items: Array<ViewTabItem<TValue>>;
+  ariaLabel?: string;
   className?: string;
 }
 
@@ -20,24 +21,14 @@ export const ViewTabs = <TValue extends string>({
   value,
   onChange,
   items,
+  ariaLabel = "View tabs",
   className
 }: ViewTabsProps<TValue>): JSX.Element => (
-  <Tabs
+  <SegmentedTabs
     value={value}
-    onValueChange={(next) => onChange(next as TValue)}
-    orientation="horizontal"
+    items={items}
+    ariaLabel={ariaLabel}
     className={className}
-  >
-    <TabsList>
-      {items.map((item) => {
-        const Icon = item.icon;
-        return (
-          <TabsTrigger key={item.value} value={item.value}>
-            {Icon ? <Icon aria-hidden /> : null}
-            {item.label}
-          </TabsTrigger>
-        );
-      })}
-    </TabsList>
-  </Tabs>
+    onValueChange={onChange}
+  />
 );

@@ -41,7 +41,6 @@ import {
 } from "@/components/ui/select";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
@@ -77,7 +76,9 @@ import type {
 import { DEFAULT_NOTICE_CHARS, sanitizeWarningText } from "../shared/warnings";
 import { ModeToggle } from "./components/mode-toggle";
 import { ThemeProvider } from "./components/theme-provider";
+import { DiffModeTabs } from "./components/diff-mode-tabs";
 import { AppLoadingState, ChartLoadingState } from "./components/loading-states";
+import { SegmentedTabs, type SegmentedTabItem } from "./components/segmented-tabs";
 import { SessionModeTabs } from "./components/session-mode-tabs";
 import { AppShell, Sidebar, TopBar } from "./components/shell";
 import {
@@ -98,15 +99,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   chatRoleConfigs: [],
   chatParticipantConfigs: []
 };
-
-const DIFF_MODES: Array<{ value: GitDiffMode; label: string }> = [
-  { value: "uncommitted", label: "Uncommitted" },
-  { value: "working", label: "Unstaged" },
-  { value: "staged", label: "Staged" },
-  { value: "base", label: "Branches" },
-  { value: "commit", label: "Commit" },
-  { value: "pasted", label: "Pasted diff" }
-];
 
 interface ChatThinkingRow {
   key: string;
@@ -143,6 +135,7 @@ const CHAT_AVATAR_URLS = {
 } as const;
 
 type ActiveView = "slack" | "points" | "settings";
+type ResultView = "slack" | "points";
 type SettingsSection = "providers" | "roles" | "participants";
 type AvatarKind = "user" | "arbiter" | "anthropic" | "codex" | "gemini" | "generic" | "custom";
 type ChatAvatarId = keyof typeof CHAT_AVATAR_URLS;
@@ -1454,34 +1447,28 @@ function App(): JSX.Element {
   const visibleDecisionResolutions = { ...pendingDecisionResolutions(conversation), ...resolvedDecisionThreads };
   const conversationKind = conversation?.kind ?? kind;
   const visibleWarnings = warnings.map((warning) => displayNoticeText(warning)).filter(Boolean);
-  const resultView: "slack" | "points" = activeView === "points" && conversationKind !== "implementation-plan" && conversationKind !== "chat" ? "points" : "slack";
+  const resultView: ResultView = activeView === "points" && conversationKind !== "implementation-plan" && conversationKind !== "chat" ? "points" : "slack";
   const hasPoints = Boolean(conversation && conversation.kind !== "chat" && conversation.metadata.running !== true && pendingDecisions.length === 0);
   const runnableParticipants = buildParticipants();
   const hasRequiredContext =
     kind === "code-review" ? diffMode === "pasted" || Boolean(repoPath.trim()) : kind !== "implementation-plan" || Boolean(repoPath.trim());
   const canStart = !busy && hasRequiredContext && Boolean(buildArbiter()) && runnableParticipants.length > 0 && (kind !== "implementation-plan" || runnableParticipants.length >= 2);
 
+  const resultTabItems: Array<SegmentedTabItem<ResultView>> = [
+    { value: "slack", label: "Slack", icon: MessageSquare, testId: "result-view-tab-slack" },
+    ...(hasPoints && conversationKind !== "implementation-plan" && conversationKind !== "chat"
+      ? [{ value: "points" as const, label: "Points", icon: ListChecks, testId: "result-view-tab-points" }]
+      : [])
+  ];
   const topBarTabs = hasResultContext ? (
-    <div className="flex items-center gap-1" role="tablist">
-      <Button
-        variant={resultView === "slack" && activeView !== "settings" ? "default" : "ghost"}
-        size="sm"
-        onClick={() => setActiveView("slack")}
-      >
-        <MessageSquare aria-hidden />
-        Slack
-      </Button>
-      {hasPoints && conversationKind !== "implementation-plan" && conversationKind !== "chat" && (
-        <Button
-          variant={resultView === "points" && activeView !== "settings" ? "default" : "ghost"}
-          size="sm"
-          onClick={() => setActiveView("points")}
-        >
-          <ListChecks aria-hidden />
-          Points
-        </Button>
-      )}
-    </div>
+    <SegmentedTabs
+      value={resultView}
+      items={resultTabItems}
+      ariaLabel="Result view"
+      className="topbar-result-tabs"
+      minItemWidth={96}
+      onValueChange={setActiveView}
+    />
   ) : null;
 
   const topBarActions = (
@@ -1678,24 +1665,7 @@ function App(): JSX.Element {
                       {kind === "code-review" && (
                         <>
                           <FormRow label="Diff mode">
-                            <ToggleGroup
-                              type="single"
-                              value={diffMode}
-                              onValueChange={(value) => {
-                                if (value) {
-                                  setDiffMode(value as GitDiffMode);
-                                }
-                              }}
-                              variant="outline"
-                              size="sm"
-                              className="flex w-full flex-wrap"
-                            >
-                              {DIFF_MODES.map((mode) => (
-                                <ToggleGroupItem key={mode.value} value={mode.value} className="flex-1 min-w-[110px]">
-                                  {mode.label}
-                                </ToggleGroupItem>
-                              ))}
-                            </ToggleGroup>
+                            <DiffModeTabs value={diffMode} onValueChange={setDiffMode} />
                           </FormRow>
 
                           {diffMode === "base" && (

@@ -1,20 +1,26 @@
-.session-mode-tabs {
+.segmented-tabs {
   width: 100%;
 }
 
-.session-mode-tabs__list {
+.segmented-tabs__list {
   display: grid;
   width: 100%;
   height: 42px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--segmented-tabs-count), minmax(var(--segmented-tabs-min-item-width), 1fr));
   gap: 2px;
+  overflow-x: auto;
   padding: 2px;
   border: 1px solid var(--app-border);
   border-radius: calc(var(--radius) + 2px);
   background: color-mix(in srgb, var(--app-surface-subtle) 92%, var(--app-surface));
+  scrollbar-width: none;
 }
 
-.session-mode-tabs__trigger {
+.segmented-tabs__list::-webkit-scrollbar {
+  display: none;
+}
+
+.segmented-tabs__trigger {
   min-width: 0;
   height: 36px;
   gap: 6px;
@@ -26,27 +32,27 @@
   letter-spacing: 0;
 }
 
-.session-mode-tabs__trigger::after {
+.segmented-tabs__trigger::after {
   display: none;
 }
 
-.session-mode-tabs__trigger span {
+.segmented-tabs__trigger span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.session-mode-tabs__trigger svg {
+.segmented-tabs__trigger svg {
   width: 15px;
   height: 15px;
 }
 
-.session-mode-tabs__trigger:hover {
+.segmented-tabs__trigger:hover {
   background: var(--app-surface-hover);
   color: var(--app-text-strong);
 }
 
-.session-mode-tabs__trigger[data-state="active"] {
+.segmented-tabs__trigger[data-state="active"] {
   background: var(--app-surface);
   color: var(--app-text-strong);
   box-shadow:
@@ -55,7 +61,7 @@
 }
 
 @media (max-width: 720px) {
-  .session-mode-tabs__trigger {
+  .segmented-tabs__trigger {
     padding-inline: 6px;
   }
 }

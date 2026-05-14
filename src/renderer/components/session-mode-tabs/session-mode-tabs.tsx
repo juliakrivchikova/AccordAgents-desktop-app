@@ -1,8 +1,7 @@
 import { GitPullRequest, ListChecks, MessageSquare, Users, type LucideIcon } from "lucide-react";
 
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { SegmentedTabs } from "@/renderer/components/segmented-tabs";
 import type { ConversationKind } from "../../../shared/types";
-import "./session-mode-tabs.css";
 
 interface SessionModeTab {
   value: ConversationKind;
@@ -24,28 +23,16 @@ export interface SessionModeTabsProps {
 
 export function SessionModeTabs({ value, onValueChange }: SessionModeTabsProps): JSX.Element {
   return (
-    <Tabs
+    <SegmentedTabs
       value={value}
-      onValueChange={(nextValue) => onValueChange(nextValue as ConversationKind)}
+      items={SESSION_MODE_TABS.map((item) => ({
+        ...item,
+        testId: `session-mode-tab-${item.value}`
+      }))}
+      ariaLabel="Session mode"
       className="session-mode-tabs"
-    >
-      <TabsList variant="line" aria-label="Session mode" className="session-mode-tabs__list">
-        {SESSION_MODE_TABS.map((item) => {
-          const Icon = item.icon;
-
-          return (
-            <TabsTrigger
-              key={item.value}
-              value={item.value}
-              className="session-mode-tabs__trigger"
-              data-testid={`session-mode-tab-${item.value}`}
-            >
-              <Icon aria-hidden />
-              <span>{item.label}</span>
-            </TabsTrigger>
-          );
-        })}
-      </TabsList>
-    </Tabs>
+      minItemWidth={128}
+      onValueChange={onValueChange}
+    />
   );
 }
