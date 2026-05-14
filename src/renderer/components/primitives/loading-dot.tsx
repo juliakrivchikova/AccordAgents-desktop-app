@@ -2,7 +2,7 @@ import * as React from "react";
 
 import { cn } from "@/lib/utils";
 
-const DOT_BASE = "inline-block size-1.5 rounded-full bg-current opacity-60 animate-pulse";
+const DOT_BASE = "loading-dot__item inline-block size-1.5 rounded-full bg-current";
 
 export interface LoadingDotProps extends React.ComponentProps<"span"> {
   label?: string;
@@ -11,7 +11,7 @@ export interface LoadingDotProps extends React.ComponentProps<"span"> {
 export const LoadingDot = ({ label, className, ...rest }: LoadingDotProps): JSX.Element => (
   <span
     className={cn(
-      "inline-flex items-center gap-1 text-muted-foreground",
+      "loading-dot inline-flex items-center gap-1 text-muted-foreground",
       className
     )}
     role={label ? "status" : undefined}

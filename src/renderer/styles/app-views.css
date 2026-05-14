@@ -513,9 +513,9 @@
 
 .plan-correction-composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 42px;
-  align-items: end;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 8px;
   width: min(100%, 960px);
   margin: 0 auto;
 }
@@ -2973,6 +2973,11 @@
 .run-status-line {
   color: var(--app-muted);
   font-size: 13px;
+}
+
+.loading-dot__item {
+  opacity: 0.35;
+  animation: progress-dot 1s ease-in-out infinite;
 }
 
 .typing-dots i,

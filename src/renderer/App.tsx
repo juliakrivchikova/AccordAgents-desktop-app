@@ -2618,6 +2618,27 @@ function ChatConversationView(props: {
     void props.onSend();
   }
 
+  function scrollToChatBottom(): void {
+    if (chatTimelineRows.length === 0) {
+      return;
+    }
+    chatVirtualizer.scrollToIndex(chatTimelineRows.length - 1, { align: "end" });
+    const timeline = timelineRef.current;
+    if (timeline) {
+      timeline.scrollTop = timeline.scrollHeight;
+    }
+  }
+
+  function scheduleScrollToChatBottom(): void {
+    scrollToChatBottom();
+    window.requestAnimationFrame(() => {
+      scrollToChatBottom();
+      window.requestAnimationFrame(scrollToChatBottom);
+    });
+    window.setTimeout(scrollToChatBottom, 80);
+    window.setTimeout(scrollToChatBottom, 180);
+  }
+
   async function sendThreadDraft(rootMessage: Conversation["messages"][number]): Promise<void> {
     const content = (threadDrafts[rootMessage.id] ?? "").trim();
     if (!content) {
@@ -2657,6 +2678,9 @@ function ChatConversationView(props: {
   useEffect(() => {
     setSelectedThreadRootId(undefined);
     setThreadDrafts({});
+    stickToBottomRef.current = true;
+    forceStickToBottomRef.current = true;
+    scheduleScrollToChatBottom();
   }, [props.conversation.id]);
 
   useEffect(() => {
@@ -2673,16 +2697,11 @@ function ChatConversationView(props: {
     if (!timeline || !shouldFollowBottom) {
       return;
     }
-    const scrollToBottom = (): void => {
-      chatVirtualizer.scrollToIndex(Math.max(0, chatTimelineRows.length - 1), { align: "end" });
-      stickToBottomRef.current = true;
-      if (messageCountChanged) {
-        forceStickToBottomRef.current = false;
-      }
-    };
-    scrollToBottom();
-    window.requestAnimationFrame(scrollToBottom);
-    window.setTimeout(scrollToBottom, 50);
+    scheduleScrollToChatBottom();
+    stickToBottomRef.current = true;
+    if (messageCountChanged) {
+      forceStickToBottomRef.current = false;
+    }
   }, [
     topLevelMessages.length,
     latestMessage?.content,
@@ -2696,13 +2715,9 @@ function ChatConversationView(props: {
   ]);
 
   useLayoutEffect(() => {
-    const scrollToBottom = (): void => {
-      chatVirtualizer.scrollToIndex(Math.max(0, chatTimelineRows.length - 1), { align: "end" });
-      stickToBottomRef.current = true;
-    };
-    window.requestAnimationFrame(scrollToBottom);
-    window.setTimeout(scrollToBottom, 50);
-  }, [chatTimelineRows.length, chatVirtualizer, topLevelMessages.length]);
+    scheduleScrollToChatBottom();
+    stickToBottomRef.current = true;
+  }, [props.conversation.id]);
 
   return (
     <div
