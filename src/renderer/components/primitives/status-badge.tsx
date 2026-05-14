@@ -6,22 +6,22 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 const statusBadgeVariants = cva(
-  "inline-flex h-5 items-center gap-1 rounded-full border px-2 text-[11px] font-semibold leading-none whitespace-nowrap shadow-[inset_0_1px_0_color-mix(in_srgb,#fff_18%,transparent)]",
+  "inline-flex h-5 items-center gap-1 rounded-full border px-2 text-[11px] font-semibold leading-none whitespace-nowrap shadow-[inset_0_1px_0_color-mix(in_srgb,#fff_22%,transparent)] [&>svg]:text-current [&>svg]:stroke-[2.35]",
   {
     variants: {
       tone: {
         neutral:
-          "border-[var(--app-border)] bg-[var(--app-surface-hover)] text-[var(--app-text)]",
+          "border-[var(--app-status-neutral-border)] bg-[var(--app-status-neutral-bg)] text-[var(--app-status-neutral-text)]",
         info:
-          "border-[var(--app-accent-border)] bg-[var(--app-accent-soft)] text-[var(--app-accent)]",
+          "border-[var(--app-status-info-border)] bg-[var(--app-status-info-bg)] text-[var(--app-status-info-text)]",
         success:
-          "border-[var(--app-success-border)] bg-[var(--app-success-soft)] text-[var(--app-success)]",
+          "border-[var(--app-status-success-border)] bg-[var(--app-status-success-bg)] text-[var(--app-status-success-text)]",
         warning:
-          "border-[var(--app-warning-border)] bg-[var(--app-warning-soft)] text-[var(--app-warning)]",
+          "border-[var(--app-status-warning-border)] bg-[var(--app-status-warning-bg)] text-[var(--app-status-warning-text)]",
         danger:
-          "border-[var(--app-danger-border)] bg-[var(--app-danger-soft)] text-[var(--app-danger)]",
+          "border-[var(--app-status-danger-border)] bg-[var(--app-status-danger-bg)] text-[var(--app-status-danger-text)]",
         muted:
-          "border-transparent bg-transparent text-[var(--app-muted)]"
+          "border-[var(--app-status-muted-border)] bg-[var(--app-status-muted-bg)] text-[var(--app-status-muted-text)]"
       },
       emphasis: {
         soft: "",
@@ -54,18 +54,25 @@ export const StatusBadge = ({
   className,
   children,
   ...rest
-}: StatusBadgeProps): JSX.Element => (
-  <Badge
-    asChild
-    className={cn(
-      statusBadgeVariants({ tone, emphasis }),
-      uppercase && "tracking-wide uppercase",
-      className
-    )}
-  >
-    <span {...rest}>
-      {Icon ? <Icon className="size-3" aria-hidden /> : null}
-      {children}
-    </span>
-  </Badge>
-);
+}: StatusBadgeProps): JSX.Element => {
+  const resolvedTone = tone ?? "neutral";
+  const resolvedEmphasis = emphasis ?? "soft";
+
+  return (
+    <Badge
+      asChild
+      variant="outline"
+      className={cn(
+        statusBadgeVariants({ tone: resolvedTone, emphasis: resolvedEmphasis }),
+        "status-badge",
+        uppercase && "tracking-wide uppercase",
+        className
+      )}
+    >
+      <span data-status-tone={resolvedTone} data-status-emphasis={resolvedEmphasis} {...rest}>
+        {Icon ? <Icon className="size-3" aria-hidden /> : null}
+        {children}
+      </span>
+    </Badge>
+  );
+};

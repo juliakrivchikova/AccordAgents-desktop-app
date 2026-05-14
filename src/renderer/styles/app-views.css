@@ -3325,3 +3325,56 @@
 .sidebar-history-item.is-loading .text-muted-foreground {
   color: color-mix(in srgb, var(--app-accent) 74%, var(--app-text-strong));
 }
+
+.status-badge,
+.message-meta .status-badge,
+.message-meta span.status-badge,
+.view-heading span.status-badge {
+  border-color: var(--status-badge-border);
+  background: var(--status-badge-bg);
+  color: var(--status-badge-text);
+}
+
+.status-badge svg {
+  color: currentColor;
+}
+
+.status-badge[data-status-tone="neutral"] {
+  --status-badge-text: var(--app-status-neutral-text);
+  --status-badge-bg: var(--app-status-neutral-bg);
+  --status-badge-border: var(--app-status-neutral-border);
+}
+
+.status-badge[data-status-tone="info"] {
+  --status-badge-text: var(--app-status-info-text);
+  --status-badge-bg: var(--app-status-info-bg);
+  --status-badge-border: var(--app-status-info-border);
+}
+
+.status-badge[data-status-tone="success"] {
+  --status-badge-text: var(--app-status-success-text);
+  --status-badge-bg: var(--app-status-success-bg);
+  --status-badge-border: var(--app-status-success-border);
+}
+
+.status-badge[data-status-tone="warning"] {
+  --status-badge-text: var(--app-status-warning-text);
+  --status-badge-bg: var(--app-status-warning-bg);
+  --status-badge-border: var(--app-status-warning-border);
+}
+
+.status-badge[data-status-tone="danger"] {
+  --status-badge-text: var(--app-status-danger-text);
+  --status-badge-bg: var(--app-status-danger-bg);
+  --status-badge-border: var(--app-status-danger-border);
+}
+
+.status-badge[data-status-tone="muted"] {
+  --status-badge-text: var(--app-status-muted-text);
+  --status-badge-bg: var(--app-status-muted-bg);
+  --status-badge-border: var(--app-status-muted-border);
+}
+
+.status-badge[data-status-emphasis="outline"] {
+  background: transparent;
+}
