@@ -57,6 +57,9 @@
   --app-danger: #b3352d;
   --app-danger-soft: #fff0ef;
   --app-danger-border: #f2c0bb;
+  --app-avatar-bg: #f8fbff;
+  --app-avatar-border: #cbd5e1;
+  --app-avatar-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
 
   --background: #f7f8fb;
   --foreground: #262a33;
@@ -142,6 +145,9 @@
   --app-danger: #ff8b7e;
   --app-danger-soft: #421f1d;
   --app-danger-border: #823c35;
+  --app-avatar-bg: #1b202b;
+  --app-avatar-border: #3a4353;
+  --app-avatar-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
   --background: #0e1016;
   --foreground: #e5e7ee;
   --card: #141720;

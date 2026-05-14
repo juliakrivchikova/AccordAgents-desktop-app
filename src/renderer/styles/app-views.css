@@ -3195,6 +3195,81 @@
   height: 100%;
 }
 
+.message-avatar,
+.thread-avatar,
+.message-avatar.avatar-user,
+.thread-avatar.avatar-user,
+.message-avatar.avatar-arbiter,
+.thread-avatar.avatar-arbiter,
+.message-avatar.avatar-anthropic,
+.thread-avatar.avatar-anthropic,
+.message-avatar.avatar-codex,
+.thread-avatar.avatar-codex,
+.message-avatar.avatar-custom,
+.thread-avatar.avatar-custom,
+.message-avatar.avatar-gemini,
+.thread-avatar.avatar-gemini,
+.message-avatar.avatar-generic,
+.thread-avatar.avatar-generic,
+.message.summary .message-avatar,
+.message.system .message-avatar,
+.message.summary .message-avatar.avatar-arbiter,
+.message.system .message-avatar.avatar-arbiter,
+.message.summary .message-avatar.avatar-codex,
+.message.system .message-avatar.avatar-codex,
+.thread-avatar.typing-avatar {
+  border: 1px solid var(--app-avatar-border);
+  background: var(--app-avatar-bg);
+  color: var(--app-text-strong);
+  box-shadow: var(--app-avatar-shadow);
+}
+
+.message-avatar.avatar-arbiter,
+.thread-avatar.avatar-arbiter,
+.message.summary .message-avatar.avatar-arbiter,
+.message.system .message-avatar.avatar-arbiter {
+  background: color-mix(in srgb, var(--app-success-soft) 62%, var(--app-avatar-bg));
+  color: var(--app-success);
+}
+
+.message-avatar.avatar-anthropic,
+.thread-avatar.avatar-anthropic {
+  background: color-mix(in srgb, var(--app-danger-soft) 58%, var(--app-avatar-bg));
+  color: var(--app-danger);
+}
+
+.message-avatar.avatar-codex,
+.thread-avatar.avatar-codex,
+.message.summary .message-avatar.avatar-codex,
+.message.system .message-avatar.avatar-codex {
+  background: color-mix(in srgb, var(--app-accent-soft) 72%, var(--app-avatar-bg));
+  color: #586eff;
+}
+
+.message-avatar.avatar-gemini,
+.thread-avatar.avatar-gemini,
+.message-avatar.avatar-generic,
+.thread-avatar.avatar-generic,
+.thread-avatar.typing-avatar {
+  background: color-mix(in srgb, var(--app-accent-soft) 58%, var(--app-avatar-bg));
+  color: var(--app-accent);
+}
+
+.message-avatar.avatar-custom,
+.thread-avatar.avatar-custom {
+  padding: 4px;
+  overflow: hidden;
+}
+
+.message-avatar.avatar-custom .custom-avatar-image,
+.thread-avatar.avatar-custom .custom-avatar-image {
+  width: 100%;
+  height: 100%;
+  border-radius: 6px;
+  object-fit: contain;
+  transform: none;
+}
+
 .role-config-card .settings-item-head {
   margin-bottom: 2px;
 }
