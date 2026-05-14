@@ -6,22 +6,22 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 const statusBadgeVariants = cva(
-  "inline-flex h-5 items-center gap-1 rounded-full border-transparent px-2 text-[11px] font-medium leading-none whitespace-nowrap",
+  "inline-flex h-5 items-center gap-1 rounded-full border px-2 text-[11px] font-semibold leading-none whitespace-nowrap shadow-[inset_0_1px_0_color-mix(in_srgb,#fff_18%,transparent)]",
   {
     variants: {
       tone: {
         neutral:
-          "bg-[var(--app-surface-hover)] text-[var(--app-text)]",
+          "border-[var(--app-border)] bg-[var(--app-surface-hover)] text-[var(--app-text)]",
         info:
-          "bg-[var(--app-accent-soft)] text-[var(--app-accent)]",
+          "border-[var(--app-accent-border)] bg-[var(--app-accent-soft)] text-[var(--app-accent)]",
         success:
-          "bg-[var(--app-success-soft)] text-[var(--app-success)]",
+          "border-[var(--app-success-border)] bg-[var(--app-success-soft)] text-[var(--app-success)]",
         warning:
-          "bg-[var(--app-warning-soft)] text-[var(--app-warning)]",
+          "border-[var(--app-warning-border)] bg-[var(--app-warning-soft)] text-[var(--app-warning)]",
         danger:
-          "bg-[var(--app-danger-soft)] text-[var(--app-danger)]",
+          "border-[var(--app-danger-border)] bg-[var(--app-danger-soft)] text-[var(--app-danger)]",
         muted:
-          "bg-transparent text-[var(--app-muted)]"
+          "border-transparent bg-transparent text-[var(--app-muted)]"
       },
       emphasis: {
         soft: "",

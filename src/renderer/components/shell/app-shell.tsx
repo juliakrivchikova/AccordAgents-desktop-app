@@ -13,7 +13,7 @@ export const AppShell = ({ sidebar, topBar, children, className }: AppShellProps
   <div
     data-shell="root"
     className={cn(
-      "grid h-full min-h-0 grid-cols-[260px_minmax(0,1fr)] bg-background text-foreground",
+      "grid h-full min-h-0 grid-cols-[260px_minmax(0,1fr)] bg-[var(--app-bg)] text-foreground",
       className
     )}
   >

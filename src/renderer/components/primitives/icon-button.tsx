@@ -10,7 +10,7 @@ export type IconButtonVariant = "ghost" | "outline" | "secondary";
 
 const SIZE_TO_BUTTON_SIZE: Record<IconButtonSize, "icon-xs" | "icon-sm" | "icon"> = {
   xs: "icon-xs",
-  sm: "icon-sm",
+  sm: "icon",
   md: "icon"
 };
 

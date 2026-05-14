@@ -3031,3 +3031,182 @@
   object-fit: contain;
   transform: none;
 }
+
+.repo-status.ok {
+  color: var(--app-success);
+}
+
+.repo-status.bad,
+.inline-error {
+  color: var(--app-danger);
+}
+
+.inline-warning {
+  color: var(--app-warning);
+}
+
+.chat-choice-card {
+  border-color: var(--app-accent-border);
+  border-left-color: var(--app-accent);
+  background: var(--app-surface);
+  box-shadow:
+    0 1px 2px color-mix(in srgb, #000 7%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--app-accent) 5%, transparent);
+}
+
+.chat-choice-card.answered {
+  border-color: var(--app-success-border);
+  border-left-color: var(--app-success);
+  background: color-mix(in srgb, var(--app-success-soft) 38%, var(--app-surface));
+}
+
+.chat-choice-title-block h3,
+.chat-choice-option-title strong,
+.chat-choice-actions strong,
+.chat-choice-text-panel > span {
+  color: var(--app-text-strong);
+}
+
+.chat-choice-kicker {
+  color: var(--app-accent);
+}
+
+.chat-choice-card.answered .chat-choice-kicker,
+.chat-choice-card.answered .chat-choice-text-panel small {
+  color: var(--app-success);
+}
+
+.chat-choice-status,
+.chat-choice-option-title small {
+  border-color: var(--app-accent-border);
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+
+.chat-choice-status.answered {
+  border-color: var(--app-success-border);
+  background: var(--app-success-soft);
+  color: var(--app-success);
+}
+
+.chat-choice-card > p,
+.chat-choice-option-description,
+.chat-choice-text-panel small,
+.chat-choice-text-panel blockquote {
+  color: var(--app-muted);
+}
+
+.chat-choice-option,
+.custom-answer-option:not(.selected) {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.chat-choice-option:hover {
+  border-color: var(--app-accent-border);
+  background: color-mix(in srgb, var(--app-accent-soft) 28%, var(--app-surface));
+}
+
+.chat-choice-option.selected {
+  border-color: var(--app-accent);
+  background: var(--app-accent-soft);
+  box-shadow: 0 0 0 1px var(--app-accent);
+}
+
+.chat-choice-card.answered .chat-choice-option {
+  border-color: var(--app-border);
+  background: color-mix(in srgb, var(--app-surface-subtle) 60%, var(--app-surface));
+  color: var(--app-muted);
+}
+
+.chat-choice-card.answered .chat-choice-option.selected {
+  border-color: var(--app-success);
+  background: var(--app-success-soft);
+  box-shadow: 0 0 0 1px var(--app-success);
+  color: var(--app-text-strong);
+}
+
+.chat-choice-radio {
+  border-color: var(--app-muted-subtle);
+}
+
+.chat-choice-option.selected .chat-choice-radio {
+  border-color: var(--app-accent);
+}
+
+.chat-choice-option.selected .chat-choice-radio::after {
+  background: var(--app-accent);
+}
+
+.chat-choice-card.answered .chat-choice-radio,
+.chat-choice-card.answered .chat-choice-option.selected .chat-choice-radio {
+  border-color: var(--app-success-border);
+}
+
+.chat-choice-card.answered .chat-choice-option.selected .chat-choice-radio::after {
+  background: var(--app-success);
+}
+
+.chat-choice-card.answered .chat-choice-option:not(.selected) .chat-choice-option-title strong,
+.chat-choice-card.answered .chat-choice-option:not(.selected) .chat-choice-option-description {
+  color: var(--app-muted-subtle);
+}
+
+.chat-choice-card.answered .chat-choice-option.selected .chat-choice-recommended-chip,
+.chat-choice-card.answered .chat-choice-option.selected .chat-choice-override-chip {
+  border-color: var(--app-success-border);
+  background: color-mix(in srgb, var(--app-surface) 82%, var(--app-success-soft));
+  color: var(--app-success);
+}
+
+.chat-choice-card.answered .chat-choice-option:not(.selected) .chat-choice-recommended-chip {
+  border-color: var(--app-accent-border);
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+
+.chat-choice-custom-icon {
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+
+.chat-choice-card.answered .chat-choice-option.selected .chat-choice-custom-icon {
+  background: color-mix(in srgb, var(--app-surface) 82%, var(--app-success-soft));
+  color: var(--app-success);
+}
+
+.chat-choice-card.answered .chat-choice-option:not(.selected) .chat-choice-custom-icon {
+  background: var(--app-surface-hover);
+  color: var(--app-muted-subtle);
+}
+
+.chat-choice-text-panel {
+  border-color: var(--app-accent-border);
+  background: color-mix(in srgb, var(--app-accent-soft) 45%, var(--app-surface));
+}
+
+.chat-choice-card.answered .chat-choice-text-panel {
+  border-color: var(--app-success-border);
+  background: var(--app-success-soft);
+}
+
+.chat-choice-card.answered .chat-choice-text-panel.locked {
+  border-left-color: var(--app-success);
+  background: color-mix(in srgb, var(--app-success-soft) 54%, var(--app-surface));
+}
+
+.chat-choice-text-panel textarea {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.chat-choice-card.answered .chat-choice-text-panel textarea {
+  border-color: var(--app-success-border);
+}
+
+.chat-choice-text-panel textarea:focus {
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 16%, transparent);
+}

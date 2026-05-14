@@ -43,8 +43,8 @@ export const Sidebar = ({
         disabled={busy}
         className={cn(
           "inline-flex h-8 w-full items-center justify-center gap-2 rounded-md",
-          "border border-border bg-background px-3 text-xs font-medium text-foreground",
-          "transition-colors hover:bg-muted/60",
+          "border border-[var(--app-border-strong)] bg-[var(--app-surface)] px-3 text-xs font-medium text-foreground",
+          "transition-colors hover:border-[var(--app-accent-border)] hover:bg-[var(--app-surface-hover)]",
           "disabled:cursor-not-allowed disabled:opacity-50",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         )}
@@ -75,8 +75,8 @@ export const Sidebar = ({
               data-selected={summary.id === activeId ? "true" : undefined}
               className={cn(
                 "group flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left text-sm",
-                "transition-colors hover:bg-muted/60",
-                "data-[selected=true]:bg-[var(--app-surface-active)] data-[selected=true]:text-[var(--app-text-strong)]",
+                "border border-transparent transition-colors hover:bg-[var(--app-surface-hover)]",
+                "data-[selected=true]:border-[var(--app-accent-border)] data-[selected=true]:bg-[var(--app-surface-active)] data-[selected=true]:text-[var(--app-text-strong)]",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
               )}
             >
