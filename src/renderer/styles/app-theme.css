@@ -165,7 +165,7 @@ button,
 input,
 textarea,
 select {
-  font: inherit;
+  font-family: inherit;
 }
 
 button:not([class]):not([data-slot="button"]) {

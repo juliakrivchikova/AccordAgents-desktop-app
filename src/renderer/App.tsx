@@ -25,6 +25,16 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger
+} from "@/components/ui/dialog";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuGroup,
@@ -2107,10 +2117,13 @@ function ChatParticipantConfigEditor(props: {
         </div>
         <div className="settings-item-actions">
           {props.participant && (
-            <Button variant="outline" size="sm" onClick={() => void props.onDelete(props.participant!.id)}>
-              <X size={16} />
-              Delete
-            </Button>
+            <ConfirmDeleteButton
+              label="Delete"
+              title={`Delete @${props.participant.handle}?`}
+              description="This participant will be removed from saved chat participants and unselected from chats that use it."
+              confirmLabel="Delete participant"
+              onConfirm={() => props.onDelete(props.participant!.id)}
+            />
           )}
           <Button
             variant="outline" size="sm"
@@ -2125,6 +2138,55 @@ function ChatParticipantConfigEditor(props: {
       <ChatParticipantDraftRow draft={draft} settings={props.settings} agents={props.agents} onChange={setDraft} />
       {validation && <div className="inline-error">{validation}</div>}
     </article>
+  );
+}
+
+function ConfirmDeleteButton(props: {
+  label: string;
+  title: string;
+  description: string;
+  confirmLabel?: string;
+  onConfirm: () => Promise<void>;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const [pending, setPending] = useState(false);
+
+  const confirm = async (): Promise<void> => {
+    setPending(true);
+    try {
+      await props.onConfirm();
+      setOpen(false);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="destructive" size="sm">
+          <X size={16} />
+          {props.label}
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{props.title}</DialogTitle>
+          <DialogDescription>{props.description}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <DialogClose asChild>
+            <Button variant="outline" size="sm" disabled={pending}>
+              Cancel
+            </Button>
+          </DialogClose>
+          <Button variant="destructive" size="sm" disabled={pending} onClick={() => void confirm()}>
+            <X size={16} />
+            {pending ? "Deleting..." : props.confirmLabel ?? props.label}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
