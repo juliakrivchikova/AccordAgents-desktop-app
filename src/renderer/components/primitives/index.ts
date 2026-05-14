@@ -17,3 +17,9 @@ export type { ParticipantPillProps, ParticipantStatus } from "./participant-pill
 
 export { Notice } from "./notice";
 export type { NoticeProps, NoticeTone } from "./notice";
+
+export { FormRow } from "./form-row";
+export type { FormRowProps } from "./form-row";
+
+export { ResizableTextarea } from "./resizable-textarea";
+export type { ResizableTextareaProps } from "./resizable-textarea";

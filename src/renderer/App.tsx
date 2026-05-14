@@ -43,6 +43,9 @@ import {
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Card } from "@/components/ui/card";
 import type {
   AgentHealth,
   AppSettings,
@@ -77,9 +80,11 @@ import { ModeToggle } from "./components/mode-toggle";
 import { ThemeProvider } from "./components/theme-provider";
 import { AppShell, Sidebar, TopBar } from "./components/shell";
 import {
+  FormRow,
   IconButton,
   LoadingDot,
   Notice,
+  ResizableTextarea,
   SeverityBadge,
   StatusBadge,
   type StatusBadgeTone
@@ -1639,17 +1644,20 @@ function App(): JSX.Element {
                 />
               ) : (
                 <>
-                  <label className="field">
-                    <span>Prompt</span>
-                    <AutoResizeTextarea value={question} onChange={(event) => setQuestion(event.target.value)} rows={5} maxHeight={360} />
-                  </label>
+                  <FormRow label="Prompt">
+                    <ResizableTextarea
+                      value={question}
+                      onChange={(event) => setQuestion(event.target.value)}
+                      rows={5}
+                      maxHeight={360}
+                    />
+                  </FormRow>
 
                   {requiresRepo(kind) && (
                     <>
-                      <div className="repo-row">
-                        <label className="field grow">
-                          <span>Repository</span>
-                          <input
+                      <div className="flex items-end gap-2">
+                        <FormRow label="Repository" className="flex-1">
+                          <Input
                             value={repoPath}
                             onChange={(event) => {
                               setRepoPath(event.target.value);
@@ -1657,10 +1665,15 @@ function App(): JSX.Element {
                             }}
                             onBlur={() => void inspectRepo()}
                           />
-                        </label>
-                        <button className="tool-button" onClick={() => void selectRepo()} title="Select repository">
-                          <FolderOpen size={17} />
-                        </button>
+                        </FormRow>
+                        <IconButton
+                          size="sm"
+                          icon={FolderOpen}
+                          label="Select repository"
+                          tooltip="Select repository"
+                          variant="outline"
+                          onClick={() => void selectRepo()}
+                        />
                       </div>
                       {repoInfo && (
                         <div className={`repo-status ${repoInfo.isRepo ? "ok" : "bad"}`}>
@@ -1680,27 +1693,31 @@ function App(): JSX.Element {
 
                       {kind === "code-review" && (
                         <>
-                          <div className="field">
-                            <span>Diff mode</span>
-                            <div className="diff-mode-grid">
+                          <FormRow label="Diff mode">
+                            <ToggleGroup
+                              type="single"
+                              value={diffMode}
+                              onValueChange={(value) => {
+                                if (value) {
+                                  setDiffMode(value as GitDiffMode);
+                                }
+                              }}
+                              variant="outline"
+                              size="sm"
+                              className="flex w-full flex-wrap"
+                            >
                               {DIFF_MODES.map((mode) => (
-                                <button
-                                  key={mode.value}
-                                  className={diffMode === mode.value ? "selected" : ""}
-                                  onClick={() => setDiffMode(mode.value)}
-                                >
+                                <ToggleGroupItem key={mode.value} value={mode.value} className="flex-1 min-w-[110px]">
                                   {mode.label}
-                                </button>
+                                </ToggleGroupItem>
                               ))}
-                            </div>
-                          </div>
+                            </ToggleGroup>
+                          </FormRow>
 
                           {diffMode === "base" && (
-                            <div className="field">
-                              <span>Branches</span>
-                              <div className="branch-compare-row">
-                                <label className="branch-select">
-                                  <span>Base branch</span>
+                            <FormRow label="Branches" hint={BRANCH_COMPARE_HELP}>
+                              <div className="grid grid-cols-2 gap-2">
+                                <FormRow label="Base branch">
                                   <AppSelect
                                     value={selectedBaseBranch}
                                     disabled={branchSelectDisabled}
@@ -1710,9 +1727,8 @@ function App(): JSX.Element {
                                     options={branchOptions.map((branch) => ({ value: branch, label: branch }))}
                                     onValueChange={setBaseBranch}
                                   />
-                                </label>
-                                <label className="branch-select">
-                                  <span>Compare branch</span>
+                                </FormRow>
+                                <FormRow label="Compare branch">
                                   <AppSelect
                                     value={selectedCompareBranch}
                                     disabled={branchSelectDisabled}
@@ -1722,30 +1738,34 @@ function App(): JSX.Element {
                                     options={branchOptions.map((branch) => ({ value: branch, label: branch }))}
                                     onValueChange={setCompareBranch}
                                   />
-                                </label>
+                                </FormRow>
                               </div>
-                              <div className="inline-hint" id="branch-compare-help">
-                                {BRANCH_COMPARE_HELP}
-                              </div>
-                            </div>
+                            </FormRow>
                           )}
                           {diffMode === "commit" && (
-                            <label className="field">
-                              <span>Commit SHA</span>
-                              <input value={commit} onChange={(event) => setCommit(event.target.value)} />
-                            </label>
+                            <FormRow label="Commit SHA">
+                              <Input value={commit} onChange={(event) => setCommit(event.target.value)} />
+                            </FormRow>
                           )}
                           {diffMode === "pasted" && (
-                            <label className="field">
-                              <span>Pasted diff</span>
-                              <AutoResizeTextarea value={pastedDiff} onChange={(event) => setPastedDiff(event.target.value)} rows={7} maxHeight={420} />
-                            </label>
+                            <FormRow label="Pasted diff">
+                              <ResizableTextarea
+                                value={pastedDiff}
+                                onChange={(event) => setPastedDiff(event.target.value)}
+                                rows={7}
+                                maxHeight={420}
+                              />
+                            </FormRow>
                           )}
 
-                          <button className="secondary-button" onClick={() => void previewDiff()}>
+                          <Button variant="outline" size="sm" onClick={() => void previewDiff()}>
                             Preview diff
-                          </button>
-                          {diffPreview && <pre className="diff-preview">{diffPreview.slice(0, 6000)}</pre>}
+                          </Button>
+                          {diffPreview && (
+                            <pre className="max-h-[280px] overflow-auto rounded-md border border-border bg-muted/40 p-3 text-xs leading-relaxed">
+                              {diffPreview.slice(0, 6000)}
+                            </pre>
+                          )}
                         </>
                       )}
                     </>
@@ -1774,8 +1794,10 @@ function App(): JSX.Element {
                     })}
                   </div>
 
-                  <label className="field">
-                    <span>{arbiterRoleLabel}</span>
+                  <FormRow
+                    label={arbiterRoleLabel}
+                    hint={`The ${arbiterRoleLabel.toLowerCase()} merge is a separate run. If the same provider is selected as a participant, it also gets an independent participant run.`}
+                  >
                     <AppSelect
                       value={arbiterSelectValue}
                       disabled={arbiterOptions.length === 0}
@@ -1785,10 +1807,7 @@ function App(): JSX.Element {
                       options={arbiterOptions.map(({ provider }) => ({ value: providerId(provider), label: provider.label }))}
                       onValueChange={setSelectedArbiterId}
                     />
-                  </label>
-                  <div className="inline-hint">
-                    The {arbiterRoleLabel.toLowerCase()} merge is a separate run. If the same provider is selected as a participant, it also gets an independent participant run.
-                  </div>
+                  </FormRow>
 
                   <Button
                     type="button"
@@ -1966,9 +1985,8 @@ function SettingsView(props: {
 
                   {!isCli(provider.kind) && (
                     <>
-                      <div className="model-row">
-                        <label className="field grow">
-                          <span>Model</span>
+                      <div className="flex items-end gap-2">
+                        <FormRow label="Model" className="flex-1">
                           {models.length > 0 ? (
                             <AppSelect
                               value={provider.model && models.some((model) => model.id === provider.model) ? provider.model : "__custom__"}
@@ -1986,58 +2004,58 @@ function SettingsView(props: {
                               }}
                             />
                           ) : (
-                            <input
+                            <Input
                               value={provider.model ?? ""}
                               onChange={(event) => void props.updateProvider(provider, { model: event.target.value })}
                               placeholder={provider.hasApiKey ? "Fetch models or enter a custom model id" : "Save an API key first"}
                             />
                           )}
-                        </label>
-                        <button
-                          className="tool-button"
-                          title="Fetch available models"
+                        </FormRow>
+                        <IconButton
+                          size="sm"
+                          icon={RefreshCw}
+                          iconClassName={isLoadingModels ? "animate-spin" : undefined}
+                          label="Fetch available models"
+                          tooltip="Fetch available models"
+                          variant="outline"
                           disabled={!provider.hasApiKey || isLoadingModels}
                           onClick={() => void props.refreshProviderModels(provider.kind)}
-                        >
-                          <RefreshCw size={17} className={isLoadingModels ? "spin" : ""} />
-                        </button>
+                        />
                       </div>
                       {models.length > 0 && !models.some((model) => model.id === provider.model) && (
-                        <label className="field compact-field">
-                          <span>Custom model ID</span>
-                          <input
+                        <FormRow label="Custom model ID">
+                          <Input
                             value={provider.model ?? ""}
                             onChange={(event) => void props.updateProvider(provider, { model: event.target.value })}
                           />
-                        </label>
+                        </FormRow>
                       )}
                       {modelError && <div className="inline-error">{modelError}</div>}
-                      <div className="key-row">
-                        <label className="field grow">
-                          <span>API key</span>
-                          <input
+                      <div className="flex items-end gap-2">
+                        <FormRow label="API key" className="flex-1">
+                          <Input
                             type="password"
                             value={props.apiKeyDrafts[provider.kind] ?? ""}
                             onChange={(event) =>
                               props.setApiKeyDrafts((current) => ({ ...current, [provider.kind]: event.target.value }))
                             }
                           />
-                        </label>
-                        <button
-                          className="save-key-button"
+                        </FormRow>
+                        <Button
+                          size="sm"
                           title="Save API key"
                           disabled={!hasDraftKey}
                           onClick={() => void props.updateProvider(provider, { apiKey: props.apiKeyDrafts[provider.kind] ?? "" })}
                         >
-                          <KeyRound size={17} />
+                          <KeyRound aria-hidden />
                           Save key
-                        </button>
+                        </Button>
                       </div>
                       {hasDraftKey && <div className="inline-warning">Unsaved API key entered.</div>}
                       {provider.hasApiKey && (
-                        <button className="secondary-button" onClick={() => void props.updateProvider(provider, { clearApiKey: true })}>
+                        <Button variant="outline" size="sm" onClick={() => void props.updateProvider(provider, { clearApiKey: true })}>
                           Clear saved key
-                        </button>
+                        </Button>
                       )}
                     </>
                   )}
@@ -2119,56 +2137,24 @@ function ChatParticipantConfigEditor(props: {
         </div>
         <div className="settings-item-actions">
           {props.participant && (
-            <button className="secondary-button" onClick={() => void props.onDelete(props.participant!.id)}>
+            <Button variant="outline" size="sm" onClick={() => void props.onDelete(props.participant!.id)}>
               <X size={16} />
               Delete
-            </button>
+            </Button>
           )}
-          <button
-            className="secondary-button"
+          <Button
+            variant="outline" size="sm"
             disabled={!canSave}
             onClick={() => void props.onSave({ id: props.participant?.id, ...normalized })}
           >
             <CheckCircle2 size={16} />
             Save
-          </button>
+          </Button>
         </div>
       </div>
       <ChatParticipantDraftRow draft={draft} settings={props.settings} agents={props.agents} onChange={setDraft} />
       {validation && <div className="inline-error">{validation}</div>}
     </article>
-  );
-}
-
-function AutoResizeTextarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement> & { maxHeight?: number }): JSX.Element {
-  const { maxHeight = 280, onInput, style, ...textareaProps } = props;
-  const ref = useRef<HTMLTextAreaElement>(null);
-
-  const resize = (): void => {
-    const element = ref.current;
-    if (!element) {
-      return;
-    }
-    element.style.height = "auto";
-    const nextHeight = Math.min(maxHeight, element.scrollHeight);
-    element.style.height = `${nextHeight}px`;
-    element.style.overflowY = element.scrollHeight > maxHeight ? "auto" : "hidden";
-  };
-
-  useEffect(() => {
-    resize();
-  }, [textareaProps.value, maxHeight]);
-
-  return (
-    <textarea
-      {...textareaProps}
-      ref={ref}
-      style={{ ...style, overflowY: "hidden" }}
-      onInput={(event) => {
-        resize();
-        onInput?.(event);
-      }}
-    />
   );
 }
 
@@ -2184,19 +2170,22 @@ function ChatRoleEditor({ role, onSave }: { role?: ChatRoleConfig; onSave: (upda
           <strong>{role ? role.label : "New role"}</strong>
           <small>{role ? `v${role.version}${role.builtIn ? " built-in" : ""}` : "custom"}</small>
         </div>
-        <button className="secondary-button" disabled={!canSave} onClick={() => void onSave({ id: role?.id, label, instructions })}>
+        <Button variant="outline" size="sm" disabled={!canSave} onClick={() => void onSave({ id: role?.id, label, instructions })}>
           <CheckCircle2 size={16} />
           Save
-        </button>
+        </Button>
       </div>
-      <label className="field compact-field">
-        <span>Name</span>
-        <input value={label} onChange={(event) => setLabel(event.target.value)} />
-      </label>
-      <label className="field compact-field">
-        <span>Instructions</span>
-        <AutoResizeTextarea value={instructions} onChange={(event) => setInstructions(event.target.value)} rows={4} maxHeight={320} />
-      </label>
+      <FormRow label="Name">
+        <Input value={label} onChange={(event) => setLabel(event.target.value)} />
+      </FormRow>
+      <FormRow label="Instructions">
+        <ResizableTextarea
+          value={instructions}
+          onChange={(event) => setInstructions(event.target.value)}
+          rows={4}
+          maxHeight={320}
+        />
+      </FormRow>
     </article>
   );
 }
@@ -2227,18 +2216,21 @@ function ChatSetup(props: {
     .map((participant) => participant.id);
   return (
     <div className="chat-setup">
-      <label className="field">
-        <span>Chat title</span>
-        <input value={props.title} onChange={(event) => props.onTitleChange(event.target.value)} />
-      </label>
-      <div className="repo-row">
-        <label className="field grow">
-          <span>Repository optional</span>
-          <input value={props.repoPath} onChange={(event) => props.onRepoPathChange(event.target.value)} onBlur={props.onRepoBlur} />
-        </label>
-        <button className="tool-button" onClick={props.onSelectRepo} title="Select repository">
-          <FolderOpen size={17} />
-        </button>
+      <FormRow label="Chat title">
+        <Input value={props.title} onChange={(event) => props.onTitleChange(event.target.value)} />
+      </FormRow>
+      <div className="flex items-end gap-2">
+        <FormRow label="Repository" optional className="flex-1">
+          <Input value={props.repoPath} onChange={(event) => props.onRepoPathChange(event.target.value)} onBlur={props.onRepoBlur} />
+        </FormRow>
+        <IconButton
+          size="sm"
+          icon={FolderOpen}
+          label="Select repository"
+          tooltip="Select repository"
+          variant="outline"
+          onClick={props.onSelectRepo}
+        />
       </div>
       {props.repoInfo && (
         <div className={`repo-status ${props.repoInfo.isRepo ? "ok" : "bad"}`}>
@@ -2259,18 +2251,18 @@ function ChatSetup(props: {
         <div className="settings-section-head">
           <h2>Participants</h2>
           <div className="settings-item-actions">
-            <button className="secondary-button" onClick={() => props.onSelectedParticipantIdsChange(new Set(allParticipantIds))}>
+            <Button variant="outline" size="sm" onClick={() => props.onSelectedParticipantIdsChange(new Set(allParticipantIds))}>
               <Users size={16} />
               Select all
-            </button>
-            <button className="secondary-button" onClick={() => props.onSelectedParticipantIdsChange(new Set())}>
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => props.onSelectedParticipantIdsChange(new Set())}>
               <X size={16} />
               Clear
-            </button>
-            <button className="secondary-button" onClick={props.onOpenParticipantsSettings}>
+            </Button>
+            <Button variant="outline" size="sm" onClick={props.onOpenParticipantsSettings}>
               <Plus size={16} />
               New participant
-            </button>
+            </Button>
           </div>
         </div>
         {props.settings.chatParticipantConfigs.length === 0 ? (
@@ -2312,10 +2304,10 @@ function ChatSetup(props: {
         )}
       </div>
       {validation && <div className="inline-error">{validation}</div>}
-      <button className="run-button" disabled={props.busy || Boolean(validation)} onClick={props.onStart}>
+      <Button className="w-full" disabled={props.busy || Boolean(validation)} onClick={props.onStart}>
         {props.busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
         {props.busy ? "Starting chat..." : "Start chat"}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -2333,16 +2325,14 @@ function ChatParticipantDraftRow(props: {
   const avatarOptions = chatAvatarOptionsForKind(props.draft.kind);
   return (
     <div className="chat-participant-row">
-      <label className="field compact-field">
-        <span>Name</span>
-        <input
+      <FormRow label="Name">
+        <Input
           value={props.draft.handle}
           onChange={(event) => props.onChange({ ...props.draft, handle: event.target.value })}
           placeholder="eng1"
         />
-      </label>
-      <label className="field compact-field">
-        <span>Role</span>
+      </FormRow>
+      <FormRow label="Role">
         <AppSelect
           value={props.draft.roleConfigId}
           placeholder="Select role"
@@ -2350,9 +2340,8 @@ function ChatParticipantDraftRow(props: {
           options={props.settings.chatRoleConfigs.map((role) => ({ value: role.id, label: role.label }))}
           onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { roleConfigId: value }))}
         />
-      </label>
-      <label className="field compact-field">
-        <span>CLI</span>
+      </FormRow>
+      <FormRow label="CLI">
         <AppSelect
           value={props.draft.kind}
           placeholder="Select CLI"
@@ -2367,17 +2356,15 @@ function ChatParticipantDraftRow(props: {
           })}
           onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { kind: value as ChatProviderKind }))}
         />
-      </label>
-      <label className="field compact-field">
-        <span>Model</span>
-        <input
+      </FormRow>
+      <FormRow label="Model">
+        <Input
           value={props.draft.model ?? ""}
           onChange={(event) => props.onChange({ ...props.draft, model: event.target.value })}
           placeholder="CLI default"
         />
-      </label>
-      <div className="field compact-field avatar-picker-field">
-        <span>Avatar</span>
+      </FormRow>
+      <FormRow label="Avatar" className="avatar-picker-field">
         <div className="avatar-choice-grid" role="radiogroup" aria-label="Participant avatar">
           {avatarOptions.map((option) => {
             const selected = option.id === avatarId;
@@ -2396,11 +2383,16 @@ function ChatParticipantDraftRow(props: {
             );
           })}
         </div>
-      </div>
+      </FormRow>
       {props.removable && (
-        <button className="icon-button chat-row-remove" title="Remove participant" onClick={props.onRemove}>
-          <X size={16} />
-        </button>
+        <IconButton
+          size="xs"
+          icon={X}
+          label="Remove participant"
+          tooltip="Remove participant"
+          onClick={props.onRemove}
+          className="chat-row-remove"
+        />
       )}
     </div>
   );
@@ -2596,10 +2588,10 @@ function ChatConversationView(props: {
                   onChange={props.onAddParticipantDraftChange}
                 />
                 {addValidation && <div className="inline-error">{addValidation}</div>}
-                <button className="secondary-button" disabled={Boolean(addValidation) || props.isRunning} onClick={props.onAddParticipant}>
+                <Button variant="outline" size="sm" disabled={Boolean(addValidation) || props.isRunning} onClick={props.onAddParticipant}>
                   <Plus size={16} />
                   Add participant
-                </button>
+                </Button>
               </div>
             </details>
           </div>
@@ -2727,7 +2719,7 @@ function ChatComposer(props: {
             ))}
           </div>
         )}
-        <AutoResizeTextarea
+        <ResizableTextarea
           value={props.draft}
           onChange={(event) => updateDraft(event.target.value)}
           onKeyDown={(event) => {
@@ -2761,9 +2753,9 @@ function ChatComposer(props: {
           placeholder={props.placeholder}
         />
       </div>
-      <button className="plan-correction-send" title="Send" disabled={!canSend} onClick={sendDraft}>
+      <Button size="sm" title="Send" disabled={!canSend} onClick={sendDraft}>
         {props.isRunning ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -2822,14 +2814,14 @@ function ChatMessageItem(props: {
   const threadActions = showThreadActions ? (
     <>
       {replyCount > 0 && (
-        <button className="chat-thread-link" onClick={props.onOpenThread}>
+        <Button variant="link" size="sm" onClick={props.onOpenThread}>
           <span>{replyCount} {replyCount === 1 ? "reply" : "replies"}</span>
           {props.latestReplyAt && <small>Last reply {formatChatReplyDate(props.latestReplyAt)}</small>}
-        </button>
+        </Button>
       )}
-      <button className="chat-reply-button" onClick={props.onOpenThread}>
+      <Button variant="link" size="sm" onClick={props.onOpenThread}>
         Reply
-      </button>
+      </Button>
     </>
   ) : null;
 
@@ -2862,10 +2854,10 @@ function ChatMessageItem(props: {
             <div className="chat-approval-note">
               <span>Approved: {approved.map((mention) => `@${mention.targetHandle}`).join(", ")}</span>
               {canContinueRequester && (
-                <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, [], true)}>
+                <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, [], true)}>
                   <RefreshCw size={15} />
                   Continue {author}
-                </button>
+                </Button>
               )}
             </div>
           )}
@@ -2873,27 +2865,27 @@ function ChatMessageItem(props: {
             <div className="chat-approval-box">
               <strong>Pending mentions: {pending.map((mention) => `@${mention.targetHandle}`).join(", ")}</strong>
               <div className="chat-approval-actions">
-                <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, continuationRequested)}>
+                <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, continuationRequested)}>
                   <CheckCircle2 size={16} />
                   {approvePendingLabel}
-                </button>
+                </Button>
                 {continuationRequested && (
-                  <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, false)}>
+                  <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, false)}>
                     Approve mentions
-                  </button>
+                  </Button>
                 )}
-                <button className="secondary-button" disabled={props.busy} onClick={() => props.onRejectMentions(message.id, allPendingIds)}>
+                <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onRejectMentions(message.id, allPendingIds)}>
                   Reject
-                </button>
+                </Button>
                 {pending.map((mention) => (
-                  <button
-                    className="secondary-button"
+                  <Button
+                    variant="outline" size="sm"
                     disabled={props.busy}
                     onClick={() => props.onApproveMentions(message.id, [mention.targetParticipantId], false)}
                     key={mention.targetParticipantId}
                   >
                     Ask @{mention.targetHandle}
-                  </button>
+                  </Button>
                 ))}
               </div>
             </div>
@@ -3045,7 +3037,7 @@ function ChatChoiceCard(props: {
             <strong>Your answer</strong>
             <small>required · sent verbatim to {requesterMention}</small>
           </span>
-          <textarea
+          <Textarea
             value={customAnswer}
             onChange={(event) => setCustomAnswer(event.target.value)}
             placeholder={'e.g. "Use session cookies for web, but issue short-lived JWTs to native clients"'}
@@ -3069,7 +3061,7 @@ function ChatChoiceCard(props: {
             <strong>Add a note</strong>
             <small>optional · {requesterMention} will see it alongside your pick</small>
           </span>
-          <textarea
+          <Textarea
             value={note}
             onChange={(event) => setNote(event.target.value)}
             placeholder={`Constraints, caveats, or follow-up questions for ${requesterMention}...`}
@@ -3087,9 +3079,9 @@ function ChatChoiceCard(props: {
           ) : (
             <span>Select one option to continue.</span>
           )}
-          <button className="chat-choice-submit" disabled={!canConfirm} onClick={confirmChoice}>
+          <Button size="sm" disabled={!canConfirm} onClick={confirmChoice}>
             {`Send to ${requesterMention}`}
-          </button>
+          </Button>
         </div>
       )}
     </section>
@@ -3120,9 +3112,7 @@ function ChatThreadPanel(props: {
           <span>{rootAuthor}</span>
         </div>
         <div className="thread-panel-actions">
-          <button className="icon-button" title="Close thread" onClick={props.onClose}>
-            <X size={17} />
-          </button>
+          <IconButton size="sm" icon={X} label="Close thread" tooltip="Close thread" onClick={props.onClose} />
         </div>
       </header>
       <div className="chat-thread-body">
@@ -3376,22 +3366,22 @@ function SlackView(props: {
                       : `${conversation.findings.length} points`}
               </span>
               {canRecoverPlan && (
-                <button className="run-button compact-run" disabled={isRunning} onClick={onRecoverPlan}>
+                <Button size="sm" disabled={isRunning} onClick={onRecoverPlan}>
                   {isRunning ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
                   {isRunning ? "Resuming..." : "Resume plan"}
-                </button>
+                </Button>
               )}
               {canRetryFinalPlan && (
-                <button className="run-button compact-run" disabled={isRunning} onClick={onRetryFinalPlan}>
+                <Button size="sm" disabled={isRunning} onClick={onRetryFinalPlan}>
                   {isRunning ? <RefreshCw size={17} className="spin" /> : <RefreshCw size={17} />}
                   {isRunning ? "Retrying..." : "Retry final plan"}
-                </button>
+                </Button>
               )}
               {pendingDecisions.length === 0 && isReviewingPlanItems && (
-                <button className="run-button compact-run" disabled={isRunning || !canComposePlan} onClick={onComposePlan}>
+                <Button size="sm" disabled={isRunning || !canComposePlan} onClick={onComposePlan}>
                   {isRunning ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
                   {isRunning ? "Composing..." : "Compose final plan"}
-                </button>
+                </Button>
               )}
             </div>
           </div>
@@ -3490,10 +3480,10 @@ function SlackView(props: {
                 </span>
                 <strong>{decisionActionTitle}</strong>
               </div>
-              <button className="run-button compact-run" disabled={isRunning || !hasAnyDecisionInput} onClick={onContinue}>
+              <Button size="sm" disabled={isRunning || !hasAnyDecisionInput} onClick={onContinue}>
                 {isRunning ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
                 {isRunning ? "Continuing..." : "Continue plan"}
-              </button>
+              </Button>
             </div>
           )}
           {showPlanFollowupComposer && (
@@ -3695,12 +3685,14 @@ function PointThread(props: {
         <div className="thread-panel-actions">
           <PointStatusBadge finding={finding} />
           {reviewRequired && <PlanItemReviewBadge review={review} />}
-          <button className="icon-button" title={focused ? "Show timeline" : "Expand thread"} onClick={focused ? onExitFocus : onFocus}>
-            {focused ? <Columns2 size={16} /> : <Maximize2 size={16} />}
-          </button>
-          <button className="icon-button" title="Close thread" onClick={onClose}>
-            <X size={17} />
-          </button>
+          <IconButton
+            size="sm"
+            icon={focused ? Columns2 : Maximize2}
+            label={focused ? "Show timeline" : "Expand thread"}
+            tooltip={focused ? "Show timeline" : "Expand thread"}
+            onClick={focused ? onExitFocus : onFocus}
+          />
+          <IconButton size="sm" icon={X} label="Close thread" tooltip="Close thread" onClick={onClose} />
         </div>
       </div>
 
@@ -3829,7 +3821,7 @@ function PlanItemReviewComposer(props: {
         />
       )}
       <div className="decision-compose plan-item-review-compose">
-        <AutoResizeTextarea
+        <ResizableTextarea
           value={draft}
           onChange={(event) => onDraftChange?.(event.target.value)}
           onKeyDown={(event) => {
@@ -3846,14 +3838,14 @@ function PlanItemReviewComposer(props: {
           disabled={busy}
         />
         <div className="plan-item-review-actions">
-          <button className="secondary-button" disabled={busy || !draft.trim()} onClick={onSubmitComment}>
+          <Button variant="outline" size="sm" disabled={busy || !draft.trim()} onClick={onSubmitComment}>
             <MessageSquare size={16} />
             Comment
-          </button>
-          <button className="secondary-button" disabled={busy || review?.status === "confirmed"} onClick={onConfirm}>
+          </Button>
+          <Button variant="outline" size="sm" disabled={busy || review?.status === "confirmed"} onClick={onConfirm}>
             <CheckCircle2 size={16} />
             Confirm
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -3876,7 +3868,7 @@ function PlanCorrectionComposer(props: {
     <div className={`plan-correction-composer ${busy ? "is-running" : ""}`} data-testid="plan-followup-composer">
       {status && <div className="plan-correction-status">{status}</div>}
       <div className="plan-correction-input-row">
-        <AutoResizeTextarea
+        <ResizableTextarea
           value={draft}
           onChange={(event) => onDraftChange(event.target.value)}
           onKeyDown={(event) => {
@@ -3892,9 +3884,9 @@ function PlanCorrectionComposer(props: {
           placeholder={placeholder}
           disabled={busy || disabled}
         />
-        <button className="plan-correction-send" title={disabledTitle} disabled={!canSubmit} onClick={onSubmit}>
+        <Button size="sm" title={disabledTitle} disabled={!canSubmit} onClick={onSubmit}>
           {busy ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -3958,12 +3950,14 @@ function DecisionThread(props: {
         </div>
         <div className="thread-panel-actions">
           <StatusBadge tone={hasThreadContext || readOnly ? "success" : "neutral"}>{statusLabel}</StatusBadge>
-          <button className="icon-button" title={focused ? "Show timeline" : "Expand thread"} onClick={focused ? onExitFocus : onFocus}>
-            {focused ? <Columns2 size={16} /> : <Maximize2 size={16} />}
-          </button>
-          <button className="icon-button" title="Close thread" onClick={onClose}>
-            <X size={17} />
-          </button>
+          <IconButton
+            size="sm"
+            icon={focused ? Columns2 : Maximize2}
+            label={focused ? "Show timeline" : "Expand thread"}
+            tooltip={focused ? "Show timeline" : "Expand thread"}
+            onClick={focused ? onExitFocus : onFocus}
+          />
+          <IconButton size="sm" icon={X} label="Close thread" tooltip="Close thread" onClick={onClose} />
         </div>
       </div>
 
@@ -4022,7 +4016,7 @@ function DecisionThread(props: {
 
       {!readOnly && (
         <div className="decision-compose">
-          <AutoResizeTextarea
+          <ResizableTextarea
             value={clarificationDraft}
             onChange={(event) => onDraftChange(event.target.value)}
             onKeyDown={(event) => {
@@ -4039,14 +4033,14 @@ function DecisionThread(props: {
             disabled={busy}
           />
           <div className="decision-compose-actions">
-            <button className="secondary-button" disabled={busy || !clarificationDraft.trim()} onClick={onAskClarification}>
+            <Button variant="outline" size="sm" disabled={busy || !clarificationDraft.trim()} onClick={onAskClarification}>
               {isAsking ? <RefreshCw size={16} className="spin" /> : <MessageSquare size={16} />}
               {isAsking ? "Sending..." : "Send"}
-            </button>
-            <button className="secondary-button resolve-button" disabled={busy || !canResolve} onClick={onResolve}>
+            </Button>
+            <Button variant="outline" size="sm" disabled={busy || !canResolve} onClick={onResolve}>
               <CheckCircle2 size={16} />
               Resolve
-            </button>
+            </Button>
           </div>
         </div>
       )}
