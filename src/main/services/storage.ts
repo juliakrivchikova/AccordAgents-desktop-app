@@ -68,13 +68,13 @@ export class StorageService {
 
   async getConversation(id: string): Promise<Conversation | undefined> {
     await this.init();
-    const rows = await this.queryJson<{ payloadJson: string }>(
-      `select payload_json as payloadJson from conversations where id = ${sqlString(id)} limit 1;`
+    const payloadJson = await this.queryText(
+      `select payload_json from conversations where id = ${sqlString(id)} limit 1;`
     );
-    if (rows.length === 0) {
+    if (!payloadJson) {
       return undefined;
     }
-    const conversation = JSON.parse(rows[0].payloadJson) as Conversation;
+    const conversation = JSON.parse(payloadJson) as Conversation;
     sanitizeConversationWarnings(conversation);
     return conversation;
   }
@@ -134,6 +134,11 @@ export class StorageService {
     const result = await runCommand("sqlite3", ["-json", this.dbPath, sql], { timeoutMs: 10_000 });
     const text = result.stdout.trim();
     return text ? (JSON.parse(text) as T[]) : [];
+  }
+
+  private async queryText(sql: string): Promise<string> {
+    const result = await runCommand("sqlite3", ["-batch", "-noheader", this.dbPath, sql], { timeoutMs: 10_000 });
+    return result.stdout.trim();
   }
 
   private async runSql(sql: string): Promise<void> {

@@ -546,8 +546,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
+  width: 52px;
+  height: 52px;
   padding: 3px;
   border: 1px solid var(--app-border-strong);
   border-radius: 8px;
@@ -570,8 +570,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 46px;
+  height: 46px;
   border-radius: 0;
   overflow: visible;
 }
@@ -594,7 +594,7 @@
 
 .saved-participant-option {
   display: grid;
-  grid-template-columns: 18px 32px minmax(120px, max-content) minmax(0, 1fr);
+  grid-template-columns: 18px 36px minmax(120px, max-content) minmax(0, 1fr);
   align-items: center;
   gap: 10px;
   min-height: 48px;
@@ -679,10 +679,10 @@
 }
 
 .mini-avatar {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  font-size: 11px;
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+  font-size: 12px;
 }
 
 .chat-header {
@@ -772,11 +772,11 @@
 
 .chat-participant-menu-list button {
   display: grid;
-  grid-template-columns: 28px minmax(120px, max-content) minmax(0, 1fr);
+  grid-template-columns: 36px minmax(120px, max-content) minmax(0, 1fr);
   align-items: center;
   gap: 10px;
   width: 100%;
-  min-height: 42px;
+  min-height: 48px;
   padding: 7px 8px;
   border-radius: 8px;
   background: transparent;
@@ -824,7 +824,7 @@
 }
 
 .message.chat-message {
-  grid-template-columns: 34px minmax(0, 1fr);
+  grid-template-columns: 42px minmax(0, 1fr);
   gap: 10px;
   margin-bottom: 12px;
   margin-left: 0;
@@ -835,10 +835,10 @@
 }
 
 .chat-message .message-avatar {
-  width: 34px;
-  height: 34px;
-  border-radius: 7px;
-  font-size: 11px;
+  width: 42px;
+  height: 42px;
+  border-radius: 9px;
+  font-size: 12px;
 }
 
 .chat-message.selected-thread-root .message-body {
@@ -1462,11 +1462,11 @@
 
 .mention-menu button {
   display: grid;
-  grid-template-columns: 28px minmax(120px, max-content) minmax(0, 1fr) auto;
+  grid-template-columns: 36px minmax(120px, max-content) minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   width: 100%;
-  min-height: 46px;
+  min-height: 50px;
   padding: 7px 10px;
   background: transparent;
   color: #20201d;
@@ -1505,7 +1505,7 @@
 
 .message {
   display: grid;
-  grid-template-columns: 42px 1fr;
+  grid-template-columns: 50px 1fr;
   gap: 12px;
   margin-bottom: 18px;
 }
@@ -1514,9 +1514,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 8px;
+  width: 50px;
+  height: 50px;
+  border-radius: 9px;
   background: #3d7d68;
   color: #ffffff;
   font-size: 12px;
@@ -1755,14 +1755,14 @@
 
 .thread-message {
   display: grid;
-  grid-template-columns: 36px 1fr;
+  grid-template-columns: 44px 1fr;
   gap: 10px;
   margin-bottom: 14px;
 }
 
 .thread-typing {
   display: grid;
-  grid-template-columns: 36px minmax(0, max-content);
+  grid-template-columns: 44px minmax(0, max-content);
   align-items: center;
   gap: 10px;
   margin-bottom: 14px;
@@ -1772,9 +1772,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
+  width: 44px;
+  height: 44px;
+  border-radius: 9px;
   background: #8c5e2f;
   color: #ffffff;
   font-size: 12px;
@@ -2063,17 +2063,17 @@
 
 .plan-source-support-row {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
+  grid-template-columns: 36px minmax(0, 1fr);
   align-items: center;
   gap: 9px;
   min-width: 0;
 }
 
 .support-avatar {
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
-  font-size: 10px;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  font-size: 12px;
 }
 
 .plan-source-support-row div {
@@ -2812,15 +2812,15 @@
 }
 
 .message {
-  grid-template-columns: 36px minmax(0, 1fr);
+  grid-template-columns: 44px minmax(0, 1fr);
   gap: 10px;
   margin-bottom: 14px;
 }
 
 .message-avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
+  width: 44px;
+  height: 44px;
+  border-radius: 9px;
 }
 
 .message-body,
@@ -3100,8 +3100,8 @@
 
 .avatar-custom .custom-avatar-image {
   display: block;
-  width: 96%;
-  height: 96%;
+  width: 100%;
+  height: 100%;
   margin: auto;
   border-radius: 0;
   object-fit: contain;
@@ -3310,4 +3310,18 @@
   background-color: var(--app-surface-active);
   background-image: linear-gradient(var(--app-surface-active), var(--app-surface-active));
   color: var(--app-text-strong);
+}
+
+.sidebar-history-item.is-loading {
+  border-color: var(--app-accent);
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--app-accent-soft) 72%, var(--app-surface)),
+      var(--app-surface-active)
+    );
+}
+
+.sidebar-history-item.is-loading .text-muted-foreground {
+  color: color-mix(in srgb, var(--app-accent) 74%, var(--app-text-strong));
 }

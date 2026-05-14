@@ -237,6 +237,12 @@ function isCli(kind: ProviderKind): boolean {
   return kind === "codex-cli" || kind === "claude-code";
 }
 
+function waitForNextFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => resolve());
+  });
+}
+
 function App(): JSX.Element {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [agents, setAgents] = useState<AgentHealth[]>([]);
@@ -267,10 +273,12 @@ function App(): JSX.Element {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [initializing, setInitializing] = useState(true);
   const [historyLoading, setHistoryLoading] = useState(true);
+  const [openingConversationId, setOpeningConversationId] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
   const [currentRunId, setCurrentRunId] = useState<string | undefined>();
   const [progressLog, setProgressLog] = useState<ReviewProgress[]>([]);
   const progressLogRef = useRef<ReviewProgress[]>([]);
+  const openConversationRequestRef = useRef(0);
   const [decisionAnswers, setDecisionAnswers] = useState<Record<string, string>>({});
   const [resolvedDecisionThreads, setResolvedDecisionThreads] = useState<Record<string, boolean>>({});
   const [clarificationDrafts, setClarificationDrafts] = useState<Record<string, string>>({});
@@ -398,9 +406,22 @@ function App(): JSX.Element {
   }
 
   async function openConversation(id: string): Promise<void> {
+    const requestId = openConversationRequestRef.current + 1;
+    openConversationRequestRef.current = requestId;
     setError(undefined);
+    if (conversation?.id === id) {
+      setOpeningConversationId(undefined);
+      setSettingsMenuOpen(false);
+      setActiveView("slack");
+      return;
+    }
+    setOpeningConversationId(id);
     try {
+      await waitForNextFrame();
       const next = await window.consensus.getConversation(id);
+      if (requestId !== openConversationRequestRef.current) {
+        return;
+      }
       const nextPendingDecisions = pendingPlanDecisions(next);
       const nextPendingItem = firstPendingPlanItemReview(next);
       setConversation(next);
@@ -420,7 +441,13 @@ function App(): JSX.Element {
       setSettingsMenuOpen(false);
       setActiveView("slack");
     } catch (caught) {
-      setError(errorText(caught));
+      if (requestId === openConversationRequestRef.current) {
+        setError(errorText(caught));
+      }
+    } finally {
+      if (requestId === openConversationRequestRef.current) {
+        setOpeningConversationId(undefined);
+      }
     }
   }
 
@@ -1447,7 +1474,12 @@ function App(): JSX.Element {
     }
   }
 
-  const hasResultContext = Boolean(conversation) || busy;
+  const openingConversation = openingConversationId ? summaries.find((summary) => summary.id === openingConversationId) : undefined;
+  const isOpeningConversation = Boolean(openingConversationId);
+  const openingConversationDescription = openingConversation
+    ? `${labelForKind(openingConversation.kind)} · ${openingConversation.title}`
+    : "Opening the selected conversation from history.";
+  const hasResultContext = Boolean(conversation) || busy || isOpeningConversation;
   const pendingDecisions = pendingPlanDecisions(conversation);
   const reviewablePlanItems = requiredPlanItemReviewFindings(conversation);
   const reviewedPlanItemCount = reviewablePlanItems.filter((finding) => planItemReviewForFinding(finding, planItemReviews(conversation))).length;
@@ -1456,7 +1488,7 @@ function App(): JSX.Element {
   const canRecoverPlan = canRecoverImplementationPlan(conversation, busy);
   const visibleDecisionAnswers = { ...pendingDecisionSelections(conversation), ...decisionAnswers };
   const visibleDecisionResolutions = { ...pendingDecisionResolutions(conversation), ...resolvedDecisionThreads };
-  const conversationKind = conversation?.kind ?? kind;
+  const conversationKind = conversation?.kind ?? openingConversation?.kind ?? kind;
   const visibleWarnings = warnings.map((warning) => displayNoticeText(warning)).filter(Boolean);
   const resultView: ResultView = activeView === "points" && conversationKind !== "implementation-plan" && conversationKind !== "chat" ? "points" : "slack";
   const hasPoints = Boolean(conversation && conversation.kind !== "chat" && conversation.metadata.running !== true && pendingDecisions.length === 0);
@@ -1557,6 +1589,7 @@ function App(): JSX.Element {
         <Sidebar
           conversations={summaries}
           activeId={conversation?.id}
+          pendingId={openingConversationId}
           busy={busy}
           loading={historyLoading}
           onSelect={(id) => void openConversation(id)}
@@ -1794,7 +1827,9 @@ function App(): JSX.Element {
 
             {hasResultContext && (
               <section className={`conversation-panel ${conversationKind === "chat" ? "chat-conversation-panel" : ""}`}>
-                {conversationKind === "chat" && conversation ? (
+                {isOpeningConversation ? (
+                  <AppLoadingState title="Loading chat" description={openingConversationDescription} />
+                ) : conversationKind === "chat" && conversation ? (
                   <ChatConversationView
                     conversation={conversation}
                     settings={settings}

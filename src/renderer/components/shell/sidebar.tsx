@@ -1,4 +1,4 @@
-import { Bot, MessageSquare } from "lucide-react";
+import { Bot, Loader2, MessageSquare } from "lucide-react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { HistoryLoadingState } from "@/renderer/components/loading-states";
@@ -10,6 +10,7 @@ import type { ConversationSummary } from "../../../shared/types";
 export interface SidebarProps {
   conversations: ConversationSummary[];
   activeId?: string;
+  pendingId?: string;
   busy?: boolean;
   loading?: boolean;
   onSelect: (id: string) => void;
@@ -19,6 +20,7 @@ export interface SidebarProps {
 export const Sidebar = ({
   conversations,
   activeId,
+  pendingId,
   busy,
   loading,
   onSelect,
@@ -68,23 +70,29 @@ export const Sidebar = ({
           </EmptyState>
         ) : (
           conversations.map((summary) => {
-            const selected = summary.id === activeId;
+            const pending = summary.id === pendingId;
+            const selected = summary.id === activeId || pending;
             return (
               <button
                 key={summary.id}
                 type="button"
                 onClick={() => onSelect(summary.id)}
                 data-selected={selected ? "true" : undefined}
+                aria-busy={pending ? "true" : undefined}
                 className={cn(
                   "sidebar-history-item group flex w-full min-w-0 max-w-full flex-col gap-0.5 overflow-hidden rounded-md px-2 py-1.5 text-left text-sm",
                   "border border-transparent transition-colors hover:bg-[var(--app-surface-hover)]",
                   selected && "is-selected text-[var(--app-text-strong)]",
+                  pending && "is-loading",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
                 )}
               >
-                <span className="w-full min-w-0 truncate text-[13px] leading-tight">{summary.title}</span>
+                <span className="flex w-full min-w-0 items-center gap-1.5 text-[13px] leading-tight">
+                  {pending && <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />}
+                  <span className="min-w-0 truncate">{summary.title}</span>
+                </span>
                 <span className="w-full min-w-0 truncate text-[11px] text-muted-foreground">
-                  {labelForKind(summary.kind)}
+                  {pending ? "Loading chat..." : labelForKind(summary.kind)}
                 </span>
               </button>
             );
