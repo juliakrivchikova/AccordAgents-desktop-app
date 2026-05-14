@@ -3713,11 +3713,14 @@ function VirtualSlackTimeline(props: {
   renderItem: (item: TimelineItem) => React.ReactNode;
 }): JSX.Element {
   const timelineRef = useRef<HTMLElement>(null);
+  const stickToBottomRef = useRef(true);
+  const previousLastRowIdRef = useRef<string | undefined>();
   const rows = useMemo<SlackTimelineRow[]>(() => {
     return props.hasOlderMessages || props.olderMessagesLoading
       ? [{ id: "load-older", type: "load-older" }, ...props.items]
       : props.items;
   }, [props.hasOlderMessages, props.items, props.olderMessagesLoading]);
+  const lastRowId = rows[rows.length - 1]?.id;
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => timelineRef.current,
@@ -3731,12 +3734,47 @@ function VirtualSlackTimeline(props: {
   });
   const virtualItems = virtualizer.getVirtualItems();
 
+  function scrollToBottom(): void {
+    if (rows.length === 0) {
+      return;
+    }
+    virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
+    const timeline = timelineRef.current;
+    if (timeline) {
+      timeline.scrollTop = timeline.scrollHeight;
+    }
+  }
+
+  function scheduleScrollToBottom(): void {
+    scrollToBottom();
+    window.requestAnimationFrame(() => {
+      scrollToBottom();
+      window.requestAnimationFrame(scrollToBottom);
+    });
+    window.setTimeout(scrollToBottom, 80);
+    window.setTimeout(scrollToBottom, 180);
+  }
+
   function handleScroll(): void {
     const timeline = timelineRef.current;
-    if (timeline && timeline.scrollTop < 96 && props.hasOlderMessages && !props.olderMessagesLoading) {
+    if (!timeline) {
+      return;
+    }
+    stickToBottomRef.current = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 96;
+    if (timeline.scrollTop < 96 && props.hasOlderMessages && !props.olderMessagesLoading) {
       props.onLoadOlderMessages();
     }
   }
+
+  useLayoutEffect(() => {
+    const previousLastRowId = previousLastRowIdRef.current;
+    previousLastRowIdRef.current = lastRowId;
+    const lastRowChanged = previousLastRowId !== lastRowId;
+    if (stickToBottomRef.current || lastRowChanged) {
+      scheduleScrollToBottom();
+      stickToBottomRef.current = true;
+    }
+  }, [lastRowId, rows.length, virtualizer]);
 
   return (
     <section className="slack-timeline virtual-timeline" aria-label="Consensus timeline" ref={timelineRef} onScroll={handleScroll}>
