@@ -1996,151 +1996,153 @@ function SettingsView(props: {
   const title = props.section === "providers" ? "Providers" : props.section === "roles" ? "Roles" : "Participants";
   return (
     <section className="settings-view">
-      <div className="settings-view-head">
-        <h1>{title}</h1>
-        <IconButton
-          size="sm"
-          icon={X}
-          label="Close settings"
-          tooltip="Close settings"
-          variant="outline"
-          onClick={props.onClose}
-        />
-      </div>
-      {props.section === "roles" && (
-        <section className="settings-section">
-          <div className="settings-section-head">
-            <h2>Chat roles</h2>
-            <span>{props.settings.chatRoleConfigs.length} roles</span>
-          </div>
-          <div className="role-config-list">
-            {props.settings.chatRoleConfigs.map((role) => (
-              <ChatRoleEditor role={role} onSave={props.saveChatRoleConfig} key={role.id} />
-            ))}
-            <ChatRoleEditor onSave={props.saveChatRoleConfig} key={`new-role-${props.settings.chatRoleConfigs.length}`} />
-          </div>
-        </section>
-      )}
-      {props.section === "participants" && (
-        <ParticipantSettingsSection
-          settings={props.settings}
-          agents={props.agents}
-          onSave={props.saveChatParticipantConfig}
-          onDelete={props.deleteChatParticipantConfig}
-        />
-      )}
-      {props.section === "providers" && (
-        <section className="settings-section">
-          <div className="settings-section-head">
-            <h2>Providers</h2>
-            <span>{props.settings.providers.length} providers</span>
-          </div>
-          <div className="settings-grid">
-            {props.settings.providers.map((provider) => {
-              const health = props.agents.find((agent) => agent.kind === provider.kind);
-              const models = props.providerModels[provider.kind] ?? [];
-              const isLoadingModels = Boolean(props.modelLoading[provider.kind]);
-              const modelError = props.modelErrors[provider.kind];
-              const hasDraftKey = Boolean(props.apiKeyDrafts[provider.kind]?.trim());
-              return (
-                <div className="settings-item" key={provider.kind}>
-                  <div className="settings-item-head">
-                    <div>
-                      <strong>{provider.label}</strong>
-                      <small>{isCli(provider.kind) ? healthLine(health) : provider.hasApiKey ? "API key saved" : "No API key saved"}</small>
+      <div className="settings-view-inner">
+        <div className="settings-view-head">
+          <h1>{title}</h1>
+          <IconButton
+            size="sm"
+            icon={X}
+            label="Close settings"
+            tooltip="Close settings"
+            variant="outline"
+            onClick={props.onClose}
+          />
+        </div>
+        {props.section === "roles" && (
+          <section className="settings-section">
+            <div className="settings-section-head">
+              <h2>Chat roles</h2>
+              <span>{props.settings.chatRoleConfigs.length} roles</span>
+            </div>
+            <div className="role-config-list">
+              {props.settings.chatRoleConfigs.map((role) => (
+                <ChatRoleEditor role={role} onSave={props.saveChatRoleConfig} key={role.id} />
+              ))}
+              <ChatRoleEditor onSave={props.saveChatRoleConfig} key={`new-role-${props.settings.chatRoleConfigs.length}`} />
+            </div>
+          </section>
+        )}
+        {props.section === "participants" && (
+          <ParticipantSettingsSection
+            settings={props.settings}
+            agents={props.agents}
+            onSave={props.saveChatParticipantConfig}
+            onDelete={props.deleteChatParticipantConfig}
+          />
+        )}
+        {props.section === "providers" && (
+          <section className="settings-section">
+            <div className="settings-section-head">
+              <h2>Providers</h2>
+              <span>{props.settings.providers.length} providers</span>
+            </div>
+            <div className="settings-grid">
+              {props.settings.providers.map((provider) => {
+                const health = props.agents.find((agent) => agent.kind === provider.kind);
+                const models = props.providerModels[provider.kind] ?? [];
+                const isLoadingModels = Boolean(props.modelLoading[provider.kind]);
+                const modelError = props.modelErrors[provider.kind];
+                const hasDraftKey = Boolean(props.apiKeyDrafts[provider.kind]?.trim());
+                return (
+                  <div className="settings-item" key={provider.kind}>
+                    <div className="settings-item-head">
+                      <div>
+                        <strong>{provider.label}</strong>
+                        <small>{isCli(provider.kind) ? healthLine(health) : provider.hasApiKey ? "API key saved" : "No API key saved"}</small>
+                      </div>
+                      <label className="toggle">
+                        <input
+                          type="checkbox"
+                          checked={provider.enabled}
+                          onChange={(event) => void props.updateProvider(provider, { enabled: event.target.checked })}
+                        />
+                        <span />
+                      </label>
                     </div>
-                    <label className="toggle">
-                      <input
-                        type="checkbox"
-                        checked={provider.enabled}
-                        onChange={(event) => void props.updateProvider(provider, { enabled: event.target.checked })}
-                      />
-                      <span />
-                    </label>
-                  </div>
 
-                  {!isCli(provider.kind) && (
-                    <>
-                      <div className="flex items-end gap-2">
-                        <FormRow label="Model" className="flex-1">
-                          {models.length > 0 ? (
-                            <AppSelect
-                              value={provider.model && models.some((model) => model.id === provider.model) ? provider.model : "__custom__"}
-                              placeholder="Select model"
-                              ariaLabel={`${provider.label} model`}
-                              testId={`${provider.kind}-model-select`}
-                              options={[
-                                ...models.map((model) => ({ value: model.id, label: model.label })),
-                                { value: "__custom__", label: "Custom model ID..." }
-                              ]}
-                              onValueChange={(value) => {
-                                if (value !== "__custom__") {
-                                  void props.updateProvider(provider, { model: value });
-                                }
-                              }}
-                            />
-                          ) : (
+                    {!isCli(provider.kind) && (
+                      <>
+                        <div className="flex items-end gap-2">
+                          <FormRow label="Model" className="flex-1">
+                            {models.length > 0 ? (
+                              <AppSelect
+                                value={provider.model && models.some((model) => model.id === provider.model) ? provider.model : "__custom__"}
+                                placeholder="Select model"
+                                ariaLabel={`${provider.label} model`}
+                                testId={`${provider.kind}-model-select`}
+                                options={[
+                                  ...models.map((model) => ({ value: model.id, label: model.label })),
+                                  { value: "__custom__", label: "Custom model ID..." }
+                                ]}
+                                onValueChange={(value) => {
+                                  if (value !== "__custom__") {
+                                    void props.updateProvider(provider, { model: value });
+                                  }
+                                }}
+                              />
+                            ) : (
+                              <Input
+                                value={provider.model ?? ""}
+                                onChange={(event) => void props.updateProvider(provider, { model: event.target.value })}
+                                placeholder={provider.hasApiKey ? "Fetch models or enter a custom model id" : "Save an API key first"}
+                              />
+                            )}
+                          </FormRow>
+                          <IconButton
+                            size="sm"
+                            icon={RefreshCw}
+                            iconClassName={isLoadingModels ? "animate-spin" : undefined}
+                            label="Fetch available models"
+                            tooltip="Fetch available models"
+                            variant="outline"
+                            disabled={!provider.hasApiKey || isLoadingModels}
+                            onClick={() => void props.refreshProviderModels(provider.kind)}
+                          />
+                        </div>
+                        {models.length > 0 && !models.some((model) => model.id === provider.model) && (
+                          <FormRow label="Custom model ID">
                             <Input
                               value={provider.model ?? ""}
                               onChange={(event) => void props.updateProvider(provider, { model: event.target.value })}
-                              placeholder={provider.hasApiKey ? "Fetch models or enter a custom model id" : "Save an API key first"}
                             />
-                          )}
-                        </FormRow>
-                        <IconButton
-                          size="sm"
-                          icon={RefreshCw}
-                          iconClassName={isLoadingModels ? "animate-spin" : undefined}
-                          label="Fetch available models"
-                          tooltip="Fetch available models"
-                          variant="outline"
-                          disabled={!provider.hasApiKey || isLoadingModels}
-                          onClick={() => void props.refreshProviderModels(provider.kind)}
-                        />
-                      </div>
-                      {models.length > 0 && !models.some((model) => model.id === provider.model) && (
-                        <FormRow label="Custom model ID">
-                          <Input
-                            value={provider.model ?? ""}
-                            onChange={(event) => void props.updateProvider(provider, { model: event.target.value })}
-                          />
-                        </FormRow>
-                      )}
-                      {modelError && <div className="inline-error">{modelError}</div>}
-                      <div className="flex items-end gap-2">
-                        <FormRow label="API key" className="flex-1">
-                          <Input
-                            type="password"
-                            value={props.apiKeyDrafts[provider.kind] ?? ""}
-                            onChange={(event) =>
-                              props.setApiKeyDrafts((current) => ({ ...current, [provider.kind]: event.target.value }))
-                            }
-                          />
-                        </FormRow>
-                        <Button
-                          size="sm"
-                          title="Save API key"
-                          disabled={!hasDraftKey}
-                          onClick={() => void props.updateProvider(provider, { apiKey: props.apiKeyDrafts[provider.kind] ?? "" })}
-                        >
-                          <KeyRound aria-hidden />
-                          Save key
-                        </Button>
-                      </div>
-                      {hasDraftKey && <div className="inline-warning">Unsaved API key entered.</div>}
-                      {provider.hasApiKey && (
-                        <Button variant="outline" size="sm" onClick={() => void props.updateProvider(provider, { clearApiKey: true })}>
-                          Clear saved key
-                        </Button>
-                      )}
-                    </>
-                  )}
-                </div>
-              );
-            })}
+                          </FormRow>
+                        )}
+                        {modelError && <div className="inline-error">{modelError}</div>}
+                        <div className="flex items-end gap-2">
+                          <FormRow label="API key" className="flex-1">
+                            <Input
+                              type="password"
+                              value={props.apiKeyDrafts[provider.kind] ?? ""}
+                              onChange={(event) =>
+                                props.setApiKeyDrafts((current) => ({ ...current, [provider.kind]: event.target.value }))
+                              }
+                            />
+                          </FormRow>
+                          <Button
+                            size="sm"
+                            title="Save API key"
+                            disabled={!hasDraftKey}
+                            onClick={() => void props.updateProvider(provider, { apiKey: props.apiKeyDrafts[provider.kind] ?? "" })}
+                          >
+                            <KeyRound aria-hidden />
+                            Save key
+                          </Button>
+                        </div>
+                        {hasDraftKey && <div className="inline-warning">Unsaved API key entered.</div>}
+                        {provider.hasApiKey && (
+                          <Button variant="outline" size="sm" onClick={() => void props.updateProvider(provider, { clearApiKey: true })}>
+                            Clear saved key
+                          </Button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })}
             </div>
-        </section>
-      )}
+          </section>
+        )}
+      </div>
     </section>
   );
 }
