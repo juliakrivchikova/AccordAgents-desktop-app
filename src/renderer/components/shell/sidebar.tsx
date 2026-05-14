@@ -58,8 +58,8 @@ export const Sidebar = ({
       History
     </div>
 
-    <ScrollArea className="flex-1 px-2 pb-2">
-      <div className="flex flex-col gap-0.5">
+    <ScrollArea className="min-w-0 flex-1 px-2 pb-2">
+      <div className="flex min-w-0 flex-col gap-0.5">
         {loading ? (
           <HistoryLoadingState />
         ) : conversations.length === 0 ? (
@@ -67,25 +67,28 @@ export const Sidebar = ({
             <EmptyState.Body>No conversations yet</EmptyState.Body>
           </EmptyState>
         ) : (
-          conversations.map((summary) => (
-            <button
-              key={summary.id}
-              type="button"
-              onClick={() => onSelect(summary.id)}
-              data-selected={summary.id === activeId ? "true" : undefined}
-              className={cn(
-                "group flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left text-sm",
-                "border border-transparent transition-colors hover:bg-[var(--app-surface-hover)]",
-                "data-[selected=true]:border-[var(--app-accent-border)] data-[selected=true]:bg-[var(--app-surface-active)] data-[selected=true]:text-[var(--app-text-strong)]",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-              )}
-            >
-              <span className="truncate text-[13px] leading-tight">{summary.title}</span>
-              <span className="text-[11px] text-muted-foreground">
-                {labelForKind(summary.kind)}
-              </span>
-            </button>
-          ))
+          conversations.map((summary) => {
+            const selected = summary.id === activeId;
+            return (
+              <button
+                key={summary.id}
+                type="button"
+                onClick={() => onSelect(summary.id)}
+                data-selected={selected ? "true" : undefined}
+                className={cn(
+                  "sidebar-history-item group flex w-full min-w-0 max-w-full flex-col gap-0.5 overflow-hidden rounded-md px-2 py-1.5 text-left text-sm",
+                  "border border-transparent transition-colors hover:bg-[var(--app-surface-hover)]",
+                  selected && "is-selected text-[var(--app-text-strong)]",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                )}
+              >
+                <span className="w-full min-w-0 truncate text-[13px] leading-tight">{summary.title}</span>
+                <span className="w-full min-w-0 truncate text-[11px] text-muted-foreground">
+                  {labelForKind(summary.kind)}
+                </span>
+              </button>
+            );
+          })
         )}
       </div>
     </ScrollArea>

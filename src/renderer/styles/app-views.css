@@ -2238,9 +2238,21 @@
   overflow: auto;
 }
 
+.settings-view-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 18px;
+}
+
 .settings-view h1 {
   margin: 0 0 18px;
   font-size: 24px;
+}
+
+.settings-view-head h1 {
+  margin: 0;
 }
 
 .settings-grid {
@@ -2737,6 +2749,10 @@
   color: var(--app-text);
 }
 
+.participant-pill small {
+  color: var(--app-muted);
+}
+
 .icon-button:hover,
 .participant-pill:hover {
   background: var(--app-surface-hover);
@@ -2746,6 +2762,14 @@
 .decision-option.selected {
   border-color: var(--app-accent);
   background: var(--app-accent-soft);
+}
+
+.participant-pill.selected {
+  color: var(--accent-foreground);
+}
+
+.participant-pill.selected small {
+  color: var(--accent-foreground);
 }
 
 .slack-timeline,
@@ -3003,6 +3027,20 @@
 .saved-participant-option {
   border-color: var(--app-border);
   background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.saved-participant-option strong {
+  color: var(--app-text-strong);
+}
+
+.saved-participant-option span,
+.saved-participant-option small {
+  color: var(--app-muted);
+}
+
+.saved-participant-option input {
+  accent-color: var(--app-accent);
 }
 
 .saved-participant-option.selected,
@@ -3010,6 +3048,15 @@
   border-color: var(--app-accent);
   background: var(--app-accent-soft);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 12%, transparent);
+}
+
+.saved-participant-option.selected strong {
+  color: var(--accent-foreground);
+}
+
+.saved-participant-option.selected span,
+.saved-participant-option.selected small {
+  color: color-mix(in srgb, var(--accent-foreground) 74%, var(--app-muted));
 }
 
 .avatar-codex,
@@ -3209,4 +3256,11 @@
 .chat-choice-text-panel textarea:focus {
   border-color: var(--app-accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 16%, transparent);
+}
+
+.sidebar-history-item.is-selected {
+  border-color: var(--app-accent-border);
+  background-color: var(--app-surface-active);
+  background-image: linear-gradient(var(--app-surface-active), var(--app-surface-active));
+  color: var(--app-text-strong);
 }

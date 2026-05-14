@@ -234,6 +234,7 @@ function App(): JSX.Element {
   const [conversation, setConversation] = useState<Conversation | undefined>();
   const [activeView, setActiveView] = useState<ActiveView>("slack");
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("providers");
+  const [settingsReturnView, setSettingsReturnView] = useState<ResultView>("slack");
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>();
   const [focusedThreadId, setFocusedThreadId] = useState<string | undefined>();
@@ -1470,6 +1471,17 @@ function App(): JSX.Element {
       onValueChange={setActiveView}
     />
   ) : null;
+  const openSettingsSection = (section: SettingsSection): void => {
+    if (activeView !== "settings") {
+      setSettingsReturnView(activeView === "points" ? "points" : "slack");
+    }
+    setActiveSettingsSection(section);
+    setActiveView("settings");
+    setSettingsMenuOpen(false);
+  };
+  const closeSettings = (): void => {
+    setActiveView(settingsReturnView === "points" && !hasPoints ? "slack" : settingsReturnView);
+  };
 
   const topBarActions = (
     <>
@@ -1497,9 +1509,7 @@ function App(): JSX.Element {
           <DropdownMenuGroup>
             <DropdownMenuItem
               onClick={() => {
-                setActiveSettingsSection("providers");
-                setActiveView("settings");
-                setSettingsMenuOpen(false);
+                openSettingsSection("providers");
               }}
             >
               <KeyRound aria-hidden />
@@ -1507,9 +1517,7 @@ function App(): JSX.Element {
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => {
-                setActiveSettingsSection("roles");
-                setActiveView("settings");
-                setSettingsMenuOpen(false);
+                openSettingsSection("roles");
               }}
             >
               <Circle aria-hidden />
@@ -1517,9 +1525,7 @@ function App(): JSX.Element {
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => {
-                setActiveSettingsSection("participants");
-                setActiveView("settings");
-                setSettingsMenuOpen(false);
+                openSettingsSection("participants");
               }}
             >
               <Users aria-hidden />
@@ -1578,6 +1584,7 @@ function App(): JSX.Element {
             saveChatRoleConfig={saveChatRoleConfig}
             saveChatParticipantConfig={saveChatParticipantConfig}
             deleteChatParticipantConfig={deleteChatParticipantConfig}
+            onClose={closeSettings}
           />
         ) : initializing ? (
           <div className="content-area compose-layout">
@@ -1607,9 +1614,7 @@ function App(): JSX.Element {
                   onSelectRepo={() => void selectRepo()}
                   onSelectedParticipantIdsChange={setSelectedChatParticipantConfigIds}
                   onOpenParticipantsSettings={() => {
-                    setActiveSettingsSection("participants");
-                    setActiveView("settings");
-                    setSettingsMenuOpen(false);
+                    openSettingsSection("participants");
                   }}
                   onStart={() => void startChat()}
                 />
@@ -1880,11 +1885,22 @@ function SettingsView(props: {
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => Promise<void>;
   saveChatParticipantConfig: (update: ChatParticipantConfigUpdate) => Promise<void>;
   deleteChatParticipantConfig: (id: string) => Promise<void>;
+  onClose: () => void;
 }): JSX.Element {
   const title = props.section === "providers" ? "Providers" : props.section === "roles" ? "Roles" : "Participants";
   return (
     <section className="settings-view">
-      <h1>{title}</h1>
+      <div className="settings-view-head">
+        <h1>{title}</h1>
+        <IconButton
+          size="sm"
+          icon={X}
+          label="Close settings"
+          tooltip="Close settings"
+          variant="outline"
+          onClick={props.onClose}
+        />
+      </div>
       {props.section === "roles" && (
         <section className="settings-section">
           <div className="settings-section-head">
