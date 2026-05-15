@@ -4,6 +4,8 @@
 
 This is an Electron desktop app built with TypeScript, React, and Vite. Main-process code lives in `src/main`, with service classes under `src/main/services`. The preload bridge is in `src/preload`, shared types and utilities are in `src/shared`, and the React renderer is in `src/renderer`. Renderer assets belong in `src/renderer/assets`, and app-wide styles are in `src/renderer/styles/app.css`. Build output goes to `dist`; do not edit generated files by hand.
 
+For chat role presets, saved participants, and runtime participant sessions, read `docs/chat-roles-and-participants.md` before changing role or participant behavior.
+
 ## Build, Test, and Development Commands
 
 Prefer the Makefile aliases when working locally:
