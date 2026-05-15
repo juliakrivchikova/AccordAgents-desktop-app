@@ -1,0 +1,163 @@
+.app-loading-state {
+  display: grid;
+  min-height: 100%;
+  place-items: center;
+  padding: 24px;
+  background: var(--app-bg);
+}
+
+.app-loading-state__panel {
+  display: grid;
+  width: min(100%, 420px);
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--app-border);
+  border-radius: calc(var(--radius) + 4px);
+  background: var(--app-surface);
+  box-shadow: 0 14px 36px color-mix(in srgb, #000 8%, transparent);
+}
+
+.loading-state-icon {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius);
+  background: var(--app-surface-subtle);
+  color: var(--app-text-strong);
+}
+
+.loading-state-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.app-loading-state .loading-state-icon svg {
+  animation: loading-state-spin 900ms linear infinite;
+}
+
+.app-loading-state__copy {
+  display: grid;
+  gap: 4px;
+}
+
+.app-loading-state__copy h2,
+.chart-loading-state__header h2 {
+  margin: 0;
+  color: var(--app-text-strong);
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.app-loading-state__copy p,
+.chart-loading-state__header p {
+  margin: 0;
+  color: var(--app-muted);
+  font-size: 13px;
+  line-height: 1.42;
+}
+
+.app-loading-state__skeleton,
+.chart-loading-state__rows {
+  display: grid;
+  gap: 8px;
+}
+
+.history-loading-state {
+  display: grid;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.history-loading-state__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 2px 5px;
+  color: var(--app-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.history-loading-state__label svg {
+  width: 13px;
+  height: 13px;
+}
+
+.history-loading-state__row {
+  display: grid;
+  gap: 7px;
+  padding: 9px 8px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--app-surface) 58%, transparent);
+}
+
+.chart-loading-state {
+  display: grid;
+  width: min(100%, 760px);
+  gap: 18px;
+  margin: 0 auto;
+  padding: 22px;
+  border: 1px solid var(--app-border);
+  border-radius: calc(var(--radius) + 4px);
+  background: var(--app-surface);
+}
+
+.chart-loading-state__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.chart-loading-state__bars {
+  display: grid;
+  height: 160px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: end;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius);
+  background: var(--app-surface-subtle);
+}
+
+.chart-loading-state__bars span {
+  height: var(--bar-height);
+  min-height: 28px;
+  border-radius: 6px 6px 3px 3px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--app-accent) 38%, #ffffff), var(--app-accent));
+  opacity: 0.72;
+  animation: loading-state-pulse 1.25s ease-in-out infinite;
+}
+
+.chart-loading-state__bars span:nth-child(2) {
+  animation-delay: 120ms;
+}
+
+.chart-loading-state__bars span:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+.chart-loading-state__bars span:nth-child(4) {
+  animation-delay: 360ms;
+}
+
+@keyframes loading-state-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes loading-state-pulse {
+  0%,
+  100% {
+    opacity: 0.44;
+  }
+
+  50% {
+    opacity: 0.85;
+  }
+}

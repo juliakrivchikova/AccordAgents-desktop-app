@@ -6,6 +6,7 @@ import type {
   ChatRoleConfigUpdate,
   ComposeImplementationPlanRequest,
   ContinueReviewRequest,
+  ConversationMessagePageRequest,
   Conversation,
   CreateChatConversationRequest,
   GitDiffRequest,
@@ -36,6 +37,8 @@ const bridge: AppBridge = {
   getDiff: (request: GitDiffRequest) => ipcRenderer.invoke("git:get-diff", request),
   listConversations: () => ipcRenderer.invoke("conversations:list"),
   getConversation: (id: string) => ipcRenderer.invoke("conversations:get", id),
+  openConversation: (id: string, limit?: number) => ipcRenderer.invoke("conversations:open", id, limit),
+  listConversationMessages: (request: ConversationMessagePageRequest) => ipcRenderer.invoke("conversations:list-messages", request),
   saveDecisionSelections: (conversationId: string, selections: Record<string, string>) =>
     ipcRenderer.invoke("conversations:save-decision-selections", conversationId, selections),
   saveDecisionResolutions: (conversationId: string, resolutions: Record<string, boolean>) =>

@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   AlertTriangle,
   Bot,
@@ -8,7 +9,6 @@ import {
   Columns2,
   Copy,
   FolderOpen,
-  GitPullRequest,
   HelpCircle,
   KeyRound,
   ListChecks,
@@ -24,6 +24,37 @@ import {
   X,
   XCircle
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from "@/components/ui/dropdown-menu";
+import {
+  Select as UiSelect,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from "@/components/ui/select";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { Toaster } from "@/components/ui/sonner";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Card } from "@/components/ui/card";
 import type {
   AgentHealth,
   AppSettings,
@@ -31,11 +62,14 @@ import type {
   ChatParticipant,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
+  ChatMessage,
   ChatPendingChoice,
   ChatProviderKind,
   ChatRoleConfig,
   ChatRoleConfigUpdate,
   Conversation,
+  ConversationMessagePage,
+  ConversationMessagePageInfo,
   ConversationKind,
   ConversationSummary,
   Finding,
@@ -54,6 +88,23 @@ import type {
   ReviewProgress
 } from "../shared/types";
 import { DEFAULT_NOTICE_CHARS, sanitizeWarningText } from "../shared/warnings";
+import { ModeToggle } from "./components/mode-toggle";
+import { ThemeProvider } from "./components/theme-provider";
+import { DiffModeTabs } from "./components/diff-mode-tabs";
+import { AppLoadingState, ChartLoadingState } from "./components/loading-states";
+import { SegmentedTabs, type SegmentedTabItem } from "./components/segmented-tabs";
+import { SessionModeTabs } from "./components/session-mode-tabs";
+import { AppShell, Sidebar, TopBar } from "./components/shell";
+import {
+  FormRow,
+  IconButton,
+  LoadingDot,
+  Notice,
+  ResizableTextarea,
+  SeverityBadge,
+  StatusBadge,
+  type StatusBadgeTone
+} from "./components/primitives";
 import "./styles/app.css";
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -62,15 +113,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   chatRoleConfigs: [],
   chatParticipantConfigs: []
 };
-
-const DIFF_MODES: Array<{ value: GitDiffMode; label: string }> = [
-  { value: "uncommitted", label: "Uncommitted" },
-  { value: "working", label: "Unstaged" },
-  { value: "staged", label: "Staged" },
-  { value: "base", label: "Branches" },
-  { value: "commit", label: "Commit" },
-  { value: "pasted", label: "Pasted diff" }
-];
+const CONVERSATION_MESSAGE_PAGE_SIZE = 80;
 
 interface ChatThinkingRow {
   key: string;
@@ -81,6 +124,11 @@ interface ChatThinkingRow {
   updatedAt: string;
 }
 
+type ChatTimelineRow =
+  | { type: "load-older"; id: string }
+  | { type: "message"; id: string; message: ChatMessage }
+  | { type: "thinking"; id: string; row: ChatThinkingRow };
+
 const BRANCH_COMPARE_HELP = "Changes committed on the compare branch since it diverged from the base branch.";
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 
@@ -90,7 +138,7 @@ const MAX_NOTICE_CHARS = DEFAULT_NOTICE_CHARS;
 const JUDGE_FLATICON_URL = new URL("./assets/judge-flaticon-5452982.png", import.meta.url).href;
 // Provider avatars by LobeHub Icons, MIT: https://lobehub.com/icons
 const CLAUDE_AVATAR_URL = new URL("./assets/claude-avatar.webp", import.meta.url).href;
-const CODEX_AVATAR_URL = new URL("./assets/codex-avatar.webp", import.meta.url).href;
+const CODEX_AVATAR_URL = new URL("./assets/codex-cli.svg", import.meta.url).href;
 const CHAT_AVATAR_URLS = {
   "codex-human": new URL("./assets/participant-codex-human.png", import.meta.url).href,
   "codex-bunny": new URL("./assets/participant-codex-bunny.png", import.meta.url).href,
@@ -107,6 +155,7 @@ const CHAT_AVATAR_URLS = {
 } as const;
 
 type ActiveView = "slack" | "points" | "settings";
+type ResultView = "slack" | "points";
 type SettingsSection = "providers" | "roles" | "participants";
 type AvatarKind = "user" | "arbiter" | "anthropic" | "codex" | "gemini" | "generic" | "custom";
 type ChatAvatarId = keyof typeof CHAT_AVATAR_URLS;
@@ -131,6 +180,45 @@ interface ChatAvatarOption {
   kind: ChatProviderKind;
   label: string;
   imageUrl: string;
+}
+
+interface AppSelectOption {
+  value: string;
+  label: string;
+  disabled?: boolean;
+}
+
+function AppSelect(props: {
+  value: string;
+  options: AppSelectOption[];
+  placeholder: string;
+  disabled?: boolean;
+  className?: string;
+  ariaLabel?: string;
+  testId?: string;
+  onValueChange: (value: string) => void;
+}): JSX.Element {
+  const selectedValue = props.value || undefined;
+  return (
+    <UiSelect
+      value={selectedValue}
+      disabled={props.disabled}
+      onValueChange={props.onValueChange}
+    >
+      <SelectTrigger className={`app-select-trigger ${props.className ?? ""}`} aria-label={props.ariaLabel ?? props.placeholder} data-testid={props.testId}>
+        <SelectValue placeholder={props.placeholder} />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectGroup>
+          {props.options.map((option) => (
+            <SelectItem value={option.value} disabled={option.disabled} key={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </UiSelect>
+  );
 }
 
 const CHAT_AVATAR_OPTIONS: ChatAvatarOption[] = [
@@ -159,13 +247,22 @@ function isCli(kind: ProviderKind): boolean {
   return kind === "codex-cli" || kind === "claude-code";
 }
 
+function waitForNextFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => resolve());
+  });
+}
+
 function App(): JSX.Element {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [agents, setAgents] = useState<AgentHealth[]>([]);
   const [summaries, setSummaries] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<Conversation | undefined>();
+  const [messagePage, setMessagePage] = useState<ConversationMessagePageInfo | undefined>();
+  const [olderMessagesLoading, setOlderMessagesLoading] = useState(false);
   const [activeView, setActiveView] = useState<ActiveView>("slack");
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("providers");
+  const [settingsReturnView, setSettingsReturnView] = useState<ResultView>("slack");
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>();
   const [focusedThreadId, setFocusedThreadId] = useState<string | undefined>();
@@ -186,10 +283,14 @@ function App(): JSX.Element {
   const [modelLoading, setModelLoading] = useState<Record<string, boolean>>({});
   const [modelErrors, setModelErrors] = useState<Record<string, string | undefined>>({});
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [initializing, setInitializing] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [openingConversationId, setOpeningConversationId] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
   const [currentRunId, setCurrentRunId] = useState<string | undefined>();
   const [progressLog, setProgressLog] = useState<ReviewProgress[]>([]);
   const progressLogRef = useRef<ReviewProgress[]>([]);
+  const openConversationRequestRef = useRef(0);
   const [decisionAnswers, setDecisionAnswers] = useState<Record<string, string>>({});
   const [resolvedDecisionThreads, setResolvedDecisionThreads] = useState<Record<string, boolean>>({});
   const [clarificationDrafts, setClarificationDrafts] = useState<Record<string, string>>({});
@@ -223,10 +324,19 @@ function App(): JSX.Element {
         }
         setSelectedThreadId((selected) => (selected && !threadExistsInConversation(updated, selected) ? undefined : selected));
         setFocusedThreadId((focused) => (focused && !threadExistsInConversation(updated, focused) ? undefined : focused));
-        return mergeProgressIntoConversation(updated, progressLogRef.current.filter((item) => item.runId === conversationRunId(updated)));
+        const merged = mergeProgressIntoConversation(updated, progressLogRef.current.filter((item) => item.runId === conversationRunId(updated)));
+        setMessagePage(fullConversationMessagePageInfo(merged));
+        return merged;
       });
     });
   }, [currentRunId]);
+
+  useEffect(() => {
+    if (!conversation || !messagePage?.hasMoreBefore || conversation.messages.length < messagePage.totalMessages) {
+      return;
+    }
+    setMessagePage(fullConversationMessagePageInfo(conversation));
+  }, [conversation?.id, conversation?.messages.length, messagePage?.hasMoreBefore, messagePage?.totalMessages]);
 
   useEffect(() => {
     setSelectedParticipants(new Set(settings.providers.filter((provider) => provider.enabled).map(providerId)));
@@ -292,6 +402,7 @@ function App(): JSX.Element {
 
   async function refreshAll(): Promise<void> {
     setError(undefined);
+    setHistoryLoading(true);
     try {
       const [nextSettings, nextAgents, nextSummaries] = await Promise.all([
         window.consensus.getSettings(),
@@ -309,16 +420,34 @@ function App(): JSX.Element {
       }
     } catch (caught) {
       setError(errorText(caught));
+    } finally {
+      setInitializing(false);
+      setHistoryLoading(false);
     }
   }
 
   async function openConversation(id: string): Promise<void> {
+    const requestId = openConversationRequestRef.current + 1;
+    openConversationRequestRef.current = requestId;
     setError(undefined);
+    if (conversation?.id === id) {
+      setOpeningConversationId(undefined);
+      setSettingsMenuOpen(false);
+      setActiveView("slack");
+      return;
+    }
+    setOpeningConversationId(id);
     try {
-      const next = await window.consensus.getConversation(id);
+      await waitForNextFrame();
+      const result = await window.consensus.openConversation(id, CONVERSATION_MESSAGE_PAGE_SIZE);
+      if (requestId !== openConversationRequestRef.current) {
+        return;
+      }
+      const next = result?.conversation;
       const nextPendingDecisions = pendingPlanDecisions(next);
       const nextPendingItem = firstPendingPlanItemReview(next);
       setConversation(next);
+      setMessagePage(result?.messagePage);
       if (next) {
         setKind(next.kind);
       }
@@ -335,7 +464,43 @@ function App(): JSX.Element {
       setSettingsMenuOpen(false);
       setActiveView("slack");
     } catch (caught) {
+      if (requestId === openConversationRequestRef.current) {
+        setError(errorText(caught));
+      }
+    } finally {
+      if (requestId === openConversationRequestRef.current) {
+        setOpeningConversationId(undefined);
+      }
+    }
+  }
+
+  async function loadOlderConversationMessages(): Promise<void> {
+    if (!conversation || !messagePage?.hasMoreBefore || olderMessagesLoading || messagePage.oldestSequence === undefined) {
+      return;
+    }
+    const conversationId = conversation.id;
+    setOlderMessagesLoading(true);
+    setError(undefined);
+    try {
+      const page = await window.consensus.listConversationMessages({
+        conversationId,
+        beforeSequence: messagePage.oldestSequence,
+        limit: CONVERSATION_MESSAGE_PAGE_SIZE
+      });
+      setConversation((current) => {
+        if (!current || current.id !== conversationId) {
+          return current;
+        }
+        return {
+          ...current,
+          messages: prependMissingMessages(current.messages, page.messages)
+        };
+      });
+      setMessagePage((current) => mergeLoadedMessagePage(current, page));
+    } catch (caught) {
       setError(errorText(caught));
+    } finally {
+      setOlderMessagesLoading(false);
     }
   }
 
@@ -1216,6 +1381,8 @@ function App(): JSX.Element {
       return;
     }
     setConversation(undefined);
+    setMessagePage(undefined);
+    setOlderMessagesLoading(false);
     progressLogRef.current = [];
     setProgressLog([]);
     setSelectedThreadId(undefined);
@@ -1362,7 +1529,12 @@ function App(): JSX.Element {
     }
   }
 
-  const hasResultContext = Boolean(conversation) || busy;
+  const openingConversation = openingConversationId ? summaries.find((summary) => summary.id === openingConversationId) : undefined;
+  const isOpeningConversation = Boolean(openingConversationId);
+  const openingConversationDescription = openingConversation
+    ? `${labelForKind(openingConversation.kind)} · ${openingConversation.title}`
+    : "Opening the selected conversation from history.";
+  const hasResultContext = Boolean(conversation) || busy || isOpeningConversation;
   const pendingDecisions = pendingPlanDecisions(conversation);
   const reviewablePlanItems = requiredPlanItemReviewFindings(conversation);
   const reviewedPlanItemCount = reviewablePlanItems.filter((finding) => planItemReviewForFinding(finding, planItemReviews(conversation))).length;
@@ -1371,126 +1543,127 @@ function App(): JSX.Element {
   const canRecoverPlan = canRecoverImplementationPlan(conversation, busy);
   const visibleDecisionAnswers = { ...pendingDecisionSelections(conversation), ...decisionAnswers };
   const visibleDecisionResolutions = { ...pendingDecisionResolutions(conversation), ...resolvedDecisionThreads };
-  const conversationKind = conversation?.kind ?? kind;
+  const conversationKind = conversation?.kind ?? openingConversation?.kind ?? kind;
   const visibleWarnings = warnings.map((warning) => displayNoticeText(warning)).filter(Boolean);
-  const resultView: "slack" | "points" = activeView === "points" && conversationKind !== "implementation-plan" && conversationKind !== "chat" ? "points" : "slack";
+  const resultView: ResultView = activeView === "points" && conversationKind !== "implementation-plan" && conversationKind !== "chat" ? "points" : "slack";
   const hasPoints = Boolean(conversation && conversation.kind !== "chat" && conversation.metadata.running !== true && pendingDecisions.length === 0);
   const runnableParticipants = buildParticipants();
   const hasRequiredContext =
     kind === "code-review" ? diffMode === "pasted" || Boolean(repoPath.trim()) : kind !== "implementation-plan" || Boolean(repoPath.trim());
   const canStart = !busy && hasRequiredContext && Boolean(buildArbiter()) && runnableParticipants.length > 0 && (kind !== "implementation-plan" || runnableParticipants.length >= 2);
 
-  return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <Bot size={22} />
-          <span>AI Consensus</span>
-        </div>
-        <button className="new-button" disabled={busy} onClick={newReview}>
-          <MessageSquare size={16} />
-          New session
-        </button>
-        <div className="sidebar-section-title">History</div>
-        <div className="history-list">
-          {summaries.map((summary) => (
-            <button
-              key={summary.id}
-              className={`history-item ${conversation?.id === summary.id ? "active" : ""}`}
-              onClick={() => void openConversation(summary.id)}
-            >
-              <span>{summary.title}</span>
-              <small>{labelForKind(summary.kind)}</small>
-            </button>
-          ))}
-          {summaries.length === 0 && <div className="empty-history">No conversations yet</div>}
-        </div>
-      </aside>
+  const resultTabItems: Array<SegmentedTabItem<ResultView>> = [
+    { value: "slack", label: "Slack", icon: MessageSquare, testId: "result-view-tab-slack" },
+    ...(hasPoints && conversationKind !== "implementation-plan" && conversationKind !== "chat"
+      ? [{ value: "points" as const, label: "Points", icon: ListChecks, testId: "result-view-tab-points" }]
+      : [])
+  ];
+  const topBarTabs = hasResultContext ? (
+    <SegmentedTabs
+      value={resultView}
+      items={resultTabItems}
+      ariaLabel="Result view"
+      className="topbar-result-tabs"
+      minItemWidth={96}
+      onValueChange={setActiveView}
+    />
+  ) : null;
+  const openSettingsSection = (section: SettingsSection): void => {
+    if (activeView !== "settings") {
+      setSettingsReturnView(activeView === "points" ? "points" : "slack");
+    }
+    setActiveSettingsSection(section);
+    setActiveView("settings");
+    setSettingsMenuOpen(false);
+  };
+  const closeSettings = (): void => {
+    setActiveView(settingsReturnView === "points" && !hasPoints ? "slack" : settingsReturnView);
+  };
 
-      <main className="workspace">
-        <header className="topbar">
-          {hasResultContext ? (
-            <div className="tabs" role="tablist">
-              <button className={resultView === "slack" && activeView !== "settings" ? "selected" : ""} onClick={() => setActiveView("slack")}>
-                <MessageSquare size={15} />
-                Slack
-              </button>
-              {hasPoints && conversationKind !== "implementation-plan" && conversationKind !== "chat" && (
-                <button className={resultView === "points" && activeView !== "settings" ? "selected" : ""} onClick={() => setActiveView("points")}>
-                  <ListChecks size={15} />
-                  Points
-                </button>
-              )}
-            </div>
-          ) : (
-            <div className="topbar-title">New session</div>
-          )}
-          <div className="topbar-actions">
-            {busy && (
-              <button className="stop-button" onClick={() => void cancelReview()}>
-                <XCircle size={17} />
-                Stop
-              </button>
-            )}
-            <div className="settings-menu-wrap">
-              <button
-                className={`icon-button ${activeView === "settings" || settingsMenuOpen ? "selected" : ""}`}
-                title="Settings"
-                onClick={() => setSettingsMenuOpen((open) => !open)}
-              >
-                <Settings size={15} />
-              </button>
-              {settingsMenuOpen && (
-                <div className="settings-menu">
-                  <button
-                    onClick={() => {
-                      setActiveSettingsSection("providers");
-                      setActiveView("settings");
-                      setSettingsMenuOpen(false);
-                    }}
-                  >
-                    <KeyRound size={15} />
-                    Providers
-                  </button>
-                  <button
-                    onClick={() => {
-                      setActiveSettingsSection("roles");
-                      setActiveView("settings");
-                      setSettingsMenuOpen(false);
-                    }}
-                  >
-                    <Circle size={15} />
-                    Roles
-                  </button>
-                  <button
-                    onClick={() => {
-                      setActiveSettingsSection("participants");
-                      setActiveView("settings");
-                      setSettingsMenuOpen(false);
-                    }}
-                  >
-                    <Users size={15} />
-                    Participants
-                  </button>
-                </div>
-              )}
-            </div>
-            <button className="icon-button" title="Refresh" onClick={() => void refreshAll()}>
-              <RefreshCw size={17} />
-            </button>
-          </div>
-        </header>
+  const topBarActions = (
+    <>
+      {busy && (
+        <Button variant="outline" size="sm" onClick={() => void cancelReview()}>
+          <XCircle aria-hidden />
+          Stop
+        </Button>
+      )}
+      <ModeToggle />
+      <DropdownMenu open={settingsMenuOpen} onOpenChange={setSettingsMenuOpen}>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant={activeView === "settings" || settingsMenuOpen ? "default" : "outline"}
+            size="icon-sm"
+            title="Settings"
+            aria-label="Settings"
+            data-testid="settings-menu-trigger"
+          >
+            <Settings aria-hidden />
+            <span className="sr-only">Settings</span>
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuGroup>
+            <DropdownMenuItem
+              onClick={() => {
+                openSettingsSection("providers");
+              }}
+            >
+              <KeyRound aria-hidden />
+              Providers
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
+                openSettingsSection("roles");
+              }}
+            >
+              <Circle aria-hidden />
+              Roles
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
+                openSettingsSection("participants");
+              }}
+            >
+              <Users aria-hidden />
+              Participants
+            </DropdownMenuItem>
+          </DropdownMenuGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <Button variant="outline" size="icon-sm" title="Refresh" aria-label="Refresh" onClick={() => void refreshAll()}>
+        <RefreshCw aria-hidden />
+        <span className="sr-only">Refresh</span>
+      </Button>
+    </>
+  );
+
+  return (
+    <AppShell
+      sidebar={
+        <Sidebar
+          conversations={summaries}
+          activeId={conversation?.id}
+          pendingId={openingConversationId}
+          busy={busy}
+          loading={historyLoading}
+          onSelect={(id) => void openConversation(id)}
+          onNewSession={newReview}
+        />
+      }
+      topBar={
+        <TopBar tabs={topBarTabs} title={hasResultContext ? undefined : "New session"} actions={topBarActions} />
+      }
+    >
 
         {error && (
-          <div className="notice error">
-            <AlertTriangle size={17} />
-            <span className="notice-text">{displayNoticeText(error)}</span>
+          <div className="mx-3 mt-2">
+            <Notice tone="error">{displayNoticeText(error)}</Notice>
           </div>
         )}
         {visibleWarnings.map((warning, index) => (
-          <div className="notice" key={`${index}:${warning.slice(0, 80)}`}>
-            <AlertTriangle size={17} />
-            <span className="notice-text">{warning}</span>
+          <div className="mx-3 mt-2" key={`${index}:${warning.slice(0, 80)}`}>
+            <Notice tone="warning">{warning}</Notice>
           </div>
         ))}
 
@@ -1509,29 +1682,17 @@ function App(): JSX.Element {
             saveChatRoleConfig={saveChatRoleConfig}
             saveChatParticipantConfig={saveChatParticipantConfig}
             deleteChatParticipantConfig={deleteChatParticipantConfig}
+            onClose={closeSettings}
           />
+        ) : initializing ? (
+          <div className="content-area compose-layout">
+            <AppLoadingState />
+          </div>
         ) : (
           <div className={`content-area ${hasResultContext ? "result-layout" : "compose-layout"}`}>
             {!hasResultContext && (
             <section className="composer">
-              <div className="segmented">
-                <button className={kind === "code-review" ? "selected" : ""} onClick={() => setKind("code-review")}>
-                  <GitPullRequest size={15} />
-                  Code review
-                </button>
-                <button className={kind === "general" ? "selected" : ""} onClick={() => setKind("general")}>
-                  <MessageSquare size={15} />
-                  Question
-                </button>
-                <button className={kind === "implementation-plan" ? "selected" : ""} onClick={() => setKind("implementation-plan")}>
-                  <ListChecks size={15} />
-                  Plan
-                </button>
-                <button className={kind === "chat" ? "selected" : ""} onClick={() => setKind("chat")}>
-                  <Users size={15} />
-                  Chat
-                </button>
-              </div>
+              <SessionModeTabs value={kind} onValueChange={setKind} />
 
               {kind === "chat" ? (
                 <ChatSetup
@@ -1551,25 +1712,26 @@ function App(): JSX.Element {
                   onSelectRepo={() => void selectRepo()}
                   onSelectedParticipantIdsChange={setSelectedChatParticipantConfigIds}
                   onOpenParticipantsSettings={() => {
-                    setActiveSettingsSection("participants");
-                    setActiveView("settings");
-                    setSettingsMenuOpen(false);
+                    openSettingsSection("participants");
                   }}
                   onStart={() => void startChat()}
                 />
               ) : (
                 <>
-                  <label className="field">
-                    <span>Prompt</span>
-                    <AutoResizeTextarea value={question} onChange={(event) => setQuestion(event.target.value)} rows={5} maxHeight={360} />
-                  </label>
+                  <FormRow label="Prompt">
+                    <ResizableTextarea
+                      value={question}
+                      onChange={(event) => setQuestion(event.target.value)}
+                      rows={5}
+                      maxHeight={360}
+                    />
+                  </FormRow>
 
                   {requiresRepo(kind) && (
                     <>
-                      <div className="repo-row">
-                        <label className="field grow">
-                          <span>Repository</span>
-                          <input
+                      <div className="flex items-end gap-2">
+                        <FormRow label="Repository" className="flex-1">
+                          <Input
                             value={repoPath}
                             onChange={(event) => {
                               setRepoPath(event.target.value);
@@ -1577,10 +1739,15 @@ function App(): JSX.Element {
                             }}
                             onBlur={() => void inspectRepo()}
                           />
-                        </label>
-                        <button className="tool-button" onClick={() => void selectRepo()} title="Select repository">
-                          <FolderOpen size={17} />
-                        </button>
+                        </FormRow>
+                        <IconButton
+                          size="sm"
+                          icon={FolderOpen}
+                          label="Select repository"
+                          tooltip="Select repository"
+                          variant="outline"
+                          onClick={() => void selectRepo()}
+                        />
                       </div>
                       {repoInfo && (
                         <div className={`repo-status ${repoInfo.isRepo ? "ok" : "bad"}`}>
@@ -1600,86 +1767,62 @@ function App(): JSX.Element {
 
                       {kind === "code-review" && (
                         <>
-                          <div className="field">
-                            <span>Diff mode</span>
-                            <div className="diff-mode-grid">
-                              {DIFF_MODES.map((mode) => (
-                                <button
-                                  key={mode.value}
-                                  className={diffMode === mode.value ? "selected" : ""}
-                                  onClick={() => setDiffMode(mode.value)}
-                                >
-                                  {mode.label}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
+                          <FormRow label="Diff mode">
+                            <DiffModeTabs value={diffMode} onValueChange={setDiffMode} />
+                          </FormRow>
 
                           {diffMode === "base" && (
-                            <div className="field">
-                              <span>Branches</span>
-                              <div className="branch-compare-row">
-                                <label className="branch-select">
-                                  <span>Base branch</span>
-                                  <select
+                            <FormRow label="Branches" hint={BRANCH_COMPARE_HELP}>
+                              <div className="grid grid-cols-2 gap-2">
+                                <FormRow label="Base branch">
+                                  <AppSelect
                                     value={selectedBaseBranch}
-                                    onChange={(event) => setBaseBranch(event.target.value)}
-                                    aria-describedby="branch-compare-help"
                                     disabled={branchSelectDisabled}
-                                    title={BRANCH_COMPARE_HELP}
-                                  >
-                                    <option value="" disabled>
-                                      {branchSelectPlaceholder}
-                                    </option>
-                                    {branchOptions.map((branch) => (
-                                      <option key={branch} value={branch}>
-                                        {branch}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </label>
-                                <label className="branch-select">
-                                  <span>Compare branch</span>
-                                  <select
+                                    placeholder={branchSelectPlaceholder}
+                                    ariaLabel="Base branch"
+                                    testId="base-branch-select"
+                                    options={branchOptions.map((branch) => ({ value: branch, label: branch }))}
+                                    onValueChange={setBaseBranch}
+                                  />
+                                </FormRow>
+                                <FormRow label="Compare branch">
+                                  <AppSelect
                                     value={selectedCompareBranch}
-                                    onChange={(event) => setCompareBranch(event.target.value)}
-                                    aria-describedby="branch-compare-help"
                                     disabled={branchSelectDisabled}
-                                    title={BRANCH_COMPARE_HELP}
-                                  >
-                                    <option value="" disabled>
-                                      {branchSelectPlaceholder}
-                                    </option>
-                                    {branchOptions.map((branch) => (
-                                      <option key={branch} value={branch}>
-                                        {branch}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </label>
+                                    placeholder={branchSelectPlaceholder}
+                                    ariaLabel="Compare branch"
+                                    testId="compare-branch-select"
+                                    options={branchOptions.map((branch) => ({ value: branch, label: branch }))}
+                                    onValueChange={setCompareBranch}
+                                  />
+                                </FormRow>
                               </div>
-                              <div className="inline-hint" id="branch-compare-help">
-                                {BRANCH_COMPARE_HELP}
-                              </div>
-                            </div>
+                            </FormRow>
                           )}
                           {diffMode === "commit" && (
-                            <label className="field">
-                              <span>Commit SHA</span>
-                              <input value={commit} onChange={(event) => setCommit(event.target.value)} />
-                            </label>
+                            <FormRow label="Commit SHA">
+                              <Input value={commit} onChange={(event) => setCommit(event.target.value)} />
+                            </FormRow>
                           )}
                           {diffMode === "pasted" && (
-                            <label className="field">
-                              <span>Pasted diff</span>
-                              <AutoResizeTextarea value={pastedDiff} onChange={(event) => setPastedDiff(event.target.value)} rows={7} maxHeight={420} />
-                            </label>
+                            <FormRow label="Pasted diff">
+                              <ResizableTextarea
+                                value={pastedDiff}
+                                onChange={(event) => setPastedDiff(event.target.value)}
+                                rows={7}
+                                maxHeight={420}
+                              />
+                            </FormRow>
                           )}
 
-                          <button className="secondary-button" onClick={() => void previewDiff()}>
+                          <Button variant="outline" size="sm" onClick={() => void previewDiff()}>
                             Preview diff
-                          </button>
-                          {diffPreview && <pre className="diff-preview">{diffPreview.slice(0, 6000)}</pre>}
+                          </Button>
+                          {diffPreview && (
+                            <pre className="max-h-[280px] overflow-auto rounded-md border border-border bg-muted/40 p-3 text-xs leading-relaxed">
+                              {diffPreview.slice(0, 6000)}
+                            </pre>
+                          )}
                         </>
                       )}
                     </>
@@ -1708,31 +1851,30 @@ function App(): JSX.Element {
                     })}
                   </div>
 
-                  <label className="field">
-                    <span>{arbiterRoleLabel}</span>
-                    <select
+                  <FormRow
+                    label={arbiterRoleLabel}
+                    hint={`The ${arbiterRoleLabel.toLowerCase()} merge is a separate run. If the same provider is selected as a participant, it also gets an independent participant run.`}
+                  >
+                    <AppSelect
                       value={arbiterSelectValue}
-                      onChange={(event) => setSelectedArbiterId(event.target.value)}
                       disabled={arbiterOptions.length === 0}
-                    >
-                      <option value="" disabled>
-                        {arbiterPlaceholder}
-                      </option>
-                      {arbiterOptions.map(({ provider }) => (
-                        <option key={provider.kind} value={providerId(provider)}>
-                          {provider.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <div className="inline-hint">
-                    The {arbiterRoleLabel.toLowerCase()} merge is a separate run. If the same provider is selected as a participant, it also gets an independent participant run.
-                  </div>
+                      placeholder={arbiterPlaceholder}
+                      ariaLabel={arbiterRoleLabel}
+                      testId="arbiter-select"
+                      options={arbiterOptions.map(({ provider }) => ({ value: providerId(provider), label: provider.label }))}
+                      onValueChange={setSelectedArbiterId}
+                    />
+                  </FormRow>
 
-                  <button className="run-button" disabled={!canStart} onClick={() => void startReview()}>
-                    {busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
+                  <Button
+                    type="button"
+                    disabled={!canStart}
+                    onClick={() => void startReview()}
+                    className="mt-2 w-full"
+                  >
+                    {busy ? <RefreshCw className="animate-spin" aria-hidden /> : <Play aria-hidden />}
                     {busy ? "Running consensus..." : "Start consensus"}
-                  </button>
+                  </Button>
                 </>
               )}
             </section>
@@ -1740,16 +1882,21 @@ function App(): JSX.Element {
 
             {hasResultContext && (
               <section className={`conversation-panel ${conversationKind === "chat" ? "chat-conversation-panel" : ""}`}>
-                {conversationKind === "chat" && conversation ? (
+                {isOpeningConversation ? (
+                  <AppLoadingState title="Loading chat" description={openingConversationDescription} />
+                ) : conversationKind === "chat" && conversation ? (
                   <ChatConversationView
                     conversation={conversation}
                     settings={settings}
                     agents={agents}
                     progress={progressLog}
                     isRunning={busy}
+                    hasOlderMessages={Boolean(messagePage?.hasMoreBefore)}
+                    olderMessagesLoading={olderMessagesLoading}
                     draft={chatMessageDraft}
                     addParticipantDraft={chatAddParticipantDraft ?? defaultChatParticipantDraft(settings)}
                     onDraftChange={setChatMessageDraft}
+                    onLoadOlderMessages={() => void loadOlderConversationMessages()}
                     onSend={() => sendChatMessage()}
                     onSendThread={(rootMessage, content) => sendChatMessage({
                       content,
@@ -1775,6 +1922,9 @@ function App(): JSX.Element {
                     progress={progressLog}
                     kind={conversationKind}
                     isRunning={busy}
+                    hasOlderMessages={Boolean(messagePage?.hasMoreBefore)}
+                    olderMessagesLoading={olderMessagesLoading}
+                    onLoadOlderMessages={() => void loadOlderConversationMessages()}
                     selectedThreadId={selectedThreadId}
                     focusedThreadId={focusedThreadId}
                     onSelectThread={(id) => {
@@ -1818,13 +1968,12 @@ function App(): JSX.Element {
                     onRevisePlan={() => void reviseImplementationPlan()}
                   />
                 )}
-                {resultView === "points" && <PointsView conversation={conversation} kind={conversationKind} />}
+                {resultView === "points" && <PointsView conversation={conversation} kind={conversationKind} isRunning={busy} />}
               </section>
             )}
           </div>
         )}
-      </main>
-    </div>
+    </AppShell>
   );
 }
 
@@ -1842,146 +1991,158 @@ function SettingsView(props: {
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => Promise<void>;
   saveChatParticipantConfig: (update: ChatParticipantConfigUpdate) => Promise<void>;
   deleteChatParticipantConfig: (id: string) => Promise<void>;
+  onClose: () => void;
 }): JSX.Element {
   const title = props.section === "providers" ? "Providers" : props.section === "roles" ? "Roles" : "Participants";
   return (
     <section className="settings-view">
-      <h1>{title}</h1>
-      {props.section === "roles" && (
-        <section className="settings-section">
-          <div className="settings-section-head">
-            <h2>Chat roles</h2>
-            <span>{props.settings.chatRoleConfigs.length} roles</span>
-          </div>
-          <div className="role-config-list">
-            {props.settings.chatRoleConfigs.map((role) => (
-              <ChatRoleEditor role={role} onSave={props.saveChatRoleConfig} key={role.id} />
-            ))}
-            <ChatRoleEditor onSave={props.saveChatRoleConfig} key={`new-role-${props.settings.chatRoleConfigs.length}`} />
-          </div>
-        </section>
-      )}
-      {props.section === "participants" && (
-        <ParticipantSettingsSection
-          settings={props.settings}
-          agents={props.agents}
-          onSave={props.saveChatParticipantConfig}
-          onDelete={props.deleteChatParticipantConfig}
-        />
-      )}
-      {props.section === "providers" && (
-        <section className="settings-section">
-          <div className="settings-section-head">
-            <h2>Providers</h2>
-            <span>{props.settings.providers.length} providers</span>
-          </div>
-          <div className="settings-grid">
-            {props.settings.providers.map((provider) => {
-              const health = props.agents.find((agent) => agent.kind === provider.kind);
-              const models = props.providerModels[provider.kind] ?? [];
-              const isLoadingModels = Boolean(props.modelLoading[provider.kind]);
-              const modelError = props.modelErrors[provider.kind];
-              const hasDraftKey = Boolean(props.apiKeyDrafts[provider.kind]?.trim());
-              return (
-                <div className="settings-item" key={provider.kind}>
-                  <div className="settings-item-head">
-                    <div>
-                      <strong>{provider.label}</strong>
-                      <small>{isCli(provider.kind) ? healthLine(health) : provider.hasApiKey ? "API key saved" : "No API key saved"}</small>
+      <div className="settings-view-inner">
+        <div className="settings-view-head">
+          <h1>{title}</h1>
+          <IconButton
+            size="sm"
+            icon={X}
+            label="Close settings"
+            tooltip="Close settings"
+            variant="outline"
+            onClick={props.onClose}
+          />
+        </div>
+        {props.section === "roles" && (
+          <section className="settings-section">
+            <div className="settings-section-head">
+              <h2>Chat roles</h2>
+              <span>{props.settings.chatRoleConfigs.length} roles</span>
+            </div>
+            <div className="role-config-list">
+              {props.settings.chatRoleConfigs.map((role) => (
+                <ChatRoleEditor role={role} onSave={props.saveChatRoleConfig} key={role.id} />
+              ))}
+              <ChatRoleEditor onSave={props.saveChatRoleConfig} key={`new-role-${props.settings.chatRoleConfigs.length}`} />
+            </div>
+          </section>
+        )}
+        {props.section === "participants" && (
+          <ParticipantSettingsSection
+            settings={props.settings}
+            agents={props.agents}
+            onSave={props.saveChatParticipantConfig}
+            onDelete={props.deleteChatParticipantConfig}
+          />
+        )}
+        {props.section === "providers" && (
+          <section className="settings-section">
+            <div className="settings-section-head">
+              <h2>Providers</h2>
+              <span>{props.settings.providers.length} providers</span>
+            </div>
+            <div className="settings-grid">
+              {props.settings.providers.map((provider) => {
+                const health = props.agents.find((agent) => agent.kind === provider.kind);
+                const models = props.providerModels[provider.kind] ?? [];
+                const isLoadingModels = Boolean(props.modelLoading[provider.kind]);
+                const modelError = props.modelErrors[provider.kind];
+                const hasDraftKey = Boolean(props.apiKeyDrafts[provider.kind]?.trim());
+                return (
+                  <div className="settings-item" key={provider.kind}>
+                    <div className="settings-item-head">
+                      <div>
+                        <strong>{provider.label}</strong>
+                        <small>{isCli(provider.kind) ? healthLine(health) : provider.hasApiKey ? "API key saved" : "No API key saved"}</small>
+                      </div>
+                      <label className="toggle">
+                        <input
+                          type="checkbox"
+                          checked={provider.enabled}
+                          onChange={(event) => void props.updateProvider(provider, { enabled: event.target.checked })}
+                        />
+                        <span />
+                      </label>
                     </div>
-                    <label className="toggle">
-                      <input
-                        type="checkbox"
-                        checked={provider.enabled}
-                        onChange={(event) => void props.updateProvider(provider, { enabled: event.target.checked })}
-                      />
-                      <span />
-                    </label>
-                  </div>
 
-                  {!isCli(provider.kind) && (
-                    <>
-                      <div className="model-row">
-                        <label className="field grow">
-                          <span>Model</span>
-                          {models.length > 0 ? (
-                            <select
-                              value={models.some((model) => model.id === provider.model) ? provider.model : "__custom__"}
-                              onChange={(event) => {
-                                if (event.target.value !== "__custom__") {
-                                  void props.updateProvider(provider, { model: event.target.value });
-                                }
-                              }}
-                            >
-                              {models.map((model) => (
-                                <option key={model.id} value={model.id}>
-                                  {model.label}
-                                </option>
-                              ))}
-                              <option value="__custom__">Custom model ID...</option>
-                            </select>
-                          ) : (
-                            <input
+                    {!isCli(provider.kind) && (
+                      <>
+                        <div className="flex items-end gap-2">
+                          <FormRow label="Model" className="flex-1">
+                            {models.length > 0 ? (
+                              <AppSelect
+                                value={provider.model && models.some((model) => model.id === provider.model) ? provider.model : "__custom__"}
+                                placeholder="Select model"
+                                ariaLabel={`${provider.label} model`}
+                                testId={`${provider.kind}-model-select`}
+                                options={[
+                                  ...models.map((model) => ({ value: model.id, label: model.label })),
+                                  { value: "__custom__", label: "Custom model ID..." }
+                                ]}
+                                onValueChange={(value) => {
+                                  if (value !== "__custom__") {
+                                    void props.updateProvider(provider, { model: value });
+                                  }
+                                }}
+                              />
+                            ) : (
+                              <Input
+                                value={provider.model ?? ""}
+                                onChange={(event) => void props.updateProvider(provider, { model: event.target.value })}
+                                placeholder={provider.hasApiKey ? "Fetch models or enter a custom model id" : "Save an API key first"}
+                              />
+                            )}
+                          </FormRow>
+                          <IconButton
+                            size="sm"
+                            icon={RefreshCw}
+                            iconClassName={isLoadingModels ? "animate-spin" : undefined}
+                            label="Fetch available models"
+                            tooltip="Fetch available models"
+                            variant="outline"
+                            disabled={!provider.hasApiKey || isLoadingModels}
+                            onClick={() => void props.refreshProviderModels(provider.kind)}
+                          />
+                        </div>
+                        {models.length > 0 && !models.some((model) => model.id === provider.model) && (
+                          <FormRow label="Custom model ID">
+                            <Input
                               value={provider.model ?? ""}
                               onChange={(event) => void props.updateProvider(provider, { model: event.target.value })}
-                              placeholder={provider.hasApiKey ? "Fetch models or enter a custom model id" : "Save an API key first"}
                             />
-                          )}
-                        </label>
-                        <button
-                          className="tool-button"
-                          title="Fetch available models"
-                          disabled={!provider.hasApiKey || isLoadingModels}
-                          onClick={() => void props.refreshProviderModels(provider.kind)}
-                        >
-                          <RefreshCw size={17} className={isLoadingModels ? "spin" : ""} />
-                        </button>
-                      </div>
-                      {models.length > 0 && !models.some((model) => model.id === provider.model) && (
-                        <label className="field compact-field">
-                          <span>Custom model ID</span>
-                          <input
-                            value={provider.model ?? ""}
-                            onChange={(event) => void props.updateProvider(provider, { model: event.target.value })}
-                          />
-                        </label>
-                      )}
-                      {modelError && <div className="inline-error">{modelError}</div>}
-                      <div className="key-row">
-                        <label className="field grow">
-                          <span>API key</span>
-                          <input
-                            type="password"
-                            value={props.apiKeyDrafts[provider.kind] ?? ""}
-                            onChange={(event) =>
-                              props.setApiKeyDrafts((current) => ({ ...current, [provider.kind]: event.target.value }))
-                            }
-                          />
-                        </label>
-                        <button
-                          className="save-key-button"
-                          title="Save API key"
-                          disabled={!hasDraftKey}
-                          onClick={() => void props.updateProvider(provider, { apiKey: props.apiKeyDrafts[provider.kind] ?? "" })}
-                        >
-                          <KeyRound size={17} />
-                          Save key
-                        </button>
-                      </div>
-                      {hasDraftKey && <div className="inline-warning">Unsaved API key entered.</div>}
-                      {provider.hasApiKey && (
-                        <button className="secondary-button" onClick={() => void props.updateProvider(provider, { clearApiKey: true })}>
-                          Clear saved key
-                        </button>
-                      )}
-                    </>
-                  )}
-                </div>
-              );
-            })}
+                          </FormRow>
+                        )}
+                        {modelError && <div className="inline-error">{modelError}</div>}
+                        <div className="flex items-end gap-2">
+                          <FormRow label="API key" className="flex-1">
+                            <Input
+                              type="password"
+                              value={props.apiKeyDrafts[provider.kind] ?? ""}
+                              onChange={(event) =>
+                                props.setApiKeyDrafts((current) => ({ ...current, [provider.kind]: event.target.value }))
+                              }
+                            />
+                          </FormRow>
+                          <Button
+                            size="sm"
+                            title="Save API key"
+                            disabled={!hasDraftKey}
+                            onClick={() => void props.updateProvider(provider, { apiKey: props.apiKeyDrafts[provider.kind] ?? "" })}
+                          >
+                            <KeyRound aria-hidden />
+                            Save key
+                          </Button>
+                        </div>
+                        {hasDraftKey && <div className="inline-warning">Unsaved API key entered.</div>}
+                        {provider.hasApiKey && (
+                          <Button variant="outline" size="sm" onClick={() => void props.updateProvider(provider, { clearApiKey: true })}>
+                            Clear saved key
+                          </Button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })}
             </div>
-        </section>
-      )}
+          </section>
+        )}
+      </div>
     </section>
   );
 }
@@ -2054,19 +2215,22 @@ function ChatParticipantConfigEditor(props: {
         </div>
         <div className="settings-item-actions">
           {props.participant && (
-            <button className="secondary-button" onClick={() => void props.onDelete(props.participant!.id)}>
-              <X size={16} />
-              Delete
-            </button>
+            <ConfirmDeleteButton
+              label="Delete"
+              title={`Delete @${props.participant.handle}?`}
+              description="This participant will be removed from saved chat participants and unselected from chats that use it."
+              confirmLabel="Delete participant"
+              onConfirm={() => props.onDelete(props.participant!.id)}
+            />
           )}
-          <button
-            className="secondary-button"
+          <Button
+            variant="outline" size="sm"
             disabled={!canSave}
             onClick={() => void props.onSave({ id: props.participant?.id, ...normalized })}
           >
             <CheckCircle2 size={16} />
             Save
-          </button>
+          </Button>
         </div>
       </div>
       <ChatParticipantDraftRow draft={draft} settings={props.settings} agents={props.agents} onChange={setDraft} />
@@ -2075,35 +2239,52 @@ function ChatParticipantConfigEditor(props: {
   );
 }
 
-function AutoResizeTextarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement> & { maxHeight?: number }): JSX.Element {
-  const { maxHeight = 280, onInput, style, ...textareaProps } = props;
-  const ref = useRef<HTMLTextAreaElement>(null);
+function ConfirmDeleteButton(props: {
+  label: string;
+  title: string;
+  description: string;
+  confirmLabel?: string;
+  onConfirm: () => Promise<void>;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const [pending, setPending] = useState(false);
 
-  const resize = (): void => {
-    const element = ref.current;
-    if (!element) {
-      return;
+  const confirm = async (): Promise<void> => {
+    setPending(true);
+    try {
+      await props.onConfirm();
+      setOpen(false);
+    } finally {
+      setPending(false);
     }
-    element.style.height = "auto";
-    const nextHeight = Math.min(maxHeight, element.scrollHeight);
-    element.style.height = `${nextHeight}px`;
-    element.style.overflowY = element.scrollHeight > maxHeight ? "auto" : "hidden";
   };
 
-  useEffect(() => {
-    resize();
-  }, [textareaProps.value, maxHeight]);
-
   return (
-    <textarea
-      {...textareaProps}
-      ref={ref}
-      style={{ ...style, overflowY: "hidden" }}
-      onInput={(event) => {
-        resize();
-        onInput?.(event);
-      }}
-    />
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="destructive" size="sm">
+          <X size={16} />
+          {props.label}
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{props.title}</DialogTitle>
+          <DialogDescription>{props.description}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <DialogClose asChild>
+            <Button variant="outline" size="sm" disabled={pending}>
+              Cancel
+            </Button>
+          </DialogClose>
+          <Button variant="destructive" size="sm" disabled={pending} onClick={() => void confirm()}>
+            <X size={16} />
+            {pending ? "Deleting..." : props.confirmLabel ?? props.label}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -2119,19 +2300,22 @@ function ChatRoleEditor({ role, onSave }: { role?: ChatRoleConfig; onSave: (upda
           <strong>{role ? role.label : "New role"}</strong>
           <small>{role ? `v${role.version}${role.builtIn ? " built-in" : ""}` : "custom"}</small>
         </div>
-        <button className="secondary-button" disabled={!canSave} onClick={() => void onSave({ id: role?.id, label, instructions })}>
+        <Button variant="outline" size="sm" disabled={!canSave} onClick={() => void onSave({ id: role?.id, label, instructions })}>
           <CheckCircle2 size={16} />
           Save
-        </button>
+        </Button>
       </div>
-      <label className="field compact-field">
-        <span>Name</span>
-        <input value={label} onChange={(event) => setLabel(event.target.value)} />
-      </label>
-      <label className="field compact-field">
-        <span>Instructions</span>
-        <AutoResizeTextarea value={instructions} onChange={(event) => setInstructions(event.target.value)} rows={4} maxHeight={320} />
-      </label>
+      <FormRow label="Name">
+        <Input value={label} onChange={(event) => setLabel(event.target.value)} />
+      </FormRow>
+      <FormRow label="Instructions">
+        <ResizableTextarea
+          value={instructions}
+          onChange={(event) => setInstructions(event.target.value)}
+          rows={4}
+          maxHeight={320}
+        />
+      </FormRow>
     </article>
   );
 }
@@ -2162,18 +2346,21 @@ function ChatSetup(props: {
     .map((participant) => participant.id);
   return (
     <div className="chat-setup">
-      <label className="field">
-        <span>Chat title</span>
-        <input value={props.title} onChange={(event) => props.onTitleChange(event.target.value)} />
-      </label>
-      <div className="repo-row">
-        <label className="field grow">
-          <span>Repository optional</span>
-          <input value={props.repoPath} onChange={(event) => props.onRepoPathChange(event.target.value)} onBlur={props.onRepoBlur} />
-        </label>
-        <button className="tool-button" onClick={props.onSelectRepo} title="Select repository">
-          <FolderOpen size={17} />
-        </button>
+      <FormRow label="Chat title">
+        <Input value={props.title} onChange={(event) => props.onTitleChange(event.target.value)} />
+      </FormRow>
+      <div className="flex items-end gap-2">
+        <FormRow label="Repository" optional className="flex-1">
+          <Input value={props.repoPath} onChange={(event) => props.onRepoPathChange(event.target.value)} onBlur={props.onRepoBlur} />
+        </FormRow>
+        <IconButton
+          size="sm"
+          icon={FolderOpen}
+          label="Select repository"
+          tooltip="Select repository"
+          variant="outline"
+          onClick={props.onSelectRepo}
+        />
       </div>
       {props.repoInfo && (
         <div className={`repo-status ${props.repoInfo.isRepo ? "ok" : "bad"}`}>
@@ -2194,18 +2381,18 @@ function ChatSetup(props: {
         <div className="settings-section-head">
           <h2>Participants</h2>
           <div className="settings-item-actions">
-            <button className="secondary-button" onClick={() => props.onSelectedParticipantIdsChange(new Set(allParticipantIds))}>
+            <Button variant="outline" size="sm" onClick={() => props.onSelectedParticipantIdsChange(new Set(allParticipantIds))}>
               <Users size={16} />
               Select all
-            </button>
-            <button className="secondary-button" onClick={() => props.onSelectedParticipantIdsChange(new Set())}>
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => props.onSelectedParticipantIdsChange(new Set())}>
               <X size={16} />
               Clear
-            </button>
-            <button className="secondary-button" onClick={props.onOpenParticipantsSettings}>
+            </Button>
+            <Button variant="outline" size="sm" onClick={props.onOpenParticipantsSettings}>
               <Plus size={16} />
               New participant
-            </button>
+            </Button>
           </div>
         </div>
         {props.settings.chatParticipantConfigs.length === 0 ? (
@@ -2247,10 +2434,10 @@ function ChatSetup(props: {
         )}
       </div>
       {validation && <div className="inline-error">{validation}</div>}
-      <button className="run-button" disabled={props.busy || Boolean(validation)} onClick={props.onStart}>
+      <Button className="w-full" disabled={props.busy || Boolean(validation)} onClick={props.onStart}>
         {props.busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
         {props.busy ? "Starting chat..." : "Start chat"}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -2268,53 +2455,46 @@ function ChatParticipantDraftRow(props: {
   const avatarOptions = chatAvatarOptionsForKind(props.draft.kind);
   return (
     <div className="chat-participant-row">
-      <label className="field compact-field">
-        <span>Name</span>
-        <input
+      <FormRow label="Name">
+        <Input
           value={props.draft.handle}
           onChange={(event) => props.onChange({ ...props.draft, handle: event.target.value })}
           placeholder="eng1"
         />
-      </label>
-      <label className="field compact-field">
-        <span>Role</span>
-        <select
+      </FormRow>
+      <FormRow label="Role">
+        <AppSelect
           value={props.draft.roleConfigId}
-          onChange={(event) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { roleConfigId: event.target.value }))}
-        >
-          {props.settings.chatRoleConfigs.map((role) => (
-            <option value={role.id} key={role.id}>
-              {role.label}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="field compact-field">
-        <span>CLI</span>
-        <select
+          placeholder="Select role"
+          ariaLabel="Participant role"
+          options={props.settings.chatRoleConfigs.map((role) => ({ value: role.id, label: role.label }))}
+          onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { roleConfigId: value }))}
+        />
+      </FormRow>
+      <FormRow label="CLI">
+        <AppSelect
           value={props.draft.kind}
-          onChange={(event) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { kind: event.target.value as ChatProviderKind }))}
-        >
-          {cliProviders.map((provider) => {
+          placeholder="Select CLI"
+          ariaLabel="Participant CLI"
+          options={cliProviders.map((provider) => {
             const health = props.agents.find((agent) => agent.kind === provider.kind);
-            return (
-              <option value={provider.kind} disabled={!health?.installed} key={provider.kind}>
-                {provider.label}{health?.installed ? "" : " (missing)"}
-              </option>
-            );
+            return {
+              value: provider.kind,
+              label: `${provider.label}${health?.installed ? "" : " (missing)"}`,
+              disabled: !health?.installed
+            };
           })}
-        </select>
-      </label>
-      <label className="field compact-field">
-        <span>Model</span>
-        <input
+          onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { kind: value as ChatProviderKind }))}
+        />
+      </FormRow>
+      <FormRow label="Model">
+        <Input
           value={props.draft.model ?? ""}
           onChange={(event) => props.onChange({ ...props.draft, model: event.target.value })}
           placeholder="CLI default"
         />
-      </label>
-      <div className="field compact-field avatar-picker-field">
-        <span>Avatar</span>
+      </FormRow>
+      <FormRow label="Avatar" className="avatar-picker-field">
         <div className="avatar-choice-grid" role="radiogroup" aria-label="Participant avatar">
           {avatarOptions.map((option) => {
             const selected = option.id === avatarId;
@@ -2333,11 +2513,16 @@ function ChatParticipantDraftRow(props: {
             );
           })}
         </div>
-      </div>
+      </FormRow>
       {props.removable && (
-        <button className="icon-button chat-row-remove" title="Remove participant" onClick={props.onRemove}>
-          <X size={16} />
-        </button>
+        <IconButton
+          size="xs"
+          icon={X}
+          label="Remove participant"
+          tooltip="Remove participant"
+          onClick={props.onRemove}
+          className="chat-row-remove"
+        />
       )}
     </div>
   );
@@ -2349,9 +2534,12 @@ function ChatConversationView(props: {
   agents: AgentHealth[];
   progress: ReviewProgress[];
   isRunning: boolean;
+  hasOlderMessages: boolean;
+  olderMessagesLoading: boolean;
   draft: string;
   addParticipantDraft: ChatParticipantDraft;
   onDraftChange: (value: string) => void;
+  onLoadOlderMessages: () => void;
   onSend: () => Promise<boolean>;
   onSendThread: (rootMessage: Conversation["messages"][number], content: string) => Promise<boolean>;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
@@ -2370,7 +2558,6 @@ function ChatConversationView(props: {
   const [isResizingThread, setIsResizingThread] = useState(false);
   const viewRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
-  const timelineBottomRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const forceStickToBottomRef = useRef(false);
   const previousMessageCountRef = useRef(topLevelMessages.length);
@@ -2389,6 +2576,33 @@ function ChatConversationView(props: {
     : undefined;
   const selectedThreadSummary = selectedThreadRoot ? threadSummaries.get(selectedThreadRoot.id) : undefined;
   const hasThread = Boolean(selectedThreadRoot);
+  const chatTimelineRows = useMemo(() => {
+    const rows: ChatTimelineRow[] = [];
+    if (props.hasOlderMessages || props.olderMessagesLoading) {
+      rows.push({ type: "load-older", id: "load-older" });
+    }
+    for (const message of topLevelMessages) {
+      rows.push({ type: "message", id: message.id, message });
+    }
+    if (props.isRunning) {
+      for (const row of thinkingRows) {
+        rows.push({ type: "thinking", id: row.key, row });
+      }
+    }
+    return rows;
+  }, [props.hasOlderMessages, props.isRunning, props.olderMessagesLoading, thinkingRows, topLevelMessages]);
+  const chatVirtualizer = useVirtualizer({
+    count: chatTimelineRows.length,
+    getScrollElement: () => timelineRef.current,
+    estimateSize: (index) => {
+      const row = chatTimelineRows[index];
+      return row?.type === "message" ? 170 : 56;
+    },
+    getItemKey: (index) => chatTimelineRows[index]?.id ?? index,
+    overscan: 8,
+    useFlushSync: false
+  });
+  const chatVirtualItems = chatVirtualizer.getVirtualItems();
 
   function updateStickToBottom(): void {
     const timeline = timelineRef.current;
@@ -2396,11 +2610,35 @@ function ChatConversationView(props: {
       return;
     }
     stickToBottomRef.current = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 96;
+    if (timeline.scrollTop < 96 && props.hasOlderMessages && !props.olderMessagesLoading) {
+      props.onLoadOlderMessages();
+    }
   }
 
   function sendDraft(): void {
     forceStickToBottomRef.current = true;
     void props.onSend();
+  }
+
+  function scrollToChatBottom(): void {
+    if (chatTimelineRows.length === 0) {
+      return;
+    }
+    chatVirtualizer.scrollToIndex(chatTimelineRows.length - 1, { align: "end" });
+    const timeline = timelineRef.current;
+    if (timeline) {
+      timeline.scrollTop = timeline.scrollHeight;
+    }
+  }
+
+  function scheduleScrollToChatBottom(): void {
+    scrollToChatBottom();
+    window.requestAnimationFrame(() => {
+      scrollToChatBottom();
+      window.requestAnimationFrame(scrollToChatBottom);
+    });
+    window.setTimeout(scrollToChatBottom, 80);
+    window.setTimeout(scrollToChatBottom, 180);
   }
 
   async function sendThreadDraft(rootMessage: Conversation["messages"][number]): Promise<void> {
@@ -2442,6 +2680,9 @@ function ChatConversationView(props: {
   useEffect(() => {
     setSelectedThreadRootId(undefined);
     setThreadDrafts({});
+    stickToBottomRef.current = true;
+    forceStickToBottomRef.current = true;
+    scheduleScrollToChatBottom();
   }, [props.conversation.id]);
 
   useEffect(() => {
@@ -2458,17 +2699,11 @@ function ChatConversationView(props: {
     if (!timeline || !shouldFollowBottom) {
       return;
     }
-    const scrollToBottom = (): void => {
-      timeline.scrollTo({ top: timeline.scrollHeight });
-      timelineBottomRef.current?.scrollIntoView({ block: "end" });
-      stickToBottomRef.current = true;
-      if (messageCountChanged) {
-        forceStickToBottomRef.current = false;
-      }
-    };
-    scrollToBottom();
-    window.requestAnimationFrame(scrollToBottom);
-    window.setTimeout(scrollToBottom, 50);
+    scheduleScrollToChatBottom();
+    stickToBottomRef.current = true;
+    if (messageCountChanged) {
+      forceStickToBottomRef.current = false;
+    }
   }, [
     topLevelMessages.length,
     latestMessage?.content,
@@ -2476,22 +2711,15 @@ function ChatConversationView(props: {
     latestProgress?.message,
     thinkingSignature,
     props.draft,
-    props.isRunning
+    props.isRunning,
+    chatTimelineRows.length,
+    chatVirtualizer
   ]);
 
   useLayoutEffect(() => {
-    const timeline = timelineRef.current;
-    if (!timeline) {
-      return;
-    }
-    const scrollToBottom = (): void => {
-      timeline.scrollTo({ top: timeline.scrollHeight });
-      timelineBottomRef.current?.scrollIntoView({ block: "end" });
-      stickToBottomRef.current = true;
-    };
-    window.requestAnimationFrame(scrollToBottom);
-    window.setTimeout(scrollToBottom, 50);
-  }, [topLevelMessages.length]);
+    scheduleScrollToChatBottom();
+    stickToBottomRef.current = true;
+  }, [props.conversation.id]);
 
   return (
     <div
@@ -2533,38 +2761,56 @@ function ChatConversationView(props: {
                   onChange={props.onAddParticipantDraftChange}
                 />
                 {addValidation && <div className="inline-error">{addValidation}</div>}
-                <button className="secondary-button" disabled={Boolean(addValidation) || props.isRunning} onClick={props.onAddParticipant}>
+                <Button variant="outline" size="sm" disabled={Boolean(addValidation) || props.isRunning} onClick={props.onAddParticipant}>
                   <Plus size={16} />
                   Add participant
-                </button>
+                </Button>
               </div>
             </details>
           </div>
         </header>
-        <div className="chat-timeline" ref={timelineRef} onScroll={updateStickToBottom}>
-          {topLevelMessages.map((message) => {
-            const summary = threadSummaries.get(message.id);
-            return (
-              <ChatMessageItem
-                message={message}
-                participants={participants}
-                busy={props.isRunning}
-                selected={message.id === selectedThreadRoot?.id}
-                replyCount={summary?.replies.length ?? 0}
-                latestReplyAt={summary?.latestReplyAt}
-                hasContinuationReply={continuedMentionRequestIds.has(message.id)}
-                onOpenThread={() => setSelectedThreadRootId(message.id)}
-                onApproveMentions={props.onApproveMentions}
-                onRejectMentions={props.onRejectMentions}
-                onRespondToChoice={props.onRespondToChoice}
-                key={message.id}
-              />
-            );
-          })}
-          {props.isRunning && thinkingRows.map((row) => (
-            <ChatThinkingRowItem row={row} key={row.key} />
-          ))}
-          <div className="chat-timeline-bottom" ref={timelineBottomRef} />
+        <div className="chat-timeline virtual-timeline" ref={timelineRef} onScroll={updateStickToBottom}>
+          <div className="virtual-timeline-inner" style={{ height: `${chatVirtualizer.getTotalSize()}px` }}>
+            {chatVirtualItems.map((virtualItem) => {
+              const row = chatTimelineRows[virtualItem.index];
+              if (!row) {
+                return null;
+              }
+              return (
+                <div
+                  className="virtual-timeline-item"
+                  data-index={virtualItem.index}
+                  key={virtualItem.key}
+                  ref={chatVirtualizer.measureElement}
+                  style={{ transform: `translateY(${virtualItem.start}px)` }}
+                >
+                  {row.type === "load-older" ? (
+                    <TimelineLoadMoreRow
+                      loading={props.olderMessagesLoading}
+                      disabled={!props.hasOlderMessages || props.olderMessagesLoading}
+                      onClick={props.onLoadOlderMessages}
+                    />
+                  ) : row.type === "thinking" ? (
+                    <ChatThinkingRowItem row={row.row} />
+                  ) : (
+                    <ChatMessageItem
+                      message={row.message}
+                      participants={participants}
+                      busy={props.isRunning}
+                      selected={row.message.id === selectedThreadRoot?.id}
+                      replyCount={threadSummaries.get(row.message.id)?.replies.length ?? 0}
+                      latestReplyAt={threadSummaries.get(row.message.id)?.latestReplyAt}
+                      hasContinuationReply={continuedMentionRequestIds.has(row.message.id)}
+                      onOpenThread={() => setSelectedThreadRootId(row.message.id)}
+                      onApproveMentions={props.onApproveMentions}
+                      onRejectMentions={props.onRejectMentions}
+                      onRespondToChoice={props.onRespondToChoice}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
         <ChatComposer
           participants={participants}
@@ -2664,7 +2910,7 @@ function ChatComposer(props: {
             ))}
           </div>
         )}
-        <AutoResizeTextarea
+        <ResizableTextarea
           value={props.draft}
           onChange={(event) => updateDraft(event.target.value)}
           onKeyDown={(event) => {
@@ -2698,9 +2944,9 @@ function ChatComposer(props: {
           placeholder={props.placeholder}
         />
       </div>
-      <button className="plan-correction-send" title="Send" disabled={!canSend} onClick={sendDraft}>
+      <Button size="sm" title="Send" disabled={!canSend} onClick={sendDraft}>
         {props.isRunning ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -2711,7 +2957,7 @@ function ChatThinkingRowItem({ row }: { row: ChatThinkingRow }): JSX.Element {
       <div className="chat-thinking-primary">
         <strong>{row.participantLabel}</strong>
         <span>Thinking</span>
-        <ProgressDots />
+        <LoadingDot label="In progress" />
       </div>
       {row.activity && <div className="chat-thinking-activity">{row.activity}</div>}
     </div>
@@ -2759,14 +3005,14 @@ function ChatMessageItem(props: {
   const threadActions = showThreadActions ? (
     <>
       {replyCount > 0 && (
-        <button className="chat-thread-link" onClick={props.onOpenThread}>
+        <Button variant="link" size="sm" onClick={props.onOpenThread}>
           <span>{replyCount} {replyCount === 1 ? "reply" : "replies"}</span>
           {props.latestReplyAt && <small>Last reply {formatChatReplyDate(props.latestReplyAt)}</small>}
-        </button>
+        </Button>
       )}
-      <button className="chat-reply-button" onClick={props.onOpenThread}>
+      <Button variant="link" size="sm" onClick={props.onOpenThread}>
         Reply
-      </button>
+      </Button>
     </>
   ) : null;
 
@@ -2775,19 +3021,22 @@ function ChatMessageItem(props: {
       <article className={`message chat-message ${choice ? "has-choice" : ""} ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""}`}>
         <Avatar className="message-avatar" spec={avatarForMessage(message, author, participant)} />
         <div className="message-body">
-          <button
-            className="icon-button message-copy-button"
-            title={copied ? "Copied" : "Copy message"}
+          <IconButton
+            className="message-copy-button"
+            size="xs"
+            icon={copied ? CheckCircle2 : Copy}
+            label={copied ? "Copied" : "Copy message"}
+            tooltip={copied ? "Copied" : "Copy message"}
             disabled={!canCopy}
             onClick={() => void copyMessage()}
-          >
-            {copied ? <CheckCircle2 size={16} /> : <Copy size={16} />}
-          </button>
+          />
           <div className="message-meta">
             <strong>{author}</strong>
             <span>{new Date(message.createdAt).toLocaleString()}</span>
-            {message.status === "error" && <span className="status-error">error</span>}
-            {!props.inThread && message.metadata?.parentMessageId && message.role === "user" && <span className="phase-badge">reply</span>}
+            {message.status === "error" && <StatusBadge tone="danger">error</StatusBadge>}
+            {!props.inThread && message.metadata?.parentMessageId && message.role === "user" && (
+              <StatusBadge tone="neutral">reply</StatusBadge>
+            )}
           </div>
           <div className="message-content">
             <MarkdownText content={displayContent} />
@@ -2796,10 +3045,10 @@ function ChatMessageItem(props: {
             <div className="chat-approval-note">
               <span>Approved: {approved.map((mention) => `@${mention.targetHandle}`).join(", ")}</span>
               {canContinueRequester && (
-                <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, [], true)}>
+                <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, [], true)}>
                   <RefreshCw size={15} />
                   Continue {author}
-                </button>
+                </Button>
               )}
             </div>
           )}
@@ -2807,27 +3056,27 @@ function ChatMessageItem(props: {
             <div className="chat-approval-box">
               <strong>Pending mentions: {pending.map((mention) => `@${mention.targetHandle}`).join(", ")}</strong>
               <div className="chat-approval-actions">
-                <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, continuationRequested)}>
+                <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, continuationRequested)}>
                   <CheckCircle2 size={16} />
                   {approvePendingLabel}
-                </button>
+                </Button>
                 {continuationRequested && (
-                  <button className="secondary-button" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, false)}>
+                  <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, false)}>
                     Approve mentions
-                  </button>
+                  </Button>
                 )}
-                <button className="secondary-button" disabled={props.busy} onClick={() => props.onRejectMentions(message.id, allPendingIds)}>
+                <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onRejectMentions(message.id, allPendingIds)}>
                   Reject
-                </button>
+                </Button>
                 {pending.map((mention) => (
-                  <button
-                    className="secondary-button"
+                  <Button
+                    variant="outline" size="sm"
                     disabled={props.busy}
                     onClick={() => props.onApproveMentions(message.id, [mention.targetParticipantId], false)}
                     key={mention.targetParticipantId}
                   >
                     Ask @{mention.targetHandle}
-                  </button>
+                  </Button>
                 ))}
               </div>
             </div>
@@ -2979,7 +3228,7 @@ function ChatChoiceCard(props: {
             <strong>Your answer</strong>
             <small>required · sent verbatim to {requesterMention}</small>
           </span>
-          <textarea
+          <Textarea
             value={customAnswer}
             onChange={(event) => setCustomAnswer(event.target.value)}
             placeholder={'e.g. "Use session cookies for web, but issue short-lived JWTs to native clients"'}
@@ -3003,7 +3252,7 @@ function ChatChoiceCard(props: {
             <strong>Add a note</strong>
             <small>optional · {requesterMention} will see it alongside your pick</small>
           </span>
-          <textarea
+          <Textarea
             value={note}
             onChange={(event) => setNote(event.target.value)}
             placeholder={`Constraints, caveats, or follow-up questions for ${requesterMention}...`}
@@ -3021,9 +3270,9 @@ function ChatChoiceCard(props: {
           ) : (
             <span>Select one option to continue.</span>
           )}
-          <button className="chat-choice-submit" disabled={!canConfirm} onClick={confirmChoice}>
+          <Button size="sm" disabled={!canConfirm} onClick={confirmChoice}>
             {`Send to ${requesterMention}`}
-          </button>
+          </Button>
         </div>
       )}
     </section>
@@ -3054,9 +3303,7 @@ function ChatThreadPanel(props: {
           <span>{rootAuthor}</span>
         </div>
         <div className="thread-panel-actions">
-          <button className="icon-button" title="Close thread" onClick={props.onClose}>
-            <X size={17} />
-          </button>
+          <IconButton size="sm" icon={X} label="Close thread" tooltip="Close thread" onClick={props.onClose} />
         </div>
       </header>
       <div className="chat-thread-body">
@@ -3110,11 +3357,16 @@ type TimelineItem =
   | { id: string; type: "finding"; createdAt: string; finding: Finding }
   | { id: string; type: "decision"; createdAt: string; decision: PlanDecisionRequest };
 
+type SlackTimelineRow = { id: string; type: "load-older" } | TimelineItem;
+
 function SlackView(props: {
   conversation?: Conversation;
   progress: ReviewProgress[];
   kind: ConversationKind;
   isRunning: boolean;
+  hasOlderMessages: boolean;
+  olderMessagesLoading: boolean;
+  onLoadOlderMessages: () => void;
   selectedThreadId?: string;
   focusedThreadId?: string;
   onSelectThread: (id: string | undefined) => void;
@@ -3151,6 +3403,9 @@ function SlackView(props: {
     progress,
     kind,
     isRunning,
+    hasOlderMessages,
+    olderMessagesLoading,
+    onLoadOlderMessages,
     selectedThreadId,
     focusedThreadId,
     onSelectThread,
@@ -3288,8 +3543,9 @@ function SlackView(props: {
       style={{ "--thread-width": `${threadWidth}px` } as React.CSSProperties}
     >
       {!isThreadFocused && (
-        <section className="slack-timeline" aria-label="Consensus timeline">
-          <div className="view-heading">
+        <VirtualSlackTimeline
+          header={(
+            <div className="view-heading">
             <h2>{kind === "code-review" ? "Review Timeline" : kind === "implementation-plan" ? "Plan Timeline" : "Consensus Timeline"}</h2>
             <div className="view-heading-actions">
               <span>
@@ -3310,28 +3566,33 @@ function SlackView(props: {
                       : `${conversation.findings.length} points`}
               </span>
               {canRecoverPlan && (
-                <button className="run-button compact-run" disabled={isRunning} onClick={onRecoverPlan}>
+                <Button size="sm" disabled={isRunning} onClick={onRecoverPlan}>
                   {isRunning ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
                   {isRunning ? "Resuming..." : "Resume plan"}
-                </button>
+                </Button>
               )}
               {canRetryFinalPlan && (
-                <button className="run-button compact-run" disabled={isRunning} onClick={onRetryFinalPlan}>
+                <Button size="sm" disabled={isRunning} onClick={onRetryFinalPlan}>
                   {isRunning ? <RefreshCw size={17} className="spin" /> : <RefreshCw size={17} />}
                   {isRunning ? "Retrying..." : "Retry final plan"}
-                </button>
+                </Button>
               )}
               {pendingDecisions.length === 0 && isReviewingPlanItems && (
-                <button className="run-button compact-run" disabled={isRunning || !canComposePlan} onClick={onComposePlan}>
+                <Button size="sm" disabled={isRunning || !canComposePlan} onClick={onComposePlan}>
                   {isRunning ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
                   {isRunning ? "Composing..." : "Compose final plan"}
-                </button>
+                </Button>
               )}
             </div>
           </div>
-          {items.map((item) =>
+          )}
+          items={items}
+          hasOlderMessages={hasOlderMessages}
+          olderMessagesLoading={olderMessagesLoading}
+          onLoadOlderMessages={onLoadOlderMessages}
+          renderItem={(item) =>
             item.type === "message" ? (
-              <TimelineMessage message={item.message} kind={kind} key={item.id} />
+              <TimelineMessage message={item.message} kind={kind} />
             ) : item.type === "finding" ? (
               <PointTimelineMessage
                 finding={item.finding}
@@ -3340,7 +3601,6 @@ function SlackView(props: {
                 reviewRequired={planActionItemIds.has(item.finding.id)}
                 review={planItemReviewForFinding(item.finding, itemReviews)}
                 onSelect={() => onSelectThread(item.finding.id)}
-                key={item.id}
               />
             ) : (
               <DecisionTimelineMessage
@@ -3350,11 +3610,10 @@ function SlackView(props: {
                 ready={decisionThreadIsReady(item.decision, decisionAnswers, decisionResolutions, savedDecisionAnswers)}
                 replyCount={decisionReplies.filter((reply) => reply.decisionId === item.decision.id).length}
                 onSelect={() => onSelectThread(item.decision.id)}
-                key={item.id}
               />
             )
-          )}
-        </section>
+          }
+        />
       )}
       {hasThread && !isThreadFocused && <div className="thread-resizer" role="separator" aria-orientation="vertical" onPointerDown={startThreadResize} />}
       {hasThread && (
@@ -3415,7 +3674,7 @@ function SlackView(props: {
       )}
       {(showLiveProgress || pendingDecisions.length > 0 || showPlanFollowupComposer) && (
         <div className={`slack-action-bar ${showPlanFollowupComposer ? "with-composer" : ""}`} role="region" aria-label="Run status and actions">
-          {showLiveProgress ? <RunStatusLine progress={latestLiveProgress} /> : pendingDecisions.length > 0 ? <span className="slack-action-spacer" /> : null}
+          {showLiveProgress && !showPlanFollowupComposer ? <RunStatusLine progress={latestLiveProgress} /> : pendingDecisions.length > 0 ? <span className="slack-action-spacer" /> : null}
           {pendingDecisions.length > 0 && (
             <div className="decision-action-bar" aria-label="Decision actions">
               <div className="decision-action-status" aria-live="polite">
@@ -3424,10 +3683,10 @@ function SlackView(props: {
                 </span>
                 <strong>{decisionActionTitle}</strong>
               </div>
-              <button className="run-button compact-run" disabled={isRunning || !hasAnyDecisionInput} onClick={onContinue}>
+              <Button size="sm" disabled={isRunning || !hasAnyDecisionInput} onClick={onContinue}>
                 {isRunning ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
                 {isRunning ? "Continuing..." : "Continue plan"}
-              </button>
+              </Button>
             </div>
           )}
           {showPlanFollowupComposer && (
@@ -3436,6 +3695,7 @@ function SlackView(props: {
               busy={isRunning}
               disabled={planFollowupDisabled}
               placeholder={planFollowupPlaceholder}
+              status={showLiveProgress ? <RunStatusLine progress={latestLiveProgress} /> : undefined}
               onDraftChange={onPlanCorrectionDraftChange}
               onSubmit={onRevisePlan}
             />
@@ -3446,22 +3706,159 @@ function SlackView(props: {
   );
 }
 
+function VirtualSlackTimeline(props: {
+  header: React.ReactNode;
+  items: TimelineItem[];
+  hasOlderMessages: boolean;
+  olderMessagesLoading: boolean;
+  onLoadOlderMessages: () => void;
+  renderItem: (item: TimelineItem) => React.ReactNode;
+}): JSX.Element {
+  const timelineRef = useRef<HTMLElement>(null);
+  const stickToBottomRef = useRef(true);
+  const previousLastRowIdRef = useRef<string | undefined>();
+  const rows = useMemo<SlackTimelineRow[]>(() => {
+    return props.hasOlderMessages || props.olderMessagesLoading
+      ? [{ id: "load-older", type: "load-older" }, ...props.items]
+      : props.items;
+  }, [props.hasOlderMessages, props.items, props.olderMessagesLoading]);
+  const lastRowId = rows[rows.length - 1]?.id;
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => timelineRef.current,
+    estimateSize: (index) => {
+      const row = rows[index];
+      return row?.type === "message" ? 190 : row?.type === "load-older" ? 56 : 150;
+    },
+    getItemKey: (index) => rows[index]?.id ?? index,
+    overscan: 8,
+    useFlushSync: false
+  });
+  const virtualItems = virtualizer.getVirtualItems();
+
+  function scrollToBottom(): void {
+    if (rows.length === 0) {
+      return;
+    }
+    virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
+    const timeline = timelineRef.current;
+    if (timeline) {
+      timeline.scrollTop = timeline.scrollHeight;
+    }
+  }
+
+  function scheduleScrollToBottom(): void {
+    scrollToBottom();
+    window.requestAnimationFrame(() => {
+      scrollToBottom();
+      window.requestAnimationFrame(scrollToBottom);
+    });
+    window.setTimeout(scrollToBottom, 80);
+    window.setTimeout(scrollToBottom, 180);
+  }
+
+  function handleScroll(): void {
+    const timeline = timelineRef.current;
+    if (!timeline) {
+      return;
+    }
+    stickToBottomRef.current = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 96;
+    if (timeline.scrollTop < 96 && props.hasOlderMessages && !props.olderMessagesLoading) {
+      props.onLoadOlderMessages();
+    }
+  }
+
+  useLayoutEffect(() => {
+    const previousLastRowId = previousLastRowIdRef.current;
+    previousLastRowIdRef.current = lastRowId;
+    const lastRowChanged = previousLastRowId !== lastRowId;
+    if (stickToBottomRef.current || lastRowChanged) {
+      scheduleScrollToBottom();
+      stickToBottomRef.current = true;
+    }
+  }, [lastRowId, rows.length, virtualizer]);
+
+  return (
+    <section className="slack-timeline virtual-timeline" aria-label="Consensus timeline" ref={timelineRef} onScroll={handleScroll}>
+      {props.header}
+      <div className="virtual-timeline-inner" style={{ height: `${virtualizer.getTotalSize()}px` }}>
+        {virtualItems.map((virtualItem) => {
+          const row = rows[virtualItem.index];
+          if (!row) {
+            return null;
+          }
+          return (
+            <div
+              className="virtual-timeline-item"
+              data-index={virtualItem.index}
+              key={virtualItem.key}
+              ref={virtualizer.measureElement}
+              style={{ transform: `translateY(${virtualItem.start}px)` }}
+            >
+              {row.type === "load-older" ? (
+                <TimelineLoadMoreRow
+                  loading={props.olderMessagesLoading}
+                  disabled={!props.hasOlderMessages || props.olderMessagesLoading}
+                  onClick={props.onLoadOlderMessages}
+                />
+              ) : (
+                props.renderItem(row)
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function TimelineMessage({ message, kind }: { message: Conversation["messages"][number]; kind: ConversationKind }): JSX.Element {
+  const [copied, setCopied] = useState(false);
   const author = authorForMessage(message, kind);
   const isLiveProgress = Boolean(message.progressPhase && message.status === "pending");
   const isFinalPlan = kind === "implementation-plan" && message.role === "summary";
   const display = displayMessageContent(message, kind);
+  const canCopy = Boolean(display.content.trim());
+
+  async function copyMessage(): Promise<void> {
+    if (!canCopy) {
+      return;
+    }
+    await navigator.clipboard.writeText(display.content);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1400);
+  }
+
   return (
-    <article className={`message ${message.role} ${isLiveProgress ? "progress-active" : ""} ${isFinalPlan ? "final-plan-message" : ""}`}>
+    <article
+      className={`message ${message.role} ${isLiveProgress ? "progress-active" : ""} ${isFinalPlan ? "final-plan-message" : ""}`}
+      data-final-plan={isFinalPlan ? "true" : undefined}
+    >
       <Avatar className="message-avatar" spec={avatarForMessage(message, author)} />
       <div className="message-body">
+        <IconButton
+          className="message-copy-button"
+          size="xs"
+          icon={copied ? CheckCircle2 : Copy}
+          label={copied ? "Copied" : "Copy markdown"}
+          tooltip={copied ? "Copied" : "Copy markdown"}
+          disabled={!canCopy}
+          data-testid={isFinalPlan ? "final-plan-copy-button" : undefined}
+          onClick={() => void copyMessage()}
+        />
         <div className="message-meta">
           <strong>{author}</strong>
-          {isFinalPlan && <span>Final plan</span>}
+          {isFinalPlan && (
+            <StatusBadge tone="success" icon={CheckCircle2} uppercase>
+              Final plan
+            </StatusBadge>
+          )}
           <span>{new Date(message.createdAt).toLocaleString()}</span>
-          {message.progressPhase && <span className="phase-badge">{message.progressPhase}</span>}
-          {isLiveProgress && <ProgressDots />}
-          {message.status === "error" && <span className="status-error">error</span>}
+          {message.progressPhase && (
+            <StatusBadge tone="neutral">{message.progressPhase}</StatusBadge>
+          )}
+          {isLiveProgress && <LoadingDot label="In progress" />}
+          {message.status === "error" && <StatusBadge tone="danger">error</StatusBadge>}
         </div>
         <div className="message-content">{display.markdown ? <MarkdownText content={display.content} /> : <pre>{display.content}</pre>}</div>
       </div>
@@ -3469,21 +3866,22 @@ function TimelineMessage({ message, kind }: { message: Conversation["messages"][
   );
 }
 
-function ProgressDots(): JSX.Element {
-  return (
-    <span className="progress-dots" aria-label="In progress">
-      <i />
-      <i />
-      <i />
-    </span>
-  );
-}
-
 function RunStatusLine({ progress }: { progress?: ReviewProgress }): JSX.Element {
   return (
     <div className="run-status-line" aria-live="polite">
       <span className="run-status-text">{progress?.message ?? "Thinking"}</span>
-      <ProgressDots />
+      <LoadingDot label="In progress" />
+    </div>
+  );
+}
+
+function TimelineLoadMoreRow(props: { loading: boolean; disabled: boolean; onClick: () => void }): JSX.Element {
+  return (
+    <div className="timeline-load-more-row">
+      <Button variant="outline" size="sm" disabled={props.disabled} onClick={props.onClick}>
+        {props.loading ? <RefreshCw size={15} className="spin" /> : <MessageSquare size={15} />}
+        {props.loading ? "Loading older messages..." : "Load older messages"}
+      </Button>
     </div>
   );
 }
@@ -3512,7 +3910,7 @@ function PointTimelineMessage(props: { finding: Finding; kind: ConversationKind;
           <span>{metaLabel}</span>
           <PointStatusBadge finding={finding} />
           {reviewRequired && <PlanItemReviewBadge review={review} />}
-          <span className={`severity ${finding.severity.toLowerCase()}`}>{finding.severity}</span>
+          <SeverityBadge severity={finding.severity} />
         </div>
         <h3>{finding.title}</h3>
         <p>{finding.claim || finding.description}</p>
@@ -3551,7 +3949,7 @@ function DecisionTimelineMessage(props: {
         <div className="message-meta">
           <strong>{author}</strong>
           <span>{pending ? "Decision needed" : "Decision answered"}</span>
-          <span className={`status-badge ${ready || !pending ? "confirmed" : "unresolved"}`}>{statusLabel}</span>
+          <StatusBadge tone={ready || !pending ? "success" : "neutral"}>{statusLabel}</StatusBadge>
         </div>
         <h3>{decision.title}</h3>
         <p>{decision.question}</p>
@@ -3607,12 +4005,14 @@ function PointThread(props: {
         <div className="thread-panel-actions">
           <PointStatusBadge finding={finding} />
           {reviewRequired && <PlanItemReviewBadge review={review} />}
-          <button className="icon-button" title={focused ? "Show timeline" : "Expand thread"} onClick={focused ? onExitFocus : onFocus}>
-            {focused ? <Columns2 size={16} /> : <Maximize2 size={16} />}
-          </button>
-          <button className="icon-button" title="Close thread" onClick={onClose}>
-            <X size={17} />
-          </button>
+          <IconButton
+            size="sm"
+            icon={focused ? Columns2 : Maximize2}
+            label={focused ? "Show timeline" : "Expand thread"}
+            tooltip={focused ? "Show timeline" : "Expand thread"}
+            onClick={focused ? onExitFocus : onFocus}
+          />
+          <IconButton size="sm" icon={X} label="Close thread" tooltip="Close thread" onClick={onClose} />
         </div>
       </div>
 
@@ -3627,7 +4027,7 @@ function PointThread(props: {
           <>
             <PointStatusBadge finding={finding} />
             {reviewRequired && <PlanItemReviewBadge review={review} />}
-            <span className={`severity ${finding.severity.toLowerCase()}`}>{finding.severity}</span>
+            <SeverityBadge severity={finding.severity} />
           </>
         }
       />
@@ -3741,7 +4141,7 @@ function PlanItemReviewComposer(props: {
         />
       )}
       <div className="decision-compose plan-item-review-compose">
-        <AutoResizeTextarea
+        <ResizableTextarea
           value={draft}
           onChange={(event) => onDraftChange?.(event.target.value)}
           onKeyDown={(event) => {
@@ -3758,14 +4158,14 @@ function PlanItemReviewComposer(props: {
           disabled={busy}
         />
         <div className="plan-item-review-actions">
-          <button className="secondary-button" disabled={busy || !draft.trim()} onClick={onSubmitComment}>
+          <Button variant="outline" size="sm" disabled={busy || !draft.trim()} onClick={onSubmitComment}>
             <MessageSquare size={16} />
             Comment
-          </button>
-          <button className="secondary-button" disabled={busy || review?.status === "confirmed"} onClick={onConfirm}>
+          </Button>
+          <Button variant="outline" size="sm" disabled={busy || review?.status === "confirmed"} onClick={onConfirm}>
             <CheckCircle2 size={16} />
             Confirm
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -3777,33 +4177,45 @@ function PlanCorrectionComposer(props: {
   busy: boolean;
   disabled?: boolean;
   placeholder?: string;
+  status?: React.ReactNode;
   onDraftChange: (value: string) => void;
   onSubmit: () => void;
 }): JSX.Element {
-  const { draft, busy, disabled = false, placeholder = "Ask for follow-up changes", onDraftChange, onSubmit } = props;
+  const { draft, busy, disabled = false, placeholder = "Ask for follow-up changes", status, onDraftChange, onSubmit } = props;
   const canSubmit = !busy && !disabled && Boolean(draft.trim());
   const disabledTitle = disabled && !busy ? placeholder : "Send correction";
   return (
-    <div className="plan-correction-composer">
-      <AutoResizeTextarea
-        value={draft}
-        onChange={(event) => onDraftChange(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey) {
-            event.preventDefault();
-            if (canSubmit) {
-              onSubmit();
+    <div className={`plan-correction-composer ${busy ? "is-running" : ""}`} data-testid="plan-followup-composer">
+      {status && <div className="plan-correction-status">{status}</div>}
+      <div className="plan-correction-input-row">
+        <ResizableTextarea
+          value={draft}
+          onChange={(event) => onDraftChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              if (canSubmit) {
+                onSubmit();
+              }
             }
-          }
-        }}
-        rows={2}
-        maxHeight={220}
-        placeholder={placeholder}
-        disabled={busy || disabled}
-      />
-      <button className="plan-correction-send" title={disabledTitle} disabled={!canSubmit} onClick={onSubmit}>
-        {busy ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
-      </button>
+          }}
+          rows={2}
+          maxHeight={220}
+          placeholder={placeholder}
+          disabled={busy || disabled}
+        />
+        <Button
+          variant="outline"
+          size="icon-lg"
+          className="plan-correction-submit"
+          title={disabledTitle}
+          aria-label={disabledTitle}
+          disabled={!canSubmit}
+          onClick={onSubmit}
+        >
+          {busy ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
+        </Button>
+      </div>
     </div>
   );
 }
@@ -3855,7 +4267,7 @@ function DecisionThread(props: {
   );
   const canResolve = !hasThreadContext && decisionThreadHasUserReply(decision, replies);
   const decisionAuthor = sourceLabelForDecision(decision);
-  const statusLabel = readOnly ? "answered" : hasThreadContext ? "ready" : "pending";
+  const statusLabel = readOnly ? "Answered" : hasThreadContext ? "Ready" : "Pending";
 
   return (
     <div className="point-thread decision-thread">
@@ -3865,13 +4277,15 @@ function DecisionThread(props: {
           <h2>{decision.title}</h2>
         </div>
         <div className="thread-panel-actions">
-          <span className={`status-badge ${hasThreadContext || readOnly ? "confirmed" : "unresolved"}`}>{statusLabel}</span>
-          <button className="icon-button" title={focused ? "Show timeline" : "Expand thread"} onClick={focused ? onExitFocus : onFocus}>
-            {focused ? <Columns2 size={16} /> : <Maximize2 size={16} />}
-          </button>
-          <button className="icon-button" title="Close thread" onClick={onClose}>
-            <X size={17} />
-          </button>
+          <StatusBadge tone={hasThreadContext || readOnly ? "success" : "neutral"}>{statusLabel}</StatusBadge>
+          <IconButton
+            size="sm"
+            icon={focused ? Columns2 : Maximize2}
+            label={focused ? "Show timeline" : "Expand thread"}
+            tooltip={focused ? "Show timeline" : "Expand thread"}
+            onClick={focused ? onExitFocus : onFocus}
+          />
+          <IconButton size="sm" icon={X} label="Close thread" tooltip="Close thread" onClick={onClose} />
         </div>
       </div>
 
@@ -3930,7 +4344,7 @@ function DecisionThread(props: {
 
       {!readOnly && (
         <div className="decision-compose">
-          <AutoResizeTextarea
+          <ResizableTextarea
             value={clarificationDraft}
             onChange={(event) => onDraftChange(event.target.value)}
             onKeyDown={(event) => {
@@ -3947,14 +4361,14 @@ function DecisionThread(props: {
             disabled={busy}
           />
           <div className="decision-compose-actions">
-            <button className="secondary-button" disabled={busy || !clarificationDraft.trim()} onClick={onAskClarification}>
+            <Button variant="outline" size="sm" disabled={busy || !clarificationDraft.trim()} onClick={onAskClarification}>
               {isAsking ? <RefreshCw size={16} className="spin" /> : <MessageSquare size={16} />}
               {isAsking ? "Sending..." : "Send"}
-            </button>
-            <button className="secondary-button resolve-button" disabled={busy || !canResolve} onClick={onResolve}>
+            </Button>
+            <Button variant="outline" size="sm" disabled={busy || !canResolve} onClick={onResolve}>
               <CheckCircle2 size={16} />
               Resolve
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -4302,7 +4716,19 @@ function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
   return nodes;
 }
 
-function PointsView({ conversation, kind }: { conversation?: Conversation; kind: ConversationKind }): JSX.Element {
+function PointsView({
+  conversation,
+  kind,
+  isRunning
+}: {
+  conversation?: Conversation;
+  kind: ConversationKind;
+  isRunning: boolean;
+}): JSX.Element {
+  if (isRunning && (!conversation || conversation.findings.length === 0)) {
+    return <ChartLoadingState />;
+  }
+
   if (!conversation) {
     return <EmptyState title="No points yet" body="The final points appear after a consensus run finishes." />;
   }
@@ -4328,7 +4754,7 @@ function PointsView({ conversation, kind }: { conversation?: Conversation; kind:
         return (
           <section className="severity-section" key={severity}>
             <h3>
-              <span className={`severity ${severity.toLowerCase()}`}>{severity}</span>
+              <SeverityBadge severity={severity} />
               {items.length}
             </h3>
             <PointTable findings={items} emptyLabel="No points" />
@@ -4337,7 +4763,7 @@ function PointsView({ conversation, kind }: { conversation?: Conversation; kind:
       })}
       <section className="severity-section filtered-section">
         <h3>
-          <span className="status-badge filtered-out">Filtered out</span>
+          <StatusBadge tone="muted">Filtered out</StatusBadge>
           {filteredOut.length}
         </h3>
         <PointTable findings={filteredOut} emptyLabel="No filtered-out points" />
@@ -4405,7 +4831,7 @@ function PointCard({ finding, compact = false }: { finding: Finding; compact?: b
     <article className={`point-card ${compact ? "compact" : ""}`}>
       <div className="point-card-head">
         <PointStatusBadge finding={finding} />
-        <span className={`severity ${finding.severity.toLowerCase()}`}>{finding.severity}</span>
+        <SeverityBadge severity={finding.severity} />
       </div>
       <h3>{finding.title}</h3>
       <dl className="point-fields">
@@ -4430,31 +4856,35 @@ function PointCard({ finding, compact = false }: { finding: Finding; compact?: b
   );
 }
 
+const POINT_STATUS_TONE: Record<"confirmed" | "disputed" | "unresolved" | "filtered-out", StatusBadgeTone> = {
+  confirmed: "success",
+  disputed: "warning",
+  unresolved: "neutral",
+  "filtered-out": "muted"
+};
+
 function PointStatusBadge({ finding }: { finding: Finding }): JSX.Element {
   const status = pointStatus(finding);
   const Icon = status.kind === "confirmed" ? CheckCircle2 : status.kind === "filtered-out" ? XCircle : HelpCircle;
   return (
-    <span className={`status-badge ${status.kind}`}>
-      <Icon size={15} />
+    <StatusBadge tone={POINT_STATUS_TONE[status.kind]} icon={Icon}>
       {status.label}
-    </span>
+    </StatusBadge>
   );
 }
 
 function PlanItemReviewBadge({ review }: { review?: PlanItemReview }): JSX.Element {
   if (review) {
     return (
-      <span className="status-badge confirmed">
-        <CheckCircle2 size={15} />
+      <StatusBadge tone="success" icon={CheckCircle2}>
         reviewed
-      </span>
+      </StatusBadge>
     );
   }
   return (
-    <span className="status-badge unresolved">
-      <Circle size={15} />
+    <StatusBadge tone="neutral" icon={Circle}>
       pending
-    </span>
+    </StatusBadge>
   );
 }
 
@@ -4655,6 +5085,30 @@ function mergeProgressIntoConversation(conversation: Conversation, _progress: Re
   }
 
   return { ...conversation, messages };
+}
+
+function fullConversationMessagePageInfo(conversation: Conversation): ConversationMessagePageInfo {
+  return {
+    oldestSequence: conversation.messages.length > 0 ? 0 : undefined,
+    newestSequence: conversation.messages.length > 0 ? conversation.messages.length - 1 : undefined,
+    hasMoreBefore: false,
+    totalMessages: conversation.messages.length
+  };
+}
+
+function prependMissingMessages(currentMessages: ChatMessage[], olderMessages: ChatMessage[]): ChatMessage[] {
+  const currentIds = new Set(currentMessages.map((message) => message.id));
+  const missingOlderMessages = olderMessages.filter((message) => !currentIds.has(message.id));
+  return [...missingOlderMessages, ...currentMessages];
+}
+
+function mergeLoadedMessagePage(current: ConversationMessagePageInfo | undefined, page: ConversationMessagePage): ConversationMessagePageInfo {
+  return {
+    oldestSequence: page.oldestSequence ?? current?.oldestSequence,
+    newestSequence: current?.newestSequence ?? page.newestSequence,
+    hasMoreBefore: page.hasMoreBefore,
+    totalMessages: page.totalMessages
+  };
 }
 
 function chatThinkingRows(progress: ReviewProgress[]): ChatThinkingRow[] {
@@ -5914,6 +6368,11 @@ function installDevMockBridge(): void {
     getDiff: async () => ({ mode: "working", title: "Mock diff", diff: "", metadata: {} }),
     listConversations: async () => [conversation],
     getConversation: async (id) => id === conversation.id ? conversation : undefined,
+    openConversation: async (id) => id === conversation.id ? { conversation, messagePage: fullConversationMessagePageInfo(conversation) } : undefined,
+    listConversationMessages: async () => ({
+      messages: conversation.messages,
+      ...fullConversationMessagePageInfo(conversation)
+    }),
     saveDecisionSelections: async () => conversation,
     saveDecisionResolutions: async () => conversation,
     savePlanItemReview: async () => conversation,
@@ -6034,6 +6493,11 @@ installDevMockBridge();
 
 createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    <ThemeProvider>
+      <TooltipProvider>
+        <App />
+        <Toaster richColors position="bottom-right" />
+      </TooltipProvider>
+    </ThemeProvider>
   </React.StrictMode>
 );

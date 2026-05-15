@@ -5,3 +5,6 @@ screenshots/
 .DS_Store
 *.log
 .idea/
+.codex
+.history
+.gstack/

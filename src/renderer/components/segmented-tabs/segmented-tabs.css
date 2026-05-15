@@ -1,0 +1,67 @@
+.segmented-tabs {
+  width: 100%;
+}
+
+.segmented-tabs__list {
+  display: grid;
+  width: 100%;
+  height: 42px;
+  grid-template-columns: repeat(var(--segmented-tabs-count), minmax(var(--segmented-tabs-min-item-width), 1fr));
+  gap: 2px;
+  overflow-x: auto;
+  padding: 2px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: calc(var(--radius) + 2px);
+  background: color-mix(in srgb, var(--app-surface-subtle) 88%, var(--app-bg));
+  scrollbar-width: none;
+}
+
+.segmented-tabs__list::-webkit-scrollbar {
+  display: none;
+}
+
+.segmented-tabs__trigger {
+  min-width: 0;
+  height: 36px;
+  gap: 6px;
+  border: 0;
+  border-radius: var(--radius);
+  color: var(--app-muted);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.segmented-tabs__trigger::after {
+  display: none;
+}
+
+.segmented-tabs__trigger span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.segmented-tabs__trigger svg {
+  width: 15px;
+  height: 15px;
+}
+
+.segmented-tabs__trigger:hover {
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+}
+
+.segmented-tabs__trigger[data-state="active"] {
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  box-shadow:
+    0 1px 2px color-mix(in srgb, #000 8%, transparent),
+    inset 0 0 0 1px var(--app-accent-border);
+}
+
+@media (max-width: 720px) {
+  .segmented-tabs__trigger {
+    padding-inline: 6px;
+  }
+}
