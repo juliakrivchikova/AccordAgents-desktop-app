@@ -56,12 +56,19 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
 import type {
+  AgentContextUsage,
   AgentHealth,
   AppSettings,
   AppBridge,
+  ChatAgentMode,
+  ChatAgentPermissions,
   ChatParticipant,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
+  ChatParticipantSession,
+  ChatShellPermissionAction,
+  ChatShellPermissionMatch,
+  ChatShellPermissionRule,
   ChatMessage,
   ChatPendingChoice,
   ChatProviderKind,
@@ -87,6 +94,15 @@ import type {
   ProviderSettings,
   ReviewProgress
 } from "../shared/types";
+import {
+  chatAgentPermissionsEqual,
+  defaultChatAgentPermissions,
+  effectiveChatAgentPermissions,
+  isChatShellPermissionPatternSafe,
+  normalizeChatAgentMode,
+  normalizeChatAgentPermissions
+} from "../shared/agentPermissions";
+import { normalizeAgentContextUsage } from "../shared/agentContext";
 import { DEFAULT_NOTICE_CHARS, sanitizeWarningText } from "../shared/warnings";
 import { ModeToggle } from "./components/mode-toggle";
 import { ThemeProvider } from "./components/theme-provider";
@@ -131,6 +147,20 @@ type ChatTimelineRow =
 
 const BRANCH_COMPARE_HELP = "Changes committed on the compare branch since it diverged from the base branch.";
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
+const CHAT_AGENT_MODE_OPTIONS: Array<{ value: ChatAgentMode; label: string }> = [
+  { value: "default", label: "Default" },
+  { value: "plan", label: "Plan" },
+  { value: "auto", label: "Auto" }
+];
+const CHAT_SHELL_ACTION_OPTIONS: Array<{ value: ChatShellPermissionAction; label: string }> = [
+  { value: "allow", label: "Allow" },
+  { value: "ask", label: "Ask" },
+  { value: "deny", label: "Deny" }
+];
+const CHAT_SHELL_MATCH_OPTIONS: Array<{ value: ChatShellPermissionMatch; label: string }> = [
+  { value: "exact", label: "Exact" },
+  { value: "prefix", label: "Prefix" }
+];
 
 const POINT_SEVERITIES: FindingSeverity[] = ["Critical", "High", "Medium", "Low"];
 const MAX_NOTICE_CHARS = DEFAULT_NOTICE_CHARS;
@@ -166,6 +196,8 @@ interface ChatParticipantDraft {
   kind: ChatProviderKind;
   model?: string;
   avatarId?: string;
+  agentMode: ChatAgentMode;
+  permissions: ChatAgentPermissions;
 }
 
 interface AvatarSpec {
@@ -842,13 +874,13 @@ function App(): JSX.Element {
     if (!conversation || conversation.kind !== "chat" || !chatAddParticipantDraft) {
       return;
     }
-    const participant = normalizedChatDrafts([chatAddParticipantDraft])[0];
     const existingHandles = new Set(chatParticipants(conversation).map((item) => item.handle.toLowerCase()));
-    const validation = validateChatParticipantDrafts([participant], settings.chatRoleConfigs, existingHandles) ?? validateChatCliAgents([participant], agents);
+    const validation = validateChatParticipantDrafts([chatAddParticipantDraft], settings.chatRoleConfigs, existingHandles) ?? validateChatCliAgents([chatAddParticipantDraft], agents);
     if (validation) {
       setError(validation);
       return;
     }
+    const participant = normalizedChatDrafts([chatAddParticipantDraft])[0];
     setError(undefined);
     try {
       const saved = await window.consensus.addChatParticipant({ conversationId: conversation.id, participant });
@@ -2199,7 +2231,7 @@ function ChatParticipantConfigEditor(props: {
   );
   const normalized = normalizedChatDrafts([draft])[0];
   const changed = !props.participant || !sameParticipantDraft(normalized, props.participant);
-  const validation = validateChatParticipantDrafts([normalized], props.settings.chatRoleConfigs, existingHandles) ?? validateChatCliAgents([normalized], props.agents);
+  const validation = validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs, existingHandles) ?? validateChatCliAgents([normalized], props.agents);
   const canSave = changed && !validation;
 
   useEffect(() => {
@@ -2425,7 +2457,7 @@ function ChatSetup(props: {
                   />
                   <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />
                   <strong>@{participant.handle}</strong>
-                  <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)} · {labelForProviderKind(props.settings.providers, participant.kind)}</span>
+                  <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)} · {labelForProviderKind(props.settings.providers, participant.kind)} · {chatParticipantPermissionSummary(participant)}</span>
                   {invalidReason && <small>{invalidReason}</small>}
                 </label>
               );
@@ -2494,6 +2526,20 @@ function ChatParticipantDraftRow(props: {
           placeholder="CLI default"
         />
       </FormRow>
+      <FormRow label="Mode">
+        <AppSelect
+          value={props.draft.agentMode}
+          placeholder="Select mode"
+          ariaLabel="Participant agent mode"
+          options={CHAT_AGENT_MODE_OPTIONS}
+          onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { agentMode: value as ChatAgentMode }))}
+        />
+      </FormRow>
+      <ChatPermissionsEditor
+        mode={props.draft.agentMode}
+        permissions={props.draft.permissions}
+        onChange={(permissions) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { permissions }))}
+      />
       <FormRow label="Avatar" className="avatar-picker-field">
         <div className="avatar-choice-grid" role="radiogroup" aria-label="Participant avatar">
           {avatarOptions.map((option) => {
@@ -2528,6 +2574,136 @@ function ChatParticipantDraftRow(props: {
   );
 }
 
+function ChatPermissionsEditor(props: {
+  mode: ChatAgentMode;
+  permissions: ChatAgentPermissions;
+  onChange: (permissions: ChatAgentPermissions) => void;
+}): JSX.Element {
+  const permissions = props.permissions;
+  const planMode = props.mode === "plan";
+
+  function updatePermissions(patch: Partial<ChatAgentPermissions>): void {
+    props.onChange({ ...permissions, ...patch });
+  }
+
+  function updateShell(patch: Partial<ChatAgentPermissions["shell"]>): void {
+    updatePermissions({
+      shell: {
+        ...permissions.shell,
+        ...patch
+      }
+    });
+  }
+
+  function updateRule(index: number, patch: Partial<ChatShellPermissionRule>): void {
+    updateShell({
+      rules: permissions.shell.rules.map((rule, ruleIndex) => ruleIndex === index ? { ...rule, ...patch } : rule)
+    });
+  }
+
+  function addRule(): void {
+    updateShell({
+      enabled: true,
+      rules: [
+        ...permissions.shell.rules,
+        { action: "allow", match: "exact", pattern: "npm run test" }
+      ]
+    });
+  }
+
+  function removeRule(index: number): void {
+    updateShell({
+      rules: permissions.shell.rules.filter((_rule, ruleIndex) => ruleIndex !== index)
+    });
+  }
+
+  return (
+    <div className="chat-permissions-panel">
+      <div className="chat-permission-toggle-grid">
+        <ChatPermissionToggle
+          label="Read repo"
+          checked={permissions.repoRead}
+          onChange={(repoRead) => updatePermissions({ repoRead })}
+        />
+        <ChatPermissionToggle
+          label="Run shell"
+          checked={permissions.shell.enabled}
+          onChange={(enabled) => updateShell({ enabled })}
+        />
+        <ChatPermissionToggle
+          label="Edit files"
+          checked={permissions.workspaceWrite}
+          onChange={(workspaceWrite) => updatePermissions({ workspaceWrite })}
+        />
+        <ChatPermissionToggle
+          label="Web access"
+          checked={permissions.webAccess}
+          onChange={(webAccess) => updatePermissions({ webAccess })}
+        />
+      </div>
+      {planMode && <div className="text-xs text-muted-foreground">Plan mode blocks shell commands and file edits while active.</div>}
+      {permissions.shell.enabled && (
+        <div className="chat-shell-rule-list">
+          <div className="chat-shell-rule-head">
+            <span>Shell rules</span>
+            <Button variant="outline" size="sm" onClick={addRule}>
+              <Plus size={15} />
+              Add rule
+            </Button>
+          </div>
+          {permissions.shell.rules.length === 0 ? (
+            <div className="text-xs text-muted-foreground">No command-specific rules. Native CLI approval mode applies.</div>
+          ) : (
+            permissions.shell.rules.map((rule, index) => (
+              <div className="chat-shell-rule-row" key={`${index}-${rule.action}-${rule.match}`}>
+                <AppSelect
+                  value={rule.action}
+                  placeholder="Action"
+                  ariaLabel="Shell rule action"
+                  options={CHAT_SHELL_ACTION_OPTIONS}
+                  onValueChange={(value) => updateRule(index, { action: value as ChatShellPermissionAction })}
+                />
+                <AppSelect
+                  value={rule.match}
+                  placeholder="Match"
+                  ariaLabel="Shell rule match type"
+                  options={CHAT_SHELL_MATCH_OPTIONS}
+                  onValueChange={(value) => updateRule(index, { match: value as ChatShellPermissionMatch })}
+                />
+                <Input
+                  value={rule.pattern}
+                  onChange={(event) => updateRule(index, { pattern: event.target.value })}
+                  placeholder={rule.match === "prefix" ? "git diff" : "npm run test"}
+                />
+                <IconButton
+                  size="xs"
+                  icon={X}
+                  label="Remove shell rule"
+                  tooltip="Remove shell rule"
+                  onClick={() => removeRule(index)}
+                />
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChatPermissionToggle(props: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}): JSX.Element {
+  return (
+    <label className="chat-permission-toggle">
+      <input type="checkbox" checked={props.checked} onChange={(event) => props.onChange(event.target.checked)} />
+      <span>{props.label}</span>
+    </label>
+  );
+}
+
 function ChatConversationView(props: {
   conversation: Conversation;
   settings: AppSettings;
@@ -2552,6 +2728,8 @@ function ChatConversationView(props: {
   const topLevelMessages = useMemo(() => chatTopLevelMessages(props.conversation), [props.conversation.messages]);
   const threadSummaries = useMemo(() => chatThreadSummaryMap(props.conversation), [props.conversation.messages]);
   const continuedMentionRequestIds = useMemo(() => chatContinuedMentionRequestIds(props.conversation), [props.conversation.messages]);
+  const contextUsageByParticipant = useMemo(() => chatContextUsageByParticipant(props.conversation), [props.conversation.metadata]);
+  const sessionsByParticipant = useMemo(() => chatSessionsByParticipant(props.conversation), [props.conversation.metadata]);
   const [selectedThreadRootId, setSelectedThreadRootId] = useState<string | undefined>();
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
   const [threadWidth, setThreadWidth] = useState(460);
@@ -2796,6 +2974,8 @@ function ChatConversationView(props: {
                     <ChatMessageItem
                       message={row.message}
                       participants={participants}
+                      contextUsage={contextUsageForMessage(row.message, contextUsageByParticipant)}
+                      sessionId={sessionIdForMessage(row.message, sessionsByParticipant)}
                       busy={props.isRunning}
                       selected={row.message.id === selectedThreadRoot?.id}
                       replyCount={threadSummaries.get(row.message.id)?.replies.length ?? 0}
@@ -2830,6 +3010,8 @@ function ChatConversationView(props: {
           rootMessage={selectedThreadRoot}
           replies={selectedThreadSummary?.replies ?? []}
           participants={participants}
+          contextUsageByParticipant={contextUsageByParticipant}
+          sessionsByParticipant={sessionsByParticipant}
           settings={props.settings}
           draft={threadDrafts[selectedThreadRoot.id] ?? ""}
           busy={props.isRunning}
@@ -2967,6 +3149,8 @@ function ChatThinkingRowItem({ row }: { row: ChatThinkingRow }): JSX.Element {
 function ChatMessageItem(props: {
   message: Conversation["messages"][number];
   participants?: ChatParticipant[];
+  contextUsage?: AgentContextUsage;
+  sessionId?: string;
   busy: boolean;
   selected?: boolean;
   inThread?: boolean;
@@ -2992,6 +3176,7 @@ function ChatMessageItem(props: {
   const canContinueRequester = message.role === "participant" && continuationRequested && approved.length > 0 && pending.length === 0 && !props.hasContinuationReply;
   const pendingMentionTargetLabel = pending.length === 1 ? `@${pending[0].targetHandle}` : `${pending.length} participants`;
   const approvePendingLabel = continuationRequested ? `Ask ${pendingMentionTargetLabel}, then return to ${author}` : "Approve mentions";
+  const avatar = avatarForMessage(message, author, participant);
   const replyCount = props.replyCount ?? 0;
   const canCopy = Boolean(displayContent.trim());
   async function copyMessage(): Promise<void> {
@@ -3019,7 +3204,16 @@ function ChatMessageItem(props: {
   return (
     <>
       <article className={`message chat-message ${choice ? "has-choice" : ""} ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""}`}>
-        <Avatar className="message-avatar" spec={avatarForMessage(message, author, participant)} />
+        {message.role === "participant" ? (
+          <AgentAvatarWithDetails
+            className="message-avatar"
+            spec={avatar}
+            contextUsage={props.contextUsage}
+            sessionId={props.sessionId}
+          />
+        ) : (
+          <Avatar className="message-avatar" spec={avatar} />
+        )}
         <div className="message-body">
           <IconButton
             className="message-copy-button"
@@ -3283,6 +3477,8 @@ function ChatThreadPanel(props: {
   rootMessage: Conversation["messages"][number];
   replies: Conversation["messages"][number][];
   participants: ChatParticipant[];
+  contextUsageByParticipant: Map<string, AgentContextUsage>;
+  sessionsByParticipant: Map<string, ChatParticipantSession>;
   settings: AppSettings;
   draft: string;
   busy: boolean;
@@ -3310,6 +3506,8 @@ function ChatThreadPanel(props: {
         <ChatMessageItem
           message={props.rootMessage}
           participants={props.participants}
+          contextUsage={contextUsageForMessage(props.rootMessage, props.contextUsageByParticipant)}
+          sessionId={sessionIdForMessage(props.rootMessage, props.sessionsByParticipant)}
           busy={props.busy}
           inThread
           hasContinuationReply={props.continuedMentionRequestIds.has(props.rootMessage.id)}
@@ -3323,6 +3521,8 @@ function ChatThreadPanel(props: {
               <ChatMessageItem
                 message={message}
                 participants={props.participants}
+                contextUsage={contextUsageForMessage(message, props.contextUsageByParticipant)}
+                sessionId={sessionIdForMessage(message, props.sessionsByParticipant)}
                 busy={props.busy}
                 inThread
                 hasContinuationReply={props.continuedMentionRequestIds.has(message.id)}
@@ -5183,10 +5383,58 @@ function authorForMessage(message: Conversation["messages"][number], kind: Conve
   return message.participantLabel || labelForRole(message.role);
 }
 
-function Avatar({ className, spec }: { className: string; spec: AvatarSpec }): JSX.Element {
+function Avatar({ className, spec, tooltip }: { className: string; spec: AvatarSpec; tooltip?: string | null }): JSX.Element {
+  const title = tooltip === null ? undefined : tooltip ?? spec.label;
   return (
-    <div className={`${className} avatar-icon avatar-${spec.kind}`} title={spec.label} aria-label={spec.label}>
+    <div className={`${className} avatar-icon avatar-${spec.kind}`} title={title} aria-label={spec.label}>
       {avatarGraphic(spec)}
+    </div>
+  );
+}
+
+function AgentAvatarWithDetails(props: {
+  className: string;
+  spec: AvatarSpec;
+  contextUsage?: AgentContextUsage;
+  sessionId?: string;
+}): JSX.Element {
+  const [copied, setCopied] = useState(false);
+  const sessionId = props.sessionId?.trim();
+
+  async function copySessionId(event: React.MouseEvent<HTMLButtonElement>): Promise<void> {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!sessionId) {
+      return;
+    }
+    await navigator.clipboard.writeText(sessionId);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1400);
+  }
+
+  return (
+    <div className="agent-avatar-wrap" tabIndex={0} aria-label={`${props.spec.label} avatar details`}>
+      <Avatar className={props.className} spec={props.spec} tooltip={null} />
+      <div className="agent-avatar-details" role="tooltip">
+        <div className="agent-avatar-detail-row">
+          <span>Context</span>
+          <strong>{contextUsageLabel(props.contextUsage)}</strong>
+        </div>
+        <div className="agent-avatar-detail-row session">
+          <span>Session ID</span>
+          <code title={sessionId}>{sessionId ?? "Unavailable"}</code>
+          <button
+            type="button"
+            className="agent-avatar-copy-button"
+            disabled={!sessionId}
+            title={copied ? "Copied session ID" : "Copy session ID"}
+            aria-label={copied ? "Copied session ID" : "Copy session ID"}
+            onClick={(event) => void copySessionId(event)}
+          >
+            {copied ? <CheckCircle2 size={14} /> : <Copy size={14} />}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -5499,7 +5747,9 @@ function defaultChatParticipantDraft(settings: AppSettings, existingHandles: Set
     roleConfigId,
     kind,
     model: provider?.model,
-    avatarId: defaultChatAvatarId(kind, handle || roleConfigId)
+    avatarId: defaultChatAvatarId(kind, handle || roleConfigId),
+    agentMode: "default",
+    permissions: defaultChatAgentPermissions()
   };
 }
 
@@ -5509,7 +5759,9 @@ function chatParticipantConfigToDraft(participant: ChatParticipantConfig): ChatP
     roleConfigId: participant.roleConfigId,
     kind: participant.kind,
     model: participant.model,
-    avatarId: normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle)
+    avatarId: normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle),
+    agentMode: normalizeChatAgentMode(participant.agentMode),
+    permissions: normalizeChatAgentPermissions(participant.permissions)
   };
 }
 
@@ -5523,12 +5775,26 @@ function sameParticipantDraft(draft: ChatParticipantDraft, participant: ChatPart
     draft.roleConfigId === participant.roleConfigId &&
     draft.kind === participant.kind &&
     (draft.model ?? "") === (participant.model ?? "") &&
-    normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle) === normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle)
+    normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle) === normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle) &&
+    normalizeChatAgentMode(draft.agentMode) === normalizeChatAgentMode(participant.agentMode) &&
+    chatAgentPermissionsEqual(draft.permissions, participant.permissions)
   );
 }
 
 function labelForProviderKind(providers: ProviderSettings[], kind: ProviderKind): string {
   return providers.find((provider) => provider.kind === kind)?.label ?? kind;
+}
+
+function chatParticipantPermissionSummary(participant: Pick<ChatParticipant, "agentMode" | "permissions">): string {
+  const mode = normalizeChatAgentMode(participant.agentMode);
+  const permissions = effectiveChatAgentPermissions(mode, normalizeChatAgentPermissions(participant.permissions));
+  const enabled = [
+    permissions.repoRead ? "repo" : "",
+    permissions.shell.enabled ? "shell" : "",
+    permissions.workspaceWrite ? "edit" : "",
+    permissions.webAccess ? "web" : ""
+  ].filter(Boolean);
+  return `${mode}${enabled.length > 0 ? ` · ${enabled.join(", ")}` : ""}`;
 }
 
 function normalizeChatParticipantDraftForSettings(draft: ChatParticipantDraft, settings: AppSettings): ChatParticipantDraft {
@@ -5545,14 +5811,16 @@ function normalizeChatParticipantDraftForSettings(draft: ChatParticipantDraft, s
     roleConfigId,
     kind,
     model: draft.model ?? provider?.model,
-    avatarId: normalizedChatAvatarId(kind, draft.avatarId, handle || roleConfigId)
+    avatarId: normalizedChatAvatarId(kind, draft.avatarId, handle || roleConfigId),
+    agentMode: normalizeChatAgentMode(draft.agentMode),
+    permissions: normalizeChatAgentPermissions(draft.permissions)
   };
 }
 
 function updateChatParticipantDraft(
   draft: ChatParticipantDraft,
   settings: AppSettings,
-  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "kind" | "avatarId">>
+  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "kind" | "avatarId" | "agentMode" | "permissions">>
 ): ChatParticipantDraft {
   let next = { ...draft, ...patch };
   if (!isChatAvatarIdForKind(next.avatarId, next.kind)) {
@@ -5621,7 +5889,9 @@ function normalizedChatDrafts(drafts: ChatParticipantDraft[]): ChatParticipantDr
     roleConfigId: draft.roleConfigId,
     kind: draft.kind,
     model: draft.model?.trim() || undefined,
-    avatarId: normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle)
+    avatarId: normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle),
+    agentMode: normalizeChatAgentMode(draft.agentMode),
+    permissions: normalizeChatAgentPermissions(draft.permissions)
   }));
 }
 
@@ -5652,6 +5922,15 @@ function validateChatParticipantDrafts(
     if (draft.avatarId && !isChatAvatarIdForKind(draft.avatarId, draft.kind)) {
       return "Select an avatar that matches the participant CLI.";
     }
+    const shellRules = draft.permissions.shell.enabled ? draft.permissions.shell.rules : [];
+    for (const rule of shellRules) {
+      if (!rule.pattern.trim()) {
+        return "Shell permission rules need a command pattern.";
+      }
+      if (!isChatShellPermissionPatternSafe(rule.pattern)) {
+        return "Shell permission rules cannot include commas, parentheses, or newlines.";
+      }
+    }
   }
   return undefined;
 }
@@ -5680,6 +5959,70 @@ function chatParticipants(conversation: Conversation | undefined): ChatParticipa
       (participant.kind === "codex-cli" || participant.kind === "claude-code")
     );
   });
+}
+
+function chatContextUsageByParticipant(conversation: Conversation | undefined): Map<string, AgentContextUsage> {
+  const value = conversation?.metadata.agentContextUsageByParticipant;
+  const usageByParticipant = new Map<string, AgentContextUsage>();
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return usageByParticipant;
+  }
+  for (const [participantId, usage] of Object.entries(value)) {
+    const normalized = normalizeAgentContextUsage(usage);
+    if (normalized) {
+      usageByParticipant.set(participantId, normalized);
+    }
+  }
+  return usageByParticipant;
+}
+
+function chatSessionsByParticipant(conversation: Conversation | undefined): Map<string, ChatParticipantSession> {
+  const value = conversation?.metadata.participantSessions;
+  const sessions = new Map<string, ChatParticipantSession>();
+  if (!Array.isArray(value)) {
+    return sessions;
+  }
+  for (const item of value) {
+    const session = item as Partial<ChatParticipantSession>;
+    if (typeof session.participantId === "string" && typeof session.sessionId === "string") {
+      sessions.set(session.participantId, session as ChatParticipantSession);
+    }
+  }
+  return sessions;
+}
+
+function contextUsageForMessage(
+  message: Conversation["messages"][number],
+  usageByParticipant: Map<string, AgentContextUsage>
+): AgentContextUsage | undefined {
+  return message.role === "participant" && message.participantId ? usageByParticipant.get(message.participantId) : undefined;
+}
+
+function sessionIdForMessage(
+  message: Conversation["messages"][number],
+  sessionsByParticipant: Map<string, ChatParticipantSession>
+): string | undefined {
+  return message.role === "participant" && message.participantId
+    ? sessionsByParticipant.get(message.participantId)?.sessionId || undefined
+    : undefined;
+}
+
+function contextUsageLabel(usage: AgentContextUsage | undefined): string {
+  if (!usage) {
+    return "Unavailable";
+  }
+  return `${usage.percentage}% (${formatContextTokenCount(usage.usedTokens)} / ${formatContextTokenCount(usage.contextWindowTokens)} tokens)`;
+}
+
+function formatContextTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const value = tokens / 1_000_000;
+    return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}M`;
+  }
+  if (tokens >= 1_000) {
+    return `${Math.round(tokens / 1_000)}k`;
+  }
+  return `${tokens}`;
 }
 
 function chatTopLevelMessages(conversation: Conversation): Conversation["messages"] {

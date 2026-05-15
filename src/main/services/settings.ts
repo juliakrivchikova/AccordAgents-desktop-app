@@ -4,6 +4,8 @@ import path from "node:path";
 import { app, safeStorage } from "electron";
 import type {
   AppSettings,
+  ChatAgentMode,
+  ChatAgentPermissions,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
   ChatProviderKind,
@@ -13,6 +15,7 @@ import type {
   ProviderSettings,
   ProviderSettingsUpdate
 } from "../../shared/types";
+import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 
 interface StoredSettings {
   settingsVersion?: number;
@@ -1564,6 +1567,8 @@ export class SettingsService {
       kind: update.kind,
       model: update.model?.trim() || undefined,
       avatarId: update.avatarId?.trim() || undefined,
+      agentMode: normalizeChatAgentMode(update.agentMode),
+      permissions: normalizeChatAgentPermissions(update.permissions),
       updatedAt: now
     };
     stored.chatParticipantConfigs = participants.some((participant) => participant.id === nextParticipant.id)
@@ -1665,6 +1670,8 @@ export class SettingsService {
         kind: participant.kind,
         model: participant.model?.trim() || undefined,
         avatarId: participant.avatarId?.trim() || undefined,
+        agentMode: normalizeChatAgentMode((participant as { agentMode?: ChatAgentMode }).agentMode),
+        permissions: normalizeChatAgentPermissions((participant as { permissions?: ChatAgentPermissions }).permissions),
         updatedAt: participant.updatedAt || new Date().toISOString()
       }));
   }

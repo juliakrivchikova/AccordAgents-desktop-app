@@ -88,8 +88,20 @@ function registerIpc(): void {
   ipcMain.handle("git:inspect-repo", (_event, repoPath: string) => gitService.inspectRepo(repoPath));
   ipcMain.handle("git:get-diff", (_event, request: GitDiffRequest) => gitService.getDiff(request));
   ipcMain.handle("conversations:list", () => storageService.listConversations());
-  ipcMain.handle("conversations:get", (_event, id: string) => storageService.getConversation(id));
-  ipcMain.handle("conversations:open", (_event, id: string, limit?: number) => storageService.openConversation(id, limit));
+  ipcMain.handle("conversations:get", async (_event, id: string) => {
+    const conversation = await storageService.getConversation(id);
+    return conversation ? chatService.hydrateContextUsage(conversation) : conversation;
+  });
+  ipcMain.handle("conversations:open", async (_event, id: string, limit?: number) => {
+    const result = await storageService.openConversation(id, limit);
+    if (!result) {
+      return result;
+    }
+    return {
+      ...result,
+      conversation: await chatService.hydrateContextUsage(result.conversation)
+    };
+  });
   ipcMain.handle("conversations:list-messages", (_event, request: ConversationMessagePageRequest) => storageService.listConversationMessages(request));
   ipcMain.handle("conversations:save-decision-selections", async (_event, conversationId: string, selections: Record<string, string>) => {
     const conversation = await storageService.getConversation(conversationId);

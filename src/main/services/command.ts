@@ -43,6 +43,7 @@ export function runCommand(command: string, args: string[], options: CommandOpti
     let stderr = "";
     let settled = false;
     let timedOut = false;
+    let stdinError: Error | undefined;
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -82,6 +83,10 @@ export function runCommand(command: string, args: string[], options: CommandOpti
       options.onStderr?.(chunk);
     });
 
+    child.stdin.on("error", (error) => {
+      stdinError = error;
+    });
+
     child.on("error", (error) => {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", abort);
@@ -94,7 +99,7 @@ export function runCommand(command: string, args: string[], options: CommandOpti
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", abort);
       settled = true;
-      const result: CommandResult = { command, args, stdout, stderr, exitCode, timedOut };
+      const result: CommandResult = { command, args, stdout, stderr: stderr || stdinError?.message || "", exitCode, timedOut };
 
       if (options.signal?.aborted) {
         reject(new CommandError(`${command} was cancelled`, result));
@@ -111,11 +116,20 @@ export function runCommand(command: string, args: string[], options: CommandOpti
         return;
       }
 
+      if (stdinError) {
+        reject(new CommandError(stdinError.message, result));
+        return;
+      }
+
       resolve(result);
     });
 
     if (options.input) {
-      child.stdin.write(options.input);
+      child.stdin.write(options.input, (error) => {
+        if (error) {
+          stdinError = error;
+        }
+      });
     }
     child.stdin.end();
   });

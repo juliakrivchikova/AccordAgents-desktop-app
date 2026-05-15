@@ -1,4 +1,4 @@
-import type { ChatRoleRuntime, ParticipantConfig, ProviderKind, ProviderModel } from "../../shared/types";
+import type { AgentContextUsage, ChatRoleRuntime, ParticipantConfig, ProviderKind, ProviderModel } from "../../shared/types";
 import { SettingsService } from "./settings";
 
 export interface ParticipantRunResult {
@@ -10,6 +10,7 @@ export interface ParticipantRunResult {
   sessionId?: string;
   sessionRestarted?: boolean;
   roleRuntime?: ChatRoleRuntime;
+  contextUsage?: AgentContextUsage;
   warnings?: string[];
 }
 

@@ -39,6 +39,39 @@ export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code"
 
 export type ChatRoleRuntime = "claude-agent" | "codex-developer-instructions" | "prompt-fallback";
 
+export type AgentContextUsageSource = Extract<ProviderKind, "codex-cli" | "claude-code">;
+
+export interface AgentContextUsage {
+  usedTokens: number;
+  contextWindowTokens: number;
+  percentage: number;
+  source: AgentContextUsageSource;
+  updatedAt: string;
+  model?: string;
+}
+
+export type ChatAgentMode = "default" | "plan" | "auto";
+
+export type ChatShellPermissionAction = "allow" | "ask" | "deny";
+
+export type ChatShellPermissionMatch = "exact" | "prefix";
+
+export interface ChatShellPermissionRule {
+  action: ChatShellPermissionAction;
+  pattern: string;
+  match: ChatShellPermissionMatch;
+}
+
+export interface ChatAgentPermissions {
+  repoRead: boolean;
+  workspaceWrite: boolean;
+  webAccess: boolean;
+  shell: {
+    enabled: boolean;
+    rules: ChatShellPermissionRule[];
+  };
+}
+
 export interface ChatParticipant {
   id: string;
   handle: string;
@@ -47,6 +80,8 @@ export interface ChatParticipant {
   kind: ChatProviderKind;
   model?: string;
   avatarId?: string;
+  agentMode?: ChatAgentMode;
+  permissions?: ChatAgentPermissions;
 }
 
 export interface ChatParticipantSession {
@@ -57,6 +92,8 @@ export interface ChatParticipantSession {
   roleRuntime?: ChatRoleRuntime;
   participantKind?: ChatProviderKind;
   participantModel?: string;
+  participantAgentMode?: ChatAgentMode;
+  participantPermissions?: ChatAgentPermissions;
   runtimeConfigVersion?: number;
   roleLabel: string;
   roleInstructions: string;
@@ -121,6 +158,8 @@ export interface ChatParticipantConfig {
   kind: ChatProviderKind;
   model?: string;
   avatarId?: string;
+  agentMode?: ChatAgentMode;
+  permissions?: ChatAgentPermissions;
   updatedAt: string;
 }
 
@@ -131,6 +170,8 @@ export interface ChatParticipantConfigUpdate {
   kind: ChatProviderKind;
   model?: string;
   avatarId?: string;
+  agentMode?: ChatAgentMode;
+  permissions?: ChatAgentPermissions;
 }
 
 export interface CreateChatConversationRequest {
@@ -142,6 +183,8 @@ export interface CreateChatConversationRequest {
     kind: ChatProviderKind;
     model?: string;
     avatarId?: string;
+    agentMode?: ChatAgentMode;
+    permissions?: ChatAgentPermissions;
   }>;
 }
 
@@ -153,6 +196,8 @@ export interface AddChatParticipantRequest {
     kind: ChatProviderKind;
     model?: string;
     avatarId?: string;
+    agentMode?: ChatAgentMode;
+    permissions?: ChatAgentPermissions;
   };
 }
 

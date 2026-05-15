@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { app } from "electron";
 import type {
+  AgentContextUsage,
   AddChatParticipantRequest,
   ChatChoiceOption,
   ChatMessage,
@@ -22,6 +23,13 @@ import type {
   SendChatMessageRequest,
   StartReviewResult
 } from "../../shared/types";
+import {
+  chatAgentPermissionsEqual,
+  effectiveChatAgentPermissions,
+  normalizeChatAgentMode,
+  normalizeChatAgentPermissions
+} from "../../shared/agentPermissions";
+import { normalizeAgentContextUsage } from "../../shared/agentContext";
 import { CliAgentRunner } from "./cliAgents";
 import type { CliAgentOutputEvent, CliAgentRoleOptions } from "./cliAgents";
 import { DebugLogService } from "./debugLogs";
@@ -32,7 +40,7 @@ import { StorageService } from "./storage";
 type ProgressCallback = (progress: ReviewProgress) => void;
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 4;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 6;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 
@@ -53,6 +61,50 @@ export class ChatService {
     private readonly debugLogs: DebugLogService,
     private readonly onConversationSnapshot?: (conversation: Conversation) => void
   ) {}
+
+  async hydrateContextUsage(conversation: Conversation): Promise<Conversation> {
+    if (conversation.kind !== "chat") {
+      return conversation;
+    }
+    const participants = new Map(this.chatParticipants(conversation).map((participant) => [participant.id, participant]));
+    const existingUsage = this.agentContextUsageByParticipant(conversation);
+    let nextUsage: Record<string, AgentContextUsage> | undefined;
+    for (const session of this.chatSessions(conversation)) {
+      if (!session.sessionId || existingUsage[session.participantId]) {
+        continue;
+      }
+      const participant = participants.get(session.participantId);
+      if (!participant) {
+        continue;
+      }
+      const usage = await this.cliRunner.contextUsageForSession(
+        {
+          id: participant.id,
+          kind: participant.kind,
+          label: `@${participant.handle}`,
+          model: session.participantModel ?? participant.model
+        },
+        session.sessionId
+      );
+      if (!usage) {
+        continue;
+      }
+      nextUsage = {
+        ...(nextUsage ?? existingUsage),
+        [participant.id]: usage
+      };
+    }
+    if (!nextUsage) {
+      return conversation;
+    }
+    return {
+      ...conversation,
+      metadata: {
+        ...conversation.metadata,
+        agentContextUsageByParticipant: nextUsage
+      }
+    };
+  }
 
   async createConversation(request: CreateChatConversationRequest): Promise<StartReviewResult> {
     const now = new Date().toISOString();
@@ -340,6 +392,8 @@ export class ChatService {
     const promptConversation = options.promptConversation ?? conversation;
     const workspacePath = options.workspacePath ?? await this.ensureHistoryFiles(promptConversation);
     const isResumingSession = Boolean(session.sessionId);
+    const agentMode = normalizeChatAgentMode(participant.agentMode);
+    const permissions = normalizeChatAgentPermissions(participant.permissions);
     const usePromptRole = session.roleRuntime === "prompt-fallback";
     const prompt = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: usePromptRole && !isResumingSession
@@ -353,7 +407,7 @@ export class ChatService {
         })
       : undefined;
     const role = usePromptRole ? undefined : this.cliRoleOptions(participant, session, promptFallbackPrompt);
-    const runPath = conversation.repoPath || workspacePath;
+    const runPath = this.runPathForParticipant(conversation, participant, workspacePath);
     const cliParticipant: ParticipantConfig = {
       id: participant.id,
       kind: participant.kind,
@@ -376,6 +430,8 @@ export class ChatService {
         extraReadableDirs: [workspacePath],
         resumeFallbackPrompt,
         role,
+        agentMode,
+        permissions,
         onOutput: progressSink.emit,
         warm: {
           conversationId: conversation.id,
@@ -404,6 +460,8 @@ export class ChatService {
           persistSession: true,
           extraReadableDirs: [workspacePath],
           role: retryRole,
+          agentMode,
+          permissions,
           onOutput: progressSink.emit,
           warm: {
             conversationId: conversation.id,
@@ -425,11 +483,63 @@ export class ChatService {
           };
         }
       }
+      const confirmationViolation = result.ok
+        ? this.confirmationBrevityViolation(result.content, triggerMessage, Boolean(options.continuation))
+        : undefined;
+      if (confirmationViolation) {
+        options.warnings.push(`@${participant.handle}: rejected verbose affirmative confirmation; restarted the chat session and retried.`);
+        session = await this.newSessionForParticipant(participant);
+        const retryUsesPromptRole = session.roleRuntime === "prompt-fallback";
+        const retryPromptBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+          includeRoleInstructions: retryUsesPromptRole
+        });
+        const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+          includeRoleInstructions: true
+        });
+        const retryPrompt = this.confirmationBrevityRetryPrompt(retryPromptBase);
+        const retryRole = retryUsesPromptRole
+          ? undefined
+          : this.cliRoleOptions(participant, session, this.confirmationBrevityRetryPrompt(retryPromptFallbackBase));
+        result = await this.cliRunner.run(cliParticipant, retryPrompt, runPath, undefined, "chat", signal, {
+          persistSession: true,
+          extraReadableDirs: [workspacePath],
+          role: retryRole,
+          agentMode,
+          permissions,
+          onOutput: progressSink.emit,
+          warm: {
+            conversationId: conversation.id,
+            participantId: participant.id,
+            contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath),
+            idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
+          }
+        });
+        this.applyCliRunMetadata(session, result, options.warnings);
+        const retryGuardViolation = result.ok ? this.chatResponseGuardViolation(result.content, triggerMessage) : undefined;
+        if (retryGuardViolation) {
+          const error = `Blocked chat response because it mentioned ${retryGuardViolation}.`;
+          options.warnings.push(`@${participant.handle}: ${error}`);
+          result = {
+            ...result,
+            ok: false,
+            content: `@${participant.handle} response was blocked because it discussed internal CLI mechanics instead of answering in chat.`,
+            error
+          };
+        } else {
+          const retryConfirmationViolation = result.ok
+            ? this.confirmationBrevityViolation(result.content, triggerMessage, Boolean(options.continuation))
+            : undefined;
+          if (retryConfirmationViolation) {
+            options.warnings.push(`@${participant.handle}: still returned a verbose affirmative confirmation after retry.`);
+          }
+        }
+      }
       const now = new Date().toISOString();
       session.updatedAt = now;
       if (result.sessionId) {
         session.sessionId = result.sessionId;
       }
+      this.updateParticipantContextUsage(conversation, participant.id, result.contextUsage);
       const participantMessage = this.message(
         "participant",
         result.content,
@@ -489,7 +599,8 @@ export class ChatService {
         options.includeRoleInstructions
           ? ["Role instructions:", session.roleInstructions].join("\n")
           : "Use your configured role instructions for this participant.",
-        conversation.repoPath ? `Repository: ${conversation.repoPath} (read-only).` : "Repository: none selected.",
+        this.participantRepositoryLine(conversation, participant),
+        this.participantPermissionPolicy(participant),
         `Readable chat history Markdown: ${historyMarkdownPath}.`,
         `Readable chat history JSON: ${historyJsonPath}.`,
         "Read the history files when you need prior conversation context. Do not ask User to grant access to these app-managed history files.",
@@ -501,6 +612,7 @@ export class ChatService {
         }),
         "Mention policy: you may cite participant handles in normal prose for attribution; those citations do not request dispatch. To ask another participant to respond, include a dedicated `Participant requests:` block with one bullet per requested participant. Use `Participant requests: none` when you cite or identify participants but do not need follow-up. If you need to synthesize after the requested participants reply, add the exact line `Return to requester after replies: yes`. Mentioned agents and requester continuations will not run until User approves them.",
         "User choice policy: when User must pick one option before you can continue, include one dedicated `User choice:` block after your explanation. Format it as lines `T: short title`, `Q: question`, `O1: option label | optional description`, `O2: option label | optional description`, and optionally `R: O1`. Use at least two options. Ask at most one user choice in a message. The UI also lets User write a custom answer instead of choosing your suggestions. After User confirms, the app will send the selected option or custom answer back to you in this chat.",
+        this.confirmationBrevityPolicy(),
         "Clarification policy: if you need clarification about goals, requirements, preferences, acceptance criteria, or user intent, ask User directly in your reply. Do not mention another agent for user-owned clarification.",
         "Thread policy: answer in the active thread. Do not assume a mentioned participant has answered until their reply appears in the transcript.",
         "Chat response guard: answer only in this chat message. Do not mention ExitPlanMode, plan files, tool availability, or recording/writing outside the chat unless User directly asks about those mechanics. If you make a decision, arbitration, plan, or summary, include it in this reply. Do not say it is posted above or recorded elsewhere unless you cite the exact existing chat message."
@@ -550,6 +662,8 @@ export class ChatService {
       "- Ask User directly when goals, requirements, preferences, acceptance criteria, or user intent are unclear.",
       "- Do not ask another participant for user-owned clarification.",
       "- When User must choose between concrete options, include one `User choice:` block with `T:`, `Q:`, `O1:`, `O2:`, and optional `R:` lines so the app can render choice buttons plus a custom-answer path.",
+      `- ${this.participantPermissionPolicy(participant)}`,
+      `- ${this.confirmationBrevityPolicy()}`,
       "- Answer in the active chat message; do not claim to write, record, or post work elsewhere.",
       "- Follow each turn's chat prompt for history paths, the triggering message, participants, and dispatch rules."
     ].join("\n");
@@ -585,6 +699,8 @@ export class ChatService {
       existing.roleConfigVersion >= role.version &&
       existing.participantKind === participant.kind &&
       this.normalizedModel(existing.participantModel) === this.normalizedModel(participant.model) &&
+      normalizeChatAgentMode(existing.participantAgentMode) === normalizeChatAgentMode(participant.agentMode) &&
+      chatAgentPermissionsEqual(existing.participantPermissions, normalizeChatAgentPermissions(participant.permissions)) &&
       this.isKnownRoleRuntime(existing.roleRuntime) &&
       existing.runtimeConfigVersion === runtimeConfigVersion
     ) {
@@ -608,6 +724,8 @@ export class ChatService {
       roleRuntime: this.preferredRoleRuntimeFor(participant),
       participantKind: participant.kind,
       participantModel: participant.model?.trim() || undefined,
+      participantAgentMode: normalizeChatAgentMode(participant.agentMode),
+      participantPermissions: normalizeChatAgentPermissions(participant.permissions),
       runtimeConfigVersion,
       roleLabel: role.label,
       roleInstructions: role.instructions,
@@ -631,6 +749,41 @@ export class ChatService {
     return value?.trim() ?? "";
   }
 
+  private runPathForParticipant(conversation: Conversation, participant: ChatParticipant, workspacePath: string): string {
+    const permissions = effectiveChatAgentPermissions(
+      normalizeChatAgentMode(participant.agentMode),
+      normalizeChatAgentPermissions(participant.permissions)
+    );
+    return permissions.repoRead && conversation.repoPath ? conversation.repoPath : workspacePath;
+  }
+
+  private participantRepositoryLine(conversation: Conversation, participant: ChatParticipant): string {
+    const permissions = effectiveChatAgentPermissions(
+      normalizeChatAgentMode(participant.agentMode),
+      normalizeChatAgentPermissions(participant.permissions)
+    );
+    if (!conversation.repoPath) {
+      return "Repository: none selected.";
+    }
+    return permissions.repoRead
+      ? `Repository: ${conversation.repoPath}.`
+      : "Repository: selected for the chat but not granted to this participant.";
+  }
+
+  private participantPermissionPolicy(participant: ChatParticipant): string {
+    const mode = normalizeChatAgentMode(participant.agentMode);
+    const permissions = effectiveChatAgentPermissions(mode, normalizeChatAgentPermissions(participant.permissions));
+    const shellRules = permissions.shell.enabled && permissions.shell.rules.length > 0
+      ? permissions.shell.rules.map((rule) => `${rule.action} ${rule.match} ${JSON.stringify(rule.pattern)}`).join("; ")
+      : "none";
+    return [
+      `Agent mode: ${mode}.`,
+      `Permissions: repo read ${permissions.repoRead ? "allowed" : "blocked"}, shell commands ${permissions.shell.enabled ? "allowed" : "blocked"}, workspace edits ${permissions.workspaceWrite ? "allowed" : "blocked"}, web access ${permissions.webAccess ? "allowed" : "blocked"}.`,
+      permissions.shell.enabled ? `Shell command rules: ${shellRules}. Follow deny rules strictly; ask rules require native CLI approval; allow rules may run without extra confirmation when the CLI supports them.` : "Do not run shell commands.",
+      permissions.workspaceWrite ? "If you change files, summarize the changed files and verification in this chat reply." : "Do not edit files."
+    ].join(" ");
+  }
+
   private warmAgentContextKey(
     conversation: Conversation,
     participant: ChatParticipant,
@@ -643,6 +796,8 @@ export class ChatService {
       participantId: participant.id,
       participantKind: participant.kind,
       participantModel: participant.model?.trim() || "",
+      participantAgentMode: normalizeChatAgentMode(participant.agentMode),
+      participantPermissions: normalizeChatAgentPermissions(participant.permissions),
       roleConfigId: session.roleConfigId,
       roleConfigVersion: session.roleConfigVersion,
       roleRuntime: session.roleRuntime ?? "",
@@ -689,6 +844,57 @@ export class ChatService {
     ].join("\n\n");
   }
 
+  private confirmationBrevityPolicy(): string {
+    return "Confirmation brevity policy: when the triggering request asks whether you agree, confirm, approve, acknowledge, sign off, or whether you have objections, reply with only a short confirmation such as `Yes, agree.`, `Confirmed.`, or `No objections.` unless you have a real objection, caveat, or correction. If you do have one, start with `Objection:` or `Concern:` and include only the material blocker; do not restate the prior proposal.";
+  }
+
+  private confirmationBrevityRetryPrompt(prompt: string): string {
+    return [
+      "Your previous draft was rejected because the triggering request only asked for agreement or confirmation, and you replied with a verbose affirmative restatement.",
+      "Rewrite with only one short confirmation sentence, such as `Yes, agree.`, `Confirmed.`, or `No objections.` If you have a real objection, caveat, or correction, start with `Objection:` or `Concern:` and include only that material blocker.",
+      prompt
+    ].join("\n\n");
+  }
+
+  private confirmationBrevityViolation(content: string, triggerMessage: ChatMessage, continuation: boolean): string | undefined {
+    if (continuation || !this.confirmationRequestWasAsked(triggerMessage.content)) {
+      return undefined;
+    }
+    const searchable = this.withoutFencedCode(content).trim();
+    if (!searchable || this.hasMaterialConfirmationObjection(searchable) || !this.startsWithAffirmativeConfirmation(searchable)) {
+      return undefined;
+    }
+    const wordCount = searchable.match(/\S+/g)?.length ?? 0;
+    const hasExtraStructure = /\n|```|^\s*(?:[-*]|\d+[.)])\s+/m.test(content);
+    return wordCount > 8 || hasExtraStructure ? "verbose affirmative confirmation" : undefined;
+  }
+
+  private confirmationRequestWasAsked(content: string): boolean {
+    const searchable = this.withoutFencedCode(content);
+    return [
+      /\bdo\s+you\s+agree\b/i,
+      /\bagree\??\s*$/i,
+      /\b(?:can|could|please|pls|kindly|would\s+you)\s+(?:confirm|approve|acknowledge|validate)\b/i,
+      /\bconfirm\??\s*$/i,
+      /\bconfirm\s+(?:this|that|it|whether|if)\b/i,
+      /\b(?:any|no)\s+objections?\b/i,
+      /\bare\s+you\s+(?:ok|okay|aligned|good)\s+with\b/i,
+      /\bdoes\s+this\s+(?:look|seem)\s+(?:right|correct|good)\b/i,
+      /\bis\s+this\s+(?:right|correct|ok|okay)\b/i,
+      /\b(?:sign\s*off|lgtm)\b/i
+    ].some((pattern) => pattern.test(searchable));
+  }
+
+  private startsWithAffirmativeConfirmation(content: string): boolean {
+    const first = content.trim().replace(/^>\s*/, "").slice(0, 160);
+    return /^(?:yes\b|agree(?:d)?\b|confirmed?\b|confirm\b|ack(?:nowledged)?\b|lgtm\b|sounds good\b|no objections?\b|i agree\b|i confirm\b|i approve\b)/i.test(first);
+  }
+
+  private hasMaterialConfirmationObjection(content: string): boolean {
+    const withoutNoObjections = content.replace(/\bno\s+objections?\b/gi, "");
+    return /\b(?:objection|concern|caveat|but|however|except|unless|disagree|reject|unclear|unsupported|blocker|risk|issue|problem|missing|incorrect|wrong|invalid|unsafe|not convinced|cannot confirm|can't confirm|do not agree|don't agree|i disagree)\b/i.test(withoutNoObjections);
+  }
+
   private lockParticipantRoleVersion(conversation: Conversation, participant: ChatParticipant, version: number): void {
     const participants = this.chatParticipants(conversation).map((item) =>
       item.id === participant.id ? { ...item, roleConfigVersion: version } : item
@@ -702,6 +908,23 @@ export class ChatService {
       ? sessions.map((item) => (item.participantId === session.participantId ? session : item))
       : [...sessions, session];
     conversation.metadata = { ...conversation.metadata, participantSessions: next };
+  }
+
+  private updateParticipantContextUsage(
+    conversation: Conversation,
+    participantId: string,
+    usage: AgentContextUsage | undefined
+  ): void {
+    if (!usage) {
+      return;
+    }
+    conversation.metadata = {
+      ...conversation.metadata,
+      agentContextUsageByParticipant: {
+        ...this.agentContextUsageByParticipant(conversation),
+        [participantId]: usage
+      }
+    };
   }
 
   private async validateParticipants(
@@ -735,7 +958,9 @@ export class ChatService {
         roleConfigId: item.roleConfigId,
         kind: item.kind as ChatProviderKind,
         model: item.model?.trim() || undefined,
-        avatarId: item.avatarId?.trim() || undefined
+        avatarId: item.avatarId?.trim() || undefined,
+        agentMode: normalizeChatAgentMode(item.agentMode),
+        permissions: normalizeChatAgentPermissions(item.permissions)
       };
     });
   }
@@ -1139,6 +1364,21 @@ export class ChatService {
           return typeof session.participantId === "string" && typeof session.sessionId === "string";
         })
       : [];
+  }
+
+  private agentContextUsageByParticipant(conversation: Conversation): Record<string, AgentContextUsage> {
+    const value = conversation.metadata.agentContextUsageByParticipant;
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return {};
+    }
+    const usageByParticipant: Record<string, AgentContextUsage> = {};
+    for (const [participantId, usage] of Object.entries(value)) {
+      const normalized = normalizeAgentContextUsage(usage);
+      if (normalized) {
+        usageByParticipant[participantId] = normalized;
+      }
+    }
+    return usageByParticipant;
   }
 
   private isChatParticipant(item: unknown): item is ChatParticipant {

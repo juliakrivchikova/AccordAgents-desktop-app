@@ -1,10 +1,23 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import type { Dirent } from "node:fs";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
-import type { AgentHealth, ConversationKind, GitDiffMode, ParticipantConfig } from "../../shared/types";
+import type {
+  AgentContextUsage,
+  AgentContextUsageSource,
+  AgentHealth,
+  ChatAgentMode,
+  ChatAgentPermissions,
+  ChatShellPermissionRule,
+  ConversationKind,
+  GitDiffMode,
+  ParticipantConfig
+} from "../../shared/types";
+import { effectiveChatAgentPermissions, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
 import { CommandError, commandExists, runCommand } from "./command";
 import type { ParticipantRunResult } from "./providers";
 
@@ -13,6 +26,8 @@ const MAX_CLI_ERROR_LINES = 8;
 const MAX_CLI_EVENT_SUMMARIES = 2;
 const CLI_AGENT_RUN_TIMEOUT_MS = 15 * 60_000;
 const WARM_AGENT_KILL_GRACE_MS = 1500;
+const SESSION_LOG_RETRY_MS = 80;
+const SESSION_LOG_RETRIES = 4;
 
 export interface CliAgentRunOptions {
   persistSession?: boolean;
@@ -22,6 +37,8 @@ export interface CliAgentRunOptions {
   role?: CliAgentRoleOptions;
   warm?: CliAgentWarmOptions;
   onOutput?: CliAgentOutputCallback;
+  agentMode?: ChatAgentMode;
+  permissions?: ChatAgentPermissions;
 }
 
 export type CliAgentOutputKind = "tool";
@@ -66,11 +83,22 @@ interface ClaudeWarmPendingTurn {
   startedAt: number;
   messages: string[];
   sessionId?: string;
+  model?: string;
+  usedTokens?: number;
+  contextWindowTokens?: number;
   timer: NodeJS.Timeout;
   abort?: () => void;
   onOutput?: CliAgentOutputCallback;
   resolve: (result: ParticipantRunResult) => void;
   reject: (error: Error) => void;
+}
+
+interface ClaudeToolConfig {
+  permissionMode: ChatAgentMode;
+  tools: string[];
+  allowedTools: string[];
+  disallowedTools: string[];
+  askTools: string[];
 }
 
 export class CliAgentRunner {
@@ -107,6 +135,22 @@ export class CliAgentRunner {
     const entries = Array.from(this.warmAgents.values());
     this.warmAgents.clear();
     await Promise.all(entries.map((entry) => this.closeWarmAgent(entry, "shutdown")));
+  }
+
+  async contextUsageForSession(
+    participant: ParticipantConfig,
+    sessionId: string | undefined
+  ): Promise<AgentContextUsage | undefined> {
+    if (!sessionId) {
+      return undefined;
+    }
+    if (participant.kind === "codex-cli") {
+      return this.extractCodexSessionLogContextUsageWithRetry(sessionId, participant);
+    }
+    if (participant.kind === "claude-code") {
+      return this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant);
+    }
+    return undefined;
   }
 
   private async detectCodex(): Promise<AgentHealth> {
@@ -166,6 +210,8 @@ export class CliAgentRunner {
       const outputPath = path.join(outputDir, "last-message.txt");
       const resuming = Boolean(options.sessionId);
       const extraReadableDirs = this.normalizedExtraReadableDirs(options.extraReadableDirs);
+      const mode = this.agentModeForRun(kind, options);
+      const permissions = this.permissionsForRun(mode, options);
       const args = resuming
         ? [
             "exec",
@@ -179,7 +225,7 @@ export class CliAgentRunner {
         : [
             "exec",
             "--sandbox",
-            "read-only",
+            permissions.workspaceWrite ? "workspace-write" : "read-only",
             "--json",
             "--output-last-message",
             outputPath,
@@ -207,25 +253,42 @@ export class CliAgentRunner {
       } else if (kind === "chat" && resuming) {
         args.splice(2, 0, "--skip-git-repo-check");
       }
+      if (mode === "auto") {
+        this.insertCodexOptionBeforePrompt(
+          args,
+          resuming,
+          "-c",
+          `approval_policy=${this.tomlString("on-request")}`,
+          "-c",
+          `approvals_reviewer=${this.tomlString("auto_review")}`
+        );
+      }
       if (options.role) {
         this.insertCodexOptionBeforePrompt(args, resuming, "-c", `developer_instructions=${this.tomlString(options.role.instructions)}`);
+      }
+      if (permissions.webAccess) {
+        args.unshift("--search");
       }
       const stdoutLines = this.createLineHandler((line) => this.emitCodexLiveOutput(line, options.onOutput));
       const result = await runCommand("codex", args, {
         cwd: repoPath,
-        input: this.codexPrompt(prompt, repoPath, diffMode, kind),
+        input: this.codexPrompt(prompt, repoPath, diffMode, kind, options),
         timeoutMs: CLI_AGENT_RUN_TIMEOUT_MS,
         signal,
         onStdout: options.onOutput ? stdoutLines : undefined
       });
       const lastMessage = await this.readOptionalFile(outputPath);
+      const sessionId = this.extractCodexSessionId(result.stdout) ?? options.sessionId;
       return {
         participant,
         ok: true,
         content: lastMessage.trim() || this.extractCodexText(result.stdout),
         durationMs: Date.now() - startedAt,
-        sessionId: this.extractCodexSessionId(result.stdout) ?? options.sessionId,
-        roleRuntime: options.role ? "codex-developer-instructions" : undefined
+        sessionId,
+        roleRuntime: options.role ? "codex-developer-instructions" : undefined,
+        contextUsage:
+          this.extractCodexContextUsage(result.stdout, participant) ??
+          await this.extractCodexSessionLogContextUsageWithRetry(sessionId, participant)
       };
     } catch (error) {
       if (options.role && this.isCodexDeveloperInstructionsUnsupported(error)) {
@@ -240,7 +303,9 @@ export class CliAgentRunner {
             persistSession: options.persistSession,
             sessionId: options.sessionId,
             extraReadableDirs: options.extraReadableDirs,
-            resumeFallbackPrompt: options.resumeFallbackPrompt
+            resumeFallbackPrompt: options.resumeFallbackPrompt,
+            agentMode: options.agentMode,
+            permissions: options.permissions
           }
         );
         return {
@@ -256,7 +321,9 @@ export class CliAgentRunner {
         const restarted = await this.runCodexOneShot(participant, options.resumeFallbackPrompt ?? prompt, repoPath, diffMode, kind, signal, {
           persistSession: options.persistSession,
           extraReadableDirs: options.extraReadableDirs,
-          role: options.role
+          role: options.role,
+          agentMode: options.agentMode,
+          permissions: options.permissions
         });
         return { ...restarted, sessionRestarted: true };
       }
@@ -293,16 +360,24 @@ export class CliAgentRunner {
     const startedAt = Date.now();
     const newSessionId = options.persistSession && !options.sessionId ? randomUUID() : undefined;
     const extraReadableDirs = this.normalizedExtraReadableDirs(options.extraReadableDirs);
+    const toolConfig = this.claudeToolConfig(kind, repoPath, extraReadableDirs, options);
     try {
       const args = [
         "-p",
         "--output-format",
         "json",
         "--permission-mode",
-        kind === "chat" ? "default" : "plan",
-        "--disallowedTools",
-        "Edit,Write,MultiEdit,NotebookEdit,Bash"
+        toolConfig.permissionMode
       ];
+      if (toolConfig.allowedTools.length > 0) {
+        args.push("--allowedTools", toolConfig.allowedTools.join(","));
+      }
+      if (toolConfig.disallowedTools.length > 0) {
+        args.push("--disallowedTools", toolConfig.disallowedTools.join(","));
+      }
+      if (toolConfig.askTools.length > 0) {
+        args.push("--settings", JSON.stringify({ permissions: { ask: toolConfig.askTools } }));
+      }
       if (options.sessionId) {
         args.push("--resume", options.sessionId);
       } else if (newSessionId) {
@@ -317,8 +392,8 @@ export class CliAgentRunner {
       if (extraReadableDirs.length > 0) {
         args.push("--add-dir", ...extraReadableDirs);
       }
-      if (repoPath || extraReadableDirs.length > 0) {
-        args.push("--tools", "Read,Grep,Glob,LS");
+      if (toolConfig.tools.length > 0) {
+        args.push("--tools", toolConfig.tools.join(","));
       } else {
         args.push("--tools", "");
       }
@@ -333,13 +408,17 @@ export class CliAgentRunner {
           signal
         }
       );
+      const sessionId = this.extractClaudeSessionId(result.stdout) ?? newSessionId ?? options.sessionId;
       return {
         participant,
         ok: true,
         content: this.extractClaudeText(result.stdout),
         durationMs: Date.now() - startedAt,
-        sessionId: this.extractClaudeSessionId(result.stdout) ?? newSessionId ?? options.sessionId,
-        roleRuntime: options.role && !options.sessionId ? "claude-agent" : undefined
+        sessionId,
+        roleRuntime: options.role && !options.sessionId ? "claude-agent" : undefined,
+        contextUsage:
+          this.extractClaudeContextUsage(result.stdout, participant) ??
+          await this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant)
       };
     } catch (error) {
       if (options.role && !options.sessionId && this.isClaudeAgentFlagUnsupported(error)) {
@@ -352,7 +431,9 @@ export class CliAgentRunner {
           {
             persistSession: options.persistSession,
             extraReadableDirs: options.extraReadableDirs,
-            resumeFallbackPrompt: options.resumeFallbackPrompt
+            resumeFallbackPrompt: options.resumeFallbackPrompt,
+            agentMode: options.agentMode,
+            permissions: options.permissions
           }
         );
         return {
@@ -368,7 +449,9 @@ export class CliAgentRunner {
         const restarted = await this.runClaudeOneShot(participant, options.resumeFallbackPrompt ?? prompt, repoPath, kind, signal, {
           persistSession: options.persistSession,
           extraReadableDirs: options.extraReadableDirs,
-          role: options.role
+          role: options.role,
+          agentMode: options.agentMode,
+          permissions: options.permissions
         });
         return { ...restarted, sessionRestarted: true };
       }
@@ -449,6 +532,7 @@ export class CliAgentRunner {
   ): WarmAgentEntry {
     const newSessionId = options.persistSession && !options.sessionId ? randomUUID() : undefined;
     const extraReadableDirs = this.normalizedExtraReadableDirs(options.extraReadableDirs);
+    const toolConfig = this.claudeToolConfig(kind, repoPath, extraReadableDirs, options);
     const args = [
       "-p",
       "--input-format",
@@ -456,10 +540,17 @@ export class CliAgentRunner {
       "--output-format",
       "stream-json",
       "--permission-mode",
-      kind === "chat" ? "default" : "plan",
-      "--disallowedTools",
-      "Edit,Write,MultiEdit,NotebookEdit,Bash"
+      toolConfig.permissionMode
     ];
+    if (toolConfig.allowedTools.length > 0) {
+      args.push("--allowedTools", toolConfig.allowedTools.join(","));
+    }
+    if (toolConfig.disallowedTools.length > 0) {
+      args.push("--disallowedTools", toolConfig.disallowedTools.join(","));
+    }
+    if (toolConfig.askTools.length > 0) {
+      args.push("--settings", JSON.stringify({ permissions: { ask: toolConfig.askTools } }));
+    }
     if (options.sessionId) {
       args.push("--resume", options.sessionId);
     } else if (newSessionId) {
@@ -474,8 +565,8 @@ export class CliAgentRunner {
     if (extraReadableDirs.length > 0) {
       args.push("--add-dir", ...extraReadableDirs);
     }
-    if (repoPath || extraReadableDirs.length > 0) {
-      args.push("--tools", "Read,Grep,Glob,LS");
+    if (toolConfig.tools.length > 0) {
+      args.push("--tools", toolConfig.tools.join(","));
     } else {
       args.push("--tools", "");
     }
@@ -513,6 +604,11 @@ export class CliAgentRunner {
 
     child.stderr.on("data", (chunk: string) => {
       stderr = this.truncateText(`${stderr}${chunk}`, MAX_CLI_ERROR_CHARS);
+    });
+
+    child.stdin.on("error", (error) => {
+      closed = true;
+      rejectPending(error);
     });
 
     child.stdout.on("data", (chunk: string) => {
@@ -564,6 +660,7 @@ export class CliAgentRunner {
             startedAt,
             messages: [],
             sessionId: options.sessionId ?? newSessionId,
+            model: participant.model,
             timer,
             abort: signal ? () => signal.removeEventListener("abort", abort) : undefined,
             onOutput,
@@ -605,6 +702,9 @@ export class CliAgentRunner {
       return;
     }
     pending.sessionId = this.findSessionId(event) ?? pending.sessionId ?? fallbackSessionId;
+    pending.model = this.findModelId(event) ?? pending.model ?? participant.model;
+    pending.usedTokens = this.findContextUsedTokens(event) ?? pending.usedTokens;
+    pending.contextWindowTokens = this.findContextWindowTokens(event) ?? pending.contextWindowTokens;
     const streamError = this.claudeWarmStreamError(event);
     if (streamError) {
       rejectPending(new Error(streamError));
@@ -626,14 +726,29 @@ export class CliAgentRunner {
       return;
     }
     const content = this.extractClaudeWarmResultText(event) ?? current.messages.at(-1) ?? "";
-    current.resolve({
+    const sessionId = this.findSessionId(event) ?? current.sessionId ?? fallbackSessionId;
+    const contextUsage = buildAgentContextUsage({
+      usedTokens: current.usedTokens,
+      contextWindowTokens: current.contextWindowTokens ?? contextWindowForModel(participant.kind, current.model),
+      source: "claude-code",
+      model: current.model
+    });
+    const result: ParticipantRunResult = {
       participant,
       ok: true,
       content: content.trim(),
       durationMs: Date.now() - current.startedAt,
-      sessionId: this.findSessionId(event) ?? current.sessionId ?? fallbackSessionId,
-      roleRuntime: options.role && !options.sessionId ? "claude-agent" : undefined
-    });
+      sessionId,
+      roleRuntime: options.role && !options.sessionId ? "claude-agent" : undefined,
+      contextUsage
+    };
+    if (contextUsage || !sessionId) {
+      current.resolve(result);
+      return;
+    }
+    void this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant)
+      .then((logUsage) => current.resolve({ ...result, contextUsage: logUsage }))
+      .catch(() => current.resolve(result));
   }
 
   private claudeWarmUserMessage(prompt: string): Record<string, unknown> {
@@ -902,11 +1017,89 @@ export class CliAgentRunner {
     await this.debugLogs?.write(event, payload);
   }
 
+  private agentModeForRun(kind: ConversationKind, options: CliAgentRunOptions): ChatAgentMode {
+    return kind === "chat" ? normalizeChatAgentMode(options.agentMode) : "plan";
+  }
+
+  private permissionsForRun(mode: ChatAgentMode, options: CliAgentRunOptions): ChatAgentPermissions {
+    return effectiveChatAgentPermissions(mode, normalizeChatAgentPermissions(options.permissions));
+  }
+
+  private claudeToolConfig(
+    kind: ConversationKind,
+    repoPath: string | undefined,
+    extraReadableDirs: string[],
+    options: CliAgentRunOptions
+  ): ClaudeToolConfig {
+    const permissionMode = this.agentModeForRun(kind, options);
+    const permissions = this.permissionsForRun(permissionMode, options);
+    const tools = new Set<string>();
+    const allowedTools: string[] = [];
+    const disallowedTools: string[] = [];
+    const askTools: string[] = [];
+    const readContextAvailable = Boolean(repoPath) || extraReadableDirs.length > 0;
+    const readTools = ["Read", "Grep", "Glob", "LS"];
+    const editTools = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+
+    if (readContextAvailable) {
+      for (const tool of readTools) {
+        tools.add(tool);
+      }
+    }
+    if (permissions.webAccess) {
+      tools.add("WebSearch");
+      tools.add("WebFetch");
+    }
+    if (permissions.workspaceWrite) {
+      for (const tool of editTools) {
+        tools.add(tool);
+      }
+    } else {
+      disallowedTools.push(...editTools);
+    }
+    if (permissions.shell.enabled) {
+      tools.add("Bash");
+      for (const rule of permissions.shell.rules) {
+        const toolRule = this.claudeBashPermissionRule(rule);
+        if (rule.action === "allow") {
+          allowedTools.push(toolRule);
+        } else if (rule.action === "ask") {
+          askTools.push(toolRule);
+        } else {
+          disallowedTools.push(toolRule);
+        }
+      }
+    } else {
+      disallowedTools.push("Bash");
+    }
+
+    return {
+      permissionMode,
+      tools: Array.from(tools),
+      allowedTools,
+      disallowedTools,
+      askTools
+    };
+  }
+
+  private claudeBashPermissionRule(rule: ChatShellPermissionRule): string {
+    const pattern = rule.pattern.trim();
+    return rule.match === "prefix" ? `Bash(${pattern}:*)` : `Bash(${pattern})`;
+  }
+
+  private shellRulesText(rules: ChatShellPermissionRule[]): string {
+    if (rules.length === 0) {
+      return "no explicit shell rules configured";
+    }
+    return rules.map((rule) => `${rule.action} ${rule.match} ${JSON.stringify(rule.pattern)}`).join("; ");
+  }
+
   private codexPrompt(
     prompt: string,
     repoPath: string | undefined,
     diffMode: GitDiffMode | undefined,
-    kind: ConversationKind
+    kind: ConversationKind,
+    options: CliAgentRunOptions = {}
   ): string {
     if (kind === "implementation-plan") {
       return [
@@ -918,10 +1111,16 @@ export class CliAgentRunner {
     }
 
     if (kind === "chat") {
+      const mode = this.agentModeForRun(kind, options);
+      const permissions = this.permissionsForRun(mode, options);
       return [
-        "You are running for AI Consensus Chat in read-only mode.",
+        `You are running for AI Consensus Chat in ${mode} mode.`,
         "Use the generated chat history path and any selected repository context described in the prompt.",
-        "Do not edit files, run mutating commands, install dependencies, or wait for terminal confirmation.",
+        permissions.shell.enabled
+          ? `Shell commands are allowed only according to these rules: ${this.shellRulesText(permissions.shell.rules)}. Deny rules are strict; ask rules require native CLI approval.`
+          : "Do not run shell commands.",
+        permissions.workspaceWrite ? "Workspace file edits are allowed when needed." : "Do not edit files.",
+        permissions.webAccess ? "Web search is available if needed." : "Do not use web search.",
         prompt
       ].join("\n\n");
     }
@@ -994,6 +1193,307 @@ export class CliAgentRunner {
       /(?:unknown|unrecognized|invalid|unsupported).{0,80}--agents?/.test(message) ||
       /--agents?.{0,80}(?:unknown|unrecognized|invalid|unsupported)/.test(message)
     );
+  }
+
+  private extractCodexContextUsage(stdout: string, participant: ParticipantConfig): AgentContextUsage | undefined {
+    let latest: AgentContextUsage | undefined;
+    let model = participant.model;
+    let usedTokens: number | undefined;
+    let contextWindowTokens: number | undefined;
+    for (const line of stdout.split(/\r?\n/)) {
+      if (!line.trim()) {
+        continue;
+      }
+      try {
+        const event = JSON.parse(line) as unknown;
+        model = this.findModelId(event) ?? model;
+        usedTokens = this.findContextUsedTokens(event) ?? usedTokens;
+        contextWindowTokens = this.findContextWindowTokens(event) ?? contextWindowTokens;
+        const usage = buildAgentContextUsage({
+          usedTokens,
+          contextWindowTokens: contextWindowTokens ?? contextWindowForModel(participant.kind, model),
+          source: "codex-cli",
+          model
+        });
+        if (usage) {
+          latest = usage;
+        }
+      } catch {
+        // Non-JSON output cannot carry structured usage.
+      }
+    }
+    return latest;
+  }
+
+  private extractClaudeContextUsage(stdout: string, participant: ParticipantConfig): AgentContextUsage | undefined {
+    try {
+      return this.agentContextUsageFromEvent(JSON.parse(stdout) as unknown, participant, "claude-code");
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async extractCodexSessionLogContextUsageWithRetry(
+    sessionId: string | undefined,
+    participant: ParticipantConfig
+  ): Promise<AgentContextUsage | undefined> {
+    if (!sessionId) {
+      return undefined;
+    }
+    for (let attempt = 0; attempt < SESSION_LOG_RETRIES; attempt += 1) {
+      const usage = await this.extractCodexSessionLogContextUsage(sessionId, participant);
+      if (usage || attempt === SESSION_LOG_RETRIES - 1) {
+        return usage;
+      }
+      await this.delay(SESSION_LOG_RETRY_MS);
+    }
+    return undefined;
+  }
+
+  private async extractCodexSessionLogContextUsage(
+    sessionId: string,
+    participant: ParticipantConfig
+  ): Promise<AgentContextUsage | undefined> {
+    const filePath = await this.findCodexSessionLogPath(sessionId);
+    if (!filePath) {
+      return undefined;
+    }
+    return this.extractCodexContextUsage(await this.readOptionalFile(filePath), participant);
+  }
+
+  private async extractClaudeSessionLogContextUsageWithRetry(
+    sessionId: string | undefined,
+    participant: ParticipantConfig
+  ): Promise<AgentContextUsage | undefined> {
+    if (!sessionId) {
+      return undefined;
+    }
+    for (let attempt = 0; attempt < SESSION_LOG_RETRIES; attempt += 1) {
+      const usage = await this.extractClaudeSessionLogContextUsage(sessionId, participant);
+      if (usage || attempt === SESSION_LOG_RETRIES - 1) {
+        return usage;
+      }
+      await this.delay(SESSION_LOG_RETRY_MS);
+    }
+    return undefined;
+  }
+
+  private async extractClaudeSessionLogContextUsage(
+    sessionId: string,
+    participant: ParticipantConfig
+  ): Promise<AgentContextUsage | undefined> {
+    const filePath = await this.findClaudeSessionLogPath(sessionId);
+    if (!filePath) {
+      return undefined;
+    }
+    const content = await this.readOptionalFile(filePath);
+    let latest: AgentContextUsage | undefined;
+    for (const line of content.split(/\r?\n/)) {
+      if (!line.trim()) {
+        continue;
+      }
+      try {
+        const usage = this.agentContextUsageFromEvent(JSON.parse(line) as unknown, participant, "claude-code");
+        if (usage) {
+          latest = usage;
+        }
+      } catch {
+        // Ignore partial or diagnostic lines in Claude's local session log.
+      }
+    }
+    return latest;
+  }
+
+  private async findClaudeSessionLogPath(sessionId: string): Promise<string | undefined> {
+    return this.findFileByName(path.join(homedir(), ".claude", "projects"), `${sessionId}.jsonl`, 5);
+  }
+
+  private async findCodexSessionLogPath(sessionId: string): Promise<string | undefined> {
+    return this.findFileByNameMatch(
+      path.join(homedir(), ".codex", "sessions"),
+      (fileName) => fileName.endsWith(".jsonl") && fileName.includes(sessionId),
+      6
+    );
+  }
+
+  private async findFileByName(
+    directoryPath: string,
+    fileName: string,
+    maxDepth: number
+  ): Promise<string | undefined> {
+    return this.findFileByNameMatch(directoryPath, (name) => name === fileName, maxDepth);
+  }
+
+  private async findFileByNameMatch(
+    directoryPath: string,
+    matchesFileName: (fileName: string) => boolean,
+    maxDepth: number
+  ): Promise<string | undefined> {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(directoryPath, { withFileTypes: true });
+    } catch {
+      return undefined;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(directoryPath, entry.name);
+      if (entry.isFile() && matchesFileName(entry.name)) {
+        return entryPath;
+      }
+    }
+    if (maxDepth <= 0) {
+      return undefined;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const found = await this.findFileByNameMatch(path.join(directoryPath, entry.name), matchesFileName, maxDepth - 1);
+      if (found) {
+        return found;
+      }
+    }
+    return undefined;
+  }
+
+  private async delay(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      timer.unref();
+    });
+  }
+
+  private agentContextUsageFromEvent(
+    event: unknown,
+    participant: ParticipantConfig,
+    source: AgentContextUsageSource
+  ): AgentContextUsage | undefined {
+    const model = this.findModelId(event) ?? participant.model;
+    return buildAgentContextUsage({
+      usedTokens: this.findContextUsedTokens(event),
+      contextWindowTokens: this.findContextWindowTokens(event) ?? contextWindowForModel(participant.kind, model),
+      source,
+      model
+    });
+  }
+
+  private findContextUsedTokens(value: unknown): number | undefined {
+    const explicit = this.findNumberField(value, [
+      "context_window_used_tokens",
+      "contextWindowUsedTokens",
+      "context_used_tokens",
+      "contextUsedTokens",
+      "context_tokens",
+      "contextTokens",
+      "used_tokens",
+      "usedTokens"
+    ]);
+    if (explicit) {
+      return explicit;
+    }
+    const usage = this.findUsageRecord(value);
+    if (usage) {
+      return this.inputTokensFromUsage(usage) ?? this.numberField(usage, "total_tokens") ?? this.numberField(usage, "totalTokens");
+    }
+    return this.findNumberField(value, ["input_tokens", "inputTokens", "prompt_tokens", "promptTokens"]);
+  }
+
+  private findContextWindowTokens(value: unknown): number | undefined {
+    return this.findNumberField(value, [
+      "model_context_window",
+      "modelContextWindow",
+      "context_window_tokens",
+      "contextWindowTokens",
+      "context_window",
+      "contextWindow",
+      "max_context_tokens",
+      "maxContextTokens"
+    ]);
+  }
+
+  private findModelId(value: unknown): string | undefined {
+    return this.findStringField(value, ["model", "model_id", "modelId", "resolved_model", "resolvedModel"]);
+  }
+
+  private inputTokensFromUsage(usage: Record<string, unknown>): number | undefined {
+    const inputTokens = this.numberField(usage, "input_tokens") ?? this.numberField(usage, "inputTokens");
+    const promptTokens = this.numberField(usage, "prompt_tokens") ?? this.numberField(usage, "promptTokens");
+    const anthropicCacheTokens =
+      (this.numberField(usage, "cache_creation_input_tokens") ?? this.numberField(usage, "cacheCreationInputTokens") ?? 0) +
+      (this.numberField(usage, "cache_read_input_tokens") ?? this.numberField(usage, "cacheReadInputTokens") ?? 0);
+    if (inputTokens || anthropicCacheTokens > 0) {
+      return (inputTokens ?? 0) + anthropicCacheTokens;
+    }
+    return promptTokens;
+  }
+
+  private findUsageRecord(value: unknown): Record<string, unknown> | undefined {
+    const stack: unknown[] = [value];
+    while (stack.length) {
+      const current = stack.pop();
+      if (Array.isArray(current)) {
+        stack.push(...current);
+        continue;
+      }
+      const record = this.asRecord(current);
+      if (!record) {
+        continue;
+      }
+      const usage = this.asRecord(record.usage) ?? this.asRecord(record.token_usage) ?? this.asRecord(record.tokenUsage);
+      if (usage) {
+        return usage;
+      }
+      stack.push(...Object.values(record).filter((nested) => nested && typeof nested === "object"));
+    }
+    return undefined;
+  }
+
+  private findNumberField(value: unknown, keys: string[]): number | undefined {
+    const stack: unknown[] = [value];
+    const wanted = new Set(keys);
+    while (stack.length) {
+      const current = stack.pop();
+      if (Array.isArray(current)) {
+        stack.push(...current);
+        continue;
+      }
+      const record = this.asRecord(current);
+      if (!record) {
+        continue;
+      }
+      for (const key of wanted) {
+        const number = this.numberField(record, key);
+        if (number) {
+          return number;
+        }
+      }
+      stack.push(...Object.values(record).filter((nested) => nested && typeof nested === "object"));
+    }
+    return undefined;
+  }
+
+  private findStringField(value: unknown, keys: string[]): string | undefined {
+    const stack: unknown[] = [value];
+    const wanted = new Set(keys);
+    while (stack.length) {
+      const current = stack.pop();
+      if (Array.isArray(current)) {
+        stack.push(...current);
+        continue;
+      }
+      const record = this.asRecord(current);
+      if (!record) {
+        continue;
+      }
+      for (const key of wanted) {
+        const text = this.stringField(record, key);
+        if (text?.trim()) {
+          return text.trim();
+        }
+      }
+      stack.push(...Object.values(record).filter((nested) => nested && typeof nested === "object"));
+    }
+    return undefined;
   }
 
   private extractCodexText(stdout: string): string {
@@ -1142,6 +1642,18 @@ export class CliAgentRunner {
   private stringField(record: Record<string, unknown>, key: string): string | undefined {
     const value = record[key];
     return typeof value === "string" ? value : undefined;
+  }
+
+  private numberField(record: Record<string, unknown>, key: string): number | undefined {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return Math.floor(value);
+    }
+    if (typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value.trim())) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
+    }
+    return undefined;
   }
 
   private findSessionId(value: unknown): string | undefined {
