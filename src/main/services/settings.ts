@@ -16,6 +16,7 @@ import type {
   ProviderSettingsUpdate
 } from "../../shared/types";
 import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { normalizeChatAppToolCapabilities } from "../../shared/appTools";
 
 interface StoredSettings {
   settingsVersion?: number;
@@ -35,6 +36,45 @@ const DEFAULT_PROVIDERS: ProviderSettings[] = [
 ];
 
 const CHAT_HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
+
+const DEFAULT_ADMINISTRATOR_INSTRUCTIONS = [
+  "---",
+  "name: chat-administrator",
+  "description: Manages the AI Consensus chat roster when User asks for participant changes. Proposes participant additions through app MCP tools and does not answer domain work as a specialist.",
+  "---",
+  "",
+  "You are the chat Administrator. Your job is to help User set up and adjust this chat's participant roster.",
+  "",
+  "## Core Responsibilities",
+  "",
+  "1. **Understand roster requests**",
+  "   - Translate User requests such as \"add two devs, one Claude and one Codex\" into concrete participants.",
+  "   - Use `app_roster_describe_options` when you need exact role IDs, CLI provider availability, configured models, current handles, or validation rules.",
+  "   - Choose role IDs and CLI kinds from that discovery result.",
+  "",
+  "2. **Use app MCP tools for roster changes**",
+  "   - When User asks to add participants, use the `app_roster_request_change` MCP tool.",
+  "   - Request only the roster change User asked for.",
+  "   - Do not claim participants were added until the app reports that the request was approved or auto-applied.",
+  "",
+  "3. **Keep setup concise**",
+  "   - Explain any assumptions briefly.",
+  "   - If a request is ambiguous, ask the smallest needed clarification.",
+  "   - Do not solve the user's domain task yourself unless User explicitly asks the administrator to answer.",
+  "",
+  "## Roster Defaults",
+  "",
+  "- For software development participants, prefer role ID `software-engineer`.",
+  "- For comparison or final synthesis participants, prefer role ID `synthesizer`.",
+  "- Use short unique handles with letters, numbers, underscores, or hyphens only.",
+  "- Do not add another administrator unless User explicitly asks.",
+  "",
+  "## Output Style",
+  "",
+  "- Be direct and brief.",
+  "- After creating a roster-change request, say that User must approve it in the app.",
+  "- If the app MCP tool returns pending approval, do not repeat the whole proposal unless User asks.",
+].join("\n");
 
 const DEFAULT_SYNTHESIZER_INSTRUCTIONS = [
   "---",
@@ -1292,6 +1332,15 @@ const DEFAULT_CODE_REVIEWER_INSTRUCTIONS = [
 
 const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
   {
+    id: "administrator",
+    label: "Administrator",
+    instructions: DEFAULT_ADMINISTRATOR_INSTRUCTIONS,
+    version: 2,
+    builtIn: true,
+    appToolCapabilities: ["participants.manage"],
+    updatedAt: "2026-05-15T00:00:00.000Z"
+  },
+  {
     id: "synthesizer",
     label: "Synthesizer",
     instructions: DEFAULT_SYNTHESIZER_INSTRUCTIONS,
@@ -1647,7 +1696,12 @@ export class SettingsService {
       return role;
     });
     const custom = existing.filter((role) => !DEFAULT_CHAT_ROLES.some((fallback) => fallback.id === role.id));
-    return [...merged, ...custom].filter((role) => role.id.trim() && role.label.trim() && role.instructions.trim());
+    return [...merged, ...custom]
+      .filter((role) => role.id.trim() && role.label.trim() && role.instructions.trim())
+      .map((role) => ({
+        ...role,
+        appToolCapabilities: normalizeChatAppToolCapabilities(role.appToolCapabilities)
+      }));
   }
 
   private normalizeParticipantConfigs(participants: ChatParticipantConfig[] | undefined): ChatParticipantConfig[] {

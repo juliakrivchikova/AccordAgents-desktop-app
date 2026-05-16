@@ -62,10 +62,14 @@ import type {
   AppBridge,
   ChatAgentMode,
   ChatAgentPermissions,
+  ChatAppToolApproval,
+  ChatAppToolApprovalScope,
   ChatParticipant,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
   ChatParticipantSession,
+  ChatPermissionChangeRequest,
+  ChatPermissionGrant,
   ChatShellPermissionAction,
   ChatShellPermissionMatch,
   ChatShellPermissionRule,
@@ -74,6 +78,7 @@ import type {
   ChatProviderKind,
   ChatRoleConfig,
   ChatRoleConfigUpdate,
+  ChatRosterChangeOperation,
   Conversation,
   ConversationMessagePage,
   ConversationMessagePageInfo,
@@ -147,6 +152,8 @@ type ChatTimelineRow =
 
 const BRANCH_COMPARE_HELP = "Changes committed on the compare branch since it diverged from the base branch.";
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
+const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
+const APP_ROSTER_REQUEST_CHANGE_TOOL = "app_roster_request_change";
 const CHAT_AGENT_MODE_OPTIONS: Array<{ value: ChatAgentMode; label: string }> = [
   { value: "default", label: "Default" },
   { value: "plan", label: "Plan" },
@@ -717,7 +724,7 @@ function App(): JSX.Element {
     setError(undefined);
     setWarnings([]);
     const participants = selectedChatParticipantDrafts(settings.chatParticipantConfigs, selectedChatParticipantConfigIds);
-    const validation = validateChatParticipantDrafts(participants, settings.chatRoleConfigs) ?? validateChatCliAgents(participants, agents);
+    const validation = validateChatStartupDrafts(participants, settings.chatRoleConfigs, agents);
     if (validation) {
       setError(validation);
       return;
@@ -888,6 +895,27 @@ function App(): JSX.Element {
         setConversation(saved);
       }
       setChatAddParticipantDraft(defaultChatParticipantDraft(settings));
+      setSummaries(await window.consensus.listConversations());
+    } catch (caught) {
+      setError(errorText(caught));
+    }
+  }
+
+  async function respondToChatAppToolApproval(approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope): Promise<void> {
+    if (!conversation || conversation.kind !== "chat") {
+      return;
+    }
+    setError(undefined);
+    try {
+      const saved = await window.consensus.respondToChatAppToolApproval({
+        conversationId: conversation.id,
+        approvalId,
+        approve,
+        scope
+      });
+      if (saved) {
+        setConversation(saved);
+      }
       setSummaries(await window.consensus.listConversations());
     } catch (caught) {
       setError(errorText(caught));
@@ -1945,6 +1973,9 @@ function App(): JSX.Element {
                     onRespondToChoice={(sourceMessageId, choiceId, response) =>
                       void respondToChatChoice(sourceMessageId, choiceId, response)
                     }
+                    onRespondToAppToolApproval={(approvalId, approve, scope) =>
+                      void respondToChatAppToolApproval(approvalId, approve, scope)
+                    }
                     onAddParticipantDraftChange={setChatAddParticipantDraft}
                     onAddParticipant={() => void addChatParticipant()}
                   />
@@ -2369,7 +2400,7 @@ function ChatSetup(props: {
   onStart: () => void;
 }): JSX.Element {
   const normalizedDrafts = selectedChatParticipantDrafts(props.settings.chatParticipantConfigs, props.selectedParticipantIds);
-  const validation = validateChatParticipantDrafts(normalizedDrafts, props.settings.chatRoleConfigs) ?? validateChatCliAgents(normalizedDrafts, props.agents);
+  const validation = validateChatStartupDrafts(normalizedDrafts, props.settings.chatRoleConfigs, props.agents);
   const allParticipantIds = props.settings.chatParticipantConfigs
     .filter((participant) => {
       const draft = chatParticipantConfigToDraft(participant);
@@ -2429,7 +2460,7 @@ function ChatSetup(props: {
         </div>
         {props.settings.chatParticipantConfigs.length === 0 ? (
           <div className="empty-state">
-            No saved participants yet. Create participants in Settings, then select them here for each chat.
+            No saved participants yet. Start chat to use @admin, or create reusable participants in Settings.
           </div>
         ) : (
           <div className="chat-participant-select-list">
@@ -2721,10 +2752,12 @@ function ChatConversationView(props: {
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: { selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
+  onRespondToAppToolApproval: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => void;
   onAddParticipantDraftChange: (draft: ChatParticipantDraft) => void;
   onAddParticipant: () => void;
 }): JSX.Element {
   const participants = chatParticipants(props.conversation);
+  const pendingAppToolApprovals = chatAppToolApprovals(props.conversation).filter((approval) => approval.status === "pending");
   const topLevelMessages = useMemo(() => chatTopLevelMessages(props.conversation), [props.conversation.messages]);
   const threadSummaries = useMemo(() => chatThreadSummaryMap(props.conversation), [props.conversation.messages]);
   const continuedMentionRequestIds = useMemo(() => chatContinuedMentionRequestIds(props.conversation), [props.conversation.messages]);
@@ -2947,6 +2980,15 @@ function ChatConversationView(props: {
             </details>
           </div>
         </header>
+        <div className={`chat-app-tool-approval-slot ${pendingAppToolApprovals.length > 0 ? "has-approvals" : ""}`}>
+          {pendingAppToolApprovals.length > 0 && (
+            <ChatAppToolApprovalList
+              approvals={pendingAppToolApprovals}
+              busy={props.isRunning}
+              onRespond={props.onRespondToAppToolApproval}
+            />
+          )}
+        </div>
         <div className="chat-timeline virtual-timeline" ref={timelineRef} onScroll={updateStickToBottom}>
           <div className="virtual-timeline-inner" style={{ height: `${chatVirtualizer.getTotalSize()}px` }}>
             {chatVirtualItems.map((virtualItem) => {
@@ -3142,6 +3184,97 @@ function ChatThinkingRowItem({ row }: { row: ChatThinkingRow }): JSX.Element {
         <LoadingDot label="In progress" />
       </div>
       {row.activity && <div className="chat-thinking-activity">{row.activity}</div>}
+    </div>
+  );
+}
+
+function ChatAppToolApprovalList(props: {
+  approvals: ChatAppToolApproval[];
+  busy: boolean;
+  onRespond: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => void;
+}): JSX.Element {
+  return (
+    <div className="chat-app-tool-approval-list" aria-label="Pending app tool approvals">
+      {props.approvals.map((approval) => (
+        <ChatAppToolApprovalCard
+          approval={approval}
+          busy={props.busy}
+          onRespond={props.onRespond}
+          key={approval.id}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ChatAppToolApprovalCard(props: {
+  approval: ChatAppToolApproval;
+  busy: boolean;
+  onRespond: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => void;
+}): JSX.Element {
+  const permissionRequest = chatPermissionChangeRequest(props.approval);
+  const added = props.approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL && "operations" in props.approval.request
+    ? props.approval.request.operations.filter((operation) => operation.type === "add")
+    : [];
+  return (
+    <section className="chat-app-tool-approval-card" aria-label={props.approval.summary}>
+      <div className="chat-app-tool-approval-head">
+        <div>
+          <span>{permissionRequest ? "Permission request" : "App tool request"} · @{props.approval.requesterHandle}</span>
+          <strong>{props.approval.summary}</strong>
+        </div>
+        <StatusBadge tone="warning">approval needed</StatusBadge>
+      </div>
+      {props.approval.request.reason && <p>{props.approval.request.reason}</p>}
+      {permissionRequest ? (
+        <ChatAppToolPermissionOperation request={permissionRequest} />
+      ) : (
+        <div className="chat-app-tool-roster-list">
+          {added.map((operation, index) => (
+            <ChatAppToolRosterOperation operation={operation} key={`${operation.participant.handle}-${index}`} />
+          ))}
+        </div>
+      )}
+      {permissionRequest && (
+        <p className="chat-app-tool-scope-note">
+          Applies only to @{props.approval.requesterHandle}. Allow once expires after the next run; chat grants stay enabled for this participant in this chat.
+        </p>
+      )}
+      <div className="chat-app-tool-approval-actions">
+        <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onRespond(props.approval.id, false)}>
+          Deny
+        </Button>
+        <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onRespond(props.approval.id, true, "once")}>
+          <CheckCircle2 size={16} />
+          Allow once
+        </Button>
+        <Button size="sm" disabled={props.busy} onClick={() => props.onRespond(props.approval.id, true, "chat")}>
+          <CheckCircle2 size={16} />
+          {permissionRequest ? `Allow @${props.approval.requesterHandle} in this chat` : "Allow for chat"}
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+function ChatAppToolRosterOperation({ operation }: { operation: ChatRosterChangeOperation }): JSX.Element {
+  return (
+    <div className="chat-app-tool-roster-item">
+      <strong>@{operation.participant.handle}</strong>
+      <span>{operation.participant.roleConfigId} · {operation.participant.kind}</span>
+    </div>
+  );
+}
+
+function ChatAppToolPermissionOperation({ request }: { request: ChatPermissionChangeRequest }): JSX.Element {
+  return (
+    <div className="chat-app-tool-roster-list">
+      {request.permissions.map((permission) => (
+        <div className="chat-app-tool-roster-item" key={permission}>
+          <strong>{chatPermissionGrantLabel(permission)}</strong>
+          <span>{permission === "workspaceWrite" ? "Allow file edits in the selected repository." : "Allow web search and fetch when the CLI supports it."}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -5935,6 +6068,19 @@ function validateChatParticipantDrafts(
   return undefined;
 }
 
+function validateChatStartupDrafts(drafts: ChatParticipantDraft[], roles: ChatRoleConfig[], agents: AgentHealth[]): string | undefined {
+  if (drafts.length === 0) {
+    if (!roles.some((role) => role.id === "administrator")) {
+      return "Administrator role is required to start an empty chat.";
+    }
+    if (!agents.some((agent) => agent.installed)) {
+      return "Codex CLI or Claude Code is required to start chat with @admin.";
+    }
+    return undefined;
+  }
+  return validateChatParticipantDrafts(drafts, roles) ?? validateChatCliAgents(drafts, agents);
+}
+
 function validateChatCliAgents(drafts: ChatParticipantDraft[], agents: AgentHealth[]): string | undefined {
   for (const draft of drafts) {
     const health = agents.find((agent) => agent.kind === draft.kind);
@@ -5959,6 +6105,51 @@ function chatParticipants(conversation: Conversation | undefined): ChatParticipa
       (participant.kind === "codex-cli" || participant.kind === "claude-code")
     );
   });
+}
+
+function chatAppToolApprovals(conversation: Conversation | undefined): ChatAppToolApproval[] {
+  const value = conversation?.metadata.pendingAppToolApprovals;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is ChatAppToolApproval => {
+    const approval = item as Partial<ChatAppToolApproval>;
+    const request = approval.request;
+    const isRosterRequest =
+      approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL &&
+      request &&
+      typeof request === "object" &&
+      !Array.isArray(request) &&
+      Array.isArray((request as { operations?: unknown }).operations);
+    const isPermissionRequest =
+      approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
+      Boolean(chatPermissionChangeRequest(approval as ChatAppToolApproval));
+    return (
+      typeof approval.id === "string" &&
+      typeof approval.requesterHandle === "string" &&
+      typeof approval.summary === "string" &&
+      approval.status === "pending" &&
+      (isRosterRequest || isPermissionRequest)
+    );
+  });
+}
+
+function chatPermissionChangeRequest(approval: ChatAppToolApproval): ChatPermissionChangeRequest | undefined {
+  if (approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL) {
+    return undefined;
+  }
+  const request = approval.request as Partial<ChatPermissionChangeRequest>;
+  return Array.isArray(request.permissions) &&
+    request.permissions.every((permission) => permission === "workspaceWrite" || permission === "webAccess")
+    ? {
+        reason: typeof request.reason === "string" ? request.reason : undefined,
+        permissions: request.permissions
+      }
+    : undefined;
+}
+
+function chatPermissionGrantLabel(permission: ChatPermissionGrant): string {
+  return permission === "workspaceWrite" ? "File editing" : "Web access";
 }
 
 function chatContextUsageByParticipant(conversation: Conversation | undefined): Map<string, AgentContextUsage> {
@@ -6011,7 +6202,9 @@ function contextUsageLabel(usage: AgentContextUsage | undefined): string {
   if (!usage) {
     return "Unavailable";
   }
-  return `${usage.percentage}% (${formatContextTokenCount(usage.usedTokens)} / ${formatContextTokenCount(usage.contextWindowTokens)} tokens)`;
+  const remainingTokens = Math.max(0, usage.contextWindowTokens - usage.usedTokens);
+  const remainingPercentage = Math.max(0, Math.min(100, Math.round((remainingTokens / usage.contextWindowTokens) * 100)));
+  return `${remainingPercentage}% left (${formatContextTokenCount(usage.usedTokens)} used / ${formatContextTokenCount(usage.contextWindowTokens)} tokens)`;
 }
 
 function formatContextTokenCount(tokens: number): string {
@@ -6814,6 +7007,10 @@ function installDevMockBridge(): void {
       }
       emitConversation();
       return { conversation, warnings: [] };
+    },
+    respondToChatAppToolApproval: async () => {
+      emitConversation();
+      return conversation;
     },
     startReview: async () => ({ conversation, warnings: [] }),
     continueReview: async () => ({ conversation, warnings: [] }),

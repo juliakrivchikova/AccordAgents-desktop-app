@@ -32,12 +32,15 @@ export interface ChatRoleConfig {
   instructions: string;
   version: number;
   builtIn?: boolean;
+  appToolCapabilities?: ChatAppToolCapability[];
   updatedAt: string;
 }
 
 export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code">;
 
 export type ChatRoleRuntime = "claude-agent" | "codex-developer-instructions" | "prompt-fallback";
+
+export type ChatAppToolCapability = "participants.manage" | "permissions.request";
 
 export type AgentContextUsageSource = Extract<ProviderKind, "codex-cli" | "claude-code">;
 
@@ -89,6 +92,7 @@ export interface ChatParticipantSession {
   sessionId: string;
   roleConfigId: string;
   roleConfigVersion: number;
+  roleAppToolCapabilities?: ChatAppToolCapability[];
   roleRuntime?: ChatRoleRuntime;
   participantKind?: ChatProviderKind;
   participantModel?: string;
@@ -129,6 +133,128 @@ export interface ChatPendingChoice {
   customAnswer?: string;
   note?: string;
   selectedAt?: string;
+}
+
+export type ChatRosterChangeOperationType = "add";
+
+export interface ChatRosterChangeParticipantInput {
+  handle: string;
+  roleConfigId: string;
+  kind: ChatProviderKind;
+  model?: string;
+  avatarId?: string;
+  agentMode?: ChatAgentMode;
+  permissions?: ChatAgentPermissions;
+}
+
+export interface ChatRosterChangeAddOperation {
+  type: "add";
+  participant: ChatRosterChangeParticipantInput;
+}
+
+export type ChatRosterChangeOperation = ChatRosterChangeAddOperation;
+
+export interface ChatRosterChangeRequest {
+  reason?: string;
+  operations: ChatRosterChangeOperation[];
+}
+
+export type ChatPermissionGrant = "workspaceWrite" | "webAccess";
+
+export interface ChatPermissionChangeRequest {
+  reason?: string;
+  permissions: ChatPermissionGrant[];
+}
+
+export interface ChatRosterAvailableRole {
+  id: string;
+  label: string;
+  version: number;
+  builtIn: boolean;
+  appToolCapabilities: ChatAppToolCapability[];
+}
+
+export interface ChatRosterAvailableProvider {
+  kind: ChatProviderKind;
+  label: string;
+  enabled: boolean;
+  installed: boolean;
+  selectedByDefault: boolean;
+  configuredModel?: string;
+  version?: string;
+  error?: string;
+}
+
+export interface ChatRosterCurrentParticipant {
+  id: string;
+  handle: string;
+  roleConfigId: string;
+  roleLabel: string;
+  kind: ChatProviderKind;
+  model?: string;
+  agentMode?: ChatAgentMode;
+}
+
+export interface ChatRosterAvailableOptions {
+  conversationId: string;
+  requester: ChatRosterCurrentParticipant & {
+    appToolCapabilities: ChatAppToolCapability[];
+  };
+  currentParticipants: ChatRosterCurrentParticipant[];
+  roles: ChatRosterAvailableRole[];
+  providers: ChatRosterAvailableProvider[];
+  agentModes: ChatAgentMode[];
+  defaults: {
+    kind: ChatProviderKind;
+    agentMode: ChatAgentMode;
+    permissions: ChatAgentPermissions;
+  };
+  handleRules: {
+    pattern: string;
+    maxLength: number;
+    duplicatePolicy: string;
+  };
+  rosterChange: {
+    supportedOperations: ChatRosterChangeOperationType[];
+    maxOperations: number;
+    modelPolicy: string;
+  };
+}
+
+export type ChatAppToolApprovalStatus = "pending" | "approved" | "denied" | "auto-applied";
+
+export type ChatAppToolApprovalScope = "once" | "chat";
+
+export type ChatAppToolApprovalRequest = ChatRosterChangeRequest | ChatPermissionChangeRequest;
+
+export interface ChatAppToolApproval {
+  id: string;
+  conversationId: string;
+  requesterParticipantId: string;
+  requesterHandle: string;
+  requesterRoleConfigId: string;
+  toolName: string;
+  capability: ChatAppToolCapability;
+  status: ChatAppToolApprovalStatus;
+  request: ChatAppToolApprovalRequest;
+  summary: string;
+  createdAt: string;
+  updatedAt: string;
+  approvalScope?: ChatAppToolApprovalScope;
+  appliedParticipantIds?: string[];
+  consumedAt?: string;
+  error?: string;
+}
+
+export interface ChatAppToolApprovalPolicy {
+  id: string;
+  participantId: string;
+  roleConfigId: string;
+  toolName: string;
+  capability: ChatAppToolCapability;
+  scope: "chat";
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ChatMessageMetadata {
@@ -227,6 +353,13 @@ export interface RespondToChatChoiceRequest {
   customAnswer?: string;
   note?: string;
   runId?: string;
+}
+
+export interface RespondToChatAppToolApprovalRequest {
+  conversationId: string;
+  approvalId: string;
+  approve: boolean;
+  scope?: ChatAppToolApprovalScope;
 }
 
 export interface ProviderSettingsUpdate {
@@ -530,6 +663,7 @@ export interface AppBridge {
   sendChatMessage(request: SendChatMessageRequest): Promise<StartReviewResult>;
   respondToChatMentions(request: RespondToChatMentionsRequest): Promise<StartReviewResult>;
   respondToChatChoice(request: RespondToChatChoiceRequest): Promise<StartReviewResult>;
+  respondToChatAppToolApproval(request: RespondToChatAppToolApprovalRequest): Promise<Conversation | undefined>;
   startReview(request: ReviewRequest): Promise<StartReviewResult>;
   continueReview(request: ContinueReviewRequest): Promise<StartReviewResult>;
   askPlanDecisionClarification(request: PlanDecisionClarificationRequest): Promise<StartReviewResult>;

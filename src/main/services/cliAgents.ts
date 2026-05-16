@@ -35,6 +35,7 @@ export interface CliAgentRunOptions {
   extraReadableDirs?: string[];
   resumeFallbackPrompt?: string;
   role?: CliAgentRoleOptions;
+  appMcp?: CliAgentAppMcpOptions;
   warm?: CliAgentWarmOptions;
   onOutput?: CliAgentOutputCallback;
   agentMode?: ChatAgentMode;
@@ -62,6 +63,12 @@ export interface CliAgentRoleOptions {
   description: string;
   instructions: string;
   promptFallbackPrompt: string;
+}
+
+export interface CliAgentAppMcpOptions {
+  url: string;
+  token: string;
+  toolNames: string[];
 }
 
 interface CliAgentDebugLogger {
@@ -266,6 +273,16 @@ export class CliAgentRunner {
       if (options.role) {
         this.insertCodexOptionBeforePrompt(args, resuming, "-c", `developer_instructions=${this.tomlString(options.role.instructions)}`);
       }
+      if (options.appMcp) {
+        this.insertCodexOptionBeforePrompt(
+          args,
+          resuming,
+          "-c",
+          `mcp_servers.ai_consensus.url=${this.tomlString(options.appMcp.url)}`,
+          "-c",
+          `mcp_servers.ai_consensus.bearer_token_env_var=${this.tomlString("AI_CONSENSUS_MCP_TOKEN")}`
+        );
+      }
       if (permissions.webAccess) {
         args.unshift("--search");
       }
@@ -274,6 +291,7 @@ export class CliAgentRunner {
         cwd: repoPath,
         input: this.codexPrompt(prompt, repoPath, diffMode, kind, options),
         timeoutMs: CLI_AGENT_RUN_TIMEOUT_MS,
+        env: this.appMcpEnv(options),
         signal,
         onStdout: options.onOutput ? stdoutLines : undefined
       });
@@ -305,7 +323,8 @@ export class CliAgentRunner {
             extraReadableDirs: options.extraReadableDirs,
             resumeFallbackPrompt: options.resumeFallbackPrompt,
             agentMode: options.agentMode,
-            permissions: options.permissions
+            permissions: options.permissions,
+            appMcp: options.appMcp
           }
         );
         return {
@@ -323,7 +342,8 @@ export class CliAgentRunner {
           extraReadableDirs: options.extraReadableDirs,
           role: options.role,
           agentMode: options.agentMode,
-          permissions: options.permissions
+          permissions: options.permissions,
+          appMcp: options.appMcp
         });
         return { ...restarted, sessionRestarted: true };
       }
@@ -389,11 +409,15 @@ export class CliAgentRunner {
       if (options.role && !options.sessionId) {
         args.push("--agents", this.claudeAgentsJson(options.role), "--agent", options.role.name);
       }
+      if (options.appMcp) {
+        args.push("--mcp-config", this.claudeMcpConfigJson(options.appMcp), "--strict-mcp-config");
+      }
       if (extraReadableDirs.length > 0) {
         args.push("--add-dir", ...extraReadableDirs);
       }
-      if (toolConfig.tools.length > 0) {
-        args.push("--tools", toolConfig.tools.join(","));
+      const tools = this.claudeToolsWithAppMcp(toolConfig.tools, options);
+      if (tools.length > 0) {
+        args.push("--tools", tools.join(","));
       } else {
         args.push("--tools", "");
       }
@@ -405,6 +429,7 @@ export class CliAgentRunner {
           cwd: repoPath,
           input: prompt,
           timeoutMs: CLI_AGENT_RUN_TIMEOUT_MS,
+          env: this.appMcpEnv(options),
           signal
         }
       );
@@ -433,7 +458,8 @@ export class CliAgentRunner {
             extraReadableDirs: options.extraReadableDirs,
             resumeFallbackPrompt: options.resumeFallbackPrompt,
             agentMode: options.agentMode,
-            permissions: options.permissions
+            permissions: options.permissions,
+            appMcp: options.appMcp
           }
         );
         return {
@@ -451,7 +477,8 @@ export class CliAgentRunner {
           extraReadableDirs: options.extraReadableDirs,
           role: options.role,
           agentMode: options.agentMode,
-          permissions: options.permissions
+          permissions: options.permissions,
+          appMcp: options.appMcp
         });
         return { ...restarted, sessionRestarted: true };
       }
@@ -562,18 +589,22 @@ export class CliAgentRunner {
     if (options.role && !options.sessionId) {
       args.push("--agents", this.claudeAgentsJson(options.role), "--agent", options.role.name);
     }
+    if (options.appMcp) {
+      args.push("--mcp-config", this.claudeMcpConfigJson(options.appMcp), "--strict-mcp-config");
+    }
     if (extraReadableDirs.length > 0) {
       args.push("--add-dir", ...extraReadableDirs);
     }
-    if (toolConfig.tools.length > 0) {
-      args.push("--tools", toolConfig.tools.join(","));
+    const tools = this.claudeToolsWithAppMcp(toolConfig.tools, options);
+    if (tools.length > 0) {
+      args.push("--tools", tools.join(","));
     } else {
       args.push("--tools", "");
     }
 
     const child = spawn("claude", args, {
       cwd: repoPath,
-      env: { ...process.env },
+      env: { ...process.env, ...this.appMcpEnv(options) },
       stdio: ["pipe", "pipe", "pipe"]
     });
     child.stdout.setEncoding("utf8");
@@ -1005,6 +1036,37 @@ export class CliAgentRunner {
     return next;
   }
 
+  private appMcpEnv(options: CliAgentRunOptions): NodeJS.ProcessEnv | undefined {
+    if (!options.appMcp) {
+      return undefined;
+    }
+    return {
+      AI_CONSENSUS_MCP_TOKEN: options.appMcp.token
+    };
+  }
+
+  private claudeToolsWithAppMcp(tools: string[], options: CliAgentRunOptions): string[] {
+    const next = new Set(tools);
+    for (const toolName of options.appMcp?.toolNames ?? []) {
+      next.add(`mcp__ai_consensus__${toolName}`);
+    }
+    return Array.from(next);
+  }
+
+  private claudeMcpConfigJson(appMcp: CliAgentAppMcpOptions): string {
+    return JSON.stringify({
+      mcpServers: {
+        ai_consensus: {
+          type: "http",
+          url: appMcp.url,
+          headers: {
+            Authorization: `Bearer ${appMcp.token}`
+          }
+        }
+      }
+    });
+  }
+
   private logWarmUnsupportedOnce(providerKind: ParticipantConfig["kind"], reason: string): void {
     if (this.warmUnsupportedLogged.has(providerKind)) {
       return;
@@ -1113,12 +1175,16 @@ export class CliAgentRunner {
     if (kind === "chat") {
       const mode = this.agentModeForRun(kind, options);
       const permissions = this.permissionsForRun(mode, options);
+      const readContextAvailable = Boolean(repoPath) || this.normalizedExtraReadableDirs(options.extraReadableDirs).length > 0;
       return [
         `You are running for AI Consensus Chat in ${mode} mode.`,
         "Use the generated chat history path and any selected repository context described in the prompt.",
+        readContextAvailable
+          ? "Read-only file inspection, search, and listing are allowed for the selected repository and app-managed history files described in the prompt. Use these only to gather context."
+          : "No repository or app-managed readable directory is available for this run.",
         permissions.shell.enabled
           ? `Shell commands are allowed only according to these rules: ${this.shellRulesText(permissions.shell.rules)}. Deny rules are strict; ask rules require native CLI approval.`
-          : "Do not run shell commands.",
+          : "General shell commands are blocked. Apart from read-only file inspection above, do not run installs, builds, tests, network commands, long-running commands, or mutating commands.",
         permissions.workspaceWrite ? "Workspace file edits are allowed when needed." : "Do not edit files.",
         permissions.webAccess ? "Web search is available if needed." : "Do not use web search.",
         prompt

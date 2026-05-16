@@ -14,6 +14,7 @@ import type {
   PlanItemReviewRequest,
   ProviderKind,
   ProviderSettingsUpdate,
+  RespondToChatAppToolApprovalRequest,
   RespondToChatChoiceRequest,
   RespondToChatMentionsRequest,
   RecoverImplementationPlanRequest,
@@ -25,6 +26,7 @@ import type {
 import { ChatService } from "./services/chat";
 import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
+import { AppMcpService } from "./services/appMcp";
 import { DebugLogService } from "./services/debugLogs";
 import { GitService } from "./services/git";
 import { ProviderRunner } from "./services/providers";
@@ -39,12 +41,16 @@ const storageService = new StorageService();
 const providerRunner = new ProviderRunner(settingsService);
 const debugLogService = new DebugLogService();
 const cliAgentRunner = new CliAgentRunner(debugLogService);
+const appMcpService = new AppMcpService();
 const consensusService = new ConsensusService(gitService, storageService, providerRunner, cliAgentRunner, debugLogService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
 });
-const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, (conversation) => {
+const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
 });
+appMcpService.setRosterChangeHandler((actor, request) => chatService.requestRosterChangeFromTool(actor, request));
+appMcpService.setRosterOptionsHandler((actor) => chatService.describeRosterOptionsForTool(actor));
+appMcpService.setPermissionChangeHandler((actor, request) => chatService.requestPermissionChangeFromTool(actor, request));
 const activeReviews = new Map<string, AbortController>();
 
 function createWindow(): void {
@@ -215,6 +221,9 @@ function registerIpc(): void {
     } finally {
       activeReviews.delete(runId);
     }
+  });
+  ipcMain.handle("chat:respond-to-app-tool-approval", async (_event, request: RespondToChatAppToolApprovalRequest) => {
+    return chatService.respondToAppToolApproval(request);
   });
   ipcMain.handle("conversations:start-review", async (_event, request: ReviewRequest) => {
     const runId = request.runId ?? randomUUID();
@@ -399,6 +408,7 @@ function registerIpc(): void {
 
 void app.whenReady().then(async () => {
   registerIpc();
+  await appMcpService.start();
   await storageService.init();
   createWindow();
 
@@ -422,4 +432,5 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   void cliAgentRunner.shutdownWarmAgents();
+  void appMcpService.stop();
 });
