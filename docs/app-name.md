@@ -86,23 +86,37 @@ Names should avoid suggesting that the product is mainly:
 | `Crewboard` | Existing crew/HR management usage. Less direct AI collision, but weak fit and not very ownable. | Defer/avoid. |
 | `Runbook AI` | Collision with runbookai/userunbook-style products. | Avoid. |
 | `Tandem` | Strong collisions: [Frumu Tandem](https://tandem.frumu.ai/) local-first AI coding/workflow runtime with `tandem` CLI/TUI, [Tandem Labs](https://tandemlabs.ai/) AI teammates for engineering, [Tandem Browser](https://tandembrowser.org/) local-first browser for agents, [Tandem Chat](https://play.google.com/store/apps/details?id=chat.tandem.android) team chat/virtual office, [Tandem Health](https://www.tandemhealth.ai/) AI medical scribe, [withtandem.com](https://withtandem.com/) medication access AI, [tandemai.io](https://tandemai.io/) hardware engineering AI, plus USPTO-style software/AI filings for `TANDEM`. | Avoid as public product name. Good internal codename only. |
-| `Convener` / `AgentConvener` | No single obvious commercial app collision found in the quick scan, but `Convener Agent` is a concept in multi-agent conversation research and Open Floor Protocol discussions. `Convener` is also generic. | Possible candidate, but requires deeper domain/trademark scan before use. |
+| `Smith` | Strong direct/adjacent collision: [Smith](https://getsmith.dev/) is a multi-agent command center for Claude Code, Codex, Gemini CLI, Aider, and OpenCode; [Try Smith](https://trysmith.dev/) runs multiple Claude Code agents in parallel; [Smith.ai](https://smith.ai/) is an established AI/live-agent receptionist company; `Agent Smith` is heavily used in AI tooling/research. | Avoid. Good craft metaphor, but too occupied in AI/devtools and not ownable enough. |
+| `Convene` | Many collisions: [Convene](https://letsconvene.ai/) is a meeting/conversation tool, [Convene AI](https://conveneai.com/) is enterprise AI enablement, [Azeus Convene AI](https://www.azeusconvene.com/news/convene-unveils-ai-powered-innovation-for-boardrooms-launches-july-1st) is boardroom AI, [letsconvene.app](https://letsconvene.app/) is a chat product, and [Convena](https://convena.ai/) is close in sound and offers multi-perspective AI advisory. | Avoid. Too crowded around meetings, chat, AI, and multi-perspective advisory. |
+| `Convener` / `AgentConvener` | No single obvious commercial app collision found in the quick scan, but `Convener Agent` is a formal concept in multi-agent conversation research / Open Floor Protocol-style work: an agent that initiates or manages multi-party agent conversations. `Convener` is also generic. | Possible but risky. Strong conceptual fit, weak ownability, and would need deeper domain/trademark scan before use. |
 
 ## Direct Competitors And Adjacent Products Found
 
 These are the products most relevant to positioning.
 
-### Shared Multi-Model / Multi-Agent Conversation
+### Direct Shared-Agent Chat Competitors
 
-- [Roundtable AI](https://www.round-table.ai/): hosted multi-model conversations with Claude, ChatGPT, Grok, Gemini, comparison, synthesis, and decision trails. Directly adjacent to shared multi-model chat, but hosted/API-oriented.
-- [CliDeck](https://clideck.dev/): runs Claude Code, Codex, Gemini CLI, and OpenCode side by side; Autopilot routes one agent's output to another in worker/reviewer loops. Adjacent to cross-agent handoff.
+These are the closest matches to "one chat session, add Claude and Codex."
+
+- [agentchattr](https://github.com/bcurts/agentchattr): closest match found. Local shared chat server where humans and agents talk in shared channels. Supports Claude Code, Codex, Gemini CLI, Copilot CLI, and others; agents can mention each other and the server injects prompts into target agent terminals.
+- [Band](https://www.band.ai/for-coding-agents): shared workspace/chatroom for coding agents. Very close conceptually, but more platform/infrastructure oriented; examples position Claude Code as planner and Codex as reviewer in one shared Docker workspace/chatroom.
+- [Crystl Quest](https://crystl.dev/docs/crystl-quest/): "party of specialized agents" coordinating through shared chat. Primarily Claude Code-focused, with early Codex support and some features tied to Claude hooks.
+- [BattleLM](https://www.neura.market/directories/gemini/agents/gh-imd11battlelm): native macOS app described as running multiple AI coding CLIs in one shared/group chat. Found mostly through directory listings, so product quality and activity need deeper verification.
+- [Stoops CLI](https://www.mdskills.ai/mcp-servers/stoops-cli): shared chatroom/MCP infrastructure for humans and agents; claims Claude Code, Codex, and humans end up in the same chat room. More CLI/MCP infrastructure than polished desktop product.
+
+### Adjacent Shared Multi-Model / Multi-Agent Conversation
+
+- [Roundtable AI](https://www.round-table.ai/): hosted multi-model conversations with Claude, ChatGPT, Grok, Gemini, comparison, synthesis, and decision trails. Adjacent to shared multi-model chat, but hosted/API-oriented rather than local CLI-agent chat.
+- [CliDeck](https://clideck.dev/): runs Claude Code, Codex, Gemini CLI, and OpenCode side by side; Autopilot routes one agent's output to another in worker/reviewer loops. Adjacent to cross-agent handoff, but not primarily a single human-moderated shared chat room.
 - [strIDEterm](https://strideterm.com/): includes Worker/Judge task runner where any two of Claude Code, Codex, Gemini, Copilot, or OpenCode can be assigned roles. Adjacent to coding-specific cross-agent workflow.
-- [Agent Relay](https://agentrelay.com/): channels, DMs, threads, and real-time messaging for agents. Directly adjacent to agent-to-agent communication.
+- [Agent Relay](https://agentrelay.com/): channels, DMs, threads, and real-time messaging for agents. Directly adjacent to agent-to-agent communication, but less specific to local coding CLIs.
 - [ModelRelay](https://modelrelay.ai/): durable multi-agent workflows and mailboxes. Infra-oriented but directly adjacent to agents communicating.
 
 ### Terminal / Session / Worktree Managers
 
 - [AgentHub](https://www.agenthub-app.com/): persistent terminal sessions for Claude Code, Codex, Gemini CLI, OpenCode, with desktop/CLI/TUI and remote sharing.
+- [Smith](https://getsmith.dev/): multi-agent command center for Claude Code, Codex, Gemini CLI, Aider, and OpenCode with tabs/panes, progress/status UI, git worktree isolation, MCP server, config-as-code, remote agents, notifications, and diff review. Adjacent competitor for local CLI-agent management, but not a direct shared-chat-room competitor.
+- [Try Smith](https://trysmith.dev/): parallel Claude Code runner with sandboxing, worktrees, live status/progress UI, context battery, and PR flow. Adjacent to multi-agent workflow management; less cross-provider and not positioned as one shared human/agent chat.
 - [Canopy](https://canopy.itsol.tech/features/multi-agent): parallel Claude Code, Gemini CLI, Codex, and OpenCode sessions in isolated worktrees.
 - [TermLoop](https://termloop.ai/): terminal IDE for Claude Code, Codex, Gemini CLI, Aider, Cline in worktrees.
 - [Spaces](https://agentspaces.co/): persistent multi-pane workspaces for Claude Code, Codex, Gemini, Aider, and shell.
@@ -144,6 +158,11 @@ These were suggested as possible directions but have not been fully scanned or c
 - `Pairwise`
 - `Sidecar`
 - `Convene`
+- `Convener`
+- `Parley`
+- `Caucus`
+- `Huddle`
+- `Commons`
 - `CoDesk`
 - `RelayRoom`
 - `Pairroom`
@@ -151,5 +170,24 @@ These were suggested as possible directions but have not been fully scanned or c
 - `AgentParley`
 - `ChatForge`
 - `Crewline`
+- `Bench`
+- `Worktable`
+- `Toolbench`
+- `Atelier`
+- `Guildbench`
+- `Rivet`
+- `Quench`
+- `Bellows`
+- `Tongs`
+- `Loom`
+- `Weft`
+- `Spindle`
+- `Pattern`
+- `Tailor`
+- `Binder`
+- `Folio`
+- `Kit`
+
+Smith-adjacent direction to explore: craft/workshop/tooling names can suggest practical setup and provider-neutral skill translation without saying `Agent*`. Best initial candidates from this direction are `Convener`, `Atelier`, `Bench` / `Toolbench`, `Parley`, and `Rivet`, pending collision checks.
 
 Any of these needs a fresh web/domain/trademark scan before serious use.

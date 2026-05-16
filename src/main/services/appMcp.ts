@@ -7,6 +7,9 @@ import { hasChatAppToolCapability } from "../../shared/appTools";
 export const APP_ROSTER_REQUEST_CHANGE_TOOL = "app_roster_request_change";
 export const APP_ROSTER_DESCRIBE_OPTIONS_TOOL = "app_roster_describe_options";
 export const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
+export const APP_CHAT_GET_CONTEXT_TOOL = "app_chat_get_context";
+export const APP_CHAT_GET_PARTICIPANTS_TOOL = "app_chat_get_participants";
+export const APP_CHAT_READ_MESSAGES_TOOL = "app_chat_read_messages";
 
 export interface AppMcpActor {
   conversationId: string;
@@ -14,6 +17,14 @@ export interface AppMcpActor {
   roleConfigId: string;
   roleConfigVersion: number;
   capabilities: ChatAppToolCapability[];
+  triggerMessageId?: string;
+  triggerThreadId?: string;
+  triggerParentMessageId?: string;
+  triggerChatThreadRootId?: string;
+  snapshotMaxSequence?: number;
+  continuation?: boolean;
+  historyMarkdownPath?: string;
+  historyJsonPath?: string;
 }
 
 export interface AppMcpConnection {
@@ -26,6 +37,9 @@ export interface AppMcpTokenGrant extends AppMcpActor {}
 type AppRosterChangeHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppRosterOptionsHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppPermissionChangeHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+type AppChatContextHandler = (actor: AppMcpActor) => Promise<unknown>;
+type AppChatParticipantsHandler = (actor: AppMcpActor) => Promise<unknown>;
+type AppChatMessagesHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 
 interface JsonRpcRequest {
   jsonrpc?: unknown;
@@ -54,6 +68,9 @@ export class AppMcpService {
   private rosterChangeHandler?: AppRosterChangeHandler;
   private rosterOptionsHandler?: AppRosterOptionsHandler;
   private permissionChangeHandler?: AppPermissionChangeHandler;
+  private chatContextHandler?: AppChatContextHandler;
+  private chatParticipantsHandler?: AppChatParticipantsHandler;
+  private chatMessagesHandler?: AppChatMessagesHandler;
 
   setRosterChangeHandler(handler: AppRosterChangeHandler): void {
     this.rosterChangeHandler = handler;
@@ -65,6 +82,18 @@ export class AppMcpService {
 
   setPermissionChangeHandler(handler: AppPermissionChangeHandler): void {
     this.permissionChangeHandler = handler;
+  }
+
+  setChatContextHandler(handler: AppChatContextHandler): void {
+    this.chatContextHandler = handler;
+  }
+
+  setChatParticipantsHandler(handler: AppChatParticipantsHandler): void {
+    this.chatParticipantsHandler = handler;
+  }
+
+  setChatMessagesHandler(handler: AppChatMessagesHandler): void {
+    this.chatMessagesHandler = handler;
   }
 
   async start(): Promise<void> {
@@ -105,14 +134,34 @@ export class AppMcpService {
       return undefined;
     }
     const token = randomUUID();
-    this.tokens.set(token, {
+    this.tokens.set(token, this.actorFromGrant(grant));
+    return { url: this.url, token };
+  }
+
+  updateToken(token: string, grant: AppMcpTokenGrant): AppMcpConnection | undefined {
+    if (!this.url || !this.tokens.has(token)) {
+      return undefined;
+    }
+    this.tokens.set(token, this.actorFromGrant(grant));
+    return { url: this.url, token };
+  }
+
+  private actorFromGrant(grant: AppMcpTokenGrant): AppMcpActor {
+    return {
       conversationId: grant.conversationId,
       participantId: grant.participantId,
       roleConfigId: grant.roleConfigId,
       roleConfigVersion: grant.roleConfigVersion,
-      capabilities: [...grant.capabilities]
-    });
-    return { url: this.url, token };
+      capabilities: [...grant.capabilities],
+      triggerMessageId: grant.triggerMessageId,
+      triggerThreadId: grant.triggerThreadId,
+      triggerParentMessageId: grant.triggerParentMessageId,
+      triggerChatThreadRootId: grant.triggerChatThreadRootId,
+      snapshotMaxSequence: grant.snapshotMaxSequence,
+      continuation: grant.continuation,
+      historyMarkdownPath: grant.historyMarkdownPath,
+      historyJsonPath: grant.historyJsonPath
+    };
   }
 
   private async handleHttpRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
@@ -198,7 +247,80 @@ export class AppMcpService {
   }
 
   private toolsForActor(actor: AppMcpActor): unknown[] {
-    const tools: unknown[] = [];
+    const tools: unknown[] = [
+      {
+        name: APP_CHAT_GET_CONTEXT_TOOL,
+        title: "Get Chat Context",
+        description:
+          "Return the current chat conversation, requesting participant, active turn metadata, and available context sources. This is read-only and scoped to the issued app token.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {}
+        },
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false
+        }
+      },
+      {
+        name: APP_CHAT_GET_PARTICIPANTS_TOOL,
+        title: "Get Chat Participants",
+        description:
+          "Return the current chat roster, role labels, provider details, and safe participant capabilities for this chat. This is read-only.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {}
+        },
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false
+        }
+      },
+      {
+        name: APP_CHAT_READ_MESSAGES_TOOL,
+        title: "Read Chat Messages",
+        description:
+          "Read paginated chat messages from the current conversation, optionally filtered to one thread. Use this instead of rereading full history files when you need prior chat context.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            threadId: {
+              type: "string",
+              description: "Optional thread id to read only messages from one chat thread."
+            },
+            beforeSequence: {
+              type: "integer",
+              minimum: 0,
+              description: "Optional exclusive upper sequence bound. Returns messages with sequence lower than this value."
+            },
+            afterSequence: {
+              type: "integer",
+              minimum: 0,
+              description: "Optional exclusive lower sequence bound. Returns messages with sequence greater than this value."
+            },
+            limit: {
+              type: "integer",
+              minimum: 1,
+              maximum: 200,
+              description: "Maximum number of messages to return. Defaults to recent focused context."
+            }
+          }
+        },
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false
+        }
+      }
+    ];
     if (hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
       tools.push({
         name: APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
@@ -319,9 +441,30 @@ export class AppMcpService {
     if (
       record.name !== APP_ROSTER_DESCRIBE_OPTIONS_TOOL &&
       record.name !== APP_ROSTER_REQUEST_CHANGE_TOOL &&
-      record.name !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL
+      record.name !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
+      record.name !== APP_CHAT_GET_CONTEXT_TOOL &&
+      record.name !== APP_CHAT_GET_PARTICIPANTS_TOOL &&
+      record.name !== APP_CHAT_READ_MESSAGES_TOOL
     ) {
       throw new Error(`Unknown app tool: ${String(record.name ?? "")}.`);
+    }
+    if (record.name === APP_CHAT_GET_CONTEXT_TOOL) {
+      if (!this.chatContextHandler) {
+        throw new Error("Chat context discovery is not available.");
+      }
+      return this.toolTextResult(await this.chatContextHandler(actor));
+    }
+    if (record.name === APP_CHAT_GET_PARTICIPANTS_TOOL) {
+      if (!this.chatParticipantsHandler) {
+        throw new Error("Chat participant discovery is not available.");
+      }
+      return this.toolTextResult(await this.chatParticipantsHandler(actor));
+    }
+    if (record.name === APP_CHAT_READ_MESSAGES_TOOL) {
+      if (!this.chatMessagesHandler) {
+        throw new Error("Chat message reading is not available.");
+      }
+      return this.toolTextResult(await this.chatMessagesHandler(actor, record.arguments));
     }
     if (record.name === APP_PERMISSIONS_REQUEST_CHANGE_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {

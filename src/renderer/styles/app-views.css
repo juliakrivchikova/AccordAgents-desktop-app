@@ -3382,10 +3382,31 @@
   color: var(--app-text);
 }
 
+.mention-menu button,
+.chat-participant-menu-list button {
+  color: var(--app-text);
+}
+
 .mention-menu button:hover,
 .mention-menu button.selected,
 .chat-participant-menu-list button:hover {
   background: var(--app-surface-hover);
+}
+
+.mention-menu strong,
+.chat-participant-menu-list strong {
+  color: var(--app-text-strong);
+}
+
+.mention-menu span,
+.chat-participant-menu-list span {
+  color: var(--app-muted);
+}
+
+.mention-menu kbd {
+  border-color: var(--app-border-strong);
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
 }
 
 .settings-grid {

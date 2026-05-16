@@ -51,6 +51,9 @@ const chatService = new ChatService(storageService, settingsService, cliAgentRun
 appMcpService.setRosterChangeHandler((actor, request) => chatService.requestRosterChangeFromTool(actor, request));
 appMcpService.setRosterOptionsHandler((actor) => chatService.describeRosterOptionsForTool(actor));
 appMcpService.setPermissionChangeHandler((actor, request) => chatService.requestPermissionChangeFromTool(actor, request));
+appMcpService.setChatContextHandler((actor) => chatService.describeChatContextForTool(actor));
+appMcpService.setChatParticipantsHandler((actor) => chatService.describeChatParticipantsForTool(actor));
+appMcpService.setChatMessagesHandler((actor, request) => chatService.readChatMessagesForTool(actor, request));
 const activeReviews = new Map<string, AbortController>();
 
 function createWindow(): void {

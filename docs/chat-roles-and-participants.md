@@ -45,8 +45,10 @@ The important consequence: existing chat sessions are intentionally coherent acr
 
 - `ChatService` issues a scoped bearer token for each participant run. The token binds to the actual `conversationId`, `participantId`, role id, role version, and resolved app-tool capabilities.
 - MCP tools derive the actor from that token. Tool arguments must never be trusted to identify the conversation or participant.
-- `tools/list` filters tools by the token's capabilities, and every `tools/call` rechecks the current participant role through `ChatService`.
+- `app_chat_get_context`, `app_chat_get_participants`, and `app_chat_read_messages` are read-only context tools available to every issued participant token. They let agents read the active turn, roster, provider status, and focused message pages without rereading full history files.
+- Roster and permission mutation tools are filtered by the token's capabilities, and every mutating `tools/call` rechecks the current participant role through `ChatService`.
 - `app_permissions_request_change` is available to every chat participant. It can request `workspaceWrite` or `webAccess` for the requesting participant only, creates a pending approval, and never grants permissions directly.
+- `app_chat_read_messages` reads only the token-bound conversation and supports thread and sequence filters. Do not add arguments that let agents select an arbitrary conversation or participant.
 - Participant prompts should describe MCP tools as the required path for app-managed mutations. If a task needs blocked web access or file edits, the agent should call `app_permissions_request_change` rather than only saying the task is blocked or asking User in prose.
 - `app_roster_describe_options` is the read-only discovery tool. It returns current roster participants, role IDs and labels, CLI provider installed/enabled state, configured provider models, default roster values, and validation rules. It exists so agents do not infer availability from prompt text or schemas.
 - `app_roster_request_change` is the mutating request tool. It supports additive roster changes in v1.

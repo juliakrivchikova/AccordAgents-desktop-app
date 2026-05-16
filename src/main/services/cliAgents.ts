@@ -28,6 +28,8 @@ const CLI_AGENT_RUN_TIMEOUT_MS = 15 * 60_000;
 const WARM_AGENT_KILL_GRACE_MS = 1500;
 const SESSION_LOG_RETRY_MS = 80;
 const SESSION_LOG_RETRIES = 4;
+const CODEX_APP_SERVER_DISABLED_ENV = "AI_CONSENSUS_CODEX_APP_SERVER";
+const CODEX_APP_SERVER_MCP_TOKEN_ENV = "AI_CONSENSUS_MCP_TOKEN";
 
 export interface CliAgentRunOptions {
   persistSession?: boolean;
@@ -98,6 +100,41 @@ interface ClaudeWarmPendingTurn {
   onOutput?: CliAgentOutputCallback;
   resolve: (result: ParticipantRunResult) => void;
   reject: (error: Error) => void;
+}
+
+interface CodexAppServerPendingRequest {
+  method: string;
+  resolve: (result: unknown) => void;
+  reject: (error: Error) => void;
+}
+
+interface CodexAppServerPendingTurn {
+  startedAt: number;
+  threadId: string;
+  turnId?: string;
+  messages: string[];
+  finalMessage?: string;
+  model?: string;
+  contextUsage?: AgentContextUsage;
+  timer: NodeJS.Timeout;
+  abort?: () => void;
+  onOutput?: CliAgentOutputCallback;
+  resolve: (result: ParticipantRunResult) => void;
+  reject: (error: Error) => void;
+}
+
+interface CodexAppServerThreadStartResult {
+  thread?: {
+    id?: string;
+    sessionId?: string;
+  };
+  model?: string;
+}
+
+interface CodexAppServerTurnStartResult {
+  turn?: {
+    id?: string;
+  };
 }
 
 interface ClaudeToolConfig {
@@ -196,9 +233,493 @@ export class CliAgentRunner {
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
     if (options.warm && kind === "chat") {
-      this.logWarmUnsupportedOnce(participant.kind, "Codex exec-server warm protocol is not wired; using one-shot resume fallback.");
+      return this.runCodexAppServerWarmOrOneShot(participant, prompt, repoPath, diffMode, kind, signal, options);
     }
     return this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, options);
+  }
+
+  private async runCodexAppServerWarmOrOneShot(
+    participant: ParticipantConfig,
+    prompt: string,
+    repoPath: string | undefined,
+    diffMode: GitDiffMode | undefined,
+    kind: ConversationKind,
+    signal: AbortSignal | undefined,
+    options: CliAgentRunOptions
+  ): Promise<ParticipantRunResult> {
+    const warm = options.warm;
+    if (!warm || process.env[CODEX_APP_SERVER_DISABLED_ENV] === "0") {
+      return this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
+    }
+    const key = this.warmAgentKey(participant, repoPath, kind, options);
+    const scopeKey = this.warmAgentScopeKey(warm);
+    await this.closeStaleWarmAgents(scopeKey, key);
+    let entry = this.warmAgents.get(key);
+    if (!entry || entry.closed || entry.process.exitCode !== null) {
+      if (entry) {
+        this.warmAgents.delete(key);
+        await this.closeWarmAgent(entry, "stale");
+      }
+      try {
+        entry = this.createCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options);
+        this.warmAgents.set(key, entry);
+        void this.writeDebugLog("cli-agent-warm-started", {
+          providerKind: participant.kind,
+          participantId: participant.id,
+          conversationId: warm.conversationId,
+          runtime: "codex-app-server"
+        });
+      } catch (error) {
+        void this.writeDebugLog("cli-agent-warm-start-failed", {
+          providerKind: participant.kind,
+          participantId: participant.id,
+          conversationId: warm.conversationId,
+          runtime: "codex-app-server",
+          error: this.errorText(error)
+        });
+        return this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
+      }
+    }
+
+    return this.enqueueWarmRun(entry, async () => {
+      this.clearWarmIdleTimer(entry as WarmAgentEntry);
+      try {
+        const result = await (entry as WarmAgentEntry).run(prompt, signal, options.onOutput);
+        this.scheduleWarmIdleTimer(entry as WarmAgentEntry, warm.idleTimeoutMs);
+        return result;
+      } catch (error) {
+        this.warmAgents.delete(key);
+        await this.closeWarmAgent(entry as WarmAgentEntry, signal?.aborted ? "aborted" : "failed");
+        if (signal?.aborted) {
+          return this.failed(participant, error);
+        }
+        void this.writeDebugLog("cli-agent-warm-fallback", {
+          providerKind: participant.kind,
+          participantId: participant.id,
+          conversationId: warm.conversationId,
+          runtime: "codex-app-server",
+          error: this.errorText(error)
+        });
+        return this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
+      }
+    });
+  }
+
+  private createCodexAppServerWarmAgent(
+    key: string,
+    scopeKey: string,
+    participant: ParticipantConfig,
+    repoPath: string | undefined,
+    diffMode: GitDiffMode | undefined,
+    kind: ConversationKind,
+    options: CliAgentRunOptions
+  ): WarmAgentEntry {
+    const child = spawn("codex", ["app-server", "--listen", "stdio://"], {
+      cwd: repoPath,
+      env: { ...process.env, ...this.appMcpEnv(options) },
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+    let stderr = "";
+    let closed = false;
+    let nextRequestId = 1;
+    let threadId = options.sessionId;
+    let threadLoaded = false;
+    let initialized = false;
+    let activeModel = participant.model;
+    const pendingRequests = new Map<number, CodexAppServerPendingRequest>();
+    let pendingTurn: CodexAppServerPendingTurn | undefined;
+
+    const cleanupPendingTurn = (): CodexAppServerPendingTurn | undefined => {
+      const current = pendingTurn;
+      if (!current) {
+        return undefined;
+      }
+      clearTimeout(current.timer);
+      if (current.abort) {
+        current.abort();
+      }
+      pendingTurn = undefined;
+      return current;
+    };
+
+    const rejectPendingTurn = (error: Error): void => {
+      const current = cleanupPendingTurn();
+      current?.reject(error);
+    };
+
+    const sendRequest = (method: string, params: unknown): Promise<unknown> => {
+      if (closed || child.exitCode !== null || child.killed) {
+        return Promise.reject(new Error("codex app-server process is not running"));
+      }
+      const id = nextRequestId;
+      nextRequestId += 1;
+      return new Promise<unknown>((resolve, reject) => {
+        pendingRequests.set(id, { method, resolve, reject });
+        child.stdin.write(`${JSON.stringify({ method, id, params })}\n`, (error) => {
+          if (error) {
+            pendingRequests.delete(id);
+            reject(error);
+          }
+        });
+      });
+    };
+
+    const initialize = async (): Promise<void> => {
+      if (initialized) {
+        return;
+      }
+      await sendRequest("initialize", {
+        clientInfo: {
+          name: "ai-consensus",
+          title: "AI Consensus",
+          version: "0.1.0"
+        },
+        capabilities: {
+          experimentalApi: true,
+          optOutNotificationMethods: []
+        }
+      });
+      initialized = true;
+    };
+
+    const ensureThread = async (): Promise<string> => {
+      await initialize();
+      if (threadId && threadLoaded) {
+        return threadId;
+      }
+      if (threadId) {
+        if (options.sessionId && threadId === options.sessionId) {
+          const result = await sendRequest("thread/resume", this.codexAppServerThreadResumeParams(options.sessionId, participant, repoPath, kind, options)) as CodexAppServerThreadStartResult;
+          threadId = result.thread?.id ?? options.sessionId;
+          activeModel = result.model ?? activeModel;
+        }
+        threadLoaded = true;
+        return threadId;
+      }
+      const result = await sendRequest("thread/start", this.codexAppServerThreadStartParams(participant, repoPath, kind, options)) as CodexAppServerThreadStartResult;
+      const nextThreadId = result.thread?.id ?? result.thread?.sessionId;
+      if (!nextThreadId) {
+        throw new Error("codex app-server did not return a thread id");
+      }
+      threadId = nextThreadId;
+      threadLoaded = true;
+      activeModel = result.model ?? activeModel;
+      return nextThreadId;
+    };
+
+    const handleResponse = (record: Record<string, unknown>): void => {
+      const id = typeof record.id === "number" ? record.id : undefined;
+      if (id === undefined) {
+        return;
+      }
+      const pending = pendingRequests.get(id);
+      if (!pending) {
+        return;
+      }
+      pendingRequests.delete(id);
+      const error = this.asRecord(record.error);
+      if (error) {
+        pending.reject(new Error(this.stringField(error, "message") ?? `${pending.method} failed`));
+        return;
+      }
+      pending.resolve(record.result);
+    };
+
+    const handleLine = (line: string): void => {
+      let event: unknown;
+      try {
+        event = JSON.parse(line) as unknown;
+      } catch {
+        return;
+      }
+      const record = this.asRecord(event);
+      if (!record) {
+        return;
+      }
+      if ("id" in record) {
+        handleResponse(record);
+        return;
+      }
+      this.handleCodexAppServerNotification(record, participant, pendingTurn, cleanupPendingTurn, rejectPendingTurn);
+    };
+
+    const handleData = (chunk: string, stream: "stdout" | "stderr"): void => {
+      if (stream === "stderr") {
+        stderr = this.truncateText(`${stderr}${chunk}`, MAX_CLI_ERROR_CHARS);
+        stderrBuffer += chunk;
+      } else {
+        stdoutBuffer += chunk;
+      }
+      let buffer = stream === "stderr" ? stderrBuffer : stdoutBuffer;
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line) {
+          handleLine(line);
+        }
+        newline = buffer.indexOf("\n");
+      }
+      if (stream === "stderr") {
+        stderrBuffer = buffer;
+      } else {
+        stdoutBuffer = buffer;
+      }
+    };
+
+    child.stdout.on("data", (chunk: string) => handleData(chunk, "stdout"));
+    child.stderr.on("data", (chunk: string) => handleData(chunk, "stderr"));
+    child.stdin.on("error", (error) => {
+      closed = true;
+      rejectPendingTurn(error);
+      for (const pending of pendingRequests.values()) {
+        pending.reject(error);
+      }
+      pendingRequests.clear();
+    });
+    child.on("error", (error) => {
+      closed = true;
+      rejectPendingTurn(error);
+      for (const pending of pendingRequests.values()) {
+        pending.reject(error);
+      }
+      pendingRequests.clear();
+    });
+    child.on("close", (exitCode) => {
+      closed = true;
+      const error = new Error(`codex app-server process exited${exitCode === null ? "" : ` with code ${exitCode}`}${stderr ? `: ${stderr}` : ""}`);
+      rejectPendingTurn(error);
+      for (const pending of pendingRequests.values()) {
+        pending.reject(error);
+      }
+      pendingRequests.clear();
+    });
+
+    return {
+      key,
+      scopeKey,
+      providerKind: participant.kind,
+      process: child,
+      queue: Promise.resolve(),
+      closed: false,
+      run: async (turnPrompt: string, signal?: AbortSignal, onOutput?: CliAgentOutputCallback): Promise<ParticipantRunResult> => {
+        const currentThreadId = await ensureThread();
+        const startedAt = Date.now();
+        const timer = setTimeout(() => {
+          rejectPendingTurn(new Error(`codex app-server timed out after ${CLI_AGENT_RUN_TIMEOUT_MS}ms`));
+        }, CLI_AGENT_RUN_TIMEOUT_MS);
+        timer.unref();
+        const abort = (): void => {
+          const current = pendingTurn;
+          if (current?.turnId) {
+            void sendRequest("turn/interrupt", { threadId: current.threadId, turnId: current.turnId }).catch(() => undefined);
+          }
+          rejectPendingTurn(new Error("codex app-server turn was cancelled"));
+        };
+        const resultPromise = new Promise<ParticipantRunResult>((resolve, reject) => {
+          pendingTurn = {
+            startedAt,
+            threadId: currentThreadId,
+            messages: [],
+            model: activeModel,
+            timer,
+            abort: signal ? () => signal.removeEventListener("abort", abort) : undefined,
+            onOutput,
+            resolve,
+            reject
+          };
+        });
+        if (signal?.aborted) {
+          abort();
+          return resultPromise;
+        }
+        signal?.addEventListener("abort", abort, { once: true });
+        const turn = await sendRequest("turn/start", {
+          threadId: currentThreadId,
+          input: [
+            {
+              type: "text",
+              text: this.codexPrompt(turnPrompt, repoPath, diffMode, kind, options),
+              text_elements: []
+            }
+          ]
+        }) as CodexAppServerTurnStartResult;
+        if (pendingTurn) {
+          pendingTurn.turnId = turn.turn?.id;
+        }
+        return resultPromise;
+      }
+    };
+  }
+
+  private codexAppServerThreadStartParams(
+    participant: ParticipantConfig,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    options: CliAgentRunOptions
+  ): Record<string, unknown> {
+    const mode = this.agentModeForRun(kind, options);
+    const permissions = this.permissionsForRun(mode, options);
+    return {
+      model: participant.model ?? null,
+      cwd: repoPath ?? null,
+      approvalPolicy: this.codexAppServerApprovalPolicy(mode),
+      approvalsReviewer: mode === "auto" ? "auto_review" : null,
+      sandbox: permissions.workspaceWrite ? "workspace-write" : "read-only",
+      config: this.codexAppServerConfig(permissions, options),
+      developerInstructions: options.role?.instructions ?? null,
+      ephemeral: !options.persistSession,
+      experimentalRawEvents: false,
+      persistExtendedHistory: false
+    };
+  }
+
+  private codexAppServerThreadResumeParams(
+    sessionId: string,
+    participant: ParticipantConfig,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    options: CliAgentRunOptions
+  ): Record<string, unknown> {
+    const mode = this.agentModeForRun(kind, options);
+    const permissions = this.permissionsForRun(mode, options);
+    return {
+      threadId: sessionId,
+      model: participant.model ?? null,
+      cwd: repoPath ?? null,
+      approvalPolicy: this.codexAppServerApprovalPolicy(mode),
+      approvalsReviewer: mode === "auto" ? "auto_review" : null,
+      sandbox: permissions.workspaceWrite ? "workspace-write" : "read-only",
+      config: this.codexAppServerConfig(permissions, options),
+      developerInstructions: options.role?.instructions ?? null,
+      excludeTurns: true,
+      persistExtendedHistory: false
+    };
+  }
+
+  private codexAppServerApprovalPolicy(mode: ChatAgentMode): string {
+    return mode === "auto" ? "on-request" : "never";
+  }
+
+  private codexAppServerConfig(
+    permissions: ChatAgentPermissions,
+    options: CliAgentRunOptions
+  ): Record<string, unknown> {
+    const config: Record<string, unknown> = {
+      web_search: permissions.webAccess ? "live" : "disabled"
+    };
+    if (options.appMcp) {
+      config["mcp_servers.ai_consensus.url"] = options.appMcp.url;
+      config["mcp_servers.ai_consensus.bearer_token_env_var"] = CODEX_APP_SERVER_MCP_TOKEN_ENV;
+    }
+    return config;
+  }
+
+  private handleCodexAppServerNotification(
+    record: Record<string, unknown>,
+    participant: ParticipantConfig,
+    pending: CodexAppServerPendingTurn | undefined,
+    cleanupPending: () => CodexAppServerPendingTurn | undefined,
+    rejectPending: (error: Error) => void
+  ): void {
+    if (!pending) {
+      return;
+    }
+    const method = this.stringField(record, "method");
+    const params = this.asRecord(record.params);
+    if (!method || !params) {
+      return;
+    }
+    if (method === "item/started") {
+      const summary = this.codexAppServerToolSummary(this.asRecord(params.item));
+      if (summary) {
+        this.emitLiveOutput(pending.onOutput, "tool", `${summary}\n`);
+      }
+      return;
+    }
+    if (method === "item/agentMessage/delta") {
+      const delta = this.stringField(params, "delta");
+      if (delta) {
+        pending.messages.push(delta);
+      }
+      return;
+    }
+    if (method === "item/completed") {
+      const item = this.asRecord(params.item);
+      if (this.stringField(item ?? {}, "type") === "agentMessage") {
+        const text = this.stringField(item ?? {}, "text");
+        if (text) {
+          pending.finalMessage = text;
+        }
+      }
+      return;
+    }
+    if (method === "thread/tokenUsage/updated") {
+      pending.contextUsage = this.agentContextUsageFromEvent(record, participant, "codex-cli") ?? pending.contextUsage;
+      return;
+    }
+    if (method === "error") {
+      const error = this.asRecord(params.error);
+      rejectPending(new Error(this.stringField(error ?? {}, "message") ?? "codex app-server reported an error"));
+      return;
+    }
+    if (method !== "turn/completed") {
+      return;
+    }
+    const turn = this.asRecord(params.turn);
+    const status = this.stringField(turn ?? {}, "status");
+    const current = cleanupPending();
+    if (!current) {
+      return;
+    }
+    if (status !== "completed") {
+      const error = this.asRecord(turn?.error);
+      current.reject(new Error(this.stringField(error ?? {}, "message") ?? `codex app-server turn ${status ?? "failed"}`));
+      return;
+    }
+    const content = (current.finalMessage ?? current.messages.join("")).trim();
+    current.resolve({
+      participant,
+      ok: true,
+      content,
+      durationMs: Date.now() - current.startedAt,
+      sessionId: current.threadId,
+      roleRuntime: undefined,
+      contextUsage: current.contextUsage
+    });
+  }
+
+  private codexAppServerToolSummary(item: Record<string, unknown> | undefined): string | undefined {
+    if (!item) {
+      return undefined;
+    }
+    const type = this.stringField(item, "type");
+    if (type === "commandExecution") {
+      return "Running command";
+    }
+    if (type === "mcpToolCall") {
+      const tool = this.stringField(item, "tool");
+      return tool ? this.toolActivityLabel(tool) : "Using MCP tool";
+    }
+    if (type === "dynamicToolCall") {
+      const tool = this.stringField(item, "tool");
+      return tool ? this.toolActivityLabel(tool) : "Using tool";
+    }
+    if (type === "webSearch") {
+      return "Using web search";
+    }
+    if (type === "imageView") {
+      return "Viewing image";
+    }
+    if (type === "fileChange") {
+      return "Updating files";
+    }
+    return undefined;
   }
 
   private async runCodexOneShot(
@@ -1041,7 +1562,7 @@ export class CliAgentRunner {
       return undefined;
     }
     return {
-      AI_CONSENSUS_MCP_TOKEN: options.appMcp.token
+      [CODEX_APP_SERVER_MCP_TOKEN_ENV]: options.appMcp.token
     };
   }
 

@@ -51,6 +51,9 @@ import {
 import { CliAgentRunner } from "./cliAgents";
 import type { CliAgentOutputEvent, CliAgentRoleOptions } from "./cliAgents";
 import {
+  APP_CHAT_GET_CONTEXT_TOOL,
+  APP_CHAT_GET_PARTICIPANTS_TOOL,
+  APP_CHAT_READ_MESSAGES_TOOL,
   APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
   APP_ROSTER_DESCRIBE_OPTIONS_TOOL,
   APP_ROSTER_REQUEST_CHANGE_TOOL
@@ -69,11 +72,19 @@ const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const CHAT_ADMINISTRATOR_ROLE_ID = "administrator";
 const CHAT_ADMINISTRATOR_HANDLE = "admin";
 const CHAT_ROSTER_CHANGE_MAX_OPERATIONS = 12;
+const CHAT_CONTEXT_MCP_TOOL_NAMES = [
+  APP_CHAT_GET_CONTEXT_TOOL,
+  APP_CHAT_GET_PARTICIPANTS_TOOL,
+  APP_CHAT_READ_MESSAGES_TOOL
+];
 const CHAT_APP_MCP_TOOL_NAMES = [
+  ...CHAT_CONTEXT_MCP_TOOL_NAMES,
   APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
   APP_ROSTER_DESCRIBE_OPTIONS_TOOL,
   APP_ROSTER_REQUEST_CHANGE_TOOL
 ];
+const CHAT_CONTEXT_READ_DEFAULT_LIMIT = 50;
+const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
 
 interface ChatAppMcpGateway {
   issueToken(grant: {
@@ -82,8 +93,19 @@ interface ChatAppMcpGateway {
     roleConfigId: string;
     roleConfigVersion: number;
     capabilities: ChatAppToolCapability[];
+    triggerMessageId?: string;
+    triggerThreadId?: string;
+    triggerParentMessageId?: string;
+    triggerChatThreadRootId?: string;
+    snapshotMaxSequence?: number;
+    continuation?: boolean;
+    historyMarkdownPath?: string;
+    historyJsonPath?: string;
   }): { url: string; token: string } | undefined;
+  updateToken?(token: string, grant: ChatAppMcpTokenGrant): { url: string; token: string } | undefined;
 }
+
+type ChatAppMcpTokenGrant = Parameters<ChatAppMcpGateway["issueToken"]>[0];
 
 interface ChatAppMcpActor {
   conversationId: string;
@@ -91,6 +113,14 @@ interface ChatAppMcpActor {
   roleConfigId: string;
   roleConfigVersion: number;
   capabilities: ChatAppToolCapability[];
+  triggerMessageId?: string;
+  triggerThreadId?: string;
+  triggerParentMessageId?: string;
+  triggerChatThreadRootId?: string;
+  snapshotMaxSequence?: number;
+  continuation?: boolean;
+  historyMarkdownPath?: string;
+  historyJsonPath?: string;
 }
 
 interface ChatChoiceDraft {
@@ -114,6 +144,7 @@ interface PreparedPermissionChange {
 
 export class ChatService {
   private readonly saveQueues = new Map<string, Promise<void>>();
+  private readonly appMcpTokens = new Map<string, string>();
 
   constructor(
     private readonly storage: StorageService,
@@ -389,6 +420,171 @@ export class ChatService {
         supportedOperations: ["add"],
         maxOperations: CHAT_ROSTER_CHANGE_MAX_OPERATIONS,
         modelPolicy: "The model field is optional. Omit it to use the CLI/provider default, or use a provider's configuredModel when one is present."
+      }
+    };
+  }
+
+  async describeChatContextForTool(actor: ChatAppMcpActor): Promise<Record<string, unknown>> {
+    await this.waitForQueuedSave(actor.conversationId);
+    const conversation = await this.requireChat(actor.conversationId);
+    const participants = this.chatParticipants(conversation);
+    const requester = participants.find((participant) => participant.id === actor.participantId);
+    if (!requester) {
+      throw new Error("The requesting participant is no longer in this chat.");
+    }
+    const triggerSequence = actor.triggerMessageId
+      ? conversation.messages.findIndex((message) => message.id === actor.triggerMessageId)
+      : -1;
+    const triggerMessage = triggerSequence >= 0 ? conversation.messages[triggerSequence] : undefined;
+    const historyFiles = this.historyFilePaths(conversation.id, actor);
+
+    return {
+      conversation: {
+        id: conversation.id,
+        title: conversation.title,
+        kind: conversation.kind,
+        createdAt: conversation.createdAt,
+        updatedAt: conversation.updatedAt,
+        repoPath: conversation.repoPath
+      },
+      requester: {
+        ...this.rosterParticipantSummary(conversation, requester),
+        appToolCapabilities: normalizeChatAppToolCapabilities(actor.capabilities)
+      },
+      activeTurn: {
+        triggerMessageId: actor.triggerMessageId,
+        triggerThreadId: actor.triggerThreadId,
+        triggerParentMessageId: actor.triggerParentMessageId,
+        triggerChatThreadRootId: actor.triggerChatThreadRootId,
+        snapshotMaxSequence: actor.snapshotMaxSequence,
+        continuation: Boolean(actor.continuation),
+        triggerMessage: triggerMessage ? this.chatMessageForTool(triggerMessage, triggerSequence) : undefined
+      },
+      contextSources: {
+        preferredMessageTool: APP_CHAT_READ_MESSAGES_TOOL,
+        preferredParticipantTool: APP_CHAT_GET_PARTICIPANTS_TOOL,
+        currentContextTool: APP_CHAT_GET_CONTEXT_TOOL,
+        fallbackHistoryFiles: {
+          markdownPath: historyFiles.markdownPath,
+          jsonPath: historyFiles.jsonPath,
+          purpose: "Temporary fallback and debugging artifact. Prefer MCP tools for dynamic context."
+        }
+      },
+      messageReadDefaults: {
+        defaultLimit: CHAT_CONTEXT_READ_DEFAULT_LIMIT,
+        maxLimit: CHAT_CONTEXT_READ_MAX_LIMIT
+      },
+      availableAppMcpTools: this.appMcpToolNames(actor.capabilities)
+    };
+  }
+
+  async describeChatParticipantsForTool(actor: ChatAppMcpActor): Promise<Record<string, unknown>> {
+    await this.waitForQueuedSave(actor.conversationId);
+    const conversation = await this.requireChat(actor.conversationId);
+    const participants = this.chatParticipants(conversation);
+    const requester = participants.find((participant) => participant.id === actor.participantId);
+    if (!requester) {
+      throw new Error("The requesting participant is no longer in this chat.");
+    }
+
+    const settings = await this.settings.getPublicSettings();
+    const agents = await this.cliRunner.detectAgents().catch((): AgentHealth[] => []);
+    const providers = (["codex-cli", "claude-code"] as ChatProviderKind[]).map((kind) => {
+      const provider = settings.providers.find((item) => item.kind === kind);
+      const health = agents.find((item) => item.kind === kind);
+      return {
+        kind,
+        label: provider?.label ?? health?.label ?? (kind === "codex-cli" ? "Codex CLI" : "Claude Code"),
+        enabled: Boolean(provider?.enabled),
+        installed: Boolean(health?.installed),
+        configuredModel: provider?.model?.trim() || undefined,
+        version: health?.version,
+        error: health?.error
+      };
+    });
+    const providerByKind = new Map(providers.map((provider) => [provider.kind, provider]));
+    const roleById = new Map(settings.chatRoleConfigs.map((role) => [role.id, role]));
+
+    return {
+      conversationId: conversation.id,
+      requesterParticipantId: requester.id,
+      participants: participants.map((participant) => {
+        const role = roleById.get(participant.roleConfigId);
+        const provider = providerByKind.get(participant.kind);
+        return {
+          id: participant.id,
+          handle: participant.handle,
+          isRequester: participant.id === requester.id,
+          roleConfigId: participant.roleConfigId,
+          roleLabel: this.roleLabelForParticipant(conversation, participant),
+          roleVersion: role?.version ?? participant.roleConfigVersion,
+          appToolCapabilities: normalizeChatAppToolCapabilities(role?.appToolCapabilities),
+          kind: participant.kind,
+          model: participant.model,
+          agentMode: normalizeChatAgentMode(participant.agentMode),
+          permissions: normalizeChatAgentPermissions(participant.permissions),
+          provider
+        };
+      }),
+      providers
+    };
+  }
+
+  async readChatMessagesForTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+    await this.waitForQueuedSave(actor.conversationId);
+    const conversation = await this.requireChat(actor.conversationId);
+    const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+    if (!requester) {
+      throw new Error("The requesting participant is no longer in this chat.");
+    }
+
+    const request = this.normalizeChatMessageReadRequest(rawRequest);
+    const sequencedMessages = conversation.messages.map((message, sequence) => ({ message, sequence }));
+    const filteredMessages = sequencedMessages.filter(({ message, sequence }) => {
+      if (typeof actor.snapshotMaxSequence === "number" && sequence > actor.snapshotMaxSequence) {
+        return false;
+      }
+      if (request.threadId && message.metadata?.threadId !== request.threadId) {
+        return false;
+      }
+      if (typeof request.beforeSequence === "number" && sequence >= request.beforeSequence) {
+        return false;
+      }
+      if (typeof request.afterSequence === "number" && sequence <= request.afterSequence) {
+        return false;
+      }
+      return true;
+    });
+    const selectedMessages = typeof request.afterSequence === "number"
+      ? filteredMessages.slice(0, request.limit)
+      : filteredMessages.slice(Math.max(0, filteredMessages.length - request.limit));
+    const oldestSequence = selectedMessages[0]?.sequence;
+    const newestSequence = selectedMessages[selectedMessages.length - 1]?.sequence;
+    const readableTotalMessages = typeof actor.snapshotMaxSequence === "number"
+      ? Math.min(conversation.messages.length, actor.snapshotMaxSequence + 1)
+      : conversation.messages.length;
+
+    return {
+      conversationId: conversation.id,
+      requesterParticipantId: requester.id,
+      filters: {
+        threadId: request.threadId,
+        beforeSequence: request.beforeSequence,
+        afterSequence: request.afterSequence,
+        limit: request.limit
+      },
+      messages: selectedMessages.map(({ message, sequence }) => this.chatMessageForTool(message, sequence)),
+      page: {
+        oldestSequence,
+        newestSequence,
+        hasMoreBefore: typeof oldestSequence === "number"
+          ? filteredMessages.some((item) => item.sequence < oldestSequence)
+          : false,
+        hasMoreAfter: typeof newestSequence === "number"
+          ? filteredMessages.some((item) => item.sequence > newestSequence)
+          : false,
+        totalMessages: readableTotalMessages,
+        totalMatchingMessages: filteredMessages.length
       }
     };
   }
@@ -677,28 +873,33 @@ export class ChatService {
       completed,
       total: participants.length
     });
-    const results = await Promise.all(
+    let appendQueue = Promise.resolve();
+    const appendCompletedTurn = async (participant: ChatParticipant, messages: ChatMessage[]): Promise<void> => {
+      const nextAppend = appendQueue.then(async () => {
+        await this.refreshStoredChatState(conversation);
+        this.appendParticipantTurnMessages(conversation, participant, messages);
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+      appendQueue = nextAppend.catch(() => undefined);
+      await nextAppend;
+    };
+    await Promise.all(
       participants.map(async (participant) => {
         const messages = await this.runParticipantTurn(conversation, participant, triggerMessage, runId, signal, progress, {
           warnings,
           promptConversation: turnSnapshot,
           workspacePath
         });
+        await appendCompletedTurn(participant, messages);
         completed += 1;
         this.emitProgress(runId, progress, "debate", `@${participant.handle} finished.`, {
           participantLabel: `@${participant.handle}`,
           completed,
           total: participants.length
         });
-        return { participant, messages };
       })
     );
-    await this.refreshStoredChatState(conversation);
-    for (const result of results) {
-      this.appendParticipantTurnMessages(conversation, result.participant, result.messages);
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
-    }
     await this.ensureHistoryFiles(conversation);
   }
 
@@ -747,13 +948,22 @@ export class ChatService {
       ...normalizeChatAppToolCapabilities(session.roleAppToolCapabilities),
       "permissions.request"
     ]);
-    const appMcp = this.appMcp?.issueToken({
+    const appMcpGrant: ChatAppMcpTokenGrant = {
       conversationId: conversation.id,
       participantId: participant.id,
       roleConfigId: session.roleConfigId,
       roleConfigVersion: session.roleConfigVersion,
-      capabilities: appToolCapabilities
-    });
+      capabilities: appToolCapabilities,
+      triggerMessageId: triggerMessage.id,
+      triggerThreadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
+      triggerParentMessageId: triggerMessage.metadata?.parentMessageId,
+      triggerChatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
+      snapshotMaxSequence: Math.max(0, promptConversation.messages.length - 1),
+      continuation: Boolean(options.continuation),
+      historyMarkdownPath: path.join(workspacePath, "history.md"),
+      historyJsonPath: path.join(workspacePath, "history.json")
+    };
+    const appMcp = this.issueAppMcpConnection(conversation, participant, appMcpGrant);
     const appMcpToolNames = this.appMcpToolNames(appToolCapabilities);
     this.emitProgress(runId, progress, "debate", `@${participant.handle} is responding.`, {
       participantLabel: `@${participant.handle}`,
@@ -961,7 +1171,6 @@ export class ChatService {
     availableRoles: ChatRoleConfig[],
     options: { includeRoleInstructions: boolean; permissions: ChatAgentPermissions }
   ): string {
-    const participants = this.chatParticipants(conversation);
     const historyMarkdownPath = path.join(workspacePath, "history.md");
     const historyJsonPath = path.join(workspacePath, "history.json");
     const sections = [
@@ -973,15 +1182,11 @@ export class ChatService {
           : "Use your configured role instructions for this participant.",
         this.participantRepositoryLine(conversation, participant, options.permissions),
         this.participantPermissionPolicy(participant, options.permissions),
-        `Readable chat history Markdown: ${historyMarkdownPath}.`,
-        `Readable chat history JSON: ${historyJsonPath}.`,
-        "Read the history files when you need prior conversation context. Do not ask User to grant access to these app-managed history files.",
-        "Participants:",
-        "- User: human conversation owner, requirements authority, and clarification source. User messages appear as `User` in the transcript.",
-        ...participants.map((item) => {
-          const role = this.roleLabelForParticipant(conversation, item);
-          return `- @${item.handle}: ${role} agent`;
-        }),
+        "Dynamic chat context: use App MCP as the preferred source for current participants, active thread metadata, and prior messages.",
+        `Fallback/debug chat history Markdown: ${historyMarkdownPath}.`,
+        `Fallback/debug chat history JSON: ${historyJsonPath}.`,
+        "Only read the history files if MCP context is unavailable or you need to debug the app-generated transcript. Do not ask User to grant access to these app-managed history files.",
+        "User: human conversation owner, requirements authority, and clarification source. User messages appear as `User` in the transcript.",
         this.appToolPromptPolicy(session, availableRoles),
         "Mention policy: you may cite participant handles in normal prose for attribution; those citations do not request dispatch. To ask another participant to respond, include a dedicated `Participant requests:` block with one bullet per requested participant. Use `Participant requests: none` when you cite or identify participants but do not need follow-up. If you need to synthesize after the requested participants reply, add the exact line `Return to requester after replies: yes`. Mentioned agents and requester continuations will not run until User approves them.",
         "User choice policy: when User must pick one option before you can continue, include one dedicated `User choice:` block after your explanation. Format it as lines `T: short title`, `Q: question`, `O1: option label | optional description`, `O2: option label | optional description`, and optionally `R: O1`. Use at least two options. Ask at most one user choice in a message. The UI also lets User write a custom answer instead of choosing your suggestions. After User confirms, the app will send the selected option or custom answer back to you in this chat.",
@@ -1044,6 +1249,7 @@ export class ChatService {
       "- Ask User directly when goals, requirements, preferences, acceptance criteria, or user intent are unclear.",
       "- Do not ask another participant for user-owned clarification.",
       "- When User must choose between concrete options, include one `User choice:` block with `T:`, `Q:`, `O1:`, `O2:`, and optional `R:` lines so the app can render choice buttons plus a custom-answer path.",
+      "- Use read-only App MCP chat context tools for dynamic chat state: `app_chat_get_context`, `app_chat_get_participants`, and `app_chat_read_messages`.",
       "- App MCP tools are the required path for app-managed mutations. If blocked file-editing or web-access permissions are needed to complete User's request, call `app_permissions_request_change` through MCP instead of asking in prose or saying the task is blocked.",
       "- For permission requests, use `workspaceWrite` for file edits and `webAccess` for web lookup. Do not claim the permission is granted until the tool result or a later app message confirms approval.",
       hasChatAppToolCapability(session.roleAppToolCapabilities, "participants.manage")
@@ -1052,13 +1258,14 @@ export class ChatService {
       `- ${this.participantPermissionPolicy(participant, permissions)}`,
       `- ${this.confirmationBrevityPolicy()}`,
       "- Answer in the active chat message; do not claim to write, record, or post work elsewhere.",
-      "- Follow each turn's chat prompt for history paths, the triggering message, participants, and dispatch rules."
+      "- Follow each turn's chat prompt for the triggering message, MCP context guidance, fallback history paths, and dispatch rules."
     ].join("\n");
   }
 
   private appToolPromptPolicy(session: ChatParticipantSession, availableRoles: ChatRoleConfig[]): string {
     const lines = [
       "App MCP tools: use the connected `ai_consensus` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
+      "Chat context MCP tools: `app_chat_get_context`, `app_chat_get_participants`, and `app_chat_read_messages` are read-only and available for the current chat. Prefer them over full history files when you need roster details, active thread metadata, or prior messages.",
       "Permission MCP tool: `app_permissions_request_change` is available when this participant needs User approval for file-editing or web-access permissions.",
       "Required permission workflow: if the current task needs a blocked capability, call `app_permissions_request_change` before answering that the work cannot be done. Send JSON like `{ \"permissions\": [\"webAccess\"], \"reason\": \"Need live web lookup to answer User's trademark question.\" }` or `{ \"permissions\": [\"workspaceWrite\"], \"reason\": \"Need to edit the requested file.\" }`.",
       "After a permission MCP call, the app will ask User to approve. If the result is pending approval, say only that the permission request is awaiting User approval; do not claim the permission was granted until the tool result or a later app message confirms approval."
@@ -1086,11 +1293,38 @@ export class ChatService {
 
   private appMcpToolNames(capabilities: ChatAppToolCapability[]): string[] {
     return CHAT_APP_MCP_TOOL_NAMES.filter((toolName) => {
+      if (CHAT_CONTEXT_MCP_TOOL_NAMES.includes(toolName)) {
+        return true;
+      }
       if (toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL) {
         return hasChatAppToolCapability(capabilities, "permissions.request");
       }
       return hasChatAppToolCapability(capabilities, "participants.manage");
     });
+  }
+
+  private issueAppMcpConnection(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    grant: ChatAppMcpTokenGrant
+  ): { url: string; token: string } | undefined {
+    if (!this.appMcp) {
+      return undefined;
+    }
+    const key = `${conversation.id}:${participant.id}`;
+    const existingToken = this.appMcpTokens.get(key);
+    if (existingToken && this.appMcp.updateToken) {
+      const updated = this.appMcp.updateToken(existingToken, grant);
+      if (updated) {
+        return updated;
+      }
+      this.appMcpTokens.delete(key);
+    }
+    const issued = this.appMcp.issueToken(grant);
+    if (issued) {
+      this.appMcpTokens.set(key, issued.token);
+    }
+    return issued;
   }
 
   private roleRuntimeName(participant: ChatParticipant, session: ChatParticipantSession): string {
@@ -1218,8 +1452,8 @@ export class ChatService {
       `Agent mode: ${mode}.`,
       `Permissions: repo read ${permissions.repoRead ? "allowed" : "blocked"}, shell commands ${permissions.shell.enabled ? "allowed" : "blocked"}, workspace edits ${permissions.workspaceWrite ? "allowed" : "blocked"}, web access ${permissions.webAccess ? "allowed" : "blocked"}.`,
       permissions.repoRead
-        ? "Repository files may be inspected read-only when repository context is selected; app-managed chat history files may be read for conversation context."
-        : "Do not inspect selected repository files; app-managed chat history files may still be read for conversation context.",
+        ? "Repository files may be inspected read-only when repository context is selected; app-managed chat context may be read through MCP, with history files as fallback/debug context."
+        : "Do not inspect selected repository files; app-managed chat context may still be read through MCP, with history files as fallback/debug context.",
       permissions.shell.enabled ? `Shell command rules: ${shellRules}. Follow deny rules strictly; ask rules require native CLI approval; allow rules may run without extra confirmation when the CLI supports them.` : "General shell commands are blocked; this does not block read-only file inspection allowed by repo or history context.",
       permissions.workspaceWrite ? "If you change files, summarize the changed files and verification in this chat reply." : "Do not edit files."
     ].join(" ");
@@ -1378,9 +1612,139 @@ export class ChatService {
     if (stored.updatedAt <= conversation.updatedAt && stored.messages.length <= conversation.messages.length) {
       return;
     }
-    conversation.messages = stored.messages;
-    conversation.metadata = stored.metadata;
-    conversation.updatedAt = stored.updatedAt;
+    conversation.messages = this.mergeStoredChatMessages(stored.messages, conversation.messages);
+    conversation.metadata = this.mergeStoredChatMetadata(stored.metadata, conversation.metadata);
+    conversation.updatedAt = stored.updatedAt > conversation.updatedAt ? stored.updatedAt : conversation.updatedAt;
+  }
+
+  private mergeStoredChatMessages(storedMessages: ChatMessage[], currentMessages: ChatMessage[]): ChatMessage[] {
+    const currentById = new Map(currentMessages.map((message) => [message.id, message]));
+    const merged = storedMessages.map((message) => currentById.get(message.id) ?? message);
+    const storedIds = new Set(storedMessages.map((message) => message.id));
+    for (const message of currentMessages) {
+      if (!storedIds.has(message.id)) {
+        merged.push(message);
+      }
+    }
+    return merged;
+  }
+
+  private mergeStoredChatMetadata(
+    storedMetadata: Record<string, unknown>,
+    currentMetadata: Record<string, unknown>
+  ): Record<string, unknown> {
+    const merged: Record<string, unknown> = {
+      ...storedMetadata,
+      ...currentMetadata
+    };
+    const participants = this.mergeMetadataItemsByKey(
+      storedMetadata.participants,
+      currentMetadata.participants,
+      "id",
+      (stored, current) => ({
+        ...stored,
+        ...(typeof current.roleConfigVersion === "number" ? { roleConfigVersion: current.roleConfigVersion } : {})
+      })
+    );
+    if (participants) {
+      merged.participants = participants;
+    }
+    const sessions = this.mergeMetadataItemsByKey(
+      storedMetadata.participantSessions,
+      currentMetadata.participantSessions,
+      "participantId",
+      (_stored, current) => current
+    );
+    if (sessions) {
+      merged.participantSessions = sessions;
+    }
+    const contextUsage = this.mergeMetadataRecords(
+      storedMetadata.agentContextUsageByParticipant,
+      currentMetadata.agentContextUsageByParticipant
+    );
+    if (contextUsage) {
+      merged.agentContextUsageByParticipant = contextUsage;
+    }
+    const approvals = this.mergeMetadataItemsByKey(
+      storedMetadata.pendingAppToolApprovals,
+      currentMetadata.pendingAppToolApprovals,
+      "id",
+      (stored, current) => this.newerMetadataItem(stored, current)
+    );
+    if (approvals) {
+      merged.pendingAppToolApprovals = approvals;
+    }
+    const policies = this.mergeMetadataItemsByKey(
+      storedMetadata.appToolApprovalPolicies,
+      currentMetadata.appToolApprovalPolicies,
+      "id",
+      (stored, current) => this.newerMetadataItem(stored, current)
+    );
+    if (policies) {
+      merged.appToolApprovalPolicies = policies;
+    }
+    return merged;
+  }
+
+  private mergeMetadataItemsByKey(
+    storedValue: unknown,
+    currentValue: unknown,
+    key: string,
+    mergeItem: (stored: Record<string, unknown>, current: Record<string, unknown>) => Record<string, unknown>
+  ): Record<string, unknown>[] | undefined {
+    const storedItems = Array.isArray(storedValue) ? storedValue.filter(this.isMetadataRecord) : [];
+    const currentItems = Array.isArray(currentValue) ? currentValue.filter(this.isMetadataRecord) : [];
+    if (storedItems.length === 0 && currentItems.length === 0) {
+      return undefined;
+    }
+    const currentByKey = new Map(
+      currentItems
+        .map((item) => [this.metadataStringKey(item, key), item] as const)
+        .filter(([itemKey]) => Boolean(itemKey))
+    );
+    const merged = storedItems.map((storedItem) => {
+      const itemKey = this.metadataStringKey(storedItem, key);
+      const currentItem = itemKey ? currentByKey.get(itemKey) : undefined;
+      return currentItem ? mergeItem(storedItem, currentItem) : storedItem;
+    });
+    const storedKeys = new Set(storedItems.map((item) => this.metadataStringKey(item, key)).filter(Boolean));
+    for (const currentItem of currentItems) {
+      const itemKey = this.metadataStringKey(currentItem, key);
+      if (!itemKey || !storedKeys.has(itemKey)) {
+        merged.push(currentItem);
+      }
+    }
+    return merged;
+  }
+
+  private mergeMetadataRecords(storedValue: unknown, currentValue: unknown): Record<string, unknown> | undefined {
+    const stored = this.isMetadataRecord(storedValue) ? storedValue : undefined;
+    const current = this.isMetadataRecord(currentValue) ? currentValue : undefined;
+    if (!stored && !current) {
+      return undefined;
+    }
+    return {
+      ...(stored ?? {}),
+      ...(current ?? {})
+    };
+  }
+
+  private newerMetadataItem(
+    stored: Record<string, unknown>,
+    current: Record<string, unknown>
+  ): Record<string, unknown> {
+    const storedUpdatedAt = typeof stored.updatedAt === "string" ? stored.updatedAt : "";
+    const currentUpdatedAt = typeof current.updatedAt === "string" ? current.updatedAt : "";
+    return currentUpdatedAt >= storedUpdatedAt ? current : stored;
+  }
+
+  private metadataStringKey(item: Record<string, unknown>, key: string): string | undefined {
+    const value = item[key];
+    return typeof value === "string" && value.trim() ? value : undefined;
+  }
+
+  private isMetadataRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value && typeof value === "object" && !Array.isArray(value));
   }
 
   private async waitForQueuedSave(conversationId: string): Promise<void> {
@@ -2224,6 +2588,17 @@ export class ChatService {
     return dir;
   }
 
+  private historyFilePaths(
+    conversationId: string,
+    actor?: Pick<ChatAppMcpActor, "historyMarkdownPath" | "historyJsonPath">
+  ): { markdownPath: string; jsonPath: string } {
+    const dir = path.join(app.getPath("userData"), "chats", conversationId);
+    return {
+      markdownPath: actor?.historyMarkdownPath ?? path.join(dir, "history.md"),
+      jsonPath: actor?.historyJsonPath ?? path.join(dir, "history.json")
+    };
+  }
+
   private historyMarkdown(conversation: Conversation): string {
     const participants = this.chatParticipants(conversation);
     return [
@@ -2263,6 +2638,21 @@ export class ChatService {
       message.metadata?.chatThreadRootId ? `Chat thread root: ${message.metadata.chatThreadRootId}` : "",
       message.content.trim()
     ].filter(Boolean).join("\n");
+  }
+
+  private chatMessageForTool(message: ChatMessage, sequence: number): Record<string, unknown> {
+    return {
+      sequence,
+      id: message.id,
+      role: message.role,
+      author: this.messageAuthor(message),
+      participantId: message.participantId,
+      participantLabel: message.participantLabel,
+      content: message.content,
+      createdAt: message.createdAt,
+      status: message.status,
+      metadata: message.metadata
+    };
   }
 
   private messageAuthor(message: ChatMessage): string {
@@ -2316,6 +2706,52 @@ export class ChatService {
           return typeof session.participantId === "string" && typeof session.sessionId === "string";
         })
       : [];
+  }
+
+  private normalizeChatMessageReadRequest(raw: unknown): {
+    threadId?: string;
+    beforeSequence?: number;
+    afterSequence?: number;
+    limit: number;
+  } {
+    if (raw !== undefined && raw !== null && (typeof raw !== "object" || Array.isArray(raw))) {
+      throw new Error("Chat message read request must be an object.");
+    }
+    const record = (raw ?? {}) as Record<string, unknown>;
+    const threadId = typeof record.threadId === "string"
+      ? record.threadId.trim().slice(0, 200) || undefined
+      : undefined;
+    return {
+      threadId,
+      beforeSequence: this.optionalNonNegativeInteger(record.beforeSequence, "beforeSequence"),
+      afterSequence: this.optionalNonNegativeInteger(record.afterSequence, "afterSequence"),
+      limit: this.optionalBoundedPositiveInteger(
+        record.limit,
+        "limit",
+        CHAT_CONTEXT_READ_DEFAULT_LIMIT,
+        CHAT_CONTEXT_READ_MAX_LIMIT
+      )
+    };
+  }
+
+  private optionalNonNegativeInteger(value: unknown, field: string): number | undefined {
+    if (value === undefined || value === null) {
+      return undefined;
+    }
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+      throw new Error(`${field} must be a non-negative integer.`);
+    }
+    return value;
+  }
+
+  private optionalBoundedPositiveInteger(value: unknown, field: string, fallback: number, max: number): number {
+    if (value === undefined || value === null) {
+      return fallback;
+    }
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+      throw new Error(`${field} must be a positive integer.`);
+    }
+    return Math.min(value, max);
   }
 
   private agentContextUsageByParticipant(conversation: Conversation): Record<string, AgentContextUsage> {
