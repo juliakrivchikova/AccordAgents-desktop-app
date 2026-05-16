@@ -5,11 +5,12 @@ import { cn } from "@/lib/utils";
 export interface TopBarProps {
   title?: React.ReactNode;
   tabs?: React.ReactNode;
+  leading?: React.ReactNode;
   actions?: React.ReactNode;
   className?: string;
 }
 
-export const TopBar = ({ title, tabs, actions, className }: TopBarProps): JSX.Element => (
+export const TopBar = ({ title, tabs, leading, actions, className }: TopBarProps): JSX.Element => (
   <header
     data-shell="topbar"
     className={cn(
@@ -18,6 +19,7 @@ export const TopBar = ({ title, tabs, actions, className }: TopBarProps): JSX.El
     )}
   >
     <div className="flex min-w-0 items-center gap-2">
+      {leading}
       {tabs ? (
         tabs
       ) : title ? (

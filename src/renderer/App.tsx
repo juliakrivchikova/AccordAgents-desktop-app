@@ -10,9 +10,9 @@ import {
   Copy,
   FolderOpen,
   HelpCircle,
-  KeyRound,
   ListChecks,
   MessageSquare,
+  PanelLeftOpen,
   PencilLine,
   Plus,
   Play,
@@ -95,7 +95,6 @@ import type {
   PlanItemReview,
   ParticipantConfig,
   ProviderKind,
-  ProviderModel,
   ProviderSettings,
   ReviewProgress
 } from "../shared/types";
@@ -111,11 +110,9 @@ import { normalizeAgentContextUsage } from "../shared/agentContext";
 import { DEFAULT_NOTICE_CHARS, sanitizeWarningText } from "../shared/warnings";
 import { ModeToggle } from "./components/mode-toggle";
 import { ThemeProvider } from "./components/theme-provider";
-import { DiffModeTabs } from "./components/diff-mode-tabs";
 import { AppLoadingState, ChartLoadingState } from "./components/loading-states";
-import { SegmentedTabs, type SegmentedTabItem } from "./components/segmented-tabs";
-import { SessionModeTabs } from "./components/session-mode-tabs";
 import { AppShell, Sidebar, TopBar } from "./components/shell";
+import type { ProjectSessionGroup } from "./components/shell";
 import {
   FormRow,
   IconButton,
@@ -154,6 +151,7 @@ const BRANCH_COMPARE_HELP = "Changes committed on the compare branch since it di
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 const APP_ROSTER_REQUEST_CHANGE_TOOL = "app_roster_request_change";
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "ai-consensus.sidebarCollapsed";
 const CHAT_AGENT_MODE_OPTIONS: Array<{ value: ChatAgentMode; label: string }> = [
   { value: "default", label: "Default" },
   { value: "plan", label: "Plan" },
@@ -193,7 +191,7 @@ const CHAT_AVATAR_URLS = {
 
 type ActiveView = "slack" | "points" | "settings";
 type ResultView = "slack" | "points";
-type SettingsSection = "providers" | "roles" | "participants";
+type SettingsSection = "local-clis" | "roles" | "participants";
 type AvatarKind = "user" | "arbiter" | "anthropic" | "codex" | "gemini" | "generic" | "custom";
 type ChatAvatarId = keyof typeof CHAT_AVATAR_URLS;
 
@@ -292,6 +290,97 @@ function waitForNextFrame(): Promise<void> {
   });
 }
 
+function readInitialSidebarCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+const NO_PROJECT_GROUP_KEY = "__no_project__";
+
+function buildProjectSessionGroups(summaries: ConversationSummary[]): ProjectSessionGroup[] {
+  const groups = new Map<string, ProjectSessionGroup>();
+
+  for (const summary of summaries) {
+    const projectPath = normalizeProjectPath(summary.repoPath);
+    const key = projectPath ?? NO_PROJECT_GROUP_KEY;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.sessions.push(summary);
+      if (conversationTimeValue(summary.updatedAt) > conversationTimeValue(existing.updatedAt)) {
+        existing.updatedAt = summary.updatedAt;
+      }
+      continue;
+    }
+    groups.set(key, {
+      key,
+      label: projectPath ? projectLabelForPath(projectPath) : "No project",
+      repoPath: projectPath,
+      updatedAt: summary.updatedAt,
+      sessions: [summary],
+      isNoProject: !projectPath
+    });
+  }
+
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      sessions: [...group.sessions].sort(compareConversationSummaries)
+    }))
+    .sort((left, right) => {
+      if (left.isNoProject !== right.isNoProject) {
+        return left.isNoProject ? 1 : -1;
+      }
+      const timeDelta = conversationTimeValue(right.updatedAt) - conversationTimeValue(left.updatedAt);
+      return timeDelta || left.label.localeCompare(right.label);
+    });
+}
+
+function normalizeProjectPath(repoPath: string | undefined): string | undefined {
+  const trimmed = repoPath?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const normalized = trimmed.replace(/[\\/]+$/g, "");
+  return normalized || trimmed;
+}
+
+function projectLabelForPath(repoPath: string): string {
+  const parts = repoPath.split(/[\\/]+/).filter(Boolean);
+  return parts[parts.length - 1] ?? repoPath;
+}
+
+function upsertConversationSummary(summaries: ConversationSummary[], conversation: Conversation): ConversationSummary[] {
+  const nextSummary = summaryFromConversation(conversation);
+  return [
+    nextSummary,
+    ...summaries.filter((summary) => summary.id !== conversation.id)
+  ].sort(compareConversationSummaries);
+}
+
+function summaryFromConversation(conversation: Conversation): ConversationSummary {
+  return {
+    id: conversation.id,
+    title: conversation.title,
+    kind: conversation.kind,
+    createdAt: conversation.createdAt,
+    updatedAt: conversation.updatedAt,
+    repoPath: conversation.repoPath
+  };
+}
+
+function compareConversationSummaries(left: ConversationSummary, right: ConversationSummary): number {
+  const timeDelta = conversationTimeValue(right.updatedAt) - conversationTimeValue(left.updatedAt);
+  return timeDelta || left.title.localeCompare(right.title) || left.id.localeCompare(right.id);
+}
+
+function conversationTimeValue(value: string): number {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function App(): JSX.Element {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [agents, setAgents] = useState<AgentHealth[]>([]);
@@ -300,15 +389,16 @@ function App(): JSX.Element {
   const [messagePage, setMessagePage] = useState<ConversationMessagePageInfo | undefined>();
   const [olderMessagesLoading, setOlderMessagesLoading] = useState(false);
   const [activeView, setActiveView] = useState<ActiveView>("slack");
-  const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("providers");
+  const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("local-clis");
   const [settingsReturnView, setSettingsReturnView] = useState<ResultView>("slack");
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(readInitialSidebarCollapsed);
   const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>();
   const [focusedThreadId, setFocusedThreadId] = useState<string | undefined>();
   const [selectedParticipants, setSelectedParticipants] = useState<Set<string>>(new Set());
   const [selectedArbiterId, setSelectedArbiterId] = useState("");
-  const [kind, setKind] = useState<ConversationKind>("code-review");
-  const [question, setQuestion] = useState("Review these changes and identify concrete bugs or risks.");
+  const [kind, setKind] = useState<ConversationKind>("chat");
+  const [question, setQuestion] = useState("Chat");
   const [repoPath, setRepoPath] = useState("");
   const [repoInfo, setRepoInfo] = useState<GitRepoInfo | undefined>();
   const [diffMode, setDiffMode] = useState<GitDiffMode>("uncommitted");
@@ -317,10 +407,6 @@ function App(): JSX.Element {
   const [commit, setCommit] = useState("");
   const [pastedDiff, setPastedDiff] = useState("");
   const [diffPreview, setDiffPreview] = useState("");
-  const [apiKeyDrafts, setApiKeyDrafts] = useState<Record<string, string>>({});
-  const [providerModels, setProviderModels] = useState<Record<string, ProviderModel[]>>({});
-  const [modelLoading, setModelLoading] = useState<Record<string, boolean>>({});
-  const [modelErrors, setModelErrors] = useState<Record<string, string | undefined>>({});
   const [warnings, setWarnings] = useState<string[]>([]);
   const [initializing, setInitializing] = useState(true);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -346,6 +432,14 @@ function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, sidebarCollapsed ? "true" : "false");
+    } catch {
+      // Local storage can be unavailable in restricted browser contexts.
+    }
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
     return window.consensus.onReviewProgress((progress) => {
       setProgressLog((current) => {
         const next = [...current.filter((item) => item.runId === progress.runId), progress];
@@ -357,6 +451,7 @@ function App(): JSX.Element {
 
   useEffect(() => {
     return window.consensus.onConversationUpdated((updated) => {
+      setSummaries((current) => upsertConversationSummary(current, updated));
       setConversation((current) => {
         if (!conversationMatchesSnapshot(current, updated, currentRunId)) {
           return current;
@@ -1456,9 +1551,24 @@ function App(): JSX.Element {
     setPlanCorrectionDraft("");
     setChatMessageDraft("");
     setChatAddParticipantDraft(defaultChatParticipantDraft(settings));
+    setKind("chat");
+    setQuestion("Chat");
     setError(undefined);
     setSettingsMenuOpen(false);
     setActiveView("slack");
+  }
+
+  async function newProjectSession(projectRepoPath?: string): Promise<void> {
+    if (busy) {
+      return;
+    }
+    const nextRepoPath = normalizeProjectPath(projectRepoPath) ?? "";
+    newReview();
+    setRepoPath(nextRepoPath);
+    setRepoInfo(undefined);
+    if (nextRepoPath) {
+      await inspectRepo(nextRepoPath);
+    }
   }
 
   function buildParticipants(): ParticipantConfig[] {
@@ -1520,31 +1630,8 @@ function App(): JSX.Element {
     try {
       const next = await window.consensus.updateProviderSettings({ kind: provider.kind, ...patch });
       setSettings(next);
-      if (patch.apiKey) {
-        setApiKeyDrafts((current) => ({ ...current, [provider.kind]: "" }));
-        await refreshProviderModels(provider.kind);
-      }
-      if (patch.clearApiKey) {
-        setProviderModels((current) => ({ ...current, [provider.kind]: [] }));
-      }
     } catch (caught) {
       setError(errorText(caught));
-    }
-  }
-
-  async function refreshProviderModels(kind: ProviderKind): Promise<void> {
-    setModelLoading((current) => ({ ...current, [kind]: true }));
-    setModelErrors((current) => ({ ...current, [kind]: undefined }));
-    try {
-      const models = await window.consensus.listProviderModels(kind);
-      setProviderModels((current) => ({ ...current, [kind]: models }));
-      if (models.length === 0) {
-        setModelErrors((current) => ({ ...current, [kind]: "No compatible text models were returned." }));
-      }
-    } catch (caught) {
-      setModelErrors((current) => ({ ...current, [kind]: errorText(caught) }));
-    } finally {
-      setModelLoading((current) => ({ ...current, [kind]: false }));
     }
   }
 
@@ -1605,29 +1692,17 @@ function App(): JSX.Element {
   const visibleDecisionResolutions = { ...pendingDecisionResolutions(conversation), ...resolvedDecisionThreads };
   const conversationKind = conversation?.kind ?? openingConversation?.kind ?? kind;
   const visibleWarnings = warnings.map((warning) => displayNoticeText(warning)).filter(Boolean);
-  const resultView: ResultView = activeView === "points" && conversationKind !== "implementation-plan" && conversationKind !== "chat" ? "points" : "slack";
-  const hasPoints = Boolean(conversation && conversation.kind !== "chat" && conversation.metadata.running !== true && pendingDecisions.length === 0);
+  const chatSummaries = useMemo(() => summaries.filter((summary) => summary.kind === "chat"), [summaries]);
+  const projectSessionGroups = useMemo(() => buildProjectSessionGroups(chatSummaries), [chatSummaries]);
   const runnableParticipants = buildParticipants();
   const hasRequiredContext =
     kind === "code-review" ? diffMode === "pasted" || Boolean(repoPath.trim()) : kind !== "implementation-plan" || Boolean(repoPath.trim());
   const canStart = !busy && hasRequiredContext && Boolean(buildArbiter()) && runnableParticipants.length > 0 && (kind !== "implementation-plan" || runnableParticipants.length >= 2);
-
-  const resultTabItems: Array<SegmentedTabItem<ResultView>> = [
-    { value: "slack", label: "Slack", icon: MessageSquare, testId: "result-view-tab-slack" },
-    ...(hasPoints && conversationKind !== "implementation-plan" && conversationKind !== "chat"
-      ? [{ value: "points" as const, label: "Points", icon: ListChecks, testId: "result-view-tab-points" }]
-      : [])
-  ];
-  const topBarTabs = hasResultContext ? (
-    <SegmentedTabs
-      value={resultView}
-      items={resultTabItems}
-      ariaLabel="Result view"
-      className="topbar-result-tabs"
-      minItemWidth={96}
-      onValueChange={setActiveView}
-    />
-  ) : null;
+  const topBarTitle = activeView === "settings"
+    ? undefined
+    : hasResultContext
+      ? conversation?.title ?? openingConversation?.title ?? "Chat"
+      : "New chat";
   const openSettingsSection = (section: SettingsSection): void => {
     if (activeView !== "settings") {
       setSettingsReturnView(activeView === "points" ? "points" : "slack");
@@ -1637,8 +1712,25 @@ function App(): JSX.Element {
     setSettingsMenuOpen(false);
   };
   const closeSettings = (): void => {
-    setActiveView(settingsReturnView === "points" && !hasPoints ? "slack" : settingsReturnView);
+    setActiveView(settingsReturnView);
   };
+
+  const topBarLeading = sidebarCollapsed ? (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      title="Show sidebar"
+      aria-label="Show sidebar"
+      aria-controls="app-sidebar"
+      aria-expanded="false"
+      data-testid="sidebar-expand-toggle"
+      onClick={() => setSidebarCollapsed(false)}
+    >
+      <PanelLeftOpen aria-hidden />
+      <span className="sr-only">Show sidebar</span>
+    </Button>
+  ) : undefined;
 
   const topBarActions = (
     <>
@@ -1666,11 +1758,11 @@ function App(): JSX.Element {
           <DropdownMenuGroup>
             <DropdownMenuItem
               onClick={() => {
-                openSettingsSection("providers");
+                openSettingsSection("local-clis");
               }}
             >
-              <KeyRound aria-hidden />
-              Providers
+              <Bot aria-hidden />
+              Local CLIs
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => {
@@ -1700,19 +1792,22 @@ function App(): JSX.Element {
 
   return (
     <AppShell
+      sidebarCollapsed={sidebarCollapsed}
       sidebar={
         <Sidebar
-          conversations={summaries}
+          projectGroups={projectSessionGroups}
           activeId={conversation?.id}
           pendingId={openingConversationId}
           busy={busy}
           loading={historyLoading}
           onSelect={(id) => void openConversation(id)}
           onNewSession={newReview}
+          onNewProjectSession={(projectRepoPath) => void newProjectSession(projectRepoPath)}
+          onToggleSidebar={() => setSidebarCollapsed(true)}
         />
       }
       topBar={
-        <TopBar tabs={topBarTabs} title={hasResultContext ? undefined : "New session"} actions={topBarActions} />
+        <TopBar leading={topBarLeading} title={topBarTitle} actions={topBarActions} />
       }
     >
 
@@ -1732,13 +1827,7 @@ function App(): JSX.Element {
             section={activeSettingsSection}
             settings={settings}
             agents={agents}
-            apiKeyDrafts={apiKeyDrafts}
-            providerModels={providerModels}
-            modelLoading={modelLoading}
-            modelErrors={modelErrors}
-            setApiKeyDrafts={setApiKeyDrafts}
             updateProvider={updateProvider}
-            refreshProviderModels={refreshProviderModels}
             saveChatRoleConfig={saveChatRoleConfig}
             saveChatParticipantConfig={saveChatParticipantConfig}
             deleteChatParticipantConfig={deleteChatParticipantConfig}
@@ -1751,10 +1840,7 @@ function App(): JSX.Element {
         ) : (
           <div className={`content-area ${hasResultContext ? "result-layout" : "compose-layout"}`}>
             {!hasResultContext && (
-            <section className="composer">
-              <SessionModeTabs value={kind} onValueChange={setKind} />
-
-              {kind === "chat" ? (
+              <section className="composer">
                 <ChatSetup
                   title={question}
                   repoPath={repoPath}
@@ -1776,168 +1862,7 @@ function App(): JSX.Element {
                   }}
                   onStart={() => void startChat()}
                 />
-              ) : (
-                <>
-                  <FormRow label="Prompt">
-                    <ResizableTextarea
-                      value={question}
-                      onChange={(event) => setQuestion(event.target.value)}
-                      rows={5}
-                      maxHeight={360}
-                    />
-                  </FormRow>
-
-                  {requiresRepo(kind) && (
-                    <>
-                      <div className="flex items-end gap-2">
-                        <FormRow label="Repository" className="flex-1">
-                          <Input
-                            value={repoPath}
-                            onChange={(event) => {
-                              setRepoPath(event.target.value);
-                              setRepoInfo(undefined);
-                            }}
-                            onBlur={() => void inspectRepo()}
-                          />
-                        </FormRow>
-                        <IconButton
-                          size="sm"
-                          icon={FolderOpen}
-                          label="Select repository"
-                          tooltip="Select repository"
-                          variant="outline"
-                          onClick={() => void selectRepo()}
-                        />
-                      </div>
-                      {repoInfo && (
-                        <div className={`repo-status ${repoInfo.isRepo ? "ok" : "bad"}`}>
-                          {repoInfo.isRepo ? (
-                            <>
-                              <CheckCircle2 size={16} />
-                              {repoInfo.currentBranch || "detached"} · {repoInfo.statusLines.length} changed paths
-                            </>
-                          ) : (
-                            <>
-                              <XCircle size={16} />
-                              {repoInfo.error || "Not a git repository"}
-                            </>
-                          )}
-                        </div>
-                      )}
-
-                      {kind === "code-review" && (
-                        <>
-                          <FormRow label="Diff mode">
-                            <DiffModeTabs value={diffMode} onValueChange={setDiffMode} />
-                          </FormRow>
-
-                          {diffMode === "base" && (
-                            <FormRow label="Branches" hint={BRANCH_COMPARE_HELP}>
-                              <div className="grid grid-cols-2 gap-2">
-                                <FormRow label="Base branch">
-                                  <AppSelect
-                                    value={selectedBaseBranch}
-                                    disabled={branchSelectDisabled}
-                                    placeholder={branchSelectPlaceholder}
-                                    ariaLabel="Base branch"
-                                    testId="base-branch-select"
-                                    options={branchOptions.map((branch) => ({ value: branch, label: branch }))}
-                                    onValueChange={setBaseBranch}
-                                  />
-                                </FormRow>
-                                <FormRow label="Compare branch">
-                                  <AppSelect
-                                    value={selectedCompareBranch}
-                                    disabled={branchSelectDisabled}
-                                    placeholder={branchSelectPlaceholder}
-                                    ariaLabel="Compare branch"
-                                    testId="compare-branch-select"
-                                    options={branchOptions.map((branch) => ({ value: branch, label: branch }))}
-                                    onValueChange={setCompareBranch}
-                                  />
-                                </FormRow>
-                              </div>
-                            </FormRow>
-                          )}
-                          {diffMode === "commit" && (
-                            <FormRow label="Commit SHA">
-                              <Input value={commit} onChange={(event) => setCommit(event.target.value)} />
-                            </FormRow>
-                          )}
-                          {diffMode === "pasted" && (
-                            <FormRow label="Pasted diff">
-                              <ResizableTextarea
-                                value={pastedDiff}
-                                onChange={(event) => setPastedDiff(event.target.value)}
-                                rows={7}
-                                maxHeight={420}
-                              />
-                            </FormRow>
-                          )}
-
-                          <Button variant="outline" size="sm" onClick={() => void previewDiff()}>
-                            Preview diff
-                          </Button>
-                          {diffPreview && (
-                            <pre className="max-h-[280px] overflow-auto rounded-md border border-border bg-muted/40 p-3 text-xs leading-relaxed">
-                              {diffPreview.slice(0, 6000)}
-                            </pre>
-                          )}
-                        </>
-                      )}
-                    </>
-                  )}
-
-                  <div className="participant-picker">
-                    <span>Participants</span>
-                    {participantOptions.map(({ provider, disabled, health, disabledReason }) => {
-                      const selected = selectedParticipants.has(providerId(provider)) && !disabled;
-                      return (
-                        <button
-                          key={provider.kind}
-                          className={`participant-pill ${selected ? "selected" : ""}`}
-                          disabled={disabled}
-                          onClick={() => toggleParticipant(provider)}
-                          title={disabledReason ?? provider.model ?? provider.label}
-                        >
-                          {selected ? <CheckCircle2 size={15} /> : <Circle size={15} />}
-                          {provider.label}
-                          {providerId(provider) === selectedArbiterId && (
-                            <small>{selected ? `also ${arbiterRoleLabel.toLowerCase()}` : `${arbiterRoleLabel.toLowerCase()} only`}</small>
-                          )}
-                          {disabledReason ? <small>{disabledReason}</small> : isCli(provider.kind) && <small>{health?.installed ? "local" : "missing"}</small>}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  <FormRow
-                    label={arbiterRoleLabel}
-                    hint={`The ${arbiterRoleLabel.toLowerCase()} merge is a separate run. If the same provider is selected as a participant, it also gets an independent participant run.`}
-                  >
-                    <AppSelect
-                      value={arbiterSelectValue}
-                      disabled={arbiterOptions.length === 0}
-                      placeholder={arbiterPlaceholder}
-                      ariaLabel={arbiterRoleLabel}
-                      testId="arbiter-select"
-                      options={arbiterOptions.map(({ provider }) => ({ value: providerId(provider), label: provider.label }))}
-                      onValueChange={setSelectedArbiterId}
-                    />
-                  </FormRow>
-
-                  <Button
-                    type="button"
-                    disabled={!canStart}
-                    onClick={() => void startReview()}
-                    className="mt-2 w-full"
-                  >
-                    {busy ? <RefreshCw className="animate-spin" aria-hidden /> : <Play aria-hidden />}
-                    {busy ? "Running consensus..." : "Start consensus"}
-                  </Button>
-                </>
-              )}
-            </section>
+              </section>
             )}
 
             {hasResultContext && (
@@ -1979,7 +1904,7 @@ function App(): JSX.Element {
                     onAddParticipantDraftChange={setChatAddParticipantDraft}
                     onAddParticipant={() => void addChatParticipant()}
                   />
-                ) : resultView === "slack" && (
+                ) : (
                   <SlackView
                     conversation={conversation}
                     progress={progressLog}
@@ -2031,7 +1956,6 @@ function App(): JSX.Element {
                     onRevisePlan={() => void reviseImplementationPlan()}
                   />
                 )}
-                {resultView === "points" && <PointsView conversation={conversation} kind={conversationKind} isRunning={busy} />}
               </section>
             )}
           </div>
@@ -2044,19 +1968,14 @@ function SettingsView(props: {
   section: SettingsSection;
   settings: AppSettings;
   agents: AgentHealth[];
-  apiKeyDrafts: Record<string, string>;
-  providerModels: Record<string, ProviderModel[]>;
-  modelLoading: Record<string, boolean>;
-  modelErrors: Record<string, string | undefined>;
-  setApiKeyDrafts: React.Dispatch<React.SetStateAction<Record<string, string>>>;
-  updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean; model?: string; apiKey?: string; clearApiKey?: boolean }) => Promise<void>;
-  refreshProviderModels: (kind: ProviderKind) => Promise<void>;
+  updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => Promise<void>;
   saveChatParticipantConfig: (update: ChatParticipantConfigUpdate) => Promise<void>;
   deleteChatParticipantConfig: (id: string) => Promise<void>;
   onClose: () => void;
 }): JSX.Element {
-  const title = props.section === "providers" ? "Providers" : props.section === "roles" ? "Roles" : "Participants";
+  const title = props.section === "local-clis" ? "Local CLIs" : props.section === "roles" ? "Roles" : "Participants";
+  const cliProviders = props.settings.providers.filter((provider) => isCli(provider.kind));
   return (
     <section className="settings-view">
       <div className="settings-view-inner">
@@ -2093,25 +2012,21 @@ function SettingsView(props: {
             onDelete={props.deleteChatParticipantConfig}
           />
         )}
-        {props.section === "providers" && (
+        {props.section === "local-clis" && (
           <section className="settings-section">
             <div className="settings-section-head">
-              <h2>Providers</h2>
-              <span>{props.settings.providers.length} providers</span>
+              <h2>Local CLI setup</h2>
+              <span>{cliProviders.length} CLIs</span>
             </div>
             <div className="settings-grid">
-              {props.settings.providers.map((provider) => {
+              {cliProviders.map((provider) => {
                 const health = props.agents.find((agent) => agent.kind === provider.kind);
-                const models = props.providerModels[provider.kind] ?? [];
-                const isLoadingModels = Boolean(props.modelLoading[provider.kind]);
-                const modelError = props.modelErrors[provider.kind];
-                const hasDraftKey = Boolean(props.apiKeyDrafts[provider.kind]?.trim());
                 return (
                   <div className="settings-item" key={provider.kind}>
                     <div className="settings-item-head">
                       <div>
                         <strong>{provider.label}</strong>
-                        <small>{isCli(provider.kind) ? healthLine(health) : provider.hasApiKey ? "API key saved" : "No API key saved"}</small>
+                        <small>{healthLine(health)}</small>
                       </div>
                       <label className="toggle">
                         <input
@@ -2122,83 +2037,6 @@ function SettingsView(props: {
                         <span />
                       </label>
                     </div>
-
-                    {!isCli(provider.kind) && (
-                      <>
-                        <div className="flex items-end gap-2">
-                          <FormRow label="Model" className="flex-1">
-                            {models.length > 0 ? (
-                              <AppSelect
-                                value={provider.model && models.some((model) => model.id === provider.model) ? provider.model : "__custom__"}
-                                placeholder="Select model"
-                                ariaLabel={`${provider.label} model`}
-                                testId={`${provider.kind}-model-select`}
-                                options={[
-                                  ...models.map((model) => ({ value: model.id, label: model.label })),
-                                  { value: "__custom__", label: "Custom model ID..." }
-                                ]}
-                                onValueChange={(value) => {
-                                  if (value !== "__custom__") {
-                                    void props.updateProvider(provider, { model: value });
-                                  }
-                                }}
-                              />
-                            ) : (
-                              <Input
-                                value={provider.model ?? ""}
-                                onChange={(event) => void props.updateProvider(provider, { model: event.target.value })}
-                                placeholder={provider.hasApiKey ? "Fetch models or enter a custom model id" : "Save an API key first"}
-                              />
-                            )}
-                          </FormRow>
-                          <IconButton
-                            size="sm"
-                            icon={RefreshCw}
-                            iconClassName={isLoadingModels ? "animate-spin" : undefined}
-                            label="Fetch available models"
-                            tooltip="Fetch available models"
-                            variant="outline"
-                            disabled={!provider.hasApiKey || isLoadingModels}
-                            onClick={() => void props.refreshProviderModels(provider.kind)}
-                          />
-                        </div>
-                        {models.length > 0 && !models.some((model) => model.id === provider.model) && (
-                          <FormRow label="Custom model ID">
-                            <Input
-                              value={provider.model ?? ""}
-                              onChange={(event) => void props.updateProvider(provider, { model: event.target.value })}
-                            />
-                          </FormRow>
-                        )}
-                        {modelError && <div className="inline-error">{modelError}</div>}
-                        <div className="flex items-end gap-2">
-                          <FormRow label="API key" className="flex-1">
-                            <Input
-                              type="password"
-                              value={props.apiKeyDrafts[provider.kind] ?? ""}
-                              onChange={(event) =>
-                                props.setApiKeyDrafts((current) => ({ ...current, [provider.kind]: event.target.value }))
-                              }
-                            />
-                          </FormRow>
-                          <Button
-                            size="sm"
-                            title="Save API key"
-                            disabled={!hasDraftKey}
-                            onClick={() => void props.updateProvider(provider, { apiKey: props.apiKeyDrafts[provider.kind] ?? "" })}
-                          >
-                            <KeyRound aria-hidden />
-                            Save key
-                          </Button>
-                        </div>
-                        {hasDraftKey && <div className="inline-warning">Unsaved API key entered.</div>}
-                        {provider.hasApiKey && (
-                          <Button variant="outline" size="sm" onClick={() => void props.updateProvider(provider, { clearApiKey: true })}>
-                            Clear saved key
-                          </Button>
-                        )}
-                      </>
-                    )}
                   </div>
                 );
               })}
@@ -2414,7 +2252,12 @@ function ChatSetup(props: {
       </FormRow>
       <div className="flex items-end gap-2">
         <FormRow label="Repository" optional className="flex-1">
-          <Input value={props.repoPath} onChange={(event) => props.onRepoPathChange(event.target.value)} onBlur={props.onRepoBlur} />
+          <Input
+            value={props.repoPath}
+            data-testid="chat-repo-input"
+            onChange={(event) => props.onRepoPathChange(event.target.value)}
+            onBlur={props.onRepoBlur}
+          />
         </FormRow>
         <IconButton
           size="sm"
