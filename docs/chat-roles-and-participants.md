@@ -39,6 +39,15 @@ If a chat contains only the injected administrator, unmentioned user messages ar
 
 The important consequence: existing chat sessions are intentionally coherent across turns. A role edit does not blindly rewrite the prompt history of an already-running CLI session; the service recreates the session only when the role version, app-tool capabilities, provider kind, model, agent mode, permissions, or runtime config requires it.
 
+## Prompt Split
+
+Chat participant prompts are split between static session instructions and a thin per-turn prompt.
+
+- Static participant/session instructions contain role identity, role instructions, App MCP usage policy, response rules, participant dispatch rules, user-choice formatting, clarification policy, and response-guard behavior. They are passed through native provider setup when available, such as Claude Code agents or Codex developer instructions.
+- Per-turn prompts contain only the current envelope: participant sanity check, current repository and permission state, App MCP context pointer, fallback/debug history paths, triggering message identifiers, triggering message content, and the current request.
+- Prompt fallback is the exception. If a provider cannot accept native role/session instructions, the fallback prompt includes the full static contract in-band so the participant still has the role and response rules.
+- Dynamic roster, provider, participant, thread, and message details should come from App MCP tools instead of repeated prompt prose.
+
 ## App MCP Tools and Approvals
 
 `AppMcpService` runs a loopback MCP endpoint inside the Electron main process. It is intended for CLI agents launched by this app, not arbitrary local clients.
@@ -49,7 +58,7 @@ The important consequence: existing chat sessions are intentionally coherent acr
 - Roster and permission mutation tools are filtered by the token's capabilities, and every mutating `tools/call` rechecks the current participant role through `ChatService`.
 - `app_permissions_request_change` is available to every chat participant. It can request `workspaceWrite` or `webAccess` for the requesting participant only, creates a pending approval, and never grants permissions directly.
 - `app_chat_read_messages` reads only the token-bound conversation and supports thread and sequence filters. Do not add arguments that let agents select an arbitrary conversation or participant.
-- Participant prompts should describe MCP tools as the required path for app-managed mutations. If a task needs blocked web access or file edits, the agent should call `app_permissions_request_change` rather than only saying the task is blocked or asking User in prose.
+- Static participant/session instructions should describe MCP tools as the required path for app-managed mutations. If a task needs blocked web access or file edits, the agent should call `app_permissions_request_change` rather than only saying the task is blocked or asking User in prose.
 - `app_roster_describe_options` is the read-only discovery tool. It returns current roster participants, role IDs and labels, CLI provider installed/enabled state, configured provider models, default roster values, and validation rules. It exists so agents do not infer availability from prompt text or schemas.
 - `app_roster_request_change` is the mutating request tool. It supports additive roster changes in v1.
 - If no matching per-chat approval policy exists, a tool call creates a pending approval item and returns `pending_user_approval`.

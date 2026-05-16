@@ -66,7 +66,7 @@ import { StorageService } from "./storage";
 type ProgressCallback = (progress: ReviewProgress) => void;
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 9;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 10;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const CHAT_ADMINISTRATOR_ROLE_ID = "administrator";
@@ -916,26 +916,25 @@ export class ChatService {
     const promptConversation = options.promptConversation ?? conversation;
     const workspacePath = options.workspacePath ?? await this.ensureHistoryFiles(promptConversation);
     const isResumingSession = Boolean(session.sessionId);
-    const availableRoles = (await this.settings.getPublicSettings()).chatRoleConfigs;
     const agentMode = normalizeChatAgentMode(participant.agentMode);
     const permissions = this.participantPermissionsForRun(conversation, participant);
     this.consumeOneTimePermissionApprovals(conversation, participant);
     const usePromptRole = session.roleRuntime === "prompt-fallback";
-    const prompt = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), availableRoles, {
+    const prompt = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: usePromptRole && !isResumingSession,
       permissions
     });
-    const promptFallbackPrompt = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), availableRoles, {
+    const promptFallbackPrompt = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: true,
       permissions
     });
     const resumeFallbackPrompt = isResumingSession
-      ? this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), availableRoles, {
+      ? this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
           includeRoleInstructions: usePromptRole,
           permissions
         })
       : undefined;
-    const role = usePromptRole ? undefined : this.cliRoleOptions(participant, session, promptFallbackPrompt, permissions);
+    const role = usePromptRole ? undefined : this.cliRoleOptions(participant, session, promptFallbackPrompt);
     const runPath = this.runPathForParticipant(conversation, participant, workspacePath, permissions);
     const cliParticipant: ParticipantConfig = {
       id: participant.id,
@@ -1002,18 +1001,18 @@ export class ChatService {
         options.warnings.push(`@${participant.handle}: rejected response that mentioned ${guardViolation}; restarted the chat session and retried.`);
         session = await this.newSessionForParticipant(participant);
         const retryUsesPromptRole = session.roleRuntime === "prompt-fallback";
-        const retryPromptBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), availableRoles, {
+        const retryPromptBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
           includeRoleInstructions: retryUsesPromptRole,
           permissions
         });
-        const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), availableRoles, {
+        const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
           includeRoleInstructions: true,
           permissions
         });
         const retryPrompt = this.chatGuardRetryPrompt(retryPromptBase, guardViolation);
         const retryRole = retryUsesPromptRole
           ? undefined
-          : this.cliRoleOptions(participant, session, this.chatGuardRetryPrompt(retryPromptFallbackBase, guardViolation), permissions);
+          : this.cliRoleOptions(participant, session, this.chatGuardRetryPrompt(retryPromptFallbackBase, guardViolation));
         result = await this.cliRunner.run(cliParticipant, retryPrompt, runPath, undefined, "chat", signal, {
           persistSession: true,
           extraReadableDirs: [workspacePath],
@@ -1054,18 +1053,18 @@ export class ChatService {
         options.warnings.push(`@${participant.handle}: rejected verbose affirmative confirmation; restarted the chat session and retried.`);
         session = await this.newSessionForParticipant(participant);
         const retryUsesPromptRole = session.roleRuntime === "prompt-fallback";
-        const retryPromptBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), availableRoles, {
+        const retryPromptBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
           includeRoleInstructions: retryUsesPromptRole,
           permissions
         });
-        const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), availableRoles, {
+        const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
           includeRoleInstructions: true,
           permissions
         });
         const retryPrompt = this.confirmationBrevityRetryPrompt(retryPromptBase);
         const retryRole = retryUsesPromptRole
           ? undefined
-          : this.cliRoleOptions(participant, session, this.confirmationBrevityRetryPrompt(retryPromptFallbackBase), permissions);
+          : this.cliRoleOptions(participant, session, this.confirmationBrevityRetryPrompt(retryPromptFallbackBase));
         result = await this.cliRunner.run(cliParticipant, retryPrompt, runPath, undefined, "chat", signal, {
           persistSession: true,
           extraReadableDirs: [workspacePath],
@@ -1168,7 +1167,6 @@ export class ChatService {
     triggerMessage: ChatMessage,
     workspacePath: string,
     continuation: boolean,
-    availableRoles: ChatRoleConfig[],
     options: { includeRoleInstructions: boolean; permissions: ChatAgentPermissions }
   ): string {
     const historyMarkdownPath = path.join(workspacePath, "history.md");
@@ -1178,29 +1176,21 @@ export class ChatService {
         `You are @${participant.handle}. Continue the same chat session.`,
         `Role: ${session.roleLabel}.`,
         options.includeRoleInstructions
-          ? ["Role instructions:", session.roleInstructions].join("\n")
-          : "Use your configured role instructions for this participant.",
+          ? this.promptFallbackStaticInstructions(session)
+          : "Use your configured role instructions and chat response rules for this participant.",
         this.participantRepositoryLine(conversation, participant, options.permissions),
         this.participantPermissionPolicy(participant, options.permissions),
         "Dynamic chat context: use App MCP as the preferred source for current participants, active thread metadata, and prior messages.",
         `Fallback/debug chat history Markdown: ${historyMarkdownPath}.`,
         `Fallback/debug chat history JSON: ${historyJsonPath}.`,
-        "Only read the history files if MCP context is unavailable or you need to debug the app-generated transcript. Do not ask User to grant access to these app-managed history files.",
-        "User: human conversation owner, requirements authority, and clarification source. User messages appear as `User` in the transcript.",
-        this.appToolPromptPolicy(session, availableRoles),
-        "Mention policy: you may cite participant handles in normal prose for attribution; those citations do not request dispatch. To ask another participant to respond, include a dedicated `Participant requests:` block with one bullet per requested participant. Use `Participant requests: none` when you cite or identify participants but do not need follow-up. If you need to synthesize after the requested participants reply, add the exact line `Return to requester after replies: yes`. Mentioned agents and requester continuations will not run until User approves them.",
-        "User choice policy: when User must pick one option before you can continue, include one dedicated `User choice:` block after your explanation. Format it as lines `T: short title`, `Q: question`, `O1: option label | optional description`, `O2: option label | optional description`, and optionally `R: O1`. Use at least two options. Ask at most one user choice in a message. The UI also lets User write a custom answer instead of choosing your suggestions. After User confirms, the app will send the selected option or custom answer back to you in this chat.",
-        this.confirmationBrevityPolicy(),
-        "Clarification policy: if you need clarification about goals, requirements, preferences, acceptance criteria, or user intent, ask User directly in your reply. Do not mention another agent for user-owned clarification.",
-        "Thread policy: answer in the active thread. Do not assume a mentioned participant has answered until their reply appears in the transcript.",
-        "Chat response guard: answer only in this chat message. Do not mention ExitPlanMode, plan files, tool availability, or recording/writing outside the chat unless User directly asks about those mechanics. If you make a decision, arbitration, plan, or summary, include it in this reply. Do not say it is posted above or recorded elsewhere unless you cite the exact existing chat message."
+        "Only read the history files if MCP context is unavailable or you need to debug the app-generated transcript. Do not ask User to grant access to these app-managed history files."
       ].join("\n"),
       "Triggering message identifiers:",
       this.triggeringMessageIdentifiers(triggerMessage),
       "Triggering message:",
       this.formatMessage(triggerMessage),
       continuation
-        ? "Current request: continue after the approved participant replies and produce your next answer."
+        ? "Current request: control has returned to you after the approved participants have replied. Produce your next answer."
         : "Current request: answer the triggering message above.",
       "Write your next message in this chat."
     ];
@@ -1219,21 +1209,19 @@ export class ChatService {
   private cliRoleOptions(
     participant: ChatParticipant,
     session: ChatParticipantSession,
-    promptFallbackPrompt: string,
-    permissions: ChatAgentPermissions
+    promptFallbackPrompt: string
   ): CliAgentRoleOptions {
     return {
       name: this.roleRuntimeName(participant, session),
       description: `${session.roleLabel} participant @${participant.handle} in AI Consensus Chat.`,
-      instructions: this.nativeRoleInstructions(participant, session, permissions),
+      instructions: this.nativeRoleInstructions(participant, session),
       promptFallbackPrompt
     };
   }
 
   private nativeRoleInstructions(
     participant: ChatParticipant,
-    session: ChatParticipantSession,
-    permissions: ChatAgentPermissions
+    session: ChatParticipantSession
   ): string {
     return [
       `You are @${participant.handle} in AI Consensus Chat.`,
@@ -1243,26 +1231,46 @@ export class ChatService {
       "Role instructions:",
       session.roleInstructions,
       "",
-      "Chat participant boundaries:",
-      "- You are one participant in a multi-participant chat.",
-      "- User is the human conversation owner, requirements authority, and clarification source.",
-      "- Ask User directly when goals, requirements, preferences, acceptance criteria, or user intent are unclear.",
-      "- Do not ask another participant for user-owned clarification.",
-      "- When User must choose between concrete options, include one `User choice:` block with `T:`, `Q:`, `O1:`, `O2:`, and optional `R:` lines so the app can render choice buttons plus a custom-answer path.",
-      "- Use read-only App MCP chat context tools for dynamic chat state: `app_chat_get_context`, `app_chat_get_participants`, and `app_chat_read_messages`.",
-      "- App MCP tools are the required path for app-managed mutations. If blocked file-editing or web-access permissions are needed to complete User's request, call `app_permissions_request_change` through MCP instead of asking in prose or saying the task is blocked.",
-      "- For permission requests, use `workspaceWrite` for file edits and `webAccess` for web lookup. Do not claim the permission is granted until the tool result or a later app message confirms approval.",
-      hasChatAppToolCapability(session.roleAppToolCapabilities, "participants.manage")
-        ? "- You may use `app_roster_describe_options` to inspect available chat roles, CLI providers, configured models, and roster rules. Use `app_roster_request_change` only when User asks you to manage chat participants; the app validates and gates mutations through User approval."
-        : "- You are not allowed to manage chat participants through app tools.",
-      `- ${this.participantPermissionPolicy(participant, permissions)}`,
-      `- ${this.confirmationBrevityPolicy()}`,
-      "- Answer in the active chat message; do not claim to write, record, or post work elsewhere.",
-      "- Follow each turn's chat prompt for the triggering message, MCP context guidance, fallback history paths, and dispatch rules."
+      this.staticChatInstructions(session)
     ].join("\n");
   }
 
-  private appToolPromptPolicy(session: ChatParticipantSession, availableRoles: ChatRoleConfig[]): string {
+  private promptFallbackStaticInstructions(session: ChatParticipantSession): string {
+    return [
+      "Role instructions:",
+      session.roleInstructions,
+      "",
+      this.staticChatInstructions(session)
+    ].join("\n");
+  }
+
+  private staticChatInstructions(session: ChatParticipantSession): string {
+    return [
+      "Chat participant boundaries:",
+      "- You are one participant in a multi-participant chat.",
+      "- User is the human conversation owner, requirements authority, and clarification source. User messages appear as `User` in the transcript.",
+      "- Ask User directly when goals, requirements, preferences, acceptance criteria, or user intent are unclear.",
+      "- Do not ask another participant for user-owned clarification.",
+      "",
+      "App MCP policy:",
+      this.appToolPromptPolicy(session),
+      "",
+      "Response rules:",
+      "- You may cite participant handles in normal prose for attribution; those citations do not request dispatch.",
+      "- To ask another participant to respond, include a dedicated `Participant requests:` block with one bullet per requested participant. Use `Participant requests: none` when you cite or identify participants but do not need follow-up.",
+      "- If control should return to the requester after the approved participants reply, add the exact line `Return to requester after replies: yes`.",
+      "- Mentioned agents and requester continuations will not run until User approves them.",
+      "- When User must pick one option before you can continue, include one dedicated `User choice:` block after your explanation. Format it as lines `T: short title`, `Q: question`, `O1: option label | optional description`, `O2: option label | optional description`, and optionally `R: O1`. Use at least two options. Ask at most one user choice in a message.",
+      "- The UI also lets User write a custom answer instead of choosing your suggestions. After User confirms, the app will send the selected option or custom answer back to you in this chat.",
+      `- ${this.confirmationBrevityPolicy()}`,
+      "- Answer in the active thread. Do not assume a mentioned participant has answered until their reply appears in the transcript.",
+      "- Answer only in this chat message. Do not mention ExitPlanMode, plan files, tool availability, or recording/writing outside the chat unless User directly asks about those mechanics.",
+      "- If you make a decision, arbitration, plan, or summary, include it in this reply. Do not say it is posted above or recorded elsewhere unless you cite the exact existing chat message.",
+      "- Follow each turn's chat prompt for the triggering message, current repository and permission state, MCP context guidance, fallback history paths, and current request."
+    ].join("\n");
+  }
+
+  private appToolPromptPolicy(session: ChatParticipantSession): string {
     const lines = [
       "App MCP tools: use the connected `ai_consensus` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
       "Chat context MCP tools: `app_chat_get_context`, `app_chat_get_participants`, and `app_chat_read_messages` are read-only and available for the current chat. Prefer them over full history files when you need roster details, active thread metadata, or prior messages.",
@@ -1276,18 +1284,13 @@ export class ChatService {
         "App tools: no chat-management app tools are available to this participant."
       ].join("\n");
     }
-    const roleLines = availableRoles
-      .filter((role) => role.id.trim() && role.label.trim())
-      .map((role) => `- ${role.id}: ${role.label}`);
     return [
       ...lines,
       "App tools: `app_roster_describe_options` is available for read-only discovery of current roles, CLI providers, configured models, current roster, defaults, and validation rules.",
       "App tools: `app_roster_request_change` is available for User-requested participant roster changes.",
       "Call `app_roster_describe_options` first when you need exact role IDs, provider availability, configured models, or handle constraints.",
       "When using it, send JSON with `operations`, where each operation is `{ \"type\": \"add\", \"participant\": { \"handle\", \"roleConfigId\", \"kind\" } }`.",
-      "The app will validate the request and either create a User approval item or auto-apply it if User already allowed roster management for this chat.",
-      "Available role IDs:",
-      ...roleLines
+      "The app will validate the request and either create a User approval item or auto-apply it if User already allowed roster management for this chat."
     ].join("\n");
   }
 
@@ -2632,10 +2635,7 @@ export class ChatService {
 
   private formatMessage(message: ChatMessage): string {
     return [
-      `[${message.createdAt}] ${this.messageAuthor(message)} (${message.id})`,
-      message.metadata?.threadId ? `Thread: ${message.metadata.threadId}` : "",
-      message.metadata?.parentMessageId ? `Parent: ${message.metadata.parentMessageId}` : "",
-      message.metadata?.chatThreadRootId ? `Chat thread root: ${message.metadata.chatThreadRootId}` : "",
+      `[${message.createdAt}] ${this.messageAuthor(message)}`,
       message.content.trim()
     ].filter(Boolean).join("\n");
   }
