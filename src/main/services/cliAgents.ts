@@ -1620,6 +1620,7 @@ export class CliAgentRunner {
     const allowedTools: string[] = [];
     const disallowedTools: string[] = [];
     const askTools: string[] = [];
+    const providerNativeAllowedTools = permissions.providerNative?.["claude-code"]?.allowedTools ?? [];
     const readContextAvailable = Boolean(repoPath) || extraReadableDirs.length > 0;
     const readTools = ["Read", "Grep", "Glob", "LS"];
     const editTools = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
@@ -1655,14 +1656,40 @@ export class CliAgentRunner {
     } else {
       disallowedTools.push("Bash");
     }
+    for (const toolRule of providerNativeAllowedTools) {
+      allowedTools.push(toolRule);
+      const toolName = this.claudeToolNameFromAllowedTool(toolRule);
+      if (toolName) {
+        tools.add(toolName);
+      }
+    }
+    for (const toolName of options.appMcp?.toolNames ?? []) {
+      allowedTools.push(`mcp__ai_consensus__${toolName}`);
+    }
+    const disallowedToolSet = new Set(disallowedTools);
+    for (const toolRule of providerNativeAllowedTools) {
+      const toolName = this.claudeToolNameFromAllowedTool(toolRule);
+      if (toolName) {
+        disallowedToolSet.delete(toolName);
+      }
+    }
 
     return {
       permissionMode,
       tools: Array.from(tools),
-      allowedTools,
-      disallowedTools,
-      askTools
+      allowedTools: Array.from(new Set(allowedTools)),
+      disallowedTools: Array.from(disallowedToolSet),
+      askTools: Array.from(new Set(askTools))
     };
+  }
+
+  private claudeToolNameFromAllowedTool(toolRule: string): string | undefined {
+    const trimmed = toolRule.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+    const parenIndex = trimmed.indexOf("(");
+    return parenIndex > 0 ? trimmed.slice(0, parenIndex) : trimmed;
   }
 
   private claudeBashPermissionRule(rule: ChatShellPermissionRule): string {

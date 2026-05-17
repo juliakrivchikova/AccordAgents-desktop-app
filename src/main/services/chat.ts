@@ -32,6 +32,7 @@ import type {
   ChatRoleRuntime,
   ChatRoleConfig,
   ChatRosterChangeRequest,
+  ChatShellPermissionRule,
   Conversation,
   CreateChatConversationRequest,
   ParticipantConfig,
@@ -43,8 +44,11 @@ import type {
   StartReviewResult
 } from "../../shared/types";
 import {
+  CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH,
+  CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
   chatAgentPermissionsEqual,
   effectiveChatAgentPermissions,
+  isChatShellPermissionPatternSafe,
   normalizeChatAgentMode,
   normalizeChatAgentPermissions
 } from "../../shared/agentPermissions";
@@ -74,7 +78,7 @@ import { StorageService } from "./storage";
 type ProgressCallback = (progress: ReviewProgress) => void;
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 10;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 11;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const CHAT_ADMINISTRATOR_ROLE_ID = "administrator";
@@ -117,6 +121,7 @@ interface ChatAppMcpGateway {
     continuation?: boolean;
     runId?: string;
     participantRequestDepth?: number;
+    participantRequestBatchId?: string;
     historyMarkdownPath?: string;
     historyJsonPath?: string;
   }): { url: string; token: string } | undefined;
@@ -139,6 +144,7 @@ interface ChatAppMcpActor {
   continuation?: boolean;
   runId?: string;
   participantRequestDepth?: number;
+  participantRequestBatchId?: string;
   historyMarkdownPath?: string;
   historyJsonPath?: string;
 }
@@ -158,7 +164,9 @@ interface PreparedRosterChange {
 
 interface PreparedPermissionChange {
   request: ChatPermissionChangeRequest;
-  permissions: ChatPermissionGrant[];
+  portablePermissions: ChatPermissionGrant[];
+  shellRules: ChatShellPermissionRule[];
+  providerNativeAllowedTools: string[];
   summary: string;
 }
 
@@ -187,6 +195,7 @@ export class ChatService {
   private readonly appMcpTokens = new Map<string, string>();
   private readonly participantRequestRunners = new Map<string, Promise<ParticipantRequestRunResult>>();
   private readonly participantRequestAutoResumes = new Set<string>();
+  private readonly permissionApprovalAutoResumes = new Set<string>();
   private readonly participantTurnQueues = new Map<string, Promise<void>>();
 
   constructor(
@@ -381,7 +390,7 @@ export class ChatService {
     }
 
     const prepared = this.preparePermissionChange(requester, this.normalizePermissionChangeRequest(rawRequest));
-    if (prepared.permissions.length === 0) {
+    if (!this.preparedPermissionChangeHasAdditions(prepared)) {
       return {
         ok: true,
         status: "already_granted",
@@ -398,6 +407,13 @@ export class ChatService {
       prepared.summary,
       "pending"
     );
+    if (actor.runId && actor.triggerMessageId) {
+      approval.resumeContext = {
+        runId: actor.runId,
+        triggerMessageId: actor.triggerMessageId,
+        participantRequestBatchId: actor.participantRequestBatchId
+      };
+    }
     this.upsertAppToolApproval(conversation, approval);
     conversation.messages.push(this.message("system", `Permission approval needed for @${requester.handle}: ${prepared.summary}.`, undefined, {
       threadId: "system"
@@ -795,14 +811,15 @@ export class ChatService {
 
     const scope = request.scope === "chat" ? "chat" : "once";
     if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && this.isParticipantRequestApprovalRequest(approval.request)) {
+      const participantScope = approval.request.source === "inferred" ? "once" : scope;
       this.upsertAppToolApproval(conversation, {
         ...approval,
         status: "approved",
-        approvalScope: scope,
+        approvalScope: participantScope,
         appliedParticipantIds: this.participantRequestApprovalTargetIds(conversation, approval.request),
         updatedAt: now
       });
-      if (scope === "chat") {
+      if (participantScope === "chat") {
         const targetIds = this.participantRequestApprovalTargetIds(conversation, approval.request);
         for (const targetParticipantId of targetIds) {
           this.upsertAppToolApprovalPolicy(conversation, {
@@ -820,7 +837,7 @@ export class ChatService {
       }
       const requestMessageId = approval.request.requestMessageId;
       if (requestMessageId) {
-        this.applyParticipantRequestApprovalDecision(conversation, approval, "approved", scope);
+        this.applyParticipantRequestApprovalDecision(conversation, approval, "approved", participantScope);
       }
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
@@ -837,23 +854,47 @@ export class ChatService {
       }
       return conversation;
     }
-    const requester = this.chatParticipants(conversation).find((participant) => participant.id === approval.requesterParticipantId);
     const isPermissionApproval = approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL;
-    const prepared = isPermissionApproval
-      ? this.preparePermissionChange(requester, approval.request)
-      : await this.prepareRosterChange(conversation, approval.request as ChatRosterChangeRequest);
+    const requester = this.chatParticipants(conversation).find((participant) => participant.id === approval.requesterParticipantId);
+    let prepared: PreparedPermissionChange | PreparedRosterChange | undefined;
+    try {
+      prepared = isPermissionApproval
+        ? this.preparePermissionChange(requester, approval.request)
+        : await this.prepareRosterChange(conversation, approval.request as ChatRosterChangeRequest);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.upsertAppToolApproval(conversation, {
+        ...approval,
+        status: "denied",
+        updatedAt: now
+      });
+      conversation.messages.push(this.message(
+        "system",
+        `Could not approve app tool request from @${approval.requesterHandle}: ${message}`,
+        undefined,
+        { threadId: "system" }
+      ));
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      return conversation;
+    }
+    if (!prepared) {
+      return conversation;
+    }
     const applied = isPermissionApproval
       ? scope === "once"
         ? [requester].filter((participant): participant is ChatParticipant => Boolean(participant))
         : [this.applyPreparedPermissionChange(conversation, approval.requesterParticipantId, prepared as PreparedPermissionChange)]
       : this.applyPreparedRosterChange(conversation, prepared as PreparedRosterChange);
-    this.upsertAppToolApproval(conversation, {
+    const updatedApproval: ChatAppToolApproval = {
       ...approval,
       status: "approved",
+      request: isPermissionApproval ? (prepared as PreparedPermissionChange).request : approval.request,
       approvalScope: scope,
       appliedParticipantIds: applied.map((participant) => participant.id),
       updatedAt: now
-    });
+    };
+    this.upsertAppToolApproval(conversation, updatedApproval);
     if (scope === "chat" && approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL) {
       this.upsertAppToolApprovalPolicy(conversation, {
         id: randomUUID(),
@@ -866,10 +907,13 @@ export class ChatService {
         updatedAt: now
       });
     }
+    const permissionGrantList = isPermissionApproval
+      ? this.formatPermissionChangeGrantList((prepared as PreparedPermissionChange).request)
+      : undefined;
     const approvalMessage = isPermissionApproval
       ? scope === "chat"
-        ? `Granted @${approval.requesterHandle} ${this.formatPermissionGrantList((prepared as PreparedPermissionChange).request.permissions)} for this chat.`
-        : `Granted @${approval.requesterHandle} ${this.formatPermissionGrantList((prepared as PreparedPermissionChange).request.permissions)} once.`
+        ? `Granted @${approval.requesterHandle} ${permissionGrantList} for this chat.`
+        : `Granted @${approval.requesterHandle} ${permissionGrantList} once.`
       : scope === "chat"
         ? `Allowed for this chat and applied app tool request from @${approval.requesterHandle}: ${approval.summary}.`
         : `Allowed once and applied app tool request from @${approval.requesterHandle}: ${approval.summary}.`;
@@ -881,6 +925,15 @@ export class ChatService {
     ));
     conversation.updatedAt = now;
     await this.saveConversation(conversation);
+    if (isPermissionApproval && updatedApproval.resumeContext) {
+      void this.autoResumePermissionApproval(conversation.id, updatedApproval.id).catch((error) => {
+        void this.debugLogs.write("chat.permission-approval.auto-resume.error", {
+          conversationId: conversation.id,
+          approvalId: updatedApproval.id,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
+    }
     return conversation;
   }
 
@@ -1130,15 +1183,28 @@ export class ChatService {
     runId: string,
     signal: AbortSignal | undefined,
     progress: ProgressCallback | undefined,
-    options: { continuation?: boolean; warnings: string[]; promptConversation?: Conversation; workspacePath?: string; participantRequestDepth?: number }
+    options: {
+      continuation?: boolean;
+      warnings: string[];
+      promptConversation?: Conversation;
+      workspacePath?: string;
+      participantRequestDepth?: number;
+      participantRequestBatchId?: string;
+    }
   ): Promise<ChatMessage[]> {
     let session = await this.sessionForParticipant(conversation, participant);
     const promptConversation = options.promptConversation ?? conversation;
     const workspacePath = options.workspacePath ?? await this.ensureHistoryFiles(promptConversation);
     const isResumingSession = Boolean(session.sessionId);
     const agentMode = normalizeChatAgentMode(participant.agentMode);
-    const permissions = this.participantPermissionsForRun(conversation, participant);
-    this.consumeOneTimePermissionApprovals(conversation, participant);
+    const oneTimePermissionApprovals = this.oneTimePermissionApprovalsForParticipant(conversation, participant);
+    const appliedOneTimePermissionApprovalIds: string[] = [];
+    const permissions = this.participantPermissionsForRun(
+      conversation,
+      participant,
+      oneTimePermissionApprovals,
+      appliedOneTimePermissionApprovalIds
+    );
     const usePromptRole = session.roleRuntime === "prompt-fallback";
     const prompt = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: usePromptRole && !isResumingSession,
@@ -1181,6 +1247,7 @@ export class ChatService {
       continuation: Boolean(options.continuation),
       runId,
       participantRequestDepth: options.participantRequestDepth ?? 0,
+      participantRequestBatchId: options.participantRequestBatchId,
       historyMarkdownPath: path.join(workspacePath, "history.md"),
       historyJsonPath: path.join(workspacePath, "history.json")
     };
@@ -1327,6 +1394,9 @@ export class ChatService {
           }
         }
       }
+      if (!signal?.aborted) {
+        this.consumeOneTimePermissionApprovals(conversation, participant, appliedOneTimePermissionApprovalIds);
+      }
       const now = new Date().toISOString();
       session.updatedAt = now;
       if (result.sessionId) {
@@ -1363,7 +1433,6 @@ export class ChatService {
             requesterContinuationRequested: requesterContinuationRequested || undefined
           };
         }
-        this.logInferredParticipantRequests(conversation, participant, participantMessage);
         session.lastSyncedMessageId = participantMessage.id;
       }
       this.upsertSession(conversation, session);
@@ -1380,6 +1449,7 @@ export class ChatService {
     messages: ChatMessage[]
   ): void {
     conversation.messages.push(...messages);
+    this.createImplicitParticipantRequestApproval(conversation, participant, messages);
     this.createImplicitPermissionApproval(conversation, participant, messages);
   }
 
@@ -1500,8 +1570,8 @@ export class ChatService {
       "Participant request MCP tools: `app_chat_request_participants` and `app_chat_get_participant_request_status` are available for asking current chat participants for input and recovering their replies. Request JSON is `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
       "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
       "If `app_chat_request_participants` returns replies before timeout, use them in this turn. If it returns `pending_approval` or `running`, stop after a brief status note; the app will auto-resume you after replies or errors arrive.",
-      "Permission MCP tool: `app_permissions_request_change` is available when this participant needs User approval for file-editing or web-access permissions.",
-      "Required permission workflow: if the current task needs a blocked capability, call `app_permissions_request_change` before answering that the work cannot be done. Send JSON like `{ \"permissions\": [\"webAccess\"], \"reason\": \"Need live web lookup to answer User's trademark question.\" }` or `{ \"permissions\": [\"workspaceWrite\"], \"reason\": \"Need to edit the requested file.\" }`.",
+      "Permission MCP tool: `app_permissions_request_change` is available when this participant needs User approval for blocked capabilities.",
+      "Required permission workflow: if the current task needs a blocked capability, call `app_permissions_request_change` before answering that the work cannot be done. Use `{ \"kind\": \"portable\", \"permissions\": [\"webAccess\"], \"reason\": \"Need live web lookup to answer User's trademark question.\" }` for web/file grants, `{ \"kind\": \"shellRules\", \"rules\": [{ \"action\": \"allow\", \"match\": \"prefix\", \"pattern\": \"git diff\" }], \"reason\": \"Need to inspect diffs.\" }` for shell rules, or `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants.",
       "After a permission MCP call, the app will ask User to approve. If the result is pending approval, say only that the permission request is awaiting User approval; do not claim the permission was granted until the tool result or a later app message confirms approval."
     ];
     if (!hasChatAppToolCapability(session.roleAppToolCapabilities, "participants.manage")) {
@@ -1677,6 +1747,10 @@ export class ChatService {
     const shellRules = permissions.shell.enabled && permissions.shell.rules.length > 0
       ? permissions.shell.rules.map((rule) => `${rule.action} ${rule.match} ${JSON.stringify(rule.pattern)}`).join("; ")
       : "none";
+    const providerNativeAllowedTools = permissions.providerNative?.["claude-code"]?.allowedTools ?? [];
+    const providerNativeGrants = providerNativeAllowedTools.length > 0
+      ? providerNativeAllowedTools.map((token) => JSON.stringify(token)).join(", ")
+      : "none";
     return [
       `Agent mode: ${mode}.`,
       `Permissions: repo read ${permissions.repoRead ? "allowed" : "blocked"}, shell commands ${permissions.shell.enabled ? "allowed" : "blocked"}, workspace edits ${permissions.workspaceWrite ? "allowed" : "blocked"}, web access ${permissions.webAccess ? "allowed" : "blocked"}.`,
@@ -1684,6 +1758,7 @@ export class ChatService {
         ? "Repository files may be inspected read-only when repository context is selected; app-managed chat context may be read through MCP, with history files as fallback/debug context."
         : "Do not inspect selected repository files; app-managed chat context may still be read through MCP, with history files as fallback/debug context.",
       permissions.shell.enabled ? `Shell command rules: ${shellRules}. Follow deny rules strictly; ask rules require native CLI approval; allow rules may run without extra confirmation when the CLI supports them.` : "General shell commands are blocked; this does not block read-only file inspection allowed by repo or history context.",
+      `Provider-native Claude tool grants: ${providerNativeGrants}.`,
       permissions.workspaceWrite ? "If you change files, summarize the changed files and verification in this chat reply." : "Do not edit files."
     ].join(" ");
   }
@@ -2209,7 +2284,7 @@ export class ChatService {
       return;
     }
     const prepared = this.preparePermissionChange(participant, request);
-    if (prepared.permissions.length === 0 || this.hasPendingPermissionApproval(conversation, participant, prepared.permissions)) {
+    if (!this.preparedPermissionChangeHasAdditions(prepared) || this.hasPendingPermissionApproval(conversation, participant, prepared.request)) {
       return;
     }
     const approval = this.newAppToolApproval(
@@ -2225,6 +2300,145 @@ export class ChatService {
     conversation.messages.push(this.message("system", `Permission approval needed for @${participant.handle}: ${prepared.summary}.`, undefined, {
       threadId: "system"
     }));
+  }
+
+  private createImplicitParticipantRequestApproval(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    messages: ChatMessage[]
+  ): void {
+    for (const sourceMessage of messages) {
+      if (
+        sourceMessage.role !== "participant" ||
+        sourceMessage.participantId !== participant.id ||
+        sourceMessage.status === "error" ||
+        sourceMessage.metadata?.participantRequest
+      ) {
+        continue;
+      }
+
+      const inferred = this.inferParticipantRequestTargets(conversation, participant, sourceMessage.content);
+      if (inferred.length === 0) {
+        continue;
+      }
+      const targetHandles = inferred.map((item) => item.targetHandle);
+      if (this.hasActiveParticipantRequestForTargets(conversation, participant, sourceMessage.id, targetHandles)) {
+        void this.debugLogs.write("chat.participant-request.inferred-skipped-existing", {
+          conversationId: conversation.id,
+          messageId: sourceMessage.id,
+          requesterParticipantId: participant.id,
+          requesterHandle: participant.handle,
+          targets: targetHandles
+        });
+        continue;
+      }
+
+      let prepared: PreparedParticipantRequest;
+      try {
+        prepared = this.prepareParticipantRequest(
+          conversation,
+          participant,
+          {
+            requests: inferred.map((item) => ({
+              target: item.targetHandle,
+              prompt: this.inferredParticipantRequestPrompt(participant.handle, item.snippet),
+              reason: `Inferred from @${participant.handle}'s chat reply.`
+            })),
+            timeoutMs: CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS,
+            resumeRequester: true
+          },
+          {
+            conversationId: conversation.id,
+            participantId: participant.id,
+            roleConfigId: participant.roleConfigId,
+            roleConfigVersion: participant.roleConfigVersion ?? 0,
+            capabilities: ["participants.request"],
+            triggerMessageId: sourceMessage.id,
+            triggerThreadId: sourceMessage.metadata?.threadId ?? sourceMessage.id,
+            triggerParentMessageId: sourceMessage.metadata?.parentMessageId,
+            triggerChatThreadRootId: sourceMessage.metadata?.chatThreadRootId,
+            snapshotMaxSequence: Math.max(0, conversation.messages.length - 1),
+            continuation: false,
+            participantRequestDepth: 0
+          },
+          "inferred",
+          { ignoreApprovalPolicies: true }
+        );
+      } catch (error) {
+        void this.debugLogs.write("chat.participant-request.inferred-create-error", {
+          conversationId: conversation.id,
+          messageId: sourceMessage.id,
+          requesterParticipantId: participant.id,
+          requesterHandle: participant.handle,
+          targets: targetHandles,
+          message: error instanceof Error ? error.message : String(error)
+        });
+        continue;
+      }
+
+      conversation.messages.push(prepared.requestMessage);
+      const pendingTargets = prepared.batch.items.filter((item) => item.status === "pending_approval");
+      if (pendingTargets.length === 0) {
+        continue;
+      }
+      const approval = this.newAppToolApproval(
+        conversation,
+        participant,
+        APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
+        "participants.request",
+        {
+          ...prepared.request,
+          requests: prepared.request.requests.filter((request) =>
+            pendingTargets.some((item) => item.targetHandle.toLowerCase() === request.target.replace(/^@/, "").toLowerCase())
+          ),
+          requestMessageId: prepared.requestMessage.id,
+          batchId: prepared.batch.id
+        },
+        this.participantRequestSummary(participant.handle, pendingTargets.map((item) => item.targetHandle)),
+        "pending"
+      );
+      this.upsertAppToolApproval(conversation, approval);
+      void this.debugLogs.write("chat.participant-request.inferred-created", {
+        conversationId: conversation.id,
+        messageId: sourceMessage.id,
+        requestMessageId: prepared.requestMessage.id,
+        requesterParticipantId: participant.id,
+        requesterHandle: participant.handle,
+        targets: pendingTargets.map((item) => item.targetHandle)
+      });
+    }
+  }
+
+  private hasActiveParticipantRequestForTargets(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    sourceMessageId: string,
+    targetHandles: string[]
+  ): boolean {
+    const targets = new Set(targetHandles.map((handle) => handle.toLowerCase()));
+    return this.participantRequestBatches(conversation).some((batch) => {
+      if (batch.requesterParticipantId !== requester.id) {
+        return false;
+      }
+      if (batch.triggerMessageId === sourceMessageId) {
+        return true;
+      }
+      if (!["pending_approval", "running", "resuming_requester"].includes(batch.status)) {
+        return false;
+      }
+      return batch.items.some((item) =>
+        targets.has(item.targetHandle.toLowerCase()) &&
+        ["pending_approval", "running", "resuming_requester"].includes(item.status)
+      );
+    });
+  }
+
+  private inferredParticipantRequestPrompt(requesterHandle: string, snippet: string): string {
+    return [
+      `@${requesterHandle} appeared to request your input in this chat reply.`,
+      `Relevant excerpt: ${snippet}`,
+      "Respond directly to the request, focusing only on the points that need your input."
+    ].join("\n");
   }
 
   private implicitPermissionChangeRequest(
@@ -2247,6 +2461,7 @@ export class ChatService {
       return undefined;
     }
     return {
+      kind: "portable",
       reason: `@${participant.handle} reported that the current request needs ${this.formatPermissionGrantList(Array.from(requested))}.`,
       permissions: Array.from(requested)
     };
@@ -2271,7 +2486,7 @@ export class ChatService {
   private hasPendingPermissionApproval(
     conversation: Conversation,
     participant: ChatParticipant,
-    permissions: ChatPermissionGrant[]
+    request: ChatPermissionChangeRequest
   ): boolean {
     return this.chatAppToolApprovals(conversation).some((approval) => {
       if (
@@ -2282,8 +2497,7 @@ export class ChatService {
       ) {
         return false;
       }
-      const request = approval.request as ChatPermissionChangeRequest;
-      return permissions.every((permission) => request.permissions.includes(permission));
+      return this.permissionChangeRequestCovers(approval.request as ChatPermissionChangeRequest, request);
     });
   }
 
@@ -2291,7 +2505,20 @@ export class ChatService {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
       throw new Error("Permission change request must be an object.");
     }
-    const record = raw as { reason?: unknown; permissions?: unknown };
+    const record = raw as Record<string, unknown>;
+    if (record.kind === "shellRules") {
+      return this.normalizeShellRulesPermissionChangeRequest(record);
+    }
+    if (record.kind === "providerNative") {
+      return this.normalizeProviderNativePermissionChangeRequest(record);
+    }
+    if (record.kind === "portable" || Array.isArray(record.permissions)) {
+      return this.normalizePortablePermissionChangeRequest(record);
+    }
+    throw new Error("Permission change request has an unsupported kind.");
+  }
+
+  private normalizePortablePermissionChangeRequest(record: Record<string, unknown>): ChatPermissionChangeRequest {
     if (!Array.isArray(record.permissions) || record.permissions.length === 0) {
       throw new Error("Permission change request needs at least one permission.");
     }
@@ -2304,9 +2531,86 @@ export class ChatService {
       }
     }
     return {
-      reason: typeof record.reason === "string" ? record.reason.trim().slice(0, 500) || undefined : undefined,
+      kind: "portable",
+      reason: this.normalizePermissionChangeReason(record.reason),
       permissions: Array.from(permissions)
     };
+  }
+
+  private normalizeShellRulesPermissionChangeRequest(record: Record<string, unknown>): ChatPermissionChangeRequest {
+    if (!Array.isArray(record.rules) || record.rules.length === 0) {
+      throw new Error("Shell permission request needs at least one rule.");
+    }
+    const rules: ChatShellPermissionRule[] = [];
+    const seen = new Set<string>();
+    for (const item of record.rules) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        throw new Error("Shell permission rules must be objects.");
+      }
+      const candidate = item as Partial<ChatShellPermissionRule>;
+      const action = candidate.action === "allow" || candidate.action === "ask" || candidate.action === "deny"
+        ? candidate.action
+        : undefined;
+      const match = candidate.match === "exact" || candidate.match === "prefix"
+        ? candidate.match
+        : undefined;
+      const pattern = typeof candidate.pattern === "string" ? candidate.pattern.trim() : "";
+      if (!action || !match || pattern.length > CHAT_SHELL_RULE_PATTERN_MAX_LENGTH || !isChatShellPermissionPatternSafe(pattern)) {
+        throw new Error("Shell permission rules need action, match, and a safe command pattern.");
+      }
+      const key = this.shellPermissionRuleKey({ action, match, pattern });
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      rules.push({ action, match, pattern });
+    }
+    if (rules.length === 0) {
+      throw new Error("Shell permission request needs at least one unique rule.");
+    }
+    return {
+      kind: "shellRules",
+      reason: this.normalizePermissionChangeReason(record.reason),
+      rules
+    };
+  }
+
+  private normalizeProviderNativePermissionChangeRequest(record: Record<string, unknown>): ChatPermissionChangeRequest {
+    if (record.provider !== "claude-code") {
+      throw new Error("Provider-native permission requests currently support only claude-code.");
+    }
+    if (!Array.isArray(record.allowedTools) || record.allowedTools.length === 0) {
+      throw new Error("Provider-native permission request needs at least one allowed tool token.");
+    }
+    const allowedTools: string[] = [];
+    const seen = new Set<string>();
+    for (const item of record.allowedTools) {
+      if (typeof item !== "string") {
+        throw new Error("Provider-native allowed tool tokens must be strings.");
+      }
+      const token = item.trim();
+      if (!token || token.length > CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH) {
+        throw new Error("Provider-native allowed tool tokens must be non-empty and reasonably short.");
+      }
+      if (seen.has(token)) {
+        continue;
+      }
+      seen.add(token);
+      allowedTools.push(token);
+    }
+    if (allowedTools.length === 0) {
+      throw new Error("Provider-native permission request needs at least one unique allowed tool token.");
+    }
+    return {
+      kind: "providerNative",
+      reason: this.normalizePermissionChangeReason(record.reason),
+      provider: "claude-code",
+      allowedTools
+    };
+  }
+
+  private normalizePermissionChangeReason(reason: unknown): string | undefined {
+    return typeof reason === "string" ? reason.trim().slice(0, 500) || undefined : undefined;
   }
 
   private preparePermissionChange(
@@ -2319,20 +2623,65 @@ export class ChatService {
     if (!this.isPermissionChangeRequest(request)) {
       throw new Error("Permission approval request is invalid.");
     }
+    const normalizedRequest = this.normalizePermissionChangeRequest(request);
     const mode = normalizeChatAgentMode(requester.agentMode);
-    if (mode === "plan" && request.permissions.includes("workspaceWrite")) {
+    if (mode === "plan" && normalizedRequest.kind === "portable" && normalizedRequest.permissions.includes("workspaceWrite")) {
       throw new Error("Plan mode blocks file edits for this participant. Switch the participant to default or auto mode before granting edit access.");
     }
+    if (mode === "plan" && normalizedRequest.kind === "shellRules") {
+      throw new Error("Plan mode blocks shell commands for this participant. Switch the participant to default or auto mode before granting shell access.");
+    }
+    if (mode === "plan" && normalizedRequest.kind === "providerNative") {
+      throw new Error("Plan mode blocks provider-native tool grants for this participant. Switch the participant to default or auto mode before granting provider-native access.");
+    }
     const current = normalizeChatAgentPermissions(requester.permissions);
-    const permissions = request.permissions.filter((permission) => !current[permission]);
-    const summaryPermissions = permissions.length > 0 ? permissions : request.permissions;
+    if (normalizedRequest.kind === "portable") {
+      const portablePermissions = normalizedRequest.permissions.filter((permission) => !current[permission]);
+      const summaryPermissions = portablePermissions.length > 0 ? portablePermissions : normalizedRequest.permissions;
+      return {
+        request: normalizedRequest,
+        portablePermissions,
+        shellRules: [],
+        providerNativeAllowedTools: [],
+        summary: `Grant @${requester.handle} ${this.formatPermissionGrantList(summaryPermissions)}`
+      };
+    }
+    if (normalizedRequest.kind === "shellRules") {
+      for (const rule of normalizedRequest.rules) {
+        if (this.isDeniedShellPermissionRule(rule)) {
+          throw new Error(`Shell permission rule is too broad: ${rule.pattern}.`);
+        }
+      }
+      const currentRuleKeys = current.shell.enabled
+        ? new Set(current.shell.rules.map((rule) => this.shellPermissionRuleKey(rule)))
+        : new Set<string>();
+      const shellRules = normalizedRequest.rules.filter((rule) => !currentRuleKeys.has(this.shellPermissionRuleKey(rule)));
+      const summaryRules = shellRules.length > 0 ? shellRules : normalizedRequest.rules;
+      return {
+        request: normalizedRequest,
+        portablePermissions: [],
+        shellRules,
+        providerNativeAllowedTools: [],
+        summary: `Grant @${requester.handle} ${this.formatShellPermissionRuleList(summaryRules)}`
+      };
+    }
+    if (normalizedRequest.provider !== requester.kind) {
+      throw new Error("Provider-native Claude grants can only be approved for Claude Code participants.");
+    }
+    for (const token of normalizedRequest.allowedTools) {
+      if (this.isDeniedProviderNativeAllowedTool(token)) {
+        throw new Error(`Provider-native allowed tool token is too broad: ${token}.`);
+      }
+    }
+    const currentAllowedTools = new Set(current.providerNative?.["claude-code"]?.allowedTools ?? []);
+    const providerNativeAllowedTools = normalizedRequest.allowedTools.filter((token) => !currentAllowedTools.has(token));
+    const summaryAllowedTools = providerNativeAllowedTools.length > 0 ? providerNativeAllowedTools : normalizedRequest.allowedTools;
     return {
-      request: {
-        reason: request.reason,
-        permissions: request.permissions
-      },
-      permissions,
-      summary: `Grant @${requester.handle} ${this.formatPermissionGrantList(summaryPermissions)}`
+      request: normalizedRequest,
+      portablePermissions: [],
+      shellRules: [],
+      providerNativeAllowedTools,
+      summary: `Grant @${requester.handle} ${this.formatProviderNativeAllowedToolList(summaryAllowedTools)}`
     };
   }
 
@@ -2346,12 +2695,10 @@ export class ChatService {
     if (!target) {
       throw new Error("The requesting participant is no longer in this chat.");
     }
-    const permissions = normalizeChatAgentPermissions(target.permissions);
-    const nextPermissions = {
-      ...permissions,
-      workspaceWrite: permissions.workspaceWrite || prepared.permissions.includes("workspaceWrite"),
-      webAccess: permissions.webAccess || prepared.permissions.includes("webAccess")
-    };
+    const nextPermissions = this.applyPermissionChangeToPermissions(
+      normalizeChatAgentPermissions(target.permissions),
+      prepared.request
+    );
     const nextParticipant: ChatParticipant = {
       ...target,
       permissions: nextPermissions
@@ -2415,7 +2762,8 @@ export class ChatService {
     requester: ChatParticipant,
     normalized: { requests: ChatParticipantRequestInput[]; timeoutMs: number; resumeRequester: boolean },
     actor: ChatAppMcpActor,
-    source: "mcp" | "inferred"
+    source: "mcp" | "inferred",
+    options: { ignoreApprovalPolicies?: boolean } = {}
   ): PreparedParticipantRequest {
     const depth = (actor.participantRequestDepth ?? 0) + 1;
     const limitError = this.participantRequestLimitError(conversation, requester, actor, depth);
@@ -2452,7 +2800,7 @@ export class ChatService {
         targetHandle: target.handle,
         prompt: request?.prompt ?? "",
         reason: request?.reason,
-        status: this.matchingAppToolApprovalPolicy(conversation, requester, APP_CHAT_REQUEST_PARTICIPANTS_TOOL, "participants.request", target.id)
+        status: !options.ignoreApprovalPolicies && this.matchingAppToolApprovalPolicy(conversation, requester, APP_CHAT_REQUEST_PARTICIPANTS_TOOL, "participants.request", target.id)
           ? "running"
           : "pending_approval",
         createdAt: now,
@@ -2672,22 +3020,40 @@ export class ChatService {
         return;
       }
       try {
-        const messages = await this.runParticipantTurnSerialized(conversation, target, requestMessage, runId, undefined, undefined, {
+        const targetTriggerMessage: ChatMessage = {
+          ...requestMessage,
+          metadata: {
+            ...requestMessage.metadata,
+            chatThreadRootId: requestMessage.metadata?.chatThreadRootId ?? requestMessage.id
+          }
+        };
+        const messages = await this.runParticipantTurnSerialized(conversation, target, targetTriggerMessage, runId, undefined, undefined, {
           warnings,
-          participantRequestDepth: depth
+          participantRequestDepth: depth,
+          participantRequestBatchId: batch.id
         });
         await this.refreshStoredChatState(conversation);
         this.appendParticipantTurnMessages(conversation, target, messages);
         const reply = messages[0];
+        const waitingOnPermissionApproval = this.hasPendingPermissionApprovalForParticipantTurn(
+          conversation,
+          target,
+          requestMessage.id,
+          batch.id
+        );
         const now = new Date().toISOString();
         this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
           ...current,
           items: current.items.map((candidate) => candidate.targetParticipantId === item.targetParticipantId
             ? {
                 ...candidate,
-                status: reply?.status === "error" ? "failed" : "answered",
+                status: waitingOnPermissionApproval
+                  ? "running"
+                  : reply?.status === "error"
+                    ? "failed"
+                    : "answered",
                 replyMessageId: reply?.id,
-                error: reply?.status === "error" ? reply.content : undefined,
+                error: !waitingOnPermissionApproval && reply?.status === "error" ? reply.content : undefined,
                 updatedAt: now
               }
             : candidate),
@@ -2748,6 +3114,177 @@ export class ChatService {
     }
   }
 
+  private async autoResumePermissionApproval(conversationId: string, approvalId: string): Promise<void> {
+    const approvalResumeKey = `approval:${approvalId}`;
+    if (this.permissionApprovalAutoResumes.has(approvalResumeKey)) {
+      return;
+    }
+    this.permissionApprovalAutoResumes.add(approvalResumeKey);
+    let triggerResumeKey: string | undefined;
+    try {
+      const conversation = await this.requireChat(conversationId);
+      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
+      if (
+        !approval ||
+        approval.status !== "approved" ||
+        approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL ||
+        !approval.resumeContext ||
+        !this.isPermissionChangeRequest(approval.request)
+      ) {
+        return;
+      }
+      if (this.hasPendingPermissionApprovalForResume(conversation, approval)) {
+        return;
+      }
+      const requester = this.chatParticipants(conversation).find((participant) => participant.id === approval.requesterParticipantId);
+      const trigger = conversation.messages.find((message) => message.id === approval.resumeContext?.triggerMessageId);
+      if (!requester || !trigger) {
+        return;
+      }
+      const participantRequestMessage = approval.resumeContext.participantRequestBatchId
+        ? this.participantRequestMessageForResumeContext(
+            conversation,
+            approval.resumeContext.triggerMessageId,
+            approval.resumeContext.participantRequestBatchId
+          )
+        : undefined;
+      const participantRequestBatch = participantRequestMessage?.metadata?.participantRequest;
+      triggerResumeKey = `trigger:${conversation.id}:${approval.requesterParticipantId}:${trigger.id}`;
+      if (this.permissionApprovalAutoResumes.has(triggerResumeKey)) {
+        return;
+      }
+      this.permissionApprovalAutoResumes.add(triggerResumeKey);
+      const now = new Date().toISOString();
+      conversation.messages.push(this.message(
+        "system",
+        `Auto-resumed @${requester.handle} after permission approval.`,
+        undefined,
+        {
+          threadId: trigger.metadata?.threadId ?? trigger.id,
+          parentMessageId: trigger.id,
+          chatThreadRootId: trigger.metadata?.chatThreadRootId,
+          sourceMessageId: trigger.id
+        }
+      ));
+      const resumeRunId = approval.resumeContext.runId || randomUUID();
+      conversation.metadata = { ...conversation.metadata, running: true, runId: resumeRunId };
+      conversation.updatedAt = now;
+      this.queueSnapshot(conversation);
+      const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, undefined, {
+        warnings: [],
+        participantRequestDepth: participantRequestBatch?.depth,
+        participantRequestBatchId: participantRequestBatch?.id
+      });
+      await this.refreshStoredChatState(conversation);
+      this.appendParticipantTurnMessages(conversation, requester, messages);
+      const participantRequestResumeMessageId = participantRequestMessage && participantRequestBatch
+        ? this.applyPermissionResumeToParticipantRequest(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, messages)
+        : undefined;
+      conversation.metadata = conversation.metadata.runId === resumeRunId
+        ? { ...conversation.metadata, running: false }
+        : conversation.metadata;
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+      await this.ensureHistoryFiles(conversation);
+      await this.saveConversation(conversation);
+      if (participantRequestResumeMessageId) {
+        void this.autoResumeParticipantRequest(conversation.id, participantRequestResumeMessageId).catch((error) => {
+          void this.debugLogs.write("chat.permission-approval.participant-request-auto-resume.error", {
+            conversationId: conversation.id,
+            requestMessageId: participantRequestResumeMessageId,
+            approvalId: approval.id,
+            message: error instanceof Error ? error.message : String(error)
+          });
+        });
+      }
+    } finally {
+      if (triggerResumeKey) {
+        this.permissionApprovalAutoResumes.delete(triggerResumeKey);
+      }
+      this.permissionApprovalAutoResumes.delete(approvalResumeKey);
+    }
+  }
+
+  private hasPendingPermissionApprovalForResume(conversation: Conversation, approval: ChatAppToolApproval): boolean {
+    const triggerMessageId = approval.resumeContext?.triggerMessageId;
+    if (!triggerMessageId) {
+      return false;
+    }
+    return this.chatAppToolApprovals(conversation).some((item) =>
+      item.id !== approval.id &&
+      item.status === "pending" &&
+      item.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
+      item.requesterParticipantId === approval.requesterParticipantId &&
+      item.resumeContext?.triggerMessageId === triggerMessageId
+    );
+  }
+
+  private hasPendingPermissionApprovalForParticipantTurn(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    triggerMessageId: string,
+    participantRequestBatchId?: string
+  ): boolean {
+    return this.chatAppToolApprovals(conversation).some((approval) =>
+      approval.status === "pending" &&
+      approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
+      approval.requesterParticipantId === participant.id &&
+      approval.resumeContext?.triggerMessageId === triggerMessageId &&
+      (!participantRequestBatchId || approval.resumeContext?.participantRequestBatchId === participantRequestBatchId)
+    );
+  }
+
+  private participantRequestMessageForResumeContext(
+    conversation: Conversation,
+    triggerMessageId: string,
+    batchId: string
+  ): ChatMessage | undefined {
+    const triggerMessage = conversation.messages.find((message) => message.id === triggerMessageId);
+    if (triggerMessage?.metadata?.participantRequest?.id === batchId) {
+      return triggerMessage;
+    }
+    return conversation.messages.find((message) => message.metadata?.participantRequest?.id === batchId);
+  }
+
+  private applyPermissionResumeToParticipantRequest(
+    conversation: Conversation,
+    requestMessageId: string,
+    batchId: string,
+    target: ChatParticipant,
+    messages: ChatMessage[]
+  ): string | undefined {
+    const reply = messages[0];
+    const now = new Date().toISOString();
+    const updatedBatch = this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => {
+      if (current.id !== batchId) {
+        return current;
+      }
+      const items = current.items.map((item) => {
+        if (item.targetParticipantId !== target.id) {
+          return item;
+        }
+        return {
+          ...item,
+          status: reply?.status === "error" ? "failed" as const : "answered" as const,
+          replyMessageId: reply?.id,
+          error: reply?.status === "error" ? reply.content : undefined,
+          updatedAt: now
+        };
+      });
+      return {
+        ...current,
+        completedInToolCall: false,
+        items,
+        status: this.rollupParticipantRequestStatus(items),
+        updatedAt: now
+      };
+    });
+    if (!updatedBatch || updatedBatch.id !== batchId || !updatedBatch.resumeRequester || updatedBatch.autoResumeMessageId) {
+      return undefined;
+    }
+    return this.participantRequestHasUnfinishedItems(updatedBatch) ? undefined : requestMessageId;
+  }
+
   private async autoResumeParticipantRequest(conversationId: string, requestMessageId: string): Promise<void> {
     if (this.participantRequestAutoResumes.has(requestMessageId)) {
       return;
@@ -2760,9 +3297,9 @@ export class ChatService {
       if (!requestMessage || !batch || !batch.resumeRequester || batch.completedInToolCall || batch.autoResumeMessageId) {
         return;
       }
-      if (batch.items.some((item) => item.status === "pending_approval" || item.status === "running" || item.status === "resuming_requester")) {
-        return;
-      }
+    if (this.participantRequestHasUnfinishedItems(batch)) {
+      return;
+    }
       if (batch.items.length > 0 && batch.items.every((item) => item.status === "denied")) {
         return;
       }
@@ -2796,7 +3333,8 @@ export class ChatService {
       const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, randomUUID(), undefined, undefined, {
         continuation: true,
         warnings: [],
-        participantRequestDepth: batch.depth
+        participantRequestDepth: batch.depth,
+        participantRequestBatchId: batch.id
       });
       await this.refreshStoredChatState(conversation);
       this.appendParticipantTurnMessages(conversation, requester, messages);
@@ -2822,7 +3360,14 @@ export class ChatService {
     runId: string,
     signal: AbortSignal | undefined,
     progress: ProgressCallback | undefined,
-    options: { continuation?: boolean; warnings: string[]; promptConversation?: Conversation; workspacePath?: string; participantRequestDepth?: number }
+    options: {
+      continuation?: boolean;
+      warnings: string[];
+      promptConversation?: Conversation;
+      workspacePath?: string;
+      participantRequestDepth?: number;
+      participantRequestBatchId?: string;
+    }
   ): Promise<ChatMessage[]> {
     const key = `${conversation.id}:${participant.id}`;
     const previous = this.participantTurnQueues.get(key) ?? Promise.resolve();
@@ -2925,25 +3470,54 @@ export class ChatService {
       .filter((batch): batch is ChatParticipantRequestBatch => Boolean(batch));
   }
 
-  private participantPermissionsForRun(conversation: Conversation, participant: ChatParticipant): ChatAgentPermissions {
-    const permissions = normalizeChatAgentPermissions(participant.permissions);
-    for (const approval of this.oneTimePermissionApprovalsForParticipant(conversation, participant)) {
+  private participantRequestHasUnfinishedItems(batch: ChatParticipantRequestBatch): boolean {
+    return batch.items.some((item) =>
+      item.status === "pending_approval" ||
+      item.status === "running" ||
+      item.status === "resuming_requester"
+    );
+  }
+
+  private participantPermissionsForRun(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    oneTimeApprovals: ChatAppToolApproval[] = this.oneTimePermissionApprovalsForParticipant(conversation, participant),
+    appliedOneTimeApprovalIds?: string[]
+  ): ChatAgentPermissions {
+    let permissions = normalizeChatAgentPermissions(participant.permissions);
+    for (const approval of oneTimeApprovals) {
       if (!this.isPermissionChangeRequest(approval.request)) {
         continue;
       }
-      for (const permission of approval.request.permissions) {
-        permissions[permission] = true;
+      try {
+        permissions = this.applyPermissionChangeToPermissions(permissions, approval.request);
+        appliedOneTimeApprovalIds?.push(approval.id);
+      } catch (error) {
+        void this.debugLogs.write("chat.permissions.once-overlay.invalid", {
+          conversationId: conversation.id,
+          approvalId: approval.id,
+          participantId: participant.id,
+          message: error instanceof Error ? error.message : String(error)
+        });
       }
     }
     return permissions;
   }
 
-  private consumeOneTimePermissionApprovals(conversation: Conversation, participant: ChatParticipant): void {
+  private consumeOneTimePermissionApprovals(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    approvalIds: string[]
+  ): void {
+    if (approvalIds.length === 0) {
+      return;
+    }
+    const approvalIdSet = new Set(approvalIds);
     const approvals = this.chatAppToolApprovals(conversation);
     const now = new Date().toISOString();
     let changed = false;
     const nextApprovals = approvals.map((approval) => {
-      if (!this.isUnconsumedOneTimePermissionApproval(approval, participant)) {
+      if (!approvalIdSet.has(approval.id) || !this.isUnconsumedOneTimePermissionApproval(approval, participant)) {
         return approval;
       }
       changed = true;
@@ -2987,8 +3561,148 @@ export class ChatService {
     );
   }
 
+  private preparedPermissionChangeHasAdditions(prepared: PreparedPermissionChange): boolean {
+    return (
+      prepared.portablePermissions.length > 0 ||
+      prepared.shellRules.length > 0 ||
+      prepared.providerNativeAllowedTools.length > 0
+    );
+  }
+
+  private permissionChangeRequestCovers(existing: ChatPermissionChangeRequest, requested: ChatPermissionChangeRequest): boolean {
+    try {
+      const normalizedExisting = this.normalizePermissionChangeRequest(existing);
+      const normalizedRequested = this.normalizePermissionChangeRequest(requested);
+      if (normalizedExisting.kind !== normalizedRequested.kind) {
+        return false;
+      }
+      if (normalizedRequested.kind === "portable") {
+        return normalizedExisting.kind === "portable" &&
+          normalizedRequested.permissions.every((permission) => normalizedExisting.permissions.includes(permission));
+      }
+      if (normalizedRequested.kind === "shellRules") {
+        if (normalizedExisting.kind !== "shellRules") {
+          return false;
+        }
+        const existingRules = new Set(normalizedExisting.rules.map((rule) => this.shellPermissionRuleKey(rule)));
+        return normalizedRequested.rules.every((rule) => existingRules.has(this.shellPermissionRuleKey(rule)));
+      }
+      return normalizedExisting.kind === "providerNative" &&
+        normalizedExisting.provider === normalizedRequested.provider &&
+        normalizedRequested.allowedTools.every((token) => normalizedExisting.allowedTools.includes(token));
+    } catch {
+      return false;
+    }
+  }
+
+  private applyPermissionChangeToPermissions(
+    permissions: ChatAgentPermissions,
+    request: ChatPermissionChangeRequest
+  ): ChatAgentPermissions {
+    const normalizedRequest = this.normalizePermissionChangeRequest(request);
+    if (normalizedRequest.kind === "portable") {
+      return {
+        ...permissions,
+        workspaceWrite: permissions.workspaceWrite || normalizedRequest.permissions.includes("workspaceWrite"),
+        webAccess: permissions.webAccess || normalizedRequest.permissions.includes("webAccess")
+      };
+    }
+    if (normalizedRequest.kind === "shellRules") {
+      return {
+        ...permissions,
+        shell: {
+          enabled: true,
+          rules: this.mergeShellPermissionRules(permissions.shell.rules, normalizedRequest.rules)
+        }
+      };
+    }
+    const allowedTools = this.mergeProviderNativeAllowedTools(
+      permissions.providerNative?.["claude-code"]?.allowedTools ?? [],
+      normalizedRequest.allowedTools
+    );
+    return {
+      ...permissions,
+      providerNative: {
+        ...permissions.providerNative,
+        "claude-code": {
+          allowedTools
+        }
+      }
+    };
+  }
+
+  private mergeShellPermissionRules(
+    existing: ChatShellPermissionRule[],
+    additions: ChatShellPermissionRule[]
+  ): ChatShellPermissionRule[] {
+    const rules = existing.map((rule) => ({ ...rule }));
+    const seen = new Set(rules.map((rule) => this.shellPermissionRuleKey(rule)));
+    for (const rule of additions) {
+      const key = this.shellPermissionRuleKey(rule);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      rules.push({ ...rule });
+    }
+    return rules;
+  }
+
+  private mergeProviderNativeAllowedTools(existing: string[], additions: string[]): string[] {
+    const allowedTools = [...existing];
+    const seen = new Set(allowedTools);
+    for (const token of additions) {
+      if (seen.has(token)) {
+        continue;
+      }
+      seen.add(token);
+      allowedTools.push(token);
+    }
+    return allowedTools;
+  }
+
+  private shellPermissionRuleKey(rule: ChatShellPermissionRule): string {
+    return `${rule.action}\0${rule.match}\0${rule.pattern}`;
+  }
+
+  private isDeniedShellPermissionRule(rule: ChatShellPermissionRule): boolean {
+    // Provider-native wildcard tokens such as Bash(*) are rejected before this path;
+    // shell rules carry the command pattern only.
+    return rule.pattern.trim() === "*";
+  }
+
+  private isDeniedProviderNativeAllowedTool(token: string): boolean {
+    const trimmed = token.trim();
+    return (
+      trimmed === "*" ||
+      trimmed === "Bash(*)" ||
+      trimmed === "Bash(*:*)" ||
+      /^mcp__.+__\*$/.test(trimmed)
+    );
+  }
+
+  private formatPermissionChangeGrantList(request: ChatPermissionChangeRequest): string {
+    if (request.kind === "portable") {
+      return this.formatPermissionGrantList(request.permissions);
+    }
+    if (request.kind === "shellRules") {
+      return this.formatShellPermissionRuleList(request.rules);
+    }
+    return this.formatProviderNativeAllowedToolList(request.allowedTools);
+  }
+
   private formatPermissionGrantList(permissions: ChatPermissionGrant[]): string {
     const labels = permissions.map((permission) => permission === "workspaceWrite" ? "file editing" : "web access");
+    return this.formatHandleList(labels);
+  }
+
+  private formatShellPermissionRuleList(rules: ChatShellPermissionRule[]): string {
+    const labels = rules.map((rule) => `shell ${rule.action} ${rule.match} ${JSON.stringify(rule.pattern)}`);
+    return this.formatHandleList(labels);
+  }
+
+  private formatProviderNativeAllowedToolList(allowedTools: string[]): string {
+    const labels = allowedTools.map((token) => `Claude native tool ${JSON.stringify(token)}`);
     return this.formatHandleList(labels);
   }
 
@@ -3079,25 +3793,6 @@ export class ChatService {
       });
     }
     return Array.from(mentions.values());
-  }
-
-  private logInferredParticipantRequests(
-    conversation: Conversation,
-    sourceParticipant: ChatParticipant,
-    message: ChatMessage
-  ): void {
-    const inferred = this.inferParticipantRequestTargets(conversation, sourceParticipant, message.content);
-    if (inferred.length === 0) {
-      return;
-    }
-    void this.debugLogs.write("chat.participant-request.inferred-log-only", {
-      conversationId: conversation.id,
-      messageId: message.id,
-      requesterParticipantId: sourceParticipant.id,
-      requesterHandle: sourceParticipant.handle,
-      targets: inferred.map((item) => item.targetHandle),
-      snippets: inferred.map((item) => item.snippet)
-    });
   }
 
   private inferParticipantRequestTargets(
@@ -3698,8 +4393,34 @@ export class ChatService {
     if (!request || typeof request !== "object" || Array.isArray(request)) {
       return false;
     }
-    const permissions = (request as Partial<ChatPermissionChangeRequest>).permissions;
-    return Array.isArray(permissions) && permissions.every((permission) => permission === "workspaceWrite" || permission === "webAccess");
+    const record = request as Record<string, unknown>;
+    if (record.kind === "shellRules") {
+      const rules = record.rules;
+      return Array.isArray(rules) && rules.length > 0 && rules.every((item) =>
+        Boolean(
+          item &&
+          typeof item === "object" &&
+          !Array.isArray(item) &&
+          ((item as Partial<ChatShellPermissionRule>).action === "allow" ||
+            (item as Partial<ChatShellPermissionRule>).action === "ask" ||
+            (item as Partial<ChatShellPermissionRule>).action === "deny") &&
+          ((item as Partial<ChatShellPermissionRule>).match === "exact" ||
+            (item as Partial<ChatShellPermissionRule>).match === "prefix") &&
+          typeof (item as Partial<ChatShellPermissionRule>).pattern === "string"
+        )
+      );
+    }
+    if (record.kind === "providerNative") {
+      return record.provider === "claude-code" &&
+        Array.isArray(record.allowedTools) &&
+        record.allowedTools.length > 0 &&
+        record.allowedTools.every((token) => typeof token === "string");
+    }
+    const permissions = record.permissions;
+    return (record.kind === "portable" || record.kind === undefined) &&
+      Array.isArray(permissions) &&
+      permissions.length > 0 &&
+      permissions.every((permission) => permission === "workspaceWrite" || permission === "webAccess");
   }
 
   private isParticipantRequestApprovalRequest(request: unknown): request is ChatParticipantRequestApprovalRequest {

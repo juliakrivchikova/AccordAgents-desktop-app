@@ -27,6 +27,7 @@ export interface AppMcpActor {
   continuation?: boolean;
   runId?: string;
   participantRequestDepth?: number;
+  participantRequestBatchId?: string;
   historyMarkdownPath?: string;
   historyJsonPath?: string;
 }
@@ -177,6 +178,7 @@ export class AppMcpService {
       continuation: grant.continuation,
       runId: grant.runId,
       participantRequestDepth: grant.participantRequestDepth,
+      participantRequestBatchId: grant.participantRequestBatchId,
       historyMarkdownPath: grant.historyMarkdownPath,
       historyJsonPath: grant.historyJsonPath
     };
@@ -419,11 +421,16 @@ export class AppMcpService {
         name: APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
         title: "Request Chat Permission Change",
         description:
-          "Request User approval to grant this chat participant file-editing or web-access permissions. Use this MCP tool when the current task needs blocked web lookup or file edits; do not merely reply that access is blocked. The app validates the request and shows an approval item; this tool never grants permissions directly.",
+          "Request User approval to grant this chat participant more capability. Use portable for workspaceWrite/webAccess, shellRules for command-specific shell rules, or providerNative for Claude Code allowedTools tokens. Provider-native grants are rejected unless the requester is a Claude Code participant. The app validates the request and shows an approval item; this tool never grants permissions directly.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
           properties: {
+            kind: {
+              type: "string",
+              enum: ["portable", "shellRules", "providerNative"],
+              description: "Permission request kind."
+            },
             reason: {
               type: "string",
               description: "Brief reason the participant needs the requested permission."
@@ -436,10 +443,47 @@ export class AppMcpService {
                 type: "string",
                 enum: ["workspaceWrite", "webAccess"]
               },
-              description: "Permission grants to request for this participant."
+              description: "Portable permission grants to request when kind is portable."
+            },
+            rules: {
+              type: "array",
+              minItems: 1,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  action: {
+                    type: "string",
+                    enum: ["allow", "ask", "deny"]
+                  },
+                  match: {
+                    type: "string",
+                    enum: ["exact", "prefix"]
+                  },
+                  pattern: {
+                    type: "string",
+                    description: "Literal shell command pattern, such as git status or git diff."
+                  }
+                },
+                required: ["action", "match", "pattern"]
+              },
+              description: "Command-specific shell rules to request when kind is shellRules."
+            },
+            provider: {
+              type: "string",
+              enum: ["claude-code"],
+              description: "Provider for provider-native grants."
+            },
+            allowedTools: {
+              type: "array",
+              minItems: 1,
+              items: {
+                type: "string"
+              },
+              description: "Literal Claude Code allowedTools tokens to request when kind is providerNative."
             }
           },
-          required: ["permissions"]
+          required: ["kind"]
         },
         annotations: {
           readOnlyHint: false,

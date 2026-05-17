@@ -154,6 +154,7 @@ const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 const APP_ROSTER_REQUEST_CHANGE_TOOL = "app_roster_request_change";
 const APP_CHAT_REQUEST_PARTICIPANTS_TOOL = "app_chat_request_participants";
+const SHOW_CHAT_SYSTEM_MESSAGES = import.meta.env.VITE_AI_CONSENSUS_SHOW_SYSTEM_MESSAGES === "1";
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "ai-consensus.sidebarCollapsed";
 const CHAT_AGENT_MODE_OPTIONS: Array<{ value: ChatAgentMode; label: string }> = [
   { value: "default", label: "Default" },
@@ -3060,6 +3061,8 @@ function ChatAppToolApprovalCard(props: {
 }): JSX.Element {
   const permissionRequest = chatPermissionChangeRequest(props.approval);
   const participantRequest = chatParticipantRequestApprovalRequest(props.approval);
+  const inferredParticipantRequest = participantRequest?.source === "inferred";
+  const preferOnceApproval = Boolean(permissionRequest && permissionRequest.kind !== "portable");
   const added = props.approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL && "operations" in props.approval.request
     ? props.approval.request.operations.filter((operation) => operation.type === "add")
     : [];
@@ -3092,25 +3095,27 @@ function ChatAppToolApprovalCard(props: {
       )}
       {participantRequest && (
         <p className="chat-app-tool-scope-note">
-          Approval runs the requested participant{participantRequest.requests.length === 1 ? "" : "s"} and then returns to @{props.approval.requesterHandle} after replies or errors. Chat grants apply only to this requester and target set.
+          Approval runs the requested participant{participantRequest.requests.length === 1 ? "" : "s"} and then returns to @{props.approval.requesterHandle} after replies or errors. {inferredParticipantRequest ? "Inferred requests are approved one time." : "Chat grants apply only to this requester and target set."}
         </p>
       )}
       <div className="chat-app-tool-approval-actions">
         <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onRespond(props.approval.id, false)}>
           Deny
         </Button>
-        <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onRespond(props.approval.id, true, "once")}>
+        <Button variant={preferOnceApproval ? "default" : "outline"} size="sm" disabled={props.busy} onClick={() => props.onRespond(props.approval.id, true, "once")}>
           <CheckCircle2 size={16} />
           Allow once
         </Button>
-        <Button size="sm" disabled={props.busy} onClick={() => props.onRespond(props.approval.id, true, "chat")}>
-          <CheckCircle2 size={16} />
-          {permissionRequest
-            ? `Allow @${props.approval.requesterHandle} in this chat`
-            : participantRequest
-              ? `Allow @${props.approval.requesterHandle} to ask ${participantRequest.requests.length === 1 ? `@${participantRequest.requests[0].target.replace(/^@/, "")}` : "these targets"}`
-              : "Allow for chat"}
-        </Button>
+        {!inferredParticipantRequest && (
+          <Button variant={preferOnceApproval ? "outline" : "default"} size="sm" disabled={props.busy} onClick={() => props.onRespond(props.approval.id, true, "chat")}>
+            <CheckCircle2 size={16} />
+            {permissionRequest
+              ? `Allow @${props.approval.requesterHandle} in this chat`
+              : participantRequest
+                ? `Allow @${props.approval.requesterHandle} to ask ${participantRequest.requests.length === 1 ? `@${participantRequest.requests[0].target.replace(/^@/, "")}` : "these targets"}`
+                : "Allow for chat"}
+          </Button>
+        )}
       </div>
     </section>
   );
@@ -3126,6 +3131,30 @@ function ChatAppToolRosterOperation({ operation }: { operation: ChatRosterChange
 }
 
 function ChatAppToolPermissionOperation({ request }: { request: ChatPermissionChangeRequest }): JSX.Element {
+  if (request.kind === "shellRules") {
+    return (
+      <div className="chat-app-tool-roster-list">
+        {request.rules.map((rule, index) => (
+          <div className="chat-app-tool-roster-item" key={`${rule.action}-${rule.match}-${rule.pattern}-${index}`}>
+            <strong>Shell {rule.action}</strong>
+            <span>{rule.match} <code>{rule.pattern}</code></span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  if (request.kind === "providerNative") {
+    return (
+      <div className="chat-app-tool-roster-list">
+        {request.allowedTools.map((token) => (
+          <div className="chat-app-tool-roster-item" key={token}>
+            <strong>Claude only</strong>
+            <span><code>{token}</code></span>
+          </div>
+        ))}
+      </div>
+    );
+  }
   return (
     <div className="chat-app-tool-roster-list">
       {request.permissions.map((permission) => (
@@ -3170,7 +3199,11 @@ function ChatMessageItem(props: {
   const { message } = props;
   const [copied, setCopied] = useState(false);
   const author = authorForMessage(message, "chat");
-  const participant = message.participantId ? props.participants?.find((item) => item.id === message.participantId) : undefined;
+  const participant = message.participantId
+    ? props.participants?.find((item) => item.id === message.participantId)
+    : message.role === "system"
+      ? props.participants?.find((item) => item.handle.toLowerCase() === "admin")
+      : undefined;
   const pending = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "pending");
   const approved = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "approved");
   const choice = message.metadata?.pendingChoice;
@@ -5387,7 +5420,7 @@ function authorForMessage(message: Conversation["messages"][number], kind: Conve
     return "Planner";
   }
   if (message.role === "system") {
-    return "Arbiter";
+    return kind === "chat" ? "@admin" : "Arbiter";
   }
   if (message.participantLabel?.toLowerCase().includes("(arbiter)") || message.participantLabel?.toLowerCase().includes("(planner)")) {
     return "Arbiter";
@@ -5534,6 +5567,9 @@ function stableHash(value: string): number {
 function avatarForMessage(message: Conversation["messages"][number], author: string, participant?: ChatParticipant): AvatarSpec {
   if (message.role === "user") {
     return USER_AVATAR;
+  }
+  if (message.role === "system" && participant) {
+    return avatarForChatParticipant(participant, author);
   }
   if (message.role === "system" || message.role === "summary" || message.participantId?.startsWith("arbiter:")) {
     return { ...ARBITER_AVATAR, label: author };
@@ -5804,7 +5840,8 @@ function chatParticipantPermissionSummary(participant: Pick<ChatParticipant, "ag
     permissions.repoRead ? "repo" : "",
     permissions.shell.enabled ? "shell" : "",
     permissions.workspaceWrite ? "edit" : "",
-    permissions.webAccess ? "web" : ""
+    permissions.webAccess ? "web" : "",
+    (permissions.providerNative?.["claude-code"]?.allowedTools.length ?? 0) > 0 ? "native" : ""
   ].filter(Boolean);
   return `${mode}${enabled.length > 0 ? ` · ${enabled.join(", ")}` : ""}`;
 }
@@ -6044,14 +6081,45 @@ function chatPermissionChangeRequest(approval: ChatAppToolApproval): ChatPermiss
   if (approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL) {
     return undefined;
   }
-  const request = approval.request as Partial<ChatPermissionChangeRequest>;
-  return Array.isArray(request.permissions) &&
-    request.permissions.every((permission) => permission === "workspaceWrite" || permission === "webAccess")
-    ? {
-        reason: typeof request.reason === "string" ? request.reason : undefined,
-        permissions: request.permissions
+  const request = approval.request as unknown as Record<string, unknown>;
+  const reason = typeof request.reason === "string" ? request.reason : undefined;
+  if ((request.kind === "portable" || request.kind === undefined) && Array.isArray(request.permissions)) {
+    const permissions = request.permissions.filter((permission): permission is ChatPermissionGrant =>
+      permission === "workspaceWrite" || permission === "webAccess"
+    );
+    return permissions.length === request.permissions.length && permissions.length > 0
+      ? { kind: "portable", reason, permissions }
+      : undefined;
+  }
+  if (request.kind === "shellRules" && Array.isArray(request.rules)) {
+    const rules = request.rules.flatMap((item): ChatShellPermissionRule[] => {
+      const rule = item as Partial<ChatShellPermissionRule>;
+      if (
+        !item ||
+        typeof item !== "object" ||
+        Array.isArray(item) ||
+        (rule.action !== "allow" && rule.action !== "ask" && rule.action !== "deny") ||
+        (rule.match !== "exact" && rule.match !== "prefix") ||
+        typeof rule.pattern !== "string"
+      ) {
+        return [];
       }
-    : undefined;
+      const pattern = rule.pattern.trim();
+      return pattern ? [{ action: rule.action, match: rule.match, pattern }] : [];
+    });
+    return rules.length === request.rules.length && rules.length > 0
+      ? { kind: "shellRules", reason, rules }
+      : undefined;
+  }
+  if (request.kind === "providerNative" && request.provider === "claude-code" && Array.isArray(request.allowedTools)) {
+    const allowedTools = request.allowedTools
+      .map((token) => (typeof token === "string" ? token.trim() : ""))
+      .filter((token) => token.length > 0);
+    return allowedTools.length === request.allowedTools.length && allowedTools.length > 0
+      ? { kind: "providerNative", reason, provider: "claude-code", allowedTools }
+      : undefined;
+  }
+  return undefined;
 }
 
 function chatPermissionGrantLabel(permission: ChatPermissionGrant): string {
@@ -6151,16 +6219,18 @@ function formatContextTokenCount(tokens: number): string {
 }
 
 function chatTopLevelMessages(conversation: Conversation): Conversation["messages"] {
-  return conversation.messages.filter((message) => !isHiddenChatMessage(message) && !chatVisualThreadRootId(message));
+  const participantRequestReplyRoots = chatParticipantRequestReplyRootMap(conversation);
+  return conversation.messages.filter((message) => !isHiddenChatMessage(message) && !chatVisualThreadRootId(message, participantRequestReplyRoots));
 }
 
 function chatThreadSummaryMap(conversation: Conversation): Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }> {
   const summaries = new Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }>();
+  const participantRequestReplyRoots = chatParticipantRequestReplyRootMap(conversation);
   for (const message of conversation.messages) {
     if (isHiddenChatMessage(message)) {
       continue;
     }
-    const rootId = chatVisualThreadRootId(message);
+    const rootId = chatVisualThreadRootId(message, participantRequestReplyRoots);
     if (!rootId) {
       continue;
     }
@@ -6180,15 +6250,21 @@ function chatThreadSummaryMap(conversation: Conversation): Map<string, { replies
 function isHiddenChatMessage(message: Conversation["messages"][number]): boolean {
   const content = message.content.trim();
   if (message.role === "participant") {
-    return /^(?:participant request is awaiting user approval|awaiting user approval|waiting for user approval)\.?$/i.test(content);
+    return isParticipantRequestWaitingStatus(content);
   }
   if (message.role !== "system") {
     return false;
   }
+  if (!SHOW_CHAT_SYSTEM_MESSAGES) {
+    return true;
+  }
+  return false;
+}
+
+function isParticipantRequestWaitingStatus(content: string): boolean {
   return (
-    /^Denied app tool request from @[^:]+:\s+@[^.]+\s+asks\s+@[^.]+\.?$/i.test(content) ||
-    /^Allowed @[^ ]+ to ask @.+ in this chat\. The requester will resume after replies or errors\.?$/i.test(content) ||
-    /^Allowed once and started participant request from @[^:]+:\s+@[^.]+\s+asks\s+@[^.]+\. The requester will resume after replies or errors\.?$/i.test(content)
+    /^(?:participant request is awaiting user approval|awaiting user approval|waiting for user approval)\.?$/i.test(content) ||
+    /^Asked\s+@[\w-]+(?:\s*,\s*@[\w-]+)*\.?\s+The participant request is awaiting User approval\.?$/i.test(content)
   );
 }
 
@@ -6200,9 +6276,29 @@ function chatContinuedMentionRequestIds(conversation: Conversation): Set<string>
   );
 }
 
-function chatVisualThreadRootId(message: Conversation["messages"][number]): string | undefined {
+function chatParticipantRequestReplyRootMap(conversation: Conversation): Map<string, string> {
+  const roots = new Map<string, string>();
+  for (const message of conversation.messages) {
+    const batch = message.metadata?.participantRequest;
+    if (!batch) {
+      continue;
+    }
+    for (const item of batch.items) {
+      if (item.replyMessageId) {
+        roots.set(item.replyMessageId, message.id);
+      }
+    }
+  }
+  return roots;
+}
+
+function chatVisualThreadRootId(message: Conversation["messages"][number], participantRequestReplyRoots = new Map<string, string>()): string | undefined {
   if (message.metadata?.chatThreadRootId) {
     return message.metadata.chatThreadRootId;
+  }
+  const participantRequestRootId = participantRequestReplyRoots.get(message.id);
+  if (participantRequestRootId) {
+    return participantRequestRootId;
   }
   if (message.role === "user" && message.metadata?.parentMessageId) {
     return message.metadata.threadId ?? message.metadata.parentMessageId;
@@ -6254,6 +6350,10 @@ function chatDisplayContent(message: Conversation["messages"][number], author: s
 }
 
 function participantRequestDisplayContent(batch: ChatParticipantRequestBatch): string {
+  if (batch.source === "inferred") {
+    const targets = batch.items.map((item) => `@${item.targetHandle}`).join(", ");
+    return `Asked ${targets} for input.`;
+  }
   return batch.items.map((item) => `@${item.targetHandle} ${item.prompt}`.trim()).join("\n");
 }
 
@@ -6666,7 +6766,25 @@ function healthLine(health: AgentHealth | undefined): string {
   if (!health.installed) {
     return "Not installed";
   }
-  return health.version || health.path || "Installed";
+  const base = health.version || health.path || "Installed";
+  const skillSync = appSkillSyncLine(health.appSkillSync);
+  return skillSync ? `${base} · ${skillSync}` : base;
+}
+
+function appSkillSyncLine(sync: AgentHealth["appSkillSync"]): string | undefined {
+  if (!sync || sync.status === "not-installed") {
+    return undefined;
+  }
+  if (sync.status === "synced") {
+    return sync.skillCount === 1 ? "1 app skill synced" : `${sync.skillCount} app skills synced`;
+  }
+  if (sync.status === "skipped") {
+    return sync.skillCount === 1 ? "1 app skill current" : `${sync.skillCount} app skills current`;
+  }
+  if (sync.status === "collision") {
+    return sync.message ?? "App skill collision";
+  }
+  return sync.message ?? "App skill sync failed";
 }
 
 function errorText(error: unknown): string {

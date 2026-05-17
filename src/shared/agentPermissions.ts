@@ -2,6 +2,7 @@ import type { ChatAgentMode, ChatAgentPermissions, ChatShellPermissionRule } fro
 
 export const DEFAULT_CHAT_AGENT_MODE: ChatAgentMode = "default";
 export const CHAT_SHELL_RULE_PATTERN_MAX_LENGTH = 160;
+export const CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH = 240;
 
 export const DEFAULT_CHAT_AGENT_PERMISSIONS: ChatAgentPermissions = {
   repoRead: true,
@@ -20,14 +21,16 @@ export function defaultChatAgentPermissions(): ChatAgentPermissions {
 }
 
 export function cloneChatAgentPermissions(permissions: ChatAgentPermissions): ChatAgentPermissions {
+  const providerNative = cloneProviderNativePermissions(permissions.providerNative);
   return {
     repoRead: permissions.repoRead,
     workspaceWrite: permissions.workspaceWrite,
     webAccess: permissions.webAccess,
     shell: {
       enabled: permissions.shell.enabled,
-      rules: permissions.shell.rules.map((rule) => ({ ...rule }))
-    }
+      rules: normalizeChatShellPermissionRules(permissions.shell.rules)
+    },
+    ...(providerNative ? { providerNative } : {})
   };
 }
 
@@ -42,6 +45,7 @@ export function normalizeChatAgentPermissions(value: unknown): ChatAgentPermissi
   const shell = record.shell && typeof record.shell === "object" && !Array.isArray(record.shell)
     ? record.shell as Partial<ChatAgentPermissions["shell"]>
     : {};
+  const providerNative = normalizeProviderNativePermissions(record.providerNative);
   return {
     repoRead: typeof record.repoRead === "boolean" ? record.repoRead : DEFAULT_CHAT_AGENT_PERMISSIONS.repoRead,
     workspaceWrite: typeof record.workspaceWrite === "boolean" ? record.workspaceWrite : DEFAULT_CHAT_AGENT_PERMISSIONS.workspaceWrite,
@@ -49,7 +53,8 @@ export function normalizeChatAgentPermissions(value: unknown): ChatAgentPermissi
     shell: {
       enabled: typeof shell.enabled === "boolean" ? shell.enabled : DEFAULT_CHAT_AGENT_PERMISSIONS.shell.enabled,
       rules: normalizeChatShellPermissionRules(shell.rules)
-    }
+    },
+    ...(providerNative ? { providerNative } : {})
   };
 }
 
@@ -58,11 +63,12 @@ export function effectiveChatAgentPermissions(mode: ChatAgentMode, permissions: 
   if (mode !== "plan") {
     return normalized;
   }
+  const { providerNative: _providerNative, ...readOnlyPermissions } = normalized;
   return {
-    ...normalized,
+    ...readOnlyPermissions,
     workspaceWrite: false,
     shell: {
-      ...normalized.shell,
+      ...readOnlyPermissions.shell,
       enabled: false
     }
   };
@@ -76,11 +82,12 @@ export function isChatShellPermissionPatternSafe(pattern: string): boolean {
   return pattern.trim().length > 0 && !UNSAFE_CHAT_SHELL_RULE_PATTERN.test(pattern);
 }
 
-function normalizeChatShellPermissionRules(value: unknown): ChatShellPermissionRule[] {
+export function normalizeChatShellPermissionRules(value: unknown): ChatShellPermissionRule[] {
   if (!Array.isArray(value)) {
     return [];
   }
   const rules: ChatShellPermissionRule[] = [];
+  const seen = new Set<string>();
   for (const item of value) {
     if (!item || typeof item !== "object" || Array.isArray(item)) {
       continue;
@@ -96,6 +103,11 @@ function normalizeChatShellPermissionRules(value: unknown): ChatShellPermissionR
     if (!action || !match || !isChatShellPermissionPatternSafe(pattern)) {
       continue;
     }
+    const key = `${action}\0${match}\0${pattern}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
     rules.push({
       action,
       match,
@@ -103,4 +115,48 @@ function normalizeChatShellPermissionRules(value: unknown): ChatShellPermissionR
     });
   }
   return rules;
+}
+
+function cloneProviderNativePermissions(
+  providerNative: ChatAgentPermissions["providerNative"] | undefined
+): ChatAgentPermissions["providerNative"] | undefined {
+  const allowedTools = normalizeProviderNativeAllowedTools(providerNative?.["claude-code"]?.allowedTools);
+  return allowedTools.length > 0
+    ? { "claude-code": { allowedTools } }
+    : undefined;
+}
+
+function normalizeProviderNativePermissions(value: unknown): ChatAgentPermissions["providerNative"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Partial<NonNullable<ChatAgentPermissions["providerNative"]>>;
+  const claudeCode = record["claude-code"];
+  if (!claudeCode || typeof claudeCode !== "object" || Array.isArray(claudeCode)) {
+    return undefined;
+  }
+  const allowedTools = normalizeProviderNativeAllowedTools((claudeCode as { allowedTools?: unknown }).allowedTools);
+  return allowedTools.length > 0
+    ? { "claude-code": { allowedTools } }
+    : undefined;
+}
+
+export function normalizeProviderNativeAllowedTools(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const allowedTools: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const token = item.trim();
+    if (!token || token.length > CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH || seen.has(token)) {
+      continue;
+    }
+    seen.add(token);
+    allowedTools.push(token);
+  }
+  return allowedTools;
 }

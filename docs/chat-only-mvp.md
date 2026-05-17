@@ -340,13 +340,14 @@ Permission mapping:
 - Claude Code receives edit tools only when `workspaceWrite` is enabled.
 - Claude Code receives `WebSearch` and `WebFetch` only when `webAccess` is enabled.
 - Claude Code receives `Bash` only when shell is enabled, with allow/ask/deny tool rules derived from shell rules.
+- Claude Code receives approved provider-native `allowedTools` tokens through native `--allowedTools`; matching tool names are also exposed through `--tools`.
 
 Permission request app-tool path:
 
-- Every chat participant can call `app_permissions_request_change` to request `workspaceWrite` or `webAccess` for itself.
+- Every chat participant can call `app_permissions_request_change` to request portable grants (`workspaceWrite` or `webAccess`), command-specific `shellRules`, or Claude-only provider-native `allowedTools` tokens for itself.
 - The app validates the request and shows a user approval item; the MCP tool never grants permissions directly.
-- Approval updates the participant's chat-scoped permissions and invalidates the runtime session on the next run through the normal permission/session matching.
-- Shell access is not requestable through this v1 tool.
+- Approval updates the participant's chat-scoped permissions, or overlays a once grant for the next run, and invalidates the runtime session on the next run through the normal permission/session matching.
+- Broad shell access is not requestable through this tool; agents can request explicit command rules instead.
 
 Validation:
 
@@ -526,37 +527,27 @@ Do not advertise:
 
 ## Known MVP Gaps From Current Code
 
-- App-managed skills, skill mentions, and provider-specific skill setup rendering do not exist yet.
-- The MVP positioning depends on cross-model chat interaction being obvious in the UI and docs. Current behavior supports local CLI participants, but the first-release flow should make mixed-provider participants and participant-to-participant handoffs easy to discover.
-- The first-release UI should reinforce the product principles: chat is primary, participants are provider-neutral, and collaboration is user-approved.
-- New sessions currently default to `code-review` in the renderer state. A chat-only MVP should default to chat and hide non-chat session modes.
-- Empty admin chat validation checks that at least one local CLI is installed, but the backend chooses the admin provider from enabled settings and prefers Codex. If Codex is enabled but missing and Claude Code is installed, the empty admin chat can still create `@admin` as a Codex participant and fail at run time.
-- The settings menu still exposes hosted providers and API-key entry. Hide this for chat-only release.
-- The result tab and some component names still use `Slack`. Rename user-facing copy before release if chat is the product.
-- Role capability editing is not exposed. That is acceptable if only the built-in Administrator can manage participants; it is a gap if users need custom administrator-like roles.
-- Live participant removal and live participant editing are not implemented. Decide whether add-only roster management is enough for MVP.
-- The stop/cancel path still uses shared `review` naming in IPC and progress types. This works technically but should be cleaned up if release polish matters.
-- Non-chat IPC handlers and storage types still exist. This is fine internally, but the first-release UI should not expose routes into non-chat workflows.
+The remaining MVP gaps should be tracked at feature-title level:
+
+- User skill management.
+- Onboarding.
+- Role permissions management.
+- Role deletion.
+- Live participant removal.
+- File references from messages.
+- Image pasting.
+- MCP status tool for agents to indicate what they are doing.
 
 ## MVP TODO
 
-- [ ] Default new sessions to chat.
-- [ ] Define the app-managed skill model and where skills are persisted.
-- [ ] Add a skill library UI for creating, editing, and selecting reusable skills.
-- [ ] Add skill mention or attachment UX for chat messages, participant presets, and chat/session setup.
-- [ ] Add provider-specific skill setup renderers for Codex, Claude Code, and Gemini-compatible providers.
-- [ ] Wire mentioned skills into participant runtime setup and visible chat history.
-- [ ] Make mixed-provider chat setup clear, including Codex CLI and Claude Code participants in one session.
-- [ ] Verify participant-to-participant requests across different local CLI providers.
-- [ ] Review the first-release UI against the MVP product principles: conversation-first, provider-neutral participants, and human-moderated collaboration.
-- [ ] Hide non-chat session modes from first-release navigation.
-- [ ] Hide hosted provider, API-key, and hosted model settings from the MVP UI.
-- [ ] Fix empty admin chat provider selection so `@admin` uses an installed local CLI.
-- [ ] Rename visible `Slack` and legacy consensus wording where it appears in the chat-only UI.
-- [ ] Decide whether live participant removal/editing is required for MVP or explicitly deferred.
-- [ ] Decide whether role deletion is required for MVP or explicitly deferred.
-- [ ] Verify the chat-only happy path: fresh install, admin chat, saved participants, skill mentions, participant mentions, parallel replies, user choices, thread replies, and chat restart.
-- [ ] Verify failure cases: missing CLI, duplicate handles, invalid role, invalid shell rule, unknown mention, cancelled run, and interrupted run recovery.
+- [ ] User skill management.
+- [ ] Onboarding.
+- [ ] Role permissions management.
+- [ ] Role deletion.
+- [ ] Live participant removal.
+- [ ] File references from messages.
+- [ ] Image pasting.
+- [ ] MCP status tool for agents to indicate what they are doing.
 
 ## MVP Acceptance Checklist
 

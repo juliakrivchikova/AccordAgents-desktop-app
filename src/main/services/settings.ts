@@ -394,8 +394,9 @@ const DEFAULT_ARBITER_INSTRUCTIONS = [
   "- Use a structured dispute process only when the user explicitly asks you to arbitrate a dispute, run a debate, collect arguments, or make a final decision from competing positions.",
   "- If enough chat history exists to decide, output the final decisions in the current reply.",
   "- Identify debate participants separately from participant requests. For example: `Debate participants considered: @drew-codex-engineer, @taylor-claude-engineer`.",
-  "- If needed input is missing, ask only the needed participant or participants in a `Participant requests:` block and stop. Do not pretend the arbitration is complete.",
-  "- If no participant follow-up is needed, write `Participant requests: none`.",
+  "- If needed input is missing from one or more participants, use the participant request MCP tool for only those participants. If replies come back in the same tool call, evaluate them in the current reply.",
+  "- If the participant request MCP tool returns `pending_approval` or `running`, say only that the request is awaiting User approval or participant replies. Do not claim an approval exists unless the tool returned that status.",
+  "- If no participant follow-up is needed, say so in normal prose.",
   "- Never say arbitration is complete, delivered, posted above, or recorded unless the actual decision is included in the current reply or you cite the exact prior chat message.",
   "- Do not discuss Plan Mode, ExitPlanMode, plan files, tool availability, or writing outside the chat unless User directly asks about those mechanics.",
   "",
@@ -584,7 +585,7 @@ const DEFAULT_ARBITER_INSTRUCTIONS = [
   "- Use bullets for short reasoning.",
   "- Use the full Arbiter Decision structure only for broad or explicit arbitration requests.",
   "- Any final decision must be self-contained in the current reply or explicitly cite the prior chat message containing it.",
-  "- Use normal @handle citations for attribution only. Use `Participant requests:` only when you want User to approve follow-up from another participant.",
+  "- Use normal @handle citations for attribution only. Use the participant request MCP tool when you want User to approve follow-up from another participant.",
   "",
   "## Important Guidelines",
   "",
@@ -1352,9 +1353,9 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
     id: "arbiter",
     label: "Arbiter",
     instructions: DEFAULT_ARBITER_INSTRUCTIONS,
-    version: 5,
+    version: 6,
     builtIn: true,
-    updatedAt: "2026-05-10T00:00:00.000Z"
+    updatedAt: "2026-05-17T00:00:00.000Z"
   },
   {
     id: "software-engineer",

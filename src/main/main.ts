@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import type {
   AddChatParticipantRequest,
+  AgentHealth,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
   ComposeImplementationPlanRequest,
@@ -27,6 +28,7 @@ import { ChatService } from "./services/chat";
 import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
+import { AppSkillsService } from "./services/appSkills";
 import { DebugLogService } from "./services/debugLogs";
 import { GitService } from "./services/git";
 import { ProviderRunner } from "./services/providers";
@@ -41,6 +43,11 @@ const storageService = new StorageService();
 const providerRunner = new ProviderRunner(settingsService);
 const debugLogService = new DebugLogService();
 const cliAgentRunner = new CliAgentRunner(debugLogService);
+const appSkillsService = new AppSkillsService({
+  sourceRoot: appSkillsSourceRoot(),
+  appVersion: app.getVersion(),
+  debugLogs: debugLogService
+});
 const appMcpService = new AppMcpService();
 const consensusService = new ConsensusService(gitService, storageService, providerRunner, cliAgentRunner, debugLogService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
@@ -57,6 +64,27 @@ appMcpService.setChatMessagesHandler((actor, request) => chatService.readChatMes
 appMcpService.setChatParticipantRequestHandler((actor, request) => chatService.requestParticipantsFromTool(actor, request));
 appMcpService.setChatParticipantRequestStatusHandler((actor, request) => chatService.participantRequestStatusForTool(actor, request));
 const activeReviews = new Map<string, AbortController>();
+
+function appSkillsSourceRoot(): string {
+  return app.isPackaged
+    ? path.join(__dirname, "appSkills")
+    : path.join(process.cwd(), "src/main/appSkills");
+}
+
+async function detectAgentsWithAppSkills(): Promise<AgentHealth[]> {
+  const agents = await cliAgentRunner.detectAgents();
+  return appSkillsService.reconcileAgents(agents).catch((error) => {
+    void debugLogService.write("app-skills-detect-sync-error", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return agents.map((agent) => ({
+      ...agent,
+      appSkillSync: agent.installed
+        ? { status: "error", skillCount: 0, updatedAt: new Date().toISOString(), message: "App skill sync failed." }
+        : { status: "not-installed", skillCount: 0, updatedAt: new Date().toISOString() }
+    }));
+  });
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -95,7 +123,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:update-last-repo-path", (_event, repoPath: string) => settingsService.updateLastRepoPath(repoPath));
   ipcMain.handle("settings:list-provider-models", (_event, kind: ProviderKind) => providerRunner.listModels(kind));
-  ipcMain.handle("agents:detect", () => cliAgentRunner.detectAgents());
+  ipcMain.handle("agents:detect", () => detectAgentsWithAppSkills());
   ipcMain.handle("git:inspect-repo", (_event, repoPath: string) => gitService.inspectRepo(repoPath));
   ipcMain.handle("git:get-diff", (_event, request: GitDiffRequest) => gitService.getDiff(request));
   ipcMain.handle("conversations:list", () => storageService.listConversations());
@@ -415,6 +443,11 @@ void app.whenReady().then(async () => {
   registerIpc();
   await appMcpService.start();
   await storageService.init();
+  await detectAgentsWithAppSkills().catch((error) => {
+    void debugLogService.write("app-skills-startup-sync-error", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
   createWindow();
 
   app.on("activate", () => {

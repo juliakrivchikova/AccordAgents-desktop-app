@@ -73,6 +73,11 @@ export interface ChatAgentPermissions {
     enabled: boolean;
     rules: ChatShellPermissionRule[];
   };
+  providerNative?: {
+    "claude-code"?: {
+      allowedTools: string[];
+    };
+  };
 }
 
 export interface ChatParticipant {
@@ -161,10 +166,29 @@ export interface ChatRosterChangeRequest {
 
 export type ChatPermissionGrant = "workspaceWrite" | "webAccess";
 
-export interface ChatPermissionChangeRequest {
+export interface ChatPortablePermissionChangeRequest {
+  kind: "portable";
   reason?: string;
   permissions: ChatPermissionGrant[];
 }
+
+export interface ChatShellRulesPermissionChangeRequest {
+  kind: "shellRules";
+  reason?: string;
+  rules: ChatShellPermissionRule[];
+}
+
+export interface ChatProviderNativePermissionChangeRequest {
+  kind: "providerNative";
+  reason?: string;
+  provider: "claude-code";
+  allowedTools: string[];
+}
+
+export type ChatPermissionChangeRequest =
+  | ChatPortablePermissionChangeRequest
+  | ChatShellRulesPermissionChangeRequest
+  | ChatProviderNativePermissionChangeRequest;
 
 export interface ChatParticipantRequestInput {
   target: string;
@@ -298,6 +322,11 @@ export interface ChatAppToolApproval {
   updatedAt: string;
   approvalScope?: ChatAppToolApprovalScope;
   appliedParticipantIds?: string[];
+  resumeContext?: {
+    runId: string;
+    triggerMessageId: string;
+    participantRequestBatchId?: string;
+  };
   consumedAt?: string;
   error?: string;
 }
@@ -442,6 +471,15 @@ export interface ParticipantConfig {
   model?: string;
 }
 
+export type AppSkillSyncStatus = "not-installed" | "synced" | "skipped" | "collision" | "error";
+
+export interface AppSkillSyncHealth {
+  status: AppSkillSyncStatus;
+  skillCount: number;
+  updatedAt?: string;
+  message?: string;
+}
+
 export interface AgentHealth {
   kind: Extract<ProviderKind, "codex-cli" | "claude-code">;
   label: string;
@@ -449,6 +487,7 @@ export interface AgentHealth {
   path?: string;
   version?: string;
   error?: string;
+  appSkillSync?: AppSkillSyncHealth;
 }
 
 export interface GitRepoInfo {
