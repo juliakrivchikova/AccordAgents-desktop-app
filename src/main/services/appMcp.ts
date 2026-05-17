@@ -7,6 +7,8 @@ import { hasChatAppToolCapability } from "../../shared/appTools";
 export const APP_ROSTER_REQUEST_CHANGE_TOOL = "app_roster_request_change";
 export const APP_ROSTER_DESCRIBE_OPTIONS_TOOL = "app_roster_describe_options";
 export const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
+export const APP_CHAT_REQUEST_PARTICIPANTS_TOOL = "app_chat_request_participants";
+export const APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL = "app_chat_get_participant_request_status";
 export const APP_CHAT_GET_CONTEXT_TOOL = "app_chat_get_context";
 export const APP_CHAT_GET_PARTICIPANTS_TOOL = "app_chat_get_participants";
 export const APP_CHAT_READ_MESSAGES_TOOL = "app_chat_read_messages";
@@ -23,6 +25,8 @@ export interface AppMcpActor {
   triggerChatThreadRootId?: string;
   snapshotMaxSequence?: number;
   continuation?: boolean;
+  runId?: string;
+  participantRequestDepth?: number;
   historyMarkdownPath?: string;
   historyJsonPath?: string;
 }
@@ -40,6 +44,8 @@ type AppPermissionChangeHandler = (actor: AppMcpActor, request: unknown) => Prom
 type AppChatContextHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppChatParticipantsHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppChatMessagesHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+type AppChatParticipantRequestHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+type AppChatParticipantRequestStatusHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 
 interface JsonRpcRequest {
   jsonrpc?: unknown;
@@ -71,6 +77,8 @@ export class AppMcpService {
   private chatContextHandler?: AppChatContextHandler;
   private chatParticipantsHandler?: AppChatParticipantsHandler;
   private chatMessagesHandler?: AppChatMessagesHandler;
+  private chatParticipantRequestHandler?: AppChatParticipantRequestHandler;
+  private chatParticipantRequestStatusHandler?: AppChatParticipantRequestStatusHandler;
 
   setRosterChangeHandler(handler: AppRosterChangeHandler): void {
     this.rosterChangeHandler = handler;
@@ -94,6 +102,14 @@ export class AppMcpService {
 
   setChatMessagesHandler(handler: AppChatMessagesHandler): void {
     this.chatMessagesHandler = handler;
+  }
+
+  setChatParticipantRequestHandler(handler: AppChatParticipantRequestHandler): void {
+    this.chatParticipantRequestHandler = handler;
+  }
+
+  setChatParticipantRequestStatusHandler(handler: AppChatParticipantRequestStatusHandler): void {
+    this.chatParticipantRequestStatusHandler = handler;
   }
 
   async start(): Promise<void> {
@@ -159,6 +175,8 @@ export class AppMcpService {
       triggerChatThreadRootId: grant.triggerChatThreadRootId,
       snapshotMaxSequence: grant.snapshotMaxSequence,
       continuation: grant.continuation,
+      runId: grant.runId,
+      participantRequestDepth: grant.participantRequestDepth,
       historyMarkdownPath: grant.historyMarkdownPath,
       historyJsonPath: grant.historyJsonPath
     };
@@ -274,6 +292,81 @@ export class AppMcpService {
           type: "object",
           additionalProperties: false,
           properties: {}
+        },
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false
+        }
+      },
+      {
+        name: APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
+        title: "Request Chat Participants",
+        description:
+          "Ask one or more current chat participants to respond to a concrete prompt. The app validates policy, may request User approval, runs approved participants, and can return replies if they finish before timeout.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            requests: {
+              type: "array",
+              minItems: 1,
+              maxItems: 4,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  target: {
+                    type: "string",
+                    description: "Target participant handle, with or without @."
+                  },
+                  prompt: {
+                    type: "string",
+                    description: "Concrete question or task for the target participant."
+                  },
+                  reason: {
+                    type: "string",
+                    description: "Optional brief reason this participant input is needed."
+                  }
+                },
+                required: ["target", "prompt"]
+              }
+            },
+            timeoutMs: {
+              type: "integer",
+              minimum: 1000,
+              maximum: 300000,
+              description: "Optional bounded wait for replies. Defaults to 120000ms."
+            },
+            resumeRequester: {
+              type: "boolean",
+              description: "Whether the app should return control to the requester if replies arrive after this tool call returns. Defaults to true."
+            }
+          },
+          required: ["requests"]
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false
+        }
+      },
+      {
+        name: APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
+        title: "Get Participant Request Status",
+        description:
+          "Return current status and available replies/errors for a previous participant request. Use this to recover after timeout, interruption, approval delay, or session resume.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            requestId: {
+              type: "string",
+              description: "Optional participant request batch id. If omitted, returns recent requests made by this participant."
+            }
+          }
         },
         annotations: {
           readOnlyHint: true,
@@ -442,6 +535,8 @@ export class AppMcpService {
       record.name !== APP_ROSTER_DESCRIBE_OPTIONS_TOOL &&
       record.name !== APP_ROSTER_REQUEST_CHANGE_TOOL &&
       record.name !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
+      record.name !== APP_CHAT_REQUEST_PARTICIPANTS_TOOL &&
+      record.name !== APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL &&
       record.name !== APP_CHAT_GET_CONTEXT_TOOL &&
       record.name !== APP_CHAT_GET_PARTICIPANTS_TOOL &&
       record.name !== APP_CHAT_READ_MESSAGES_TOOL
@@ -465,6 +560,18 @@ export class AppMcpService {
         throw new Error("Chat message reading is not available.");
       }
       return this.toolTextResult(await this.chatMessagesHandler(actor, record.arguments));
+    }
+    if (record.name === APP_CHAT_REQUEST_PARTICIPANTS_TOOL) {
+      if (!this.chatParticipantRequestHandler) {
+        throw new Error("Chat participant request handling is not available.");
+      }
+      return this.toolTextResult(await this.chatParticipantRequestHandler(actor, record.arguments));
+    }
+    if (record.name === APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL) {
+      if (!this.chatParticipantRequestStatusHandler) {
+        throw new Error("Chat participant request status is not available.");
+      }
+      return this.toolTextResult(await this.chatParticipantRequestStatusHandler(actor, record.arguments));
     }
     if (record.name === APP_PERMISSIONS_REQUEST_CHANGE_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {

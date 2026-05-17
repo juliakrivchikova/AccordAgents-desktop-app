@@ -64,6 +64,8 @@ import type {
   ChatAgentPermissions,
   ChatAppToolApproval,
   ChatAppToolApprovalScope,
+  ChatParticipantRequestApprovalRequest,
+  ChatParticipantRequestBatch,
   ChatParticipant,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
@@ -151,6 +153,7 @@ const BRANCH_COMPARE_HELP = "Changes committed on the compare branch since it di
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 const APP_ROSTER_REQUEST_CHANGE_TOOL = "app_roster_request_change";
+const APP_CHAT_REQUEST_PARTICIPANTS_TOOL = "app_chat_request_participants";
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "ai-consensus.sidebarCollapsed";
 const CHAT_AGENT_MODE_OPTIONS: Array<{ value: ChatAgentMode; label: string }> = [
   { value: "default", label: "Default" },
@@ -3056,14 +3059,16 @@ function ChatAppToolApprovalCard(props: {
   onRespond: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => void;
 }): JSX.Element {
   const permissionRequest = chatPermissionChangeRequest(props.approval);
+  const participantRequest = chatParticipantRequestApprovalRequest(props.approval);
   const added = props.approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL && "operations" in props.approval.request
     ? props.approval.request.operations.filter((operation) => operation.type === "add")
     : [];
+  const approvalKind = permissionRequest ? "Permission request" : participantRequest ? "Participant request" : "App tool request";
   return (
     <section className="chat-app-tool-approval-card" aria-label={props.approval.summary}>
       <div className="chat-app-tool-approval-head">
         <div>
-          <span>{permissionRequest ? "Permission request" : "App tool request"} · @{props.approval.requesterHandle}</span>
+          <span>{approvalKind} · @{props.approval.requesterHandle}</span>
           <strong>{props.approval.summary}</strong>
         </div>
         <StatusBadge tone="warning">approval needed</StatusBadge>
@@ -3071,6 +3076,8 @@ function ChatAppToolApprovalCard(props: {
       {props.approval.request.reason && <p>{props.approval.request.reason}</p>}
       {permissionRequest ? (
         <ChatAppToolPermissionOperation request={permissionRequest} />
+      ) : participantRequest ? (
+        <ChatAppToolParticipantRequestOperation request={participantRequest} requesterHandle={props.approval.requesterHandle} />
       ) : (
         <div className="chat-app-tool-roster-list">
           {added.map((operation, index) => (
@@ -3083,6 +3090,11 @@ function ChatAppToolApprovalCard(props: {
           Applies only to @{props.approval.requesterHandle}. Allow once expires after the next run; chat grants stay enabled for this participant in this chat.
         </p>
       )}
+      {participantRequest && (
+        <p className="chat-app-tool-scope-note">
+          Approval runs the requested participant{participantRequest.requests.length === 1 ? "" : "s"} and then returns to @{props.approval.requesterHandle} after replies or errors. Chat grants apply only to this requester and target set.
+        </p>
+      )}
       <div className="chat-app-tool-approval-actions">
         <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onRespond(props.approval.id, false)}>
           Deny
@@ -3093,7 +3105,11 @@ function ChatAppToolApprovalCard(props: {
         </Button>
         <Button size="sm" disabled={props.busy} onClick={() => props.onRespond(props.approval.id, true, "chat")}>
           <CheckCircle2 size={16} />
-          {permissionRequest ? `Allow @${props.approval.requesterHandle} in this chat` : "Allow for chat"}
+          {permissionRequest
+            ? `Allow @${props.approval.requesterHandle} in this chat`
+            : participantRequest
+              ? `Allow @${props.approval.requesterHandle} to ask ${participantRequest.requests.length === 1 ? `@${participantRequest.requests[0].target.replace(/^@/, "")}` : "these targets"}`
+              : "Allow for chat"}
         </Button>
       </div>
     </section>
@@ -3116,6 +3132,19 @@ function ChatAppToolPermissionOperation({ request }: { request: ChatPermissionCh
         <div className="chat-app-tool-roster-item" key={permission}>
           <strong>{chatPermissionGrantLabel(permission)}</strong>
           <span>{permission === "workspaceWrite" ? "Allow file edits in the selected repository." : "Allow web search and fetch when the CLI supports it."}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ChatAppToolParticipantRequestOperation({ request, requesterHandle }: { request: ChatParticipantRequestApprovalRequest; requesterHandle: string }): JSX.Element {
+  return (
+    <div className="chat-app-tool-roster-list">
+      {request.requests.map((item, index) => (
+        <div className="chat-app-tool-roster-item" key={`${item.target}-${index}`}>
+          <strong>@{requesterHandle} asks @{item.target.replace(/^@/, "")}</strong>
+          <span>{item.prompt}</span>
         </div>
       ))}
     </div>
@@ -3145,6 +3174,7 @@ function ChatMessageItem(props: {
   const pending = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "pending");
   const approved = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "approved");
   const choice = message.metadata?.pendingChoice;
+  const participantRequest = message.metadata?.participantRequest;
   const allPendingIds = pending.map((mention) => mention.targetParticipantId);
   const displayContent = chatDisplayContent(message, author);
   const showThreadActions = !props.inThread && message.role !== "system" && Boolean(props.onOpenThread);
@@ -3211,6 +3241,12 @@ function ChatMessageItem(props: {
           <div className="message-content">
             <MarkdownText content={displayContent} />
           </div>
+          {participantRequest && (
+            <div className="chat-approval-note">
+              <span>{participantRequestStatusLabel(participantRequest)}</span>
+              {participantRequest.source === "inferred" && <StatusBadge tone="neutral">inferred request</StatusBadge>}
+            </div>
+          )}
           {approved.length > 0 && (
             <div className="chat-approval-note">
               <span>Approved: {approved.map((mention) => `@${mention.targetHandle}`).join(", ")}</span>
@@ -5967,14 +6003,41 @@ function chatAppToolApprovals(conversation: Conversation | undefined): ChatAppTo
     const isPermissionRequest =
       approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
       Boolean(chatPermissionChangeRequest(approval as ChatAppToolApproval));
+    const isParticipantRequest =
+      approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL &&
+      Boolean(chatParticipantRequestApprovalRequest(approval as ChatAppToolApproval));
     return (
       typeof approval.id === "string" &&
       typeof approval.requesterHandle === "string" &&
       typeof approval.summary === "string" &&
       approval.status === "pending" &&
-      (isRosterRequest || isPermissionRequest)
+      (isRosterRequest || isPermissionRequest || isParticipantRequest)
     );
   });
+}
+
+function chatParticipantRequestApprovalRequest(approval: ChatAppToolApproval): ChatParticipantRequestApprovalRequest | undefined {
+  if (approval.toolName !== APP_CHAT_REQUEST_PARTICIPANTS_TOOL) {
+    return undefined;
+  }
+  const request = approval.request as Partial<ChatParticipantRequestApprovalRequest>;
+  return Array.isArray(request.requests) &&
+    request.requests.every((item) => (
+      item &&
+      typeof item === "object" &&
+      !Array.isArray(item) &&
+      typeof (item as { target?: unknown }).target === "string" &&
+      typeof (item as { prompt?: unknown }).prompt === "string"
+    ))
+    ? {
+        reason: typeof request.reason === "string" ? request.reason : undefined,
+        requests: request.requests,
+        resumeRequester: request.resumeRequester,
+        source: request.source,
+        requestMessageId: request.requestMessageId,
+        batchId: request.batchId
+      }
+    : undefined;
 }
 
 function chatPermissionChangeRequest(approval: ChatAppToolApproval): ChatPermissionChangeRequest | undefined {
@@ -5993,6 +6056,32 @@ function chatPermissionChangeRequest(approval: ChatAppToolApproval): ChatPermiss
 
 function chatPermissionGrantLabel(permission: ChatPermissionGrant): string {
   return permission === "workspaceWrite" ? "File editing" : "Web access";
+}
+
+function participantRequestStatusLabel(batch: ChatParticipantRequestBatch): string {
+  const targets = batch.items.map((item) => `@${item.targetHandle}`).join(", ");
+  if (batch.status === "pending_approval") {
+    return `Approval needed for ${targets}`;
+  }
+  if (batch.status === "running") {
+    return `Running ${targets}`;
+  }
+  if (batch.status === "answered") {
+    return `Answered by ${targets}`;
+  }
+  if (batch.status === "resuming_requester") {
+    return `Returning to @${batch.requesterHandle}`;
+  }
+  if (batch.status === "completed") {
+    return "Completed";
+  }
+  if (batch.status === "denied") {
+    return "Denied";
+  }
+  if (batch.status === "failed") {
+    return "Failed";
+  }
+  return "Interrupted";
 }
 
 function chatContextUsageByParticipant(conversation: Conversation | undefined): Map<string, AgentContextUsage> {
@@ -6062,12 +6151,15 @@ function formatContextTokenCount(tokens: number): string {
 }
 
 function chatTopLevelMessages(conversation: Conversation): Conversation["messages"] {
-  return conversation.messages.filter((message) => !chatVisualThreadRootId(message));
+  return conversation.messages.filter((message) => !isHiddenChatMessage(message) && !chatVisualThreadRootId(message));
 }
 
 function chatThreadSummaryMap(conversation: Conversation): Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }> {
   const summaries = new Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }>();
   for (const message of conversation.messages) {
+    if (isHiddenChatMessage(message)) {
+      continue;
+    }
     const rootId = chatVisualThreadRootId(message);
     if (!rootId) {
       continue;
@@ -6083,6 +6175,21 @@ function chatThreadSummaryMap(conversation: Conversation): Map<string, { replies
     summary.replies.sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
   }
   return summaries;
+}
+
+function isHiddenChatMessage(message: Conversation["messages"][number]): boolean {
+  const content = message.content.trim();
+  if (message.role === "participant") {
+    return /^(?:participant request is awaiting user approval|awaiting user approval|waiting for user approval)\.?$/i.test(content);
+  }
+  if (message.role !== "system") {
+    return false;
+  }
+  return (
+    /^Denied app tool request from @[^:]+:\s+@[^.]+\s+asks\s+@[^.]+\.?$/i.test(content) ||
+    /^Allowed @[^ ]+ to ask @.+ in this chat\. The requester will resume after replies or errors\.?$/i.test(content) ||
+    /^Allowed once and started participant request from @[^:]+:\s+@[^.]+\s+asks\s+@[^.]+\. The requester will resume after replies or errors\.?$/i.test(content)
+  );
 }
 
 function chatContinuedMentionRequestIds(conversation: Conversation): Set<string> {
@@ -6123,6 +6230,9 @@ function chatRoleLabel(roles: ChatRoleConfig[], participant: Pick<ChatParticipan
 }
 
 function chatDisplayContent(message: Conversation["messages"][number], author: string): string {
+  if (message.metadata?.participantRequest) {
+    return participantRequestDisplayContent(message.metadata.participantRequest);
+  }
   if (message.role !== "participant") {
     return message.content;
   }
@@ -6141,6 +6251,10 @@ function chatDisplayContent(message: Conversation["messages"][number], author: s
     next.shift();
   }
   return stripChatControlBlocks(next.join("\n"));
+}
+
+function participantRequestDisplayContent(batch: ChatParticipantRequestBatch): string {
+  return batch.items.map((item) => `@${item.targetHandle} ${item.prompt}`.trim()).join("\n");
 }
 
 function stripChatControlBlocks(content: string): string {

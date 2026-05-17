@@ -10,10 +10,16 @@ import type {
   ChatAppToolApproval,
   ChatAppToolApprovalPolicy,
   ChatAppToolApprovalRequest,
+  ChatAppToolApprovalScope,
   ChatAppToolCapability,
   ChatChoiceOption,
   ChatMessage,
   ChatParticipant,
+  ChatParticipantRequestApprovalRequest,
+  ChatParticipantRequestBatch,
+  ChatParticipantRequestInput,
+  ChatParticipantRequestItem,
+  ChatParticipantRequestStatus,
   ChatParticipantSession,
   ChatPermissionChangeRequest,
   ChatPermissionGrant,
@@ -52,7 +58,9 @@ import { CliAgentRunner } from "./cliAgents";
 import type { CliAgentOutputEvent, CliAgentRoleOptions } from "./cliAgents";
 import {
   APP_CHAT_GET_CONTEXT_TOOL,
+  APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
   APP_CHAT_GET_PARTICIPANTS_TOOL,
+  APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_CHAT_READ_MESSAGES_TOOL,
   APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
   APP_ROSTER_DESCRIBE_OPTIONS_TOOL,
@@ -72,9 +80,17 @@ const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const CHAT_ADMINISTRATOR_ROLE_ID = "administrator";
 const CHAT_ADMINISTRATOR_HANDLE = "admin";
 const CHAT_ROSTER_CHANGE_MAX_OPERATIONS = 12;
+const CHAT_PARTICIPANT_REQUEST_MAX_ITEMS = 4;
+const CHAT_PARTICIPANT_REQUEST_MAX_DEPTH = 2;
+const CHAT_PARTICIPANT_REQUEST_RATE_WINDOW_MS = 60_000;
+const CHAT_PARTICIPANT_REQUEST_RATE_LIMIT = 8;
+const CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS = 120_000;
+const CHAT_PARTICIPANT_REQUEST_WAIT_MAX_MS = 300_000;
 const CHAT_CONTEXT_MCP_TOOL_NAMES = [
   APP_CHAT_GET_CONTEXT_TOOL,
   APP_CHAT_GET_PARTICIPANTS_TOOL,
+  APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
+  APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
   APP_CHAT_READ_MESSAGES_TOOL
 ];
 const CHAT_APP_MCP_TOOL_NAMES = [
@@ -99,6 +115,8 @@ interface ChatAppMcpGateway {
     triggerChatThreadRootId?: string;
     snapshotMaxSequence?: number;
     continuation?: boolean;
+    runId?: string;
+    participantRequestDepth?: number;
     historyMarkdownPath?: string;
     historyJsonPath?: string;
   }): { url: string; token: string } | undefined;
@@ -119,6 +137,8 @@ interface ChatAppMcpActor {
   triggerChatThreadRootId?: string;
   snapshotMaxSequence?: number;
   continuation?: boolean;
+  runId?: string;
+  participantRequestDepth?: number;
   historyMarkdownPath?: string;
   historyJsonPath?: string;
 }
@@ -142,9 +162,32 @@ interface PreparedPermissionChange {
   summary: string;
 }
 
+interface PreparedParticipantRequest {
+  request: ChatParticipantRequestApprovalRequest;
+  requester: ChatParticipant;
+  targets: ChatParticipant[];
+  batch: ChatParticipantRequestBatch;
+  requestMessage: ChatMessage;
+  summary: string;
+  timeoutMs: number;
+}
+
+interface ParticipantRequestRunResult {
+  batch: ChatParticipantRequestBatch;
+  replies: Array<{
+    targetHandle: string;
+    messageId?: string;
+    content?: string;
+    error?: string;
+  }>;
+}
+
 export class ChatService {
   private readonly saveQueues = new Map<string, Promise<void>>();
   private readonly appMcpTokens = new Map<string, string>();
+  private readonly participantRequestRunners = new Map<string, Promise<ParticipantRequestRunResult>>();
+  private readonly participantRequestAutoResumes = new Set<string>();
+  private readonly participantTurnQueues = new Map<string, Promise<void>>();
 
   constructor(
     private readonly storage: StorageService,
@@ -158,6 +201,12 @@ export class ChatService {
   async hydrateContextUsage(conversation: Conversation): Promise<Conversation> {
     if (conversation.kind !== "chat") {
       return conversation;
+    }
+    let interruptedRequests = false;
+    for (const message of conversation.messages) {
+      if (this.markOrphanedParticipantRequestInterrupted(message)) {
+        interruptedRequests = true;
+      }
     }
     const participants = new Map(this.chatParticipants(conversation).map((participant) => [participant.id, participant]));
     const existingUsage = this.agentContextUsageByParticipant(conversation);
@@ -187,16 +236,21 @@ export class ChatService {
         [participant.id]: usage
       };
     }
-    if (!nextUsage) {
+    if (!nextUsage && !interruptedRequests) {
       return conversation;
     }
-    return {
+    const hydrated = {
       ...conversation,
       metadata: {
         ...conversation.metadata,
-        agentContextUsageByParticipant: nextUsage
+        ...(nextUsage ? { agentContextUsageByParticipant: nextUsage } : {})
       }
     };
+    if (interruptedRequests) {
+      hydrated.updatedAt = new Date().toISOString();
+      await this.saveConversation(hydrated);
+    }
+    return hydrated;
   }
 
   async createConversation(request: CreateChatConversationRequest): Promise<StartReviewResult> {
@@ -356,6 +410,118 @@ export class ChatService {
       status: "pending_user_approval",
       approvalId: approval.id,
       summary: prepared.summary
+    };
+  }
+
+  async requestParticipantsFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+    await this.waitForQueuedSave(actor.conversationId);
+    const conversation = await this.requireChat(actor.conversationId);
+    const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+    if (!requester) {
+      throw new Error("The requesting participant is no longer in this chat.");
+    }
+
+    let prepared: PreparedParticipantRequest;
+    try {
+      prepared = this.prepareParticipantRequest(conversation, requester, this.normalizeParticipantRequest(rawRequest), actor, "mcp");
+    } catch (error) {
+      return this.participantRequestFailedToolResult(error instanceof Error ? error.message : String(error));
+    }
+    conversation.messages.push(prepared.requestMessage);
+    const pendingTargets = prepared.batch.items.filter((item) => item.status === "pending_approval");
+    if (pendingTargets.length > 0) {
+      const approval = this.newAppToolApproval(
+        conversation,
+        requester,
+        APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
+        "participants.request",
+        {
+          ...prepared.request,
+          requests: prepared.request.requests.filter((request) =>
+            pendingTargets.some((item) => item.targetHandle.toLowerCase() === request.target.replace(/^@/, "").toLowerCase())
+          ),
+          requestMessageId: prepared.requestMessage.id,
+          batchId: prepared.batch.id
+        },
+        this.participantRequestSummary(requester.handle, pendingTargets.map((item) => item.targetHandle)),
+        "pending"
+      );
+      this.upsertAppToolApproval(conversation, approval);
+    }
+    conversation.updatedAt = new Date().toISOString();
+    await this.saveConversation(conversation);
+
+    const hasRunningTargets = prepared.batch.items.some((item) => item.status === "running");
+    if (!hasRunningTargets) {
+      return this.participantRequestToolResult(conversation, prepared.requestMessage.id, {
+        status: "pending_approval",
+        approvalRequired: true
+      });
+    }
+
+    const runner = this.startParticipantRequestRunner(conversation.id, prepared.requestMessage.id, actor.runId ?? randomUUID(), prepared.batch.depth);
+    const result = await this.awaitParticipantRequestRunner(runner, prepared.timeoutMs);
+    if (result.timedOut) {
+      void runner.then(() => this.autoResumeParticipantRequest(conversation.id, prepared.requestMessage.id)).catch((error) => {
+        void this.debugLogs.write("chat.participant-request.auto-resume.error", {
+          conversationId: conversation.id,
+          requestMessageId: prepared.requestMessage.id,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
+      const latest = await this.requireChat(conversation.id);
+      return this.participantRequestToolResult(latest, prepared.requestMessage.id, { status: "running" });
+    }
+
+    const latest = await this.requireChat(conversation.id);
+    const latestBatch = latest.messages.find((message) => message.id === prepared.requestMessage.id)?.metadata?.participantRequest;
+    const hasUnfinishedItems = latestBatch?.items.some((item) => item.status === "pending_approval" || item.status === "running" || item.status === "resuming_requester");
+    if (!hasUnfinishedItems) {
+      this.updateParticipantRequestBatch(latest, prepared.requestMessage.id, (batch) => ({
+        ...batch,
+        completedInToolCall: true,
+        status: "completed",
+        updatedAt: new Date().toISOString()
+      }));
+    }
+    await this.saveConversation(latest);
+    return this.participantRequestToolResult(latest, prepared.requestMessage.id, { status: hasUnfinishedItems ? "pending_approval" : "completed" });
+  }
+
+  async participantRequestStatusForTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+    await this.waitForQueuedSave(actor.conversationId);
+    const conversation = await this.requireChat(actor.conversationId);
+    const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+    if (!requester) {
+      throw new Error("The requesting participant is no longer in this chat.");
+    }
+    const record = rawRequest && typeof rawRequest === "object" && !Array.isArray(rawRequest)
+      ? rawRequest as { requestId?: unknown }
+      : {};
+    const requestId = typeof record.requestId === "string" ? record.requestId.trim() : "";
+    let changed = false;
+    for (const message of conversation.messages) {
+      const batch = message.metadata?.participantRequest;
+      if (!batch || (requestId && batch.id !== requestId)) {
+        continue;
+      }
+      if (this.markOrphanedParticipantRequestInterrupted(message)) {
+        changed = true;
+      }
+    }
+    if (changed) {
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+    }
+    const batches = conversation.messages
+      .map((message) => message.metadata?.participantRequest)
+      .filter((batch): batch is ChatParticipantRequestBatch => Boolean(batch))
+      .filter((batch) => requestId ? batch.id === requestId : batch.requesterParticipantId === requester.id)
+      .slice(-10)
+      .reverse();
+    return {
+      ok: true,
+      requests: batches.map((batch) => this.participantRequestBatchForTool(conversation, batch))
     };
   }
 
@@ -603,20 +769,74 @@ export class ChatService {
     }
     const now = new Date().toISOString();
     if (!request.approve) {
+      if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && this.isParticipantRequestApprovalRequest(approval.request)) {
+        this.applyParticipantRequestApprovalDecision(conversation, approval, "denied", request.scope);
+      }
       this.upsertAppToolApproval(conversation, {
         ...approval,
         status: "denied",
         updatedAt: now
       });
-      conversation.messages.push(this.message("system", `Denied app tool request from @${approval.requesterHandle}: ${approval.summary}.`, undefined, {
-        threadId: "system"
-      }));
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
+      const deniedParticipantRequest = this.isParticipantRequestApprovalRequest(approval.request) ? approval.request : undefined;
+      if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && deniedParticipantRequest?.requestMessageId) {
+        const requestMessageId = deniedParticipantRequest.requestMessageId;
+        void this.autoResumeParticipantRequest(conversation.id, requestMessageId).catch((error) => {
+          void this.debugLogs.write("chat.participant-request.deny-auto-resume.error", {
+            conversationId: conversation.id,
+            requestMessageId,
+            message: error instanceof Error ? error.message : String(error)
+          });
+        });
+      }
       return conversation;
     }
 
     const scope = request.scope === "chat" ? "chat" : "once";
+    if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && this.isParticipantRequestApprovalRequest(approval.request)) {
+      this.upsertAppToolApproval(conversation, {
+        ...approval,
+        status: "approved",
+        approvalScope: scope,
+        appliedParticipantIds: this.participantRequestApprovalTargetIds(conversation, approval.request),
+        updatedAt: now
+      });
+      if (scope === "chat") {
+        const targetIds = this.participantRequestApprovalTargetIds(conversation, approval.request);
+        for (const targetParticipantId of targetIds) {
+          this.upsertAppToolApprovalPolicy(conversation, {
+            id: randomUUID(),
+            participantId: approval.requesterParticipantId,
+            roleConfigId: approval.requesterRoleConfigId,
+            toolName: approval.toolName,
+            capability: approval.capability,
+            targetParticipantId,
+            scope: "chat",
+            createdAt: now,
+            updatedAt: now
+          });
+        }
+      }
+      const requestMessageId = approval.request.requestMessageId;
+      if (requestMessageId) {
+        this.applyParticipantRequestApprovalDecision(conversation, approval, "approved", scope);
+      }
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      if (requestMessageId) {
+        const batch = conversation.messages.find((message) => message.id === requestMessageId)?.metadata?.participantRequest;
+        const runner = this.startParticipantRequestRunner(conversation.id, requestMessageId, randomUUID(), batch?.depth ?? 1);
+        void runner.then(() => this.autoResumeParticipantRequest(conversation.id, requestMessageId)).catch((error) => {
+          void this.debugLogs.write("chat.participant-request.approval-run.error", {
+            conversationId: conversation.id,
+            requestMessageId,
+            message: error instanceof Error ? error.message : String(error)
+          });
+        });
+      }
+      return conversation;
+    }
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === approval.requesterParticipantId);
     const isPermissionApproval = approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL;
     const prepared = isPermissionApproval
@@ -772,7 +992,7 @@ export class ChatService {
         this.emitProgress(runId, progress, "debate", `Returning to @${requester.handle}.`, {
           participantLabel: `@${requester.handle}`
         });
-        const messages = await this.runParticipantTurn(conversation, requester, sourceMessage, runId, signal, progress, {
+        const messages = await this.runParticipantTurnSerialized(conversation, requester, sourceMessage, runId, signal, progress, {
           continuation: true,
           warnings
         });
@@ -841,7 +1061,7 @@ export class ChatService {
     this.emitProgress(runId, progress, "debate", `Returning choice to @${requester.handle}.`, {
       participantLabel: `@${requester.handle}`
     });
-    const messages = await this.runParticipantTurn(conversation, requester, userMessage, runId, signal, progress, {
+    const messages = await this.runParticipantTurnSerialized(conversation, requester, userMessage, runId, signal, progress, {
       continuation: true,
       warnings
     });
@@ -886,7 +1106,7 @@ export class ChatService {
     };
     await Promise.all(
       participants.map(async (participant) => {
-        const messages = await this.runParticipantTurn(conversation, participant, triggerMessage, runId, signal, progress, {
+        const messages = await this.runParticipantTurnSerialized(conversation, participant, triggerMessage, runId, signal, progress, {
           warnings,
           promptConversation: turnSnapshot,
           workspacePath
@@ -910,7 +1130,7 @@ export class ChatService {
     runId: string,
     signal: AbortSignal | undefined,
     progress: ProgressCallback | undefined,
-    options: { continuation?: boolean; warnings: string[]; promptConversation?: Conversation; workspacePath?: string }
+    options: { continuation?: boolean; warnings: string[]; promptConversation?: Conversation; workspacePath?: string; participantRequestDepth?: number }
   ): Promise<ChatMessage[]> {
     let session = await this.sessionForParticipant(conversation, participant);
     const promptConversation = options.promptConversation ?? conversation;
@@ -959,6 +1179,8 @@ export class ChatService {
       triggerChatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
       snapshotMaxSequence: Math.max(0, promptConversation.messages.length - 1),
       continuation: Boolean(options.continuation),
+      runId,
+      participantRequestDepth: options.participantRequestDepth ?? 0,
       historyMarkdownPath: path.join(workspacePath, "history.md"),
       historyJsonPath: path.join(workspacePath, "history.json")
     };
@@ -1129,9 +1351,9 @@ export class ChatService {
         options.warnings.push(`@${participant.handle}: ${result.error}`);
       }
       if (result.ok) {
-        const pendingMentions = this.pendingMentionsFromAgentReply(conversation, participant, result.content);
+        const pendingMentions: ChatPendingMention[] = [];
         const pendingChoice = this.pendingChoiceFromAgentReply(result.content);
-        const requesterContinuationRequested = pendingMentions.length > 0 ? this.requesterContinuationRequested(result.content) : false;
+        const requesterContinuationRequested = false;
         if (pendingMentions.length > 0 || pendingChoice) {
           participantMessage.metadata = {
             ...participantMessage.metadata,
@@ -1141,6 +1363,7 @@ export class ChatService {
             requesterContinuationRequested: requesterContinuationRequested || undefined
           };
         }
+        this.logInferredParticipantRequests(conversation, participant, participantMessage);
         session.lastSyncedMessageId = participantMessage.id;
       }
       this.upsertSession(conversation, session);
@@ -1256,10 +1479,10 @@ export class ChatService {
       this.appToolPromptPolicy(session),
       "",
       "Response rules:",
-      "- You may cite participant handles in normal prose for attribution; those citations do not request dispatch.",
-      "- To ask another participant to respond, include a dedicated `Participant requests:` block with one bullet per requested participant. Use `Participant requests: none` when you cite or identify participants but do not need follow-up.",
-      "- If control should return to the requester after the approved participants reply, add the exact line `Return to requester after replies: yes`.",
-      "- Mentioned agents and requester continuations will not run until User approves them.",
+      "- You may cite participant handles in normal prose for attribution; use the participant request MCP tool when you need another participant to answer.",
+      "- Do not emit `Participant requests:` or `Return to requester after replies:` protocol blocks. They are legacy text and are not the current dispatch mechanism.",
+      "- When a participant request MCP call returns `pending_approval` or `running`, end your turn unless User explicitly asked you to continue without that answer. The app will return control to you when replies or errors arrive.",
+      "- Do not repeatedly poll participant request status in the same turn. Use the status tool only to recover a previous request after a timeout, interruption, approval delay, or resumed session.",
       "- When User must pick one option before you can continue, include one dedicated `User choice:` block after your explanation. Format it as lines `T: short title`, `Q: question`, `O1: option label | optional description`, `O2: option label | optional description`, and optionally `R: O1`. Use at least two options. Ask at most one user choice in a message.",
       "- The UI also lets User write a custom answer instead of choosing your suggestions. After User confirms, the app will send the selected option or custom answer back to you in this chat.",
       `- ${this.confirmationBrevityPolicy()}`,
@@ -1274,6 +1497,9 @@ export class ChatService {
     const lines = [
       "App MCP tools: use the connected `ai_consensus` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
       "Chat context MCP tools: `app_chat_get_context`, `app_chat_get_participants`, and `app_chat_read_messages` are read-only and available for the current chat. Prefer them over full history files when you need roster details, active thread metadata, or prior messages.",
+      "Participant request MCP tools: `app_chat_request_participants` and `app_chat_get_participant_request_status` are available for asking current chat participants for input and recovering their replies. Request JSON is `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
+      "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
+      "If `app_chat_request_participants` returns replies before timeout, use them in this turn. If it returns `pending_approval` or `running`, stop after a brief status note; the app will auto-resume you after replies or errors arrive.",
       "Permission MCP tool: `app_permissions_request_change` is available when this participant needs User approval for file-editing or web-access permissions.",
       "Required permission workflow: if the current task needs a blocked capability, call `app_permissions_request_change` before answering that the work cannot be done. Send JSON like `{ \"permissions\": [\"webAccess\"], \"reason\": \"Need live web lookup to answer User's trademark question.\" }` or `{ \"permissions\": [\"workspaceWrite\"], \"reason\": \"Need to edit the requested file.\" }`.",
       "After a permission MCP call, the app will ask User to approve. If the result is pending approval, say only that the permission request is awaiting User approval; do not claim the permission was granted until the tool result or a later app message confirms approval."
@@ -1281,7 +1507,7 @@ export class ChatService {
     if (!hasChatAppToolCapability(session.roleAppToolCapabilities, "participants.manage")) {
       return [
         ...lines,
-        "App tools: no chat-management app tools are available to this participant."
+        "Roster management app tools are not available to this participant."
       ].join("\n");
     }
     return [
@@ -2137,6 +2363,568 @@ export class ChatService {
     return nextParticipant;
   }
 
+  private normalizeParticipantRequest(raw: unknown): {
+    requests: ChatParticipantRequestInput[];
+    timeoutMs: number;
+    resumeRequester: boolean;
+  } {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error("Participant request must be an object.");
+    }
+    const record = raw as { requests?: unknown; timeoutMs?: unknown; resumeRequester?: unknown };
+    if (!Array.isArray(record.requests) || record.requests.length === 0) {
+      throw new Error("Participant request needs at least one target.");
+    }
+    if (record.requests.length > CHAT_PARTICIPANT_REQUEST_MAX_ITEMS) {
+      throw new Error(`Participant request can target at most ${CHAT_PARTICIPANT_REQUEST_MAX_ITEMS} participants.`);
+    }
+    const requests: ChatParticipantRequestInput[] = [];
+    for (const item of record.requests) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        throw new Error("Each participant request item must be an object.");
+      }
+      const candidate = item as { target?: unknown; prompt?: unknown; reason?: unknown };
+      const target = typeof candidate.target === "string" ? candidate.target.trim().replace(/^@/, "") : "";
+      const prompt = typeof candidate.prompt === "string" ? candidate.prompt.trim() : "";
+      if (!HANDLE_PATTERN.test(target)) {
+        throw new Error(`Invalid participant target: ${String(candidate.target ?? "")}.`);
+      }
+      if (!prompt) {
+        throw new Error(`Participant request for @${target} needs a prompt.`);
+      }
+      requests.push({
+        target,
+        prompt: prompt.slice(0, 2000),
+        reason: typeof candidate.reason === "string" ? candidate.reason.trim().slice(0, 500) || undefined : undefined
+      });
+    }
+    return {
+      requests,
+      timeoutMs: this.optionalBoundedPositiveInteger(
+        record.timeoutMs,
+        "timeoutMs",
+        CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS,
+        CHAT_PARTICIPANT_REQUEST_WAIT_MAX_MS
+      ),
+      resumeRequester: typeof record.resumeRequester === "boolean" ? record.resumeRequester : true
+    };
+  }
+
+  private prepareParticipantRequest(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    normalized: { requests: ChatParticipantRequestInput[]; timeoutMs: number; resumeRequester: boolean },
+    actor: ChatAppMcpActor,
+    source: "mcp" | "inferred"
+  ): PreparedParticipantRequest {
+    const depth = (actor.participantRequestDepth ?? 0) + 1;
+    const limitError = this.participantRequestLimitError(conversation, requester, actor, depth);
+    if (limitError) {
+      throw new Error(limitError);
+    }
+    const participants = this.chatParticipants(conversation);
+    const targets = new Map<string, ChatParticipant>();
+    const requests: ChatParticipantRequestInput[] = [];
+    for (const request of normalized.requests) {
+      const target = participants.find((participant) => participant.handle.toLowerCase() === request.target.toLowerCase());
+      if (!target) {
+        throw new Error(`No participant named @${request.target}.`);
+      }
+      if (target.id === requester.id) {
+        throw new Error("A participant cannot request itself.");
+      }
+      if (targets.has(target.id)) {
+        continue;
+      }
+      targets.set(target.id, target);
+      requests.push({ ...request, target: target.handle });
+    }
+    if (targets.size === 0) {
+      throw new Error("Participant request did not include any runnable targets.");
+    }
+
+    const now = new Date().toISOString();
+    const batchId = randomUUID();
+    const items: ChatParticipantRequestItem[] = Array.from(targets.values()).map((target) => {
+      const request = requests.find((item) => item.target.toLowerCase() === target.handle.toLowerCase());
+      return {
+        targetParticipantId: target.id,
+        targetHandle: target.handle,
+        prompt: request?.prompt ?? "",
+        reason: request?.reason,
+        status: this.matchingAppToolApprovalPolicy(conversation, requester, APP_CHAT_REQUEST_PARTICIPANTS_TOOL, "participants.request", target.id)
+          ? "running"
+          : "pending_approval",
+        createdAt: now,
+        updatedAt: now
+      };
+    });
+    const batch: ChatParticipantRequestBatch = {
+      id: batchId,
+      requesterParticipantId: requester.id,
+      requesterHandle: requester.handle,
+      source,
+      resumeRequester: source === "inferred" ? true : normalized.resumeRequester,
+      status: this.rollupParticipantRequestStatus(items),
+      depth,
+      createdAt: now,
+      updatedAt: now,
+      triggerMessageId: actor.triggerMessageId,
+      items
+    };
+    const requestMessage = this.message(
+      "participant",
+      this.formatParticipantRequestMessage(requester.handle, items),
+      { id: requester.id, kind: requester.kind, label: `@${requester.handle}`, model: requester.model },
+      {
+        threadId: actor.triggerThreadId ?? actor.triggerMessageId ?? batchId,
+        parentMessageId: actor.triggerMessageId,
+        chatThreadRootId: actor.triggerChatThreadRootId,
+        sourceMessageId: actor.triggerMessageId,
+        participantRequest: batch
+      }
+    );
+    const request: ChatParticipantRequestApprovalRequest = {
+      requests,
+      resumeRequester: batch.resumeRequester,
+      source,
+      requestMessageId: requestMessage.id,
+      batchId
+    };
+    return {
+      request,
+      requester,
+      targets: Array.from(targets.values()),
+      batch,
+      requestMessage,
+      summary: this.participantRequestSummary(requester.handle, Array.from(targets.values()).map((target) => target.handle)),
+      timeoutMs: normalized.timeoutMs
+    };
+  }
+
+  private participantRequestLimitError(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    actor: ChatAppMcpActor,
+    depth: number
+  ): string | undefined {
+    if (depth > CHAT_PARTICIPANT_REQUEST_MAX_DEPTH) {
+      return `max depth (${CHAT_PARTICIPANT_REQUEST_MAX_DEPTH}) reached`;
+    }
+    if (actor.triggerMessageId && this.participantRequestBatches(conversation).some((batch) =>
+      batch.requesterParticipantId === requester.id &&
+      batch.triggerMessageId === actor.triggerMessageId &&
+      batch.source === "mcp"
+    )) {
+      return "one active request batch is already attached to this requester turn";
+    }
+    const threshold = Date.now() - CHAT_PARTICIPANT_REQUEST_RATE_WINDOW_MS;
+    const recent = this.participantRequestBatches(conversation).filter((batch) => Date.parse(batch.createdAt) >= threshold);
+    if (recent.length >= CHAT_PARTICIPANT_REQUEST_RATE_LIMIT) {
+      return `participant request rate limit (${CHAT_PARTICIPANT_REQUEST_RATE_LIMIT}/minute) reached`;
+    }
+    return undefined;
+  }
+
+  private participantRequestSummary(requesterHandle: string, targetHandles: string[]): string {
+    return `@${requesterHandle} asks ${this.formatHandleList(targetHandles.map((handle) => `@${handle}`))}`;
+  }
+
+  private participantRequestApprovalTargetIds(
+    conversation: Conversation,
+    request: ChatParticipantRequestApprovalRequest
+  ): string[] {
+    const participants = this.chatParticipants(conversation);
+    const ids: string[] = [];
+    for (const item of request.requests) {
+      const targetHandle = item.target.replace(/^@/, "");
+      const target = participants.find((participant) => participant.handle.toLowerCase() === targetHandle.toLowerCase());
+      if (target && !ids.includes(target.id)) {
+        ids.push(target.id);
+      }
+    }
+    return ids;
+  }
+
+  private applyParticipantRequestApprovalDecision(
+    conversation: Conversation,
+    approval: ChatAppToolApproval,
+    decision: "approved" | "denied",
+    _scope?: ChatAppToolApprovalScope
+  ): void {
+    if (!this.isParticipantRequestApprovalRequest(approval.request) || !approval.request.requestMessageId) {
+      return;
+    }
+    const targetIds = new Set(this.participantRequestApprovalTargetIds(conversation, approval.request));
+    const now = new Date().toISOString();
+    this.updateParticipantRequestBatch(conversation, approval.request.requestMessageId, (batch) => {
+      const items = batch.items.map((item) => {
+        if (!targetIds.has(item.targetParticipantId) || item.status !== "pending_approval") {
+          return item;
+        }
+        return {
+          ...item,
+          status: decision === "approved" ? "running" as const : "denied" as const,
+          updatedAt: now
+        };
+      });
+      return {
+        ...batch,
+        items,
+        status: this.rollupParticipantRequestStatus(items),
+        updatedAt: now
+      };
+    });
+  }
+
+  private formatParticipantRequestMessage(_requesterHandle: string, items: ChatParticipantRequestItem[]): string {
+    return items.map((item) => `@${item.targetHandle} ${item.prompt}`.trim()).join("\n");
+  }
+
+  private rollupParticipantRequestStatus(items: ChatParticipantRequestItem[], forced?: ChatParticipantRequestStatus): ChatParticipantRequestStatus {
+    if (forced) {
+      return forced;
+    }
+    if (items.some((item) => item.status === "pending_approval")) {
+      return "pending_approval";
+    }
+    if (items.some((item) => item.status === "running")) {
+      return "running";
+    }
+    if (items.some((item) => item.status === "resuming_requester")) {
+      return "resuming_requester";
+    }
+    for (const status of ["failed", "denied", "interrupted", "completed", "answered"] as ChatParticipantRequestStatus[]) {
+      if (items.some((item) => item.status === status)) {
+        return status;
+      }
+    }
+    return "completed";
+  }
+
+  private updateParticipantRequestBatch(
+    conversation: Conversation,
+    requestMessageId: string,
+    update: (batch: ChatParticipantRequestBatch) => ChatParticipantRequestBatch
+  ): ChatParticipantRequestBatch | undefined {
+    let updated: ChatParticipantRequestBatch | undefined;
+    conversation.messages = conversation.messages.map((message) => {
+      if (message.id !== requestMessageId || !message.metadata?.participantRequest) {
+        return message;
+      }
+      updated = update(message.metadata.participantRequest);
+      return {
+        ...message,
+        metadata: {
+          ...message.metadata,
+          participantRequest: updated
+        }
+      };
+    });
+    return updated;
+  }
+
+  private startParticipantRequestRunner(
+    conversationId: string,
+    requestMessageId: string,
+    runId: string,
+    depth: number
+  ): Promise<ParticipantRequestRunResult> {
+    const existing = this.participantRequestRunners.get(requestMessageId);
+    if (existing) {
+      return existing;
+    }
+    const runner = this.runParticipantRequest(conversationId, requestMessageId, runId, depth)
+      .finally(() => {
+        this.participantRequestRunners.delete(requestMessageId);
+      });
+    this.participantRequestRunners.set(requestMessageId, runner);
+    return runner;
+  }
+
+  private async runParticipantRequest(
+    conversationId: string,
+    requestMessageId: string,
+    runId: string,
+    depth: number
+  ): Promise<ParticipantRequestRunResult> {
+    const warnings: string[] = [];
+    const conversation = await this.requireChat(conversationId);
+    const requestMessage = conversation.messages.find((message) => message.id === requestMessageId);
+    const batch = requestMessage?.metadata?.participantRequest;
+    if (!requestMessage || !batch) {
+      throw new Error("Participant request message was not found.");
+    }
+    const participants = this.chatParticipants(conversation);
+    const runnableItems = batch.items.filter((item) => item.status === "running");
+    const replies: ParticipantRequestRunResult["replies"] = [];
+    await Promise.all(runnableItems.map(async (item) => {
+      const target = participants.find((participant) => participant.id === item.targetParticipantId);
+      if (!target) {
+        const now = new Date().toISOString();
+        this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
+          ...current,
+          items: current.items.map((candidate) => candidate.targetParticipantId === item.targetParticipantId
+            ? { ...candidate, status: "failed", error: "Target participant is no longer in this chat.", updatedAt: now }
+            : candidate),
+          updatedAt: now
+        }));
+        return;
+      }
+      try {
+        const messages = await this.runParticipantTurnSerialized(conversation, target, requestMessage, runId, undefined, undefined, {
+          warnings,
+          participantRequestDepth: depth
+        });
+        await this.refreshStoredChatState(conversation);
+        this.appendParticipantTurnMessages(conversation, target, messages);
+        const reply = messages[0];
+        const now = new Date().toISOString();
+        this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
+          ...current,
+          items: current.items.map((candidate) => candidate.targetParticipantId === item.targetParticipantId
+            ? {
+                ...candidate,
+                status: reply?.status === "error" ? "failed" : "answered",
+                replyMessageId: reply?.id,
+                error: reply?.status === "error" ? reply.content : undefined,
+                updatedAt: now
+              }
+            : candidate),
+          updatedAt: now
+        }));
+        replies.push({
+          targetHandle: target.handle,
+          messageId: reply?.id,
+          content: reply?.content,
+          error: reply?.status === "error" ? reply.content : undefined
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const now = new Date().toISOString();
+        this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
+          ...current,
+          items: current.items.map((candidate) => candidate.targetParticipantId === item.targetParticipantId
+            ? { ...candidate, status: "failed", error: message, updatedAt: now }
+            : candidate),
+          updatedAt: now
+        }));
+        replies.push({ targetHandle: target.handle, error: message });
+      }
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    }));
+    const updatedBatch = this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => {
+      const status = this.rollupParticipantRequestStatus(current.items);
+      return {
+        ...current,
+        status: status === "answered" ? "answered" : status,
+        updatedAt: new Date().toISOString()
+      };
+    }) ?? batch;
+    conversation.updatedAt = new Date().toISOString();
+    await this.ensureHistoryFiles(conversation);
+    await this.saveConversation(conversation);
+    return { batch: updatedBatch, replies };
+  }
+
+  private async awaitParticipantRequestRunner(
+    runner: Promise<ParticipantRequestRunResult>,
+    timeoutMs: number
+  ): Promise<{ timedOut: true } | { timedOut: false; result: ParticipantRequestRunResult }> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        runner.then((result) => ({ timedOut: false as const, result })),
+        new Promise<{ timedOut: true }>((resolve) => {
+          timer = setTimeout(() => resolve({ timedOut: true }), timeoutMs);
+          timer.unref();
+        })
+      ]);
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
+  }
+
+  private async autoResumeParticipantRequest(conversationId: string, requestMessageId: string): Promise<void> {
+    if (this.participantRequestAutoResumes.has(requestMessageId)) {
+      return;
+    }
+    this.participantRequestAutoResumes.add(requestMessageId);
+    try {
+      const conversation = await this.requireChat(conversationId);
+      const requestMessage = conversation.messages.find((message) => message.id === requestMessageId);
+      const batch = requestMessage?.metadata?.participantRequest;
+      if (!requestMessage || !batch || !batch.resumeRequester || batch.completedInToolCall || batch.autoResumeMessageId) {
+        return;
+      }
+      if (batch.items.some((item) => item.status === "pending_approval" || item.status === "running" || item.status === "resuming_requester")) {
+        return;
+      }
+      if (batch.items.length > 0 && batch.items.every((item) => item.status === "denied")) {
+        return;
+      }
+      const requester = this.chatParticipants(conversation).find((participant) => participant.id === batch.requesterParticipantId);
+      if (!requester) {
+        return;
+      }
+      const now = new Date().toISOString();
+      this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
+        ...current,
+        status: "resuming_requester",
+        updatedAt: now
+      }));
+      const trigger = this.message(
+        "system",
+        [
+          `Auto-resumed @${requester.handle} after participant request.`,
+          "Target replies/errors are in the transcript above. Continue from your request using the available answers and errors."
+        ].join("\n"),
+        undefined,
+        {
+          threadId: requestMessage.metadata?.threadId ?? requestMessage.id,
+          parentMessageId: requestMessage.id,
+          chatThreadRootId: requestMessage.metadata?.chatThreadRootId ?? requestMessage.id,
+          sourceMessageId: requestMessage.id
+        }
+      );
+      conversation.messages.push(trigger);
+      conversation.updatedAt = now;
+      this.queueSnapshot(conversation);
+      const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, randomUUID(), undefined, undefined, {
+        continuation: true,
+        warnings: [],
+        participantRequestDepth: batch.depth
+      });
+      await this.refreshStoredChatState(conversation);
+      this.appendParticipantTurnMessages(conversation, requester, messages);
+      this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
+        ...current,
+        status: "completed",
+        autoResumeMessageId: messages[0]?.id,
+        updatedAt: new Date().toISOString()
+      }));
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+      await this.ensureHistoryFiles(conversation);
+      await this.saveConversation(conversation);
+    } finally {
+      this.participantRequestAutoResumes.delete(requestMessageId);
+    }
+  }
+
+  private async runParticipantTurnSerialized(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    triggerMessage: ChatMessage,
+    runId: string,
+    signal: AbortSignal | undefined,
+    progress: ProgressCallback | undefined,
+    options: { continuation?: boolean; warnings: string[]; promptConversation?: Conversation; workspacePath?: string; participantRequestDepth?: number }
+  ): Promise<ChatMessage[]> {
+    const key = `${conversation.id}:${participant.id}`;
+    const previous = this.participantTurnQueues.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chained = previous.catch(() => undefined).then(() => current);
+    this.participantTurnQueues.set(key, chained);
+    await previous.catch(() => undefined);
+    try {
+      return await this.runParticipantTurn(conversation, participant, triggerMessage, runId, signal, progress, options);
+    } finally {
+      release();
+      if (this.participantTurnQueues.get(key) === chained) {
+        this.participantTurnQueues.delete(key);
+      }
+    }
+  }
+
+  private participantRequestToolResult(
+    conversation: Conversation,
+    requestMessageId: string,
+    extra: Record<string, unknown>
+  ): Record<string, unknown> {
+    const message = conversation.messages.find((item) => item.id === requestMessageId);
+    const batch = message?.metadata?.participantRequest;
+    if (!batch) {
+      return { ok: false, status: "failed", error: "Participant request was not found." };
+    }
+    return {
+      ok: true,
+      requestId: batch.id,
+      requestMessageId,
+      batch: this.participantRequestBatchForTool(conversation, batch),
+      ...extra
+    };
+  }
+
+  private participantRequestFailedToolResult(error: string): Record<string, unknown> {
+    return {
+      ok: false,
+      status: "failed",
+      error
+    };
+  }
+
+  private participantRequestBatchForTool(conversation: Conversation, batch: ChatParticipantRequestBatch): Record<string, unknown> {
+    return {
+      id: batch.id,
+      status: batch.status,
+      source: batch.source,
+      resumeRequester: batch.resumeRequester,
+      requester: `@${batch.requesterHandle}`,
+      items: batch.items.map((item) => {
+        const reply = item.replyMessageId ? conversation.messages.find((message) => message.id === item.replyMessageId) : undefined;
+        return {
+          target: `@${item.targetHandle}`,
+          prompt: item.prompt,
+          reason: item.reason,
+          status: item.status,
+          replyMessageId: item.replyMessageId,
+          reply: reply?.content,
+          error: item.error
+        };
+      })
+    };
+  }
+
+  private markOrphanedParticipantRequestInterrupted(message: ChatMessage): boolean {
+    const batch = message.metadata?.participantRequest;
+    if (!batch || (batch.status !== "running" && batch.status !== "resuming_requester")) {
+      return false;
+    }
+    if (this.participantRequestRunners.has(message.id) || this.participantRequestAutoResumes.has(message.id)) {
+      return false;
+    }
+    const now = new Date().toISOString();
+    const nextItems = batch.items.map((item) =>
+      item.status === "running" || item.status === "resuming_requester"
+        ? { ...item, status: "interrupted" as ChatParticipantRequestStatus, updatedAt: now, error: item.error ?? "Request was interrupted before completion." }
+        : item
+    );
+    message.metadata = {
+      ...message.metadata,
+      participantRequest: {
+        ...batch,
+        status: "interrupted",
+        items: nextItems,
+        updatedAt: now,
+        error: batch.error ?? "Request was interrupted before completion."
+      }
+    };
+    return true;
+  }
+
+  private participantRequestBatches(conversation: Conversation): ChatParticipantRequestBatch[] {
+    return conversation.messages
+      .map((message) => message.metadata?.participantRequest)
+      .filter((batch): batch is ChatParticipantRequestBatch => Boolean(batch));
+  }
+
   private participantPermissionsForRun(conversation: Conversation, participant: ChatParticipant): ChatAgentPermissions {
     const permissions = normalizeChatAgentPermissions(participant.permissions);
     for (const approval of this.oneTimePermissionApprovalsForParticipant(conversation, participant)) {
@@ -2244,13 +3032,15 @@ export class ChatService {
     conversation: Conversation,
     participant: ChatParticipant,
     toolName: string,
-    capability: ChatAppToolCapability
+    capability: ChatAppToolCapability,
+    targetParticipantId?: string
   ): ChatAppToolApprovalPolicy | undefined {
     return this.chatAppToolApprovalPolicies(conversation).find((policy) =>
       policy.participantId === participant.id &&
       policy.roleConfigId === participant.roleConfigId &&
       policy.toolName === toolName &&
       policy.capability === capability &&
+      (targetParticipantId ? policy.targetParticipantId === targetParticipantId : !policy.targetParticipantId) &&
       policy.scope === "chat"
     );
   }
@@ -2262,6 +3052,7 @@ export class ChatService {
       item.roleConfigId === policy.roleConfigId &&
       item.toolName === policy.toolName &&
       item.capability === policy.capability &&
+      item.targetParticipantId === policy.targetParticipantId &&
       item.scope === policy.scope
     );
     conversation.metadata = {
@@ -2288,6 +3079,93 @@ export class ChatService {
       });
     }
     return Array.from(mentions.values());
+  }
+
+  private logInferredParticipantRequests(
+    conversation: Conversation,
+    sourceParticipant: ChatParticipant,
+    message: ChatMessage
+  ): void {
+    const inferred = this.inferParticipantRequestTargets(conversation, sourceParticipant, message.content);
+    if (inferred.length === 0) {
+      return;
+    }
+    void this.debugLogs.write("chat.participant-request.inferred-log-only", {
+      conversationId: conversation.id,
+      messageId: message.id,
+      requesterParticipantId: sourceParticipant.id,
+      requesterHandle: sourceParticipant.handle,
+      targets: inferred.map((item) => item.targetHandle),
+      snippets: inferred.map((item) => item.snippet)
+    });
+  }
+
+  private inferParticipantRequestTargets(
+    conversation: Conversation,
+    sourceParticipant: ChatParticipant,
+    content: string
+  ): Array<{ targetHandle: string; snippet: string }> {
+    const participants = this.chatParticipants(conversation)
+      .filter((participant) => participant.id !== sourceParticipant.id);
+    const cleaned = this.stripInferenceIgnoredText(content);
+    const inferred: Array<{ targetHandle: string; snippet: string }> = [];
+    for (const participant of participants) {
+      const pattern = new RegExp(`@${this.escapeRegExp(participant.handle)}\\b`, "i");
+      const match = cleaned.match(pattern);
+      if (!match || typeof match.index !== "number") {
+        continue;
+      }
+      const start = Math.max(0, match.index - 80);
+      const end = Math.min(cleaned.length, match.index + participant.handle.length + 140);
+      const snippet = cleaned.slice(start, end).replace(/\s+/g, " ").trim();
+      if (this.isActionableParticipantMention(snippet, participant.handle)) {
+        inferred.push({ targetHandle: participant.handle, snippet });
+      }
+      if (inferred.length >= CHAT_PARTICIPANT_REQUEST_MAX_ITEMS) {
+        break;
+      }
+    }
+    return inferred;
+  }
+
+  private stripInferenceIgnoredText(content: string): string {
+    return this.withoutFencedCode(content)
+      .replace(/`[^`\n]+`/g, "")
+      .split(/\r?\n/)
+      .filter((line) => {
+        const trimmed = line.trim();
+        return (
+          !trimmed.startsWith(">") &&
+          !/^participant requests\s*:/i.test(trimmed) &&
+          !/^return to requester after replies\s*:/i.test(trimmed) &&
+          !/^(?:user|system)\s*:\s+/i.test(trimmed)
+        );
+      })
+      .join("\n");
+  }
+
+  private isActionableParticipantMention(snippet: string, handle: string): boolean {
+    const escaped = this.escapeRegExp(handle);
+    const nonAction = [
+      new RegExp(`\\b(?:as|per|from|according to|quoting|citing)\\s+@${escaped}\\b`, "i"),
+      new RegExp(`\\b(?:thanks|thank you|agree with|disagree with|good catch)\\s+@${escaped}\\b`, "i"),
+      new RegExp(`@${escaped}\\b\\s+(?:said|noted|wrote|answered|suggested|recommended|agreed|confirmed|covered)\\b`, "i")
+    ];
+    if (nonAction.some((pattern) => pattern.test(snippet))) {
+      return false;
+    }
+    const action = [
+      new RegExp(`@${escaped}\\b[^.!?\\n]{0,120}\\?`, "i"),
+      new RegExp(`@${escaped}\\b\\s*(?:,|:|—|-)\\s*(?:your move|thoughts?|please|can|could|would|will|check|confirm|review|verify|validate|concur|respond|answer|comment|clarify)\\b`, "i"),
+      new RegExp(`\\b(?:can|could|please|pls|would|will)\\s+@${escaped}\\b`, "i"),
+      new RegExp(`@${escaped}\\b[^.!?\\n]{0,120}\\b(?:confirm|check|review|verify|validate|concur|respond|answer|comment|clarify)\\b`, "i"),
+      new RegExp(`\\b(?:confirm|check|review|verify|validate|concur|respond|answer|comment|clarify)\\b[^.!?\\n]{0,120}@${escaped}\\b`, "i")
+    ];
+    return action.some((pattern) => pattern.test(snippet));
+  }
+
+  private escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
   private pendingChoiceFromAgentReply(content: string): ChatPendingChoice | undefined {
@@ -2789,13 +3667,17 @@ export class ChatService {
       approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
       approval.capability === "permissions.request" &&
       this.isPermissionChangeRequest(approval.request);
+    const isParticipantRequestApproval =
+      approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL &&
+      approval.capability === "participants.request" &&
+      this.isParticipantRequestApprovalRequest(approval.request);
     return (
       typeof approval.id === "string" &&
       typeof approval.conversationId === "string" &&
       typeof approval.requesterParticipantId === "string" &&
       typeof approval.requesterHandle === "string" &&
       typeof approval.requesterRoleConfigId === "string" &&
-      (isRosterApproval || isPermissionApproval) &&
+      (isRosterApproval || isPermissionApproval || isParticipantRequestApproval) &&
       (approval.status === "pending" || approval.status === "approved" || approval.status === "denied" || approval.status === "auto-applied") &&
       typeof approval.summary === "string" &&
       typeof approval.createdAt === "string" &&
@@ -2820,14 +3702,37 @@ export class ChatService {
     return Array.isArray(permissions) && permissions.every((permission) => permission === "workspaceWrite" || permission === "webAccess");
   }
 
+  private isParticipantRequestApprovalRequest(request: unknown): request is ChatParticipantRequestApprovalRequest {
+    if (!request || typeof request !== "object" || Array.isArray(request)) {
+      return false;
+    }
+    const requests = (request as Partial<ChatParticipantRequestApprovalRequest>).requests;
+    return Array.isArray(requests) && requests.every((item) =>
+      Boolean(
+        item &&
+        typeof item === "object" &&
+        !Array.isArray(item) &&
+        typeof (item as Partial<ChatParticipantRequestInput>).target === "string" &&
+        typeof (item as Partial<ChatParticipantRequestInput>).prompt === "string"
+      )
+    );
+  }
+
   private isChatAppToolApprovalPolicy(item: unknown): item is ChatAppToolApprovalPolicy {
     const policy = item as Partial<ChatAppToolApprovalPolicy>;
     return (
       typeof policy.id === "string" &&
       typeof policy.participantId === "string" &&
       typeof policy.roleConfigId === "string" &&
-      policy.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL &&
-      policy.capability === "participants.manage" &&
+      ((
+        policy.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL &&
+        policy.capability === "participants.manage" &&
+        typeof policy.targetParticipantId !== "string"
+      ) || (
+        policy.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL &&
+        policy.capability === "participants.request" &&
+        typeof policy.targetParticipantId === "string"
+      )) &&
       policy.scope === "chat" &&
       typeof policy.createdAt === "string" &&
       typeof policy.updatedAt === "string"

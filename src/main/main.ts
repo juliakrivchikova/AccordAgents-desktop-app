@@ -54,6 +54,8 @@ appMcpService.setPermissionChangeHandler((actor, request) => chatService.request
 appMcpService.setChatContextHandler((actor) => chatService.describeChatContextForTool(actor));
 appMcpService.setChatParticipantsHandler((actor) => chatService.describeChatParticipantsForTool(actor));
 appMcpService.setChatMessagesHandler((actor, request) => chatService.readChatMessagesForTool(actor, request));
+appMcpService.setChatParticipantRequestHandler((actor, request) => chatService.requestParticipantsFromTool(actor, request));
+appMcpService.setChatParticipantRequestStatusHandler((actor, request) => chatService.participantRequestStatusForTool(actor, request));
 const activeReviews = new Map<string, AbortController>();
 
 function createWindow(): void {

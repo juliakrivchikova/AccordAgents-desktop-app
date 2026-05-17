@@ -40,7 +40,7 @@ export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code"
 
 export type ChatRoleRuntime = "claude-agent" | "codex-developer-instructions" | "prompt-fallback";
 
-export type ChatAppToolCapability = "participants.manage" | "permissions.request";
+export type ChatAppToolCapability = "participants.manage" | "participants.request" | "permissions.request";
 
 export type AgentContextUsageSource = Extract<ProviderKind, "codex-cli" | "claude-code">;
 
@@ -166,6 +166,62 @@ export interface ChatPermissionChangeRequest {
   permissions: ChatPermissionGrant[];
 }
 
+export interface ChatParticipantRequestInput {
+  target: string;
+  prompt: string;
+  reason?: string;
+}
+
+export interface ChatParticipantRequestApprovalRequest {
+  reason?: string;
+  requests: ChatParticipantRequestInput[];
+  resumeRequester?: boolean;
+  source?: ChatParticipantRequestSource;
+  requestMessageId?: string;
+  batchId?: string;
+}
+
+export type ChatParticipantRequestSource = "mcp" | "inferred";
+
+export type ChatParticipantRequestStatus =
+  | "pending_approval"
+  | "running"
+  | "answered"
+  | "resuming_requester"
+  | "completed"
+  | "failed"
+  | "denied"
+  | "interrupted";
+
+export interface ChatParticipantRequestItem {
+  targetParticipantId: string;
+  targetHandle: string;
+  prompt: string;
+  reason?: string;
+  status: ChatParticipantRequestStatus;
+  replyMessageId?: string;
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+}
+
+export interface ChatParticipantRequestBatch {
+  id: string;
+  requesterParticipantId: string;
+  requesterHandle: string;
+  source: ChatParticipantRequestSource;
+  resumeRequester: boolean;
+  status: ChatParticipantRequestStatus;
+  depth: number;
+  createdAt: string;
+  updatedAt: string;
+  triggerMessageId?: string;
+  completedInToolCall?: boolean;
+  autoResumeMessageId?: string;
+  items: ChatParticipantRequestItem[];
+  error?: string;
+}
+
 export interface ChatRosterAvailableRole {
   id: string;
   label: string;
@@ -225,7 +281,7 @@ export type ChatAppToolApprovalStatus = "pending" | "approved" | "denied" | "aut
 
 export type ChatAppToolApprovalScope = "once" | "chat";
 
-export type ChatAppToolApprovalRequest = ChatRosterChangeRequest | ChatPermissionChangeRequest;
+export type ChatAppToolApprovalRequest = ChatRosterChangeRequest | ChatPermissionChangeRequest | ChatParticipantRequestApprovalRequest;
 
 export interface ChatAppToolApproval {
   id: string;
@@ -252,6 +308,7 @@ export interface ChatAppToolApprovalPolicy {
   roleConfigId: string;
   toolName: string;
   capability: ChatAppToolCapability;
+  targetParticipantId?: string;
   scope: "chat";
   createdAt: string;
   updatedAt: string;
@@ -264,6 +321,7 @@ export interface ChatMessageMetadata {
   mentions?: string[];
   pendingMentions?: ChatPendingMention[];
   pendingChoice?: ChatPendingChoice;
+  participantRequest?: ChatParticipantRequestBatch;
   sourceMessageId?: string;
   requesterParticipantId?: string;
   requesterContinuationRequested?: boolean;
