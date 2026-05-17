@@ -256,7 +256,10 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle("chat:respond-to-app-tool-approval", async (_event, request: RespondToChatAppToolApprovalRequest) => {
-    return chatService.respondToAppToolApproval(request);
+    return chatService.respondToAppToolApproval(
+      request,
+      (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+    );
   });
   ipcMain.handle("conversations:start-review", async (_event, request: ReviewRequest) => {
     const runId = request.runId ?? randomUUID();

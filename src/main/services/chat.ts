@@ -6,6 +6,7 @@ import type {
   AgentContextUsage,
   AgentHealth,
   AddChatParticipantRequest,
+  ChatAgentMode,
   ChatAgentPermissions,
   ChatAppToolApproval,
   ChatAppToolApprovalPolicy,
@@ -46,7 +47,6 @@ import type {
 import {
   CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH,
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
-  chatAgentPermissionsEqual,
   effectiveChatAgentPermissions,
   isChatShellPermissionPatternSafe,
   normalizeChatAgentMode,
@@ -76,6 +76,11 @@ import { SettingsService } from "./settings";
 import { StorageService } from "./storage";
 
 type ProgressCallback = (progress: ReviewProgress) => void;
+
+interface ChatParticipantSessionState {
+  session: ChatParticipantSession;
+  instructionsRefreshed: boolean;
+}
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 11;
@@ -229,12 +234,7 @@ export class ChatService {
         continue;
       }
       const usage = await this.cliRunner.contextUsageForSession(
-        {
-          id: participant.id,
-          kind: participant.kind,
-          label: `@${participant.handle}`,
-          model: session.participantModel ?? participant.model
-        },
+        this.cliParticipantForSession(participant, session),
         session.sessionId
       );
       if (!usage) {
@@ -318,7 +318,6 @@ export class ChatService {
     if (!requester) {
       throw new Error("The requesting participant is no longer in this chat.");
     }
-    await this.requireParticipantCapability(requester, "participants.manage");
     if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
       throw new Error("The issued app-tool token does not grant participant management.");
     }
@@ -549,7 +548,6 @@ export class ChatService {
     if (!requester) {
       throw new Error("The requesting participant is no longer in this chat.");
     }
-    await this.requireParticipantCapability(requester, "participants.manage");
     if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
       throw new Error("The issued app-tool token does not grant participant management.");
     }
@@ -771,7 +769,10 @@ export class ChatService {
     };
   }
 
-  async respondToAppToolApproval(request: RespondToChatAppToolApprovalRequest): Promise<Conversation | undefined> {
+  async respondToAppToolApproval(
+    request: RespondToChatAppToolApprovalRequest,
+    progress?: ProgressCallback
+  ): Promise<Conversation | undefined> {
     const conversation = await this.storage.getConversation(request.conversationId);
     if (!conversation || conversation.kind !== "chat") {
       return conversation;
@@ -926,7 +927,8 @@ export class ChatService {
     conversation.updatedAt = now;
     await this.saveConversation(conversation);
     if (isPermissionApproval && updatedApproval.resumeContext) {
-      void this.autoResumePermissionApproval(conversation.id, updatedApproval.id).catch((error) => {
+      void this.autoResumePermissionApproval(conversation.id, updatedApproval.id, progress).catch((error) => {
+        this.emitProgress(updatedApproval.resumeContext?.runId ?? updatedApproval.id, progress, "error", error instanceof Error ? error.message : String(error));
         void this.debugLogs.write("chat.permission-approval.auto-resume.error", {
           conversationId: conversation.id,
           approvalId: updatedApproval.id,
@@ -1192,11 +1194,12 @@ export class ChatService {
       participantRequestBatchId?: string;
     }
   ): Promise<ChatMessage[]> {
-    let session = await this.sessionForParticipant(conversation, participant);
+    const sessionState = await this.sessionForParticipant(conversation, participant);
+    const session = sessionState.session;
     const promptConversation = options.promptConversation ?? conversation;
     const workspacePath = options.workspacePath ?? await this.ensureHistoryFiles(promptConversation);
     const isResumingSession = Boolean(session.sessionId);
-    const agentMode = normalizeChatAgentMode(participant.agentMode);
+    const agentMode = this.agentModeForSession(session, participant);
     const oneTimePermissionApprovals = this.oneTimePermissionApprovalsForParticipant(conversation, participant);
     const appliedOneTimePermissionApprovalIds: string[] = [];
     const permissions = this.participantPermissionsForRun(
@@ -1205,29 +1208,29 @@ export class ChatService {
       oneTimePermissionApprovals,
       appliedOneTimePermissionApprovalIds
     );
+    session.participantPermissions = normalizeChatAgentPermissions(permissions);
     const usePromptRole = session.roleRuntime === "prompt-fallback";
+    const includeRefreshedRoleInstructions = isResumingSession && sessionState.instructionsRefreshed;
     const prompt = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
-      includeRoleInstructions: usePromptRole && !isResumingSession,
+      includeRoleInstructions: (usePromptRole && !isResumingSession) || includeRefreshedRoleInstructions,
+      agentMode,
       permissions
     });
     const promptFallbackPrompt = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: true,
+      agentMode,
       permissions
     });
     const resumeFallbackPrompt = isResumingSession
       ? this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
-          includeRoleInstructions: usePromptRole,
+          includeRoleInstructions: usePromptRole || includeRefreshedRoleInstructions,
+          agentMode,
           permissions
         })
       : undefined;
     const role = usePromptRole ? undefined : this.cliRoleOptions(participant, session, promptFallbackPrompt);
-    const runPath = this.runPathForParticipant(conversation, participant, workspacePath, permissions);
-    const cliParticipant: ParticipantConfig = {
-      id: participant.id,
-      kind: participant.kind,
-      label: `@${participant.handle}`,
-      model: participant.model
-    };
+    const runPath = this.runPathForParticipant(conversation, workspacePath, agentMode, permissions);
+    const cliParticipant = this.cliParticipantForSession(participant, session);
     const progressSink = this.createAgentProgressSink(runId, progress, participant);
     const appToolCapabilities = normalizeChatAppToolCapabilities([
       ...normalizeChatAppToolCapabilities(session.roleAppToolCapabilities),
@@ -1284,18 +1287,20 @@ export class ChatService {
           idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
         }
       });
-      this.applyCliRunMetadata(session, result, options.warnings);
+      this.applyCliRunMetadata(session, result, participant, options.warnings);
       const guardViolation = result.ok ? this.chatResponseGuardViolation(result.content, triggerMessage) : undefined;
       if (guardViolation) {
-        options.warnings.push(`@${participant.handle}: rejected response that mentioned ${guardViolation}; restarted the chat session and retried.`);
-        session = await this.newSessionForParticipant(participant);
+        options.warnings.push(`@${participant.handle}: rejected response that mentioned ${guardViolation}; retried in the same chat session.`);
         const retryUsesPromptRole = session.roleRuntime === "prompt-fallback";
+        const retryIsResumingSession = Boolean(session.sessionId);
         const retryPromptBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
-          includeRoleInstructions: retryUsesPromptRole,
+          includeRoleInstructions: (retryUsesPromptRole && !retryIsResumingSession) || (retryIsResumingSession && sessionState.instructionsRefreshed),
+          agentMode,
           permissions
         });
         const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
           includeRoleInstructions: true,
+          agentMode,
           permissions
         });
         const retryPrompt = this.chatGuardRetryPrompt(retryPromptBase, guardViolation);
@@ -1304,7 +1309,9 @@ export class ChatService {
           : this.cliRoleOptions(participant, session, this.chatGuardRetryPrompt(retryPromptFallbackBase, guardViolation));
         result = await this.cliRunner.run(cliParticipant, retryPrompt, runPath, undefined, "chat", signal, {
           persistSession: true,
+          sessionId: session.sessionId,
           extraReadableDirs: [workspacePath],
+          resumeFallbackPrompt,
           role: retryRole,
           appMcp: appMcp
             ? {
@@ -1322,7 +1329,7 @@ export class ChatService {
             idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
           }
         });
-        this.applyCliRunMetadata(session, result, options.warnings);
+        this.applyCliRunMetadata(session, result, participant, options.warnings);
         const retryViolation = result.ok ? this.chatResponseGuardViolation(result.content, triggerMessage) : undefined;
         if (retryViolation) {
           const error = `Blocked chat response because it mentioned ${retryViolation}.`;
@@ -1339,15 +1346,17 @@ export class ChatService {
         ? this.confirmationBrevityViolation(result.content, triggerMessage, Boolean(options.continuation))
         : undefined;
       if (confirmationViolation) {
-        options.warnings.push(`@${participant.handle}: rejected verbose affirmative confirmation; restarted the chat session and retried.`);
-        session = await this.newSessionForParticipant(participant);
+        options.warnings.push(`@${participant.handle}: rejected verbose affirmative confirmation; retried in the same chat session.`);
         const retryUsesPromptRole = session.roleRuntime === "prompt-fallback";
+        const retryIsResumingSession = Boolean(session.sessionId);
         const retryPromptBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
-          includeRoleInstructions: retryUsesPromptRole,
+          includeRoleInstructions: (retryUsesPromptRole && !retryIsResumingSession) || (retryIsResumingSession && sessionState.instructionsRefreshed),
+          agentMode,
           permissions
         });
         const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
           includeRoleInstructions: true,
+          agentMode,
           permissions
         });
         const retryPrompt = this.confirmationBrevityRetryPrompt(retryPromptBase);
@@ -1356,7 +1365,9 @@ export class ChatService {
           : this.cliRoleOptions(participant, session, this.confirmationBrevityRetryPrompt(retryPromptFallbackBase));
         result = await this.cliRunner.run(cliParticipant, retryPrompt, runPath, undefined, "chat", signal, {
           persistSession: true,
+          sessionId: session.sessionId,
           extraReadableDirs: [workspacePath],
+          resumeFallbackPrompt,
           role: retryRole,
           appMcp: appMcp
             ? {
@@ -1374,7 +1385,7 @@ export class ChatService {
             idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
           }
         });
-        this.applyCliRunMetadata(session, result, options.warnings);
+        this.applyCliRunMetadata(session, result, participant, options.warnings);
         const retryGuardViolation = result.ok ? this.chatResponseGuardViolation(result.content, triggerMessage) : undefined;
         if (retryGuardViolation) {
           const error = `Blocked chat response because it mentioned ${retryGuardViolation}.`;
@@ -1399,9 +1410,6 @@ export class ChatService {
       }
       const now = new Date().toISOString();
       session.updatedAt = now;
-      if (result.sessionId) {
-        session.sessionId = result.sessionId;
-      }
       this.updateParticipantContextUsage(conversation, participant.id, result.contextUsage);
       const participantMessage = this.message(
         "participant",
@@ -1460,7 +1468,7 @@ export class ChatService {
     triggerMessage: ChatMessage,
     workspacePath: string,
     continuation: boolean,
-    options: { includeRoleInstructions: boolean; permissions: ChatAgentPermissions }
+    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions }
   ): string {
     const historyMarkdownPath = path.join(workspacePath, "history.md");
     const historyJsonPath = path.join(workspacePath, "history.json");
@@ -1471,8 +1479,8 @@ export class ChatService {
         options.includeRoleInstructions
           ? this.promptFallbackStaticInstructions(session)
           : "Use your configured role instructions and chat response rules for this participant.",
-        this.participantRepositoryLine(conversation, participant, options.permissions),
-        this.participantPermissionPolicy(participant, options.permissions),
+        this.participantRepositoryLine(conversation, options.agentMode, options.permissions),
+        this.participantPermissionPolicy(options.agentMode, options.permissions),
         "Dynamic chat context: use App MCP as the preferred source for current participants, active thread metadata, and prior messages.",
         `Fallback/debug chat history Markdown: ${historyMarkdownPath}.`,
         `Fallback/debug chat history JSON: ${historyJsonPath}.`,
@@ -1637,34 +1645,51 @@ export class ChatService {
     return base || `ai-consensus-${participant.id.slice(0, 8)}`;
   }
 
-  private applyCliRunMetadata(session: ChatParticipantSession, result: ParticipantRunResult, warnings: string[]): void {
+  private applyCliRunMetadata(
+    session: ChatParticipantSession,
+    result: ParticipantRunResult,
+    participant: ChatParticipant,
+    warnings: string[]
+  ): void {
     if (this.isKnownRoleRuntime(result.roleRuntime)) {
       session.roleRuntime = result.roleRuntime;
+    }
+    if (result.sessionId) {
+      session.sessionId = result.sessionId;
+    }
+    if (result.sessionRestarted) {
+      const warning = `@${participant.handle}: previous CLI session was unavailable, so a new session was started from saved chat context.`;
+      if (!warnings.includes(warning)) {
+        warnings.push(warning);
+      }
     }
     for (const warning of result.warnings ?? []) {
       warnings.push(warning);
     }
   }
 
-  private async sessionForParticipant(conversation: Conversation, participant: ChatParticipant): Promise<ChatParticipantSession> {
+  private async sessionForParticipant(conversation: Conversation, participant: ChatParticipant): Promise<ChatParticipantSessionState> {
     const existing = this.chatSessions(conversation).find((session) => session.participantId === participant.id);
-    const role = await this.roleForParticipant(participant);
     const runtimeConfigVersion = this.runtimeConfigVersionFor(participant);
-    if (
-      existing &&
-      existing.roleConfigId === role.id &&
-      existing.roleConfigVersion >= role.version &&
-      chatAppToolCapabilitiesEqual(existing.roleAppToolCapabilities, role.appToolCapabilities) &&
-      existing.participantKind === participant.kind &&
-      this.normalizedModel(existing.participantModel) === this.normalizedModel(participant.model) &&
-      normalizeChatAgentMode(existing.participantAgentMode) === normalizeChatAgentMode(participant.agentMode) &&
-      chatAgentPermissionsEqual(existing.participantPermissions, normalizeChatAgentPermissions(participant.permissions)) &&
-      this.isKnownRoleRuntime(existing.roleRuntime) &&
-      existing.runtimeConfigVersion === runtimeConfigVersion
-    ) {
-      return existing;
+    if (existing) {
+      const role = await this.roleForConfigId(existing.roleConfigId);
+      if (!role) {
+        void this.debugLogs.write("chat.session.role-snapshot-refresh-skipped", {
+          conversationId: conversation.id,
+          participantId: participant.id,
+          roleConfigId: existing.roleConfigId
+        });
+      }
+      return {
+        session: this.refreshExistingSessionForParticipant(existing, participant, role, runtimeConfigVersion),
+        instructionsRefreshed: Boolean(role && this.roleSnapshotChanged(existing, role)) || existing.runtimeConfigVersion !== runtimeConfigVersion
+      };
     }
-    return this.newSessionForParticipant(participant, role, runtimeConfigVersion);
+    const role = await this.roleForParticipant(participant);
+    return {
+      session: await this.newSessionForParticipant(participant, role, runtimeConfigVersion),
+      instructionsRefreshed: false
+    };
   }
 
   private async newSessionForParticipant(
@@ -1692,12 +1717,52 @@ export class ChatService {
     };
   }
 
+  private refreshExistingSessionForParticipant(
+    existing: ChatParticipantSession,
+    participant: ChatParticipant,
+    role: ChatRoleConfig | undefined,
+    runtimeConfigVersion: number
+  ): ChatParticipantSession {
+    const participantKind = existing.participantKind ?? participant.kind;
+    return {
+      ...existing,
+      roleConfigVersion: role?.version ?? existing.roleConfigVersion,
+      roleAppToolCapabilities: role
+        ? normalizeChatAppToolCapabilities(role.appToolCapabilities)
+        : normalizeChatAppToolCapabilities(existing.roleAppToolCapabilities),
+      roleRuntime: this.isKnownRoleRuntime(existing.roleRuntime)
+        ? existing.roleRuntime
+        : this.preferredRoleRuntimeForKind(participantKind),
+      participantKind,
+      participantModel: this.normalizedModel(existing.participantModel) || undefined,
+      participantAgentMode: normalizeChatAgentMode(existing.participantAgentMode ?? participant.agentMode),
+      participantPermissions: normalizeChatAgentPermissions(existing.participantPermissions ?? participant.permissions),
+      runtimeConfigVersion,
+      roleLabel: role?.label ?? existing.roleLabel,
+      roleInstructions: role?.instructions ?? existing.roleInstructions,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  private roleSnapshotChanged(session: ChatParticipantSession, role: ChatRoleConfig): boolean {
+    return (
+      session.roleConfigVersion !== role.version ||
+      session.roleLabel !== role.label ||
+      session.roleInstructions !== role.instructions ||
+      !chatAppToolCapabilitiesEqual(session.roleAppToolCapabilities, role.appToolCapabilities)
+    );
+  }
+
   private runtimeConfigVersionFor(_participant: ChatParticipant): number {
     return CHAT_ROLE_RUNTIME_CONFIG_VERSION;
   }
 
   private preferredRoleRuntimeFor(participant: ChatParticipant): ChatRoleRuntime {
-    return participant.kind === "claude-code" ? "claude-agent" : "codex-developer-instructions";
+    return this.preferredRoleRuntimeForKind(participant.kind);
+  }
+
+  private preferredRoleRuntimeForKind(kind: ChatProviderKind): ChatRoleRuntime {
+    return kind === "claude-code" ? "claude-agent" : "codex-developer-instructions";
   }
 
   private isKnownRoleRuntime(value: ChatRoleRuntime | undefined): value is ChatRoleRuntime {
@@ -1708,28 +1773,35 @@ export class ChatService {
     return value?.trim() ?? "";
   }
 
+  private agentModeForSession(session: ChatParticipantSession, participant: ChatParticipant): ChatAgentMode {
+    return normalizeChatAgentMode(session.participantAgentMode ?? participant.agentMode);
+  }
+
+  private cliParticipantForSession(participant: ChatParticipant, session: ChatParticipantSession): ParticipantConfig {
+    return {
+      id: participant.id,
+      kind: session.participantKind ?? participant.kind,
+      label: `@${participant.handle}`,
+      model: this.normalizedModel(session.participantModel) || undefined
+    };
+  }
+
   private runPathForParticipant(
     conversation: Conversation,
-    participant: ChatParticipant,
     workspacePath: string,
+    agentMode: ChatAgentMode,
     runPermissions: ChatAgentPermissions
   ): string {
-    const permissions = effectiveChatAgentPermissions(
-      normalizeChatAgentMode(participant.agentMode),
-      runPermissions
-    );
+    const permissions = effectiveChatAgentPermissions(agentMode, runPermissions);
     return permissions.repoRead && conversation.repoPath ? conversation.repoPath : workspacePath;
   }
 
   private participantRepositoryLine(
     conversation: Conversation,
-    participant: ChatParticipant,
+    agentMode: ChatAgentMode,
     runPermissions: ChatAgentPermissions
   ): string {
-    const permissions = effectiveChatAgentPermissions(
-      normalizeChatAgentMode(participant.agentMode),
-      runPermissions
-    );
+    const permissions = effectiveChatAgentPermissions(agentMode, runPermissions);
     if (!conversation.repoPath) {
       return "Repository: none selected.";
     }
@@ -1739,11 +1811,10 @@ export class ChatService {
   }
 
   private participantPermissionPolicy(
-    participant: ChatParticipant,
+    agentMode: ChatAgentMode,
     runPermissions: ChatAgentPermissions
   ): string {
-    const mode = normalizeChatAgentMode(participant.agentMode);
-    const permissions = effectiveChatAgentPermissions(mode, runPermissions);
+    const permissions = effectiveChatAgentPermissions(agentMode, runPermissions);
     const shellRules = permissions.shell.enabled && permissions.shell.rules.length > 0
       ? permissions.shell.rules.map((rule) => `${rule.action} ${rule.match} ${JSON.stringify(rule.pattern)}`).join("; ")
       : "none";
@@ -1752,7 +1823,7 @@ export class ChatService {
       ? providerNativeAllowedTools.map((token) => JSON.stringify(token)).join(", ")
       : "none";
     return [
-      `Agent mode: ${mode}.`,
+      `Agent mode: ${agentMode}.`,
       `Permissions: repo read ${permissions.repoRead ? "allowed" : "blocked"}, shell commands ${permissions.shell.enabled ? "allowed" : "blocked"}, workspace edits ${permissions.workspaceWrite ? "allowed" : "blocked"}, web access ${permissions.webAccess ? "allowed" : "blocked"}.`,
       permissions.repoRead
         ? "Repository files may be inspected read-only when repository context is selected; app-managed chat context may be read through MCP, with history files as fallback/debug context."
@@ -1774,9 +1845,9 @@ export class ChatService {
     return JSON.stringify({
       conversationId: conversation.id,
       participantId: participant.id,
-      participantKind: participant.kind,
-      participantModel: participant.model?.trim() || "",
-      participantAgentMode: normalizeChatAgentMode(participant.agentMode),
+      participantKind: session.participantKind ?? participant.kind,
+      participantModel: this.normalizedModel(session.participantModel),
+      participantAgentMode: this.agentModeForSession(session, participant),
       participantPermissions: normalizeChatAgentPermissions(runPermissions),
       roleConfigId: session.roleConfigId,
       roleConfigVersion: session.roleConfigVersion,
@@ -1789,12 +1860,16 @@ export class ChatService {
   }
 
   private async roleForParticipant(participant: ChatParticipant): Promise<ChatRoleConfig> {
-    const roles = (await this.settings.getPublicSettings()).chatRoleConfigs;
-    const role = roles.find((item) => item.id === participant.roleConfigId);
+    const role = await this.roleForConfigId(participant.roleConfigId);
     if (!role) {
       throw new Error(`Unknown role for @${participant.handle}.`);
     }
     return role;
+  }
+
+  private async roleForConfigId(roleConfigId: string): Promise<ChatRoleConfig | undefined> {
+    const roles = (await this.settings.getPublicSettings()).chatRoleConfigs;
+    return roles.find((item) => item.id === roleConfigId);
   }
 
   private chatResponseGuardViolation(content: string, triggerMessage: ChatMessage): string | undefined {
@@ -2182,13 +2257,6 @@ export class ChatService {
       model: participant.model,
       agentMode: normalizeChatAgentMode(participant.agentMode)
     };
-  }
-
-  private async requireParticipantCapability(participant: ChatParticipant, capability: ChatAppToolCapability): Promise<void> {
-    const role = await this.roleForParticipant(participant);
-    if (!hasChatAppToolCapability(role.appToolCapabilities, capability)) {
-      throw new Error(`@${participant.handle} is not allowed to use ${capability}.`);
-    }
   }
 
   private normalizeRosterChangeRequest(raw: unknown): ChatRosterChangeRequest {
@@ -3114,7 +3182,11 @@ export class ChatService {
     }
   }
 
-  private async autoResumePermissionApproval(conversationId: string, approvalId: string): Promise<void> {
+  private async autoResumePermissionApproval(
+    conversationId: string,
+    approvalId: string,
+    progress?: ProgressCallback
+  ): Promise<void> {
     const approvalResumeKey = `approval:${approvalId}`;
     if (this.permissionApprovalAutoResumes.has(approvalResumeKey)) {
       return;
@@ -3154,6 +3226,16 @@ export class ChatService {
         return;
       }
       this.permissionApprovalAutoResumes.add(triggerResumeKey);
+      const resumeRunId = approval.resumeContext.runId || randomUUID();
+      const participantLabel = `@${requester.handle}`;
+      this.emitProgress(resumeRunId, progress, "initial", `Resuming ${participantLabel} after permission approval.`, {
+        participantLabel,
+        agentProgress: {
+          participantId: requester.id,
+          participantLabel,
+          state: "running"
+        }
+      });
       const now = new Date().toISOString();
       conversation.messages.push(this.message(
         "system",
@@ -3166,11 +3248,10 @@ export class ChatService {
           sourceMessageId: trigger.id
         }
       ));
-      const resumeRunId = approval.resumeContext.runId || randomUUID();
       conversation.metadata = { ...conversation.metadata, running: true, runId: resumeRunId };
       conversation.updatedAt = now;
       this.queueSnapshot(conversation);
-      const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, undefined, {
+      const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, progress, {
         warnings: [],
         participantRequestDepth: participantRequestBatch?.depth,
         participantRequestBatchId: participantRequestBatch?.id
@@ -3187,6 +3268,7 @@ export class ChatService {
       this.queueSnapshot(conversation);
       await this.ensureHistoryFiles(conversation);
       await this.saveConversation(conversation);
+      this.emitProgress(resumeRunId, progress, "done", "Permission approval resume finished.");
       if (participantRequestResumeMessageId) {
         void this.autoResumeParticipantRequest(conversation.id, participantRequestResumeMessageId).catch((error) => {
           void this.debugLogs.write("chat.permission-approval.participant-request-auto-resume.error", {

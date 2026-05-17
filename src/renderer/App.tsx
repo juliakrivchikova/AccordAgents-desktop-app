@@ -1695,6 +1695,7 @@ function App(): JSX.Element {
   const visibleDecisionAnswers = { ...pendingDecisionSelections(conversation), ...decisionAnswers };
   const visibleDecisionResolutions = { ...pendingDecisionResolutions(conversation), ...resolvedDecisionThreads };
   const conversationKind = conversation?.kind ?? openingConversation?.kind ?? kind;
+  const conversationRunning = busy || Boolean(conversation?.metadata.running);
   const visibleWarnings = warnings.map((warning) => displayNoticeText(warning)).filter(Boolean);
   const chatSummaries = useMemo(() => summaries.filter((summary) => summary.kind === "chat"), [summaries]);
   const projectSessionGroups = useMemo(() => buildProjectSessionGroups(chatSummaries), [chatSummaries]);
@@ -1879,7 +1880,7 @@ function App(): JSX.Element {
                     settings={settings}
                     agents={agents}
                     progress={progressLog}
-                    isRunning={busy}
+                    isRunning={conversationRunning}
                     hasOlderMessages={Boolean(messagePage?.hasMoreBefore)}
                     olderMessagesLoading={olderMessagesLoading}
                     draft={chatMessageDraft}
@@ -1913,7 +1914,7 @@ function App(): JSX.Element {
                     conversation={conversation}
                     progress={progressLog}
                     kind={conversationKind}
-                    isRunning={busy}
+                    isRunning={conversationRunning}
                     hasOlderMessages={Boolean(messagePage?.hasMoreBefore)}
                     olderMessagesLoading={olderMessagesLoading}
                     onLoadOlderMessages={() => void loadOlderConversationMessages()}

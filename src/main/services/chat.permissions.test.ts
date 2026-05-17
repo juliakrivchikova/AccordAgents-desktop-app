@@ -205,6 +205,7 @@ test("permission resume attaches resumed participant-request reply to the origin
   });
   const conversation = chatConversation([participant], { pendingAppToolApprovals: [approval] });
   conversation.messages.push(trigger);
+  const progressEvents: Array<{ runId: string; phase: string; message: string; agentProgress?: { state: string } }> = [];
   const { service, storage, tempRoot } = testService({
     conversation,
     run: async (runParticipant, prompt, _repoPath, _diffMode, _kind, _signal, options) => {
@@ -220,7 +221,9 @@ test("permission resume attaches resumed participant-request reply to the origin
   });
   (service as any).ensureHistoryFiles = async () => tempRoot;
 
-  await (service as any).autoResumePermissionApproval(conversation.id, approval.id);
+  await (service as any).autoResumePermissionApproval(conversation.id, approval.id, (progress: typeof progressEvents[number]) => {
+    progressEvents.push(progress);
+  });
 
   assert.equal(runs.length, 1);
   assert.equal(runs[0].prompt.includes("Message ID: request-message"), true);
@@ -234,6 +237,10 @@ test("permission resume attaches resumed participant-request reply to the origin
   assert.equal(batch?.items[0].status, "answered");
   assert.equal(batch?.items[0].replyMessageId, reply?.id);
   assert.equal(saved.metadata.pendingAppToolApprovals[0].consumedAt.length > 0, true);
+  assert.equal(progressEvents[0]?.runId, "blocked-run");
+  assert.equal(progressEvents[0]?.phase, "initial");
+  assert.equal(progressEvents[0]?.agentProgress?.state, "running");
+  assert.equal(progressEvents.at(-1)?.phase, "done");
 });
 
 test("approved permission without resumeContext does not auto-run", async () => {
