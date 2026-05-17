@@ -1,6 +1,6 @@
 ````markdown
 ---
-name: ai-consensus-reply
+name: app-chat-reply
 description: >
   Reply to a participant request that was addressed to your handle. Use this
   skill when another participant triggered your turn through a participant
