@@ -58,6 +58,7 @@ import {
   hasChatAppToolCapability,
   normalizeChatAppToolCapabilities
 } from "../../shared/appTools";
+import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
 import { CliAgentRunner } from "./cliAgents";
 import type { CliAgentOutputEvent, CliAgentRoleOptions } from "./cliAgents";
 import {
@@ -1490,7 +1491,7 @@ export class ChatService {
           ? this.promptFallbackStaticInstructions(session)
           : "Use your configured role instructions and chat response rules for this participant.",
         this.participantRepositoryLine(conversation, options.agentMode, options.permissions),
-        this.participantPermissionPolicy(options.agentMode, options.permissions),
+        this.participantPermissionPolicy(options.agentMode, options.permissions, this.canRequestPermissionChanges(session)),
         "Dynamic chat context: use App MCP as the preferred source for current participants, active thread metadata, and prior messages.",
         `Fallback/debug chat history Markdown: ${historyMarkdownPath}.`,
         `Fallback/debug chat history JSON: ${historyJsonPath}.`,
@@ -1582,15 +1583,22 @@ export class ChatService {
   }
 
   private appToolPromptPolicy(session: ChatParticipantSession): string {
+    const permissionPolicyLines = this.canRequestPermissionChanges(session)
+      ? [
+          "Permission MCP tool: `app_permissions_request_change` is available when this participant needs User approval for blocked capabilities.",
+          "Required permission workflow: if the current task needs a blocked capability, call `app_permissions_request_change` before answering that the work cannot be done. Use `{ \"kind\": \"portable\", \"permissions\": [\"webAccess\"], \"reason\": \"Need live web lookup to answer User's trademark question.\" }` for web/file grants, `{ \"kind\": \"shellRules\", \"rules\": [{ \"action\": \"allow\", \"match\": \"prefix\", \"pattern\": \"git diff\" }], \"reason\": \"Need to inspect diffs.\" }` for shell rules, or `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants.",
+          "After a permission MCP call, the app will ask User to approve. If the result is pending approval, say only that the permission request is awaiting User approval; do not claim the permission was granted until the tool result or a later app message confirms approval."
+        ]
+      : [
+          "Permission changes are not directly available to this participant. If the current task needs a blocked capability, explain the specific capability needed before refusing."
+        ];
     const lines = [
       "App MCP tools: use the connected `ai_consensus` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
       "Chat context MCP tools: `app_chat_get_context`, `app_chat_get_participants`, and `app_chat_read_messages` are read-only and available for the current chat. Prefer them over full history files when you need roster details, active thread metadata, or prior messages.",
       "Participant request MCP tools: `app_chat_request_participants` and `app_chat_get_participant_request_status` are available for asking current chat participants for input and recovering their replies. Request JSON is `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
       "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
       "If `app_chat_request_participants` returns replies before timeout, use them in this turn. If it returns `pending_approval` or `running`, stop after a brief status note; the app will auto-resume you after replies or errors arrive.",
-      "Permission MCP tool: `app_permissions_request_change` is available when this participant needs User approval for blocked capabilities.",
-      "Required permission workflow: if the current task needs a blocked capability, call `app_permissions_request_change` before answering that the work cannot be done. Use `{ \"kind\": \"portable\", \"permissions\": [\"webAccess\"], \"reason\": \"Need live web lookup to answer User's trademark question.\" }` for web/file grants, `{ \"kind\": \"shellRules\", \"rules\": [{ \"action\": \"allow\", \"match\": \"prefix\", \"pattern\": \"git diff\" }], \"reason\": \"Need to inspect diffs.\" }` for shell rules, or `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants.",
-      "After a permission MCP call, the app will ask User to approve. If the result is pending approval, say only that the permission request is awaiting User approval; do not claim the permission was granted until the tool result or a later app message confirms approval."
+      ...permissionPolicyLines
     ];
     if (!hasChatAppToolCapability(session.roleAppToolCapabilities, "participants.manage")) {
       return [
@@ -1618,6 +1626,13 @@ export class ChatService {
       }
       return hasChatAppToolCapability(capabilities, "participants.manage");
     });
+  }
+
+  private canRequestPermissionChanges(session: ChatParticipantSession): boolean {
+    return Boolean(this.appMcp) && hasChatAppToolCapability([
+      ...normalizeChatAppToolCapabilities(session.roleAppToolCapabilities),
+      "permissions.request"
+    ], "permissions.request");
   }
 
   private issueAppMcpConnection(
@@ -1822,26 +1837,27 @@ export class ChatService {
 
   private participantPermissionPolicy(
     agentMode: ChatAgentMode,
-    runPermissions: ChatAgentPermissions
+    runPermissions: ChatAgentPermissions,
+    canRequestPermissions: boolean
   ): string {
     const permissions = effectiveChatAgentPermissions(agentMode, runPermissions);
-    const shellRules = permissions.shell.enabled && permissions.shell.rules.length > 0
-      ? permissions.shell.rules.map((rule) => `${rule.action} ${rule.match} ${JSON.stringify(rule.pattern)}`).join("; ")
-      : "none";
     const providerNativeAllowedTools = permissions.providerNative?.["claude-code"]?.allowedTools ?? [];
     const providerNativeGrants = providerNativeAllowedTools.length > 0
       ? providerNativeAllowedTools.map((token) => JSON.stringify(token)).join(", ")
       : "none";
+    const permissionLines = chatPermissionPromptLines({ agentMode, permissions, canRequestPermissions });
     return [
       `Agent mode: ${agentMode}.`,
       `Permissions: repo read ${permissions.repoRead ? "allowed" : "blocked"}, shell commands ${permissions.shell.enabled ? "allowed" : "blocked"}, workspace edits ${permissions.workspaceWrite ? "allowed" : "blocked"}, web access ${permissions.webAccess ? "allowed" : "blocked"}.`,
       permissions.repoRead
         ? "Repository files may be inspected read-only when repository context is selected; app-managed chat context may be read through MCP, with history files as fallback/debug context."
         : "Do not inspect selected repository files; app-managed chat context may still be read through MCP, with history files as fallback/debug context.",
-      permissions.shell.enabled ? `Shell command rules: ${shellRules}. Follow deny rules strictly; ask rules require native CLI approval; allow rules may run without extra confirmation when the CLI supports them.` : "General shell commands are blocked; this does not block read-only file inspection allowed by repo or history context.",
+      permissionLines.shell,
       `Provider-native Claude tool grants: ${providerNativeGrants}.`,
-      permissions.workspaceWrite ? "If you change files, summarize the changed files and verification in this chat reply." : "Do not edit files."
-    ].join(" ");
+      permissionLines.workspace,
+      permissions.workspaceWrite ? "If you change files, summarize the changed files and verification in this chat reply." : "",
+      permissionLines.web
+    ].filter(Boolean).join(" ");
   }
 
   private warmAgentContextKey(

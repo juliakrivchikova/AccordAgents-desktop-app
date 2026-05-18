@@ -18,6 +18,7 @@ import type {
 } from "../../shared/types";
 import { effectiveChatAgentPermissions, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
+import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
 import { CommandError, commandExists, runCommand } from "./command";
 import type { ParticipantRunResult } from "./providers";
 
@@ -30,6 +31,7 @@ const SESSION_LOG_RETRY_MS = 80;
 const SESSION_LOG_RETRIES = 4;
 const CODEX_APP_SERVER_DISABLED_ENV = "AI_CONSENSUS_CODEX_APP_SERVER";
 const CODEX_APP_SERVER_MCP_TOKEN_ENV = "AI_CONSENSUS_MCP_TOKEN";
+const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 
 export interface CliAgentRunOptions {
   persistSession?: boolean;
@@ -1714,11 +1716,8 @@ export class CliAgentRunner {
     return rule.match === "prefix" ? `Bash(${pattern}:*)` : `Bash(${pattern})`;
   }
 
-  private shellRulesText(rules: ChatShellPermissionRule[]): string {
-    if (rules.length === 0) {
-      return "no explicit shell rules configured";
-    }
-    return rules.map((rule) => `${rule.action} ${rule.match} ${JSON.stringify(rule.pattern)}`).join("; ");
+  private canRequestPermissionChanges(options: CliAgentRunOptions): boolean {
+    return Boolean(options.appMcp?.toolNames.includes(APP_PERMISSIONS_REQUEST_CHANGE_TOOL));
   }
 
   private codexPrompt(
@@ -1740,6 +1739,11 @@ export class CliAgentRunner {
     if (kind === "chat") {
       const mode = this.agentModeForRun(kind, options);
       const permissions = this.permissionsForRun(mode, options);
+      const permissionLines = chatPermissionPromptLines({
+        agentMode: mode,
+        permissions,
+        canRequestPermissions: this.canRequestPermissionChanges(options)
+      });
       const readContextAvailable = Boolean(repoPath) || this.normalizedExtraReadableDirs(options.extraReadableDirs).length > 0;
       return [
         `You are running for AI Consensus Chat in ${mode} mode.`,
@@ -1747,11 +1751,9 @@ export class CliAgentRunner {
         readContextAvailable
           ? "Read-only file inspection, search, and listing are allowed for the selected repository and app-managed history files described in the prompt. Use these only to gather context."
           : "No repository or app-managed readable directory is available for this run.",
-        permissions.shell.enabled
-          ? `Shell commands are allowed only according to these rules: ${this.shellRulesText(permissions.shell.rules)}. Deny rules are strict; ask rules require native CLI approval.`
-          : "General shell commands are blocked. Apart from read-only file inspection above, do not run installs, builds, tests, network commands, long-running commands, or mutating commands.",
-        permissions.workspaceWrite ? "Workspace file edits are allowed when needed." : "Do not edit files.",
-        permissions.webAccess ? "Web search is available if needed." : "Do not use web search.",
+        permissionLines.shell,
+        permissionLines.workspace,
+        permissionLines.web,
         prompt
       ].join("\n\n");
     }

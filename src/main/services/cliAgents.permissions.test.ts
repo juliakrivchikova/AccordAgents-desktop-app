@@ -11,15 +11,26 @@ function chatOptions(overrides: {
   agentMode: "default" | "plan";
   workspaceWrite: boolean;
   webAccess?: boolean;
+  shell?: ReturnType<typeof defaultChatAgentPermissions>["shell"];
+  canRequestPermissions?: boolean;
 }) {
+  const permissions = defaultChatAgentPermissions();
   return {
     agentMode: overrides.agentMode,
     permissions: {
-      ...defaultChatAgentPermissions(),
+      ...permissions,
       repoRead: true,
       workspaceWrite: overrides.workspaceWrite,
-      webAccess: overrides.webAccess ?? false
-    }
+      webAccess: overrides.webAccess ?? false,
+      shell: overrides.shell ?? permissions.shell
+    },
+    appMcp: overrides.canRequestPermissions
+      ? {
+          url: "http://127.0.0.1:1/mcp",
+          token: "token",
+          toolNames: ["app_permissions_request_change"]
+        }
+      : undefined
   };
 }
 
@@ -95,4 +106,77 @@ test("claudeToolConfig leaves plan agent mode untouched regardless of workspaceW
   assert.equal(planWithWrite.permissionMode, "plan");
   // plan mode disables workspaceWrite via effective permissions, so editors stay disallowed
   assert.ok(planWithWrite.disallowedTools.includes("Write"));
+});
+
+test("codexPrompt chat uses permission-request guidance for blocked capabilities", () => {
+  const runner = makeRunner() as any;
+  const prompt = runner.codexPrompt("Handle the request.", "/repo", undefined, "chat", chatOptions({
+    agentMode: "default",
+    workspaceWrite: false,
+    webAccess: false,
+    canRequestPermissions: true
+  }));
+
+  assert.match(prompt, /Shell commands are blocked for this turn/);
+  assert.match(prompt, /app_permissions_request_change.*shellRules/);
+  assert.match(prompt, /Workspace file edits are blocked for this turn/);
+  assert.match(prompt, /app_permissions_request_change.*workspaceWrite/);
+  assert.match(prompt, /Web access is blocked for this turn/);
+  assert.match(prompt, /app_permissions_request_change.*webAccess/);
+  assert.doesNotMatch(prompt, /General shell commands are blocked/);
+  assert.doesNotMatch(prompt, /Do not edit files/);
+  assert.doesNotMatch(prompt, /Do not use web search/);
+});
+
+test("codexPrompt chat keeps explicit shell deny rules as hard stops", () => {
+  const runner = makeRunner() as any;
+  const prompt = runner.codexPrompt("Handle the request.", "/repo", undefined, "chat", chatOptions({
+    agentMode: "default",
+    workspaceWrite: false,
+    shell: {
+      enabled: true,
+      rules: [{ action: "deny", match: "exact", pattern: "rm -rf" }]
+    },
+    canRequestPermissions: true
+  }));
+
+  assert.match(prompt, /deny exact "rm -rf"/);
+  assert.match(prompt, /Deny rules are strict hard stops for matching commands/);
+  assert.match(prompt, /do not request escalation for commands that match a deny rule/);
+  assert.match(prompt, /outside these rules/);
+});
+
+test("codexPrompt chat uses explanation fallback when permission requests are unavailable", () => {
+  const runner = makeRunner() as any;
+  const prompt = runner.codexPrompt("Handle the request.", "/repo", undefined, "chat", chatOptions({
+    agentMode: "default",
+    workspaceWrite: false,
+    webAccess: false,
+    canRequestPermissions: false
+  }));
+
+  assert.match(prompt, /explain the specific command and shell rule needed before refusing/);
+  assert.match(prompt, /explain that `workspaceWrite` is needed before refusing/);
+  assert.match(prompt, /explain that `webAccess` is needed before refusing/);
+  assert.doesNotMatch(prompt, /app_permissions_request_change/);
+});
+
+test("codexPrompt chat does not suggest escalation for agent-mode masked shell and workspace grants", () => {
+  const runner = makeRunner() as any;
+  const prompt = runner.codexPrompt("Handle the request.", "/repo", undefined, "chat", chatOptions({
+    agentMode: "plan",
+    workspaceWrite: true,
+    webAccess: false,
+    shell: {
+      enabled: true,
+      rules: [{ action: "allow", match: "prefix", pattern: "npm run" }]
+    },
+    canRequestPermissions: true
+  }));
+
+  assert.match(prompt, /Shell commands are blocked by the current agent mode/);
+  assert.match(prompt, /Workspace file edits are blocked by the current agent mode/);
+  assert.match(prompt, /app_permissions_request_change.*webAccess/);
+  assert.doesNotMatch(prompt, /shellRules/);
+  assert.doesNotMatch(prompt, /workspaceWrite/);
 });

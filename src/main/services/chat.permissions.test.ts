@@ -337,6 +337,66 @@ test("approved permission without resumeContext does not auto-run", async () => 
   assert.equal(runs.length, 0);
 });
 
+test("participantPermissionPolicy guides blocked capabilities to request before refusing", () => {
+  const { service } = testService();
+  const prompt = (service as any).participantPermissionPolicy("default", defaultChatAgentPermissions(), true);
+
+  assert.match(prompt, /Shell commands are blocked for this turn/);
+  assert.match(prompt, /app_permissions_request_change.*shellRules/);
+  assert.match(prompt, /Workspace file edits are blocked for this turn/);
+  assert.match(prompt, /app_permissions_request_change.*workspaceWrite/);
+  assert.match(prompt, /Web access is blocked for this turn/);
+  assert.match(prompt, /app_permissions_request_change.*webAccess/);
+  assert.doesNotMatch(prompt, /General shell commands are blocked/);
+  assert.doesNotMatch(prompt, /Do not edit files/);
+  assert.doesNotMatch(prompt, /Do not use web search/);
+});
+
+test("participantPermissionPolicy keeps explicit shell deny rules as hard stops", () => {
+  const { service } = testService();
+  const prompt = (service as any).participantPermissionPolicy("default", normalizeChatAgentPermissions({
+    ...defaultChatAgentPermissions(),
+    shell: {
+      enabled: true,
+      rules: [{ action: "deny", match: "exact", pattern: "rm -rf" }]
+    }
+  }), true);
+
+  assert.match(prompt, /deny exact "rm -rf"/);
+  assert.match(prompt, /Deny rules are strict hard stops for matching commands/);
+  assert.match(prompt, /do not request escalation for commands that match a deny rule/);
+  assert.match(prompt, /outside these rules/);
+});
+
+test("participantPermissionPolicy uses explanation fallback when permission requests are unavailable", () => {
+  const { service } = testService();
+  const prompt = (service as any).participantPermissionPolicy("default", defaultChatAgentPermissions(), false);
+
+  assert.match(prompt, /explain the specific command and shell rule needed before refusing/);
+  assert.match(prompt, /explain that `workspaceWrite` is needed before refusing/);
+  assert.match(prompt, /explain that `webAccess` is needed before refusing/);
+  assert.doesNotMatch(prompt, /app_permissions_request_change/);
+});
+
+test("participantPermissionPolicy does not suggest escalation for agent-mode masked shell and workspace grants", () => {
+  const { service } = testService();
+  const prompt = (service as any).participantPermissionPolicy("plan", normalizeChatAgentPermissions({
+    ...defaultChatAgentPermissions(),
+    workspaceWrite: true,
+    webAccess: false,
+    shell: {
+      enabled: true,
+      rules: [{ action: "allow", match: "prefix", pattern: "npm run" }]
+    }
+  }), true);
+
+  assert.match(prompt, /Shell commands are blocked by the current agent mode/);
+  assert.match(prompt, /Workspace file edits are blocked by the current agent mode/);
+  assert.match(prompt, /app_permissions_request_change.*webAccess/);
+  assert.doesNotMatch(prompt, /shellRules/);
+  assert.doesNotMatch(prompt, /workspaceWrite/);
+});
+
 function testService(options: {
   conversation?: Conversation;
   run?: (...args: any[]) => Promise<any>;
