@@ -1636,6 +1636,7 @@ export class CliAgentRunner {
     const readContextAvailable = Boolean(repoPath) || extraReadableDirs.length > 0;
     const readTools = ["Read", "Grep", "Glob", "LS"];
     const editTools = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+    const webTools = ["WebSearch", "WebFetch"];
 
     if (readContextAvailable) {
       for (const tool of readTools) {
@@ -1643,8 +1644,12 @@ export class CliAgentRunner {
       }
     }
     if (permissions.webAccess) {
-      tools.add("WebSearch");
-      tools.add("WebFetch");
+      for (const tool of webTools) {
+        tools.add(tool);
+        allowedTools.push(tool);
+      }
+    } else {
+      disallowedTools.push(...webTools);
     }
     if (permissions.workspaceWrite) {
       for (const tool of editTools) {
