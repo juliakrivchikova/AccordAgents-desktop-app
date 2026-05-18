@@ -29,16 +29,20 @@ const MISSING_CLAUDE_AGENT: AgentHealth = {
   installed: false
 };
 
-test("strips the current 4-backtick wrapper without removing inner fences", async () => {
+test("parses participant reply skill frontmatter without stale reply-tool guidance", async () => {
   const skillPath = path.join(process.cwd(), "src/main/appSkills/app-chat-reply/SKILL.md");
   const raw = await readFile(skillPath, "utf8");
+  assert.equal(raw.startsWith("````"), false);
   const stripped = stripOuterMarkdownFence(raw);
   assert.ok(stripped.startsWith("---\n"));
-  assert.equal(stripped.startsWith("````"), false);
-  assert.ok(stripped.includes("```json"));
   const parsed = parseSkillFrontmatter(stripped);
   assert.equal(parsed.name, "app-chat-reply");
   assert.ok(parsed.description.includes("Reply to a participant request"));
+  assert.match(parsed.body, /answer directly in the\s+active request thread/);
+  assert.ok(parsed.body.includes("Ask for clarification"));
+  assert.doesNotMatch(parsed.body, /Plain chat messages do not resume the requester/);
+  assert.doesNotMatch(parsed.body, /app_chat_reply_to_participant_request/);
+  assert.doesNotMatch(parsed.body, /app_chat_get_pending_requests/);
 });
 
 test("parses participant request skill frontmatter", async () => {

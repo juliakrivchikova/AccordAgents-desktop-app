@@ -397,6 +397,18 @@ test("participantPermissionPolicy does not suggest escalation for agent-mode mas
   assert.doesNotMatch(prompt, /workspaceWrite/);
 });
 
+test("static chat instructions include structured participant request and reply guidance", () => {
+  const { service } = testService();
+  const instructions = (service as any).staticChatInstructions({
+    roleAppToolCapabilities: ["participants.request", "permissions.request"]
+  });
+
+  assert.match(instructions, /use `app_chat_request_participants` rather than plain `@mentions`/);
+  assert.match(instructions, /When replying to a participant request addressed to you, answer in the active thread/);
+  assert.match(instructions, /if request matching is ambiguous, ask for clarification rather than guessing/);
+  assert.doesNotMatch(instructions, /app_chat_reply_to_participant_request/);
+});
+
 function testService(options: {
   conversation?: Conversation;
   run?: (...args: any[]) => Promise<any>;
