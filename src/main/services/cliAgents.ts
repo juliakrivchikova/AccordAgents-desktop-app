@@ -137,8 +137,10 @@ interface CodexAppServerTurnStartResult {
   };
 }
 
+type ClaudePermissionMode = "default" | "plan" | "acceptEdits";
+
 interface ClaudeToolConfig {
-  permissionMode: ChatAgentMode;
+  permissionMode: ClaudePermissionMode;
   tools: string[];
   allowedTools: string[];
   disallowedTools: string[];
@@ -1608,14 +1610,24 @@ export class CliAgentRunner {
     return effectiveChatAgentPermissions(mode, normalizeChatAgentPermissions(options.permissions));
   }
 
+  private claudePermissionMode(kind: ConversationKind, options: CliAgentRunOptions): ClaudePermissionMode {
+    const agentMode = this.agentModeForRun(kind, options);
+    if (agentMode === "plan") {
+      return "plan";
+    }
+    const permissions = this.permissionsForRun(agentMode, options);
+    return permissions.workspaceWrite ? "acceptEdits" : "default";
+  }
+
   private claudeToolConfig(
     kind: ConversationKind,
     repoPath: string | undefined,
     extraReadableDirs: string[],
     options: CliAgentRunOptions
   ): ClaudeToolConfig {
-    const permissionMode = this.agentModeForRun(kind, options);
-    const permissions = this.permissionsForRun(permissionMode, options);
+    const agentMode = this.agentModeForRun(kind, options);
+    const permissionMode = this.claudePermissionMode(kind, options);
+    const permissions = this.permissionsForRun(agentMode, options);
     const tools = new Set<string>();
     const allowedTools: string[] = [];
     const disallowedTools: string[] = [];

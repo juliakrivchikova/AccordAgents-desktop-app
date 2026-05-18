@@ -243,6 +243,71 @@ test("permission resume attaches resumed participant-request reply to the origin
   assert.equal(progressEvents.at(-1)?.phase, "done");
 });
 
+test("implicit permission approval inherits resumeContext from the triggering turn", () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+
+  const reply: any = {
+    id: "reply-1",
+    role: "participant",
+    participantId: participant.id,
+    content: "I can't do that here — I need workspace edit access to save the file.",
+    createdAt: NOW,
+    status: "done",
+    metadata: {
+      threadId: "thread-1",
+      sourceMessageId: "user-message"
+    }
+  };
+
+  (service as any).appendParticipantTurnMessages(conversation, participant, [reply], {
+    runId: "run-42",
+    triggerMessageId: "user-message"
+  });
+
+  const approval = (conversation.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).find(
+    (item) => item.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL
+  );
+  assert.ok(approval, "expected an implicit permission approval");
+  assert.equal(approval.status, "pending");
+  assert.equal(approval.resumeContext?.runId, "run-42");
+  assert.equal(approval.resumeContext?.triggerMessageId, "user-message");
+});
+
+test("implicit permission approval preserves participantRequestBatchId from a participant-request turn", () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+
+  const reply: any = {
+    id: "reply-1",
+    role: "participant",
+    participantId: participant.id,
+    content: "I can't help here — I need workspace edit access to update the file.",
+    createdAt: NOW,
+    status: "done",
+    metadata: {
+      threadId: "thread-1",
+      sourceMessageId: "request-message"
+    }
+  };
+
+  (service as any).appendParticipantTurnMessages(conversation, participant, [reply], {
+    runId: "run-99",
+    triggerMessageId: "request-message",
+    participantRequestBatchId: "batch-77"
+  });
+
+  const approval = (conversation.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).find(
+    (item) => item.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL
+  );
+  assert.ok(approval, "expected an implicit permission approval");
+  assert.equal(approval.resumeContext?.runId, "run-99");
+  assert.equal(approval.resumeContext?.triggerMessageId, "request-message");
+  assert.equal(approval.resumeContext?.participantRequestBatchId, "batch-77");
+});
+
 test("approved permission without resumeContext does not auto-run", async () => {
   const runs: ParticipantConfig[] = [];
   const participant = chatParticipant("claude-code");

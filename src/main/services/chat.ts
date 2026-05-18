@@ -1052,7 +1052,10 @@ export class ChatService {
           warnings
         });
         await this.refreshStoredChatState(conversation);
-        this.appendParticipantTurnMessages(conversation, requester, messages);
+        this.appendParticipantTurnMessages(conversation, requester, messages, {
+          runId,
+          triggerMessageId: sourceMessage.id
+        });
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
         await this.ensureHistoryFiles(conversation);
@@ -1121,7 +1124,10 @@ export class ChatService {
       warnings
     });
     await this.refreshStoredChatState(conversation);
-    this.appendParticipantTurnMessages(conversation, requester, messages);
+    this.appendParticipantTurnMessages(conversation, requester, messages, {
+      runId,
+      triggerMessageId: userMessage.id
+    });
     conversation.metadata = { ...conversation.metadata, running: false };
     conversation.updatedAt = new Date().toISOString();
     this.queueSnapshot(conversation);
@@ -1152,7 +1158,10 @@ export class ChatService {
     const appendCompletedTurn = async (participant: ChatParticipant, messages: ChatMessage[]): Promise<void> => {
       const nextAppend = appendQueue.then(async () => {
         await this.refreshStoredChatState(conversation);
-        this.appendParticipantTurnMessages(conversation, participant, messages);
+        this.appendParticipantTurnMessages(conversation, participant, messages, {
+          runId,
+          triggerMessageId: triggerMessage.id
+        });
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
       });
@@ -1454,11 +1463,12 @@ export class ChatService {
   private appendParticipantTurnMessages(
     conversation: Conversation,
     participant: ChatParticipant,
-    messages: ChatMessage[]
+    messages: ChatMessage[],
+    resumeContext?: ChatAppToolApproval["resumeContext"]
   ): void {
     conversation.messages.push(...messages);
     this.createImplicitParticipantRequestApproval(conversation, participant, messages);
-    this.createImplicitPermissionApproval(conversation, participant, messages);
+    this.createImplicitPermissionApproval(conversation, participant, messages, resumeContext);
   }
 
   private buildPrompt(
@@ -2345,7 +2355,8 @@ export class ChatService {
   private createImplicitPermissionApproval(
     conversation: Conversation,
     participant: ChatParticipant,
-    messages: ChatMessage[]
+    messages: ChatMessage[],
+    resumeContext?: ChatAppToolApproval["resumeContext"]
   ): void {
     const request = this.implicitPermissionChangeRequest(participant, messages);
     if (!request) {
@@ -2364,6 +2375,9 @@ export class ChatService {
       prepared.summary,
       "pending"
     );
+    if (resumeContext) {
+      approval.resumeContext = resumeContext;
+    }
     this.upsertAppToolApproval(conversation, approval);
     conversation.messages.push(this.message("system", `Permission approval needed for @${participant.handle}: ${prepared.summary}.`, undefined, {
       threadId: "system"
@@ -3101,7 +3115,11 @@ export class ChatService {
           participantRequestBatchId: batch.id
         });
         await this.refreshStoredChatState(conversation);
-        this.appendParticipantTurnMessages(conversation, target, messages);
+        this.appendParticipantTurnMessages(conversation, target, messages, {
+          runId,
+          triggerMessageId: targetTriggerMessage.id,
+          participantRequestBatchId: batch.id
+        });
         const reply = messages[0];
         const waitingOnPermissionApproval = this.hasPendingPermissionApprovalForParticipantTurn(
           conversation,
@@ -3257,7 +3275,11 @@ export class ChatService {
         participantRequestBatchId: participantRequestBatch?.id
       });
       await this.refreshStoredChatState(conversation);
-      this.appendParticipantTurnMessages(conversation, requester, messages);
+      this.appendParticipantTurnMessages(conversation, requester, messages, {
+        runId: resumeRunId,
+        triggerMessageId: trigger.id,
+        participantRequestBatchId: participantRequestBatch?.id
+      });
       const participantRequestResumeMessageId = participantRequestMessage && participantRequestBatch
         ? this.applyPermissionResumeToParticipantRequest(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, messages)
         : undefined;
@@ -3412,14 +3434,19 @@ export class ChatService {
       conversation.messages.push(trigger);
       conversation.updatedAt = now;
       this.queueSnapshot(conversation);
-      const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, randomUUID(), undefined, undefined, {
+      const resumeRunId = randomUUID();
+      const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, undefined, {
         continuation: true,
         warnings: [],
         participantRequestDepth: batch.depth,
         participantRequestBatchId: batch.id
       });
       await this.refreshStoredChatState(conversation);
-      this.appendParticipantTurnMessages(conversation, requester, messages);
+      this.appendParticipantTurnMessages(conversation, requester, messages, {
+        runId: resumeRunId,
+        triggerMessageId: trigger.id,
+        participantRequestBatchId: batch.id
+      });
       this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
         ...current,
         status: "completed",
