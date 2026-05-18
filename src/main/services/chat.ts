@@ -92,6 +92,7 @@ const CHAT_ADMINISTRATOR_HANDLE = "admin";
 const CHAT_ROSTER_CHANGE_MAX_OPERATIONS = 12;
 const CHAT_PARTICIPANT_REQUEST_MAX_ITEMS = 4;
 const CHAT_PARTICIPANT_REQUEST_MAX_DEPTH = 2;
+const CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN = 4;
 const CHAT_PARTICIPANT_REQUEST_RATE_WINDOW_MS = 60_000;
 const CHAT_PARTICIPANT_REQUEST_RATE_LIMIT = 8;
 const CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS = 120_000;
@@ -2520,9 +2521,9 @@ export class ChatService {
         return false;
       }
       if (batch.triggerMessageId === sourceMessageId) {
-        return true;
+        return this.participantRequestHasUnfinishedItems(batch);
       }
-      if (!["pending_approval", "running", "resuming_requester"].includes(batch.status)) {
+      if (!this.participantRequestHasUnfinishedItems(batch)) {
         return false;
       }
       return batch.items.some((item) =>
@@ -2958,12 +2959,18 @@ export class ChatService {
     if (depth > CHAT_PARTICIPANT_REQUEST_MAX_DEPTH) {
       return `max depth (${CHAT_PARTICIPANT_REQUEST_MAX_DEPTH}) reached`;
     }
-    if (actor.triggerMessageId && this.participantRequestBatches(conversation).some((batch) =>
-      batch.requesterParticipantId === requester.id &&
-      batch.triggerMessageId === actor.triggerMessageId &&
-      batch.source === "mcp"
-    )) {
+    const sameTurnMcpBatches = actor.triggerMessageId
+      ? this.participantRequestBatches(conversation).filter((batch) =>
+          batch.requesterParticipantId === requester.id &&
+          batch.triggerMessageId === actor.triggerMessageId &&
+          batch.source === "mcp"
+        )
+      : [];
+    if (sameTurnMcpBatches.some((batch) => this.participantRequestHasUnfinishedItems(batch))) {
       return "one active request batch is already attached to this requester turn";
+    }
+    if (sameTurnMcpBatches.length >= CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN) {
+      return `participant request turn limit (${CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN}) reached`;
     }
     const threshold = Date.now() - CHAT_PARTICIPANT_REQUEST_RATE_WINDOW_MS;
     const recent = this.participantRequestBatches(conversation).filter((batch) => Date.parse(batch.createdAt) >= threshold);
