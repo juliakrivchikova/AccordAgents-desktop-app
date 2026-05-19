@@ -84,7 +84,7 @@ interface ChatParticipantSessionState {
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 11;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 12;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const CHAT_ADMINISTRATOR_ROLE_ID = "administrator";
@@ -97,6 +97,8 @@ const CHAT_PARTICIPANT_REQUEST_RATE_WINDOW_MS = 60_000;
 const CHAT_PARTICIPANT_REQUEST_RATE_LIMIT = 8;
 const CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS = 120_000;
 const CHAT_PARTICIPANT_REQUEST_WAIT_MAX_MS = 300_000;
+const PARTICIPANT_REQUEST_SCRUTINY_APPENDIX =
+  "Review for blockers, incorrect assumptions, missing edge cases, or simpler alternatives. If none, reply with only `No objections.` Do not restate the proposal.";
 const CHAT_CONTEXT_MCP_TOOL_NAMES = [
   APP_CHAT_GET_CONTEXT_TOOL,
   APP_CHAT_GET_PARTICIPANTS_TOOL,
@@ -1569,6 +1571,7 @@ export class ChatService {
       this.appToolPromptPolicy(session),
       "",
       "Response rules:",
+      "- The user strongly prefers concise replies. Do not repeat accepted context or restate proposals when a short verdict, blocker, or delta is enough.",
       "- You may cite participant handles in normal prose for attribution; for cross-participant asks, use `app_chat_request_participants` rather than plain `@mentions` when another participant is expected to answer.",
       "- When replying to a participant request addressed to you, answer in the active thread; if request matching is ambiguous, ask for clarification rather than guessing.",
       "- Do not emit `Participant requests:` or `Return to requester after replies:` protocol blocks. They are legacy text and are not the current dispatch mechanism.",
@@ -1929,13 +1932,13 @@ export class ChatService {
   }
 
   private confirmationBrevityPolicy(): string {
-    return "Confirmation brevity policy: when the triggering request asks whether you agree, confirm, approve, acknowledge, sign off, or whether you have objections, reply with only a short confirmation such as `Yes, agree.`, `Confirmed.`, or `No objections.` unless you have a real objection, caveat, or correction. If you do have one, start with `Objection:` or `Concern:` and include only the material blocker; do not restate the prior proposal.";
+    return "Confirmation brevity policy: when the triggering request asks whether you agree, confirm, approve, acknowledge, sign off, review for objections, or confirm/correct/add anything, reply with only a short verdict such as `Yes, agree.`, `Confirmed.`, or `No objections.` Do not restate, summarize, or re-list the proposal you are confirming. If you have a real objection, caveat, correction, or short additive observation, start with `Objection:`, `Concern:`, `Correction:`, or `Note:` and include only the new material.";
   }
 
   private confirmationBrevityRetryPrompt(prompt: string): string {
     return [
       "Your previous draft was rejected because the triggering request only asked for agreement or confirmation, and you replied with a verbose affirmative restatement.",
-      "Rewrite with only one short confirmation sentence, such as `Yes, agree.`, `Confirmed.`, or `No objections.` If you have a real objection, caveat, or correction, start with `Objection:` or `Concern:` and include only that material blocker.",
+      "Rewrite with only one short confirmation sentence, such as `Yes, agree.`, `Confirmed.`, or `No objections.` Do not restate, summarize, or re-list the prior proposal. If you have a real objection, caveat, correction, or short additive observation, start with `Objection:`, `Concern:`, `Correction:`, or `Note:` and include only that new material.",
       prompt
     ].join("\n\n");
   }
@@ -1961,7 +1964,9 @@ export class ChatService {
       /\b(?:can|could|please|pls|kindly|would\s+you)\s+(?:confirm|approve|acknowledge|validate)\b/i,
       /\bconfirm\??\s*$/i,
       /\bconfirm\s+(?:this|that|it|whether|if)\b/i,
+      /\bconfirm\s+or\s+(?:correct|add|object)\b/i,
       /\b(?:any|no)\s+objections?\b/i,
+      /\breview\b[^.!?\n]{0,80}\b(?:objections?|corrections?|blockers?)\b/i,
       /\bare\s+you\s+(?:ok|okay|aligned|good)\s+with\b/i,
       /\bdoes\s+this\s+(?:look|seem)\s+(?:right|correct|good)\b/i,
       /\bis\s+this\s+(?:right|correct|ok|okay)\b/i,
@@ -1976,6 +1981,9 @@ export class ChatService {
 
   private hasMaterialConfirmationObjection(content: string): boolean {
     const withoutNoObjections = content.replace(/\bno\s+objections?\b/gi, "");
+    if (/\b(?:note|correction|addition)\s*:/i.test(withoutNoObjections)) {
+      return true;
+    }
     return /\b(?:objection|concern|caveat|but|however|except|unless|disagree|reject|unclear|unsupported|blocker|risk|issue|problem|missing|incorrect|wrong|invalid|unsafe|not convinced|cannot confirm|can't confirm|do not agree|don't agree|i disagree)\b/i.test(withoutNoObjections);
   }
 
@@ -2534,11 +2542,25 @@ export class ChatService {
   }
 
   private inferredParticipantRequestPrompt(requesterHandle: string, snippet: string): string {
-    return [
+    const base = [
       `@${requesterHandle} appeared to request your input in this chat reply.`,
       `Relevant excerpt: ${snippet}`,
       "Respond directly to the request, focusing only on the points that need your input."
     ].join("\n");
+    if (!this.confirmationRequestWasAsked(snippet)) {
+      return base;
+    }
+    return [base, "", PARTICIPANT_REQUEST_SCRUTINY_APPENDIX].join("\n");
+  }
+
+  private participantRequestPromptForTarget(prompt: string): string {
+    if (prompt.includes(PARTICIPANT_REQUEST_SCRUTINY_APPENDIX)) {
+      return prompt;
+    }
+    if (!this.confirmationRequestWasAsked(prompt)) {
+      return prompt;
+    }
+    return [prompt, "", PARTICIPANT_REQUEST_SCRUTINY_APPENDIX].join("\n");
   }
 
   private implicitPermissionChangeRequest(
@@ -3032,7 +3054,7 @@ export class ChatService {
   }
 
   private formatParticipantRequestMessage(_requesterHandle: string, items: ChatParticipantRequestItem[]): string {
-    return items.map((item) => `@${item.targetHandle} ${item.prompt}`.trim()).join("\n");
+    return items.map((item) => `@${item.targetHandle} ${this.participantRequestPromptForTarget(item.prompt)}`.trim()).join("\n");
   }
 
   private rollupParticipantRequestStatus(items: ChatParticipantRequestItem[], forced?: ChatParticipantRequestStatus): ChatParticipantRequestStatus {

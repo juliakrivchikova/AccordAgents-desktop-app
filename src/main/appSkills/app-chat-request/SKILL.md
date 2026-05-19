@@ -37,6 +37,13 @@ not expected to respond.
    preferences, or acceptance criteria.
 5. Include a short `reason` when it helps User understand why approval is being
    requested.
+6. When asking another participant to review a plan, prefer scrutiny-first
+   wording such as: "Review this plan for blockers, incorrect assumptions,
+   missing edge cases, or simpler alternatives. If none, reply with only
+   `No objections.`" Avoid "confirm or add" unless confirmation is truly the
+   only task. The app also rewrites confirm/agree-style prompts before they
+   reach the target, but starting with scrutiny-first wording yourself reduces
+   bias more reliably.
 
 ## Call the tool
 
