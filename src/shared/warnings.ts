@@ -1,6 +1,7 @@
 import type { Conversation } from "./types";
 
 export const DEFAULT_NOTICE_CHARS = 220;
+export const INTERRUPTED_RUN_WARNING = "Previous run was interrupted before completion. Continue from the saved context.";
 
 const RAW_CLI_PATTERNS = [
   /"type"\s*:\s*"thread\.started"/,

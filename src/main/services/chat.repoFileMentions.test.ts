@@ -4,8 +4,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { ChatService } from "./chat";
+import { StorageService } from "./storage";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { INTERRUPTED_RUN_WARNING } from "../../shared/warnings";
 import type {
+  ChatMessage,
   ChatParticipant,
   ChatParticipantSession,
   ChatRoleConfig,
@@ -122,13 +125,291 @@ test("buildPrompt adds repo file guidance based on repoRead permission", () => {
   assert.match(allowedPrompt, /You may read these with your usual tools/);
 });
 
-function testService(options: { canRequestPermissions?: boolean } = {}): { service: ChatService } {
+test("sendMessage clears running and emits terminal error when participant run fails", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant], "/repo");
+  const { service, storage } = testService({ conversations: [conversation] });
+  const progress: Array<{ phase: string; message: string }> = [];
+  (service as any).runParticipantBatch = async () => {
+    throw new Error("participant exploded");
+  };
+
+  await assert.rejects(
+    () => service.sendMessage(
+      { conversationId: conversation.id, runId: "run-failure", content: "@drew implement" },
+      undefined,
+      (item) => progress.push({ phase: item.phase, message: item.message })
+    ),
+    /participant exploded/
+  );
+
+  const saved = await storage.getConversation(conversation.id);
+  assert.equal(saved?.metadata.running, false);
+  assert.equal(saved?.metadata.runId, undefined);
+  assert.equal(progress.some((item) => item.phase === "error" && item.message === "participant exploded"), true);
+});
+
+test("respondToMentions clears running and emits terminal error when participant run fails", async () => {
+  const requester = chatParticipant();
+  const target = chatParticipant({}, { id: "participant-2", handle: "taylor" });
+  const conversation = chatConversation([requester, target], "/repo");
+  const sourceMessage = participantMessage(requester, "source-message", "@taylor please review");
+  sourceMessage.metadata = {
+    ...sourceMessage.metadata,
+    pendingMentions: [{
+      targetParticipantId: target.id,
+      targetHandle: target.handle,
+      status: "pending"
+    }]
+  };
+  conversation.messages.push(sourceMessage);
+  const { service, storage } = testService({ conversations: [conversation] });
+  const progress: Array<{ phase: string; message: string }> = [];
+  (service as any).runParticipantBatch = async () => {
+    throw new Error("mention exploded");
+  };
+
+  await assert.rejects(
+    () => service.respondToMentions(
+      {
+        conversationId: conversation.id,
+        runId: "mention-failure",
+        sourceMessageId: sourceMessage.id,
+        targetParticipantIds: [target.id],
+        approve: true
+      },
+      undefined,
+      (item) => progress.push({ phase: item.phase, message: item.message })
+    ),
+    /mention exploded/
+  );
+
+  const saved = await storage.getConversation(conversation.id);
+  assert.equal(saved?.metadata.running, false);
+  assert.equal(saved?.metadata.runId, undefined);
+  assert.equal(progress.some((item) => item.phase === "error" && item.message === "mention exploded"), true);
+});
+
+test("respondToChoice clears running and emits terminal error when requester run fails", async () => {
+  const requester = chatParticipant();
+  const conversation = chatConversation([requester], "/repo");
+  const sourceMessage = participantMessage(requester, "choice-message", "Choose an option.");
+  sourceMessage.metadata = {
+    ...sourceMessage.metadata,
+    pendingChoice: {
+      id: "choice-1",
+      title: "Decision",
+      question: "Proceed?",
+      options: [{ id: "yes", label: "Yes" }],
+      status: "pending"
+    }
+  };
+  conversation.messages.push(sourceMessage);
+  const { service, storage } = testService({ conversations: [conversation] });
+  const progress: Array<{ phase: string; message: string }> = [];
+  (service as any).runParticipantTurnSerialized = async () => {
+    throw new Error("choice exploded");
+  };
+
+  await assert.rejects(
+    () => service.respondToChoice(
+      {
+        conversationId: conversation.id,
+        runId: "choice-failure",
+        sourceMessageId: sourceMessage.id,
+        choiceId: "choice-1",
+        selectedOptionId: "yes"
+      },
+      undefined,
+      (item) => progress.push({ phase: item.phase, message: item.message })
+    ),
+    /choice exploded/
+  );
+
+  const saved = await storage.getConversation(conversation.id);
+  assert.equal(saved?.metadata.running, false);
+  assert.equal(saved?.metadata.runId, undefined);
+  assert.equal(progress.some((item) => item.phase === "error" && item.message === "choice exploded"), true);
+});
+
+test("hydrateContextUsage clears inactive stale running state once", async () => {
+  const conversation = chatConversation([chatParticipant()], "/repo");
+  conversation.metadata = {
+    ...conversation.metadata,
+    running: true,
+    runId: "stale-run",
+    warnings: [INTERRUPTED_RUN_WARNING, INTERRUPTED_RUN_WARNING]
+  };
+  const { service, storage } = testService({ conversations: [conversation] });
+
+  const hydrated = await service.hydrateContextUsage(cloneConversation(conversation));
+  const saved = await storage.getConversation(conversation.id);
+
+  assert.equal(hydrated.metadata.running, false);
+  assert.equal(hydrated.metadata.runId, undefined);
+  assert.deepEqual(hydrated.metadata.warnings, [INTERRUPTED_RUN_WARNING]);
+  assert.equal(saved?.metadata.running, false);
+  assert.deepEqual(saved?.metadata.warnings, [INTERRUPTED_RUN_WARNING]);
+});
+
+test("stale recovery does not clear running while background runner is active", async () => {
+  const conversation = chatConversation([chatParticipant()], "/repo");
+  const { service, storage } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+
+  await serviceAny.beginChatRun(conversation, "origin-run");
+  serviceAny.incrementBackgroundRunner(conversation.id);
+  await serviceAny.endChatRun(conversation, "origin-run");
+
+  let saved = await storage.getConversation(conversation.id);
+  assert.equal(saved?.metadata.running, true);
+  assert.equal(saved?.metadata.runId, "origin-run");
+
+  const recoveredCandidate = cloneConversation(saved as Conversation);
+  assert.equal(serviceAny.recoverStaleChatRun(recoveredCandidate), false);
+  assert.equal(recoveredCandidate.metadata.running, true);
+
+  serviceAny.decrementBackgroundRunner(conversation.id);
+  await serviceAny.tryClearRunningIfIdle(conversation.id);
+
+  saved = await storage.getConversation(conversation.id);
+  assert.equal(saved?.metadata.running, false);
+  assert.equal(saved?.metadata.runId, undefined);
+});
+
+test("tryClearRunningIfIdle waits for the chat run queue before clearing running", async () => {
+  const conversation = chatConversation([chatParticipant()], "/repo");
+  conversation.metadata = { ...conversation.metadata, running: true, runId: "origin-run" };
+  const { service, storage } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+  let releaseRunQueue!: () => void;
+  serviceAny.runQueues.set(conversation.id, new Promise<void>((resolve) => {
+    releaseRunQueue = resolve;
+  }));
+
+  const clearing = serviceAny.tryClearRunningIfIdle(conversation.id);
+  await Promise.resolve();
+
+  let saved = await storage.getConversation(conversation.id);
+  assert.equal(saved?.metadata.running, true);
+  assert.equal(saved?.metadata.runId, "origin-run");
+
+  releaseRunQueue();
+  await clearing;
+
+  saved = await storage.getConversation(conversation.id);
+  assert.equal(saved?.metadata.running, false);
+  assert.equal(saved?.metadata.runId, undefined);
+});
+
+test("endChatRun does not clear a newer run id", async () => {
+  const conversation = chatConversation([chatParticipant()], "/repo");
+  conversation.metadata = { ...conversation.metadata, running: true, runId: "newer-run" };
+  const { service } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+  serviceAny.activeRunIds.add("older-run");
+
+  await serviceAny.endChatRun(conversation, "older-run");
+
+  assert.equal(conversation.metadata.running, true);
+  assert.equal(conversation.metadata.runId, "newer-run");
+  assert.equal(serviceAny.activeRunIds.has("older-run"), false);
+});
+
+test("autoResumeParticipantRequest completes and clears running state", async () => {
+  const requester = chatParticipant();
+  const conversation = chatConversation([requester], "/repo");
+  const requestMessage = participantRequestMessage(requester);
+  conversation.messages.push(requestMessage);
+  const { service, storage } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+  serviceAny.ensureHistoryFiles = async () => "/tmp/ai-consensus-test-history";
+  serviceAny.runParticipantTurnSerialized = async () => [
+    participantMessage(requester, "resume-reply", "Final required fixes are listed.")
+  ];
+
+  await serviceAny.autoResumeParticipantRequest(conversation.id, requestMessage.id);
+  const saved = await storage.getConversation(conversation.id);
+  const savedRequest = saved?.messages.find((message) => message.id === requestMessage.id);
+
+  assert.equal(saved?.metadata.running, false);
+  assert.equal(saved?.metadata.runId, undefined);
+  assert.equal(savedRequest?.metadata?.participantRequest?.status, "completed");
+  assert.equal(savedRequest?.metadata?.participantRequest?.autoResumeMessageId, "resume-reply");
+});
+
+test("clearInterruptedRuns removes stale run id during startup cleanup", async () => {
+  const conversation = chatConversation([chatParticipant()], "/repo");
+  conversation.metadata = {
+    ...conversation.metadata,
+    running: true,
+    runId: "stale-run"
+  };
+  let saved: Conversation | undefined;
+  const storage = Object.create(StorageService.prototype) as any;
+  storage.queryJson = async () => [{ payloadJson: JSON.stringify(conversation) }];
+  storage.saveConversation = async (next: Conversation) => {
+    saved = cloneConversation(next);
+  };
+
+  await (storage as any).clearInterruptedRuns();
+
+  assert.equal(saved?.metadata.running, false);
+  assert.equal(saved?.metadata.runId, undefined);
+  assert.deepEqual(saved?.metadata.warnings, [INTERRUPTED_RUN_WARNING]);
+});
+
+test("requestParticipantsFromTool does not wait on top-level run queue", async () => {
+  const requester = chatParticipant();
+  const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
+  const conversation = chatConversation([requester, target], "/repo");
+  conversation.messages.push(userMessage("trigger-message", "@drew ask Taylor"));
+  const { service } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+  let releaseRunQueue!: () => void;
+  serviceAny.runQueues.set(conversation.id, new Promise<void>((resolve) => {
+    releaseRunQueue = resolve;
+  }));
+
+  try {
+    const result = await withTimeout(
+      service.requestParticipantsFromTool({
+        conversationId: conversation.id,
+        participantId: requester.id,
+        roleConfigId: requester.roleConfigId,
+        roleConfigVersion: ROLE.version,
+        capabilities: [],
+        triggerMessageId: "trigger-message",
+        runId: "active-run"
+      } as never, {
+        requests: [{ target: "taylor", prompt: "Review this.", reason: "Need another opinion." }],
+        timeoutMs: 50,
+        resumeRequester: true
+      }),
+      250
+    );
+    assert.equal(result.status, "pending_approval");
+  } finally {
+    releaseRunQueue();
+    serviceAny.runQueues.delete(conversation.id);
+  }
+});
+
+function testService(options: { canRequestPermissions?: boolean; conversations?: Conversation[] } = {}): {
+  service: ChatService;
+  storage: {
+    getConversation(id: string): Promise<Conversation | undefined>;
+    saveConversation(conversation: Conversation): Promise<void>;
+  };
+} {
+  const conversations = new Map((options.conversations ?? []).map((conversation) => [conversation.id, cloneConversation(conversation)]));
   const storage = {
-    async getConversation(): Promise<undefined> {
-      return undefined;
+    async getConversation(id: string): Promise<Conversation | undefined> {
+      const conversation = conversations.get(id);
+      return conversation ? cloneConversation(conversation) : undefined;
     },
-    async saveConversation(): Promise<void> {
-      return undefined;
+    async saveConversation(conversation: Conversation): Promise<void> {
+      conversations.set(conversation.id, cloneConversation(conversation));
     }
   };
   const settings = {
@@ -152,11 +433,15 @@ function testService(options: { canRequestPermissions?: boolean } = {}): { servi
       }
     : undefined;
   return {
-    service: new ChatService(storage as never, settings as never, cliRunner as never, debugLogs as never, appMcp as never)
+    service: new ChatService(storage as never, settings as never, cliRunner as never, debugLogs as never, appMcp as never),
+    storage
   };
 }
 
-function chatParticipant(permissionPatch: Partial<ReturnType<typeof defaultChatAgentPermissions>> = {}): ChatParticipant {
+function chatParticipant(
+  permissionPatch: Partial<ReturnType<typeof defaultChatAgentPermissions>> = {},
+  participantPatch: Partial<ChatParticipant> = {}
+): ChatParticipant {
   return {
     id: "participant-1",
     handle: "drew",
@@ -166,7 +451,8 @@ function chatParticipant(permissionPatch: Partial<ReturnType<typeof defaultChatA
     permissions: normalizeChatAgentPermissions({
       ...defaultChatAgentPermissions(),
       ...permissionPatch
-    })
+    }),
+    ...participantPatch
   };
 }
 
@@ -185,6 +471,86 @@ function chatConversation(participants: ChatParticipant[], repoPath: string): Co
       participantSessions: []
     }
   };
+}
+
+function userMessage(id: string, content: string): ChatMessage {
+  return {
+    id,
+    role: "user",
+    content,
+    createdAt: NOW,
+    status: "done",
+    metadata: { threadId: id }
+  };
+}
+
+function participantMessage(participant: ChatParticipant, id: string, content: string): ChatMessage {
+  return {
+    id,
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content,
+    createdAt: NOW,
+    status: "done",
+    metadata: { threadId: id }
+  };
+}
+
+function participantRequestMessage(requester: ChatParticipant): ChatMessage {
+  return {
+    id: "request-message",
+    role: "participant",
+    participantId: requester.id,
+    participantLabel: `@${requester.handle}`,
+    content: "@taylor Review this.",
+    createdAt: NOW,
+    status: "done",
+    metadata: {
+      threadId: "request-message",
+      participantRequest: {
+        id: "batch-1",
+        requesterParticipantId: requester.id,
+        requesterHandle: requester.handle,
+        source: "mcp",
+        resumeRequester: true,
+        status: "answered",
+        depth: 1,
+        createdAt: NOW,
+        updatedAt: NOW,
+        triggerMessageId: "trigger-message",
+        items: [{
+          targetParticipantId: "participant-2",
+          targetHandle: "taylor",
+          prompt: "Review this.",
+          status: "answered",
+          replyMessageId: "target-reply",
+          createdAt: NOW,
+          updatedAt: NOW
+        }]
+      }
+    }
+  };
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("Timed out waiting for operation.")), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function cloneConversation(conversation: Conversation): Conversation {
+  return JSON.parse(JSON.stringify(conversation)) as Conversation;
 }
 
 function chatSession(participant: ChatParticipant): ChatParticipantSession {

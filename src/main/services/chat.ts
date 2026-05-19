@@ -76,6 +76,8 @@ import { DebugLogService } from "./debugLogs";
 import type { ParticipantRunResult } from "./providers";
 import { SettingsService } from "./settings";
 import { StorageService } from "./storage";
+import { clearChatRunMetadata } from "../../shared/chatRunState";
+import { INTERRUPTED_RUN_WARNING, sanitizeWarningList } from "../../shared/warnings";
 
 type ProgressCallback = (progress: ReviewProgress) => void;
 
@@ -202,6 +204,10 @@ interface ParticipantRequestRunResult {
 
 export class ChatService {
   private readonly saveQueues = new Map<string, Promise<void>>();
+  private readonly runQueues = new Map<string, Promise<void>>();
+  private readonly activeRunIds = new Set<string>();
+  private readonly activeConversationRunIds = new Map<string, Set<string>>();
+  private readonly backgroundRunnerCounts = new Map<string, number>();
   private readonly appMcpTokens = new Map<string, string>();
   private readonly participantRequestRunners = new Map<string, Promise<ParticipantRequestRunResult>>();
   private readonly participantRequestAutoResumes = new Set<string>();
@@ -221,6 +227,7 @@ export class ChatService {
     if (conversation.kind !== "chat") {
       return conversation;
     }
+    const recoveredRunState = this.recoverStaleChatRun(conversation);
     let interruptedRequests = false;
     for (const message of conversation.messages) {
       if (this.markOrphanedParticipantRequestInterrupted(message)) {
@@ -250,7 +257,7 @@ export class ChatService {
         [participant.id]: usage
       };
     }
-    if (!nextUsage && !interruptedRequests) {
+    if (!nextUsage && !interruptedRequests && !recoveredRunState) {
       return conversation;
     }
     const hydrated = {
@@ -260,7 +267,7 @@ export class ChatService {
         ...(nextUsage ? { agentContextUsageByParticipant: nextUsage } : {})
       }
     };
-    if (interruptedRequests) {
+    if (interruptedRequests || recoveredRunState) {
       hydrated.updatedAt = new Date().toISOString();
       await this.saveConversation(hydrated);
     }
@@ -804,7 +811,7 @@ export class ChatService {
       const deniedParticipantRequest = this.isParticipantRequestApprovalRequest(approval.request) ? approval.request : undefined;
       if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && deniedParticipantRequest?.requestMessageId) {
         const requestMessageId = deniedParticipantRequest.requestMessageId;
-        void this.autoResumeParticipantRequest(conversation.id, requestMessageId).catch((error) => {
+        void this.autoResumeParticipantRequest(conversation.id, requestMessageId, progress).catch((error) => {
           void this.debugLogs.write("chat.participant-request.deny-auto-resume.error", {
             conversationId: conversation.id,
             requestMessageId,
@@ -850,7 +857,7 @@ export class ChatService {
       if (requestMessageId) {
         const batch = conversation.messages.find((message) => message.id === requestMessageId)?.metadata?.participantRequest;
         const runner = this.startParticipantRequestRunner(conversation.id, requestMessageId, randomUUID(), batch?.depth ?? 1);
-        void runner.then(() => this.autoResumeParticipantRequest(conversation.id, requestMessageId)).catch((error) => {
+        void runner.then(() => this.autoResumeParticipantRequest(conversation.id, requestMessageId, progress)).catch((error) => {
           void this.debugLogs.write("chat.participant-request.approval-run.error", {
             conversationId: conversation.id,
             requestMessageId,
@@ -947,201 +954,209 @@ export class ChatService {
   async sendMessage(request: SendChatMessageRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
     const runId = request.runId ?? randomUUID();
     const warnings: string[] = [];
-    const conversation = await this.requireChat(request.conversationId);
-    const content = request.content.trim();
-    if (!content) {
-      throw new Error("Message is required.");
-    }
-    const repoFileMentions = await this.validateRepoFileMentions(conversation, request.repoFileMentions, warnings, content);
-    const chatThreadRootId = request.chatThreadRootId?.trim() || undefined;
-    const threadId = request.threadId?.trim() || randomUUID();
-    const userMessage = this.message("user", content, undefined, {
-      threadId,
-      parentMessageId: request.parentMessageId,
-      chatThreadRootId,
-      ...(repoFileMentions.length > 0 ? { repoFileMentions } : {})
-    });
-    if (!request.threadId?.trim()) {
-      userMessage.metadata = { ...userMessage.metadata, threadId: userMessage.id };
-    }
-    conversation.messages.push(userMessage);
-    conversation.metadata = { ...conversation.metadata, running: true, runId };
-    conversation.updatedAt = new Date().toISOString();
-    this.queueSnapshot(conversation);
-
-    let dispatch = this.resolveMentionTargets(conversation, content);
-    for (const unknown of dispatch.unknownHandles) {
-      const warning = `No participant named @${unknown}.`;
-      warnings.push(warning);
-      conversation.messages.push(this.message("system", warning, undefined, {
-        threadId: userMessage.metadata?.threadId ?? threadId,
-        parentMessageId: userMessage.id,
-        chatThreadRootId
-      }));
-    }
-    if (dispatch.targets.length === 0 && dispatch.unknownHandles.length === 0) {
-      const adminTarget = this.defaultAdministratorDispatchTarget(conversation);
-      if (adminTarget) {
-        dispatch = { ...dispatch, targets: [adminTarget] };
+    return this.withChatRunLock(request.conversationId, async () => {
+      const conversation = await this.requireChat(request.conversationId);
+      const content = request.content.trim();
+      if (!content) {
+        throw new Error("Message is required.");
       }
-    }
-    if (dispatch.targets.length === 0) {
-      conversation.metadata = { ...conversation.metadata, running: false };
-      await this.saveConversation(conversation);
-      return { conversation, warnings };
-    }
+      const repoFileMentions = await this.validateRepoFileMentions(conversation, request.repoFileMentions, warnings, content);
+      const chatThreadRootId = request.chatThreadRootId?.trim() || undefined;
+      const threadId = request.threadId?.trim() || randomUUID();
+      const userMessage = this.message("user", content, undefined, {
+        threadId,
+        parentMessageId: request.parentMessageId,
+        chatThreadRootId,
+        ...(repoFileMentions.length > 0 ? { repoFileMentions } : {})
+      });
+      if (!request.threadId?.trim()) {
+        userMessage.metadata = { ...userMessage.metadata, threadId: userMessage.id };
+      }
+      conversation.messages.push(userMessage);
+      await this.beginChatRun(conversation, runId);
+      try {
+        let dispatch = this.resolveMentionTargets(conversation, content);
+        for (const unknown of dispatch.unknownHandles) {
+          const warning = `No participant named @${unknown}.`;
+          warnings.push(warning);
+          conversation.messages.push(this.message("system", warning, undefined, {
+            threadId: userMessage.metadata?.threadId ?? threadId,
+            parentMessageId: userMessage.id,
+            chatThreadRootId
+          }));
+        }
+        if (dispatch.targets.length === 0 && dispatch.unknownHandles.length === 0) {
+          const adminTarget = this.defaultAdministratorDispatchTarget(conversation);
+          if (adminTarget) {
+            dispatch = { ...dispatch, targets: [adminTarget] };
+          }
+        }
+        if (dispatch.targets.length === 0) {
+          return { conversation, warnings };
+        }
 
-    this.emitProgress(runId, progress, "initial", `Running ${dispatch.targets.length} chat participant${dispatch.targets.length === 1 ? "" : "s"}.`, {
-      total: dispatch.targets.length,
-      completed: 0
+        this.emitProgress(runId, progress, "initial", `Running ${dispatch.targets.length} chat participant${dispatch.targets.length === 1 ? "" : "s"}.`, {
+          total: dispatch.targets.length,
+          completed: 0
+        });
+        await this.runParticipantBatch(conversation, dispatch.targets, userMessage, runId, signal, progress, warnings);
+        this.emitProgress(runId, progress, "done", "Chat turn finished.", {
+          completed: dispatch.targets.length,
+          total: dispatch.targets.length
+        });
+        return { conversation, warnings };
+      } catch (error) {
+        this.emitChatRunFailure(runId, progress, error);
+        throw error;
+      } finally {
+        await this.endChatRun(conversation, runId);
+      }
     });
-    await this.runParticipantBatch(conversation, dispatch.targets, userMessage, runId, signal, progress, warnings);
-    conversation.metadata = { ...conversation.metadata, running: false };
-    conversation.updatedAt = new Date().toISOString();
-    await this.saveConversation(conversation);
-    this.emitProgress(runId, progress, "done", "Chat turn finished.", {
-      completed: dispatch.targets.length,
-      total: dispatch.targets.length
-    });
-    return { conversation, warnings };
   }
 
   async respondToMentions(request: RespondToChatMentionsRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
     const runId = request.runId ?? randomUUID();
     const warnings: string[] = [];
-    const conversation = await this.requireChat(request.conversationId);
-    const sourceMessage = conversation.messages.find((message) => message.id === request.sourceMessageId);
-    if (!sourceMessage) {
-      throw new Error("Source message was not found.");
-    }
-    const pendingMentions = sourceMessage.metadata?.pendingMentions ?? [];
-    const requestedIds = new Set(request.targetParticipantIds);
-    const selectedMentions = pendingMentions.filter((mention) => requestedIds.has(mention.targetParticipantId));
-    const continuationOnly = request.approve && request.continueRequester && selectedMentions.length === 0 && Boolean(sourceMessage.participantId);
-    if (selectedMentions.length === 0 && request.approve && !continuationOnly) {
-      throw new Error("Select at least one pending mention.");
-    }
+    return this.withChatRunLock(request.conversationId, async () => {
+      const conversation = await this.requireChat(request.conversationId);
+      const sourceMessage = conversation.messages.find((message) => message.id === request.sourceMessageId);
+      if (!sourceMessage) {
+        throw new Error("Source message was not found.");
+      }
+      const pendingMentions = sourceMessage.metadata?.pendingMentions ?? [];
+      const requestedIds = new Set(request.targetParticipantIds);
+      const selectedMentions = pendingMentions.filter((mention) => requestedIds.has(mention.targetParticipantId));
+      const continuationOnly = request.approve && request.continueRequester && selectedMentions.length === 0 && Boolean(sourceMessage.participantId);
+      if (selectedMentions.length === 0 && request.approve && !continuationOnly) {
+        throw new Error("Select at least one pending mention.");
+      }
 
-    if (!request.approve) {
-      this.updatePendingMentionStatus(sourceMessage, new Set(pendingMentions.map((mention) => mention.targetParticipantId)), "rejected");
-      conversation.updatedAt = new Date().toISOString();
-      await this.saveConversation(conversation);
-      return { conversation, warnings };
-    }
+      if (!request.approve) {
+        this.updatePendingMentionStatus(sourceMessage, new Set(pendingMentions.map((mention) => mention.targetParticipantId)), "rejected");
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+        return { conversation, warnings };
+      }
 
-    if (selectedMentions.length > 0) {
-      this.updatePendingMentionStatus(sourceMessage, requestedIds, "approved");
-    }
-    conversation.metadata = { ...conversation.metadata, running: true, runId };
-    conversation.updatedAt = new Date().toISOString();
-    this.queueSnapshot(conversation);
+      if (selectedMentions.length > 0) {
+        this.updatePendingMentionStatus(sourceMessage, requestedIds, "approved");
+      }
+      await this.beginChatRun(conversation, runId);
+      try {
+        const participants = this.chatParticipants(conversation);
+        const targets = selectedMentions
+          .map((mention) => participants.find((participant) => participant.id === mention.targetParticipantId))
+          .filter((participant): participant is ChatParticipant => Boolean(participant));
+        if (targets.length > 0) {
+          this.emitProgress(runId, progress, "initial", `Running ${targets.length} approved mention${targets.length === 1 ? "" : "s"}.`, {
+            total: targets.length,
+            completed: 0
+          });
+          await this.runParticipantBatch(conversation, targets, sourceMessage, runId, signal, progress, warnings);
+        }
 
-    const participants = this.chatParticipants(conversation);
-    const targets = selectedMentions
-      .map((mention) => participants.find((participant) => participant.id === mention.targetParticipantId))
-      .filter((participant): participant is ChatParticipant => Boolean(participant));
-    if (targets.length > 0) {
-      this.emitProgress(runId, progress, "initial", `Running ${targets.length} approved mention${targets.length === 1 ? "" : "s"}.`, {
-        total: targets.length,
-        completed: 0
+        if (request.continueRequester && sourceMessage.participantId) {
+          const requester = participants.find((participant) => participant.id === sourceMessage.participantId);
+          if (requester) {
+            this.emitProgress(runId, progress, "debate", `Returning to @${requester.handle}.`, {
+              participantLabel: `@${requester.handle}`
+            });
+            const messages = await this.runParticipantTurnSerialized(conversation, requester, sourceMessage, runId, signal, progress, {
+              continuation: true,
+              warnings
+            });
+            await this.refreshStoredChatState(conversation);
+            this.appendParticipantTurnMessages(conversation, requester, messages, {
+              runId,
+              triggerMessageId: sourceMessage.id
+            });
+            conversation.updatedAt = new Date().toISOString();
+            this.queueSnapshot(conversation);
+            await this.ensureHistoryFiles(conversation);
+          }
+        }
+
+        this.emitProgress(runId, progress, "done", "Approved mention flow finished.");
+        return { conversation, warnings };
+      } catch (error) {
+        this.emitChatRunFailure(runId, progress, error);
+        throw error;
+      } finally {
+        await this.endChatRun(conversation, runId);
+      }
+    });
+  }
+
+  async respondToChoice(request: RespondToChatChoiceRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
+    const runId = request.runId ?? randomUUID();
+    const warnings: string[] = [];
+    return this.withChatRunLock(request.conversationId, async () => {
+      const conversation = await this.requireChat(request.conversationId);
+      const sourceMessage = conversation.messages.find((message) => message.id === request.sourceMessageId);
+      if (!sourceMessage) {
+        throw new Error("Source message was not found.");
+      }
+      const choice = sourceMessage.metadata?.pendingChoice;
+      if (!choice || choice.id !== request.choiceId) {
+        throw new Error("Choice request was not found.");
+      }
+      if (choice.status !== "pending") {
+        throw new Error("Choice request has already been answered.");
+      }
+      const selectedOptionId = request.selectedOptionId?.trim();
+      const customAnswer = request.customAnswer?.trim();
+      const note = request.note?.trim();
+      const isCustomAnswer = selectedOptionId === CHAT_CUSTOM_CHOICE_OPTION_ID;
+      const selectedOption = isCustomAnswer ? undefined : choice.options.find((option) => option.id === selectedOptionId);
+      if (isCustomAnswer && !customAnswer) {
+        throw new Error("Custom choice answer is required.");
+      }
+      if (!isCustomAnswer && !selectedOption) {
+        throw new Error("Selected option was not found.");
+      }
+      if (!sourceMessage.participantId) {
+        throw new Error("Choice request is not attached to a chat participant.");
+      }
+      const requester = this.chatParticipants(conversation).find((participant) => participant.id === sourceMessage.participantId);
+      if (!requester) {
+        throw new Error("Choice requester is no longer in this chat.");
+      }
+
+      this.updatePendingChoiceSelection(sourceMessage, choice.id, selectedOption?.id ?? CHAT_CUSTOM_CHOICE_OPTION_ID, customAnswer, note);
+      const rootId = sourceMessage.metadata?.chatThreadRootId ?? sourceMessage.id;
+      const userMessage = this.message("user", this.formatChoiceSelectionForChat(sourceMessage, choice, selectedOption, customAnswer, note), undefined, {
+        threadId: sourceMessage.metadata?.threadId ?? rootId,
+        parentMessageId: sourceMessage.id,
+        chatThreadRootId: rootId,
+        sourceMessageId: sourceMessage.id
       });
-      await this.runParticipantBatch(conversation, targets, sourceMessage, runId, signal, progress, warnings);
-    }
-
-    if (request.continueRequester && sourceMessage.participantId) {
-      const requester = participants.find((participant) => participant.id === sourceMessage.participantId);
-      if (requester) {
-        this.emitProgress(runId, progress, "debate", `Returning to @${requester.handle}.`, {
+      conversation.messages.push(userMessage);
+      await this.beginChatRun(conversation, runId);
+      try {
+        this.emitProgress(runId, progress, "debate", `Returning choice to @${requester.handle}.`, {
           participantLabel: `@${requester.handle}`
         });
-        const messages = await this.runParticipantTurnSerialized(conversation, requester, sourceMessage, runId, signal, progress, {
+        const messages = await this.runParticipantTurnSerialized(conversation, requester, userMessage, runId, signal, progress, {
           continuation: true,
           warnings
         });
         await this.refreshStoredChatState(conversation);
         this.appendParticipantTurnMessages(conversation, requester, messages, {
           runId,
-          triggerMessageId: sourceMessage.id
+          triggerMessageId: userMessage.id
         });
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
         await this.ensureHistoryFiles(conversation);
+        this.emitProgress(runId, progress, "done", "Choice response finished.");
+        return { conversation, warnings };
+      } catch (error) {
+        this.emitChatRunFailure(runId, progress, error);
+        throw error;
+      } finally {
+        await this.endChatRun(conversation, runId);
       }
-    }
-
-    conversation.metadata = { ...conversation.metadata, running: false };
-    conversation.updatedAt = new Date().toISOString();
-    await this.saveConversation(conversation);
-    this.emitProgress(runId, progress, "done", "Approved mention flow finished.");
-    return { conversation, warnings };
-  }
-
-  async respondToChoice(request: RespondToChatChoiceRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
-    const runId = request.runId ?? randomUUID();
-    const warnings: string[] = [];
-    const conversation = await this.requireChat(request.conversationId);
-    const sourceMessage = conversation.messages.find((message) => message.id === request.sourceMessageId);
-    if (!sourceMessage) {
-      throw new Error("Source message was not found.");
-    }
-    const choice = sourceMessage.metadata?.pendingChoice;
-    if (!choice || choice.id !== request.choiceId) {
-      throw new Error("Choice request was not found.");
-    }
-    if (choice.status !== "pending") {
-      throw new Error("Choice request has already been answered.");
-    }
-    const selectedOptionId = request.selectedOptionId?.trim();
-    const customAnswer = request.customAnswer?.trim();
-    const note = request.note?.trim();
-    const isCustomAnswer = selectedOptionId === CHAT_CUSTOM_CHOICE_OPTION_ID;
-    const selectedOption = isCustomAnswer ? undefined : choice.options.find((option) => option.id === selectedOptionId);
-    if (isCustomAnswer && !customAnswer) {
-      throw new Error("Custom choice answer is required.");
-    }
-    if (!isCustomAnswer && !selectedOption) {
-      throw new Error("Selected option was not found.");
-    }
-    if (!sourceMessage.participantId) {
-      throw new Error("Choice request is not attached to a chat participant.");
-    }
-    const requester = this.chatParticipants(conversation).find((participant) => participant.id === sourceMessage.participantId);
-    if (!requester) {
-      throw new Error("Choice requester is no longer in this chat.");
-    }
-
-    this.updatePendingChoiceSelection(sourceMessage, choice.id, selectedOption?.id ?? CHAT_CUSTOM_CHOICE_OPTION_ID, customAnswer, note);
-    const rootId = sourceMessage.metadata?.chatThreadRootId ?? sourceMessage.id;
-    const userMessage = this.message("user", this.formatChoiceSelectionForChat(sourceMessage, choice, selectedOption, customAnswer, note), undefined, {
-      threadId: sourceMessage.metadata?.threadId ?? rootId,
-      parentMessageId: sourceMessage.id,
-      chatThreadRootId: rootId,
-      sourceMessageId: sourceMessage.id
     });
-    conversation.messages.push(userMessage);
-    conversation.metadata = { ...conversation.metadata, running: true, runId };
-    conversation.updatedAt = new Date().toISOString();
-    this.queueSnapshot(conversation);
-
-    this.emitProgress(runId, progress, "debate", `Returning choice to @${requester.handle}.`, {
-      participantLabel: `@${requester.handle}`
-    });
-    const messages = await this.runParticipantTurnSerialized(conversation, requester, userMessage, runId, signal, progress, {
-      continuation: true,
-      warnings
-    });
-    await this.refreshStoredChatState(conversation);
-    this.appendParticipantTurnMessages(conversation, requester, messages, {
-      runId,
-      triggerMessageId: userMessage.id
-    });
-    conversation.metadata = { ...conversation.metadata, running: false };
-    conversation.updatedAt = new Date().toISOString();
-    this.queueSnapshot(conversation);
-    await this.ensureHistoryFiles(conversation);
-    await this.saveConversation(conversation);
-    this.emitProgress(runId, progress, "done", "Choice response finished.");
-    return { conversation, warnings };
   }
 
   private async validateRepoFileMentions(
@@ -3275,9 +3290,11 @@ export class ChatService {
     if (existing) {
       return existing;
     }
+    this.incrementBackgroundRunner(conversationId);
     const runner = this.runParticipantRequest(conversationId, requestMessageId, runId, depth)
       .finally(() => {
         this.participantRequestRunners.delete(requestMessageId);
+        this.decrementBackgroundRunner(conversationId);
       });
     this.participantRequestRunners.set(requestMessageId, runner);
     return runner;
@@ -3423,95 +3440,98 @@ export class ChatService {
     this.permissionApprovalAutoResumes.add(approvalResumeKey);
     let triggerResumeKey: string | undefined;
     try {
-      const conversation = await this.requireChat(conversationId);
-      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
-      if (
-        !approval ||
-        approval.status !== "approved" ||
-        approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL ||
-        !approval.resumeContext ||
-        !this.isPermissionChangeRequest(approval.request)
-      ) {
-        return;
-      }
-      if (this.hasPendingPermissionApprovalForResume(conversation, approval)) {
-        return;
-      }
-      const requester = this.chatParticipants(conversation).find((participant) => participant.id === approval.requesterParticipantId);
-      const trigger = conversation.messages.find((message) => message.id === approval.resumeContext?.triggerMessageId);
-      if (!requester || !trigger) {
-        return;
-      }
-      const participantRequestMessage = approval.resumeContext.participantRequestBatchId
-        ? this.participantRequestMessageForResumeContext(
-            conversation,
-            approval.resumeContext.triggerMessageId,
-            approval.resumeContext.participantRequestBatchId
-          )
-        : undefined;
-      const participantRequestBatch = participantRequestMessage?.metadata?.participantRequest;
-      triggerResumeKey = `trigger:${conversation.id}:${approval.requesterParticipantId}:${trigger.id}`;
-      if (this.permissionApprovalAutoResumes.has(triggerResumeKey)) {
-        return;
-      }
-      this.permissionApprovalAutoResumes.add(triggerResumeKey);
-      const resumeRunId = approval.resumeContext.runId || randomUUID();
-      const participantLabel = `@${requester.handle}`;
-      this.emitProgress(resumeRunId, progress, "initial", `Resuming ${participantLabel} after permission approval.`, {
-        participantLabel,
-        agentProgress: {
-          participantId: requester.id,
+      await this.withChatRunLock(conversationId, async () => {
+        const conversation = await this.requireChat(conversationId);
+        const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
+        if (
+          !approval ||
+          approval.status !== "approved" ||
+          approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL ||
+          !approval.resumeContext ||
+          !this.isPermissionChangeRequest(approval.request)
+        ) {
+          return;
+        }
+        if (this.hasPendingPermissionApprovalForResume(conversation, approval)) {
+          return;
+        }
+        const requester = this.chatParticipants(conversation).find((participant) => participant.id === approval.requesterParticipantId);
+        const trigger = conversation.messages.find((message) => message.id === approval.resumeContext?.triggerMessageId);
+        if (!requester || !trigger) {
+          return;
+        }
+        const participantRequestMessage = approval.resumeContext.participantRequestBatchId
+          ? this.participantRequestMessageForResumeContext(
+              conversation,
+              approval.resumeContext.triggerMessageId,
+              approval.resumeContext.participantRequestBatchId
+            )
+          : undefined;
+        const participantRequestBatch = participantRequestMessage?.metadata?.participantRequest;
+        triggerResumeKey = `trigger:${conversation.id}:${approval.requesterParticipantId}:${trigger.id}`;
+        if (this.permissionApprovalAutoResumes.has(triggerResumeKey)) {
+          return;
+        }
+        this.permissionApprovalAutoResumes.add(triggerResumeKey);
+        const resumeRunId = approval.resumeContext.runId || randomUUID();
+        const participantLabel = `@${requester.handle}`;
+        this.emitProgress(resumeRunId, progress, "initial", `Resuming ${participantLabel} after permission approval.`, {
           participantLabel,
-          state: "running"
-        }
-      });
-      const now = new Date().toISOString();
-      conversation.messages.push(this.message(
-        "system",
-        `Auto-resumed @${requester.handle} after permission approval.`,
-        undefined,
-        {
-          threadId: trigger.metadata?.threadId ?? trigger.id,
-          parentMessageId: trigger.id,
-          chatThreadRootId: trigger.metadata?.chatThreadRootId,
-          sourceMessageId: trigger.id
-        }
-      ));
-      conversation.metadata = { ...conversation.metadata, running: true, runId: resumeRunId };
-      conversation.updatedAt = now;
-      this.queueSnapshot(conversation);
-      const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, progress, {
-        warnings: [],
-        participantRequestDepth: participantRequestBatch?.depth,
-        participantRequestBatchId: participantRequestBatch?.id
-      });
-      await this.refreshStoredChatState(conversation);
-      this.appendParticipantTurnMessages(conversation, requester, messages, {
-        runId: resumeRunId,
-        triggerMessageId: trigger.id,
-        participantRequestBatchId: participantRequestBatch?.id
-      });
-      const participantRequestResumeMessageId = participantRequestMessage && participantRequestBatch
-        ? this.applyPermissionResumeToParticipantRequest(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, messages)
-        : undefined;
-      conversation.metadata = conversation.metadata.runId === resumeRunId
-        ? { ...conversation.metadata, running: false }
-        : conversation.metadata;
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
-      await this.ensureHistoryFiles(conversation);
-      await this.saveConversation(conversation);
-      this.emitProgress(resumeRunId, progress, "done", "Permission approval resume finished.");
-      if (participantRequestResumeMessageId) {
-        void this.autoResumeParticipantRequest(conversation.id, participantRequestResumeMessageId).catch((error) => {
-          void this.debugLogs.write("chat.permission-approval.participant-request-auto-resume.error", {
-            conversationId: conversation.id,
-            requestMessageId: participantRequestResumeMessageId,
-            approvalId: approval.id,
-            message: error instanceof Error ? error.message : String(error)
-          });
+          agentProgress: {
+            participantId: requester.id,
+            participantLabel,
+            state: "running"
+          }
         });
-      }
+        const now = new Date().toISOString();
+        conversation.messages.push(this.message(
+          "system",
+          `Auto-resumed @${requester.handle} after permission approval.`,
+          undefined,
+          {
+            threadId: trigger.metadata?.threadId ?? trigger.id,
+            parentMessageId: trigger.id,
+            chatThreadRootId: trigger.metadata?.chatThreadRootId,
+            sourceMessageId: trigger.id
+          }
+        ));
+        await this.beginChatRun(conversation, resumeRunId);
+        try {
+          const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, progress, {
+            warnings: [],
+            participantRequestDepth: participantRequestBatch?.depth,
+            participantRequestBatchId: participantRequestBatch?.id
+          });
+          await this.refreshStoredChatState(conversation);
+          this.appendParticipantTurnMessages(conversation, requester, messages, {
+            runId: resumeRunId,
+            triggerMessageId: trigger.id,
+            participantRequestBatchId: participantRequestBatch?.id
+          });
+          const participantRequestResumeMessageId = participantRequestMessage && participantRequestBatch
+            ? this.applyPermissionResumeToParticipantRequest(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, messages)
+            : undefined;
+          conversation.updatedAt = new Date().toISOString();
+          this.queueSnapshot(conversation);
+          await this.ensureHistoryFiles(conversation);
+          this.emitProgress(resumeRunId, progress, "done", "Permission approval resume finished.");
+          if (participantRequestResumeMessageId) {
+            void this.autoResumeParticipantRequest(conversation.id, participantRequestResumeMessageId, progress).catch((error) => {
+              void this.debugLogs.write("chat.permission-approval.participant-request-auto-resume.error", {
+                conversationId: conversation.id,
+                requestMessageId: participantRequestResumeMessageId,
+                approvalId: approval.id,
+                message: error instanceof Error ? error.message : String(error)
+              });
+            });
+          }
+        } catch (error) {
+          this.emitChatRunFailure(resumeRunId, progress, error);
+          throw error;
+        } finally {
+          await this.endChatRun(conversation, resumeRunId);
+        }
+      });
     } finally {
       if (triggerResumeKey) {
         this.permissionApprovalAutoResumes.delete(triggerResumeKey);
@@ -3600,74 +3620,82 @@ export class ChatService {
     return this.participantRequestHasUnfinishedItems(updatedBatch) ? undefined : requestMessageId;
   }
 
-  private async autoResumeParticipantRequest(conversationId: string, requestMessageId: string): Promise<void> {
+  private async autoResumeParticipantRequest(conversationId: string, requestMessageId: string, progress?: ProgressCallback): Promise<void> {
     if (this.participantRequestAutoResumes.has(requestMessageId)) {
       return;
     }
     this.participantRequestAutoResumes.add(requestMessageId);
     try {
-      const conversation = await this.requireChat(conversationId);
-      const requestMessage = conversation.messages.find((message) => message.id === requestMessageId);
-      const batch = requestMessage?.metadata?.participantRequest;
-      if (!requestMessage || !batch || !batch.resumeRequester || batch.completedInToolCall || batch.autoResumeMessageId) {
-        return;
-      }
-    if (this.participantRequestHasUnfinishedItems(batch)) {
-      return;
-    }
-      if (batch.items.length > 0 && batch.items.every((item) => item.status === "denied")) {
-        return;
-      }
-      const requester = this.chatParticipants(conversation).find((participant) => participant.id === batch.requesterParticipantId);
-      if (!requester) {
-        return;
-      }
-      const now = new Date().toISOString();
-      this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
-        ...current,
-        status: "resuming_requester",
-        updatedAt: now
-      }));
-      const trigger = this.message(
-        "system",
-        [
-          `Auto-resumed @${requester.handle} after participant request.`,
-          "Target replies/errors are in the transcript above. Continue from your request using the available answers and errors."
-        ].join("\n"),
-        undefined,
-        {
-          threadId: requestMessage.metadata?.threadId ?? requestMessage.id,
-          parentMessageId: requestMessage.id,
-          chatThreadRootId: requestMessage.metadata?.chatThreadRootId ?? requestMessage.id,
-          sourceMessageId: requestMessage.id
+      await this.withChatRunLock(conversationId, async () => {
+        const conversation = await this.requireChat(conversationId);
+        const requestMessage = conversation.messages.find((message) => message.id === requestMessageId);
+        const batch = requestMessage?.metadata?.participantRequest;
+        if (!requestMessage || !batch || !batch.resumeRequester || batch.completedInToolCall || batch.autoResumeMessageId) {
+          return;
         }
-      );
-      conversation.messages.push(trigger);
-      conversation.updatedAt = now;
-      this.queueSnapshot(conversation);
-      const resumeRunId = randomUUID();
-      const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, undefined, {
-        continuation: true,
-        warnings: [],
-        participantRequestDepth: batch.depth,
-        participantRequestBatchId: batch.id
+        if (this.participantRequestHasUnfinishedItems(batch)) {
+          return;
+        }
+        if (batch.items.length > 0 && batch.items.every((item) => item.status === "denied")) {
+          return;
+        }
+        const requester = this.chatParticipants(conversation).find((participant) => participant.id === batch.requesterParticipantId);
+        if (!requester) {
+          return;
+        }
+        const now = new Date().toISOString();
+        this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
+          ...current,
+          status: "resuming_requester",
+          updatedAt: now
+        }));
+        const trigger = this.message(
+          "system",
+          [
+            `Auto-resumed @${requester.handle} after participant request.`,
+            "Target replies/errors are in the transcript above. Continue from your request using the available answers and errors."
+          ].join("\n"),
+          undefined,
+          {
+            threadId: requestMessage.metadata?.threadId ?? requestMessage.id,
+            parentMessageId: requestMessage.id,
+            chatThreadRootId: requestMessage.metadata?.chatThreadRootId ?? requestMessage.id,
+            sourceMessageId: requestMessage.id
+          }
+        );
+        conversation.messages.push(trigger);
+        const resumeRunId = randomUUID();
+        await this.beginChatRun(conversation, resumeRunId);
+        try {
+          const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, progress, {
+            continuation: true,
+            warnings: [],
+            participantRequestDepth: batch.depth,
+            participantRequestBatchId: batch.id
+          });
+          await this.refreshStoredChatState(conversation);
+          this.appendParticipantTurnMessages(conversation, requester, messages, {
+            runId: resumeRunId,
+            triggerMessageId: trigger.id,
+            participantRequestBatchId: batch.id
+          });
+          this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
+            ...current,
+            status: "completed",
+            autoResumeMessageId: messages[0]?.id,
+            updatedAt: new Date().toISOString()
+          }));
+          conversation.updatedAt = new Date().toISOString();
+          this.queueSnapshot(conversation);
+          await this.ensureHistoryFiles(conversation);
+        } catch (error) {
+          this.markParticipantRequestAutoResumeFailed(conversation, requestMessageId, error);
+          this.emitChatRunFailure(resumeRunId, progress, error);
+          throw error;
+        } finally {
+          await this.endChatRun(conversation, resumeRunId);
+        }
       });
-      await this.refreshStoredChatState(conversation);
-      this.appendParticipantTurnMessages(conversation, requester, messages, {
-        runId: resumeRunId,
-        triggerMessageId: trigger.id,
-        participantRequestBatchId: batch.id
-      });
-      this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
-        ...current,
-        status: "completed",
-        autoResumeMessageId: messages[0]?.id,
-        updatedAt: new Date().toISOString()
-      }));
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
-      await this.ensureHistoryFiles(conversation);
-      await this.saveConversation(conversation);
     } finally {
       this.participantRequestAutoResumes.delete(requestMessageId);
     }
@@ -3782,6 +3810,17 @@ export class ChatService {
       }
     };
     return true;
+  }
+
+  private markParticipantRequestAutoResumeFailed(conversation: Conversation, requestMessageId: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.updateParticipantRequestBatch(conversation, requestMessageId, (batch) => ({
+      ...batch,
+      status: "failed",
+      updatedAt: new Date().toISOString(),
+      error: message || "Requester auto-resume failed before completion."
+    }));
+    conversation.updatedAt = new Date().toISOString();
   }
 
   private participantRequestBatches(conversation: Conversation): ChatParticipantRequestBatch[] {
@@ -4818,7 +4857,42 @@ export class ChatService {
     if (!conversation || conversation.kind !== "chat") {
       throw new Error("Chat conversation was not found.");
     }
+    if (this.recoverStaleChatRun(conversation)) {
+      await this.saveConversation(conversation);
+    }
     return conversation;
+  }
+
+  private recoverStaleChatRun(conversation: Conversation): boolean {
+    if (conversation.metadata.running !== true) {
+      return false;
+    }
+    const runId = this.chatRunId(conversation);
+    if (runId && this.activeRunIds.has(runId)) {
+      return false;
+    }
+    if (this.chatHasLiveWork(conversation.id)) {
+      return false;
+    }
+    const warnings = sanitizeWarningList(conversation.metadata.warnings);
+    if (!warnings.includes(INTERRUPTED_RUN_WARNING)) {
+      warnings.push(INTERRUPTED_RUN_WARNING);
+    }
+    conversation.metadata = this.clearedChatRunMetadata({
+      ...conversation.metadata,
+      warnings
+    });
+    conversation.updatedAt = new Date().toISOString();
+    return true;
+  }
+
+  private chatRunId(conversation: Conversation): string | undefined {
+    const runId = conversation.metadata.runId;
+    return typeof runId === "string" && runId.trim() ? runId : undefined;
+  }
+
+  private clearedChatRunMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+    return clearChatRunMetadata(metadata);
   }
 
   private message(
@@ -4859,6 +4933,124 @@ export class ChatService {
         this.saveQueues.delete(conversation.id);
       }
     });
+  }
+
+  private async withChatRunLock<T>(conversationId: string, run: () => Promise<T>): Promise<T> {
+    const previous = this.runQueues.get(conversationId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chained = previous.catch(() => undefined).then(() => current);
+    this.runQueues.set(conversationId, chained);
+    await previous.catch(() => undefined);
+    try {
+      return await run();
+    } finally {
+      release();
+      if (this.runQueues.get(conversationId) === chained) {
+        this.runQueues.delete(conversationId);
+      }
+    }
+  }
+
+  private async beginChatRun(conversation: Conversation, runId: string): Promise<void> {
+    this.rememberActiveChatRun(conversation.id, runId);
+    try {
+      conversation.metadata = { ...conversation.metadata, running: true, runId };
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+    } catch (error) {
+      this.forgetActiveChatRun(conversation.id, runId);
+      throw error;
+    }
+  }
+
+  private async endChatRun(conversation: Conversation, runId: string): Promise<void> {
+    await this.refreshStoredChatState(conversation).finally(() => {
+      this.forgetActiveChatRun(conversation.id, runId);
+    });
+    if (this.chatRunId(conversation) !== runId) {
+      return;
+    }
+    if (this.chatHasLiveWork(conversation.id)) {
+      await this.waitForQueuedSave(conversation.id);
+      return;
+    }
+    conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
+    conversation.updatedAt = new Date().toISOString();
+    await this.saveConversation(conversation);
+  }
+
+  private rememberActiveChatRun(conversationId: string, runId: string): void {
+    this.activeRunIds.add(runId);
+    const runIds = this.activeConversationRunIds.get(conversationId) ?? new Set<string>();
+    runIds.add(runId);
+    this.activeConversationRunIds.set(conversationId, runIds);
+  }
+
+  private forgetActiveChatRun(conversationId: string, runId: string): void {
+    this.activeRunIds.delete(runId);
+    const runIds = this.activeConversationRunIds.get(conversationId);
+    if (!runIds) {
+      return;
+    }
+    runIds.delete(runId);
+    if (runIds.size === 0) {
+      this.activeConversationRunIds.delete(conversationId);
+    }
+  }
+
+  private chatHasLiveWork(conversationId: string): boolean {
+    return (
+      (this.activeConversationRunIds.get(conversationId)?.size ?? 0) > 0 ||
+      (this.backgroundRunnerCounts.get(conversationId) ?? 0) > 0
+    );
+  }
+
+  private incrementBackgroundRunner(conversationId: string): void {
+    this.backgroundRunnerCounts.set(conversationId, (this.backgroundRunnerCounts.get(conversationId) ?? 0) + 1);
+  }
+
+  private decrementBackgroundRunner(conversationId: string): void {
+    const nextCount = (this.backgroundRunnerCounts.get(conversationId) ?? 0) - 1;
+    if (nextCount > 0) {
+      this.backgroundRunnerCounts.set(conversationId, nextCount);
+      return;
+    }
+    this.backgroundRunnerCounts.delete(conversationId);
+    void this.tryClearRunningIfIdle(conversationId).catch((error) => {
+      void this.debugLogs.write("chat.background-runner.clear-idle.error", {
+        conversationId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    });
+  }
+
+  private async tryClearRunningIfIdle(conversationId: string): Promise<void> {
+    if (this.chatHasLiveWork(conversationId)) {
+      return;
+    }
+    await this.withChatRunLock(conversationId, async () => {
+      if (this.chatHasLiveWork(conversationId)) {
+        return;
+      }
+      await this.waitForQueuedSave(conversationId);
+      const conversation = await this.storage.getConversation(conversationId);
+      if (!conversation || conversation.kind !== "chat" || conversation.metadata.running !== true) {
+        return;
+      }
+      if (this.chatHasLiveWork(conversationId)) {
+        return;
+      }
+      conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+    });
+  }
+
+  private emitChatRunFailure(runId: string, progress: ProgressCallback | undefined, error: unknown): void {
+    this.emitProgress(runId, progress, "error", error instanceof Error ? error.message : String(error));
   }
 
   private async saveConversation(conversation: Conversation): Promise<void> {

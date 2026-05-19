@@ -248,7 +248,8 @@ test("permission resume attaches resumed participant-request reply to the origin
   const saved = storage.current;
   const batch = saved.messages.find((message: Conversation["messages"][number]) => message.id === trigger.id)?.metadata?.participantRequest;
   const reply = saved.messages.find((message: Conversation["messages"][number]) => message.content === "Finished after approval.");
-  assert.equal(saved.metadata.runId, "blocked-run");
+  assert.equal(saved.metadata.running, false);
+  assert.equal(saved.metadata.runId, undefined);
   assert.equal(batch?.status, "answered");
   assert.equal(batch?.items[0].status, "answered");
   assert.equal(batch?.items[0].replyMessageId, reply?.id);
@@ -257,6 +258,45 @@ test("permission resume attaches resumed participant-request reply to the origin
   assert.equal(progressEvents[0]?.phase, "initial");
   assert.equal(progressEvents[0]?.agentProgress?.state, "running");
   assert.equal(progressEvents.at(-1)?.phase, "done");
+});
+
+test("permission resume clears running and emits terminal error when resumed participant fails", async () => {
+  const participant = chatParticipant("claude-code");
+  const approval = permissionApproval(participant, {
+    kind: "shellRules",
+    rules: [{ action: "allow", match: "prefix", pattern: "git diff" }]
+  }, {
+    approvalScope: "once",
+    status: "approved",
+    resumeContext: {
+      runId: "blocked-run",
+      triggerMessageId: "user-message"
+    }
+  });
+  const conversation = chatConversation([participant], { pendingAppToolApprovals: [approval] });
+  const progressEvents: Array<{ runId: string; phase: string; message: string }> = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async () => {
+      throw new Error("resume exploded");
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await assert.rejects(
+    () => (service as any).autoResumePermissionApproval(
+      conversation.id,
+      approval.id,
+      (progress: typeof progressEvents[number]) => {
+        progressEvents.push(progress);
+      }
+    ),
+    /resume exploded/
+  );
+
+  assert.equal(storage.current.metadata.running, false);
+  assert.equal(storage.current.metadata.runId, undefined);
+  assert.equal(progressEvents.some((item) => item.phase === "error" && item.message === "resume exploded"), true);
 });
 
 test("implicit permission approval inherits resumeContext from the triggering turn", () => {

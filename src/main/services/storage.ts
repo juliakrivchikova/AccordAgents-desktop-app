@@ -10,9 +10,9 @@ import type {
   ConversationOpenResult,
   ConversationSummary
 } from "../../shared/types";
-import { sanitizeConversationWarnings, sanitizeWarningList } from "../../shared/warnings";
+import { clearChatRunMetadata } from "../../shared/chatRunState";
+import { INTERRUPTED_RUN_WARNING, sanitizeConversationWarnings, sanitizeWarningList } from "../../shared/warnings";
 
-const INTERRUPTED_RUN_WARNING = "Previous run was interrupted before completion. Continue from the saved context.";
 const DEFAULT_MESSAGE_PAGE_LIMIT = 80;
 const MAX_MESSAGE_PAGE_LIMIT = 200;
 const SQLITE_BUSY_TIMEOUT_MS = 30_000;
@@ -258,11 +258,7 @@ export class StorageService {
       if (!warnings.includes(INTERRUPTED_RUN_WARNING)) {
         warnings.push(INTERRUPTED_RUN_WARNING);
       }
-      conversation.metadata = {
-        ...conversation.metadata,
-        warnings,
-        running: false
-      };
+      conversation.metadata = clearChatRunMetadata({ ...conversation.metadata, warnings });
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
     }
