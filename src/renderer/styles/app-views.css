@@ -1725,6 +1725,34 @@
   min-height: 28px;
 }
 
+.file-mention-chips {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.file-mention-chips button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 4px 7px;
+  border: 1px solid #d7cfc1;
+  border-radius: 7px;
+  background: #f6f3ee;
+  color: #3c3833;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.file-mention-chips span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-input-wrap {
   position: relative;
   min-width: 0;
@@ -1804,6 +1832,30 @@
   font-family: inherit;
   font-size: 12px;
   text-align: center;
+}
+
+.file-mention-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  color: #3d7d68;
+}
+
+.repo-file-reference-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  color: #6a655e;
+  font-size: 12px;
+}
+
+.repo-file-reference-footer span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .message {
@@ -3407,6 +3459,20 @@
   border-color: var(--app-border-strong);
   background: var(--app-surface-subtle);
   color: var(--app-text);
+}
+
+.file-mention-chips button {
+  border-color: var(--app-border);
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
+}
+
+.file-mention-icon {
+  color: var(--app-accent);
+}
+
+.repo-file-reference-footer {
+  color: var(--app-muted);
 }
 
 .settings-grid {

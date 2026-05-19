@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, realpath, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { app } from "electron";
 import type {
@@ -41,6 +41,7 @@ import type {
   RespondToChatChoiceRequest,
   RespondToChatMentionsRequest,
   ReviewProgress,
+  RepoFileMention,
   SendChatMessageRequest,
   StartReviewResult
 } from "../../shared/types";
@@ -84,7 +85,7 @@ interface ChatParticipantSessionState {
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 12;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 13;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const CHAT_ADMINISTRATOR_ROLE_ID = "administrator";
@@ -951,12 +952,14 @@ export class ChatService {
     if (!content) {
       throw new Error("Message is required.");
     }
+    const repoFileMentions = await this.validateRepoFileMentions(conversation, request.repoFileMentions, warnings, content);
     const chatThreadRootId = request.chatThreadRootId?.trim() || undefined;
     const threadId = request.threadId?.trim() || randomUUID();
     const userMessage = this.message("user", content, undefined, {
       threadId,
       parentMessageId: request.parentMessageId,
-      chatThreadRootId
+      chatThreadRootId,
+      ...(repoFileMentions.length > 0 ? { repoFileMentions } : {})
     });
     if (!request.threadId?.trim()) {
       userMessage.metadata = { ...userMessage.metadata, threadId: userMessage.id };
@@ -1139,6 +1142,133 @@ export class ChatService {
     await this.saveConversation(conversation);
     this.emitProgress(runId, progress, "done", "Choice response finished.");
     return { conversation, warnings };
+  }
+
+  private async validateRepoFileMentions(
+    conversation: Conversation,
+    rawMentions: RepoFileMention[] | undefined,
+    warnings: string[],
+    content?: string
+  ): Promise<RepoFileMention[]> {
+    const candidates: Array<{ path: unknown; source: "request" | "content" }> = [];
+    if (Array.isArray(rawMentions)) {
+      candidates.push(...rawMentions.map((mention) => ({ path: mention?.path, source: "request" as const })));
+    }
+    candidates.push(...this.extractRepoFileMentionPaths(content).map((mentionPath) => ({ path: mentionPath, source: "content" as const })));
+    if (candidates.length === 0) {
+      return [];
+    }
+    if (!conversation.repoPath) {
+      warnings.push("Skipped repository file mentions because this chat has no selected repository.");
+      return [];
+    }
+
+    let repoRealPath: string;
+    try {
+      repoRealPath = await realpath(conversation.repoPath);
+    } catch {
+      warnings.push("Skipped repository file mentions because the selected repository no longer exists.");
+      return [];
+    }
+
+    const mentions: RepoFileMention[] = [];
+    const seen = new Set<string>();
+    for (const item of candidates) {
+      const normalizedPath = this.normalizeRepoFileMentionPath(item.path);
+      if (!normalizedPath) {
+        if (item.source === "request" || this.shouldWarnForParsedRepoFileMention(String(item.path ?? ""))) {
+          warnings.push("Skipped repository file mention because the path is invalid.");
+        }
+        continue;
+      }
+      if (seen.has(normalizedPath)) {
+        continue;
+      }
+      seen.add(normalizedPath);
+
+      const absolutePath = path.resolve(conversation.repoPath, normalizedPath);
+      if (!this.isPathInside(path.resolve(conversation.repoPath), absolutePath)) {
+        warnings.push(`Skipped repository file mention ${normalizedPath}: path escapes repository.`);
+        continue;
+      }
+
+      try {
+        const linkInfo = await lstat(absolutePath);
+        if (linkInfo.isDirectory()) {
+          warnings.push(`Skipped repository file mention ${normalizedPath}: path is a directory.`);
+          continue;
+        }
+        const realFilePath = await realpath(absolutePath);
+        if (!this.isPathInside(repoRealPath, realFilePath)) {
+          warnings.push(`Skipped repository file mention ${normalizedPath}: path escapes repository.`);
+          continue;
+        }
+        const fileInfo = await stat(absolutePath);
+        if (!fileInfo.isFile()) {
+          warnings.push(`Skipped repository file mention ${normalizedPath}: path is not a regular file.`);
+          continue;
+        }
+      } catch {
+        if (item.source === "request" || this.shouldWarnForParsedRepoFileMention(normalizedPath)) {
+          warnings.push(`Skipped repository file mention ${normalizedPath}: file no longer exists.`);
+        }
+        continue;
+      }
+      mentions.push({ path: normalizedPath });
+    }
+    return mentions;
+  }
+
+  private normalizeRepoFileMentionPath(value: unknown): string | undefined {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.includes("\0") || trimmed.includes("\\") || trimmed.startsWith("/")) {
+      return undefined;
+    }
+    const normalized = path.posix.normalize(trimmed);
+    if (
+      !normalized ||
+      normalized === "." ||
+      normalized === ".." ||
+      normalized.startsWith("../") ||
+      normalized.split("/").includes("..")
+    ) {
+      return undefined;
+    }
+    return normalized;
+  }
+
+  private extractRepoFileMentionPaths(content: string | undefined): string[] {
+    if (!content) {
+      return [];
+    }
+    const paths: string[] = [];
+    const seen = new Set<string>();
+    const matches = this.withoutFencedCode(content).matchAll(/(^|\s)#([^\s`#]+)/g);
+    for (const match of matches) {
+      const normalizedPath = this.normalizeRepoFileMentionPath(this.trimRepoFileMentionToken(match[2] ?? ""));
+      if (!normalizedPath || seen.has(normalizedPath)) {
+        continue;
+      }
+      seen.add(normalizedPath);
+      paths.push(normalizedPath);
+    }
+    return paths;
+  }
+
+  private trimRepoFileMentionToken(token: string): string {
+    return token.replace(/[.,;:!?)]+$/g, "");
+  }
+
+  private shouldWarnForParsedRepoFileMention(pathValue: string): boolean {
+    return pathValue.includes("/") || pathValue.includes(".");
+  }
+
+  private isPathInside(parentPath: string, childPath: string): boolean {
+    const relative = path.relative(parentPath, childPath);
+    return relative === "" || Boolean(relative && !relative.startsWith("..") && !path.isAbsolute(relative));
   }
 
   private async runParticipantBatch(
@@ -1503,7 +1633,8 @@ export class ChatService {
       "Triggering message identifiers:",
       this.triggeringMessageIdentifiers(triggerMessage),
       "Triggering message:",
-      this.formatMessage(triggerMessage),
+      this.formatMessage(triggerMessage, false),
+      this.repoFileMentionsPromptSection(triggerMessage, options.agentMode, options.permissions, this.canRequestPermissionChanges(session)),
       continuation
         ? "Current request: control has returned to you after the approved participants have replied. Produce your next answer."
         : "Current request: answer the triggering message above.",
@@ -1519,6 +1650,27 @@ export class ChatService {
       message.metadata?.parentMessageId ? `Parent message ID: ${message.metadata.parentMessageId}` : "",
       message.metadata?.chatThreadRootId ? `Chat thread root ID: ${message.metadata.chatThreadRootId}` : ""
     ].filter(Boolean).join("\n");
+  }
+
+  private repoFileMentionsPromptSection(
+    message: ChatMessage,
+    agentMode: ChatAgentMode,
+    runPermissions: ChatAgentPermissions,
+    canRequestPermissions: boolean
+  ): string {
+    const mentions = this.repoFileMentions(message);
+    if (mentions.length === 0) {
+      return "";
+    }
+    const permissions = effectiveChatAgentPermissions(agentMode, runPermissions);
+    const header = "Referenced repository files (paths are relative to the repository root):";
+    const paths = mentions.map((mention) => `- ${mention.path}`);
+    const guidance = permissions.repoRead
+      ? "You may read these with your usual tools."
+      : canRequestPermissions
+        ? "You do not currently have repo read access. If you need their contents, call `app_permissions_request_change` with `permissions: [\"repoRead\"]` and a brief reason; otherwise proceed without them."
+        : "You do not currently have repo read access. If you need their contents, explain that `repoRead` is needed before refusing.";
+    return [header, ...paths, "", guidance].join("\n");
   }
 
   private cliRoleOptions(
@@ -1591,7 +1743,7 @@ export class ChatService {
     const permissionPolicyLines = this.canRequestPermissionChanges(session)
       ? [
           "Permission MCP tool: `app_permissions_request_change` is available when this participant needs User approval for blocked capabilities.",
-          "Required permission workflow: if the current task needs a blocked capability, call `app_permissions_request_change` before answering that the work cannot be done. Use `{ \"kind\": \"portable\", \"permissions\": [\"webAccess\"], \"reason\": \"Need live web lookup to answer User's trademark question.\" }` for web/file grants, `{ \"kind\": \"shellRules\", \"rules\": [{ \"action\": \"allow\", \"match\": \"prefix\", \"pattern\": \"git diff\" }], \"reason\": \"Need to inspect diffs.\" }` for shell rules, or `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants.",
+          "Required permission workflow: if the current task needs a blocked capability, call `app_permissions_request_change` before answering that the work cannot be done. Use `{ \"kind\": \"portable\", \"permissions\": [\"repoRead\"], \"reason\": \"Need to inspect the referenced repository files.\" }` for repository reads, `{ \"kind\": \"portable\", \"permissions\": [\"webAccess\"], \"reason\": \"Need live web lookup to answer User's trademark question.\" }` for web access, `{ \"kind\": \"portable\", \"permissions\": [\"workspaceWrite\"], \"reason\": \"Need to edit files for the requested change.\" }` for file edits, `{ \"kind\": \"shellRules\", \"rules\": [{ \"action\": \"allow\", \"match\": \"prefix\", \"pattern\": \"git diff\" }], \"reason\": \"Need to inspect diffs.\" }` for shell rules, or `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants.",
           "After a permission MCP call, the app will ask User to approve. If the result is pending approval, say only that the permission request is awaiting User approval; do not claim the permission was granted until the tool result or a later app message confirms approval."
         ]
       : [
@@ -1856,7 +2008,9 @@ export class ChatService {
       `Permissions: repo read ${permissions.repoRead ? "allowed" : "blocked"}, shell commands ${permissions.shell.enabled ? "allowed" : "blocked"}, workspace edits ${permissions.workspaceWrite ? "allowed" : "blocked"}, web access ${permissions.webAccess ? "allowed" : "blocked"}.`,
       permissions.repoRead
         ? "Repository files may be inspected read-only when repository context is selected; app-managed chat context may be read through MCP, with history files as fallback/debug context."
-        : "Do not inspect selected repository files; app-managed chat context may still be read through MCP, with history files as fallback/debug context.",
+        : canRequestPermissions
+          ? "Repository files may not be inspected unless User grants repoRead. If you need repository file contents, call `app_permissions_request_change` for `repoRead` before refusing; app-managed chat context may still be read through MCP, with history files as fallback/debug context."
+          : "Repository files may not be inspected unless User grants repoRead. If you need repository file contents, explain that `repoRead` is needed before refusing; app-managed chat context may still be read through MCP, with history files as fallback/debug context.",
       permissionLines.shell,
       `Provider-native Claude tool grants: ${providerNativeGrants}.`,
       permissionLines.workspace,
@@ -2579,6 +2733,9 @@ export class ChatService {
     if (!permissions.workspaceWrite && this.responseAsksForWorkspaceWrite(content)) {
       requested.add("workspaceWrite");
     }
+    if (!permissions.repoRead && this.responseAsksForRepoRead(content)) {
+      requested.add("repoRead");
+    }
     if (requested.size === 0) {
       return undefined;
     }
@@ -2602,6 +2759,14 @@ export class ChatService {
       /\b(?:need|needs|needed|require|requires|required|would need)\b[\s\S]{0,160}\b(?:edit|write|update|modify|change) (?:files?|access|permission)\b/i.test(content) ||
       /\b(?:can(?:not|'t)|unable to)\b[\s\S]{0,80}\b(?:edit|write|update|modify)\b/i.test(content) ||
       /\bworkspace (?:edits?|write)\b[\s\S]{0,120}\b(?:blocked|not enabled|not available|needed|required)\b/i.test(content)
+    );
+  }
+
+  private responseAsksForRepoRead(content: string): boolean {
+    return (
+      /\b(?:need|needs|needed|require|requires|required|would need)\b[\s\S]{0,160}\b(?:repo|repository) read (?:access|permission)\b/i.test(content) ||
+      /\b(?:can(?:not|'t)|unable to)\b[\s\S]{0,100}\b(?:read|inspect|open) (?:repo|repository) files?\b/i.test(content) ||
+      /\brepo(?:sitory)? read\b[\s\S]{0,120}\b(?:blocked|not enabled|not available|needed|required)\b/i.test(content)
     );
   }
 
@@ -2646,7 +2811,7 @@ export class ChatService {
     }
     const permissions = new Set<ChatPermissionGrant>();
     for (const permission of record.permissions) {
-      if (permission === "workspaceWrite" || permission === "webAccess") {
+      if (permission === "workspaceWrite" || permission === "webAccess" || permission === "repoRead") {
         permissions.add(permission);
       } else {
         throw new Error(`Unsupported permission request: ${String(permission)}.`);
@@ -3758,6 +3923,7 @@ export class ChatService {
     if (normalizedRequest.kind === "portable") {
       return {
         ...permissions,
+        repoRead: permissions.repoRead || normalizedRequest.permissions.includes("repoRead"),
         workspaceWrite: permissions.workspaceWrite || normalizedRequest.permissions.includes("workspaceWrite"),
         webAccess: permissions.webAccess || normalizedRequest.permissions.includes("webAccess")
       };
@@ -3847,7 +4013,12 @@ export class ChatService {
   }
 
   private formatPermissionGrantList(permissions: ChatPermissionGrant[]): string {
-    const labels = permissions.map((permission) => permission === "workspaceWrite" ? "file editing" : "web access");
+    const labels = permissions.map((permission) => {
+      if (permission === "repoRead") {
+        return "repository read access";
+      }
+      return permission === "workspaceWrite" ? "file editing" : "web access";
+    });
     return this.formatHandleList(labels);
   }
 
@@ -4351,6 +4522,7 @@ export class ChatService {
         message.metadata?.chatThreadRootId ? `Chat thread root ID: ${message.metadata.chatThreadRootId}` : "",
         "",
         message.content.trim(),
+        this.repoFileMentionsMarkdown(message),
         ""
       ].filter(Boolean).join("\n"))
     ].join("\n");
@@ -4361,11 +4533,37 @@ export class ChatService {
     return session?.roleLabel ?? participant.roleConfigId;
   }
 
-  private formatMessage(message: ChatMessage): string {
+  private formatMessage(message: ChatMessage, includeRepoFileMentions = true): string {
     return [
       `[${message.createdAt}] ${this.messageAuthor(message)}`,
-      message.content.trim()
+      message.content.trim(),
+      includeRepoFileMentions ? this.repoFileMentionsMarkdown(message) : ""
     ].filter(Boolean).join("\n");
+  }
+
+  private repoFileMentionsMarkdown(message: ChatMessage): string {
+    const mentions = this.repoFileMentions(message);
+    if (mentions.length === 0) {
+      return "";
+    }
+    return [
+      "Referenced repository files:",
+      ...mentions.map((mention) => `- ${mention.path}`)
+    ].join("\n");
+  }
+
+  private repoFileMentions(message: ChatMessage): RepoFileMention[] {
+    const seen = new Set<string>();
+    const mentions: RepoFileMention[] = [];
+    for (const mention of message.metadata?.repoFileMentions ?? []) {
+      const normalizedPath = this.normalizeRepoFileMentionPath(mention.path);
+      if (!normalizedPath || seen.has(normalizedPath)) {
+        continue;
+      }
+      seen.add(normalizedPath);
+      mentions.push({ path: normalizedPath });
+    }
+    return mentions;
   }
 
   private chatMessageForTool(message: ChatMessage, sequence: number): Record<string, unknown> {
@@ -4575,7 +4773,7 @@ export class ChatService {
     return (record.kind === "portable" || record.kind === undefined) &&
       Array.isArray(permissions) &&
       permissions.length > 0 &&
-      permissions.every((permission) => permission === "workspaceWrite" || permission === "webAccess");
+      permissions.every((permission) => permission === "workspaceWrite" || permission === "webAccess" || permission === "repoRead");
   }
 
   private isParticipantRequestApprovalRequest(request: unknown): request is ChatParticipantRequestApprovalRequest {

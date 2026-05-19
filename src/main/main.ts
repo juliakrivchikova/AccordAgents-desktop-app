@@ -15,6 +15,7 @@ import type {
   PlanItemReviewRequest,
   ProviderKind,
   ProviderSettingsUpdate,
+  RepoFileSearchRequest,
   RespondToChatAppToolApprovalRequest,
   RespondToChatChoiceRequest,
   RespondToChatMentionsRequest,
@@ -126,6 +127,16 @@ function registerIpc(): void {
   ipcMain.handle("agents:detect", () => detectAgentsWithAppSkills());
   ipcMain.handle("git:inspect-repo", (_event, repoPath: string) => gitService.inspectRepo(repoPath));
   ipcMain.handle("git:get-diff", (_event, request: GitDiffRequest) => gitService.getDiff(request));
+  ipcMain.handle("git:search-repo-files", async (_event, request: RepoFileSearchRequest) => {
+    const conversationId = typeof request?.conversationId === "string" ? request.conversationId : "";
+    const query = typeof request?.query === "string" ? request.query : "";
+    const limit = typeof request?.limit === "number" ? request.limit : undefined;
+    const conversation = await storageService.getConversation(conversationId);
+    if (!conversation?.repoPath) {
+      return [];
+    }
+    return gitService.searchRepoFiles(conversation.repoPath, query, limit);
+  });
   ipcMain.handle("conversations:list", () => storageService.listConversations());
   ipcMain.handle("conversations:get", async (_event, id: string) => {
     const conversation = await storageService.getConversation(id);

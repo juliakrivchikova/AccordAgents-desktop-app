@@ -421,7 +421,7 @@ export class AppMcpService {
         name: APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
         title: "Request Chat Permission Change",
         description:
-          "Request User approval to grant this chat participant more capability. Use portable for workspaceWrite/webAccess, shellRules for command-specific shell rules, or providerNative for Claude Code allowedTools tokens. Provider-native grants are rejected unless the requester is a Claude Code participant. The app validates the request and shows an approval item; this tool never grants permissions directly.",
+          "Request User approval to grant this chat participant more capability. Use portable for repoRead/workspaceWrite/webAccess, shellRules for command-specific shell rules, or providerNative for Claude Code allowedTools tokens. Provider-native grants are rejected unless the requester is a Claude Code participant. The app validates the request and shows an approval item; this tool never grants permissions directly.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -438,10 +438,10 @@ export class AppMcpService {
             permissions: {
               type: "array",
               minItems: 1,
-              maxItems: 2,
+              maxItems: 3,
               items: {
                 type: "string",
-                enum: ["workspaceWrite", "webAccess"]
+                enum: ["repoRead", "workspaceWrite", "webAccess"]
               },
               description: "Portable permission grants to request when kind is portable."
             },

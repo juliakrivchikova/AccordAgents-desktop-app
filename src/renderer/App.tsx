@@ -8,6 +8,7 @@ import {
   Circle,
   Columns2,
   Copy,
+  FileText,
   FolderOpen,
   HelpCircle,
   ListChecks,
@@ -98,6 +99,8 @@ import type {
   ParticipantConfig,
   ProviderKind,
   ProviderSettings,
+  RepoFileMention,
+  RepoFileSearchResult,
   ReviewProgress
 } from "../shared/types";
 import {
@@ -852,6 +855,7 @@ function App(): JSX.Element {
 
   async function sendChatMessage(options: {
     content?: string;
+    repoFileMentions?: RepoFileMention[];
     threadId?: string;
     parentMessageId?: string;
     chatThreadRootId?: string;
@@ -879,6 +883,7 @@ function App(): JSX.Element {
         conversationId: conversation.id,
         runId,
         content,
+        repoFileMentions: options.repoFileMentions,
         threadId: options.threadId,
         parentMessageId: options.parentMessageId,
         chatThreadRootId: options.chatThreadRootId
@@ -1887,9 +1892,10 @@ function App(): JSX.Element {
                     addParticipantDraft={chatAddParticipantDraft ?? defaultChatParticipantDraft(settings)}
                     onDraftChange={setChatMessageDraft}
                     onLoadOlderMessages={() => void loadOlderConversationMessages()}
-                    onSend={() => sendChatMessage()}
-                    onSendThread={(rootMessage, content) => sendChatMessage({
+                    onSend={(repoFileMentions) => sendChatMessage({ repoFileMentions })}
+                    onSendThread={(rootMessage, content, repoFileMentions) => sendChatMessage({
                       content,
+                      repoFileMentions,
                       threadId: rootMessage.metadata?.threadId ?? rootMessage.id,
                       parentMessageId: rootMessage.id,
                       chatThreadRootId: rootMessage.id
@@ -2593,8 +2599,8 @@ function ChatConversationView(props: {
   addParticipantDraft: ChatParticipantDraft;
   onDraftChange: (value: string) => void;
   onLoadOlderMessages: () => void;
-  onSend: () => Promise<boolean>;
-  onSendThread: (rootMessage: Conversation["messages"][number], content: string) => Promise<boolean>;
+  onSend: (repoFileMentions?: RepoFileMention[]) => Promise<boolean>;
+  onSendThread: (rootMessage: Conversation["messages"][number], content: string, repoFileMentions?: RepoFileMention[]) => Promise<boolean>;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: { selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
@@ -2674,9 +2680,9 @@ function ChatConversationView(props: {
     }
   }
 
-  function sendDraft(): void {
+  async function sendDraft(repoFileMentions: RepoFileMention[] = []): Promise<boolean> {
     forceStickToBottomRef.current = true;
-    void props.onSend();
+    return props.onSend(repoFileMentions);
   }
 
   function scrollToChatBottom(): void {
@@ -2700,15 +2706,16 @@ function ChatConversationView(props: {
     window.setTimeout(scrollToChatBottom, 180);
   }
 
-  async function sendThreadDraft(rootMessage: Conversation["messages"][number]): Promise<void> {
+  async function sendThreadDraft(rootMessage: Conversation["messages"][number], repoFileMentions: RepoFileMention[] = []): Promise<boolean> {
     const content = (threadDrafts[rootMessage.id] ?? "").trim();
     if (!content) {
-      return;
+      return false;
     }
-    const sent = await props.onSendThread(rootMessage, content);
+    const sent = await props.onSendThread(rootMessage, content, repoFileMentions);
     if (sent) {
       setThreadDrafts((current) => ({ ...current, [rootMessage.id]: "" }));
     }
+    return sent;
   }
 
   async function handleAppToolApproval(
@@ -2905,11 +2912,13 @@ function ChatConversationView(props: {
         <ChatComposer
           participants={participants}
           settings={props.settings}
+          conversationId={props.conversation.id}
+          repoPath={props.conversation.repoPath}
           draft={props.draft}
           onDraftChange={props.onDraftChange}
           onSend={sendDraft}
           isRunning={props.isRunning}
-          placeholder="Mention participants with @name"
+          placeholder="Mention participants with @name or repo files with #path"
           status={props.isRunning && latestProgress ? <RunStatusLine progress={latestProgress} /> : undefined}
           testId="chat-main-composer"
         />
@@ -2920,13 +2929,15 @@ function ChatConversationView(props: {
           rootMessage={selectedThreadRoot}
           replies={selectedThreadSummary?.replies ?? []}
           participants={participants}
+          conversationId={props.conversation.id}
+          repoPath={props.conversation.repoPath}
           contextUsageByParticipant={contextUsageByParticipant}
           sessionsByParticipant={sessionsByParticipant}
           settings={props.settings}
           draft={threadDrafts[selectedThreadRoot.id] ?? ""}
           busy={props.isRunning}
           onDraftChange={(value) => setThreadDrafts((current) => ({ ...current, [selectedThreadRoot.id]: value }))}
-          onSend={() => sendThreadDraft(selectedThreadRoot)}
+          onSend={(repoFileMentions) => sendThreadDraft(selectedThreadRoot, repoFileMentions)}
           onClose={() => setSelectedThreadRootId(undefined)}
           onApproveMentions={props.onApproveMentions}
           onRejectMentions={props.onRejectMentions}
@@ -2941,6 +2952,8 @@ function ChatConversationView(props: {
 function ChatComposer(props: {
   participants: ChatParticipant[];
   settings: AppSettings;
+  conversationId?: string;
+  repoPath?: string;
   draft: string;
   placeholder: string;
   isRunning: boolean;
@@ -2950,19 +2963,64 @@ function ChatComposer(props: {
   maxHeight?: number;
   testId?: string;
   onDraftChange: (value: string) => void;
-  onSend: () => void | Promise<void>;
+  onSend: (repoFileMentions?: RepoFileMention[]) => boolean | void | Promise<boolean | void>;
 }): JSX.Element {
   const [mentionQuery, setMentionQuery] = useState<string | undefined>();
   const [mentionIndex, setMentionIndex] = useState(0);
+  const [fileQuery, setFileQuery] = useState<string | undefined>();
+  const [fileIndex, setFileIndex] = useState(0);
+  const [fileOptions, setFileOptions] = useState<RepoFileSearchResult[]>([]);
+  const [selectedFileMentions, setSelectedFileMentions] = useState<RepoFileMention[]>([]);
+  const fileSearchRequestRef = useRef(0);
   const canSend = !props.isRunning && Boolean(props.draft.trim());
   const mentionOptions = mentionQuery === undefined
     ? []
     : props.participants.filter((participant) => participant.handle.toLowerCase().includes(mentionQuery.toLowerCase()));
+  const visibleFileOptions = fileQuery === undefined ? [] : fileOptions;
+
+  useEffect(() => {
+    setFileQuery(undefined);
+    setFileOptions([]);
+    setSelectedFileMentions([]);
+  }, [props.conversationId]);
+
+  useEffect(() => {
+    setSelectedFileMentions((current) => current.filter((mention) => draftHasFileMention(props.draft, mention.path)));
+  }, [props.draft]);
+
+  useEffect(() => {
+    if (fileQuery === undefined || !props.conversationId || !props.repoPath) {
+      setFileOptions([]);
+      return;
+    }
+    const requestId = fileSearchRequestRef.current + 1;
+    fileSearchRequestRef.current = requestId;
+    const timeout = window.setTimeout(() => {
+      void window.consensus.searchRepoFiles({
+        conversationId: props.conversationId ?? "",
+        query: fileQuery,
+        limit: 50
+      }).then((results) => {
+        if (fileSearchRequestRef.current === requestId) {
+          setFileOptions(results);
+          setFileIndex(0);
+        }
+      }).catch(() => {
+        if (fileSearchRequestRef.current === requestId) {
+          setFileOptions([]);
+        }
+      });
+    }, 200);
+    return () => window.clearTimeout(timeout);
+  }, [fileQuery, props.conversationId, props.repoPath]);
 
   function updateDraft(value: string): void {
     props.onDraftChange(value);
-    setMentionQuery(activeMentionQuery(value));
+    const nextFileQuery = props.conversationId && props.repoPath ? activeFileQuery(value) : undefined;
+    setFileQuery(nextFileQuery);
+    setMentionQuery(nextFileQuery === undefined ? activeMentionQuery(value) : undefined);
     setMentionIndex(0);
+    setFileIndex(0);
   }
 
   function insertMention(participant: ChatParticipant): void {
@@ -2971,15 +3029,47 @@ function ChatComposer(props: {
     setMentionIndex(0);
   }
 
-  function sendDraft(): void {
+  function insertFileMention(file: RepoFileSearchResult): void {
+    props.onDraftChange(replaceActiveFileMention(props.draft, file.path));
+    setSelectedFileMentions((current) => {
+      if (current.some((mention) => mention.path === file.path)) {
+        return current;
+      }
+      return [...current, { path: file.path }];
+    });
+    setFileQuery(undefined);
+    setFileOptions([]);
+    setFileIndex(0);
+  }
+
+  function removeFileMention(filePath: string): void {
+    props.onDraftChange(removeFileMentionToken(props.draft, filePath));
+    setSelectedFileMentions((current) => current.filter((mention) => mention.path !== filePath));
+  }
+
+  async function sendDraft(): Promise<void> {
     if (canSend) {
-      void props.onSend();
+      const sent = await props.onSend(selectedFileMentions);
+      if (sent !== false) {
+        setSelectedFileMentions([]);
+      }
     }
   }
 
   return (
     <div className={`chat-composer ${props.className ?? ""}`} data-testid={props.testId}>
       {props.status && <div className="chat-composer-status">{props.status}</div>}
+      {selectedFileMentions.length > 0 && (
+        <div className="file-mention-chips" aria-label="Referenced repository files">
+          {selectedFileMentions.map((mention) => (
+            <button type="button" onClick={() => removeFileMention(mention.path)} key={mention.path}>
+              <FileText size={14} />
+              <span>{mention.path}</span>
+              <X size={13} />
+            </button>
+          ))}
+        </div>
+      )}
       <div className="chat-input-wrap">
         {mentionOptions.length > 0 && (
           <div className="mention-menu" role="listbox">
@@ -3002,10 +3092,46 @@ function ChatComposer(props: {
             ))}
           </div>
         )}
+        {visibleFileOptions.length > 0 && (
+          <div className="mention-menu file-mention-menu" role="listbox">
+            {visibleFileOptions.map((file, index) => (
+              <button
+                className={index === fileIndex ? "selected" : ""}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  insertFileMention(file);
+                }}
+                role="option"
+                aria-selected={index === fileIndex}
+                key={file.path}
+              >
+                <span className="file-mention-icon"><FileText size={18} /></span>
+                <strong>{repoFileBasename(file.path)}</strong>
+                <span>{file.path}</span>
+                {index === 0 && <kbd>Enter</kbd>}
+              </button>
+            ))}
+          </div>
+        )}
         <ResizableTextarea
           value={props.draft}
           onChange={(event) => updateDraft(event.target.value)}
           onKeyDown={(event) => {
+            if (visibleFileOptions.length > 0 && event.key === "ArrowDown") {
+              event.preventDefault();
+              setFileIndex((current) => (current + 1) % visibleFileOptions.length);
+              return;
+            }
+            if (visibleFileOptions.length > 0 && event.key === "ArrowUp") {
+              event.preventDefault();
+              setFileIndex((current) => (current - 1 + visibleFileOptions.length) % visibleFileOptions.length);
+              return;
+            }
+            if (visibleFileOptions.length > 0 && (event.key === "Enter" || event.key === "Tab")) {
+              event.preventDefault();
+              insertFileMention(visibleFileOptions[fileIndex] ?? visibleFileOptions[0]);
+              return;
+            }
             if (mentionOptions.length > 0 && event.key === "ArrowDown") {
               event.preventDefault();
               setMentionIndex((current) => (current + 1) % mentionOptions.length);
@@ -3023,20 +3149,24 @@ function ChatComposer(props: {
             }
             if (event.key === "Escape") {
               setMentionQuery(undefined);
+              setFileQuery(undefined);
               return;
             }
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              sendDraft();
+              void sendDraft();
             }
           }}
-          onBlur={() => window.setTimeout(() => setMentionQuery(undefined), 120)}
+          onBlur={() => window.setTimeout(() => {
+            setMentionQuery(undefined);
+            setFileQuery(undefined);
+          }, 120)}
           rows={props.rows ?? 2}
           maxHeight={props.maxHeight ?? 260}
           placeholder={props.placeholder}
         />
       </div>
-      <Button size="sm" title="Send" disabled={!canSend} onClick={sendDraft}>
+      <Button size="sm" title="Send" disabled={!canSend} onClick={() => void sendDraft()}>
         {props.isRunning ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
       </Button>
     </div>
@@ -3181,7 +3311,7 @@ function ChatAppToolPermissionOperation({ request }: { request: ChatPermissionCh
       {request.permissions.map((permission) => (
         <div className="chat-app-tool-roster-item" key={permission}>
           <strong>{chatPermissionGrantLabel(permission)}</strong>
-          <span>{permission === "workspaceWrite" ? "Allow file edits in the selected repository." : "Allow web search and fetch when the CLI supports it."}</span>
+          <span>{chatPermissionGrantDescription(permission)}</span>
         </div>
       ))}
     </div>
@@ -3229,6 +3359,7 @@ function ChatMessageItem(props: {
   const approved = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "approved");
   const choice = message.metadata?.pendingChoice;
   const participantRequest = message.metadata?.participantRequest;
+  const repoFileMentions = chatMessageRepoFileMentions(message);
   const allPendingIds = pending.map((mention) => mention.targetParticipantId);
   const displayContent = chatDisplayContent(message, author);
   const showThreadActions = !props.inThread && message.role !== "system" && Boolean(props.onOpenThread);
@@ -3295,6 +3426,12 @@ function ChatMessageItem(props: {
           <div className="message-content">
             <MarkdownText content={displayContent} />
           </div>
+          {repoFileMentions.length > 0 && (
+            <div className="repo-file-reference-footer">
+              <FileText size={14} />
+              <span>Referenced: {repoFileMentions.map((mention) => mention.path).join(", ")}</span>
+            </div>
+          )}
           {participantRequest && (
             <div className="chat-approval-note">
               <span>{participantRequestStatusLabel(participantRequest)}</span>
@@ -3543,13 +3680,15 @@ function ChatThreadPanel(props: {
   rootMessage: Conversation["messages"][number];
   replies: Conversation["messages"][number][];
   participants: ChatParticipant[];
+  conversationId?: string;
+  repoPath?: string;
   contextUsageByParticipant: Map<string, AgentContextUsage>;
   sessionsByParticipant: Map<string, ChatParticipantSession>;
   settings: AppSettings;
   draft: string;
   busy: boolean;
   onDraftChange: (value: string) => void;
-  onSend: () => void | Promise<void>;
+  onSend: (repoFileMentions?: RepoFileMention[]) => boolean | void | Promise<boolean | void>;
   onClose: () => void;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
@@ -3605,11 +3744,13 @@ function ChatThreadPanel(props: {
         className="chat-thread-composer"
         participants={props.participants}
         settings={props.settings}
+        conversationId={props.conversationId}
+        repoPath={props.repoPath}
         draft={props.draft}
         onDraftChange={props.onDraftChange}
         onSend={props.onSend}
         isRunning={props.busy}
-        placeholder="Reply..."
+        placeholder="Reply with @name or #path..."
         rows={3}
         maxHeight={180}
         testId="chat-thread-composer"
@@ -6106,7 +6247,7 @@ function chatPermissionChangeRequest(approval: ChatAppToolApproval): ChatPermiss
   const reason = typeof request.reason === "string" ? request.reason : undefined;
   if ((request.kind === "portable" || request.kind === undefined) && Array.isArray(request.permissions)) {
     const permissions = request.permissions.filter((permission): permission is ChatPermissionGrant =>
-      permission === "workspaceWrite" || permission === "webAccess"
+      permission === "workspaceWrite" || permission === "webAccess" || permission === "repoRead"
     );
     return permissions.length === request.permissions.length && permissions.length > 0
       ? { kind: "portable", reason, permissions }
@@ -6144,7 +6285,19 @@ function chatPermissionChangeRequest(approval: ChatAppToolApproval): ChatPermiss
 }
 
 function chatPermissionGrantLabel(permission: ChatPermissionGrant): string {
+  if (permission === "repoRead") {
+    return "Repository read";
+  }
   return permission === "workspaceWrite" ? "File editing" : "Web access";
+}
+
+function chatPermissionGrantDescription(permission: ChatPermissionGrant): string {
+  if (permission === "repoRead") {
+    return "Allow read-only inspection of files in the selected repository.";
+  }
+  return permission === "workspaceWrite"
+    ? "Allow file edits in the selected repository."
+    : "Allow web search and fetch when the CLI supports it.";
 }
 
 function participantRequestStatusLabel(batch: ChatParticipantRequestBatch): string {
@@ -6217,6 +6370,22 @@ function sessionIdForMessage(
   return message.role === "participant" && message.participantId
     ? sessionsByParticipant.get(message.participantId)?.sessionId || undefined
     : undefined;
+}
+
+function chatMessageRepoFileMentions(message: Conversation["messages"][number]): RepoFileMention[] {
+  const mentions = message.metadata?.repoFileMentions;
+  if (!Array.isArray(mentions)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  return mentions.flatMap((mention): RepoFileMention[] => {
+    const filePath = typeof mention?.path === "string" ? mention.path.trim() : "";
+    if (!filePath || seen.has(filePath)) {
+      return [];
+    }
+    seen.add(filePath);
+    return [{ path: filePath }];
+  });
 }
 
 function contextUsageLabel(usage: AgentContextUsage | undefined): string {
@@ -6444,6 +6613,11 @@ function activeMentionQuery(value: string): string | undefined {
   return match ? match[1] : undefined;
 }
 
+function activeFileQuery(value: string): string | undefined {
+  const match = value.match(/(?:^|\s)#([^\s#]*)$/);
+  return match ? match[1] : undefined;
+}
+
 function replaceActiveMention(value: string, handle: string): string {
   const match = value.match(/(?:^|\s)@([A-Za-z0-9_-]*)$/);
   if (!match || match.index === undefined) {
@@ -6452,6 +6626,37 @@ function replaceActiveMention(value: string, handle: string): string {
   const prefix = value.slice(0, match.index);
   const leadingSpace = match[0].startsWith(" ") ? " " : "";
   return `${prefix}${leadingSpace}@${handle} `;
+}
+
+function replaceActiveFileMention(value: string, filePath: string): string {
+  const match = value.match(/(?:^|\s)#([^\s#]*)$/);
+  if (!match || match.index === undefined) {
+    return `${value}${value.endsWith(" ") || !value ? "" : " "}#${filePath} `;
+  }
+  const prefix = value.slice(0, match.index);
+  const leadingSpace = match[0].startsWith(" ") ? " " : "";
+  return `${prefix}${leadingSpace}#${filePath} `;
+}
+
+function removeFileMentionToken(value: string, filePath: string): string {
+  const escaped = escapeRegExp(filePath);
+  return value
+    .replace(new RegExp(`(^|\\s)#${escaped}(?=\\s|$)`, "g"), "$1")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trimEnd();
+}
+
+function draftHasFileMention(value: string, filePath: string): boolean {
+  return new RegExp(`(^|\\s)#${escapeRegExp(filePath)}(?=\\s|$)`).test(value);
+}
+
+function repoFileBasename(filePath: string): string {
+  return filePath.split("/").filter(Boolean).pop() ?? filePath;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function pendingPlanDecisions(conversation: Conversation | undefined): PlanDecisionRequest[] {
@@ -6998,6 +7203,11 @@ function installDevMockBridge(): void {
     selectRepoDirectory: async () => undefined,
     inspectRepo: async (repoPath) => ({ repoPath, isRepo: true, currentBranch: "mock", branches: ["mock"], statusLines: [] }),
     getDiff: async () => ({ mode: "working", title: "Mock diff", diff: "", metadata: {} }),
+    searchRepoFiles: async (request) => [
+      "src/main/services/chat.ts",
+      "src/renderer/App.tsx",
+      "src/shared/types.ts"
+    ].filter((path) => path.toLowerCase().includes(request.query.toLowerCase())).map((path) => ({ path })),
     listConversations: async () => [conversation],
     getConversation: async (id) => id === conversation.id ? conversation : undefined,
     openConversation: async (id) => id === conversation.id ? { conversation, messagePage: fullConversationMessagePageInfo(conversation) } : undefined,

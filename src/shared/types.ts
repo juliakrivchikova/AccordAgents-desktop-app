@@ -164,7 +164,7 @@ export interface ChatRosterChangeRequest {
   operations: ChatRosterChangeOperation[];
 }
 
-export type ChatPermissionGrant = "workspaceWrite" | "webAccess";
+export type ChatPermissionGrant = "workspaceWrite" | "webAccess" | "repoRead";
 
 export interface ChatPortablePermissionChangeRequest {
   kind: "portable";
@@ -348,6 +348,7 @@ export interface ChatMessageMetadata {
   parentMessageId?: string;
   chatThreadRootId?: string;
   mentions?: string[];
+  repoFileMentions?: RepoFileMention[];
   pendingMentions?: ChatPendingMention[];
   pendingChoice?: ChatPendingChoice;
   participantRequest?: ChatParticipantRequestBatch;
@@ -418,6 +419,7 @@ export interface SendChatMessageRequest {
   conversationId: string;
   runId?: string;
   content: string;
+  repoFileMentions?: RepoFileMention[];
   threadId?: string;
   parentMessageId?: string;
   chatThreadRootId?: string;
@@ -514,6 +516,20 @@ export interface GitDiffResult {
   title: string;
   diff: string;
   metadata: Record<string, string | number | boolean | undefined>;
+}
+
+export interface RepoFileMention {
+  path: string;
+}
+
+export interface RepoFileSearchRequest {
+  conversationId: string;
+  query: string;
+  limit?: number;
+}
+
+export interface RepoFileSearchResult {
+  path: string;
 }
 
 export interface ReviewRequest {
@@ -748,6 +764,7 @@ export interface AppBridge {
   selectRepoDirectory(): Promise<string | undefined>;
   inspectRepo(repoPath: string): Promise<GitRepoInfo>;
   getDiff(request: GitDiffRequest): Promise<GitDiffResult>;
+  searchRepoFiles(request: RepoFileSearchRequest): Promise<RepoFileSearchResult[]>;
   listConversations(): Promise<ConversationSummary[]>;
   getConversation(id: string): Promise<Conversation | undefined>;
   openConversation(id: string, limit?: number): Promise<ConversationOpenResult | undefined>;

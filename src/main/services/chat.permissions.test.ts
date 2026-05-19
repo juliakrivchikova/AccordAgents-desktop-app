@@ -157,6 +157,22 @@ test("one-time permission overlay is consumed after one run projection", () => {
   assert.deepEqual(after.shell.rules, []);
 });
 
+test("repoRead is a portable permission grant", () => {
+  const service = testService().service as any;
+  const participant = chatParticipant("claude-code", { repoRead: false });
+  const conversation = chatConversation([participant]);
+
+  const prepared = service.preparePermissionChange(participant, {
+    kind: "portable",
+    permissions: ["repoRead"]
+  });
+  service.applyPreparedPermissionChange(conversation, participant.id, prepared);
+
+  const permissions = normalizeChatAgentPermissions((conversation.metadata.participants as ChatParticipant[])[0].permissions);
+  assert.equal(permissions.repoRead, true);
+  assert.equal(prepared.summary.includes("repository read access"), true);
+});
+
 test("permission resume attaches resumed participant-request reply to the original batch", async () => {
   const runs: Array<{ participant: ParticipantConfig; options: any; prompt: string }> = [];
   const participant = chatParticipant("claude-code");
@@ -376,6 +392,17 @@ test("participantPermissionPolicy uses explanation fallback when permission requ
   assert.match(prompt, /explain that `workspaceWrite` is needed before refusing/);
   assert.match(prompt, /explain that `webAccess` is needed before refusing/);
   assert.doesNotMatch(prompt, /app_permissions_request_change/);
+});
+
+test("participantPermissionPolicy guides blocked repoRead to request before refusing", () => {
+  const { service } = testService();
+  const prompt = (service as any).participantPermissionPolicy("default", normalizeChatAgentPermissions({
+    ...defaultChatAgentPermissions(),
+    repoRead: false
+  }), true);
+
+  assert.match(prompt, /repoRead/);
+  assert.match(prompt, /app_permissions_request_change/);
 });
 
 test("participantPermissionPolicy does not suggest escalation for agent-mode masked shell and workspace grants", () => {
