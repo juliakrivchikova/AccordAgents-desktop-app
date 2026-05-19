@@ -1903,9 +1903,7 @@ function App(): JSX.Element {
                     onRespondToChoice={(sourceMessageId, choiceId, response) =>
                       void respondToChatChoice(sourceMessageId, choiceId, response)
                     }
-                    onRespondToAppToolApproval={(approvalId, approve, scope) =>
-                      void respondToChatAppToolApproval(approvalId, approve, scope)
-                    }
+                    onRespondToAppToolApproval={respondToChatAppToolApproval}
                     onAddParticipantDraftChange={setChatAddParticipantDraft}
                     onAddParticipant={() => void addChatParticipant()}
                   />
@@ -2600,7 +2598,7 @@ function ChatConversationView(props: {
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: { selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
-  onRespondToAppToolApproval: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => void;
+  onRespondToAppToolApproval: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => Promise<void>;
   onAddParticipantDraftChange: (draft: ChatParticipantDraft) => void;
   onAddParticipant: () => void;
 }): JSX.Element {
@@ -2613,6 +2611,8 @@ function ChatConversationView(props: {
   const sessionsByParticipant = useMemo(() => chatSessionsByParticipant(props.conversation), [props.conversation.metadata]);
   const [selectedThreadRootId, setSelectedThreadRootId] = useState<string | undefined>();
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
+  const submittingApprovalIdsRef = useRef<Set<string>>(new Set<string>());
+  const [submittingApprovalIds, setSubmittingApprovalIds] = useState<ReadonlySet<string>>(new Set<string>());
   const [threadWidth, setThreadWidth] = useState(460);
   const [isResizingThread, setIsResizingThread] = useState(false);
   const viewRef = useRef<HTMLDivElement>(null);
@@ -2711,6 +2711,24 @@ function ChatConversationView(props: {
     }
   }
 
+  async function handleAppToolApproval(
+    approvalId: string,
+    approve: boolean,
+    scope?: ChatAppToolApprovalScope
+  ): Promise<void> {
+    if (submittingApprovalIdsRef.current.has(approvalId)) {
+      return;
+    }
+    submittingApprovalIdsRef.current.add(approvalId);
+    setSubmittingApprovalIds(new Set(submittingApprovalIdsRef.current));
+    try {
+      await props.onRespondToAppToolApproval(approvalId, approve, scope);
+    } finally {
+      submittingApprovalIdsRef.current.delete(approvalId);
+      setSubmittingApprovalIds(new Set(submittingApprovalIdsRef.current));
+    }
+  }
+
   function startThreadResize(event: React.PointerEvent<HTMLDivElement>): void {
     const view = viewRef.current;
     if (!view) {
@@ -2739,6 +2757,8 @@ function ChatConversationView(props: {
   useEffect(() => {
     setSelectedThreadRootId(undefined);
     setThreadDrafts({});
+    submittingApprovalIdsRef.current.clear();
+    setSubmittingApprovalIds(new Set<string>());
     stickToBottomRef.current = true;
     forceStickToBottomRef.current = true;
     scheduleScrollToChatBottom();
@@ -2832,8 +2852,8 @@ function ChatConversationView(props: {
           {pendingAppToolApprovals.length > 0 && (
             <ChatAppToolApprovalList
               approvals={pendingAppToolApprovals}
-              busy={props.isRunning}
-              onRespond={props.onRespondToAppToolApproval}
+              submittingIds={submittingApprovalIds}
+              onRespond={handleAppToolApproval}
             />
           )}
         </div>
@@ -3038,15 +3058,15 @@ function ChatThinkingRowItem({ row }: { row: ChatThinkingRow }): JSX.Element {
 
 function ChatAppToolApprovalList(props: {
   approvals: ChatAppToolApproval[];
-  busy: boolean;
-  onRespond: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => void;
+  submittingIds: ReadonlySet<string>;
+  onRespond: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => Promise<void>;
 }): JSX.Element {
   return (
     <div className="chat-app-tool-approval-list" aria-label="Pending app tool approvals">
       {props.approvals.map((approval) => (
         <ChatAppToolApprovalCard
           approval={approval}
-          busy={props.busy}
+          submitting={props.submittingIds.has(approval.id)}
           onRespond={props.onRespond}
           key={approval.id}
         />
@@ -3057,8 +3077,8 @@ function ChatAppToolApprovalList(props: {
 
 function ChatAppToolApprovalCard(props: {
   approval: ChatAppToolApproval;
-  busy: boolean;
-  onRespond: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => void;
+  submitting: boolean;
+  onRespond: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => Promise<void>;
 }): JSX.Element {
   const permissionRequest = chatPermissionChangeRequest(props.approval);
   const participantRequest = chatParticipantRequestApprovalRequest(props.approval);
@@ -3100,15 +3120,15 @@ function ChatAppToolApprovalCard(props: {
         </p>
       )}
       <div className="chat-app-tool-approval-actions">
-        <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onRespond(props.approval.id, false)}>
+        <Button variant="outline" size="sm" disabled={props.submitting} onClick={() => void props.onRespond(props.approval.id, false)}>
           Deny
         </Button>
-        <Button variant={preferOnceApproval ? "default" : "outline"} size="sm" disabled={props.busy} onClick={() => props.onRespond(props.approval.id, true, "once")}>
+        <Button variant={preferOnceApproval ? "default" : "outline"} size="sm" disabled={props.submitting} onClick={() => void props.onRespond(props.approval.id, true, "once")}>
           <CheckCircle2 size={16} />
           Allow once
         </Button>
         {!inferredParticipantRequest && (
-          <Button variant={preferOnceApproval ? "outline" : "default"} size="sm" disabled={props.busy} onClick={() => props.onRespond(props.approval.id, true, "chat")}>
+          <Button variant={preferOnceApproval ? "outline" : "default"} size="sm" disabled={props.submitting} onClick={() => void props.onRespond(props.approval.id, true, "chat")}>
             <CheckCircle2 size={16} />
             {permissionRequest
               ? `Allow @${props.approval.requesterHandle} in this chat`
