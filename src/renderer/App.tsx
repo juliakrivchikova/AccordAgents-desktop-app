@@ -4,6 +4,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   AlertTriangle,
   Bot,
+  Check,
   CheckCircle2,
   Circle,
   Columns2,
@@ -850,6 +851,27 @@ function App(): JSX.Element {
     } finally {
       setBusy(false);
       setCurrentRunId(undefined);
+    }
+  }
+
+  async function renameChatConversation(title: string): Promise<boolean> {
+    if (!conversation || conversation.kind !== "chat") {
+      return false;
+    }
+    const conversationId = conversation.id;
+    setError(undefined);
+    try {
+      const saved = await window.consensus.renameChatConversation({ conversationId, title });
+      if (!saved) {
+        setError("Chat was not found.");
+        return false;
+      }
+      setConversation((current) => (current?.id === conversationId ? saved : current));
+      setSummaries((current) => upsertConversationSummary(current, saved));
+      return true;
+    } catch (caught) {
+      setError(errorText(caught));
+      return false;
     }
   }
 
@@ -1891,6 +1913,7 @@ function App(): JSX.Element {
                     draft={chatMessageDraft}
                     addParticipantDraft={chatAddParticipantDraft ?? defaultChatParticipantDraft(settings)}
                     onDraftChange={setChatMessageDraft}
+                    onRenameTitle={renameChatConversation}
                     onLoadOlderMessages={() => void loadOlderConversationMessages()}
                     onSend={(repoFileMentions) => sendChatMessage({ repoFileMentions })}
                     onSendThread={(rootMessage, content, repoFileMentions) => sendChatMessage({
@@ -2598,6 +2621,7 @@ function ChatConversationView(props: {
   draft: string;
   addParticipantDraft: ChatParticipantDraft;
   onDraftChange: (value: string) => void;
+  onRenameTitle: (title: string) => Promise<boolean>;
   onLoadOlderMessages: () => void;
   onSend: (repoFileMentions?: RepoFileMention[]) => Promise<boolean>;
   onSendThread: (rootMessage: Conversation["messages"][number], content: string, repoFileMentions?: RepoFileMention[]) => Promise<boolean>;
@@ -2621,8 +2645,12 @@ function ChatConversationView(props: {
   const [submittingApprovalIds, setSubmittingApprovalIds] = useState<ReadonlySet<string>>(new Set<string>());
   const [threadWidth, setThreadWidth] = useState(460);
   const [isResizingThread, setIsResizingThread] = useState(false);
+  const [renamingTitle, setRenamingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(props.conversation.title);
+  const [titleSaving, setTitleSaving] = useState(false);
   const viewRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const titleInputRef = useRef<HTMLInputElement>(null);
   const stickToBottomRef = useRef(true);
   const forceStickToBottomRef = useRef(false);
   const previousMessageCountRef = useRef(topLevelMessages.length);
@@ -2641,6 +2669,8 @@ function ChatConversationView(props: {
     : undefined;
   const selectedThreadSummary = selectedThreadRoot ? threadSummaries.get(selectedThreadRoot.id) : undefined;
   const hasThread = Boolean(selectedThreadRoot);
+  const normalizedTitleDraft = normalizeChatTitle(titleDraft);
+  const titleSaveDisabled = props.isRunning || titleSaving || !titleDraft.trim() || normalizedTitleDraft === props.conversation.title;
   const chatTimelineRows = useMemo(() => {
     const rows: ChatTimelineRow[] = [];
     if (props.hasOlderMessages || props.olderMessagesLoading) {
@@ -2736,6 +2766,43 @@ function ChatConversationView(props: {
     }
   }
 
+  function startTitleRename(): void {
+    setTitleDraft(props.conversation.title);
+    setRenamingTitle(true);
+  }
+
+  function cancelTitleRename(): void {
+    setTitleDraft(props.conversation.title);
+    setRenamingTitle(false);
+  }
+
+  async function saveTitleRename(): Promise<void> {
+    if (titleSaveDisabled) {
+      return;
+    }
+    setTitleSaving(true);
+    try {
+      const saved = await props.onRenameTitle(titleDraft);
+      if (saved) {
+        setRenamingTitle(false);
+      }
+    } finally {
+      setTitleSaving(false);
+    }
+  }
+
+  function handleTitleKeyDown(event: React.KeyboardEvent<HTMLInputElement>): void {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void saveTitleRename();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelTitleRename();
+    }
+  }
+
   function startThreadResize(event: React.PointerEvent<HTMLDivElement>): void {
     const view = viewRef.current;
     if (!view) {
@@ -2760,6 +2827,28 @@ function ChatConversationView(props: {
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", stop, { once: true });
   }
+
+  useEffect(() => {
+    setRenamingTitle(false);
+    setTitleSaving(false);
+    setTitleDraft(props.conversation.title);
+  }, [props.conversation.id]);
+
+  useEffect(() => {
+    if (!renamingTitle) {
+      setTitleDraft(props.conversation.title);
+    }
+  }, [props.conversation.title, renamingTitle]);
+
+  useEffect(() => {
+    if (!renamingTitle) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      titleInputRef.current?.focus();
+      titleInputRef.current?.select();
+    });
+  }, [renamingTitle]);
 
   useEffect(() => {
     setSelectedThreadRootId(undefined);
@@ -2817,7 +2906,51 @@ function ChatConversationView(props: {
       <div className="chat-main">
         <header className="chat-header">
           <div className="chat-title-block">
-            <h2>{props.conversation.title}</h2>
+            {renamingTitle ? (
+              <div className="chat-title-editor">
+                <Input
+                  ref={titleInputRef}
+                  value={titleDraft}
+                  maxLength={80}
+                  aria-label="Chat name"
+                  disabled={titleSaving}
+                  data-testid="chat-title-input"
+                  onChange={(event) => setTitleDraft(event.target.value)}
+                  onKeyDown={handleTitleKeyDown}
+                />
+                <IconButton
+                  size="xs"
+                  icon={Check}
+                  label="Save chat name"
+                  tooltip="Save chat name"
+                  disabled={titleSaveDisabled}
+                  data-testid="chat-title-save"
+                  onClick={() => void saveTitleRename()}
+                />
+                <IconButton
+                  size="xs"
+                  icon={X}
+                  label="Cancel chat name edit"
+                  tooltip="Cancel chat name edit"
+                  disabled={titleSaving}
+                  data-testid="chat-title-cancel"
+                  onClick={cancelTitleRename}
+                />
+              </div>
+            ) : (
+              <div className="chat-title-row">
+                <h2>{props.conversation.title}</h2>
+                <IconButton
+                  size="xs"
+                  icon={PencilLine}
+                  label="Edit chat name"
+                  tooltip={props.isRunning ? "Chat name cannot be edited while participants are running" : "Edit chat name"}
+                  disabled={props.isRunning}
+                  data-testid="chat-title-edit"
+                  onClick={startTitleRename}
+                />
+              </div>
+            )}
             <span>{props.isRunning ? latestProgress?.message ?? "Running" : props.conversation.repoPath ? "Repo context" : "No repo"}</span>
           </div>
           <div className="chat-header-actions">
@@ -7017,6 +7150,10 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function normalizeChatTitle(value: string): string {
+  return value.trim().slice(0, 80) || "Chat";
+}
+
 function installDevMockBridge(): void {
   if (!import.meta.env.DEV || window.consensus || new URLSearchParams(window.location.search).get("mock") !== "chat-layout") {
     return;
@@ -7219,6 +7356,14 @@ function installDevMockBridge(): void {
     saveDecisionResolutions: async () => conversation,
     savePlanItemReview: async () => conversation,
     createChatConversation: async () => ({ conversation, warnings: [] }),
+    renameChatConversation: async (request) => {
+      const title = normalizeChatTitle(request.title);
+      if (title !== conversation.title) {
+        conversation = { ...conversation, title, updatedAt: new Date().toISOString() };
+        conversationListeners.forEach((callback) => callback(conversation));
+      }
+      return conversation;
+    },
     addChatParticipant: async () => {
       emitConversation();
       return conversation;

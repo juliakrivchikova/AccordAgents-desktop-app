@@ -121,8 +121,82 @@ test("buildPrompt adds repo file guidance based on repoRead permission", () => {
 
   assert.match(blockedPrompt, /Referenced repository files/);
   assert.match(blockedPrompt, /src\/chat\.ts/);
-  assert.match(blockedPrompt, /permissions: \["repoRead"\]/);
-  assert.match(allowedPrompt, /You may read these with your usual tools/);
+  assert.match(blockedPrompt, /repoRead is not granted/);
+  assert.match(allowedPrompt, /You may read these\./);
+});
+
+test("buildPromptParts section sizes stay under baseline caps across envelope branches", () => {
+  const participant = chatParticipant();
+  const conversationWithRepo = chatConversation([participant], "/repo");
+  const conversationNoRepo = chatConversation([participant], "");
+  const triggerMessage: ChatMessage = {
+    id: "trigger-1",
+    role: "user",
+    content: "Short trigger.",
+    createdAt: NOW,
+    status: "done",
+    metadata: { threadId: "trigger-1" }
+  };
+  conversationWithRepo.messages.push(triggerMessage);
+  conversationNoRepo.messages.push(triggerMessage);
+  const service = testService({ canRequestPermissions: true }).service as any;
+  const session = chatSession(participant);
+  const permGranted = normalizeChatAgentPermissions(defaultChatAgentPermissions());
+  const permBlocked = normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), repoRead: false });
+
+  const build = (
+    conversation: Conversation,
+    permissions: ReturnType<typeof normalizeChatAgentPermissions>,
+    includeRoleInstructions: boolean
+  ) => service.buildPromptParts(conversation, participant, session, triggerMessage, "/workspace", false, {
+    includeRoleInstructions,
+    agentMode: "default",
+    permissions
+  }) as { prompt: string; sections: { staticEnvelope: number; dynamicHeader: number; trigger: number; mentions: number; currentRequest: number; total: number } };
+
+  const slimRepoRead = build(conversationWithRepo, permGranted, false);
+  const slimNoRepoRead = build(conversationWithRepo, permBlocked, false);
+  const slimNoRepo = build(conversationNoRepo, permGranted, false);
+  const fullRepoRead = build(conversationWithRepo, permGranted, true);
+  const fullNoRepoRead = build(conversationWithRepo, permBlocked, true);
+
+  // Per-section caps for slim envelope (resumed CLI session, no refresh).
+  for (const [label, parts] of [
+    ["slim repo+repoRead", slimRepoRead],
+    ["slim repo+no-repoRead", slimNoRepoRead],
+    ["slim no-repo", slimNoRepo]
+  ] as const) {
+    assert.equal(parts.sections.staticEnvelope, 0, `${label}: staticEnvelope should be empty on slim`);
+    assert.ok(parts.sections.dynamicHeader < 1000, `${label}: dynamicHeader too large: ${parts.sections.dynamicHeader}`);
+    assert.ok(parts.sections.trigger < 350, `${label}: trigger too large: ${parts.sections.trigger}`);
+    assert.equal(parts.sections.mentions, 0, `${label}: mentions should be empty when no #file tokens`);
+    assert.ok(parts.sections.currentRequest < 130, `${label}: currentRequest too large: ${parts.sections.currentRequest}`);
+  }
+
+  // Per-section caps for full envelope.
+  for (const [label, parts] of [
+    ["full repo+repoRead", fullRepoRead],
+    ["full repo+no-repoRead", fullNoRepoRead]
+  ] as const) {
+    assert.equal(parts.sections.dynamicHeader, 0, `${label}: dynamicHeader is folded into staticEnvelope when role instructions are included`);
+    assert.ok(parts.sections.staticEnvelope < 7200, `${label}: staticEnvelope too large: ${parts.sections.staticEnvelope}`);
+    assert.ok(parts.sections.trigger < 350, `${label}: trigger too large: ${parts.sections.trigger}`);
+    assert.ok(parts.sections.currentRequest < 130, `${label}: currentRequest too large: ${parts.sections.currentRequest}`);
+  }
+
+  // Total caps (carried over from v2; tighten deliberately if intentional growth happens).
+  assert.ok(slimRepoRead.sections.total < 1100, `slim repo+repoRead total too large: ${slimRepoRead.sections.total}`);
+  assert.ok(slimNoRepoRead.sections.total < 1500, `slim repo+no-repoRead total too large: ${slimNoRepoRead.sections.total}`);
+  assert.ok(slimNoRepo.sections.total < 1500, `slim no-repo total too large: ${slimNoRepo.sections.total}`);
+  assert.ok(fullRepoRead.sections.total < 7500, `full repo+repoRead total too large: ${fullRepoRead.sections.total}`);
+  assert.ok(fullNoRepoRead.sections.total < 8000, `full repo+no-repoRead total too large: ${fullNoRepoRead.sections.total}`);
+  assert.ok(slimRepoRead.sections.total * 4 < fullRepoRead.sections.total, "slim envelope should be at least 4x smaller than full");
+
+  // Repo-read state appears once: on the Repository line (and the escalation line when blocked).
+  assert.equal(/repo read /.test(slimRepoRead.prompt), false, "slim repo+repoRead should not say 'repo read' on the Permissions line");
+  assert.match(slimRepoRead.prompt, /Repository: \/repo \(repoRead allowed\)/);
+  assert.match(slimNoRepoRead.prompt, /Repository: \/repo \(repoRead blocked\)/);
+  assert.match(slimNoRepoRead.prompt, /repoRead.*app_permissions_request_change/);
 });
 
 test("sendMessage clears running and emits terminal error when participant run fails", async () => {

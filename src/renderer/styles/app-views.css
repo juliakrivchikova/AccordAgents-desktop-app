@@ -813,6 +813,33 @@
   white-space: nowrap;
 }
 
+.chat-title-row,
+.chat-title-editor {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+}
+
+.chat-title-row h2 {
+  min-width: 0;
+}
+
+.chat-title-row [data-slot="button"],
+.chat-title-editor [data-slot="button"] {
+  flex: 0 0 auto;
+}
+
+.chat-title-editor {
+  max-width: min(520px, 52vw);
+}
+
+.chat-title-editor [data-slot="input"] {
+  width: min(360px, 42vw);
+  font-size: 18px;
+  font-weight: 700;
+}
+
 .chat-title-block span {
   color: #6a655e;
   font-size: 12px;

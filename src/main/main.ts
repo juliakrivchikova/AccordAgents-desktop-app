@@ -15,6 +15,7 @@ import type {
   PlanItemReviewRequest,
   ProviderKind,
   ProviderSettingsUpdate,
+  RenameChatConversationRequest,
   RepoFileSearchRequest,
   RespondToChatAppToolApprovalRequest,
   RespondToChatChoiceRequest,
@@ -190,6 +191,9 @@ function registerIpc(): void {
   });
   ipcMain.handle("chat:create", async (_event, request: CreateChatConversationRequest) => {
     return chatService.createConversation(request);
+  });
+  ipcMain.handle("chat:rename", async (_event, request: RenameChatConversationRequest) => {
+    return chatService.renameConversation(request);
   });
   ipcMain.handle("chat:add-participant", async (_event, request: AddChatParticipantRequest) => {
     return chatService.addParticipant(request);

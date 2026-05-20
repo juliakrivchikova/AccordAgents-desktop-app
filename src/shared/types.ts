@@ -415,6 +415,11 @@ export interface AddChatParticipantRequest {
   };
 }
 
+export interface RenameChatConversationRequest {
+  conversationId: string;
+  title: string;
+}
+
 export interface SendChatMessageRequest {
   conversationId: string;
   runId?: string;
@@ -773,6 +778,7 @@ export interface AppBridge {
   saveDecisionResolutions(conversationId: string, resolutions: Record<string, boolean>): Promise<Conversation | undefined>;
   savePlanItemReview(request: PlanItemReviewRequest): Promise<Conversation | undefined>;
   createChatConversation(request: CreateChatConversationRequest): Promise<StartReviewResult>;
+  renameChatConversation(request: RenameChatConversationRequest): Promise<Conversation | undefined>;
   addChatParticipant(request: AddChatParticipantRequest): Promise<Conversation | undefined>;
   sendChatMessage(request: SendChatMessageRequest): Promise<StartReviewResult>;
   respondToChatMentions(request: RespondToChatMentionsRequest): Promise<StartReviewResult>;

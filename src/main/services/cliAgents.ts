@@ -18,7 +18,6 @@ import type {
 } from "../../shared/types";
 import { effectiveChatAgentPermissions, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
-import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
 import { CommandError, commandExists, runCommand } from "./command";
 import type { ParticipantRunResult } from "./providers";
 
@@ -1738,22 +1737,12 @@ export class CliAgentRunner {
 
     if (kind === "chat") {
       const mode = this.agentModeForRun(kind, options);
-      const permissions = this.permissionsForRun(mode, options);
-      const permissionLines = chatPermissionPromptLines({
-        agentMode: mode,
-        permissions,
-        canRequestPermissions: this.canRequestPermissionChanges(options)
-      });
       const readContextAvailable = Boolean(repoPath) || this.normalizedExtraReadableDirs(options.extraReadableDirs).length > 0;
       return [
         `You are running for AI Consensus Chat in ${mode} mode.`,
-        "Use the generated chat history path and any selected repository context described in the prompt.",
         readContextAvailable
           ? "Read-only file inspection, search, and listing are allowed for the selected repository and app-managed history files described in the prompt. Use these only to gather context."
           : "No repository or app-managed readable directory is available for this run.",
-        permissionLines.shell,
-        permissionLines.workspace,
-        permissionLines.web,
         prompt
       ].join("\n\n");
     }

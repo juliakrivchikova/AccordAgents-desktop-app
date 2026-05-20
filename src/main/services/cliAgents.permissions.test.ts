@@ -108,75 +108,44 @@ test("claudeToolConfig leaves plan agent mode untouched regardless of workspaceW
   assert.ok(planWithWrite.disallowedTools.includes("Write"));
 });
 
-test("codexPrompt chat uses permission-request guidance for blocked capabilities", () => {
+test("codexPrompt chat envelope passes the inner prompt through and does not duplicate permission text", () => {
   const runner = makeRunner() as any;
-  const prompt = runner.codexPrompt("Handle the request.", "/repo", undefined, "chat", chatOptions({
+  const innerPrompt = "INNER_PROMPT_MARKER";
+  const wrapped = runner.codexPrompt(innerPrompt, "/repo", undefined, "chat", chatOptions({
     agentMode: "default",
     workspaceWrite: false,
     webAccess: false,
     canRequestPermissions: true
   }));
 
-  assert.match(prompt, /Shell commands are blocked for this turn/);
-  assert.match(prompt, /app_permissions_request_change.*shellRules/);
-  assert.match(prompt, /Workspace file edits are blocked for this turn/);
-  assert.match(prompt, /app_permissions_request_change.*workspaceWrite/);
-  assert.match(prompt, /Web access is blocked for this turn/);
-  assert.match(prompt, /app_permissions_request_change.*webAccess/);
-  assert.doesNotMatch(prompt, /General shell commands are blocked/);
-  assert.doesNotMatch(prompt, /Do not edit files/);
-  assert.doesNotMatch(prompt, /Do not use web search/);
+  assert.match(wrapped, /You are running for AI Consensus Chat in default mode/);
+  assert.match(wrapped, /Read-only file inspection/);
+  assert.ok(wrapped.includes(innerPrompt));
+  assert.doesNotMatch(wrapped, /Shell commands are blocked for this turn/);
+  assert.doesNotMatch(wrapped, /Workspace file edits are blocked for this turn/);
+  assert.doesNotMatch(wrapped, /Web access is blocked for this turn/);
+  assert.doesNotMatch(wrapped, /app_permissions_request_change/);
 });
 
-test("codexPrompt chat keeps explicit shell deny rules as hard stops", () => {
+test("codexPrompt chat envelope reflects plan agent mode in its header", () => {
   const runner = makeRunner() as any;
-  const prompt = runner.codexPrompt("Handle the request.", "/repo", undefined, "chat", chatOptions({
-    agentMode: "default",
-    workspaceWrite: false,
-    shell: {
-      enabled: true,
-      rules: [{ action: "deny", match: "exact", pattern: "rm -rf" }]
-    },
-    canRequestPermissions: true
-  }));
-
-  assert.match(prompt, /deny exact "rm -rf"/);
-  assert.match(prompt, /Deny rules are strict hard stops for matching commands/);
-  assert.match(prompt, /do not request escalation for commands that match a deny rule/);
-  assert.match(prompt, /outside these rules/);
-});
-
-test("codexPrompt chat uses explanation fallback when permission requests are unavailable", () => {
-  const runner = makeRunner() as any;
-  const prompt = runner.codexPrompt("Handle the request.", "/repo", undefined, "chat", chatOptions({
-    agentMode: "default",
-    workspaceWrite: false,
-    webAccess: false,
-    canRequestPermissions: false
-  }));
-
-  assert.match(prompt, /explain the specific command and shell rule needed before refusing/);
-  assert.match(prompt, /explain that `workspaceWrite` is needed before refusing/);
-  assert.match(prompt, /explain that `webAccess` is needed before refusing/);
-  assert.doesNotMatch(prompt, /app_permissions_request_change/);
-});
-
-test("codexPrompt chat does not suggest escalation for agent-mode masked shell and workspace grants", () => {
-  const runner = makeRunner() as any;
-  const prompt = runner.codexPrompt("Handle the request.", "/repo", undefined, "chat", chatOptions({
+  const wrapped = runner.codexPrompt("INNER", "/repo", undefined, "chat", chatOptions({
     agentMode: "plan",
     workspaceWrite: true,
     webAccess: false,
-    shell: {
-      enabled: true,
-      rules: [{ action: "allow", match: "prefix", pattern: "npm run" }]
-    },
     canRequestPermissions: true
   }));
 
-  assert.match(prompt, /Shell commands are blocked by the current agent mode/);
-  assert.match(prompt, /Workspace file edits are blocked by the current agent mode/);
-  assert.match(prompt, /app_permissions_request_change.*webAccess/);
-  assert.doesNotMatch(prompt, /shellRules/);
-  assert.doesNotMatch(prompt, /workspaceWrite/);
+  assert.match(wrapped, /You are running for AI Consensus Chat in plan mode/);
+});
+
+test("codexPrompt chat envelope marks runs without readable context", () => {
+  const runner = makeRunner() as any;
+  const wrapped = runner.codexPrompt("INNER", undefined, undefined, "chat", chatOptions({
+    agentMode: "default",
+    workspaceWrite: false,
+    canRequestPermissions: false
+  }));
+
+  assert.match(wrapped, /No repository or app-managed readable directory is available/);
 });

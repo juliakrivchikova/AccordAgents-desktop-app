@@ -37,6 +37,7 @@ import type {
   Conversation,
   CreateChatConversationRequest,
   ParticipantConfig,
+  RenameChatConversationRequest,
   RespondToChatAppToolApprovalRequest,
   RespondToChatChoiceRequest,
   RespondToChatMentionsRequest,
@@ -84,6 +85,15 @@ type ProgressCallback = (progress: ReviewProgress) => void;
 interface ChatParticipantSessionState {
   session: ChatParticipantSession;
   instructionsRefreshed: boolean;
+}
+
+interface ChatPromptSectionSizes {
+  staticEnvelope: number;
+  dynamicHeader: number;
+  trigger: number;
+  mentions: number;
+  currentRequest: number;
+  total: number;
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
@@ -280,7 +290,7 @@ export class ChatService {
     const participants = await this.ensureAdministratorParticipant(requestedParticipants);
     const conversation: Conversation = {
       id: randomUUID(),
-      title: request.title?.trim() || "Chat",
+      title: this.normalizeChatTitle(request.title ?? ""),
       kind: "chat",
       createdAt: now,
       updatedAt: now,
@@ -300,6 +310,34 @@ export class ChatService {
     };
     await this.saveConversation(conversation);
     return { conversation, warnings: [] };
+  }
+
+  async renameConversation(request: RenameChatConversationRequest): Promise<Conversation | undefined> {
+    return this.withChatRunLock(request.conversationId, async () => {
+      await this.waitForQueuedSave(request.conversationId);
+      const conversation = await this.storage.getConversation(request.conversationId);
+      if (!conversation) {
+        return undefined;
+      }
+      if (conversation.kind !== "chat") {
+        throw new Error("Only chat conversations can be renamed.");
+      }
+      if (conversation.metadata.running === true || this.chatHasLiveWork(conversation.id)) {
+        throw new Error("Chat name cannot be edited while participants are running.");
+      }
+      const title = this.normalizeChatTitle(request.title);
+      if (title === conversation.title) {
+        return conversation;
+      }
+      conversation.title = title;
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      await this.ensureHistoryFiles(conversation);
+      return conversation;
+    }, {
+      rejectIfQueued: true,
+      queuedMessage: "Chat name cannot be edited while participants are running."
+    });
   }
 
   async addParticipant(request: AddChatParticipantRequest): Promise<Conversation | undefined> {
@@ -1369,11 +1407,13 @@ export class ChatService {
     session.participantPermissions = normalizeChatAgentPermissions(permissions);
     const usePromptRole = session.roleRuntime === "prompt-fallback";
     const includeRefreshedRoleInstructions = isResumingSession && sessionState.instructionsRefreshed;
-    const prompt = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
-      includeRoleInstructions: (usePromptRole && !isResumingSession) || includeRefreshedRoleInstructions,
+    const primaryIncludeRoleInstructions = (usePromptRole && !isResumingSession) || includeRefreshedRoleInstructions;
+    const primary = this.buildPromptParts(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+      includeRoleInstructions: primaryIncludeRoleInstructions,
       agentMode,
       permissions
     });
+    const prompt = primary.prompt;
     const promptFallbackPrompt = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: true,
       agentMode,
@@ -1387,6 +1427,19 @@ export class ChatService {
         })
       : undefined;
     const role = usePromptRole ? undefined : this.cliRoleOptions(participant, session, promptFallbackPrompt);
+    void this.debugLogs.write("chat.prompt.size", {
+      conversationId: conversation.id,
+      participantId: participant.id,
+      participantHandle: participant.handle,
+      runId,
+      includeRoleInstructions: primaryIncludeRoleInstructions,
+      resuming: isResumingSession,
+      instructionsRefreshed: sessionState.instructionsRefreshed,
+      sections: primary.sections,
+      promptFallbackSize: promptFallbackPrompt.length,
+      resumeFallbackSize: resumeFallbackPrompt?.length ?? 0,
+      roleInstructionsSize: role?.instructions.length ?? 0
+    });
     const runPath = this.runPathForParticipant(conversation, workspacePath, agentMode, permissions);
     const cliParticipant = this.cliParticipantForSession(participant, session);
     const progressSink = this.createAgentProgressSink(runId, progress, participant);
@@ -1451,11 +1504,14 @@ export class ChatService {
         options.warnings.push(`@${participant.handle}: rejected response that mentioned ${guardViolation}; retried in the same chat session.`);
         const retryUsesPromptRole = session.roleRuntime === "prompt-fallback";
         const retryIsResumingSession = Boolean(session.sessionId);
-        const retryPromptBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
-          includeRoleInstructions: (retryUsesPromptRole && !retryIsResumingSession) || (retryIsResumingSession && sessionState.instructionsRefreshed),
-          agentMode,
-          permissions
-        });
+        const retryIncludeRoleInstructions = (retryUsesPromptRole && !retryIsResumingSession) || (retryIsResumingSession && sessionState.instructionsRefreshed);
+        const retryPromptBase = retryIncludeRoleInstructions
+          ? this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+              includeRoleInstructions: true,
+              agentMode,
+              permissions
+            })
+          : this.buildRetryEnvelope(triggerMessage, Boolean(options.continuation));
         const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
           includeRoleInstructions: true,
           agentMode,
@@ -1507,11 +1563,14 @@ export class ChatService {
         options.warnings.push(`@${participant.handle}: rejected verbose affirmative confirmation; retried in the same chat session.`);
         const retryUsesPromptRole = session.roleRuntime === "prompt-fallback";
         const retryIsResumingSession = Boolean(session.sessionId);
-        const retryPromptBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
-          includeRoleInstructions: (retryUsesPromptRole && !retryIsResumingSession) || (retryIsResumingSession && sessionState.instructionsRefreshed),
-          agentMode,
-          permissions
-        });
+        const retryIncludeRoleInstructions = (retryUsesPromptRole && !retryIsResumingSession) || (retryIsResumingSession && sessionState.instructionsRefreshed);
+        const retryPromptBase = retryIncludeRoleInstructions
+          ? this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+              includeRoleInstructions: true,
+              agentMode,
+              permissions
+            })
+          : this.buildRetryEnvelope(triggerMessage, Boolean(options.continuation));
         const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
           includeRoleInstructions: true,
           agentMode,
@@ -1629,33 +1688,82 @@ export class ChatService {
     continuation: boolean,
     options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions }
   ): string {
-    const historyMarkdownPath = path.join(workspacePath, "history.md");
-    const historyJsonPath = path.join(workspacePath, "history.json");
-    const sections = [
-      [
+    return this.buildPromptParts(conversation, participant, session, triggerMessage, workspacePath, continuation, options).prompt;
+  }
+
+  private buildPromptParts(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    session: ChatParticipantSession,
+    triggerMessage: ChatMessage,
+    workspacePath: string,
+    continuation: boolean,
+    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions }
+  ): { prompt: string; sections: ChatPromptSectionSizes } {
+    const canRequestPermissions = this.canRequestPermissionChanges(session);
+    const dynamicHeader = [
+      this.participantRepositoryLine(conversation, options.agentMode, options.permissions),
+      this.participantPermissionPolicy(options.agentMode, options.permissions, canRequestPermissions)
+    ].filter(Boolean).join("\n");
+
+    let staticEnvelope = "";
+    if (options.includeRoleInstructions) {
+      const historyMarkdownPath = path.join(workspacePath, "history.md");
+      const historyJsonPath = path.join(workspacePath, "history.json");
+      staticEnvelope = [
         `You are @${participant.handle}. Continue the same chat session.`,
         `Role: ${session.roleLabel}.`,
-        options.includeRoleInstructions
-          ? this.promptFallbackStaticInstructions(session)
-          : "Use your configured role instructions and chat response rules for this participant.",
-        this.participantRepositoryLine(conversation, options.agentMode, options.permissions),
-        this.participantPermissionPolicy(options.agentMode, options.permissions, this.canRequestPermissionChanges(session)),
-        "Dynamic chat context: use App MCP as the preferred source for current participants, active thread metadata, and prior messages.",
-        `Fallback/debug chat history Markdown: ${historyMarkdownPath}.`,
-        `Fallback/debug chat history JSON: ${historyJsonPath}.`,
-        "Only read the history files if MCP context is unavailable or you need to debug the app-generated transcript. Do not ask User to grant access to these app-managed history files."
-      ].join("\n"),
+        this.promptFallbackStaticInstructions(session),
+        dynamicHeader,
+        `App MCP is the source of truth for chat context. History files at ${historyMarkdownPath} and ${historyJsonPath} are debug-only fallbacks.`
+      ].join("\n");
+    }
+    const triggerBlock = [
       "Triggering message identifiers:",
       this.triggeringMessageIdentifiers(triggerMessage),
       "Triggering message:",
-      this.formatMessage(triggerMessage, false),
-      this.repoFileMentionsPromptSection(triggerMessage, options.agentMode, options.permissions, this.canRequestPermissionChanges(session)),
+      this.formatMessage(triggerMessage, false)
+    ].join("\n\n");
+    const mentionsBlock = this.repoFileMentionsPromptSection(triggerMessage, options.agentMode, options.permissions, canRequestPermissions);
+    const currentRequestBlock = [
       continuation
         ? "Current request: control has returned to you after the approved participants have replied. Produce your next answer."
         : "Current request: answer the triggering message above.",
       "Write your next message in this chat."
-    ];
-    return sections.join("\n\n");
+    ].join("\n\n");
+
+    const orderedBlocks = [
+      staticEnvelope || dynamicHeader,
+      triggerBlock,
+      mentionsBlock,
+      currentRequestBlock
+    ].filter(Boolean);
+    const prompt = orderedBlocks.join("\n\n");
+
+    return {
+      prompt,
+      sections: {
+        staticEnvelope: staticEnvelope.length,
+        dynamicHeader: staticEnvelope ? 0 : dynamicHeader.length,
+        trigger: triggerBlock.length,
+        mentions: mentionsBlock.length,
+        currentRequest: currentRequestBlock.length,
+        total: prompt.length
+      }
+    };
+  }
+
+  private buildRetryEnvelope(triggerMessage: ChatMessage, continuation: boolean): string {
+    return [
+      "Triggering message identifiers:",
+      this.triggeringMessageIdentifiers(triggerMessage),
+      "Triggering message:",
+      this.formatMessage(triggerMessage, false),
+      continuation
+        ? "Current request: control has returned to you after the approved participants have replied. Produce your next answer."
+        : "Current request: answer the triggering message above.",
+      "Write your next message in this chat."
+    ].join("\n\n");
   }
 
   private triggeringMessageIdentifiers(message: ChatMessage): string {
@@ -1671,21 +1779,19 @@ export class ChatService {
     message: ChatMessage,
     agentMode: ChatAgentMode,
     runPermissions: ChatAgentPermissions,
-    canRequestPermissions: boolean
+    _canRequestPermissions: boolean
   ): string {
     const mentions = this.repoFileMentions(message);
     if (mentions.length === 0) {
       return "";
     }
     const permissions = effectiveChatAgentPermissions(agentMode, runPermissions);
-    const header = "Referenced repository files (paths are relative to the repository root):";
+    const header = "Referenced repository files (paths relative to repo root):";
     const paths = mentions.map((mention) => `- ${mention.path}`);
     const guidance = permissions.repoRead
-      ? "You may read these with your usual tools."
-      : canRequestPermissions
-        ? "You do not currently have repo read access. If you need their contents, call `app_permissions_request_change` with `permissions: [\"repoRead\"]` and a brief reason; otherwise proceed without them."
-        : "You do not currently have repo read access. If you need their contents, explain that `repoRead` is needed before refusing.";
-    return [header, ...paths, "", guidance].join("\n");
+      ? "You may read these."
+      : "repoRead is not granted; see permissions policy above for the escalation path.";
+    return [header, ...paths, guidance].join("\n");
   }
 
   private cliRoleOptions(
@@ -1750,6 +1856,7 @@ export class ChatService {
       "- Answer in the active thread. Do not assume a mentioned participant has answered until their reply appears in the transcript.",
       "- Answer only in this chat message. Do not mention ExitPlanMode, plan files, tool availability, or recording/writing outside the chat unless User directly asks about those mechanics.",
       "- If you make a decision, arbitration, plan, or summary, include it in this reply. Do not say it is posted above or recorded elsewhere unless you cite the exact existing chat message.",
+      "- When you change files in this turn, summarize the changed files and how you verified them in this chat reply.",
       "- Follow each turn's chat prompt for the triggering message, current repository and permission state, MCP context guidance, fallback history paths, and current request."
     ].join("\n");
   }
@@ -2002,9 +2109,7 @@ export class ChatService {
     if (!conversation.repoPath) {
       return "Repository: none selected.";
     }
-    return permissions.repoRead
-      ? `Repository: ${conversation.repoPath}.`
-      : "Repository: selected for the chat but not granted to this participant.";
+    return `Repository: ${conversation.repoPath} (repoRead ${permissions.repoRead ? "allowed" : "blocked"}).`;
   }
 
   private participantPermissionPolicy(
@@ -2013,25 +2118,23 @@ export class ChatService {
     canRequestPermissions: boolean
   ): string {
     const permissions = effectiveChatAgentPermissions(agentMode, runPermissions);
-    const providerNativeAllowedTools = permissions.providerNative?.["claude-code"]?.allowedTools ?? [];
-    const providerNativeGrants = providerNativeAllowedTools.length > 0
-      ? providerNativeAllowedTools.map((token) => JSON.stringify(token)).join(", ")
-      : "none";
     const permissionLines = chatPermissionPromptLines({ agentMode, permissions, canRequestPermissions });
     return [
-      `Agent mode: ${agentMode}.`,
-      `Permissions: repo read ${permissions.repoRead ? "allowed" : "blocked"}, shell commands ${permissions.shell.enabled ? "allowed" : "blocked"}, workspace edits ${permissions.workspaceWrite ? "allowed" : "blocked"}, web access ${permissions.webAccess ? "allowed" : "blocked"}.`,
-      permissions.repoRead
-        ? "Repository files may be inspected read-only when repository context is selected; app-managed chat context may be read through MCP, with history files as fallback/debug context."
-        : canRequestPermissions
-          ? "Repository files may not be inspected unless User grants repoRead. If you need repository file contents, call `app_permissions_request_change` for `repoRead` before refusing; app-managed chat context may still be read through MCP, with history files as fallback/debug context."
-          : "Repository files may not be inspected unless User grants repoRead. If you need repository file contents, explain that `repoRead` is needed before refusing; app-managed chat context may still be read through MCP, with history files as fallback/debug context.",
+      `Permissions: shell commands ${permissions.shell.enabled ? "allowed" : "blocked"}, workspace edits ${permissions.workspaceWrite ? "allowed" : "blocked"}, web access ${permissions.webAccess ? "allowed" : "blocked"}.`,
+      this.repoReadEscalationLine(permissions.repoRead, canRequestPermissions),
       permissionLines.shell,
-      `Provider-native Claude tool grants: ${providerNativeGrants}.`,
       permissionLines.workspace,
-      permissions.workspaceWrite ? "If you change files, summarize the changed files and verification in this chat reply." : "",
       permissionLines.web
     ].filter(Boolean).join(" ");
+  }
+
+  private repoReadEscalationLine(repoReadGranted: boolean, canRequestPermissions: boolean): string {
+    if (repoReadGranted) {
+      return "";
+    }
+    return canRequestPermissions
+      ? "If you need repository file contents, call `app_permissions_request_change` for `repoRead` before refusing."
+      : "If you need repository file contents, explain that `repoRead` is needed before refusing.";
   }
 
   private warmAgentContextKey(
@@ -4639,6 +4742,10 @@ export class ChatService {
     ].join("\n");
   }
 
+  private normalizeChatTitle(value: string): string {
+    return value.trim().slice(0, 80) || "Chat";
+  }
+
   private formatHandleList(handles: string[]): string {
     if (handles.length <= 2) {
       return handles.join(handles.length === 2 ? " and " : "");
@@ -4935,15 +5042,23 @@ export class ChatService {
     });
   }
 
-  private async withChatRunLock<T>(conversationId: string, run: () => Promise<T>): Promise<T> {
-    const previous = this.runQueues.get(conversationId) ?? Promise.resolve();
+  private async withChatRunLock<T>(
+    conversationId: string,
+    run: () => Promise<T>,
+    options: { rejectIfQueued?: boolean; queuedMessage?: string } = {}
+  ): Promise<T> {
+    const previous = this.runQueues.get(conversationId);
+    if (previous && options.rejectIfQueued) {
+      throw new Error(options.queuedMessage ?? "Chat is busy.");
+    }
+    const previousRun = previous ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const chained = previous.catch(() => undefined).then(() => current);
+    const chained = previousRun.catch(() => undefined).then(() => current);
     this.runQueues.set(conversationId, chained);
-    await previous.catch(() => undefined);
+    await previousRun.catch(() => undefined);
     try {
       return await run();
     } finally {
