@@ -26,17 +26,25 @@ The chat feature (`ConversationKind = "chat"`) is the multi-participant flow whe
 
 ## 2. Stream agent output into the chat view
 
+**Status.** Implemented in the streaming-status work. The current implementation uses a persisted pending participant `ChatMessage` as the anchor, streams live text/status through existing review-progress events, and replaces the same message in place when the turn completes.
+
 **Pain.** Today a turn appears atomically once the CLI finishes (`runClaude`/`runCodex` resolves). For 20-60 second turns the chat looks frozen, which makes multi-agent debates feel sluggish and uncertain.
 
 **Why now.** Lowest-cost perceived-quality win once item 1 is done. The data already exists: `cliAgents.ts` already emits `CliAgentOutputEvent` via the `onOutput` callback, and `ChatService` already pushes `ReviewProgress` events.
 
-**Approach sketch.**
-- Reserve a placeholder message bubble keyed by the upcoming participant message id (created when the turn starts, marked `status: "running"`).
-- Forward progress events / partial stdout from the main process via the existing `conversations:review-progress` channel; the renderer appends partial text into the placeholder.
-- On completion, swap the placeholder for the real message (no new bubble flicker).
-- Keep it opt-in per provider — Codex emits progress JSON, Claude streams differently; degrade to a "thinking…" indicator when only a heartbeat is available.
+**Implemented approach.**
+- Create a pending participant message when the turn starts (`status: "pending"`, stable id, empty content).
+- Forward live progress through the existing `conversations:review-progress` channel, keyed by the pending message id.
+- Keep partial text renderer-only; persist only the final validated message content.
+- Render pending messages inline with streamed plain text plus caret, or "Thinking" plus elapsed seconds when no partial text is available.
+- On completion, mutate the same message id to `status: "done"` or `status: "error"` so there is no replacement flicker.
+- Guard cumulative partial snapshots before display; if guard text would leak, suppress partial content for that attempt and keep activity-only status.
+- Keep fallback thinking rows for progress events without a message id, but suppress composer-level status whenever a pending participant bubble exists.
+- Recover stale pending participant messages as errors when a chat is reloaded after interruption.
 
 **Done means.** When a participant is producing a long response, the user sees incremental text (or at minimum a "thinking + elapsed seconds" indicator) instead of a frozen UI.
+
+**Follow-up.** The MCP status tool for agents to explicitly report what they are doing is still separate from stdout/tool-output streaming and remains a later MVP task.
 
 ---
 

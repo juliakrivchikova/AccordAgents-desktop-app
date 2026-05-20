@@ -102,7 +102,8 @@ import type {
   ProviderSettings,
   RepoFileMention,
   RepoFileSearchResult,
-  ReviewProgress
+  ReviewProgress,
+  AgentRunProgress
 } from "../shared/types";
 import {
   chatAgentPermissionsEqual,
@@ -1726,12 +1727,22 @@ function App(): JSX.Element {
   const visibleWarnings = warnings.map((warning) => displayNoticeText(warning)).filter(Boolean);
   const chatSummaries = useMemo(() => summaries.filter((summary) => summary.kind === "chat"), [summaries]);
   const projectSessionGroups = useMemo(() => buildProjectSessionGroups(chatSummaries), [chatSummaries]);
+  const activeChatConversation = activeView !== "settings" && conversation?.kind === "chat" ? conversation : undefined;
+  const activeChatParticipants = useMemo(() => activeChatConversation ? chatParticipants(activeChatConversation) : [], [activeChatConversation]);
   const runnableParticipants = buildParticipants();
   const hasRequiredContext =
     kind === "code-review" ? diffMode === "pasted" || Boolean(repoPath.trim()) : kind !== "implementation-plan" || Boolean(repoPath.trim());
   const canStart = !busy && hasRequiredContext && Boolean(buildArbiter()) && runnableParticipants.length > 0 && (kind !== "implementation-plan" || runnableParticipants.length >= 2);
   const topBarTitle = activeView === "settings"
     ? undefined
+    : activeChatConversation
+      ? (
+        <ChatTopBarTitle
+          conversation={activeChatConversation}
+          isRunning={conversationRunning}
+          onRenameTitle={renameChatConversation}
+        />
+      )
     : hasResultContext
       ? conversation?.title ?? openingConversation?.title ?? "Chat"
       : "New chat";
@@ -1771,6 +1782,19 @@ function App(): JSX.Element {
           <XCircle aria-hidden />
           Stop
         </Button>
+      )}
+      {activeChatConversation && (
+        <ChatParticipantMenu
+          participants={activeChatParticipants}
+          settings={settings}
+          agents={agents}
+          draft={chatMessageDraft}
+          addParticipantDraft={chatAddParticipantDraft ?? defaultChatParticipantDraft(settings)}
+          isRunning={conversationRunning}
+          onDraftChange={setChatMessageDraft}
+          onAddParticipantDraftChange={setChatAddParticipantDraft}
+          onAddParticipant={() => void addChatParticipant()}
+        />
       )}
       <ModeToggle />
       <DropdownMenu open={settingsMenuOpen} onOpenChange={setSettingsMenuOpen}>
@@ -1905,15 +1929,12 @@ function App(): JSX.Element {
                   <ChatConversationView
                     conversation={conversation}
                     settings={settings}
-                    agents={agents}
                     progress={progressLog}
                     isRunning={conversationRunning}
                     hasOlderMessages={Boolean(messagePage?.hasMoreBefore)}
                     olderMessagesLoading={olderMessagesLoading}
                     draft={chatMessageDraft}
-                    addParticipantDraft={chatAddParticipantDraft ?? defaultChatParticipantDraft(settings)}
                     onDraftChange={setChatMessageDraft}
-                    onRenameTitle={renameChatConversation}
                     onLoadOlderMessages={() => void loadOlderConversationMessages()}
                     onSend={(repoFileMentions) => sendChatMessage({ repoFileMentions })}
                     onSendThread={(rootMessage, content, repoFileMentions) => sendChatMessage({
@@ -1933,8 +1954,6 @@ function App(): JSX.Element {
                       void respondToChatChoice(sourceMessageId, choiceId, response)
                     }
                     onRespondToAppToolApproval={respondToChatAppToolApproval}
-                    onAddParticipantDraftChange={setChatAddParticipantDraft}
-                    onAddParticipant={() => void addChatParticipant()}
                   />
                 ) : (
                   <SlackView
@@ -2610,18 +2629,191 @@ function ChatPermissionToggle(props: {
   );
 }
 
+function ChatTopBarTitle(props: {
+  conversation: Conversation;
+  isRunning: boolean;
+  onRenameTitle: (title: string) => Promise<boolean>;
+}): JSX.Element {
+  const [renamingTitle, setRenamingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(props.conversation.title);
+  const [titleSaving, setTitleSaving] = useState(false);
+  const titleEditorRef = useRef<HTMLDivElement>(null);
+  const normalizedTitleDraft = normalizeChatTitle(titleDraft);
+  const titleSaveDisabled = props.isRunning || titleSaving || !titleDraft.trim() || normalizedTitleDraft === props.conversation.title;
+
+  function startTitleRename(): void {
+    setTitleDraft(props.conversation.title);
+    setRenamingTitle(true);
+  }
+
+  function cancelTitleRename(): void {
+    setTitleDraft(props.conversation.title);
+    setRenamingTitle(false);
+  }
+
+  async function saveTitleRename(): Promise<void> {
+    if (titleSaveDisabled) {
+      return;
+    }
+    setTitleSaving(true);
+    try {
+      const saved = await props.onRenameTitle(titleDraft);
+      if (saved) {
+        setRenamingTitle(false);
+      }
+    } finally {
+      setTitleSaving(false);
+    }
+  }
+
+  function handleTitleKeyDown(event: React.KeyboardEvent<HTMLInputElement>): void {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void saveTitleRename();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelTitleRename();
+    }
+  }
+
+  useEffect(() => {
+    setRenamingTitle(false);
+    setTitleSaving(false);
+    setTitleDraft(props.conversation.title);
+  }, [props.conversation.id]);
+
+  useEffect(() => {
+    if (!renamingTitle) {
+      setTitleDraft(props.conversation.title);
+    }
+  }, [props.conversation.title, renamingTitle]);
+
+  useEffect(() => {
+    if (!renamingTitle) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      const input = titleEditorRef.current?.querySelector("input");
+      input?.focus();
+      input?.select();
+    });
+  }, [renamingTitle]);
+
+  return (
+    <div className="topbar-chat-title">
+      {renamingTitle ? (
+        <div className="topbar-chat-title-editor" ref={titleEditorRef}>
+          <Input
+            value={titleDraft}
+            maxLength={80}
+            aria-label="Chat name"
+            disabled={titleSaving}
+            data-testid="chat-title-input"
+            onChange={(event) => setTitleDraft(event.target.value)}
+            onKeyDown={handleTitleKeyDown}
+          />
+          <IconButton
+            size="xs"
+            icon={Check}
+            label="Save chat name"
+            tooltip="Save chat name"
+            disabled={titleSaveDisabled}
+            data-testid="chat-title-save"
+            onClick={() => void saveTitleRename()}
+          />
+          <IconButton
+            size="xs"
+            icon={X}
+            label="Cancel chat name edit"
+            tooltip="Cancel chat name edit"
+            disabled={titleSaving}
+            data-testid="chat-title-cancel"
+            onClick={cancelTitleRename}
+          />
+        </div>
+      ) : (
+        <div className="topbar-chat-title-row">
+          <span className="topbar-chat-title-text">{props.conversation.title}</span>
+          <IconButton
+            size="xs"
+            icon={PencilLine}
+            label="Edit chat name"
+            tooltip={props.isRunning ? "Chat name cannot be edited while participants are running" : "Edit chat name"}
+            disabled={props.isRunning}
+            data-testid="chat-title-edit"
+            onClick={startTitleRename}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChatParticipantMenu(props: {
+  participants: ChatParticipant[];
+  settings: AppSettings;
+  agents: AgentHealth[];
+  draft: string;
+  addParticipantDraft: ChatParticipantDraft;
+  isRunning: boolean;
+  onDraftChange: (value: string) => void;
+  onAddParticipantDraftChange: (draft: ChatParticipantDraft) => void;
+  onAddParticipant: () => void;
+}): JSX.Element {
+  const addDraft = normalizedChatDrafts([props.addParticipantDraft]);
+  const addValidation = validateChatParticipantDrafts(
+    addDraft,
+    props.settings.chatRoleConfigs,
+    new Set(props.participants.map((participant) => participant.handle.toLowerCase()))
+  ) ?? validateChatCliAgents(addDraft, props.agents);
+
+  return (
+    <details className="chat-participant-menu topbar-chat-participant-menu">
+      <summary title="Participants" aria-label={`${props.participants.length} participants`}>
+        <Users size={17} />
+        {props.participants.length}
+      </summary>
+      <div className="chat-participant-popover">
+        <div className="chat-participant-menu-list">
+          {props.participants.map((participant) => (
+            <button
+              onClick={() => props.onDraftChange(`${props.draft}${props.draft.endsWith(" ") || !props.draft ? "" : " "}@${participant.handle} `)}
+              key={participant.id}
+            >
+              <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />
+              <strong>@{participant.handle}</strong>
+              <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)}</span>
+            </button>
+          ))}
+        </div>
+        <div className="chat-menu-divider" />
+        <ChatParticipantDraftRow
+          draft={props.addParticipantDraft}
+          settings={props.settings}
+          agents={props.agents}
+          onChange={props.onAddParticipantDraftChange}
+        />
+        {addValidation && <div className="inline-error">{addValidation}</div>}
+        <Button variant="outline" size="sm" disabled={Boolean(addValidation) || props.isRunning} onClick={props.onAddParticipant}>
+          <Plus size={16} />
+          Add participant
+        </Button>
+      </div>
+    </details>
+  );
+}
+
 function ChatConversationView(props: {
   conversation: Conversation;
   settings: AppSettings;
-  agents: AgentHealth[];
   progress: ReviewProgress[];
   isRunning: boolean;
   hasOlderMessages: boolean;
   olderMessagesLoading: boolean;
   draft: string;
-  addParticipantDraft: ChatParticipantDraft;
   onDraftChange: (value: string) => void;
-  onRenameTitle: (title: string) => Promise<boolean>;
   onLoadOlderMessages: () => void;
   onSend: (repoFileMentions?: RepoFileMention[]) => Promise<boolean>;
   onSendThread: (rootMessage: Conversation["messages"][number], content: string, repoFileMentions?: RepoFileMention[]) => Promise<boolean>;
@@ -2629,8 +2821,6 @@ function ChatConversationView(props: {
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: { selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
   onRespondToAppToolApproval: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => Promise<void>;
-  onAddParticipantDraftChange: (draft: ChatParticipantDraft) => void;
-  onAddParticipant: () => void;
 }): JSX.Element {
   const participants = chatParticipants(props.conversation);
   const pendingAppToolApprovals = chatAppToolApprovals(props.conversation).filter((approval) => approval.status === "pending");
@@ -2645,32 +2835,34 @@ function ChatConversationView(props: {
   const [submittingApprovalIds, setSubmittingApprovalIds] = useState<ReadonlySet<string>>(new Set<string>());
   const [threadWidth, setThreadWidth] = useState(460);
   const [isResizingThread, setIsResizingThread] = useState(false);
-  const [renamingTitle, setRenamingTitle] = useState(false);
-  const [titleDraft, setTitleDraft] = useState(props.conversation.title);
-  const [titleSaving, setTitleSaving] = useState(false);
   const viewRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
-  const titleInputRef = useRef<HTMLInputElement>(null);
   const stickToBottomRef = useRef(true);
   const forceStickToBottomRef = useRef(false);
   const previousMessageCountRef = useRef(topLevelMessages.length);
   const latestProgress = props.progress[props.progress.length - 1];
+  const latestComposerProgress = useMemo(() => {
+    for (let i = props.progress.length - 1; i >= 0; i -= 1) {
+      const item = props.progress[i];
+      if (!item.agentProgress || !item.agentProgress.messageId) {
+        return item;
+      }
+    }
+    return undefined;
+  }, [props.progress]);
+  const hasPendingParticipantMessage = useMemo(
+    () => props.conversation.messages.some((message) => message.status === "pending" && message.role === "participant"),
+    [props.conversation.messages]
+  );
   const thinkingRows = useMemo(() => chatThinkingRows(props.progress), [props.progress]);
+  const liveProgressById = useMemo(() => liveMessageProgressById(props.progress), [props.progress]);
   const thinkingSignature = thinkingRows.map((row) => `${row.key}:${row.activity ?? ""}:${row.updatedAt}`).join("|");
   const latestMessage = topLevelMessages[topLevelMessages.length - 1];
-  const addDraft = normalizedChatDrafts([props.addParticipantDraft]);
-  const addValidation = validateChatParticipantDrafts(
-    addDraft,
-    props.settings.chatRoleConfigs,
-    new Set(participants.map((participant) => participant.handle.toLowerCase()))
-  ) ?? validateChatCliAgents(addDraft, props.agents);
   const selectedThreadRoot = selectedThreadRootId
     ? topLevelMessages.find((message) => message.id === selectedThreadRootId)
     : undefined;
   const selectedThreadSummary = selectedThreadRoot ? threadSummaries.get(selectedThreadRoot.id) : undefined;
   const hasThread = Boolean(selectedThreadRoot);
-  const normalizedTitleDraft = normalizeChatTitle(titleDraft);
-  const titleSaveDisabled = props.isRunning || titleSaving || !titleDraft.trim() || normalizedTitleDraft === props.conversation.title;
   const chatTimelineRows = useMemo(() => {
     const rows: ChatTimelineRow[] = [];
     if (props.hasOlderMessages || props.olderMessagesLoading) {
@@ -2766,43 +2958,6 @@ function ChatConversationView(props: {
     }
   }
 
-  function startTitleRename(): void {
-    setTitleDraft(props.conversation.title);
-    setRenamingTitle(true);
-  }
-
-  function cancelTitleRename(): void {
-    setTitleDraft(props.conversation.title);
-    setRenamingTitle(false);
-  }
-
-  async function saveTitleRename(): Promise<void> {
-    if (titleSaveDisabled) {
-      return;
-    }
-    setTitleSaving(true);
-    try {
-      const saved = await props.onRenameTitle(titleDraft);
-      if (saved) {
-        setRenamingTitle(false);
-      }
-    } finally {
-      setTitleSaving(false);
-    }
-  }
-
-  function handleTitleKeyDown(event: React.KeyboardEvent<HTMLInputElement>): void {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      void saveTitleRename();
-      return;
-    }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      cancelTitleRename();
-    }
-  }
-
   function startThreadResize(event: React.PointerEvent<HTMLDivElement>): void {
     const view = viewRef.current;
     if (!view) {
@@ -2827,28 +2982,6 @@ function ChatConversationView(props: {
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", stop, { once: true });
   }
-
-  useEffect(() => {
-    setRenamingTitle(false);
-    setTitleSaving(false);
-    setTitleDraft(props.conversation.title);
-  }, [props.conversation.id]);
-
-  useEffect(() => {
-    if (!renamingTitle) {
-      setTitleDraft(props.conversation.title);
-    }
-  }, [props.conversation.title, renamingTitle]);
-
-  useEffect(() => {
-    if (!renamingTitle) {
-      return;
-    }
-    window.requestAnimationFrame(() => {
-      titleInputRef.current?.focus();
-      titleInputRef.current?.select();
-    });
-  }, [renamingTitle]);
 
   useEffect(() => {
     setSelectedThreadRootId(undefined);
@@ -2904,90 +3037,6 @@ function ChatConversationView(props: {
       style={{ "--chat-thread-width": `${threadWidth}px` } as React.CSSProperties}
     >
       <div className="chat-main">
-        <header className="chat-header">
-          <div className="chat-title-block">
-            {renamingTitle ? (
-              <div className="chat-title-editor">
-                <Input
-                  ref={titleInputRef}
-                  value={titleDraft}
-                  maxLength={80}
-                  aria-label="Chat name"
-                  disabled={titleSaving}
-                  data-testid="chat-title-input"
-                  onChange={(event) => setTitleDraft(event.target.value)}
-                  onKeyDown={handleTitleKeyDown}
-                />
-                <IconButton
-                  size="xs"
-                  icon={Check}
-                  label="Save chat name"
-                  tooltip="Save chat name"
-                  disabled={titleSaveDisabled}
-                  data-testid="chat-title-save"
-                  onClick={() => void saveTitleRename()}
-                />
-                <IconButton
-                  size="xs"
-                  icon={X}
-                  label="Cancel chat name edit"
-                  tooltip="Cancel chat name edit"
-                  disabled={titleSaving}
-                  data-testid="chat-title-cancel"
-                  onClick={cancelTitleRename}
-                />
-              </div>
-            ) : (
-              <div className="chat-title-row">
-                <h2>{props.conversation.title}</h2>
-                <IconButton
-                  size="xs"
-                  icon={PencilLine}
-                  label="Edit chat name"
-                  tooltip={props.isRunning ? "Chat name cannot be edited while participants are running" : "Edit chat name"}
-                  disabled={props.isRunning}
-                  data-testid="chat-title-edit"
-                  onClick={startTitleRename}
-                />
-              </div>
-            )}
-            <span>{props.isRunning ? latestProgress?.message ?? "Running" : props.conversation.repoPath ? "Repo context" : "No repo"}</span>
-          </div>
-          <div className="chat-header-actions">
-            <details className="chat-participant-menu">
-              <summary>
-                <Users size={17} />
-                {participants.length}
-              </summary>
-              <div className="chat-participant-popover">
-                <div className="chat-participant-menu-list">
-                  {participants.map((participant) => (
-                    <button
-                      onClick={() => props.onDraftChange(`${props.draft}${props.draft.endsWith(" ") || !props.draft ? "" : " "}@${participant.handle} `)}
-                      key={participant.id}
-                    >
-                      <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />
-                      <strong>@{participant.handle}</strong>
-                      <span>{chatRoleLabel(props.settings.chatRoleConfigs, participant)}</span>
-                    </button>
-                  ))}
-                </div>
-                <div className="chat-menu-divider" />
-                <ChatParticipantDraftRow
-                  draft={props.addParticipantDraft}
-                  settings={props.settings}
-                  agents={props.agents}
-                  onChange={props.onAddParticipantDraftChange}
-                />
-                {addValidation && <div className="inline-error">{addValidation}</div>}
-                <Button variant="outline" size="sm" disabled={Boolean(addValidation) || props.isRunning} onClick={props.onAddParticipant}>
-                  <Plus size={16} />
-                  Add participant
-                </Button>
-              </div>
-            </details>
-          </div>
-        </header>
         <div className={`chat-app-tool-approval-slot ${pendingAppToolApprovals.length > 0 ? "has-approvals" : ""}`}>
           {pendingAppToolApprovals.length > 0 && (
             <ChatAppToolApprovalList
@@ -3031,6 +3080,7 @@ function ChatConversationView(props: {
                       replyCount={threadSummaries.get(row.message.id)?.replies.length ?? 0}
                       latestReplyAt={threadSummaries.get(row.message.id)?.latestReplyAt}
                       hasContinuationReply={continuedMentionRequestIds.has(row.message.id)}
+                      liveProgress={liveProgressById.get(row.message.id)}
                       onOpenThread={() => setSelectedThreadRootId(row.message.id)}
                       onApproveMentions={props.onApproveMentions}
                       onRejectMentions={props.onRejectMentions}
@@ -3052,7 +3102,7 @@ function ChatConversationView(props: {
           onSend={sendDraft}
           isRunning={props.isRunning}
           placeholder="Mention participants with @name or repo files with #path"
-          status={props.isRunning && latestProgress ? <RunStatusLine progress={latestProgress} /> : undefined}
+          status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
           testId="chat-main-composer"
         />
       </div>
@@ -3069,6 +3119,7 @@ function ChatConversationView(props: {
           settings={props.settings}
           draft={threadDrafts[selectedThreadRoot.id] ?? ""}
           busy={props.isRunning}
+          liveProgressById={liveProgressById}
           onDraftChange={(value) => setThreadDrafts((current) => ({ ...current, [selectedThreadRoot.id]: value }))}
           onSend={(repoFileMentions) => sendThreadDraft(selectedThreadRoot, repoFileMentions)}
           onClose={() => setSelectedThreadRootId(undefined)}
@@ -3319,6 +3370,38 @@ function ChatThinkingRowItem({ row }: { row: ChatThinkingRow }): JSX.Element {
   );
 }
 
+function StreamingMessageContent(props: { content?: string; activity?: string; startedAt: string }): JSX.Element {
+  const elapsedSeconds = useStreamingElapsedSeconds(props.startedAt);
+  const hasContent = Boolean(props.content && props.content.length > 0);
+  return (
+    <div className="streaming-message-content" aria-live="polite">
+      {hasContent ? (
+        <div className="streaming-message-text">
+          {props.content}
+          <span className="streaming-caret" aria-hidden="true" />
+        </div>
+      ) : (
+        <div className="streaming-message-thinking">
+          <span>Thinking</span>
+          <LoadingDot label="In progress" />
+          <span className="streaming-message-elapsed">{`${elapsedSeconds}s`}</span>
+        </div>
+      )}
+      {props.activity && <div className="streaming-message-activity">{props.activity}</div>}
+    </div>
+  );
+}
+
+function useStreamingElapsedSeconds(startedAt: string): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const handle = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(handle);
+  }, []);
+  const startMs = new Date(startedAt).getTime();
+  return Math.max(0, Math.floor((now - startMs) / 1000));
+}
+
 function ChatAppToolApprovalList(props: {
   approvals: ChatAppToolApproval[];
   submittingIds: ReadonlySet<string>;
@@ -3475,6 +3558,7 @@ function ChatMessageItem(props: {
   replyCount?: number;
   latestReplyAt?: string;
   hasContinuationReply?: boolean;
+  liveProgress?: AgentRunProgress;
   onOpenThread?: () => void;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
@@ -3483,6 +3567,9 @@ function ChatMessageItem(props: {
   const { message } = props;
   const [copied, setCopied] = useState(false);
   const author = authorForMessage(message, "chat");
+  const isStreaming = message.status === "pending" && message.role === "participant";
+  const streamedContent = props.liveProgress?.partialContent;
+  const streamedActivity = props.liveProgress?.activity;
   const participant = message.participantId
     ? props.participants?.find((item) => item.id === message.participantId)
     : message.role === "system"
@@ -3557,7 +3644,11 @@ function ChatMessageItem(props: {
             )}
           </div>
           <div className="message-content">
-            <MarkdownText content={displayContent} />
+            {isStreaming ? (
+              <StreamingMessageContent content={streamedContent} activity={streamedActivity} startedAt={message.createdAt} />
+            ) : (
+              <MarkdownText content={displayContent} />
+            )}
           </div>
           {repoFileMentions.length > 0 && (
             <div className="repo-file-reference-footer">
@@ -3820,6 +3911,7 @@ function ChatThreadPanel(props: {
   settings: AppSettings;
   draft: string;
   busy: boolean;
+  liveProgressById: Map<string, AgentRunProgress>;
   onDraftChange: (value: string) => void;
   onSend: (repoFileMentions?: RepoFileMention[]) => boolean | void | Promise<boolean | void>;
   onClose: () => void;
@@ -3849,6 +3941,7 @@ function ChatThreadPanel(props: {
           busy={props.busy}
           inThread
           hasContinuationReply={props.continuedMentionRequestIds.has(props.rootMessage.id)}
+          liveProgress={props.liveProgressById.get(props.rootMessage.id)}
           onApproveMentions={props.onApproveMentions}
           onRejectMentions={props.onRejectMentions}
           onRespondToChoice={props.onRespondToChoice}
@@ -3864,6 +3957,7 @@ function ChatThreadPanel(props: {
                 busy={props.busy}
                 inThread
                 hasContinuationReply={props.continuedMentionRequestIds.has(message.id)}
+                liveProgress={props.liveProgressById.get(message.id)}
                 onApproveMentions={props.onApproveMentions}
                 onRejectMentions={props.onRejectMentions}
                 onRespondToChoice={props.onRespondToChoice}
@@ -5662,6 +5756,10 @@ function chatThinkingRows(progress: ReviewProgress[]): ChatThinkingRow[] {
     if (!agentProgress) {
       continue;
     }
+    if (agentProgress.messageId) {
+      // Handled inline by the pending ChatMessage; skip the fallback row.
+      continue;
+    }
     const participantLabel = agentProgress.participantLabel || item.participantLabel || "Agent";
     const key = agentProgress.participantId || participantLabel;
     if (agentProgress.state === "finished") {
@@ -5679,6 +5777,26 @@ function chatThinkingRows(progress: ReviewProgress[]): ChatThinkingRow[] {
     });
   }
   return Array.from(rows.values()).sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+}
+
+function liveMessageProgressById(progress: ReviewProgress[]): Map<string, AgentRunProgress> {
+  const map = new Map<string, AgentRunProgress>();
+  for (const item of progress) {
+    if (item.phase === "done" || item.phase === "cancelled" || item.phase === "error") {
+      map.clear();
+      continue;
+    }
+    const agentProgress = item.agentProgress;
+    if (!agentProgress?.messageId) {
+      continue;
+    }
+    if (agentProgress.state === "finished") {
+      map.delete(agentProgress.messageId);
+      continue;
+    }
+    map.set(agentProgress.messageId, agentProgress);
+  }
+  return map;
 }
 
 function conversationRunId(conversation: Conversation): string {

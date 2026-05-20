@@ -45,11 +45,12 @@ export interface CliAgentRunOptions {
   permissions?: ChatAgentPermissions;
 }
 
-export type CliAgentOutputKind = "tool";
+export type CliAgentOutputKind = "tool" | "text";
 
 export interface CliAgentOutputEvent {
   kind: CliAgentOutputKind;
   text: string;
+  cumulative?: string;
 }
 
 export type CliAgentOutputCallback = (event: CliAgentOutputEvent) => void;
@@ -92,6 +93,7 @@ interface WarmAgentEntry {
 interface ClaudeWarmPendingTurn {
   startedAt: number;
   messages: string[];
+  streamedText: string;
   sessionId?: string;
   model?: string;
   usedTokens?: number;
@@ -114,6 +116,7 @@ interface CodexAppServerPendingTurn {
   threadId: string;
   turnId?: string;
   messages: string[];
+  streamedText: string;
   finalMessage?: string;
   model?: string;
   contextUsage?: AgentContextUsage;
@@ -529,6 +532,7 @@ export class CliAgentRunner {
             startedAt,
             threadId: currentThreadId,
             messages: [],
+            streamedText: "",
             model: activeModel,
             timer,
             abort: signal ? () => signal.removeEventListener("abort", abort) : undefined,
@@ -649,6 +653,8 @@ export class CliAgentRunner {
       const delta = this.stringField(params, "delta");
       if (delta) {
         pending.messages.push(delta);
+        pending.streamedText += delta;
+        this.emitLiveOutput(pending.onOutput, "text", delta, pending.streamedText);
       }
       return;
     }
@@ -810,7 +816,8 @@ export class CliAgentRunner {
       if (permissions.webAccess) {
         args.unshift("--search");
       }
-      const stdoutLines = this.createLineHandler((line) => this.emitCodexLiveOutput(line, options.onOutput));
+      const codexDeltaAccumulator = { value: "" };
+      const stdoutLines = this.createLineHandler((line) => this.emitCodexLiveOutput(line, options.onOutput, codexDeltaAccumulator));
       const result = await runCommand("codex", args, {
         cwd: repoPath,
         input: this.codexPrompt(prompt, repoPath, diffMode, kind, options),
@@ -1086,6 +1093,8 @@ export class CliAgentRunner {
     const toolConfig = this.claudeToolConfig(kind, repoPath, extraReadableDirs, options);
     const args = [
       "-p",
+      "--verbose",
+      "--include-partial-messages",
       "--input-format",
       "stream-json",
       "--output-format",
@@ -1214,6 +1223,7 @@ export class CliAgentRunner {
           pending = {
             startedAt,
             messages: [],
+            streamedText: "",
             sessionId: options.sessionId ?? newSessionId,
             model: participant.model,
             timer,
@@ -1268,6 +1278,11 @@ export class CliAgentRunner {
     const toolSummary = this.claudeWarmToolSummary(event);
     if (toolSummary) {
       this.emitLiveOutput(pending.onOutput, "tool", `${toolSummary}\n`);
+    }
+    const streamDelta = this.extractClaudeStreamEventTextDelta(event);
+    if (streamDelta) {
+      pending.streamedText += streamDelta;
+      this.emitLiveOutput(pending.onOutput, "text", streamDelta, pending.streamedText);
     }
     const assistantText = this.extractClaudeWarmAssistantText(event);
     if (assistantText) {
@@ -1347,6 +1362,31 @@ export class CliAgentRunner {
       return undefined;
     }
     return this.stringField(record, "result") ?? this.stringField(record, "content") ?? this.stringField(record, "message");
+  }
+
+  private extractClaudeStreamEventTextDelta(event: unknown): string | undefined {
+    const record = this.asRecord(event);
+    if (!record) {
+      return undefined;
+    }
+    if (this.stringField(record, "type") !== "stream_event") {
+      return undefined;
+    }
+    const inner = this.asRecord(record.event);
+    if (!inner) {
+      return undefined;
+    }
+    if (this.stringField(inner, "type") !== "content_block_delta") {
+      return undefined;
+    }
+    const delta = this.asRecord(inner.delta);
+    if (!delta) {
+      return undefined;
+    }
+    if (this.stringField(delta, "type") !== "text_delta") {
+      return undefined;
+    }
+    return this.stringField(delta, "text");
   }
 
   private extractClaudeWarmAssistantText(event: unknown): string | undefined {
@@ -1462,12 +1502,18 @@ export class CliAgentRunner {
     };
   }
 
-  private emitCodexLiveOutput(line: string, onOutput: CliAgentOutputCallback | undefined): void {
+  private emitCodexLiveOutput(line: string, onOutput: CliAgentOutputCallback | undefined, deltaAccumulator?: { value: string }): void {
     if (!onOutput) {
       return;
     }
     try {
       const event = JSON.parse(line) as unknown;
+      const delta = this.extractCodexAssistantStreamingDelta(event);
+      if (delta && deltaAccumulator) {
+        deltaAccumulator.value += delta;
+        this.emitLiveOutput(onOutput, "text", delta, deltaAccumulator.value);
+        return;
+      }
       const toolSummary = this.codexToolSummary(event);
       if (toolSummary) {
         this.emitLiveOutput(onOutput, "tool", `${toolSummary}\n`);
@@ -1481,13 +1527,15 @@ export class CliAgentRunner {
   private emitLiveOutput(
     onOutput: CliAgentOutputCallback | undefined,
     kind: CliAgentOutputKind,
-    text: string
+    text: string,
+    cumulative?: string
   ): void {
     const clean = this.cleanLiveOutputText(text);
     if (!onOutput || !clean) {
       return;
     }
-    onOutput({ kind, text: clean });
+    const cleanCumulative = cumulative !== undefined ? this.cleanLiveOutputText(cumulative) : undefined;
+    onOutput({ kind, text: clean, cumulative: cleanCumulative });
   }
 
   private cleanLiveOutputText(text: string): string {
@@ -2216,6 +2264,18 @@ export class CliAgentRunner {
       return undefined;
     }
     return this.stringField(record, "delta") ?? this.stringField(record, "text") ?? this.stringField(record, "message");
+  }
+
+  private extractCodexAssistantStreamingDelta(event: unknown): string | undefined {
+    const record = this.asRecord(event);
+    if (!record) {
+      return undefined;
+    }
+    const type = this.stringField(record, "type");
+    if (type !== "agent_message_delta" && type !== "response.output_text.delta") {
+      return undefined;
+    }
+    return this.stringField(record, "delta");
   }
 
   private textFromAssistantMessageItem(item: Record<string, unknown>): string | undefined {

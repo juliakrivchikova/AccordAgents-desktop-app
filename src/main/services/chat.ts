@@ -1442,7 +1442,34 @@ export class ChatService {
     });
     const runPath = this.runPathForParticipant(conversation, workspacePath, agentMode, permissions);
     const cliParticipant = this.cliParticipantForSession(participant, session);
-    const progressSink = this.createAgentProgressSink(runId, progress, participant);
+    const pendingMessage = this.message(
+      "participant",
+      "",
+      cliParticipant,
+      {
+        threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
+        parentMessageId: triggerMessage.id,
+        chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
+        sourceMessageId: triggerMessage.id,
+        requesterParticipantId: options.continuation ? triggerMessage.participantId : undefined,
+        approvedContinuation: options.continuation || undefined
+      },
+      "pending"
+    );
+    conversation.messages.push(pendingMessage);
+    this.queueSnapshot(conversation);
+    const progressSink = this.createAgentProgressSink(
+      runId,
+      progress,
+      participant,
+      pendingMessage.id,
+      (cumulative: string): boolean => {
+        return Boolean(
+          this.chatResponseGuardViolation(cumulative, triggerMessage) ??
+            this.confirmationBrevityViolation(cumulative, triggerMessage, Boolean(options.continuation))
+        );
+      }
+    );
     const appToolCapabilities = normalizeChatAppToolCapabilities([
       ...normalizeChatAppToolCapabilities(session.roleAppToolCapabilities),
       "permissions.request"
@@ -1472,10 +1499,12 @@ export class ChatService {
       agentProgress: {
         participantId: participant.id,
         participantLabel: `@${participant.handle}`,
-        state: "running"
+        state: "running",
+        messageId: pendingMessage.id
       }
     });
     try {
+      progressSink.beginAttempt();
       let result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
         persistSession: true,
         sessionId: session.sessionId,
@@ -1521,6 +1550,7 @@ export class ChatService {
         const retryRole = retryUsesPromptRole
           ? undefined
           : this.cliRoleOptions(participant, session, this.chatGuardRetryPrompt(retryPromptFallbackBase, guardViolation));
+        progressSink.beginAttempt();
         result = await this.cliRunner.run(cliParticipant, retryPrompt, runPath, undefined, "chat", signal, {
           persistSession: true,
           sessionId: session.sessionId,
@@ -1580,6 +1610,7 @@ export class ChatService {
         const retryRole = retryUsesPromptRole
           ? undefined
           : this.cliRoleOptions(participant, session, this.confirmationBrevityRetryPrompt(retryPromptFallbackBase));
+        progressSink.beginAttempt();
         result = await this.cliRunner.run(cliParticipant, retryPrompt, runPath, undefined, "chat", signal, {
           persistSession: true,
           sessionId: session.sessionId,
@@ -1628,20 +1659,8 @@ export class ChatService {
       const now = new Date().toISOString();
       session.updatedAt = now;
       this.updateParticipantContextUsage(conversation, participant.id, result.contextUsage);
-      const participantMessage = this.message(
-        "participant",
-        result.content,
-        cliParticipant,
-        {
-          threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
-          parentMessageId: triggerMessage.id,
-          chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
-          sourceMessageId: triggerMessage.id,
-          requesterParticipantId: options.continuation ? triggerMessage.participantId : undefined,
-          approvedContinuation: options.continuation || undefined
-        },
-        result.ok ? "done" : "error"
-      );
+      pendingMessage.content = result.content;
+      pendingMessage.status = result.ok ? "done" : "error";
       if (!result.ok && result.error) {
         options.warnings.push(`@${participant.handle}: ${result.error}`);
       }
@@ -1650,20 +1669,29 @@ export class ChatService {
         const pendingChoice = this.pendingChoiceFromAgentReply(result.content);
         const requesterContinuationRequested = false;
         if (pendingMentions.length > 0 || pendingChoice) {
-          participantMessage.metadata = {
-            ...participantMessage.metadata,
+          pendingMessage.metadata = {
+            ...pendingMessage.metadata,
             mentions: pendingMentions.length > 0 ? pendingMentions.map((mention) => mention.targetHandle) : undefined,
             pendingMentions: pendingMentions.length > 0 ? pendingMentions : undefined,
             pendingChoice,
             requesterContinuationRequested: requesterContinuationRequested || undefined
           };
         }
-        session.lastSyncedMessageId = participantMessage.id;
+        session.lastSyncedMessageId = pendingMessage.id;
       }
       this.upsertSession(conversation, session);
       this.lockParticipantRoleVersion(conversation, participant, session.roleConfigVersion);
-      return [participantMessage];
+      return [pendingMessage];
     } finally {
+      if (pendingMessage.status === "pending") {
+        pendingMessage.status = "error";
+        if (!pendingMessage.content) {
+          pendingMessage.content = `@${participant.handle} run was interrupted before a response was produced.`;
+        }
+      }
+      // Push the finalized message ahead of the sink "finished" event so the renderer
+      // sees the final content before live progress is cleared, avoiding a flash of empty body.
+      this.queueSnapshot(conversation);
       progressSink.finish();
     }
   }
@@ -1674,7 +1702,12 @@ export class ChatService {
     messages: ChatMessage[],
     resumeContext?: ChatAppToolApproval["resumeContext"]
   ): void {
-    conversation.messages.push(...messages);
+    const existingIds = new Set(conversation.messages.map((message) => message.id));
+    for (const message of messages) {
+      if (!existingIds.has(message.id)) {
+        conversation.messages.push(message);
+      }
+    }
     this.createImplicitParticipantRequestApproval(conversation, participant, messages);
     this.createImplicitPermissionApproval(conversation, participant, messages, resumeContext);
   }
@@ -3579,12 +3612,7 @@ export class ChatService {
         const resumeRunId = approval.resumeContext.runId || randomUUID();
         const participantLabel = `@${requester.handle}`;
         this.emitProgress(resumeRunId, progress, "initial", `Resuming ${participantLabel} after permission approval.`, {
-          participantLabel,
-          agentProgress: {
-            participantId: requester.id,
-            participantLabel,
-            state: "running"
-          }
+          participantLabel
         });
         const now = new Date().toISOString();
         conversation.messages.push(this.message(
@@ -4971,9 +4999,6 @@ export class ChatService {
   }
 
   private recoverStaleChatRun(conversation: Conversation): boolean {
-    if (conversation.metadata.running !== true) {
-      return false;
-    }
     const runId = this.chatRunId(conversation);
     if (runId && this.activeRunIds.has(runId)) {
       return false;
@@ -4981,14 +5006,30 @@ export class ChatService {
     if (this.chatHasLiveWork(conversation.id)) {
       return false;
     }
-    const warnings = sanitizeWarningList(conversation.metadata.warnings);
-    if (!warnings.includes(INTERRUPTED_RUN_WARNING)) {
-      warnings.push(INTERRUPTED_RUN_WARNING);
+    const wasRunning = conversation.metadata.running === true;
+    let pendingSwept = false;
+    for (const message of conversation.messages) {
+      if (message.status === "pending" && message.role === "participant") {
+        message.status = "error";
+        if (!message.content) {
+          message.content = "Interrupted before completion.";
+        }
+        pendingSwept = true;
+      }
     }
-    conversation.metadata = this.clearedChatRunMetadata({
-      ...conversation.metadata,
-      warnings
-    });
+    if (!wasRunning && !pendingSwept) {
+      return false;
+    }
+    if (wasRunning) {
+      const warnings = sanitizeWarningList(conversation.metadata.warnings);
+      if (!warnings.includes(INTERRUPTED_RUN_WARNING)) {
+        warnings.push(INTERRUPTED_RUN_WARNING);
+      }
+      conversation.metadata = this.clearedChatRunMetadata({
+        ...conversation.metadata,
+        warnings
+      });
+    }
     conversation.updatedAt = new Date().toISOString();
     return true;
   }
@@ -5185,33 +5226,116 @@ export class ChatService {
   private createAgentProgressSink(
     runId: string,
     progress: ProgressCallback | undefined,
-    participant: ChatParticipant
-  ): { emit: (event: CliAgentOutputEvent) => void; finish: () => void } {
+    participant: ChatParticipant,
+    messageId: string,
+    guardViolationCheck?: (cumulative: string) => boolean
+  ): {
+    emit: (event: CliAgentOutputEvent) => void;
+    beginAttempt: () => void;
+    finish: () => void;
+  } {
     if (!progress) {
-      return { emit: () => undefined, finish: () => undefined };
+      return {
+        emit: () => undefined,
+        beginAttempt: () => undefined,
+        finish: () => undefined
+      };
     }
     const participantLabel = `@${participant.handle}`;
+    const THROTTLE_MS = 100;
     let finished = false;
+    let cumulative = "";
+    let activity: string | undefined;
+    let suppressed = false;
+    let lastFlush = 0;
+    let pendingTimer: NodeJS.Timeout | undefined;
+    let dirty = false;
 
-    const emitNow = (event: CliAgentOutputEvent): void => {
-      const activity = event.text.trim();
-      if (!progress || finished || !activity) {
+    const flush = (): void => {
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        pendingTimer = undefined;
+      }
+      if (finished || !dirty) {
         return;
       }
+      dirty = false;
+      lastFlush = Date.now();
+      const partialContent = !suppressed && cumulative ? cumulative : undefined;
       this.emitProgress(runId, progress, "debate", `${participantLabel} is responding.`, {
         participantLabel,
         agentProgress: {
           participantId: participant.id,
           participantLabel,
           state: "running",
-          activity
+          messageId,
+          activity,
+          partialContent
         }
       });
+    };
+
+    const scheduleFlush = (): void => {
+      if (finished || pendingTimer) {
+        return;
+      }
+      const elapsed = Date.now() - lastFlush;
+      if (elapsed >= THROTTLE_MS) {
+        flush();
+      } else {
+        pendingTimer = setTimeout(flush, THROTTLE_MS - elapsed);
+        pendingTimer.unref?.();
+      }
+    };
+
+    const emitNow = (event: CliAgentOutputEvent): void => {
+      if (finished) {
+        return;
+      }
+      if (event.kind === "text") {
+        const next = event.cumulative ?? cumulative + event.text;
+        if (next === cumulative) {
+          return;
+        }
+        cumulative = next;
+        if (!suppressed && guardViolationCheck && guardViolationCheck(cumulative)) {
+          suppressed = true;
+        }
+        dirty = true;
+        scheduleFlush();
+        return;
+      }
+      const label = event.text.trim();
+      if (!label) {
+        return;
+      }
+      if (label === activity) {
+        return;
+      }
+      activity = label;
+      dirty = true;
+      scheduleFlush();
+    };
+
+    const beginAttempt = (): void => {
+      if (finished) {
+        return;
+      }
+      cumulative = "";
+      suppressed = false;
+      activity = undefined;
+      // Emit a snapshot so the renderer clears any prior partial content on retry.
+      dirty = true;
+      flush();
     };
 
     const finish = (): void => {
       if (finished) {
         return;
+      }
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        pendingTimer = undefined;
       }
       finished = true;
       this.emitProgress(runId, progress, "debate", `${participantLabel} finished.`, {
@@ -5219,13 +5343,15 @@ export class ChatService {
         agentProgress: {
           participantId: participant.id,
           participantLabel,
-          state: "finished"
+          state: "finished",
+          messageId
         }
       });
     };
 
     return {
       emit: emitNow,
+      beginAttempt,
       finish
     };
   }

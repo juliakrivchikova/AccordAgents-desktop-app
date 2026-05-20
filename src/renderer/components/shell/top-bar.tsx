@@ -23,7 +23,11 @@ export const TopBar = ({ title, tabs, leading, actions, className }: TopBarProps
       {tabs ? (
         tabs
       ) : title ? (
-        <div className="truncate text-sm font-medium text-foreground">{title}</div>
+        typeof title === "string" || typeof title === "number" ? (
+          <div className="truncate text-sm font-medium text-foreground">{title}</div>
+        ) : (
+          <div className="min-w-0">{title}</div>
+        )
       ) : null}
     </div>
     <div className="flex shrink-0 items-center gap-1">{actions}</div>

@@ -658,6 +658,8 @@ export interface AgentRunProgress {
   participantLabel: string;
   state: "running" | "finished";
   activity?: string;
+  messageId?: string;
+  partialContent?: string;
 }
 
 export interface ChatMessage {

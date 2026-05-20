@@ -38,7 +38,9 @@ npx cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 \
 
 4. In sandboxed Codex sessions, local port binding or local CDP requests may need escalation. If `vite` fails with `listen EPERM` or CDP `curl` cannot read `127.0.0.1:9222`, rerun the same command with the required sandbox approval instead of switching to macOS window capture.
 
-5. Prefer the checked-in helpers:
+5. If this workflow still cannot reach or drive the live Electron renderer, stop and ask the user how to proceed. Offer concrete choices: relaunch/quit the desktop app and retry with the debug port, use a renderer mock or browser fixture as a limited fallback, or skip visual verification. Do not silently treat a Vite/browser fixture as desktop-app validation.
+
+6. Prefer the checked-in helpers:
 
 ```bash
 node scripts/screenshot.cjs app.png

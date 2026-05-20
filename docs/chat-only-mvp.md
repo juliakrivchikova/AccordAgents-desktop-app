@@ -434,7 +434,10 @@ Required behavior:
 
 - A running chat turn can be stopped.
 - The app tracks runs by `runId` and aborts the matching controller.
-- Progress is shown in the composer/status area.
+- Participant progress is shown inline in the pending participant reply bubble.
+- A pending participant bubble appears immediately, shows streamed text when available, and otherwise shows "Thinking" with elapsed seconds.
+- The final participant response replaces the pending bubble in place.
+- Composer/global status is reserved for progress that is not tied to an inline pending participant message.
 - Agent tool activity can be summarized as reading, searching, listing, running command, or using a named tool.
 - Warnings and errors are displayed above the main content.
 
