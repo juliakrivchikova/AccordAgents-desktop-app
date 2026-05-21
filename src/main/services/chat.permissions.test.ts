@@ -173,6 +173,41 @@ test("repoRead is a portable permission grant", () => {
   assert.equal(prepared.summary.includes("repository read access"), true);
 });
 
+test("structured permission request creates exactly one approval card", async () => {
+  const participant = chatParticipant("claude-code", { webAccess: false });
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+
+  const result = await service.requestPermissionChangeFromTool({
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request"],
+    runId: "run-42",
+    triggerMessageId: "user-message"
+  }, {
+    kind: "portable",
+    permissions: ["webAccess"],
+    reason: "Need live web lookup to answer this request."
+  });
+
+  assert.equal(result.status, "pending_user_approval");
+
+  const approvals = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).filter(
+    (approval) => approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL
+  );
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].status, "pending");
+  assert.deepEqual(approvals[0].request, {
+    kind: "portable",
+    reason: "Need live web lookup to answer this request.",
+    permissions: ["webAccess"]
+  });
+  assert.equal(approvals[0].resumeContext?.runId, "run-42");
+  assert.equal(approvals[0].resumeContext?.triggerMessageId, "user-message");
+});
+
 test("permission resume attaches resumed participant-request reply to the original batch", async () => {
   const runs: Array<{ participant: ParticipantConfig; options: any; prompt: string }> = [];
   const participant = chatParticipant("claude-code");
@@ -299,69 +334,97 @@ test("permission resume clears running and emits terminal error when resumed par
   assert.equal(progressEvents.some((item) => item.phase === "error" && item.message === "resume exploded"), true);
 });
 
-test("implicit permission approval inherits resumeContext from the triggering turn", () => {
-  const participant = chatParticipant("claude-code");
+test("participant prose mentioning blocked permissions does not create approval cards", () => {
+  const participant = chatParticipant("claude-code", {
+    repoRead: false,
+    workspaceWrite: false,
+    webAccess: false
+  });
   const conversation = chatConversation([participant]);
   const { service } = testService({ conversation });
 
-  const reply: any = {
-    id: "reply-1",
-    role: "participant",
-    participantId: participant.id,
-    content: "I can't do that here — I need workspace edit access to save the file.",
-    createdAt: NOW,
-    status: "done",
-    metadata: {
-      threadId: "thread-1",
-      sourceMessageId: "user-message"
+  const replies: any[] = [
+    {
+      id: "reply-1",
+      role: "participant",
+      participantId: participant.id,
+      content: "I can't do that here - I need workspace edit access to save the file.",
+      createdAt: NOW,
+      status: "done",
+      metadata: {
+        threadId: "thread-1",
+        sourceMessageId: "user-message"
+      }
+    },
+    {
+      id: "reply-2",
+      role: "participant",
+      participantId: participant.id,
+      content: "I cannot edit files until write access is approved. A grant file editing card would be needed in older builds.",
+      createdAt: NOW,
+      status: "done",
+      metadata: {
+        threadId: "thread-1",
+        sourceMessageId: "user-message"
+      }
+    },
+    {
+      id: "reply-3",
+      role: "participant",
+      participantId: participant.id,
+      content: "Need web access and repository read permission to continue.",
+      createdAt: NOW,
+      status: "done",
+      metadata: {
+        threadId: "thread-1",
+        sourceMessageId: "user-message"
+      }
     }
-  };
+  ];
 
-  (service as any).appendParticipantTurnMessages(conversation, participant, [reply], {
-    runId: "run-42",
-    triggerMessageId: "user-message"
-  });
+  (service as any).appendParticipantTurnMessages(conversation, participant, replies);
 
-  const approval = (conversation.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).find(
+  const approvals = ((conversation.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).filter(
     (item) => item.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL
   );
-  assert.ok(approval, "expected an implicit permission approval");
-  assert.equal(approval.status, "pending");
-  assert.equal(approval.resumeContext?.runId, "run-42");
-  assert.equal(approval.resumeContext?.triggerMessageId, "user-message");
+  assert.equal(approvals.length, 0);
+  assert.equal(conversation.messages.some((message) => message.content.includes("Permission approval needed")), false);
 });
 
-test("implicit permission approval preserves participantRequestBatchId from a participant-request turn", () => {
-  const participant = chatParticipant("claude-code");
+test("guard retry response mentioning write access does not create approval cards", async () => {
+  const participant = chatParticipant("claude-code", { workspaceWrite: false });
   const conversation = chatConversation([participant]);
-  const { service } = testService({ conversation });
+  const outputs = [
+    "The write tool is not enabled, so I need workspace edit access to save the file.",
+    "I cannot edit files until write access is approved."
+  ];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => ({
+      participant: runParticipant,
+      ok: true,
+      content: outputs.shift() ?? "Unexpected extra run.",
+      durationMs: 1
+    })
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
 
-  const reply: any = {
-    id: "reply-1",
-    role: "participant",
-    participantId: participant.id,
-    content: "I can't help here — I need workspace edit access to update the file.",
-    createdAt: NOW,
-    status: "done",
-    metadata: {
-      threadId: "thread-1",
-      sourceMessageId: "request-message"
-    }
-  };
-
-  (service as any).appendParticipantTurnMessages(conversation, participant, [reply], {
-    runId: "run-99",
-    triggerMessageId: "request-message",
-    participantRequestBatchId: "batch-77"
+  const result = await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "retry-run",
+    content: "@drew please update the file"
   });
 
-  const approval = (conversation.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).find(
+  assert.equal(result.warnings.some((warning) => warning.includes("rejected response that mentioned tool availability")), true);
+  assert.equal(outputs.length, 0);
+
+  const approvals = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).filter(
     (item) => item.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL
   );
-  assert.ok(approval, "expected an implicit permission approval");
-  assert.equal(approval.resumeContext?.runId, "run-99");
-  assert.equal(approval.resumeContext?.triggerMessageId, "request-message");
-  assert.equal(approval.resumeContext?.participantRequestBatchId, "batch-77");
+  assert.equal(approvals.length, 0);
+  assert.equal(storage.current.messages.some((message: Conversation["messages"][number]) =>
+    message.content.includes("Permission approval needed")
+  ), false);
 });
 
 test("approved permission without resumeContext does not auto-run", async () => {

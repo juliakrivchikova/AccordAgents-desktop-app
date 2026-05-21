@@ -1223,10 +1223,7 @@ export class ChatService {
               warnings
             });
             await this.refreshStoredChatState(conversation);
-            this.appendParticipantTurnMessages(conversation, requester, messages, {
-              runId,
-              triggerMessageId: sourceMessage.id
-            });
+            this.appendParticipantTurnMessages(conversation, requester, messages);
             conversation.updatedAt = new Date().toISOString();
             this.queueSnapshot(conversation);
             await this.ensureHistoryFiles(conversation);
@@ -1298,10 +1295,7 @@ export class ChatService {
           warnings
         });
         await this.refreshStoredChatState(conversation);
-        this.appendParticipantTurnMessages(conversation, requester, messages, {
-          runId,
-          triggerMessageId: userMessage.id
-        });
+        this.appendParticipantTurnMessages(conversation, requester, messages);
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
         await this.ensureHistoryFiles(conversation);
@@ -1464,10 +1458,7 @@ export class ChatService {
     const appendCompletedTurn = async (participant: ChatParticipant, messages: ChatMessage[]): Promise<void> => {
       const nextAppend = appendQueue.then(async () => {
         await this.refreshStoredChatState(conversation);
-        this.appendParticipantTurnMessages(conversation, participant, messages, {
-          runId,
-          triggerMessageId: triggerMessage.id
-        });
+        this.appendParticipantTurnMessages(conversation, participant, messages);
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
       });
@@ -1830,8 +1821,7 @@ export class ChatService {
   private appendParticipantTurnMessages(
     conversation: Conversation,
     participant: ChatParticipant,
-    messages: ChatMessage[],
-    resumeContext?: ChatAppToolApproval["resumeContext"]
+    messages: ChatMessage[]
   ): void {
     const existingIds = new Set(conversation.messages.map((message) => message.id));
     for (const message of messages) {
@@ -1840,7 +1830,6 @@ export class ChatService {
       }
     }
     this.createImplicitParticipantRequestApproval(conversation, participant, messages);
-    this.createImplicitPermissionApproval(conversation, participant, messages, resumeContext);
   }
 
   private buildPrompt(
@@ -2819,38 +2808,6 @@ export class ChatService {
     return prepared.participants;
   }
 
-  private createImplicitPermissionApproval(
-    conversation: Conversation,
-    participant: ChatParticipant,
-    messages: ChatMessage[],
-    resumeContext?: ChatAppToolApproval["resumeContext"]
-  ): void {
-    const request = this.implicitPermissionChangeRequest(participant, messages);
-    if (!request) {
-      return;
-    }
-    const prepared = this.preparePermissionChange(participant, request);
-    if (!this.preparedPermissionChangeHasAdditions(prepared) || this.hasPendingPermissionApproval(conversation, participant, prepared.request)) {
-      return;
-    }
-    const approval = this.newAppToolApproval(
-      conversation,
-      participant,
-      APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
-      "permissions.request",
-      prepared.request,
-      prepared.summary,
-      "pending"
-    );
-    if (resumeContext) {
-      approval.resumeContext = resumeContext;
-    }
-    this.upsertAppToolApproval(conversation, approval);
-    conversation.messages.push(this.message("system", `Permission approval needed for @${participant.handle}: ${prepared.summary}.`, undefined, {
-      threadId: "system"
-    }));
-  }
-
   private createImplicitParticipantRequestApproval(
     conversation: Conversation,
     participant: ChatParticipant,
@@ -3002,59 +2959,6 @@ export class ChatService {
       return prompt;
     }
     return [prompt, "", PARTICIPANT_REQUEST_SCRUTINY_APPENDIX].join("\n");
-  }
-
-  private implicitPermissionChangeRequest(
-    participant: ChatParticipant,
-    messages: ChatMessage[]
-  ): ChatPermissionChangeRequest | undefined {
-    const permissions = normalizeChatAgentPermissions(participant.permissions);
-    const content = messages
-      .filter((message) => message.role === "participant" && message.participantId === participant.id)
-      .map((message) => message.content)
-      .join("\n");
-    const requested = new Set<ChatPermissionGrant>();
-    if (!permissions.webAccess && this.responseAsksForWebAccess(content)) {
-      requested.add("webAccess");
-    }
-    if (!permissions.workspaceWrite && this.responseAsksForWorkspaceWrite(content)) {
-      requested.add("workspaceWrite");
-    }
-    if (!permissions.repoRead && this.responseAsksForRepoRead(content)) {
-      requested.add("repoRead");
-    }
-    if (requested.size === 0) {
-      return undefined;
-    }
-    return {
-      kind: "portable",
-      reason: `@${participant.handle} reported that the current request needs ${this.formatPermissionGrantList(Array.from(requested))}.`,
-      permissions: Array.from(requested)
-    };
-  }
-
-  private responseAsksForWebAccess(content: string): boolean {
-    return (
-      /\b(?:need|needs|needed|require|requires|required|would need|needs? to use)\b[\s\S]{0,160}\bweb (?:access|search|lookup|lookups|results?|use)\b/i.test(content) ||
-      /\bweb access\b[\s\S]{0,120}\b(?:blocked|not enabled|not available|needed|required)\b/i.test(content) ||
-      /\bdo not use web search\b/i.test(content)
-    );
-  }
-
-  private responseAsksForWorkspaceWrite(content: string): boolean {
-    return (
-      /\b(?:need|needs|needed|require|requires|required|would need)\b[\s\S]{0,160}\b(?:edit|write|update|modify|change) (?:files?|access|permission)\b/i.test(content) ||
-      /\b(?:can(?:not|'t)|unable to)\b[\s\S]{0,80}\b(?:edit|write|update|modify)\b/i.test(content) ||
-      /\bworkspace (?:edits?|write)\b[\s\S]{0,120}\b(?:blocked|not enabled|not available|needed|required)\b/i.test(content)
-    );
-  }
-
-  private responseAsksForRepoRead(content: string): boolean {
-    return (
-      /\b(?:need|needs|needed|require|requires|required|would need)\b[\s\S]{0,160}\b(?:repo|repository) read (?:access|permission)\b/i.test(content) ||
-      /\b(?:can(?:not|'t)|unable to)\b[\s\S]{0,100}\b(?:read|inspect|open) (?:repo|repository) files?\b/i.test(content) ||
-      /\brepo(?:sitory)? read\b[\s\S]{0,120}\b(?:blocked|not enabled|not available|needed|required)\b/i.test(content)
-    );
   }
 
   private hasPendingPermissionApproval(
@@ -3615,11 +3519,7 @@ export class ChatService {
           participantRequestBatchId: batch.id
         });
         await this.refreshStoredChatState(conversation);
-        this.appendParticipantTurnMessages(conversation, target, messages, {
-          runId,
-          triggerMessageId: targetTriggerMessage.id,
-          participantRequestBatchId: batch.id
-        });
+        this.appendParticipantTurnMessages(conversation, target, messages);
         const reply = messages[0];
         const waitingOnPermissionApproval = this.hasPendingPermissionApprovalForParticipantTurn(
           conversation,
@@ -3770,11 +3670,7 @@ export class ChatService {
             participantRequestBatchId: participantRequestBatch?.id
           });
           await this.refreshStoredChatState(conversation);
-          this.appendParticipantTurnMessages(conversation, requester, messages, {
-            runId: resumeRunId,
-            triggerMessageId: trigger.id,
-            participantRequestBatchId: participantRequestBatch?.id
-          });
+          this.appendParticipantTurnMessages(conversation, requester, messages);
           const participantRequestResumeMessageId = participantRequestMessage && participantRequestBatch
             ? this.applyPermissionResumeToParticipantRequest(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, messages)
             : undefined;
@@ -3941,11 +3837,7 @@ export class ChatService {
             participantRequestBatchId: batch.id
           });
           await this.refreshStoredChatState(conversation);
-          this.appendParticipantTurnMessages(conversation, requester, messages, {
-            runId: resumeRunId,
-            triggerMessageId: trigger.id,
-            participantRequestBatchId: batch.id
-          });
+          this.appendParticipantTurnMessages(conversation, requester, messages);
           this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
             ...current,
             status: "completed",
