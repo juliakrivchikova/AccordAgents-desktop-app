@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { app } from "electron";
 import type {
@@ -14,6 +14,9 @@ import type {
   ChatAppToolApprovalScope,
   ChatAppToolCapability,
   ChatChoiceOption,
+  ChatImageAttachment,
+  ChatImageInput,
+  ChatImageMimeType,
   ChatMessage,
   ChatParticipant,
   ChatParticipantRequestApprovalRequest,
@@ -37,6 +40,7 @@ import type {
   Conversation,
   CreateChatConversationRequest,
   ParticipantConfig,
+  ReadChatAttachmentRequest,
   RenameChatConversationRequest,
   RespondToChatAppToolApprovalRequest,
   RespondToChatChoiceRequest,
@@ -67,6 +71,8 @@ import {
   APP_CHAT_GET_CONTEXT_TOOL,
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
   APP_CHAT_GET_PARTICIPANTS_TOOL,
+  APP_CHAT_LIST_ATTACHMENTS_TOOL,
+  APP_CHAT_READ_ATTACHMENT_TOOL,
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_CHAT_READ_MESSAGES_TOOL,
   APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
@@ -92,8 +98,20 @@ interface ChatPromptSectionSizes {
   dynamicHeader: number;
   trigger: number;
   mentions: number;
+  attachments: number;
   currentRequest: number;
   total: number;
+}
+
+interface PreparedImageAttachments {
+  attachments: ChatImageAttachment[];
+  writtenPaths: string[];
+}
+
+interface ChatAttachmentRecord {
+  message: ChatMessage;
+  sequence: number;
+  attachment: ChatImageAttachment;
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
@@ -117,7 +135,9 @@ const CHAT_CONTEXT_MCP_TOOL_NAMES = [
   APP_CHAT_GET_PARTICIPANTS_TOOL,
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
-  APP_CHAT_READ_MESSAGES_TOOL
+  APP_CHAT_READ_MESSAGES_TOOL,
+  APP_CHAT_LIST_ATTACHMENTS_TOOL,
+  APP_CHAT_READ_ATTACHMENT_TOOL
 ];
 const CHAT_APP_MCP_TOOL_NAMES = [
   ...CHAT_CONTEXT_MCP_TOOL_NAMES,
@@ -127,6 +147,16 @@ const CHAT_APP_MCP_TOOL_NAMES = [
 ];
 const CHAT_CONTEXT_READ_DEFAULT_LIMIT = 50;
 const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
+const CHAT_IMAGE_MAX_ATTACHMENTS = 5;
+const CHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+const CHAT_IMAGE_MAX_DIMENSION = 8192;
+const CHAT_IMAGE_MAX_PIXELS = 25_000_000;
+const CHAT_IMAGE_MIME_TYPES: ChatImageMimeType[] = ["image/png", "image/jpeg", "image/webp"];
+const CHAT_IMAGE_EXTENSION_BY_MIME: Record<ChatImageMimeType, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp"
+};
 
 interface ChatAppMcpGateway {
   issueToken(grant: {
@@ -692,6 +722,8 @@ export class ChatService {
       },
       contextSources: {
         preferredMessageTool: APP_CHAT_READ_MESSAGES_TOOL,
+        preferredAttachmentListTool: APP_CHAT_LIST_ATTACHMENTS_TOOL,
+        preferredAttachmentReadTool: APP_CHAT_READ_ATTACHMENT_TOOL,
         preferredParticipantTool: APP_CHAT_GET_PARTICIPANTS_TOOL,
         currentContextTool: APP_CHAT_GET_CONTEXT_TOOL,
         fallbackHistoryFiles: {
@@ -816,6 +848,86 @@ export class ChatService {
         totalMessages: readableTotalMessages,
         totalMatchingMessages: filteredMessages.length
       }
+    };
+  }
+
+  async readChatAttachment(request: ReadChatAttachmentRequest): Promise<{ attachment: ChatImageAttachment; dataBase64: string }> {
+    await this.waitForQueuedSave(request.conversationId);
+    const conversation = await this.requireChat(request.conversationId);
+    const record = this.findImageAttachmentRecord(conversation, request.attachmentId);
+    if (!record) {
+      throw new Error("Attachment was not found in this conversation.");
+    }
+    const dataBase64 = await this.readAttachmentBase64(conversation.id, record.attachment);
+    return {
+      attachment: record.attachment,
+      dataBase64
+    };
+  }
+
+  async listChatAttachmentsForTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+    await this.waitForQueuedSave(actor.conversationId);
+    const conversation = await this.requireChat(actor.conversationId);
+    const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+    if (!requester) {
+      throw new Error("The requesting participant is no longer in this chat.");
+    }
+    const request = this.normalizeChatAttachmentListRequest(rawRequest);
+    const records = this.visibleImageAttachmentRecords(conversation, actor)
+      .filter((record) => !request.messageId || record.message.id === request.messageId)
+      .filter((record) => !request.threadId || record.message.metadata?.threadId === request.threadId)
+      .slice(-request.limit);
+
+    return {
+      conversationId: conversation.id,
+      requesterParticipantId: requester.id,
+      filters: {
+        messageId: request.messageId,
+        threadId: request.threadId,
+        limit: request.limit
+      },
+      attachments: records.map((record) => ({
+        messageId: record.message.id,
+        sequence: record.sequence,
+        author: this.messageAuthor(record.message),
+        threadId: record.message.metadata?.threadId,
+        attachment: this.chatImageAttachmentForTool(record.attachment),
+        readTool: APP_CHAT_READ_ATTACHMENT_TOOL,
+        readArguments: { attachmentId: record.attachment.id }
+      }))
+    };
+  }
+
+  async readChatAttachmentForTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+    await this.waitForQueuedSave(actor.conversationId);
+    const conversation = await this.requireChat(actor.conversationId);
+    const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+    if (!requester) {
+      throw new Error("The requesting participant is no longer in this chat.");
+    }
+    const request = this.normalizeChatAttachmentReadRequest(rawRequest);
+    const record = this.visibleImageAttachmentRecords(conversation, actor).find((item) => item.attachment.id === request.attachmentId);
+    if (!record) {
+      void this.debugLogs.write("chat.attachments.mcp-read-denied", {
+        conversationId: actor.conversationId,
+        participantId: actor.participantId,
+        attachmentId: request.attachmentId,
+        snapshotMaxSequence: actor.snapshotMaxSequence
+      });
+      throw new Error(
+        "AttachmentReadDenied. Problem: this attachment is not visible to the current participant turn. Cause: the attachment id is absent, belongs to another conversation, or is newer than this turn snapshot. Fix: call app_chat_list_attachments for visible attachment IDs, or ask User to resend the image."
+      );
+    }
+    const dataBase64 = await this.readAttachmentBase64(conversation.id, record.attachment);
+    return {
+      conversationId: conversation.id,
+      requesterParticipantId: requester.id,
+      messageId: record.message.id,
+      sequence: record.sequence,
+      author: this.messageAuthor(record.message),
+      threadId: record.message.metadata?.threadId,
+      attachment: this.chatImageAttachmentForTool(record.attachment),
+      dataBase64
     };
   }
 
@@ -995,7 +1107,8 @@ export class ChatService {
     return this.withChatRunLock(request.conversationId, async () => {
       const conversation = await this.requireChat(request.conversationId);
       const content = request.content.trim();
-      if (!content) {
+      const preparedImages = await this.prepareImageAttachments(conversation.id, request.imageAttachments);
+      if (!content && preparedImages.attachments.length === 0) {
         throw new Error("Message is required.");
       }
       const repoFileMentions = await this.validateRepoFileMentions(conversation, request.repoFileMentions, warnings, content);
@@ -1005,13 +1118,19 @@ export class ChatService {
         threadId,
         parentMessageId: request.parentMessageId,
         chatThreadRootId,
-        ...(repoFileMentions.length > 0 ? { repoFileMentions } : {})
+        ...(repoFileMentions.length > 0 ? { repoFileMentions } : {}),
+        ...(preparedImages.attachments.length > 0 ? { imageAttachments: preparedImages.attachments } : {})
       });
       if (!request.threadId?.trim()) {
         userMessage.metadata = { ...userMessage.metadata, threadId: userMessage.id };
       }
       conversation.messages.push(userMessage);
-      await this.beginChatRun(conversation, runId);
+      try {
+        await this.beginChatRun(conversation, runId);
+      } catch (error) {
+        await this.rollbackPreparedImageAttachments(conversation.id, preparedImages, "ConversationSaveFailed", error);
+        throw error;
+      }
       try {
         let dispatch = this.resolveMentionTargets(conversation, content);
         for (const unknown of dispatch.unknownHandles) {
@@ -1494,6 +1613,18 @@ export class ChatService {
     };
     const appMcp = this.issueAppMcpConnection(conversation, participant, appMcpGrant);
     const appMcpToolNames = this.appMcpToolNames(appToolCapabilities);
+    const triggerAttachments = this.imageAttachments(triggerMessage);
+    if (triggerAttachments.length > 0) {
+      void this.debugLogs.write("chat.attachments.direct-delivery-skipped", {
+        conversationId: conversation.id,
+        participantId: participant.id,
+        participantKind: participant.kind,
+        runId,
+        triggerMessageId: triggerMessage.id,
+        attachmentIds: triggerAttachments.map((attachment) => attachment.id),
+        reason: "Native CLI image input is not enabled until runner capability is verified; App MCP image read is available."
+      });
+    }
     this.emitProgress(runId, progress, "debate", `@${participant.handle} is responding.`, {
       participantLabel: `@${participant.handle}`,
       agentProgress: {
@@ -1758,6 +1889,7 @@ export class ChatService {
       this.formatMessage(triggerMessage, false)
     ].join("\n\n");
     const mentionsBlock = this.repoFileMentionsPromptSection(triggerMessage, options.agentMode, options.permissions, canRequestPermissions);
+    const attachmentsBlock = this.imageAttachmentsPromptSection(triggerMessage);
     const currentRequestBlock = [
       continuation
         ? "Current request: control has returned to you after the approved participants have replied. Produce your next answer."
@@ -1769,6 +1901,7 @@ export class ChatService {
       staticEnvelope || dynamicHeader,
       triggerBlock,
       mentionsBlock,
+      attachmentsBlock,
       currentRequestBlock
     ].filter(Boolean);
     const prompt = orderedBlocks.join("\n\n");
@@ -1780,6 +1913,7 @@ export class ChatService {
         dynamicHeader: staticEnvelope ? 0 : dynamicHeader.length,
         trigger: triggerBlock.length,
         mentions: mentionsBlock.length,
+        attachments: attachmentsBlock.length,
         currentRequest: currentRequestBlock.length,
         total: prompt.length
       }
@@ -1792,6 +1926,7 @@ export class ChatService {
       this.triggeringMessageIdentifiers(triggerMessage),
       "Triggering message:",
       this.formatMessage(triggerMessage, false),
+      this.imageAttachmentsPromptSection(triggerMessage),
       continuation
         ? "Current request: control has returned to you after the approved participants have replied. Produce your next answer."
         : "Current request: answer the triggering message above.",
@@ -1906,7 +2041,8 @@ export class ChatService {
         ];
     const lines = [
       "App MCP tools: use the connected `ai_consensus` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
-      "Chat context MCP tools: `app_chat_get_context`, `app_chat_get_participants`, and `app_chat_read_messages` are read-only and available for the current chat. Prefer them over full history files when you need roster details, active thread metadata, or prior messages.",
+      "Read-only chat MCP tools: `app_chat_get_context`, `app_chat_get_participants`, `app_chat_read_messages`, `app_chat_list_attachments`, and `app_chat_read_attachment`. Prefer them over history files for roster, thread, messages, and screenshots.",
+      "If a message lists attached images, call `app_chat_read_attachment` with the attachment ID before reasoning about visual details.",
       "Participant request MCP tools: `app_chat_request_participants` and `app_chat_get_participant_request_status` are available for asking current chat participants for input and recovering their replies. Request JSON is `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
       "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
       "If `app_chat_request_participants` returns replies before timeout, use them in this turn. If it returns `pending_approval` or `running`, stop after a brief status note; the app will auto-resume you after replies or errors arrive.",
@@ -4691,8 +4827,9 @@ export class ChatService {
         message.metadata?.parentMessageId ? `Parent message ID: ${message.metadata.parentMessageId}` : "",
         message.metadata?.chatThreadRootId ? `Chat thread root ID: ${message.metadata.chatThreadRootId}` : "",
         "",
-        message.content.trim(),
+        message.content.trim() || (this.imageAttachments(message).length > 0 ? "(image-only message)" : ""),
         this.repoFileMentionsMarkdown(message),
+        this.imageAttachmentsMarkdown(message),
         ""
       ].filter(Boolean).join("\n"))
     ].join("\n");
@@ -4704,10 +4841,12 @@ export class ChatService {
   }
 
   private formatMessage(message: ChatMessage, includeRepoFileMentions = true): string {
+    const content = message.content.trim() || (this.imageAttachments(message).length > 0 ? "(image-only message)" : "");
     return [
       `[${message.createdAt}] ${this.messageAuthor(message)}`,
-      message.content.trim(),
-      includeRepoFileMentions ? this.repoFileMentionsMarkdown(message) : ""
+      content,
+      includeRepoFileMentions ? this.repoFileMentionsMarkdown(message) : "",
+      this.imageAttachmentsMarkdown(message)
     ].filter(Boolean).join("\n");
   }
 
@@ -4736,7 +4875,398 @@ export class ChatService {
     return mentions;
   }
 
+  private imageAttachments(message: ChatMessage): ChatImageAttachment[] {
+    const seen = new Set<string>();
+    const attachments: ChatImageAttachment[] = [];
+    for (const attachment of message.metadata?.imageAttachments ?? []) {
+      if (!this.isStoredChatImageAttachment(attachment) || seen.has(attachment.id)) {
+        continue;
+      }
+      seen.add(attachment.id);
+      attachments.push(attachment);
+    }
+    return attachments;
+  }
+
+  private chatImageAttachmentForTool(attachment: ChatImageAttachment): Omit<ChatImageAttachment, "storageKey"> {
+    const { storageKey: _storageKey, ...safeAttachment } = attachment;
+    return safeAttachment;
+  }
+
+  private imageAttachmentsMarkdown(message: ChatMessage): string {
+    const attachments = this.imageAttachments(message);
+    if (attachments.length === 0) {
+      return "";
+    }
+    return [
+      "Attached images:",
+      ...attachments.map((attachment) =>
+        `- ${attachment.filename} (${attachment.mimeType}, ${this.formatBytes(attachment.sizeBytes)}, ${attachment.width}x${attachment.height}, id: ${attachment.id})`
+      )
+    ].join("\n");
+  }
+
+  private imageAttachmentsPromptSection(message: ChatMessage): string {
+    const attachments = this.imageAttachments(message);
+    if (attachments.length === 0) {
+      return "";
+    }
+    return [
+      "Attached images for the triggering message:",
+      ...attachments.map((attachment) =>
+        `- ${attachment.filename} (${attachment.mimeType}, ${this.formatBytes(attachment.sizeBytes)}, ${attachment.width}x${attachment.height}) attachmentId=${attachment.id}`
+      ),
+      `Use \`${APP_CHAT_READ_ATTACHMENT_TOOL}\` with JSON like { "attachmentId": "${attachments[0].id}" } to inspect the image content. Use \`${APP_CHAT_LIST_ATTACHMENTS_TOOL}\` if you need to rediscover visible attachment IDs.`
+    ].join("\n");
+  }
+
+  private visibleImageAttachmentRecords(conversation: Conversation, actor: ChatAppMcpActor): ChatAttachmentRecord[] {
+    const records: ChatAttachmentRecord[] = [];
+    conversation.messages.forEach((message, sequence) => {
+      if (typeof actor.snapshotMaxSequence === "number" && sequence > actor.snapshotMaxSequence) {
+        return;
+      }
+      for (const attachment of this.imageAttachments(message)) {
+        records.push({ message, sequence, attachment });
+      }
+    });
+    return records;
+  }
+
+  private findImageAttachmentRecord(conversation: Conversation, attachmentId: string): ChatAttachmentRecord | undefined {
+    const normalizedId = attachmentId.trim();
+    for (const [sequence, message] of conversation.messages.entries()) {
+      const attachment = this.imageAttachments(message).find((item) => item.id === normalizedId);
+      if (attachment) {
+        return { message, sequence, attachment };
+      }
+    }
+    return undefined;
+  }
+
+  private normalizeChatAttachmentListRequest(raw: unknown): { messageId?: string; threadId?: string; limit: number } {
+    const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+    const messageId = typeof record.messageId === "string" && record.messageId.trim() ? record.messageId.trim() : undefined;
+    const threadId = typeof record.threadId === "string" && record.threadId.trim() ? record.threadId.trim() : undefined;
+    const rawLimit = typeof record.limit === "number" ? record.limit : CHAT_CONTEXT_READ_DEFAULT_LIMIT;
+    return {
+      messageId,
+      threadId,
+      limit: Math.min(100, Math.max(1, Math.floor(rawLimit)))
+    };
+  }
+
+  private normalizeChatAttachmentReadRequest(raw: unknown): { attachmentId: string } {
+    const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+    const attachmentId = typeof record.attachmentId === "string" ? record.attachmentId.trim() : "";
+    if (!attachmentId) {
+      throw new Error("AttachmentReadDenied. Problem: attachmentId is required. Cause: the read request did not include an attachmentId. Fix: call app_chat_list_attachments and pass one returned attachmentId.");
+    }
+    return { attachmentId };
+  }
+
+  private async readAttachmentBase64(conversationId: string, attachment: ChatImageAttachment): Promise<string> {
+    const filePath = this.attachmentPath(conversationId, attachment.storageKey);
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(filePath);
+    } catch (error) {
+      void this.debugLogs.write("chat.attachments.missing", {
+        conversationId,
+        attachmentId: attachment.id,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      throw new Error(
+        "AttachmentMissing. Problem: the attachment metadata exists, but the image file could not be read. Cause: the attachment file is missing or inaccessible in app storage. Fix: ask User to resend the image."
+      );
+    }
+    return bytes.toString("base64");
+  }
+
+  private async prepareImageAttachments(conversationId: string, inputs: ChatImageInput[] | undefined): Promise<PreparedImageAttachments> {
+    if (!inputs || inputs.length === 0) {
+      return { attachments: [], writtenPaths: [] };
+    }
+    if (!Array.isArray(inputs)) {
+      throw new Error("Image attachments must be an array.");
+    }
+    if (inputs.length > CHAT_IMAGE_MAX_ATTACHMENTS) {
+      throw new Error(`Too many images. Attach at most ${CHAT_IMAGE_MAX_ATTACHMENTS} images per message.`);
+    }
+
+    const prepared: PreparedImageAttachments = { attachments: [], writtenPaths: [] };
+    try {
+      for (let index = 0; index < inputs.length; index += 1) {
+        const persisted = await this.prepareImageAttachment(conversationId, inputs[index], index);
+        prepared.attachments.push(persisted.attachment);
+        prepared.writtenPaths.push(persisted.filePath);
+      }
+      return prepared;
+    } catch (error) {
+      await this.rollbackPreparedImageAttachments(conversationId, prepared, "AttachmentPersistFailed", error);
+      throw error;
+    }
+  }
+
+  private async prepareImageAttachment(
+    conversationId: string,
+    input: ChatImageInput,
+    index: number
+  ): Promise<{ attachment: ChatImageAttachment; filePath: string }> {
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw new Error("Image attachment input is invalid.");
+    }
+    const mimeType = this.normalizeChatImageMimeType(input.mimeType);
+    const bytes = this.decodeImageInputBase64(input.dataBase64);
+    if (bytes.length === 0) {
+      throw new Error("ImageDecodeFailed. Problem: image data is empty. Cause: the pasted or selected image did not produce bytes. Fix: paste or choose the image again.");
+    }
+    if (bytes.length > CHAT_IMAGE_MAX_BYTES) {
+      throw new Error(`ImageTooLarge. Problem: image ${index + 1} is ${this.formatBytes(bytes.length)}. Cause: v1 accepts images up to ${this.formatBytes(CHAT_IMAGE_MAX_BYTES)}. Fix: crop or compress the image and try again.`);
+    }
+    const detectedMimeType = this.detectChatImageMimeType(bytes);
+    if (!detectedMimeType || detectedMimeType !== mimeType) {
+      void this.debugLogs.write("chat.attachments.validation-failed", {
+        conversationId,
+        reason: "mime-mismatch",
+        providedMimeType: input.mimeType,
+        detectedMimeType
+      });
+      throw new Error("UnsupportedImageType. Problem: image MIME type does not match the file bytes. Cause: the attachment is not a PNG, JPEG, or WebP image. Fix: paste or choose a PNG, JPEG, or WebP image.");
+    }
+    const dimensions = this.chatImageDimensions(bytes, mimeType);
+    if (!dimensions) {
+      void this.debugLogs.write("chat.attachments.validation-failed", {
+        conversationId,
+        reason: "dimensions-unreadable",
+        mimeType
+      });
+      throw new Error("ImageDecodeFailed. Problem: image dimensions could not be read. Cause: the image is malformed or uses an unsupported encoding. Fix: export it as PNG, JPEG, or WebP and try again.");
+    }
+    if (
+      dimensions.width > CHAT_IMAGE_MAX_DIMENSION ||
+      dimensions.height > CHAT_IMAGE_MAX_DIMENSION ||
+      dimensions.width * dimensions.height > CHAT_IMAGE_MAX_PIXELS
+    ) {
+      throw new Error(`ImageTooManyPixels. Problem: image is ${dimensions.width}x${dimensions.height}. Cause: v1 accepts images up to ${CHAT_IMAGE_MAX_DIMENSION}px per side and ${CHAT_IMAGE_MAX_PIXELS.toLocaleString()} pixels. Fix: crop or scale the image and try again.`);
+    }
+
+    const attachmentId = randomUUID();
+    const extension = CHAT_IMAGE_EXTENSION_BY_MIME[mimeType];
+    const storageKey = `attachments/${attachmentId}.${extension}`;
+    const filePath = this.attachmentPath(conversationId, storageKey);
+    const tempPath = `${filePath}.${randomUUID()}.tmp`;
+    await mkdir(path.dirname(filePath), { recursive: true });
+    try {
+      await writeFile(tempPath, bytes);
+      await rename(tempPath, filePath);
+    } catch (error) {
+      await rm(tempPath, { force: true }).catch(() => undefined);
+      void this.debugLogs.write("chat.attachments.persistence-failed", {
+        conversationId,
+        attachmentId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      throw new Error("AttachmentPersistFailed. Problem: the image could not be saved. Cause: app attachment storage is unavailable or full. Fix: retry, or check local disk permissions and free space.");
+    }
+
+    return {
+      filePath,
+      attachment: {
+        id: attachmentId,
+        filename: this.normalizeChatImageFilename(input.filename, extension, index),
+        mimeType,
+        sizeBytes: bytes.length,
+        width: dimensions.width,
+        height: dimensions.height,
+        storageKey,
+        createdAt: new Date().toISOString()
+      }
+    };
+  }
+
+  private async rollbackPreparedImageAttachments(
+    conversationId: string,
+    prepared: PreparedImageAttachments,
+    reason: string,
+    cause: unknown
+  ): Promise<void> {
+    if (prepared.writtenPaths.length === 0) {
+      return;
+    }
+    await Promise.all(prepared.writtenPaths.map((filePath) => rm(filePath, { force: true }).catch(() => undefined)));
+    void this.debugLogs.write("chat.attachments.rollback", {
+      conversationId,
+      reason,
+      attachmentIds: prepared.attachments.map((attachment) => attachment.id),
+      message: cause instanceof Error ? cause.message : String(cause)
+    });
+  }
+
+  private normalizeChatImageMimeType(value: string): ChatImageMimeType {
+    const normalized = value.toLowerCase().trim();
+    if (CHAT_IMAGE_MIME_TYPES.includes(normalized as ChatImageMimeType)) {
+      return normalized as ChatImageMimeType;
+    }
+    throw new Error("UnsupportedImageType. Problem: this image type is not supported. Cause: v1 accepts PNG, JPEG, and WebP images only. Fix: paste or choose a PNG, JPEG, or WebP image.");
+  }
+
+  private decodeImageInputBase64(value: string): Buffer {
+    if (typeof value !== "string") {
+      throw new Error("ImageDecodeFailed. Problem: image payload is invalid. Cause: the renderer did not send base64 image data. Fix: paste or choose the image again.");
+    }
+    const trimmed = value.trim();
+    const withoutDataUrl = trimmed.replace(/^data:image\/(?:png|jpeg|jpg|webp);base64,/i, "");
+    if (!/^[A-Za-z0-9+/=\s]+$/.test(withoutDataUrl)) {
+      throw new Error("ImageDecodeFailed. Problem: image payload is not valid base64. Cause: the pasted or selected image was not encoded correctly. Fix: paste or choose the image again.");
+    }
+    return Buffer.from(withoutDataUrl.replace(/\s/g, ""), "base64");
+  }
+
+  private detectChatImageMimeType(bytes: Buffer): ChatImageMimeType | undefined {
+    if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+      return "image/png";
+    }
+    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+      return "image/jpeg";
+    }
+    if (
+      bytes.length >= 12 &&
+      bytes.subarray(0, 4).toString("ascii") === "RIFF" &&
+      bytes.subarray(8, 12).toString("ascii") === "WEBP"
+    ) {
+      return "image/webp";
+    }
+    return undefined;
+  }
+
+  private chatImageDimensions(bytes: Buffer, mimeType: ChatImageMimeType): { width: number; height: number } | undefined {
+    if (mimeType === "image/png") {
+      return this.pngImageDimensions(bytes);
+    }
+    if (mimeType === "image/jpeg") {
+      return this.jpegImageDimensions(bytes);
+    }
+    return this.webpImageDimensions(bytes);
+  }
+
+  private pngImageDimensions(bytes: Buffer): { width: number; height: number } | undefined {
+    if (bytes.length < 24 || bytes.subarray(12, 16).toString("ascii") !== "IHDR") {
+      return undefined;
+    }
+    return {
+      width: bytes.readUInt32BE(16),
+      height: bytes.readUInt32BE(20)
+    };
+  }
+
+  private jpegImageDimensions(bytes: Buffer): { width: number; height: number } | undefined {
+    let offset = 2;
+    while (offset + 9 < bytes.length) {
+      if (bytes[offset] !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      const marker = bytes[offset + 1];
+      offset += 2;
+      if (marker === 0xd9 || marker === 0xda) {
+        break;
+      }
+      if (offset + 2 > bytes.length) {
+        break;
+      }
+      const segmentLength = bytes.readUInt16BE(offset);
+      if (segmentLength < 2 || offset + segmentLength > bytes.length) {
+        break;
+      }
+      if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
+        return {
+          height: bytes.readUInt16BE(offset + 3),
+          width: bytes.readUInt16BE(offset + 5)
+        };
+      }
+      offset += segmentLength;
+    }
+    return undefined;
+  }
+
+  private webpImageDimensions(bytes: Buffer): { width: number; height: number } | undefined {
+    const chunkType = bytes.length >= 16 ? bytes.subarray(12, 16).toString("ascii") : "";
+    if (chunkType === "VP8X" && bytes.length >= 30) {
+      return {
+        width: 1 + bytes.readUIntLE(24, 3),
+        height: 1 + bytes.readUIntLE(27, 3)
+      };
+    }
+    if (chunkType === "VP8 " && bytes.length >= 30) {
+      return {
+        width: bytes.readUInt16LE(26) & 0x3fff,
+        height: bytes.readUInt16LE(28) & 0x3fff
+      };
+    }
+    if (chunkType === "VP8L" && bytes.length >= 25) {
+      const bits = bytes.readUInt32LE(21);
+      return {
+        width: (bits & 0x3fff) + 1,
+        height: ((bits >> 14) & 0x3fff) + 1
+      };
+    }
+    return undefined;
+  }
+
+  private normalizeChatImageFilename(filename: string | undefined, extension: string, index: number): string {
+    const fallback = `image-${index + 1}.${extension}`;
+    const base = typeof filename === "string" && filename.trim()
+      ? path.basename(filename.trim()).replace(/[^\w .@()-]/g, "_").replace(/\s+/g, " ").slice(0, 120)
+      : fallback;
+    if (base.toLowerCase().endsWith(`.${extension}`) || (extension === "jpg" && base.toLowerCase().endsWith(".jpeg"))) {
+      return base;
+    }
+    return `${base.replace(/\.[^.]+$/, "")}.${extension}`;
+  }
+
+  private attachmentPath(conversationId: string, storageKey: string): string {
+    if (!/^attachments\/[A-Za-z0-9-]+\.(?:png|jpg|webp)$/.test(storageKey)) {
+      throw new Error("Attachment storage key is invalid.");
+    }
+    return path.join(app.getPath("userData"), "chats", conversationId, storageKey);
+  }
+
+  private isStoredChatImageAttachment(value: unknown): value is ChatImageAttachment {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return false;
+    }
+    const record = value as Partial<ChatImageAttachment>;
+    return (
+      typeof record.id === "string" &&
+      typeof record.filename === "string" &&
+      CHAT_IMAGE_MIME_TYPES.includes(record.mimeType as ChatImageMimeType) &&
+      typeof record.sizeBytes === "number" &&
+      typeof record.width === "number" &&
+      typeof record.height === "number" &&
+      typeof record.storageKey === "string" &&
+      typeof record.createdAt === "string"
+    );
+  }
+
+  private formatBytes(bytes: number): string {
+    if (bytes >= 1024 * 1024) {
+      return `${(bytes / (1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+    }
+    if (bytes >= 1024) {
+      return `${Math.round(bytes / 1024)} KB`;
+    }
+    return `${bytes} B`;
+  }
+
   private chatMessageForTool(message: ChatMessage, sequence: number): Record<string, unknown> {
+    const attachments = this.imageAttachments(message);
+    const metadata = message.metadata
+      ? {
+          ...message.metadata,
+          imageAttachments: attachments.length > 0 ? attachments.map((attachment) => this.chatImageAttachmentForTool(attachment)) : undefined
+        }
+      : undefined;
     return {
       sequence,
       id: message.id,
@@ -4747,7 +5277,12 @@ export class ChatService {
       content: message.content,
       createdAt: message.createdAt,
       status: message.status,
-      metadata: message.metadata
+      metadata,
+      imageAttachments: attachments.map((attachment) => ({
+        ...this.chatImageAttachmentForTool(attachment),
+        readTool: APP_CHAT_READ_ATTACHMENT_TOOL,
+        readArguments: { attachmentId: attachment.id }
+      }))
     };
   }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,6 +9,7 @@ import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../.
 import { INTERRUPTED_RUN_WARNING } from "../../shared/warnings";
 import type {
   ChatMessage,
+  ChatImageAttachment,
   ChatParticipant,
   ChatParticipantSession,
   ChatRoleConfig,
@@ -16,6 +17,7 @@ import type {
 } from "../../shared/types";
 
 const NOW = "2026-05-19T12:00:00.000Z";
+const ONE_BY_ONE_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 
 const ROLE: ChatRoleConfig = {
   id: "engineer",
@@ -221,6 +223,86 @@ test("sendMessage clears running and emits terminal error when participant run f
   assert.equal(saved?.metadata.running, false);
   assert.equal(saved?.metadata.runId, undefined);
   assert.equal(progress.some((item) => item.phase === "error" && item.message === "participant exploded"), true);
+});
+
+test("sendMessage persists image-only messages as metadata plus app-owned files", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "ai-consensus-chat-images-"));
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant], "/repo");
+  const { service, storage } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+  serviceAny.attachmentPath = (_conversationId: string, storageKey: string) => path.join(tempRoot, storageKey);
+
+  try {
+    const result = await service.sendMessage({
+      conversationId: conversation.id,
+      runId: "image-run",
+      content: "",
+      imageAttachments: [{
+        filename: "screenshot.png",
+        mimeType: "image/png",
+        dataBase64: ONE_BY_ONE_PNG_BASE64
+      }]
+    });
+
+    const saved = await storage.getConversation(conversation.id);
+    const userMessage = saved?.messages.find((message) => message.role === "user");
+    const attachment = userMessage?.metadata?.imageAttachments?.[0];
+
+    assert.equal(result.conversation.metadata.running, false);
+    assert.equal(userMessage?.content, "");
+    assert.equal(attachment?.filename, "screenshot.png");
+    assert.equal(attachment?.mimeType, "image/png");
+    assert.equal(attachment?.width, 1);
+    assert.equal(attachment?.height, 1);
+    assert.equal(attachment?.storageKey.startsWith("attachments/"), true);
+    await stat(path.join(tempRoot, attachment?.storageKey ?? ""));
+
+    const readBack = await service.readChatAttachment({
+      conversationId: conversation.id,
+      attachmentId: attachment?.id ?? ""
+    });
+    assert.equal(readBack.dataBase64, ONE_BY_ONE_PNG_BASE64);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("MCP attachment reads are bounded by the issued turn snapshot", async () => {
+  const participant = chatParticipant();
+  const visibleAttachment = chatImageAttachment("visible-image");
+  const futureAttachment = chatImageAttachment("future-image");
+  const conversation = chatConversation([participant], "/repo");
+  conversation.messages.push(userMessage("visible-message", "Visible"));
+  conversation.messages[0].metadata = {
+    ...conversation.messages[0].metadata,
+    imageAttachments: [visibleAttachment]
+  };
+  conversation.messages.push(userMessage("future-message", "Future"));
+  conversation.messages[1].metadata = {
+    ...conversation.messages[1].metadata,
+    imageAttachments: [futureAttachment]
+  };
+  const { service } = testService({ conversations: [conversation] });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: ROLE.version,
+    capabilities: [],
+    snapshotMaxSequence: 0
+  };
+
+  const listed = await service.listChatAttachmentsForTool(actor as never, {});
+
+  assert.deepEqual(
+    ((listed.attachments as Array<{ attachment: { id: string } }>)).map((item) => item.attachment.id),
+    [visibleAttachment.id]
+  );
+  await assert.rejects(
+    () => service.readChatAttachmentForTool(actor as never, { attachmentId: futureAttachment.id }),
+    /AttachmentReadDenied/
+  );
 });
 
 test("respondToMentions clears running and emits terminal error when participant run fails", async () => {
@@ -555,6 +637,19 @@ function userMessage(id: string, content: string): ChatMessage {
     createdAt: NOW,
     status: "done",
     metadata: { threadId: id }
+  };
+}
+
+function chatImageAttachment(id: string): ChatImageAttachment {
+  return {
+    id,
+    filename: `${id}.png`,
+    mimeType: "image/png",
+    sizeBytes: 68,
+    width: 1,
+    height: 1,
+    storageKey: `attachments/${id}.png`,
+    createdAt: NOW
   };
 }
 

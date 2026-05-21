@@ -349,6 +349,7 @@ export interface ChatMessageMetadata {
   chatThreadRootId?: string;
   mentions?: string[];
   repoFileMentions?: RepoFileMention[];
+  imageAttachments?: ChatImageAttachment[];
   pendingMentions?: ChatPendingMention[];
   pendingChoice?: ChatPendingChoice;
   participantRequest?: ChatParticipantRequestBatch;
@@ -425,9 +426,39 @@ export interface SendChatMessageRequest {
   runId?: string;
   content: string;
   repoFileMentions?: RepoFileMention[];
+  imageAttachments?: ChatImageInput[];
   threadId?: string;
   parentMessageId?: string;
   chatThreadRootId?: string;
+}
+
+export type ChatImageMimeType = "image/png" | "image/jpeg" | "image/webp";
+
+export interface ChatImageInput {
+  filename?: string;
+  mimeType: string;
+  dataBase64: string;
+}
+
+export interface ChatImageAttachment {
+  id: string;
+  filename: string;
+  mimeType: ChatImageMimeType;
+  sizeBytes: number;
+  width: number;
+  height: number;
+  storageKey: string;
+  createdAt: string;
+}
+
+export interface ReadChatAttachmentRequest {
+  conversationId: string;
+  attachmentId: string;
+}
+
+export interface ReadChatAttachmentResult {
+  attachment: ChatImageAttachment;
+  dataBase64: string;
 }
 
 export interface RespondToChatMentionsRequest {
@@ -783,6 +814,7 @@ export interface AppBridge {
   renameChatConversation(request: RenameChatConversationRequest): Promise<Conversation | undefined>;
   addChatParticipant(request: AddChatParticipantRequest): Promise<Conversation | undefined>;
   sendChatMessage(request: SendChatMessageRequest): Promise<StartReviewResult>;
+  readChatAttachment(request: ReadChatAttachmentRequest): Promise<ReadChatAttachmentResult>;
   respondToChatMentions(request: RespondToChatMentionsRequest): Promise<StartReviewResult>;
   respondToChatChoice(request: RespondToChatChoiceRequest): Promise<StartReviewResult>;
   respondToChatAppToolApproval(request: RespondToChatAppToolApprovalRequest): Promise<Conversation | undefined>;

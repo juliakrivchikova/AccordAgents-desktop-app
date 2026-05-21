@@ -12,6 +12,7 @@ import {
   FileText,
   FolderOpen,
   HelpCircle,
+  ImagePlus,
   ListChecks,
   MessageSquare,
   PanelLeftOpen,
@@ -66,6 +67,8 @@ import type {
   ChatAgentPermissions,
   ChatAppToolApproval,
   ChatAppToolApprovalScope,
+  ChatImageAttachment,
+  ChatImageInput,
   ChatParticipantRequestApprovalRequest,
   ChatParticipantRequestBatch,
   ChatParticipant,
@@ -154,10 +157,24 @@ type ChatTimelineRow =
   | { type: "message"; id: string; message: ChatMessage }
   | { type: "thinking"; id: string; row: ChatThinkingRow };
 
+interface PendingChatImage {
+  id: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  objectUrl?: string;
+  dataBase64?: string;
+  status: "loading" | "ready" | "error";
+  error?: string;
+}
+
 const BRANCH_COMPARE_HELP = "Changes committed on the compare branch since it diverged from the base branch.";
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 const APP_ROSTER_REQUEST_CHANGE_TOOL = "app_roster_request_change";
+const CHAT_IMAGE_MAX_ATTACHMENTS = 5;
+const CHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+const CHAT_IMAGE_ALLOWED_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const APP_CHAT_REQUEST_PARTICIPANTS_TOOL = "app_chat_request_participants";
 const SHOW_CHAT_SYSTEM_MESSAGES = import.meta.env.VITE_AI_CONSENSUS_SHOW_SYSTEM_MESSAGES === "1";
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "ai-consensus.sidebarCollapsed";
@@ -879,6 +896,7 @@ function App(): JSX.Element {
   async function sendChatMessage(options: {
     content?: string;
     repoFileMentions?: RepoFileMention[];
+    imageAttachments?: ChatImageInput[];
     threadId?: string;
     parentMessageId?: string;
     chatThreadRootId?: string;
@@ -887,8 +905,9 @@ function App(): JSX.Element {
       return false;
     }
     const content = (options.content ?? chatMessageDraft).trim();
-    if (!content) {
-      setError("Enter a chat message.");
+    const imageAttachments = options.imageAttachments ?? [];
+    if (!content && imageAttachments.length === 0) {
+      setError("Enter a chat message or attach an image.");
       return false;
     }
     const runId = crypto.randomUUID();
@@ -907,6 +926,7 @@ function App(): JSX.Element {
         runId,
         content,
         repoFileMentions: options.repoFileMentions,
+        imageAttachments,
         threadId: options.threadId,
         parentMessageId: options.parentMessageId,
         chatThreadRootId: options.chatThreadRootId
@@ -1936,10 +1956,11 @@ function App(): JSX.Element {
                     draft={chatMessageDraft}
                     onDraftChange={setChatMessageDraft}
                     onLoadOlderMessages={() => void loadOlderConversationMessages()}
-                    onSend={(repoFileMentions) => sendChatMessage({ repoFileMentions })}
-                    onSendThread={(rootMessage, content, repoFileMentions) => sendChatMessage({
+                    onSend={(repoFileMentions, imageAttachments) => sendChatMessage({ repoFileMentions, imageAttachments })}
+                    onSendThread={(rootMessage, content, repoFileMentions, imageAttachments) => sendChatMessage({
                       content,
                       repoFileMentions,
+                      imageAttachments,
                       threadId: rootMessage.metadata?.threadId ?? rootMessage.id,
                       parentMessageId: rootMessage.id,
                       chatThreadRootId: rootMessage.id
@@ -2815,8 +2836,8 @@ function ChatConversationView(props: {
   draft: string;
   onDraftChange: (value: string) => void;
   onLoadOlderMessages: () => void;
-  onSend: (repoFileMentions?: RepoFileMention[]) => Promise<boolean>;
-  onSendThread: (rootMessage: Conversation["messages"][number], content: string, repoFileMentions?: RepoFileMention[]) => Promise<boolean>;
+  onSend: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[]) => Promise<boolean>;
+  onSendThread: (rootMessage: Conversation["messages"][number], content: string, repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[]) => Promise<boolean>;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: { selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
@@ -2902,9 +2923,9 @@ function ChatConversationView(props: {
     }
   }
 
-  async function sendDraft(repoFileMentions: RepoFileMention[] = []): Promise<boolean> {
+  async function sendDraft(repoFileMentions: RepoFileMention[] = [], imageAttachments: ChatImageInput[] = []): Promise<boolean> {
     forceStickToBottomRef.current = true;
-    return props.onSend(repoFileMentions);
+    return props.onSend(repoFileMentions, imageAttachments);
   }
 
   function scrollToChatBottom(): void {
@@ -2928,12 +2949,12 @@ function ChatConversationView(props: {
     window.setTimeout(scrollToChatBottom, 180);
   }
 
-  async function sendThreadDraft(rootMessage: Conversation["messages"][number], repoFileMentions: RepoFileMention[] = []): Promise<boolean> {
+  async function sendThreadDraft(rootMessage: Conversation["messages"][number], repoFileMentions: RepoFileMention[] = [], imageAttachments: ChatImageInput[] = []): Promise<boolean> {
     const content = (threadDrafts[rootMessage.id] ?? "").trim();
-    if (!content) {
+    if (!content && imageAttachments.length === 0) {
       return false;
     }
-    const sent = await props.onSendThread(rootMessage, content, repoFileMentions);
+    const sent = await props.onSendThread(rootMessage, content, repoFileMentions, imageAttachments);
     if (sent) {
       setThreadDrafts((current) => ({ ...current, [rootMessage.id]: "" }));
     }
@@ -3072,6 +3093,7 @@ function ChatConversationView(props: {
                   ) : (
                     <ChatMessageItem
                       message={row.message}
+                      conversationId={props.conversation.id}
                       participants={participants}
                       contextUsage={contextUsageForMessage(row.message, contextUsageByParticipant)}
                       sessionId={sessionIdForMessage(row.message, sessionsByParticipant)}
@@ -3121,7 +3143,7 @@ function ChatConversationView(props: {
           busy={props.isRunning}
           liveProgressById={liveProgressById}
           onDraftChange={(value) => setThreadDrafts((current) => ({ ...current, [selectedThreadRoot.id]: value }))}
-          onSend={(repoFileMentions) => sendThreadDraft(selectedThreadRoot, repoFileMentions)}
+          onSend={(repoFileMentions, imageAttachments) => sendThreadDraft(selectedThreadRoot, repoFileMentions, imageAttachments)}
           onClose={() => setSelectedThreadRootId(undefined)}
           onApproveMentions={props.onApproveMentions}
           onRejectMentions={props.onRejectMentions}
@@ -3147,7 +3169,7 @@ function ChatComposer(props: {
   maxHeight?: number;
   testId?: string;
   onDraftChange: (value: string) => void;
-  onSend: (repoFileMentions?: RepoFileMention[]) => boolean | void | Promise<boolean | void>;
+  onSend: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[]) => boolean | void | Promise<boolean | void>;
 }): JSX.Element {
   const [mentionQuery, setMentionQuery] = useState<string | undefined>();
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -3155,8 +3177,13 @@ function ChatComposer(props: {
   const [fileIndex, setFileIndex] = useState(0);
   const [fileOptions, setFileOptions] = useState<RepoFileSearchResult[]>([]);
   const [selectedFileMentions, setSelectedFileMentions] = useState<RepoFileMention[]>([]);
+  const [pendingImages, setPendingImages] = useState<PendingChatImage[]>([]);
+  const pendingImagesRef = useRef<PendingChatImage[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const fileSearchRequestRef = useRef(0);
-  const canSend = !props.isRunning && Boolean(props.draft.trim());
+  const readyImages = pendingImages.filter((image) => image.status === "ready" && image.dataBase64);
+  const hasInvalidImages = pendingImages.some((image) => image.status !== "ready");
+  const canSend = !props.isRunning && !hasInvalidImages && (Boolean(props.draft.trim()) || readyImages.length > 0);
   const mentionOptions = mentionQuery === undefined
     ? []
     : props.participants.filter((participant) => participant.handle.toLowerCase().includes(mentionQuery.toLowerCase()));
@@ -3166,7 +3193,29 @@ function ChatComposer(props: {
     setFileQuery(undefined);
     setFileOptions([]);
     setSelectedFileMentions([]);
+    setPendingImages((current) => {
+      for (const image of current) {
+        if (image.objectUrl) {
+          URL.revokeObjectURL(image.objectUrl);
+        }
+      }
+      return [];
+    });
   }, [props.conversationId]);
+
+  useEffect(() => {
+    pendingImagesRef.current = pendingImages;
+  }, [pendingImages]);
+
+  useEffect(() => {
+    return () => {
+      for (const image of pendingImagesRef.current) {
+        if (image.objectUrl) {
+          URL.revokeObjectURL(image.objectUrl);
+        }
+      }
+    };
+  }, []);
 
   useEffect(() => {
     setSelectedFileMentions((current) => current.filter((mention) => draftHasFileMention(props.draft, mention.path)));
@@ -3231,11 +3280,104 @@ function ChatComposer(props: {
     setSelectedFileMentions((current) => current.filter((mention) => mention.path !== filePath));
   }
 
+  async function addImageFiles(files: File[]): Promise<void> {
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    if (imageFiles.length === 0) {
+      return;
+    }
+    const availableSlots = CHAT_IMAGE_MAX_ATTACHMENTS - pendingImages.length;
+    if (availableSlots <= 0) {
+      setPendingImages((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          filename: "Too many images",
+          mimeType: "",
+          sizeBytes: 0,
+          status: "error",
+          error: `Attach at most ${CHAT_IMAGE_MAX_ATTACHMENTS} images.`
+        }
+      ]);
+      return;
+    }
+    const acceptedFiles = imageFiles.slice(0, availableSlots);
+    const overflow = imageFiles.length - acceptedFiles.length;
+    const placeholders = acceptedFiles.map((file): PendingChatImage => {
+      const validationError = pendingImageValidationError(file);
+      return {
+        id: crypto.randomUUID(),
+        filename: file.name || defaultImageFilename(file.type),
+        mimeType: file.type,
+        sizeBytes: file.size,
+        objectUrl: validationError ? undefined : URL.createObjectURL(file),
+        status: validationError ? "error" : "loading",
+        error: validationError
+      };
+    });
+    setPendingImages((current) => [
+      ...current,
+      ...placeholders,
+      ...(overflow > 0
+        ? [{
+            id: crypto.randomUUID(),
+            filename: "Too many images",
+            mimeType: "",
+            sizeBytes: 0,
+            status: "error" as const,
+            error: `Attach at most ${CHAT_IMAGE_MAX_ATTACHMENTS} images.`
+          }]
+        : [])
+    ]);
+    await Promise.all(placeholders.map(async (placeholder, index) => {
+      if (placeholder.status === "error") {
+        return;
+      }
+      try {
+        const dataBase64 = await readFileAsBase64(acceptedFiles[index]);
+        setPendingImages((current) => current.map((image) => image.id === placeholder.id
+          ? { ...image, dataBase64, status: "ready" }
+          : image
+        ));
+      } catch {
+        setPendingImages((current) => current.map((image) => image.id === placeholder.id
+          ? { ...image, status: "error", error: "Could not read this image." }
+          : image
+        ));
+      }
+    }));
+  }
+
+  function removePendingImage(imageId: string): void {
+    setPendingImages((current) => {
+      const removed = current.find((image) => image.id === imageId);
+      if (removed?.objectUrl) {
+        URL.revokeObjectURL(removed.objectUrl);
+      }
+      return current.filter((image) => image.id !== imageId);
+    });
+  }
+
   async function sendDraft(): Promise<void> {
     if (canSend) {
-      const sent = await props.onSend(selectedFileMentions);
-      if (sent !== false) {
-        setSelectedFileMentions([]);
+      const fileMentionsToSend = selectedFileMentions;
+      const pendingImagesToSend = pendingImages;
+      const imageInputs = readyImages.map((image): ChatImageInput => ({
+        filename: image.filename,
+        mimeType: image.mimeType,
+        dataBase64: image.dataBase64 ?? ""
+      }));
+      setSelectedFileMentions([]);
+      setPendingImages([]);
+      const sent = await props.onSend(fileMentionsToSend, imageInputs);
+      if (sent === false) {
+        setSelectedFileMentions(fileMentionsToSend);
+        setPendingImages(pendingImagesToSend);
+        return;
+      }
+      for (const image of pendingImagesToSend) {
+        if (image.objectUrl) {
+          URL.revokeObjectURL(image.objectUrl);
+        }
       }
     }
   }
@@ -3251,6 +3393,26 @@ function ChatComposer(props: {
               <span>{mention.path}</span>
               <X size={13} />
             </button>
+          ))}
+        </div>
+      )}
+      {pendingImages.length > 0 && (
+        <div className="pending-image-strip" aria-label="Pending image attachments">
+          {pendingImages.map((image) => (
+            <div className={`pending-image-item ${image.status}`} key={image.id}>
+              {image.objectUrl ? (
+                <img src={image.objectUrl} alt="" />
+              ) : (
+                <ImagePlus size={18} aria-hidden />
+              )}
+              <div>
+                <strong>{image.filename}</strong>
+                <span>{image.error ?? `${formatBytes(image.sizeBytes)}${image.status === "loading" ? " · reading" : ""}`}</span>
+              </div>
+              <button type="button" aria-label={`Remove ${image.filename}`} onClick={() => removePendingImage(image.id)}>
+                <X size={14} />
+              </button>
+            </div>
           ))}
         </div>
       )}
@@ -3300,6 +3462,25 @@ function ChatComposer(props: {
         <ResizableTextarea
           value={props.draft}
           onChange={(event) => updateDraft(event.target.value)}
+          onPaste={(event) => {
+            const files = Array.from(event.clipboardData?.files ?? []);
+            if (files.some((file) => file.type.startsWith("image/"))) {
+              event.preventDefault();
+              void addImageFiles(files);
+            }
+          }}
+          onDrop={(event) => {
+            const files = Array.from(event.dataTransfer?.files ?? []);
+            if (files.some((file) => file.type.startsWith("image/"))) {
+              event.preventDefault();
+              void addImageFiles(files);
+            }
+          }}
+          onDragOver={(event) => {
+            if (Array.from(event.dataTransfer.types).includes("Files")) {
+              event.preventDefault();
+            }
+          }}
           onKeyDown={(event) => {
             if (visibleFileOptions.length > 0 && event.key === "ArrowDown") {
               event.preventDefault();
@@ -3350,6 +3531,21 @@ function ChatComposer(props: {
           placeholder={props.placeholder}
         />
       </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        multiple
+        hidden
+        onChange={(event) => {
+          const files = Array.from(event.currentTarget.files ?? []);
+          event.currentTarget.value = "";
+          void addImageFiles(files);
+        }}
+      />
+      <Button size="sm" variant="outline" title="Attach image" aria-label="Attach image" onClick={() => fileInputRef.current?.click()}>
+        <ImagePlus size={18} />
+      </Button>
       <Button size="sm" title="Send" disabled={!canSend} onClick={() => void sendDraft()}>
         {props.isRunning ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
       </Button>
@@ -3549,6 +3745,7 @@ function ChatAppToolParticipantRequestOperation({ request, requesterHandle }: { 
 
 function ChatMessageItem(props: {
   message: Conversation["messages"][number];
+  conversationId: string;
   participants?: ChatParticipant[];
   contextUsage?: AgentContextUsage;
   sessionId?: string;
@@ -3580,6 +3777,7 @@ function ChatMessageItem(props: {
   const choice = message.metadata?.pendingChoice;
   const participantRequest = message.metadata?.participantRequest;
   const repoFileMentions = chatMessageRepoFileMentions(message);
+  const imageAttachments = chatMessageImageAttachments(message);
   const allPendingIds = pending.map((mention) => mention.targetParticipantId);
   const displayContent = chatDisplayContent(message, author);
   const showThreadActions = !props.inThread && message.role !== "system" && Boolean(props.onOpenThread);
@@ -3656,6 +3854,9 @@ function ChatMessageItem(props: {
               <span>Referenced: {repoFileMentions.map((mention) => mention.path).join(", ")}</span>
             </div>
           )}
+          {imageAttachments.length > 0 && (
+            <ChatImageAttachmentStrip conversationId={props.conversationId} attachments={imageAttachments} />
+          )}
           {participantRequest && (
             <div className="chat-approval-note">
               <span>{participantRequestStatusLabel(participantRequest)}</span>
@@ -3719,6 +3920,98 @@ function ChatMessageItem(props: {
           </div>
         </div>
       )}
+    </>
+  );
+}
+
+function ChatImageAttachmentStrip(props: {
+  conversationId: string;
+  attachments: ChatImageAttachment[];
+}): JSX.Element {
+  const [dataById, setDataById] = useState<Record<string, { dataUrl?: string; error?: string }>>({});
+  const [selectedId, setSelectedId] = useState<string | undefined>();
+  const signature = props.attachments.map((attachment) => `${attachment.id}:${attachment.sizeBytes}`).join("|");
+  const selectedAttachment = selectedId ? props.attachments.find((attachment) => attachment.id === selectedId) : undefined;
+  const selectedData = selectedId ? dataById[selectedId]?.dataUrl : undefined;
+
+  useEffect(() => {
+    let cancelled = false;
+    setDataById({});
+    for (const attachment of props.attachments) {
+      void window.consensus.readChatAttachment({
+        conversationId: props.conversationId,
+        attachmentId: attachment.id
+      }).then((result) => {
+        if (cancelled) {
+          return;
+        }
+        setDataById((current) => ({
+          ...current,
+          [attachment.id]: {
+            dataUrl: `data:${result.attachment.mimeType};base64,${result.dataBase64}`
+          }
+        }));
+      }).catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setDataById((current) => ({
+          ...current,
+          [attachment.id]: {
+            error: errorText(error)
+          }
+        }));
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [props.conversationId, signature]);
+
+  return (
+    <>
+      <div className="chat-image-attachments" aria-label="Attached images">
+        {props.attachments.map((attachment) => {
+          const imageData = dataById[attachment.id];
+          return (
+            <button
+              type="button"
+              className={`chat-image-attachment ${imageData?.error ? "error" : ""}`}
+              disabled={!imageData?.dataUrl}
+              onClick={() => setSelectedId(attachment.id)}
+              title={imageData?.error ?? attachment.filename}
+              key={attachment.id}
+            >
+              {imageData?.dataUrl ? (
+                <img src={imageData.dataUrl} alt={attachment.filename} />
+              ) : (
+                <ImagePlus size={18} aria-hidden />
+              )}
+              <span>{attachment.filename}</span>
+              <small>{imageData?.error ? "Unavailable" : `${attachment.width}x${attachment.height} · ${formatBytes(attachment.sizeBytes)}`}</small>
+            </button>
+          );
+        })}
+      </div>
+      <Dialog open={Boolean(selectedAttachment)} onOpenChange={(open) => {
+        if (!open) {
+          setSelectedId(undefined);
+        }
+      }}>
+        <DialogContent className="chat-image-preview-dialog">
+          <DialogHeader>
+            <DialogTitle>{selectedAttachment?.filename ?? "Image"}</DialogTitle>
+            <DialogDescription>
+              {selectedAttachment ? `${selectedAttachment.width}x${selectedAttachment.height} · ${formatBytes(selectedAttachment.sizeBytes)}` : ""}
+            </DialogDescription>
+          </DialogHeader>
+          {selectedAttachment && selectedData && (
+            <div className="chat-image-preview-frame">
+              <img src={selectedData} alt={selectedAttachment.filename} />
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
@@ -3913,7 +4206,7 @@ function ChatThreadPanel(props: {
   busy: boolean;
   liveProgressById: Map<string, AgentRunProgress>;
   onDraftChange: (value: string) => void;
-  onSend: (repoFileMentions?: RepoFileMention[]) => boolean | void | Promise<boolean | void>;
+  onSend: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[]) => boolean | void | Promise<boolean | void>;
   onClose: () => void;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
@@ -3935,6 +4228,7 @@ function ChatThreadPanel(props: {
       <div className="chat-thread-body">
         <ChatMessageItem
           message={props.rootMessage}
+          conversationId={props.conversationId ?? ""}
           participants={props.participants}
           contextUsage={contextUsageForMessage(props.rootMessage, props.contextUsageByParticipant)}
           sessionId={sessionIdForMessage(props.rootMessage, props.sessionsByParticipant)}
@@ -3951,6 +4245,7 @@ function ChatThreadPanel(props: {
             {props.replies.map((message) => (
               <ChatMessageItem
                 message={message}
+                conversationId={props.conversationId ?? ""}
                 participants={props.participants}
                 contextUsage={contextUsageForMessage(message, props.contextUsageByParticipant)}
                 sessionId={sessionIdForMessage(message, props.sessionsByParticipant)}
@@ -6639,6 +6934,71 @@ function chatMessageRepoFileMentions(message: Conversation["messages"][number]):
   });
 }
 
+function chatMessageImageAttachments(message: Conversation["messages"][number]): ChatImageAttachment[] {
+  const attachments = message.metadata?.imageAttachments;
+  if (!Array.isArray(attachments)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  return attachments.flatMap((attachment): ChatImageAttachment[] => {
+    if (
+      !attachment ||
+      typeof attachment !== "object" ||
+      typeof attachment.id !== "string" ||
+      seen.has(attachment.id)
+    ) {
+      return [];
+    }
+    seen.add(attachment.id);
+    return [attachment as ChatImageAttachment];
+  });
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Unable to read image."));
+    reader.onload = () => {
+      if (typeof reader.result !== "string") {
+        reject(new Error("Unable to read image."));
+        return;
+      }
+      resolve(reader.result.replace(/^data:[^;]+;base64,/, ""));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function defaultImageFilename(mimeType: string): string {
+  if (mimeType === "image/jpeg") {
+    return "image.jpg";
+  }
+  if (mimeType === "image/webp") {
+    return "image.webp";
+  }
+  return "image.png";
+}
+
+function pendingImageValidationError(file: File): string | undefined {
+  if (!CHAT_IMAGE_ALLOWED_MIME_TYPES.has(file.type)) {
+    return "Use PNG, JPEG, or WebP.";
+  }
+  if (file.size > CHAT_IMAGE_MAX_BYTES) {
+    return `Use images up to ${formatBytes(CHAT_IMAGE_MAX_BYTES)}.`;
+  }
+  return undefined;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+  }
+  if (bytes >= 1024) {
+    return `${Math.round(bytes / 1024)} KB`;
+  }
+  return `${bytes} B`;
+}
+
 function contextUsageLabel(usage: AgentContextUsage | undefined): string {
   if (!usage) {
     return "Unavailable";
@@ -7438,6 +7798,7 @@ function installDevMockBridge(): void {
     ]
   };
   const conversationListeners = new Set<(updated: Conversation) => void>();
+  const mockAttachmentData = new Map<string, { attachment: ChatImageAttachment; dataBase64: string }>();
   const emitConversation = (): void => {
     const updated = { ...conversation, messages: [...conversation.messages], updatedAt: new Date().toISOString() };
     conversation = updated;
@@ -7488,12 +7849,36 @@ function installDevMockBridge(): void {
     },
     sendChatMessage: async (request) => {
       const now = new Date().toISOString();
+      const imageAttachments = (request.imageAttachments ?? []).map((input, index): ChatImageAttachment => {
+        const id = nextId("mock-image");
+        const attachment: ChatImageAttachment = {
+          id,
+          filename: input.filename || defaultImageFilename(input.mimeType),
+          mimeType: input.mimeType === "image/jpeg" || input.mimeType === "image/webp" ? input.mimeType : "image/png",
+          sizeBytes: Math.round((input.dataBase64.length * 3) / 4),
+          width: 1,
+          height: 1,
+          storageKey: `attachments/${id}-${index}.png`,
+          createdAt: now
+        };
+        mockAttachmentData.set(id, {
+          attachment,
+          dataBase64: input.dataBase64
+        });
+        return attachment;
+      });
       conversation = {
         ...conversation,
         updatedAt: now,
         messages: [
           ...conversation.messages,
-          { id: nextId("mock-user"), role: "user", content: request.content, createdAt: now },
+          {
+            id: nextId("mock-user"),
+            role: "user",
+            content: request.content,
+            createdAt: now,
+            metadata: imageAttachments.length > 0 ? { imageAttachments } : undefined
+          },
           {
             id: nextId("mock-response"),
             role: "participant",
@@ -7507,6 +7892,13 @@ function installDevMockBridge(): void {
       };
       emitConversation();
       return { conversation, warnings: [] };
+    },
+    readChatAttachment: async (request) => {
+      const stored = mockAttachmentData.get(request.attachmentId);
+      if (!stored) {
+        throw new Error("Attachment was not found.");
+      }
+      return stored;
     },
     respondToChatMentions: async () => ({ conversation, warnings: [] }),
     respondToChatChoice: async (request) => {

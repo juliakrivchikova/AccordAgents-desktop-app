@@ -15,6 +15,7 @@ import type {
   PlanItemReviewRequest,
   ProviderKind,
   ProviderSettingsUpdate,
+  ReadChatAttachmentRequest,
   RenameChatConversationRequest,
   RepoFileSearchRequest,
   RespondToChatAppToolApprovalRequest,
@@ -63,6 +64,8 @@ appMcpService.setPermissionChangeHandler((actor, request) => chatService.request
 appMcpService.setChatContextHandler((actor) => chatService.describeChatContextForTool(actor));
 appMcpService.setChatParticipantsHandler((actor) => chatService.describeChatParticipantsForTool(actor));
 appMcpService.setChatMessagesHandler((actor, request) => chatService.readChatMessagesForTool(actor, request));
+appMcpService.setChatAttachmentListHandler((actor, request) => chatService.listChatAttachmentsForTool(actor, request));
+appMcpService.setChatAttachmentReadHandler((actor, request) => chatService.readChatAttachmentForTool(actor, request));
 appMcpService.setChatParticipantRequestHandler((actor, request) => chatService.requestParticipantsFromTool(actor, request));
 appMcpService.setChatParticipantRequestStatusHandler((actor, request) => chatService.participantRequestStatusForTool(actor, request));
 const activeReviews = new Map<string, AbortController>();
@@ -221,6 +224,9 @@ function registerIpc(): void {
     } finally {
       activeReviews.delete(runId);
     }
+  });
+  ipcMain.handle("chat:read-attachment", async (_event, request: ReadChatAttachmentRequest) => {
+    return chatService.readChatAttachment(request);
   });
   ipcMain.handle("chat:respond-to-mentions", async (_event, request: RespondToChatMentionsRequest) => {
     const runId = request.runId ?? randomUUID();

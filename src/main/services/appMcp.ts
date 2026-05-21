@@ -12,6 +12,8 @@ export const APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL = "app_chat_get_partic
 export const APP_CHAT_GET_CONTEXT_TOOL = "app_chat_get_context";
 export const APP_CHAT_GET_PARTICIPANTS_TOOL = "app_chat_get_participants";
 export const APP_CHAT_READ_MESSAGES_TOOL = "app_chat_read_messages";
+export const APP_CHAT_LIST_ATTACHMENTS_TOOL = "app_chat_list_attachments";
+export const APP_CHAT_READ_ATTACHMENT_TOOL = "app_chat_read_attachment";
 
 export interface AppMcpActor {
   conversationId: string;
@@ -45,6 +47,8 @@ type AppPermissionChangeHandler = (actor: AppMcpActor, request: unknown) => Prom
 type AppChatContextHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppChatParticipantsHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppChatMessagesHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+type AppChatAttachmentListHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+type AppChatAttachmentReadHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatParticipantRequestHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatParticipantRequestStatusHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 
@@ -78,6 +82,8 @@ export class AppMcpService {
   private chatContextHandler?: AppChatContextHandler;
   private chatParticipantsHandler?: AppChatParticipantsHandler;
   private chatMessagesHandler?: AppChatMessagesHandler;
+  private chatAttachmentListHandler?: AppChatAttachmentListHandler;
+  private chatAttachmentReadHandler?: AppChatAttachmentReadHandler;
   private chatParticipantRequestHandler?: AppChatParticipantRequestHandler;
   private chatParticipantRequestStatusHandler?: AppChatParticipantRequestStatusHandler;
 
@@ -103,6 +109,14 @@ export class AppMcpService {
 
   setChatMessagesHandler(handler: AppChatMessagesHandler): void {
     this.chatMessagesHandler = handler;
+  }
+
+  setChatAttachmentListHandler(handler: AppChatAttachmentListHandler): void {
+    this.chatAttachmentListHandler = handler;
+  }
+
+  setChatAttachmentReadHandler(handler: AppChatAttachmentReadHandler): void {
+    this.chatAttachmentReadHandler = handler;
   }
 
   setChatParticipantRequestHandler(handler: AppChatParticipantRequestHandler): void {
@@ -414,6 +428,61 @@ export class AppMcpService {
           idempotentHint: true,
           openWorldHint: false
         }
+      },
+      {
+        name: APP_CHAT_LIST_ATTACHMENTS_TOOL,
+        title: "List Chat Attachments",
+        description:
+          "List image attachments visible to the current app token. Use this to discover attachment IDs, filenames, MIME types, dimensions, and source message IDs before reading image bytes.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            messageId: {
+              type: "string",
+              description: "Optional source message id. If omitted, returns visible attachments from the current conversation snapshot."
+            },
+            threadId: {
+              type: "string",
+              description: "Optional chat thread id to list attachments from one thread."
+            },
+            limit: {
+              type: "integer",
+              minimum: 1,
+              maximum: 100,
+              description: "Maximum number of attachment records to return. Defaults to 50."
+            }
+          }
+        },
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false
+        }
+      },
+      {
+        name: APP_CHAT_READ_ATTACHMENT_TOOL,
+        title: "Read Chat Attachment",
+        description:
+          "Read one visible image attachment by attachmentId. The result includes metadata plus image content; use this when a message says it has an attached screenshot or image.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            attachmentId: {
+              type: "string",
+              description: "Attachment id from app_chat_list_attachments or message metadata."
+            }
+          },
+          required: ["attachmentId"]
+        },
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false
+        }
       }
     ];
     if (hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
@@ -583,7 +652,9 @@ export class AppMcpService {
       record.name !== APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL &&
       record.name !== APP_CHAT_GET_CONTEXT_TOOL &&
       record.name !== APP_CHAT_GET_PARTICIPANTS_TOOL &&
-      record.name !== APP_CHAT_READ_MESSAGES_TOOL
+      record.name !== APP_CHAT_READ_MESSAGES_TOOL &&
+      record.name !== APP_CHAT_LIST_ATTACHMENTS_TOOL &&
+      record.name !== APP_CHAT_READ_ATTACHMENT_TOOL
     ) {
       throw new Error(`Unknown app tool: ${String(record.name ?? "")}.`);
     }
@@ -604,6 +675,18 @@ export class AppMcpService {
         throw new Error("Chat message reading is not available.");
       }
       return this.toolTextResult(await this.chatMessagesHandler(actor, record.arguments));
+    }
+    if (record.name === APP_CHAT_LIST_ATTACHMENTS_TOOL) {
+      if (!this.chatAttachmentListHandler) {
+        throw new Error("Chat attachment listing is not available.");
+      }
+      return this.toolTextResult(await this.chatAttachmentListHandler(actor, record.arguments));
+    }
+    if (record.name === APP_CHAT_READ_ATTACHMENT_TOOL) {
+      if (!this.chatAttachmentReadHandler) {
+        throw new Error("Chat attachment reading is not available.");
+      }
+      return this.toolImageResult(await this.chatAttachmentReadHandler(actor, record.arguments));
     }
     if (record.name === APP_CHAT_REQUEST_PARTICIPANTS_TOOL) {
       if (!this.chatParticipantRequestHandler) {
@@ -651,6 +734,36 @@ export class AppMcpService {
           type: "text",
           text: JSON.stringify(result, null, 2)
         }
+      ]
+    };
+  }
+
+  private toolImageResult(result: unknown): unknown {
+    const record = result && typeof result === "object" && !Array.isArray(result)
+      ? result as { attachment?: unknown; dataBase64?: unknown }
+      : {};
+    const attachment = record.attachment && typeof record.attachment === "object" && !Array.isArray(record.attachment)
+      ? record.attachment as { mimeType?: unknown }
+      : undefined;
+    const data = typeof record.dataBase64 === "string" ? record.dataBase64 : "";
+    const mimeType = typeof attachment?.mimeType === "string" ? attachment.mimeType : "image/png";
+    const summary = {
+      ...record,
+      dataBase64: data ? "[omitted: returned as MCP image content]" : undefined
+    };
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(summary, null, 2)
+        },
+        ...(data
+          ? [{
+              type: "image",
+              data,
+              mimeType
+            }]
+          : [])
       ]
     };
   }

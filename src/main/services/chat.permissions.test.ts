@@ -256,7 +256,7 @@ test("permission resume attaches resumed participant-request reply to the origin
   assert.equal(saved.metadata.pendingAppToolApprovals[0].consumedAt.length > 0, true);
   assert.equal(progressEvents[0]?.runId, "blocked-run");
   assert.equal(progressEvents[0]?.phase, "initial");
-  assert.equal(progressEvents[0]?.agentProgress?.state, "running");
+  assert.equal(progressEvents.some((event) => event.agentProgress?.state === "running"), true);
   assert.equal(progressEvents.at(-1)?.phase, "done");
 });
 
