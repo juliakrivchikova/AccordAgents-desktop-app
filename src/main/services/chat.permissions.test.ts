@@ -391,40 +391,49 @@ test("participant prose mentioning blocked permissions does not create approval 
   assert.equal(conversation.messages.some((message) => message.content.includes("Permission approval needed")), false);
 });
 
-test("guard retry response mentioning write access does not create approval cards", async () => {
+test("internal-mechanics phrasing in a draft is delivered as-is without retry", async () => {
   const participant = chatParticipant("claude-code", { workspaceWrite: false });
   const conversation = chatConversation([participant]);
-  const outputs = [
-    "The write tool is not enabled, so I need workspace edit access to save the file.",
-    "I cannot edit files until write access is approved."
-  ];
+  let runCount = 0;
+  const draft = "The write tool is not enabled, so I cannot edit the file here.";
   const { service, storage, tempRoot } = testService({
     conversation,
-    run: async (runParticipant) => ({
-      participant: runParticipant,
-      ok: true,
-      content: outputs.shift() ?? "Unexpected extra run.",
-      durationMs: 1
-    })
+    run: async (runParticipant) => {
+      runCount += 1;
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: draft,
+        durationMs: 1
+      };
+    }
   });
   (service as any).ensureHistoryFiles = async () => tempRoot;
 
   const result = await service.sendMessage({
     conversationId: conversation.id,
-    runId: "retry-run",
+    runId: "no-retry-run",
     content: "@drew please update the file"
   });
 
-  assert.equal(result.warnings.some((warning) => warning.includes("rejected response that mentioned tool availability")), true);
-  assert.equal(outputs.length, 0);
-
+  assert.equal(runCount, 1);
+  assert.equal(
+    result.warnings.some((warning) =>
+      warning.includes("rejected response that mentioned") ||
+      warning.includes("blocked") ||
+      warning.includes("Blocked")
+    ),
+    false
+  );
+  const participantMessage = storage.current.messages.find(
+    (message: Conversation["messages"][number]) => message.role === "participant"
+  );
+  assert.equal(participantMessage?.content, draft);
+  assert.equal(participantMessage?.status, "done");
   const approvals = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).filter(
     (item) => item.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL
   );
   assert.equal(approvals.length, 0);
-  assert.equal(storage.current.messages.some((message: Conversation["messages"][number]) =>
-    message.content.includes("Permission approval needed")
-  ), false);
 });
 
 test("approved permission without resumeContext does not auto-run", async () => {

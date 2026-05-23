@@ -1574,10 +1574,7 @@ export class ChatService {
       participant,
       pendingMessage.id,
       (cumulative: string): boolean => {
-        return Boolean(
-          this.chatResponseGuardViolation(cumulative, triggerMessage) ??
-            this.confirmationBrevityViolation(cumulative, triggerMessage, Boolean(options.continuation))
-        );
+        return Boolean(this.confirmationBrevityViolation(cumulative, triggerMessage, Boolean(options.continuation)));
       }
     );
     const appToolCapabilities = normalizeChatAppToolCapabilities([
@@ -1650,64 +1647,6 @@ export class ChatService {
         }
       });
       this.applyCliRunMetadata(session, result, participant, options.warnings);
-      const guardViolation = result.ok ? this.chatResponseGuardViolation(result.content, triggerMessage) : undefined;
-      if (guardViolation) {
-        options.warnings.push(`@${participant.handle}: rejected response that mentioned ${guardViolation}; retried in the same chat session.`);
-        const retryUsesPromptRole = session.roleRuntime === "prompt-fallback";
-        const retryIsResumingSession = Boolean(session.sessionId);
-        const retryIncludeRoleInstructions = (retryUsesPromptRole && !retryIsResumingSession) || (retryIsResumingSession && sessionState.instructionsRefreshed);
-        const retryPromptBase = retryIncludeRoleInstructions
-          ? this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
-              includeRoleInstructions: true,
-              agentMode,
-              permissions
-            })
-          : this.buildRetryEnvelope(triggerMessage, Boolean(options.continuation));
-        const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
-          includeRoleInstructions: true,
-          agentMode,
-          permissions
-        });
-        const retryPrompt = this.chatGuardRetryPrompt(retryPromptBase, guardViolation);
-        const retryRole = retryUsesPromptRole
-          ? undefined
-          : this.cliRoleOptions(participant, session, this.chatGuardRetryPrompt(retryPromptFallbackBase, guardViolation));
-        progressSink.beginAttempt();
-        result = await this.cliRunner.run(cliParticipant, retryPrompt, runPath, undefined, "chat", signal, {
-          persistSession: true,
-          sessionId: session.sessionId,
-          extraReadableDirs: [workspacePath],
-          resumeFallbackPrompt,
-          role: retryRole,
-          appMcp: appMcp
-            ? {
-                ...appMcp,
-                toolNames: appMcpToolNames
-              }
-            : undefined,
-          agentMode,
-          permissions,
-          onOutput: progressSink.emit,
-          warm: {
-            conversationId: conversation.id,
-            participantId: participant.id,
-            contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions),
-            idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
-          }
-        });
-        this.applyCliRunMetadata(session, result, participant, options.warnings);
-        const retryViolation = result.ok ? this.chatResponseGuardViolation(result.content, triggerMessage) : undefined;
-        if (retryViolation) {
-          const error = `Blocked chat response because it mentioned ${retryViolation}.`;
-          options.warnings.push(`@${participant.handle}: ${error}`);
-          result = {
-            ...result,
-            ok: false,
-            content: `@${participant.handle} response was blocked because it discussed internal CLI mechanics instead of answering in chat.`,
-            error
-          };
-        }
-      }
       const confirmationViolation = result.ok
         ? this.confirmationBrevityViolation(result.content, triggerMessage, Boolean(options.continuation))
         : undefined;
@@ -1756,23 +1695,11 @@ export class ChatService {
           }
         });
         this.applyCliRunMetadata(session, result, participant, options.warnings);
-        const retryGuardViolation = result.ok ? this.chatResponseGuardViolation(result.content, triggerMessage) : undefined;
-        if (retryGuardViolation) {
-          const error = `Blocked chat response because it mentioned ${retryGuardViolation}.`;
-          options.warnings.push(`@${participant.handle}: ${error}`);
-          result = {
-            ...result,
-            ok: false,
-            content: `@${participant.handle} response was blocked because it discussed internal CLI mechanics instead of answering in chat.`,
-            error
-          };
-        } else {
-          const retryConfirmationViolation = result.ok
-            ? this.confirmationBrevityViolation(result.content, triggerMessage, Boolean(options.continuation))
-            : undefined;
-          if (retryConfirmationViolation) {
-            options.warnings.push(`@${participant.handle}: still returned a verbose affirmative confirmation after retry.`);
-          }
+        const retryConfirmationViolation = result.ok
+          ? this.confirmationBrevityViolation(result.content, triggerMessage, Boolean(options.continuation))
+          : undefined;
+        if (retryConfirmationViolation) {
+          options.warnings.push(`@${participant.handle}: still returned a verbose affirmative confirmation after retry.`);
         }
       }
       if (!signal?.aborted) {
@@ -2331,34 +2258,6 @@ export class ChatService {
   private async roleForConfigId(roleConfigId: string): Promise<ChatRoleConfig | undefined> {
     const roles = (await this.settings.getPublicSettings()).chatRoleConfigs;
     return roles.find((item) => item.id === roleConfigId);
-  }
-
-  private chatResponseGuardViolation(content: string, triggerMessage: ChatMessage): string | undefined {
-    if (this.chatMechanicsWereRequested(triggerMessage.content)) {
-      return undefined;
-    }
-    const searchable = this.withoutFencedCode(content);
-    const forbidden: Array<{ label: string; pattern: RegExp }> = [
-      { label: "ExitPlanMode", pattern: /\bExitPlanMode\b/i },
-      { label: "Plan Mode", pattern: /\bplan mode\b/i },
-      { label: "plan files", pattern: /\bplan file\b/i },
-      { label: "tool availability", pattern: /\b(?:write|edit|bash|read|grep|glob|ls)\s+tool\b|\btools?\s+(?:is|are|was|were)\s+not\s+enabled\b|\bnot\s+enabled\s+in\s+this\s+context\b/i },
-      { label: "out-of-chat writing", pattern: /\b(?:recorded|written|saved)\s+(?:in|to)\s+(?:the\s+)?(?:plan|file|elsewhere)\b/i },
-      { label: "posted-above deflection", pattern: /\bposted above\b/i }
-    ];
-    return forbidden.find((item) => item.pattern.test(searchable))?.label;
-  }
-
-  private chatMechanicsWereRequested(content: string): boolean {
-    return /\b(?:ExitPlanMode|plan mode|plan file|write tool|edit tool|bash tool|tool availability|permission mode|enabled tools?)\b/i.test(content);
-  }
-
-  private chatGuardRetryPrompt(prompt: string, violation: string): string {
-    return [
-      `Your previous draft was rejected because it mentioned ${violation}, which is forbidden for AI Consensus chat participants unless User directly asks about app or CLI mechanics.`,
-      "Rewrite the response as a normal chat message. Do not mention tools, permission modes, plan files, ExitPlanMode, or writing/recording outside the chat. Include the actual answer, decision, or request in this reply.",
-      prompt
-    ].join("\n\n");
   }
 
   private confirmationBrevityPolicy(): string {
@@ -5655,7 +5554,7 @@ export class ChatService {
     progress: ProgressCallback | undefined,
     participant: ChatParticipant,
     messageId: string,
-    guardViolationCheck?: (cumulative: string) => boolean
+    suppressIf?: (cumulative: string) => boolean
   ): {
     emit: (event: CliAgentOutputEvent) => void;
     beginAttempt: () => void;
@@ -5725,7 +5624,7 @@ export class ChatService {
           return;
         }
         cumulative = next;
-        if (!suppressed && guardViolationCheck && guardViolationCheck(cumulative)) {
+        if (!suppressed && suppressIf && suppressIf(cumulative)) {
           suppressed = true;
         }
         dirty = true;

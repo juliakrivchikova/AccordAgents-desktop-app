@@ -528,29 +528,20 @@ Do not advertise:
 - Gemini hosted chat execution
 - Generic autonomous agent orchestration or unattended swarms
 
-## Known MVP Gaps From Current Code
-
-The remaining MVP gaps should be tracked at feature-title level:
-
-- User skill management.
-- Onboarding.
-- Role permissions management.
-- Role deletion.
-- Live participant removal.
-- File references from messages.
-- Image pasting.
-- MCP status tool for agents to indicate what they are doing.
-
 ## MVP TODO
 
+- [ ] Rule management.
 - [ ] User skill management.
-- [ ] Onboarding.
-- [ ] Role permissions management.
-- [ ] Role deletion.
-- [ ] Live participant removal.
-- [ ] File references from messages.
-- [ ] Image pasting.
-- [ ] MCP status tool for agents to indicate what they are doing.
+- [ ] Stop agent.
+- [ ] Not block when the agent is running, add indicators that chat state is running or run finished.
+- [ ] Role management: create, read, update, delete – should be available via both UI for user and MCP for admin. Role permissions management - only UI.
+- [ ] Participant management: when admin creates a participant, it should first check if the participant is already in
+  the system. If no, create and make it available for future use. It will allow to attach rules to them and reuse.
+- [ ] Live participant removal: mcp and UI.
+- [ ] User-friendly delivery
+- ✅ File references from messages.
+- ✅ Image pasting.
+- ✅ MCP status tool for agents to indicate what they are doing.
 
 ## MVP Acceptance Checklist
 

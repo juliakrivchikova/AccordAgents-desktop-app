@@ -24,7 +24,7 @@ The chat feature (`ConversationKind = "chat"`) is the multi-participant flow whe
 
 ---
 
-## 2. Stream agent output into the chat view
+## 2. ✅ Stream agent output into the chat view
 
 **Status.** Implemented in the streaming-status work. The current implementation uses a persisted pending participant `ChatMessage` as the anchor, streams live text/status through existing review-progress events, and replaces the same message in place when the turn completes.
 
