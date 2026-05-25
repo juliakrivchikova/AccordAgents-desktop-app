@@ -32,6 +32,7 @@ import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
 import { AppSkillsService } from "./services/appSkills";
+import { bootstrapAppUpdater } from "./services/appUpdater";
 import { DebugLogService } from "./services/debugLogs";
 import { GitService } from "./services/git";
 import { ProviderRunner } from "./services/providers";
@@ -470,6 +471,7 @@ function registerIpc(): void {
 
 void app.whenReady().then(async () => {
   registerIpc();
+  bootstrapAppUpdater(debugLogService);
   await appMcpService.start();
   await storageService.init();
   await detectAgentsWithAppSkills().catch((error) => {
