@@ -18,7 +18,7 @@ import type {
 } from "../../shared/types";
 import { effectiveChatAgentPermissions, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
-import { CommandError, commandExists, runCommand } from "./command";
+import { CommandError, commandEnvironment, commandExists, runCommand } from "./command";
 import type { ParticipantRunResult } from "./providers";
 
 const MAX_CLI_ERROR_CHARS = 500;
@@ -322,7 +322,7 @@ export class CliAgentRunner {
   ): WarmAgentEntry {
     const child = spawn("codex", ["app-server", "--listen", "stdio://"], {
       cwd: repoPath,
-      env: { ...process.env, ...this.appMcpEnv(options) },
+      env: commandEnvironment(this.appMcpEnv(options)),
       stdio: ["pipe", "pipe", "pipe"]
     });
     child.stdout.setEncoding("utf8");
@@ -1137,7 +1137,7 @@ export class CliAgentRunner {
 
     const child = spawn("claude", args, {
       cwd: repoPath,
-      env: { ...process.env, ...this.appMcpEnv(options) },
+      env: commandEnvironment(this.appMcpEnv(options)),
       stdio: ["pipe", "pipe", "pipe"]
     });
     child.stdout.setEncoding("utf8");
