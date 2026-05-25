@@ -78,17 +78,37 @@ export class StorageService {
       createdAt: string;
       updatedAt: string;
       repoPath?: string;
+      running?: number | string | boolean | null;
+      activeRunIdsCount?: number | string | null;
     }>(
-      "select id, title, kind, created_at as createdAt, updated_at as updatedAt, repo_path as repoPath from conversations order by updated_at desc;"
+      `select
+         id,
+         title,
+         kind,
+         created_at as createdAt,
+         updated_at as updatedAt,
+         repo_path as repoPath,
+         json_extract(payload_json, '$.metadata.running') as running,
+         coalesce(json_array_length(payload_json, '$.metadata.activeRunIds'), 0) as activeRunIdsCount
+       from conversations
+       order by updated_at desc;`
     );
-    return rows.map((row) => ({
-      id: row.id,
-      title: row.title,
-      kind: row.kind,
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
-      repoPath: row.repoPath ?? undefined
-    }));
+    return rows.map((row) => {
+      const activeCount = typeof row.activeRunIdsCount === "string"
+        ? Number.parseInt(row.activeRunIdsCount, 10) || 0
+        : (row.activeRunIdsCount ?? 0);
+      const runningFlag = row.running === 1 || row.running === "1" || row.running === true || row.running === "true";
+      const isRunning = activeCount > 0 || runningFlag;
+      return {
+        id: row.id,
+        title: row.title,
+        kind: row.kind,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        repoPath: row.repoPath ?? undefined,
+        running: isRunning
+      };
+    });
   }
 
   async getConversation(id: string): Promise<Conversation | undefined> {
@@ -242,7 +262,7 @@ export class StorageService {
 
   private async clearInterruptedRuns(): Promise<void> {
     const rows = await this.queryJson<{ payloadJson: string }>(
-      "select payload_json as payloadJson from conversations where payload_json like '%\"running\":true%';"
+      "select payload_json as payloadJson from conversations where payload_json like '%\"running\":true%' or payload_json like '%\"activeRunIds\":[%';"
     );
     for (const row of rows) {
       let conversation: Conversation;
@@ -251,7 +271,9 @@ export class StorageService {
       } catch {
         continue;
       }
-      if (conversation.metadata.running !== true) {
+      const activeRunIds = Array.isArray(conversation.metadata.activeRunIds) ? conversation.metadata.activeRunIds : [];
+      const wasRunning = conversation.metadata.running === true || activeRunIds.length > 0;
+      if (!wasRunning) {
         continue;
       }
       const warnings = sanitizeWarningList(conversation.metadata.warnings);

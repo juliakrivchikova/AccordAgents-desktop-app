@@ -1316,6 +1316,32 @@
   font-weight: 700;
 }
 
+.chat-stop-actions {
+  display: flex;
+  margin-top: 8px;
+}
+
+.chat-stop-all-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 12px;
+  margin: 0 12px;
+  border: 1px solid var(--app-border-strong, #e5e7eb);
+  border-radius: 8px;
+  background: var(--app-surface, #fafafa);
+  font-size: 12px;
+  color: var(--muted-foreground, #6b7280);
+}
+
+.chat-queued-badge {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted-foreground, #6b7280);
+  font-style: italic;
+}
+
 .chat-choice-row {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr);

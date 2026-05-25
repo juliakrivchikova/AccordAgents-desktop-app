@@ -83,7 +83,12 @@ import { DebugLogService } from "./debugLogs";
 import type { ParticipantRunResult } from "./providers";
 import { SettingsService } from "./settings";
 import { StorageService } from "./storage";
-import { clearChatRunMetadata } from "../../shared/chatRunState";
+import {
+  clearChatRunMetadata,
+  readActiveRunIds,
+  withActiveRunIdAdded,
+  withActiveRunIdRemoved
+} from "../../shared/chatRunState";
 import { INTERRUPTED_RUN_WARNING, sanitizeWarningList } from "../../shared/warnings";
 
 type ProgressCallback = (progress: ReviewProgress) => void;
@@ -253,6 +258,9 @@ export class ChatService {
   private readonly participantRequestAutoResumes = new Set<string>();
   private readonly permissionApprovalAutoResumes = new Set<string>();
   private readonly participantTurnQueues = new Map<string, Promise<void>>();
+  private readonly chatRunControllers = new Map<string, AbortController>();
+  private readonly chatRunMeta = new Map<string, { conversationId: string; participantId: string; participantHandle: string; pendingMessageId?: string }>();
+  private readonly chatMutationQueues = new Map<string, Promise<void>>();
 
   constructor(
     private readonly storage: StorageService,
@@ -1104,7 +1112,7 @@ export class ChatService {
   async sendMessage(request: SendChatMessageRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
     const runId = request.runId ?? randomUUID();
     const warnings: string[] = [];
-    return this.withChatRunLock(request.conversationId, async () => {
+    const ingest = await this.withChatRunLock(request.conversationId, async () => {
       const conversation = await this.requireChat(request.conversationId);
       const content = request.content.trim();
       const preparedImages = await this.prepareImageAttachments(conversation.id, request.imageAttachments);
@@ -1125,49 +1133,90 @@ export class ChatService {
         userMessage.metadata = { ...userMessage.metadata, threadId: userMessage.id };
       }
       conversation.messages.push(userMessage);
+      let dispatch = this.resolveMentionTargets(conversation, content);
+      for (const unknown of dispatch.unknownHandles) {
+        const warning = `No participant named @${unknown}.`;
+        warnings.push(warning);
+        conversation.messages.push(this.message("system", warning, undefined, {
+          threadId: userMessage.metadata?.threadId ?? threadId,
+          parentMessageId: userMessage.id,
+          chatThreadRootId
+        }));
+      }
+      if (dispatch.targets.length === 0 && dispatch.unknownHandles.length === 0) {
+        const adminTarget = this.defaultAdministratorDispatchTarget(conversation);
+        if (adminTarget) {
+          dispatch = { ...dispatch, targets: [adminTarget] };
+        }
+      }
+      conversation.updatedAt = new Date().toISOString();
       try {
-        await this.beginChatRun(conversation, runId);
+        await this.withChatMutation(conversation, async () => {
+          await this.saveConversation(conversation);
+        });
       } catch (error) {
         await this.rollbackPreparedImageAttachments(conversation.id, preparedImages, "ConversationSaveFailed", error);
         throw error;
       }
-      try {
-        let dispatch = this.resolveMentionTargets(conversation, content);
-        for (const unknown of dispatch.unknownHandles) {
-          const warning = `No participant named @${unknown}.`;
-          warnings.push(warning);
-          conversation.messages.push(this.message("system", warning, undefined, {
-            threadId: userMessage.metadata?.threadId ?? threadId,
-            parentMessageId: userMessage.id,
-            chatThreadRootId
-          }));
-        }
-        if (dispatch.targets.length === 0 && dispatch.unknownHandles.length === 0) {
-          const adminTarget = this.defaultAdministratorDispatchTarget(conversation);
-          if (adminTarget) {
-            dispatch = { ...dispatch, targets: [adminTarget] };
-          }
-        }
-        if (dispatch.targets.length === 0) {
-          return { conversation, warnings };
-        }
+      return { conversation, dispatch, userMessage };
+    });
 
-        this.emitProgress(runId, progress, "initial", `Running ${dispatch.targets.length} chat participant${dispatch.targets.length === 1 ? "" : "s"}.`, {
-          total: dispatch.targets.length,
-          completed: 0
-        });
-        await this.runParticipantBatch(conversation, dispatch.targets, userMessage, runId, signal, progress, warnings);
+    if (ingest.dispatch.targets.length === 0) {
+      return { conversation: ingest.conversation, warnings };
+    }
+
+    this.emitProgress(runId, progress, "initial", `Running ${ingest.dispatch.targets.length} chat participant${ingest.dispatch.targets.length === 1 ? "" : "s"}.`, {
+      total: ingest.dispatch.targets.length,
+      completed: 0
+    });
+
+    const dispatchWarnings: string[] = [];
+    const dispatchPromise = this.runParticipantBatch(
+      ingest.conversation,
+      ingest.dispatch.targets,
+      ingest.userMessage,
+      runId,
+      signal,
+      progress,
+      dispatchWarnings
+    );
+    void dispatchPromise
+      .then(() => {
         this.emitProgress(runId, progress, "done", "Chat turn finished.", {
-          completed: dispatch.targets.length,
-          total: dispatch.targets.length
+          completed: ingest.dispatch.targets.length,
+          total: ingest.dispatch.targets.length
         });
-        return { conversation, warnings };
-      } catch (error) {
+      })
+      .catch((error) => {
         this.emitChatRunFailure(runId, progress, error);
-        throw error;
-      } finally {
-        await this.endChatRun(conversation, runId);
+      })
+      .finally(async () => {
+        if (dispatchWarnings.length > 0) {
+          await this.appendConversationWarnings(ingest.conversation, dispatchWarnings);
+        }
+      });
+    return { conversation: ingest.conversation, warnings };
+  }
+
+  private async appendConversationWarnings(conversation: Conversation, additions: string[]): Promise<void> {
+    if (additions.length === 0) {
+      return;
+    }
+    await this.withChatMutation(conversation, async () => {
+      const existing = sanitizeWarningList(conversation.metadata.warnings);
+      let mutated = false;
+      for (const warning of additions) {
+        if (!existing.includes(warning)) {
+          existing.push(warning);
+          mutated = true;
+        }
       }
+      if (!mutated) {
+        return;
+      }
+      conversation.metadata = { ...conversation.metadata, warnings: existing };
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
     });
   }
 
@@ -1454,25 +1503,81 @@ export class ChatService {
       completed,
       total: participants.length
     });
-    let appendQueue = Promise.resolve();
     const appendCompletedTurn = async (participant: ChatParticipant, messages: ChatMessage[]): Promise<void> => {
-      const nextAppend = appendQueue.then(async () => {
-        await this.refreshStoredChatState(conversation);
+      await this.withChatMutation(conversation, async () => {
         this.appendParticipantTurnMessages(conversation, participant, messages);
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
       });
-      appendQueue = nextAppend.catch(() => undefined);
-      await nextAppend;
     };
     await Promise.all(
       participants.map(async (participant) => {
-        const messages = await this.runParticipantTurnSerialized(conversation, participant, triggerMessage, runId, signal, progress, {
-          warnings,
-          promptConversation: turnSnapshot,
-          workspacePath
+        const targetRunId = randomUUID();
+        const targetController = new AbortController();
+        const onParentAbort = (): void => {
+          if (!targetController.signal.aborted) {
+            targetController.abort();
+          }
+        };
+        if (signal?.aborted) {
+          targetController.abort();
+        } else {
+          signal?.addEventListener("abort", onParentAbort, { once: true });
+        }
+        this.registerTargetRun(targetRunId, targetController, {
+          conversationId: conversation.id,
+          participantId: participant.id,
+          participantHandle: participant.handle
         });
-        await appendCompletedTurn(participant, messages);
+        const queueKey = `${conversation.id}:${participant.id}`;
+        const wasQueued = this.participantTurnQueues.has(queueKey);
+        // Pre-create the pending message inside the shared mutation queue, before
+        // the per-participant turn queue wait, so the queued/streaming bubble is
+        // visible immediately even if a prior same-participant turn is still running.
+        const pendingMessage = this.message(
+          "participant",
+          "",
+          { id: participant.id, kind: participant.kind, label: `@${participant.handle}`, model: participant.model },
+          {
+            threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
+            parentMessageId: triggerMessage.id,
+            chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
+            sourceMessageId: triggerMessage.id,
+            runId: targetRunId,
+            queuedBehind: wasQueued ? { handle: participant.handle } : undefined
+          },
+          "pending"
+        );
+        this.setTargetRunPendingMessageId(targetRunId, pendingMessage.id);
+        await this.withChatMutation(conversation, async () => {
+          conversation.messages.push(pendingMessage);
+          conversation.updatedAt = new Date().toISOString();
+          this.queueSnapshot(conversation);
+        });
+        await this.beginChatRun(conversation, targetRunId);
+        try {
+          const messages = await this.runParticipantTurnSerialized(conversation, participant, triggerMessage, targetRunId, targetController.signal, progress, {
+            warnings,
+            promptConversation: turnSnapshot,
+            workspacePath,
+            existingPendingMessage: pendingMessage
+          });
+          if (targetController.signal.aborted) {
+            await this.discardStoppedTargetRun(conversation, targetRunId, participant);
+          } else {
+            await appendCompletedTurn(participant, messages);
+          }
+        } catch (error) {
+          if (targetController.signal.aborted) {
+            await this.discardStoppedTargetRun(conversation, targetRunId, participant);
+          } else {
+            throw error;
+          }
+        } finally {
+          signal?.removeEventListener("abort", onParentAbort);
+          await this.endChatRun(conversation, targetRunId);
+          this.unregisterTargetRun(targetRunId);
+        }
         completed += 1;
         this.emitProgress(runId, progress, "debate", `@${participant.handle} finished.`, {
           participantLabel: `@${participant.handle}`,
@@ -1482,6 +1587,32 @@ export class ChatService {
       })
     );
     await this.ensureHistoryFiles(conversation);
+  }
+
+  private async discardStoppedTargetRun(conversation: Conversation, runId: string, participant: ChatParticipant): Promise<void> {
+    const meta = this.chatRunMeta.get(runId);
+    const pendingMessageId = meta?.pendingMessageId;
+    await this.withChatMutation(conversation, async () => {
+      let threadId: string | undefined;
+      let chatThreadRootId: string | undefined;
+      if (pendingMessageId) {
+        const idx = conversation.messages.findIndex((message) => message.id === pendingMessageId);
+        if (idx >= 0) {
+          const pending = conversation.messages[idx];
+          threadId = pending.metadata?.threadId;
+          chatThreadRootId = pending.metadata?.chatThreadRootId;
+          conversation.messages.splice(idx, 1);
+        }
+      }
+      conversation.messages.push(this.message(
+        "system",
+        `@${participant.handle} stopped by user.`,
+        undefined,
+        { threadId, chatThreadRootId }
+      ));
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
   }
 
   private async runParticipantTurn(
@@ -1498,6 +1629,8 @@ export class ChatService {
       workspacePath?: string;
       participantRequestDepth?: number;
       participantRequestBatchId?: string;
+      queuedBehindHandle?: string;
+      existingPendingMessage?: ChatMessage;
     }
   ): Promise<ChatMessage[]> {
     const sessionState = await this.sessionForParticipant(conversation, participant);
@@ -1552,22 +1685,45 @@ export class ChatService {
     });
     const runPath = this.runPathForParticipant(conversation, workspacePath, agentMode, permissions);
     const cliParticipant = this.cliParticipantForSession(participant, session);
-    const pendingMessage = this.message(
-      "participant",
-      "",
-      cliParticipant,
-      {
-        threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
-        parentMessageId: triggerMessage.id,
-        chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
-        sourceMessageId: triggerMessage.id,
-        requesterParticipantId: options.continuation ? triggerMessage.participantId : undefined,
-        approvedContinuation: options.continuation || undefined
-      },
-      "pending"
-    );
-    conversation.messages.push(pendingMessage);
-    this.queueSnapshot(conversation);
+    let pendingMessage: ChatMessage;
+    if (options.existingPendingMessage) {
+      pendingMessage = options.existingPendingMessage;
+      await this.withChatMutation(conversation, async () => {
+        pendingMessage.participantId = cliParticipant.id;
+        pendingMessage.participantLabel = cliParticipant.label;
+        pendingMessage.metadata = {
+          ...pendingMessage.metadata,
+          requesterParticipantId: options.continuation ? triggerMessage.participantId : pendingMessage.metadata?.requesterParticipantId,
+          approvedContinuation: options.continuation || pendingMessage.metadata?.approvedContinuation,
+          queuedBehind: undefined
+        };
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+    } else {
+      pendingMessage = this.message(
+        "participant",
+        "",
+        cliParticipant,
+        {
+          threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
+          parentMessageId: triggerMessage.id,
+          chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
+          sourceMessageId: triggerMessage.id,
+          requesterParticipantId: options.continuation ? triggerMessage.participantId : undefined,
+          approvedContinuation: options.continuation || undefined,
+          runId,
+          queuedBehind: options.queuedBehindHandle ? { handle: options.queuedBehindHandle } : undefined
+        },
+        "pending"
+      );
+      this.setTargetRunPendingMessageId(runId, pendingMessage.id);
+      await this.withChatMutation(conversation, async () => {
+        conversation.messages.push(pendingMessage);
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+    }
     const progressSink = this.createAgentProgressSink(
       runId,
       progress,
@@ -1738,11 +1894,39 @@ export class ChatService {
           pendingMessage.content = `@${participant.handle} run was interrupted before a response was produced.`;
         }
       }
-      // Push the finalized message ahead of the sink "finished" event so the renderer
-      // sees the final content before live progress is cleared, avoiding a flash of empty body.
-      this.queueSnapshot(conversation);
+      // Skip the snapshot push for two cases:
+      //   1. The run was cancelled — caller (`discardStoppedTargetRun`) will drop
+      //      the pending message and emit a clean "stopped by user" note under
+      //      `withChatMutation`.
+      //   2. This run came from `runParticipantBatch` (identified by the
+      //      pre-created `existingPendingMessage`) — that caller emits the final
+      //      snapshot under `withChatMutation` via `appendCompletedTurn`.
+      // The legacy path (mention approval continuation, choice continuation,
+      // auto-resume) still needs an immediate snapshot of the finalized pending
+      // message, but it must run under `withChatMutation` so concurrent background
+      // dispatches' state isn't clobbered by a stale clone.
+      if (!signal?.aborted && !options.existingPendingMessage) {
+        await this.finalizePendingParticipantMessage(conversation, pendingMessage);
+      }
       progressSink.finish();
     }
+  }
+
+  private async finalizePendingParticipantMessage(conversation: Conversation, pendingMessage: ChatMessage): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      // After refresh-then-merge, the pendingMessage object may or may not be in
+      // conversation.messages. mergeStoredChatMessages prefers our in-memory
+      // reference when ids match, so the in-place updates (content/status) are
+      // preserved. If the pending message is missing entirely (rare — would mean
+      // a concurrent delete by another mutation), re-append the finalized version
+      // so the response isn't lost.
+      const idx = conversation.messages.findIndex((message) => message.id === pendingMessage.id);
+      if (idx < 0) {
+        conversation.messages.push(pendingMessage);
+      }
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
   }
 
   private appendParticipantTurnMessages(
@@ -2353,9 +2537,9 @@ export class ChatService {
     if (!stored || stored.kind !== "chat") {
       return;
     }
-    if (stored.updatedAt <= conversation.updatedAt && stored.messages.length <= conversation.messages.length) {
-      return;
-    }
+    // Always merge: the (updatedAt, length) short-circuit was unsound under concurrent
+    // sends, where two batches can land at the same length+timestamp with different
+    // message ids. The merge is O(n) and id-keyed, so a no-op when storage matches.
     conversation.messages = this.mergeStoredChatMessages(stored.messages, conversation.messages);
     conversation.metadata = this.mergeStoredChatMetadata(stored.metadata, conversation.metadata);
     conversation.updatedAt = stored.updatedAt > conversation.updatedAt ? stored.updatedAt : conversation.updatedAt;
@@ -3773,6 +3957,8 @@ export class ChatService {
       workspacePath?: string;
       participantRequestDepth?: number;
       participantRequestBatchId?: string;
+      queuedBehindHandle?: string;
+      existingPendingMessage?: ChatMessage;
     }
   ): Promise<ChatMessage[]> {
     const key = `${conversation.id}:${participant.id}`;
@@ -5325,14 +5511,15 @@ export class ChatService {
   }
 
   private recoverStaleChatRun(conversation: Conversation): boolean {
-    const runId = this.chatRunId(conversation);
-    if (runId && this.activeRunIds.has(runId)) {
+    const activeIds = readActiveRunIds(conversation.metadata);
+    const stillActive = activeIds.some((id) => this.activeRunIds.has(id));
+    if (stillActive) {
       return false;
     }
     if (this.chatHasLiveWork(conversation.id)) {
       return false;
     }
-    const wasRunning = conversation.metadata.running === true;
+    const wasRunning = conversation.metadata.running === true || activeIds.length > 0;
     let pendingSwept = false;
     for (const message of conversation.messages) {
       if (message.status === "pending" && message.role === "participant") {
@@ -5409,6 +5596,64 @@ export class ChatService {
     });
   }
 
+  cancelRun(runId: string): boolean {
+    const controller = this.chatRunControllers.get(runId);
+    if (!controller) {
+      return false;
+    }
+    controller.abort();
+    return true;
+  }
+
+  private async withChatMutation<T>(
+    conversation: Conversation,
+    fn: () => Promise<T> | T,
+    options: { skipRefresh?: boolean } = {}
+  ): Promise<T> {
+    const conversationId = conversation.id;
+    const previous = this.chatMutationQueues.get(conversationId) ?? Promise.resolve();
+    let resolveStep!: () => void;
+    const step = new Promise<void>((resolve) => {
+      resolveStep = resolve;
+    });
+    const chained = previous.catch(() => undefined).then(() => step);
+    this.chatMutationQueues.set(conversationId, chained);
+    await previous.catch(() => undefined);
+    try {
+      if (!options.skipRefresh) {
+        // Wait for any in-flight saves to flush, then merge the latest stored state
+        // into this batch's in-memory conversation reference. Concurrent sends each hold
+        // their own Conversation object; without this, a save here can overwrite another
+        // batch's user message / pending bubble / activeRunIds.
+        await this.waitForQueuedSave(conversationId);
+        await this.refreshStoredChatState(conversation);
+      }
+      return await fn();
+    } finally {
+      resolveStep();
+      if (this.chatMutationQueues.get(conversationId) === chained) {
+        this.chatMutationQueues.delete(conversationId);
+      }
+    }
+  }
+
+  private registerTargetRun(runId: string, controller: AbortController, meta: { conversationId: string; participantId: string; participantHandle: string }): void {
+    this.chatRunControllers.set(runId, controller);
+    this.chatRunMeta.set(runId, { ...meta });
+  }
+
+  private setTargetRunPendingMessageId(runId: string, messageId: string): void {
+    const meta = this.chatRunMeta.get(runId);
+    if (meta) {
+      this.chatRunMeta.set(runId, { ...meta, pendingMessageId: messageId });
+    }
+  }
+
+  private unregisterTargetRun(runId: string): void {
+    this.chatRunControllers.delete(runId);
+    this.chatRunMeta.delete(runId);
+  }
+
   private async withChatRunLock<T>(
     conversationId: string,
     run: () => Promise<T>,
@@ -5439,9 +5684,11 @@ export class ChatService {
   private async beginChatRun(conversation: Conversation, runId: string): Promise<void> {
     this.rememberActiveChatRun(conversation.id, runId);
     try {
-      conversation.metadata = { ...conversation.metadata, running: true, runId };
-      conversation.updatedAt = new Date().toISOString();
-      await this.saveConversation(conversation);
+      await this.withChatMutation(conversation, async () => {
+        conversation.metadata = withActiveRunIdAdded({ ...conversation.metadata, runId }, runId);
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
     } catch (error) {
       this.forgetActiveChatRun(conversation.id, runId);
       throw error;
@@ -5449,19 +5696,30 @@ export class ChatService {
   }
 
   private async endChatRun(conversation: Conversation, runId: string): Promise<void> {
-    await this.refreshStoredChatState(conversation).finally(() => {
+    try {
+      await this.withChatMutation(conversation, async () => {
+        conversation.metadata = withActiveRunIdRemoved(conversation.metadata, runId);
+        if (!this.hasOtherLiveWork(conversation.id, runId) && readActiveRunIds(conversation.metadata).length === 0) {
+          conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
+        }
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+    } finally {
       this.forgetActiveChatRun(conversation.id, runId);
-    });
-    if (this.chatRunId(conversation) !== runId) {
-      return;
     }
-    if (this.chatHasLiveWork(conversation.id)) {
-      await this.waitForQueuedSave(conversation.id);
-      return;
+  }
+
+  private hasOtherLiveWork(conversationId: string, excludingRunId: string): boolean {
+    const runIds = this.activeConversationRunIds.get(conversationId);
+    if (runIds) {
+      for (const id of runIds) {
+        if (id !== excludingRunId) {
+          return true;
+        }
+      }
     }
-    conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
-    conversation.updatedAt = new Date().toISOString();
-    await this.saveConversation(conversation);
+    return (this.backgroundRunnerCounts.get(conversationId) ?? 0) > 0;
   }
 
   private rememberActiveChatRun(conversationId: string, runId: string): void {

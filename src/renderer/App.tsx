@@ -178,6 +178,33 @@ const CHAT_IMAGE_ALLOWED_MIME_TYPES = new Set(["image/png", "image/jpeg", "image
 const APP_CHAT_REQUEST_PARTICIPANTS_TOOL = "app_chat_request_participants";
 const SHOW_CHAT_SYSTEM_MESSAGES = import.meta.env.VITE_AI_CONSENSUS_SHOW_SYSTEM_MESSAGES === "1";
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "ai-consensus.sidebarCollapsed";
+const LAST_VIEWED_AT_STORAGE_KEY = "ai-consensus.lastViewedAt";
+
+function readLastViewedAtFromStorage(): Record<string, string> {
+  try {
+    const raw = window.localStorage.getItem(LAST_VIEWED_AT_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      const out: Record<string, string> = {};
+      for (const [id, ts] of Object.entries(parsed)) {
+        if (typeof ts === "string") out[id] = ts;
+      }
+      return out;
+    }
+  } catch {
+    // ignore
+  }
+  return {};
+}
+
+function persistLastViewedAt(map: Record<string, string>): void {
+  try {
+    window.localStorage.setItem(LAST_VIEWED_AT_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // ignore
+  }
+}
 const CHAT_AGENT_MODE_OPTIONS: Array<{ value: ChatAgentMode; label: string }> = [
   { value: "default", label: "Default" },
   { value: "plan", label: "Plan" },
@@ -387,13 +414,17 @@ function upsertConversationSummary(summaries: ConversationSummary[], conversatio
 }
 
 function summaryFromConversation(conversation: Conversation): ConversationSummary {
+  const activeRunIds = conversation.metadata?.activeRunIds;
+  const hasActiveRuns = Array.isArray(activeRunIds) && activeRunIds.length > 0;
+  const running = Boolean(hasActiveRuns || conversation.metadata?.running);
   return {
     id: conversation.id,
     title: conversation.title,
     kind: conversation.kind,
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
-    repoPath: conversation.repoPath
+    repoPath: conversation.repoPath,
+    running
   };
 }
 
@@ -452,6 +483,8 @@ function App(): JSX.Element {
   const [chatMessageDraft, setChatMessageDraft] = useState("");
   const [chatAddParticipantDraft, setChatAddParticipantDraft] = useState<ChatParticipantDraft | undefined>();
   const [error, setError] = useState<string | undefined>();
+  const [unreadConversationIds, setUnreadConversationIds] = useState<Set<string>>(new Set());
+  const lastViewedAtRef = useRef<Record<string, string>>(readLastViewedAtFromStorage());
 
   useEffect(() => {
     void refreshAll();
@@ -468,7 +501,10 @@ function App(): JSX.Element {
   useEffect(() => {
     return window.consensus.onReviewProgress((progress) => {
       setProgressLog((current) => {
-        const next = [...current.filter((item) => item.runId === progress.runId), progress];
+        const appended = [...current, progress];
+        // Keep last 500 entries across all runs to bound memory; concurrent runs each get
+        // their own runId-tagged stream so downstream consumers filter by runId.
+        const next = appended.length > 500 ? appended.slice(appended.length - 500) : appended;
         progressLogRef.current = next;
         return next;
       });
@@ -479,13 +515,30 @@ function App(): JSX.Element {
     return window.consensus.onConversationUpdated((updated) => {
       setSummaries((current) => upsertConversationSummary(current, updated));
       setConversation((current) => {
+        const isActive = current?.id === updated.id;
         if (!conversationMatchesSnapshot(current, updated, currentRunId)) {
+          if (!isActive) {
+            const lastViewed = lastViewedAtRef.current[updated.id];
+            if (!lastViewed || conversationTimeValue(updated.updatedAt) > conversationTimeValue(lastViewed)) {
+              setUnreadConversationIds((prev) => {
+                if (prev.has(updated.id)) return prev;
+                const next = new Set(prev);
+                next.add(updated.id);
+                return next;
+              });
+            }
+          }
           return current;
         }
         setSelectedThreadId((selected) => (selected && !threadExistsInConversation(updated, selected) ? undefined : selected));
         setFocusedThreadId((focused) => (focused && !threadExistsInConversation(updated, focused) ? undefined : focused));
-        const merged = mergeProgressIntoConversation(updated, progressLogRef.current.filter((item) => item.runId === conversationRunId(updated)));
+        const relevantRunIds = conversationRelevantRunIds(updated);
+        const merged = mergeProgressIntoConversation(updated, progressLogRef.current.filter((item) => relevantRunIds.has(item.runId)));
         setMessagePage(fullConversationMessagePageInfo(merged));
+        if (isActive) {
+          lastViewedAtRef.current = { ...lastViewedAtRef.current, [updated.id]: merged.updatedAt };
+          persistLastViewedAt(lastViewedAtRef.current);
+        }
         return merged;
       });
     });
@@ -610,6 +663,14 @@ function App(): JSX.Element {
       setMessagePage(result?.messagePage);
       if (next) {
         setKind(next.kind);
+        lastViewedAtRef.current = { ...lastViewedAtRef.current, [next.id]: next.updatedAt };
+        persistLastViewedAt(lastViewedAtRef.current);
+        setUnreadConversationIds((prev) => {
+          if (!prev.has(next.id)) return prev;
+          const ns = new Set(prev);
+          ns.delete(next.id);
+          return ns;
+        });
       }
       progressLogRef.current = [];
       setProgressLog([]);
@@ -913,10 +974,6 @@ function App(): JSX.Element {
     const runId = crypto.randomUUID();
     setError(undefined);
     setWarnings([]);
-    setCurrentRunId(runId);
-    progressLogRef.current = [];
-    setProgressLog([]);
-    setBusy(true);
     if (!options.chatThreadRootId) {
       setChatMessageDraft("");
     }
@@ -931,9 +988,14 @@ function App(): JSX.Element {
         parentMessageId: options.parentMessageId,
         chatThreadRootId: options.chatThreadRootId
       });
-      setConversation(mergeProgressIntoConversation(result.conversation, progressLogRef.current.filter((item) => item.runId === runId)));
-      setWarnings(result.warnings);
-      setSummaries(await window.consensus.listConversations());
+      const stillSameConversation = (current: Conversation | undefined): Conversation | undefined =>
+        current && current.id === result.conversation.id
+          ? mergeProgressIntoConversation(result.conversation, progressLogRef.current.filter((item) => item.runId === runId))
+          : current;
+      setConversation(stillSameConversation);
+      if (result.warnings.length > 0) {
+        setWarnings(result.warnings);
+      }
       return true;
     } catch (caught) {
       const message = errorText(caught);
@@ -943,9 +1005,6 @@ function App(): JSX.Element {
         setError(message);
       }
       return false;
-    } finally {
-      setBusy(false);
-      setCurrentRunId(undefined);
     }
   }
 
@@ -1744,7 +1803,12 @@ function App(): JSX.Element {
   const visibleDecisionResolutions = { ...pendingDecisionResolutions(conversation), ...resolvedDecisionThreads };
   const conversationKind = conversation?.kind ?? openingConversation?.kind ?? kind;
   const conversationRunning = busy || Boolean(conversation?.metadata.running);
-  const visibleWarnings = warnings.map((warning) => displayNoticeText(warning)).filter(Boolean);
+  const conversationMetadataWarnings = Array.isArray(conversation?.metadata?.warnings)
+    ? (conversation!.metadata.warnings as unknown[]).filter((w): w is string => typeof w === "string")
+    : [];
+  const visibleWarnings = Array.from(new Set([...warnings, ...conversationMetadataWarnings]))
+    .map((warning) => displayNoticeText(warning))
+    .filter(Boolean);
   const chatSummaries = useMemo(() => summaries.filter((summary) => summary.kind === "chat"), [summaries]);
   const projectSessionGroups = useMemo(() => buildProjectSessionGroups(chatSummaries), [chatSummaries]);
   const activeChatConversation = activeView !== "settings" && conversation?.kind === "chat" ? conversation : undefined;
@@ -1876,6 +1940,7 @@ function App(): JSX.Element {
           pendingId={openingConversationId}
           busy={busy}
           loading={historyLoading}
+          unreadIds={unreadConversationIds}
           onSelect={(id) => void openConversation(id)}
           onNewSession={newReview}
           onNewProjectSession={(projectRepoPath) => void newProjectSession(projectRepoPath)}
@@ -1975,6 +2040,7 @@ function App(): JSX.Element {
                       void respondToChatChoice(sourceMessageId, choiceId, response)
                     }
                     onRespondToAppToolApproval={respondToChatAppToolApproval}
+                    onStopRun={(runId) => void window.consensus.cancelReview(runId)}
                   />
                 ) : (
                   <SlackView
@@ -2842,9 +2908,33 @@ function ChatConversationView(props: {
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: { selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
   onRespondToAppToolApproval: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => Promise<void>;
+  onStopRun?: (runId: string) => void;
 }): JSX.Element {
   const participants = chatParticipants(props.conversation);
   const pendingAppToolApprovals = chatAppToolApprovals(props.conversation).filter((approval) => approval.status === "pending");
+  const activeRunIdsForChat = useMemo(() => {
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    const active = props.conversation.metadata?.activeRunIds;
+    if (Array.isArray(active)) {
+      for (const id of active) {
+        if (typeof id === "string" && id && !seen.has(id)) {
+          seen.add(id);
+          ids.push(id);
+        }
+      }
+    }
+    for (const message of props.conversation.messages) {
+      if (message.status === "pending" && message.role === "participant") {
+        const id = message.metadata?.runId;
+        if (typeof id === "string" && id && !seen.has(id)) {
+          seen.add(id);
+          ids.push(id);
+        }
+      }
+    }
+    return ids;
+  }, [props.conversation.metadata, props.conversation.messages]);
   const topLevelMessages = useMemo(() => chatTopLevelMessages(props.conversation), [props.conversation.messages]);
   const threadSummaries = useMemo(() => chatThreadSummaryMap(props.conversation), [props.conversation.messages]);
   const continuedMentionRequestIds = useMemo(() => chatContinuedMentionRequestIds(props.conversation), [props.conversation.messages]);
@@ -3067,6 +3157,19 @@ function ChatConversationView(props: {
             />
           )}
         </div>
+        {activeRunIdsForChat.length > 0 && props.onStopRun && (
+          <div className="chat-stop-all-bar">
+            <span>{activeRunIdsForChat.length} active {activeRunIdsForChat.length === 1 ? "run" : "runs"}</span>
+            <Button variant="outline" size="sm" onClick={() => {
+              for (const runId of activeRunIdsForChat) {
+                props.onStopRun?.(runId);
+              }
+            }}>
+              <X size={14} />
+              Stop all
+            </Button>
+          </div>
+        )}
         <div className="chat-timeline virtual-timeline" ref={timelineRef} onScroll={updateStickToBottom}>
           <div className="virtual-timeline-inner" style={{ height: `${chatVirtualizer.getTotalSize()}px` }}>
             {chatVirtualItems.map((virtualItem) => {
@@ -3107,6 +3210,7 @@ function ChatConversationView(props: {
                       onApproveMentions={props.onApproveMentions}
                       onRejectMentions={props.onRejectMentions}
                       onRespondToChoice={props.onRespondToChoice}
+                      onStopRun={props.onStopRun}
                     />
                   )}
                 </div>
@@ -3148,6 +3252,7 @@ function ChatConversationView(props: {
           onApproveMentions={props.onApproveMentions}
           onRejectMentions={props.onRejectMentions}
           onRespondToChoice={props.onRespondToChoice}
+          onStopRun={props.onStopRun}
           continuedMentionRequestIds={continuedMentionRequestIds}
         />
       )}
@@ -3183,7 +3288,7 @@ function ChatComposer(props: {
   const fileSearchRequestRef = useRef(0);
   const readyImages = pendingImages.filter((image) => image.status === "ready" && image.dataBase64);
   const hasInvalidImages = pendingImages.some((image) => image.status !== "ready");
-  const canSend = !props.isRunning && !hasInvalidImages && (Boolean(props.draft.trim()) || readyImages.length > 0);
+  const canSend = !hasInvalidImages && (Boolean(props.draft.trim()) || readyImages.length > 0);
   const mentionOptions = mentionQuery === undefined
     ? []
     : props.participants.filter((participant) => participant.handle.toLowerCase().includes(mentionQuery.toLowerCase()));
@@ -3760,6 +3865,7 @@ function ChatMessageItem(props: {
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: { selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
+  onStopRun?: (runId: string) => void;
 }): JSX.Element {
   const { message } = props;
   const [copied, setCopied] = useState(false);
@@ -3848,6 +3954,19 @@ function ChatMessageItem(props: {
               <MarkdownText content={displayContent} />
             )}
           </div>
+          {isStreaming && message.metadata?.queuedBehind && (
+            <div className="chat-queued-badge">
+              <span>Queued — waiting for @{message.metadata.queuedBehind.handle} to finish</span>
+            </div>
+          )}
+          {isStreaming && message.metadata?.runId && props.onStopRun && (
+            <div className="chat-stop-actions">
+              <Button variant="outline" size="sm" onClick={() => props.onStopRun?.(message.metadata!.runId!)}>
+                <X size={14} />
+                Stop
+              </Button>
+            </div>
+          )}
           {repoFileMentions.length > 0 && (
             <div className="repo-file-reference-footer">
               <FileText size={14} />
@@ -3867,7 +3986,7 @@ function ChatMessageItem(props: {
             <div className="chat-approval-note">
               <span>Approved: {approved.map((mention) => `@${mention.targetHandle}`).join(", ")}</span>
               {canContinueRequester && (
-                <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, [], true)}>
+                <Button variant="outline" size="sm" onClick={() => props.onApproveMentions(message.id, [], true)}>
                   <RefreshCw size={15} />
                   Continue {author}
                 </Button>
@@ -3878,22 +3997,21 @@ function ChatMessageItem(props: {
             <div className="chat-approval-box">
               <strong>Pending mentions: {pending.map((mention) => `@${mention.targetHandle}`).join(", ")}</strong>
               <div className="chat-approval-actions">
-                <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, continuationRequested)}>
+                <Button variant="outline" size="sm" onClick={() => props.onApproveMentions(message.id, allPendingIds, continuationRequested)}>
                   <CheckCircle2 size={16} />
                   {approvePendingLabel}
                 </Button>
                 {continuationRequested && (
-                  <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onApproveMentions(message.id, allPendingIds, false)}>
+                  <Button variant="outline" size="sm" onClick={() => props.onApproveMentions(message.id, allPendingIds, false)}>
                     Approve mentions
                   </Button>
                 )}
-                <Button variant="outline" size="sm" disabled={props.busy} onClick={() => props.onRejectMentions(message.id, allPendingIds)}>
+                <Button variant="outline" size="sm" onClick={() => props.onRejectMentions(message.id, allPendingIds)}>
                   Reject
                 </Button>
                 {pending.map((mention) => (
                   <Button
                     variant="outline" size="sm"
-                    disabled={props.busy}
                     onClick={() => props.onApproveMentions(message.id, [mention.targetParticipantId], false)}
                     key={mention.targetParticipantId}
                   >
@@ -4211,6 +4329,7 @@ function ChatThreadPanel(props: {
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: { selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
+  onStopRun?: (runId: string) => void;
   continuedMentionRequestIds: Set<string>;
 }): JSX.Element {
   const rootAuthor = authorForMessage(props.rootMessage, "chat");
@@ -4239,6 +4358,7 @@ function ChatThreadPanel(props: {
           onApproveMentions={props.onApproveMentions}
           onRejectMentions={props.onRejectMentions}
           onRespondToChoice={props.onRespondToChoice}
+          onStopRun={props.onStopRun}
         />
         {props.replies.length > 0 && (
           <div className="chat-thread-replies">
@@ -4256,6 +4376,7 @@ function ChatThreadPanel(props: {
                 onApproveMentions={props.onApproveMentions}
                 onRejectMentions={props.onRejectMentions}
                 onRespondToChoice={props.onRespondToChoice}
+                onStopRun={props.onStopRun}
                 key={message.id}
               />
             ))}
@@ -6096,6 +6217,25 @@ function liveMessageProgressById(progress: ReviewProgress[]): Map<string, AgentR
 
 function conversationRunId(conversation: Conversation): string {
   return metadataString(conversation.metadata.runId) || conversation.id;
+}
+
+function conversationRelevantRunIds(conversation: Conversation): Set<string> {
+  const ids = new Set<string>();
+  const legacy = metadataString(conversation.metadata.runId);
+  if (legacy) ids.add(legacy);
+  const active = conversation.metadata.activeRunIds;
+  if (Array.isArray(active)) {
+    for (const id of active) {
+      if (typeof id === "string" && id) ids.add(id);
+    }
+  }
+  for (const message of conversation.messages) {
+    const messageRunId = message.metadata?.runId;
+    if (typeof messageRunId === "string" && messageRunId) {
+      ids.add(messageRunId);
+    }
+  }
+  return ids;
 }
 
 function conversationMatchesSnapshot(current: Conversation | undefined, updated: Conversation, currentRunId: string | undefined): boolean {

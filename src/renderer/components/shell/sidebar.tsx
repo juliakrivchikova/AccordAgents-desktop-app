@@ -24,6 +24,7 @@ export interface SidebarProps {
   pendingId?: string;
   busy?: boolean;
   loading?: boolean;
+  unreadIds?: ReadonlySet<string>;
   onSelect: (id: string) => void;
   onNewSession: () => void;
   onNewProjectSession: (repoPath?: string) => void;
@@ -36,6 +37,7 @@ export const Sidebar = ({
   pendingId,
   busy,
   loading,
+  unreadIds,
   onSelect,
   onNewSession,
   onNewProjectSession,
@@ -177,14 +179,18 @@ export const Sidebar = ({
                         const pending = summary.id === pendingId;
                         const selected = summary.id === activeId || pending;
                         const relativeTime = formatCompactRelativeTime(summary.updatedAt);
+                        const running = summary.running === true;
+                        const unread = !selected && !running && unreadIds?.has(summary.id) === true;
                         return (
                           <button
                             key={summary.id}
                             type="button"
                             onClick={() => onSelect(summary.id)}
                             data-selected={selected ? "true" : undefined}
+                            data-running={running ? "true" : undefined}
+                            data-unread={unread ? "true" : undefined}
                             data-testid="project-session"
-                            aria-busy={pending ? "true" : undefined}
+                            aria-busy={pending || running ? "true" : undefined}
                             className={cn(
                               "sidebar-history-item group flex w-full min-w-0 max-w-full flex-col gap-0.5 overflow-hidden rounded-md px-2 py-1.5 text-left text-sm",
                               "border border-transparent transition-colors hover:bg-[var(--app-surface-hover)]",
@@ -194,8 +200,9 @@ export const Sidebar = ({
                             )}
                           >
                             <span className="flex w-full min-w-0 items-center gap-1.5 text-[13px] leading-tight">
-                              {pending && <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />}
+                              {(pending || running) && <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />}
                               <span className="min-w-0 flex-1 truncate">{summary.title}</span>
+                              {unread && <span className="size-2 shrink-0 rounded-full bg-sky-400" aria-label="New activity" title="New activity" />}
                               {relativeTime && <span className="shrink-0 text-[11px] text-muted-foreground">{relativeTime}</span>}
                             </span>
                           </button>

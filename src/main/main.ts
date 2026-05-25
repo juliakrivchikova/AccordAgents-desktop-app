@@ -451,7 +451,12 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle("conversations:cancel-review", (_event, runId: string) => {
-    activeReviews.get(runId)?.abort();
+    const controller = activeReviews.get(runId);
+    if (controller) {
+      controller.abort();
+      return;
+    }
+    chatService.cancelRun(runId);
   });
   ipcMain.handle("dialog:select-repo", async () => {
     const options: Electron.OpenDialogOptions = {

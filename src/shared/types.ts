@@ -358,6 +358,8 @@ export interface ChatMessageMetadata {
   requesterContinuationRequested?: boolean;
   approvedContinuation?: boolean;
   syncedThroughMessageId?: string;
+  runId?: string;
+  queuedBehind?: { handle: string };
 }
 
 export interface ChatRoleConfigUpdate {
@@ -753,6 +755,7 @@ export interface ConversationSummary {
   createdAt: string;
   updatedAt: string;
   repoPath?: string;
+  running?: boolean;
 }
 
 export interface Conversation extends ConversationSummary {
