@@ -252,13 +252,15 @@ export class ChatService {
   private readonly runQueues = new Map<string, Promise<void>>();
   private readonly activeRunIds = new Set<string>();
   private readonly activeConversationRunIds = new Map<string, Set<string>>();
+  private readonly activeRunRefCounts = new Map<string, number>();
+  private readonly activeConversationRunRefCounts = new Map<string, Map<string, number>>();
   private readonly backgroundRunnerCounts = new Map<string, number>();
   private readonly appMcpTokens = new Map<string, string>();
   private readonly participantRequestRunners = new Map<string, Promise<ParticipantRequestRunResult>>();
   private readonly participantRequestAutoResumes = new Set<string>();
   private readonly permissionApprovalAutoResumes = new Set<string>();
   private readonly participantTurnQueues = new Map<string, Promise<void>>();
-  private readonly chatRunControllers = new Map<string, AbortController>();
+  private readonly chatRunControllers = new Map<string, Set<AbortController>>();
   private readonly chatRunMeta = new Map<string, { conversationId: string; participantId: string; participantHandle: string; pendingMessageId?: string }>();
   private readonly chatMutationQueues = new Map<string, Promise<void>>();
 
@@ -1576,7 +1578,7 @@ export class ChatService {
         } finally {
           signal?.removeEventListener("abort", onParentAbort);
           await this.endChatRun(conversation, targetRunId);
-          this.unregisterTargetRun(targetRunId);
+          this.unregisterTargetRun(targetRunId, targetController);
         }
         completed += 1;
         this.emitProgress(runId, progress, "debate", `@${participant.handle} finished.`, {
@@ -3961,6 +3963,7 @@ export class ChatService {
       existingPendingMessage?: ChatMessage;
     }
   ): Promise<ChatMessage[]> {
+    const turnController = this.ensureChatTurnController(conversation, participant, runId, signal);
     const key = `${conversation.id}:${participant.id}`;
     const previous = this.participantTurnQueues.get(key) ?? Promise.resolve();
     let release!: () => void;
@@ -3971,13 +3974,51 @@ export class ChatService {
     this.participantTurnQueues.set(key, chained);
     await previous.catch(() => undefined);
     try {
-      return await this.runParticipantTurn(conversation, participant, triggerMessage, runId, signal, progress, options);
+      return await this.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, options);
     } finally {
       release();
+      turnController.cleanup();
       if (this.participantTurnQueues.get(key) === chained) {
         this.participantTurnQueues.delete(key);
       }
     }
+  }
+
+  private ensureChatTurnController(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    runId: string,
+    parentSignal: AbortSignal | undefined
+  ): { signal: AbortSignal; cleanup: () => void } {
+    const existingController = this.firstChatRunController(runId);
+    if (existingController && parentSignal === existingController.signal) {
+      return { signal: parentSignal, cleanup: () => undefined };
+    }
+    const controller = new AbortController();
+    const inheritedSignal = parentSignal ?? existingController?.signal;
+    const abortFromInherited = (): void => controller.abort();
+    if (inheritedSignal?.aborted) {
+      controller.abort();
+    } else {
+      inheritedSignal?.addEventListener("abort", abortFromInherited, { once: true });
+    }
+    this.registerTargetRun(runId, controller, {
+      conversationId: conversation.id,
+      participantId: participant.id,
+      participantHandle: participant.handle
+    });
+    return {
+      signal: controller.signal,
+      cleanup: () => {
+        inheritedSignal?.removeEventListener("abort", abortFromInherited);
+        this.unregisterTargetRun(runId, controller);
+      }
+    };
+  }
+
+  private firstChatRunController(runId: string): AbortController | undefined {
+    const controllers = this.chatRunControllers.get(runId);
+    return controllers?.values().next().value;
   }
 
   private participantRequestToolResult(
@@ -5597,11 +5638,13 @@ export class ChatService {
   }
 
   cancelRun(runId: string): boolean {
-    const controller = this.chatRunControllers.get(runId);
-    if (!controller) {
+    const controllers = this.chatRunControllers.get(runId);
+    if (!controllers || controllers.size === 0) {
       return false;
     }
-    controller.abort();
+    for (const controller of controllers) {
+      controller.abort();
+    }
     return true;
   }
 
@@ -5638,7 +5681,9 @@ export class ChatService {
   }
 
   private registerTargetRun(runId: string, controller: AbortController, meta: { conversationId: string; participantId: string; participantHandle: string }): void {
-    this.chatRunControllers.set(runId, controller);
+    const controllers = this.chatRunControllers.get(runId) ?? new Set<AbortController>();
+    controllers.add(controller);
+    this.chatRunControllers.set(runId, controllers);
     this.chatRunMeta.set(runId, { ...meta });
   }
 
@@ -5649,7 +5694,14 @@ export class ChatService {
     }
   }
 
-  private unregisterTargetRun(runId: string): void {
+  private unregisterTargetRun(runId: string, controller?: AbortController): void {
+    if (controller) {
+      const controllers = this.chatRunControllers.get(runId);
+      controllers?.delete(controller);
+      if (controllers && controllers.size > 0) {
+        return;
+      }
+    }
     this.chatRunControllers.delete(runId);
     this.chatRunMeta.delete(runId);
   }
@@ -5698,9 +5750,11 @@ export class ChatService {
   private async endChatRun(conversation: Conversation, runId: string): Promise<void> {
     try {
       await this.withChatMutation(conversation, async () => {
-        conversation.metadata = withActiveRunIdRemoved(conversation.metadata, runId);
-        if (!this.hasOtherLiveWork(conversation.id, runId) && readActiveRunIds(conversation.metadata).length === 0) {
-          conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
+        if (this.activeConversationRunRefCount(conversation.id, runId) <= 1) {
+          conversation.metadata = withActiveRunIdRemoved(conversation.metadata, runId);
+          if (!this.hasOtherLiveWork(conversation.id, runId) && readActiveRunIds(conversation.metadata).length === 0) {
+            conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
+          }
         }
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
@@ -5723,14 +5777,34 @@ export class ChatService {
   }
 
   private rememberActiveChatRun(conversationId: string, runId: string): void {
+    this.activeRunRefCounts.set(runId, (this.activeRunRefCounts.get(runId) ?? 0) + 1);
     this.activeRunIds.add(runId);
     const runIds = this.activeConversationRunIds.get(conversationId) ?? new Set<string>();
     runIds.add(runId);
     this.activeConversationRunIds.set(conversationId, runIds);
+    const runCounts = this.activeConversationRunRefCounts.get(conversationId) ?? new Map<string, number>();
+    runCounts.set(runId, (runCounts.get(runId) ?? 0) + 1);
+    this.activeConversationRunRefCounts.set(conversationId, runCounts);
   }
 
   private forgetActiveChatRun(conversationId: string, runId: string): void {
-    this.activeRunIds.delete(runId);
+    const nextGlobalCount = (this.activeRunRefCounts.get(runId) ?? 0) - 1;
+    if (nextGlobalCount > 0) {
+      this.activeRunRefCounts.set(runId, nextGlobalCount);
+    } else {
+      this.activeRunRefCounts.delete(runId);
+      this.activeRunIds.delete(runId);
+    }
+    const runCounts = this.activeConversationRunRefCounts.get(conversationId);
+    const nextConversationCount = (runCounts?.get(runId) ?? 0) - 1;
+    if (runCounts && nextConversationCount > 0) {
+      runCounts.set(runId, nextConversationCount);
+      return;
+    }
+    runCounts?.delete(runId);
+    if (runCounts && runCounts.size === 0) {
+      this.activeConversationRunRefCounts.delete(conversationId);
+    }
     const runIds = this.activeConversationRunIds.get(conversationId);
     if (!runIds) {
       return;
@@ -5739,6 +5813,10 @@ export class ChatService {
     if (runIds.size === 0) {
       this.activeConversationRunIds.delete(conversationId);
     }
+  }
+
+  private activeConversationRunRefCount(conversationId: string, runId: string): number {
+    return this.activeConversationRunRefCounts.get(conversationId)?.get(runId) ?? 0;
   }
 
   private chatHasLiveWork(conversationId: string): boolean {

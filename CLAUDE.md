@@ -11,8 +11,10 @@ Prefer the Makefile aliases; they wrap the npm scripts in `package.json`.
 - `make start` — Build, then run Electron from `dist`.
 - `make typecheck` — Strict TS checks for both main and renderer projects (`tsc --noEmit` against each tsconfig).
 - `make clean` — Remove `dist`.
+- `npm run test:permissions` — Build the main process, then run targeted Node service tests for chat permissions/cancellation, repo file mentions, chat rename, git repo-file listing, and CLI permission handling.
+- `npm run test:app-skills` — Build the main process, then run app-skill service tests.
 
-There is no lint or test runner configured. Before submitting changes, run `make typecheck` and (for renderer changes) `make build`. Manual verification notes are expected in PRs whenever IPC, provider integrations, git diff handling, or conversation storage are touched.
+There is no lint runner. Before submitting changes, run `make typecheck` and (for renderer changes) `make build`. For chat permissions, cancellation, repo-file mentions, rename, git repo-file listing, or CLI permission changes, run `npm run test:permissions`. For app-skill service changes, run `npm run test:app-skills`. Manual verification notes are expected in PRs whenever IPC, provider integrations, git diff handling, or conversation storage are touched. For chat concurrency / fan-out changes, walk through `docs/concurrent-chat-fanout-test-cases.md` as the QA matrix.
 
 Debug logs (JSONL of progress events and raw provider/CLI output) are written to Electron's `userData/debug-logs/<date>.jsonl`. The `DebugLogService` enables them automatically when running unpackaged; force on/off with `AI_CONSENSUS_DEBUG_LOGS=1` / `=0`.
 
@@ -40,7 +42,7 @@ This is an Electron desktop app that orchestrates a debate between several AI pa
 Services in `src/main/services`:
 
 - `consensus.ts` (~3.5k lines) — Core orchestration. Runs each participant on the initial prompt, asks the arbiter to merge points, opens a debate thread per point, and either confirms/rejects findings or escalates to the arbiter. Implementation-plan conversations have additional flows (`composeImplementationPlan`, `retryImplementationPlanSynthesis`, `recoverImplementationPlan`, `reviseImplementationPlan`, `askPlanDecisionClarification`) for plan synthesis, decision gates, and revision; understand the four `ConversationKind` values (`general`, `code-review`, `implementation-plan`, `chat`) before changing branching here.
-- `chat.ts` — The `chat` conversation kind. Maintains per-participant CLI sessions (`ChatParticipantSession`) with persistent `sessionId`s so Codex/Claude resume context across turns. Mention approvals (`ChatPendingMention`) gate when an `@handle` triggers another agent.
+- `chat.ts` — The `chat` conversation kind. Maintains per-participant CLI sessions (`ChatParticipantSession`) with persistent `sessionId`s so Codex/Claude resume context across turns. Mention approvals (`ChatPendingMention`) gate when an `@handle` triggers another agent. Chat sends ingest the user message synchronously, then fan out mentioned participants in the background. Each target run has its own `runId`/`AbortController`; `metadata.activeRunIds` is the active-run source of truth, with `metadata.running`/`metadata.runId` kept for compatibility. Concurrent chat writes must go through `withChatMutation`, which waits for queued saves and refreshes/merges storage before mutating. Do not emit `queueSnapshot` or call `saveConversation` directly from long-running chat-turn code. Same-participant turns serialize via `participantTurnQueues`, while different participants can run concurrently. `cancelRun(runId)` may abort multiple controllers because resume flows can share a run id, so active run bookkeeping is ref-counted.
 - `providers.ts` — HTTP providers (OpenAI, Anthropic, Gemini). Reads API keys from `SettingsService` at call time. Normalizes responses to a `ParticipantRunResult`.
 - `cliAgents.ts` — Runs `codex` and `claude` CLIs. Detects them via `which`, then spawns `codex exec` / `claude` with carefully constructed argv: `--sandbox read-only`, `--cd <repo>`, `--skip-git-repo-check` for non-repo or `chat` runs, `--ephemeral --ignore-rules` when no repo is selected. Resumes Codex sessions via `codex exec resume <sessionId>`. Output goes through a temp `--output-last-message` file; raw stdout is mostly progress JSON.
 - `settings.ts` — Reads/writes JSON settings under Electron `userData`. API keys are encrypted with Electron `safeStorage`; `hasApiKey` is the only key-related field exposed to the renderer. Owns `chatRoleConfigs` (instructions templates) and `chatParticipantConfigs` (handle/role/CLI bindings) used by `ChatService`. See `docs/chat-roles-and-participants.md` before changing chat role presets, participant configs, or runtime session behavior.
@@ -50,7 +52,7 @@ Services in `src/main/services`:
 
 ### Renderer
 
-`src/renderer/App.tsx` is a single ~5k-line component that contains the entire UI (sidebar, chat view, review view, plan view, settings). State is local React state plus subscriptions to `onReviewProgress` / `onConversationUpdated`. Styles are in `src/renderer/styles/app.css`; assets in `src/renderer/assets`. Touch this file with care — it is large but intentional, and lacks tests.
+`src/renderer/App.tsx` is a single ~5k-line component that contains the entire UI (sidebar, chat view, review view, plan view, settings). State is local React state plus subscriptions to `onReviewProgress` / `onConversationUpdated`. Chat sends should not set the global `busy` flag; active chat state is per-conversation/per-run. The chat UI derives per-message Stop controls from `message.metadata.runId`, and Stop all from `metadata.activeRunIds` plus pending message run ids. Styles are in `src/renderer/styles/app.css`; assets in `src/renderer/assets`. Touch this file with care — it is large but intentional, and lacks renderer tests.
 
 ### Warning sanitization
 

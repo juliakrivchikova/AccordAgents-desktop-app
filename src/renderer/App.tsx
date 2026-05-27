@@ -14,16 +14,17 @@ import {
   HelpCircle,
   ImagePlus,
   ListChecks,
+  Maximize2,
   MessageSquare,
   PanelLeftOpen,
   PencilLine,
-  Plus,
   Play,
+  Plus,
   RefreshCw,
   SendHorizontal,
   Settings,
+  Square,
   Users,
-  Maximize2,
   X,
   XCircle
 } from "lucide-react";
@@ -179,6 +180,15 @@ const APP_CHAT_REQUEST_PARTICIPANTS_TOOL = "app_chat_request_participants";
 const SHOW_CHAT_SYSTEM_MESSAGES = import.meta.env.VITE_AI_CONSENSUS_SHOW_SYSTEM_MESSAGES === "1";
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "ai-consensus.sidebarCollapsed";
 const LAST_VIEWED_AT_STORAGE_KEY = "ai-consensus.lastViewedAt";
+const DISMISSED_WARNINGS_STORAGE_KEY = "ai-consensus.dismissedWarnings.v1";
+const GLOBAL_WARNING_DISMISS_SCOPE = "__global__";
+
+type DismissedWarningMap = Record<string, string[]>;
+
+interface WarningNoticeEntry {
+  key: string;
+  text: string;
+}
 
 function readLastViewedAtFromStorage(): Record<string, string> {
   try {
@@ -204,6 +214,69 @@ function persistLastViewedAt(map: Record<string, string>): void {
   } catch {
     // ignore
   }
+}
+
+function readDismissedWarningsFromStorage(): DismissedWarningMap {
+  try {
+    const raw = window.localStorage.getItem(DISMISSED_WARNINGS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const out: DismissedWarningMap = {};
+    for (const [scope, values] of Object.entries(parsed)) {
+      if (typeof scope !== "string" || !Array.isArray(values)) {
+        continue;
+      }
+      const warnings = values.filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+      if (warnings.length > 0) {
+        out[scope] = Array.from(new Set(warnings));
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function persistDismissedWarnings(map: DismissedWarningMap): void {
+  try {
+    window.localStorage.setItem(DISMISSED_WARNINGS_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // ignore
+  }
+}
+
+function warningDismissScope(conversation: Conversation | undefined): string {
+  return conversation?.id ?? GLOBAL_WARNING_DISMISS_SCOPE;
+}
+
+function warningNoticeEntries(warnings: string[], dismissedKeys: Set<string>): WarningNoticeEntry[] {
+  const seen = new Set<string>();
+  const entries: WarningNoticeEntry[] = [];
+  for (const warning of warnings) {
+    const text = displayNoticeText(warning);
+    if (!text || seen.has(text) || dismissedKeys.has(text)) {
+      continue;
+    }
+    seen.add(text);
+    entries.push({ key: text, text });
+  }
+  return entries;
+}
+
+function addDismissedWarningKeys(current: DismissedWarningMap, scope: string, keys: string[]): DismissedWarningMap {
+  const additions = keys.filter(Boolean);
+  if (additions.length === 0) {
+    return current;
+  }
+  const existing = current[scope] ?? [];
+  const merged = Array.from(new Set([...existing, ...additions]));
+  if (merged.length === existing.length) {
+    return current;
+  }
+  return { ...current, [scope]: merged };
 }
 const CHAT_AGENT_MODE_OPTIONS: Array<{ value: ChatAgentMode; label: string }> = [
   { value: "default", label: "Default" },
@@ -465,6 +538,7 @@ function App(): JSX.Element {
   const [pastedDiff, setPastedDiff] = useState("");
   const [diffPreview, setDiffPreview] = useState("");
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [dismissedWarningKeysByScope, setDismissedWarningKeysByScope] = useState<DismissedWarningMap>(readDismissedWarningsFromStorage);
   const [initializing, setInitializing] = useState(true);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [openingConversationId, setOpeningConversationId] = useState<string | undefined>();
@@ -643,6 +717,9 @@ function App(): JSX.Element {
     const requestId = openConversationRequestRef.current + 1;
     openConversationRequestRef.current = requestId;
     setError(undefined);
+    if (conversation?.id !== id) {
+      setWarnings([]);
+    }
     if (conversation?.id === id) {
       setOpeningConversationId(undefined);
       setSettingsMenuOpen(false);
@@ -1806,9 +1883,9 @@ function App(): JSX.Element {
   const conversationMetadataWarnings = Array.isArray(conversation?.metadata?.warnings)
     ? (conversation!.metadata.warnings as unknown[]).filter((w): w is string => typeof w === "string")
     : [];
-  const visibleWarnings = Array.from(new Set([...warnings, ...conversationMetadataWarnings]))
-    .map((warning) => displayNoticeText(warning))
-    .filter(Boolean);
+  const warningScope = warningDismissScope(conversation);
+  const dismissedWarningKeys = new Set(dismissedWarningKeysByScope[warningScope] ?? []);
+  const visibleWarnings = warningNoticeEntries([...warnings, ...conversationMetadataWarnings], dismissedWarningKeys);
   const chatSummaries = useMemo(() => summaries.filter((summary) => summary.kind === "chat"), [summaries]);
   const projectSessionGroups = useMemo(() => buildProjectSessionGroups(chatSummaries), [chatSummaries]);
   const activeChatConversation = activeView !== "settings" && conversation?.kind === "chat" ? conversation : undefined;
@@ -1840,6 +1917,21 @@ function App(): JSX.Element {
   };
   const closeSettings = (): void => {
     setActiveView(settingsReturnView);
+  };
+  const dismissWarnings = (keys: string[]): void => {
+    setDismissedWarningKeysByScope((current) => {
+      const next = addDismissedWarningKeys(current, warningScope, keys);
+      if (next !== current) {
+        persistDismissedWarnings(next);
+      }
+      return next;
+    });
+  };
+  const dismissWarning = (key: string): void => {
+    dismissWarnings([key]);
+  };
+  const dismissVisibleWarnings = (): void => {
+    dismissWarnings(visibleWarnings.map((warning) => warning.key));
   };
 
   const topBarLeading = sidebarCollapsed ? (
@@ -1957,11 +2049,34 @@ function App(): JSX.Element {
             <Notice tone="error">{displayNoticeText(error)}</Notice>
           </div>
         )}
-        {visibleWarnings.map((warning, index) => (
-          <div className="mx-3 mt-2" key={`${index}:${warning.slice(0, 80)}`}>
-            <Notice tone="warning">{warning}</Notice>
+        {visibleWarnings.length > 0 && (
+          <div className="mx-3 mt-2 space-y-2">
+            {visibleWarnings.length > 1 && (
+              <div className="flex justify-end">
+                <Button type="button" variant="ghost" size="xs" onClick={dismissVisibleWarnings}>
+                  Dismiss all
+                </Button>
+              </div>
+            )}
+            {visibleWarnings.map((warning) => (
+              <Notice
+                tone="warning"
+                key={warning.key}
+                action={
+                  <IconButton
+                    label="Dismiss warning"
+                    icon={X}
+                    size="xs"
+                    tooltip="Dismiss warning"
+                    onClick={() => dismissWarning(warning.key)}
+                  />
+                }
+              >
+                {warning.text}
+              </Notice>
+            ))}
           </div>
-        ))}
+        )}
 
         {activeView === "settings" ? (
           <SettingsView
@@ -3156,20 +3271,20 @@ function ChatConversationView(props: {
               onRespond={handleAppToolApproval}
             />
           )}
+          {activeRunIdsForChat.length > 0 && props.onStopRun && (
+            <div className="chat-stop-all-bar">
+              <span>{activeRunIdsForChat.length} active {activeRunIdsForChat.length === 1 ? "run" : "runs"}</span>
+              <Button variant="outline" size="sm" onClick={() => {
+                for (const runId of activeRunIdsForChat) {
+                  props.onStopRun?.(runId);
+                }
+              }}>
+                <X size={14} />
+                Stop all
+              </Button>
+            </div>
+          )}
         </div>
-        {activeRunIdsForChat.length > 0 && props.onStopRun && (
-          <div className="chat-stop-all-bar">
-            <span>{activeRunIdsForChat.length} active {activeRunIdsForChat.length === 1 ? "run" : "runs"}</span>
-            <Button variant="outline" size="sm" onClick={() => {
-              for (const runId of activeRunIdsForChat) {
-                props.onStopRun?.(runId);
-              }
-            }}>
-              <X size={14} />
-              Stop all
-            </Button>
-          </div>
-        )}
         <div className="chat-timeline virtual-timeline" ref={timelineRef} onScroll={updateStickToBottom}>
           <div className="virtual-timeline-inner" style={{ height: `${chatVirtualizer.getTotalSize()}px` }}>
             {chatVirtualItems.map((virtualItem) => {
@@ -3930,15 +4045,27 @@ function ChatMessageItem(props: {
           <Avatar className="message-avatar" spec={avatar} />
         )}
         <div className="message-body">
-          <IconButton
-            className="message-copy-button"
-            size="xs"
-            icon={copied ? CheckCircle2 : Copy}
-            label={copied ? "Copied" : "Copy message"}
-            tooltip={copied ? "Copied" : "Copy message"}
-            disabled={!canCopy}
-            onClick={() => void copyMessage()}
-          />
+          {isStreaming && message.metadata?.runId && props.onStopRun ? (
+            <IconButton
+              className="message-stop-button"
+              size="xs"
+              variant="outline"
+              icon={Square}
+              label="Stop response"
+              tooltip="Stop response"
+              onClick={() => props.onStopRun?.(message.metadata!.runId!)}
+            />
+          ) : (
+            <IconButton
+              className="message-copy-button"
+              size="xs"
+              icon={copied ? CheckCircle2 : Copy}
+              label={copied ? "Copied" : "Copy message"}
+              tooltip={copied ? "Copied" : "Copy message"}
+              disabled={!canCopy}
+              onClick={() => void copyMessage()}
+            />
+          )}
           <div className="message-meta">
             <strong>{author}</strong>
             <span>{new Date(message.createdAt).toLocaleString()}</span>
@@ -3957,14 +4084,6 @@ function ChatMessageItem(props: {
           {isStreaming && message.metadata?.queuedBehind && (
             <div className="chat-queued-badge">
               <span>Queued — waiting for @{message.metadata.queuedBehind.handle} to finish</span>
-            </div>
-          )}
-          {isStreaming && message.metadata?.runId && props.onStopRun && (
-            <div className="chat-stop-actions">
-              <Button variant="outline" size="sm" onClick={() => props.onStopRun?.(message.metadata!.runId!)}>
-                <X size={14} />
-                Stop
-              </Button>
             </div>
           )}
           {repoFileMentions.length > 0 && (

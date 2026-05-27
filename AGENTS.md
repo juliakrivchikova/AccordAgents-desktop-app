@@ -6,6 +6,8 @@ This is an Electron desktop app built with TypeScript, React, and Vite. Main-pro
 
 For chat role presets, saved participants, and runtime participant sessions, read `docs/chat-roles-and-participants.md` before changing role or participant behavior.
 
+For chat concurrency and cancellation changes, treat `src/main/services/chat.ts`, `src/shared/chatRunState.ts`, chat storage summaries, and the renderer chat UI as one contract. Active chat runs are tracked with `metadata.activeRunIds`; `metadata.running` and `metadata.runId` are compatibility fields. Chat conversation mutations from concurrent runs must go through the `ChatService` mutation queue rather than direct stale snapshots.
+
 ## Build, Test, and Development Commands
 
 Prefer the Makefile aliases when working locally:
@@ -16,6 +18,8 @@ Prefer the Makefile aliases when working locally:
 - `make build`: compile the main process and build the renderer.
 - `make typecheck`: run strict TypeScript checks.
 - `make clean`: remove `dist`.
+- `npm run test:permissions`: build the main process and run targeted service tests for chat permissions/cancellation, repo file mentions, chat rename, git repo-file listing, and CLI permission handling.
+- `npm run test:app-skills`: build the main process and run app-skill service tests.
 
 Equivalent npm scripts are in `package.json`, for example `npm run dev`, `npm run build`, and `npm run typecheck`.
 
@@ -25,7 +29,7 @@ Use strict TypeScript and keep types explicit at IPC, service, and shared bounda
 
 ## Testing Guidelines
 
-No automated test framework is currently configured. Until one is added, run `make typecheck` and `make build` before submitting changes. For behavior that touches Electron IPC, provider integrations, git diff handling, or conversation storage, include manual verification notes in the PR. If adding tests, colocate them near the code under test or use `*.test.ts` / `*.test.tsx`, and add the command to `package.json`.
+There is no full test suite or lint runner, but targeted Node service tests exist. Run `make typecheck` and `make build` before submitting broad changes. Run `npm run test:permissions` for chat permissions, cancellation, repo-file mentions, rename, git repo-file listing, or CLI permission behavior, and `npm run test:app-skills` for app-skill service changes. For behavior that touches Electron IPC, provider integrations, git diff handling, conversation storage, or chat concurrency, include manual verification notes in the PR; the concurrent-chat fan-out QA matrix lives in `docs/concurrent-chat-fanout-test-cases.md`. If adding tests, colocate them near the code under test or use `*.test.ts` / `*.test.tsx`, and add the command to `package.json`.
 
 ## Inspecting the running desktop app
 

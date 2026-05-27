@@ -334,6 +334,78 @@ test("permission resume clears running and emits terminal error when resumed par
   assert.equal(progressEvents.some((item) => item.phase === "error" && item.message === "resume exploded"), true);
 });
 
+test("permission resume registers a cancellable chat run controller", async () => {
+  const participant = chatParticipant("claude-code");
+  const approval = permissionApproval(participant, {
+    kind: "shellRules",
+    rules: [{ action: "allow", match: "prefix", pattern: "git diff" }]
+  }, {
+    approvalScope: "once",
+    status: "approved",
+    resumeContext: {
+      runId: "blocked-run",
+      triggerMessageId: "user-message"
+    }
+  });
+  const conversation = chatConversation([participant], { pendingAppToolApprovals: [approval] });
+  let capturedSignal: AbortSignal | undefined;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, signal: AbortSignal | undefined) => {
+      capturedSignal = signal;
+      markStarted();
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) {
+          resolve();
+          return;
+        }
+        signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return {
+        participant: runParticipant,
+        ok: false,
+        content: "",
+        error: "cancelled",
+        durationMs: 1,
+        sessionId: "session-1"
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  const resume = (service as any).autoResumePermissionApproval(conversation.id, approval.id);
+  await started;
+
+  assert.equal(service.cancelRun("blocked-run"), true);
+  await resume;
+
+  assert.equal(capturedSignal?.aborted, true);
+  assert.equal(storage.current.metadata.running, false);
+  assert.equal(storage.current.metadata.runId, undefined);
+});
+
+test("duplicate chat run ids stay active until every owner ends", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+
+  await (service as any).beginChatRun(conversation, "shared-run");
+  await (service as any).beginChatRun(conversation, "shared-run");
+  await (service as any).endChatRun(conversation, "shared-run");
+
+  assert.deepEqual(storage.current.metadata.activeRunIds, ["shared-run"]);
+  assert.equal(storage.current.metadata.running, true);
+
+  await (service as any).endChatRun(conversation, "shared-run");
+
+  assert.equal(storage.current.metadata.activeRunIds, undefined);
+  assert.equal(storage.current.metadata.running, false);
+});
+
 test("participant prose mentioning blocked permissions does not create approval cards", () => {
   const participant = chatParticipant("claude-code", {
     repoRead: false,

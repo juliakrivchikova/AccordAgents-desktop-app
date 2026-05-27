@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CliAgentRunner } from "./cliAgents";
+import { CommandError } from "./command";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 
 function makeRunner(): CliAgentRunner {
@@ -148,4 +149,25 @@ test("codexPrompt chat envelope marks runs without readable context", () => {
   }));
 
   assert.match(wrapped, /No repository or app-managed readable directory is available/);
+});
+
+test("commandErrorText surfaces structured result errors", () => {
+  const runner = makeRunner() as any;
+  const error = new CommandError("claude exited with code 1", {
+    command: "claude",
+    args: [],
+    stdout: JSON.stringify({
+      type: "result",
+      is_error: true,
+      result: "You've hit your session limit; resets 4:10pm"
+    }),
+    stderr: "",
+    exitCode: 1,
+    timedOut: false
+  });
+
+  const message = runner.commandErrorText(error);
+
+  assert.match(message, /You've hit your session limit/);
+  assert.doesNotMatch(message, /Last events: result\./);
 });

@@ -1316,9 +1316,14 @@
   font-weight: 700;
 }
 
-.chat-stop-actions {
-  display: flex;
-  margin-top: 8px;
+.message-stop-button {
+  opacity: 1;
+  pointer-events: auto;
+  color: var(--app-text-strong, #20201d);
+}
+
+.message-stop-button:hover {
+  background: var(--app-surface-hover, #f0eee9);
 }
 
 .chat-stop-all-bar {
@@ -2124,6 +2129,12 @@
 }
 
 .message-copy-button {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+}
+
+.message-stop-button {
   position: absolute;
   top: 10px;
   right: 10px;

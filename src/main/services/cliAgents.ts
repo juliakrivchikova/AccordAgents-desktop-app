@@ -2459,7 +2459,12 @@ export class CliAgentRunner {
     }
 
     const type = this.stringField(record, "type") ?? "event";
-    const message = this.stringField(record, "message") ?? this.stringField(record, "error");
+    const message =
+      this.stringField(record, "message") ??
+      this.stringField(record, "error") ??
+      (record.is_error === true
+        ? this.stringField(record, "result") ?? this.stringField(record, "content")
+        : undefined);
     if (message) {
       return `${type}: ${this.truncateText(message, 90)}`;
     }

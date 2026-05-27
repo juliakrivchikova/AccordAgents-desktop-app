@@ -2,7 +2,7 @@ import * as React from "react";
 import { AlertCircle, AlertTriangle, Info } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { cn } from "@/lib/utils";
 
 export type NoticeTone = "info" | "warning" | "error";
@@ -29,12 +29,14 @@ export interface NoticeProps extends Omit<React.ComponentProps<"div">, "title"> 
   tone?: NoticeTone;
   title?: React.ReactNode;
   icon?: LucideIcon;
+  action?: React.ReactNode;
 }
 
 export const Notice = ({
   tone = "info",
   title,
   icon,
+  action,
   className,
   children,
   ...rest
@@ -45,6 +47,7 @@ export const Notice = ({
       <Icon className={cn("size-4", TONE_ICON_CLASS[tone])} aria-hidden />
       {title ? <AlertTitle>{title}</AlertTitle> : null}
       {children ? <AlertDescription>{children}</AlertDescription> : null}
+      {action ? <AlertAction>{action}</AlertAction> : null}
     </Alert>
   );
 };
