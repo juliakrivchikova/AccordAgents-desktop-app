@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="658" height="498" viewBox="0 0 658 498">
+  <defs>
+    <linearGradient id="base" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8fbff"/>
+      <stop offset="0.46" stop-color="#edf4f8"/>
+      <stop offset="1" stop-color="#f8f7f2"/>
+    </linearGradient>
+    <radialGradient id="blueGlow" cx="72%" cy="26%" r="58%">
+      <stop offset="0" stop-color="#78c7df" stop-opacity="0.46"/>
+      <stop offset="0.52" stop-color="#78c7df" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#78c7df" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="goldGlow" cx="18%" cy="78%" r="60%">
+      <stop offset="0" stop-color="#f1c783" stop-opacity="0.36"/>
+      <stop offset="0.56" stop-color="#f1c783" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#f1c783" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ribbonA" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#64b6d2" stop-opacity="0"/>
+      <stop offset="0.45" stop-color="#64b6d2" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#64b6d2" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="ribbonB" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#d0a35f" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#d0a35f" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#d0a35f" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="270" y1="0" x2="388" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#516174"/>
+      <stop offset="1" stop-color="#253344"/>
+    </linearGradient>
+    <filter id="softShadow" x="-25%" y="-120%" width="150%" height="340%">
+      <feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#243244" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <rect width="658" height="498" fill="url(#base)"/>
+  <rect width="658" height="498" fill="url(#blueGlow)"/>
+  <rect width="658" height="498" fill="url(#goldGlow)"/>
+
+  <path d="M-56 138 C92 46 198 224 335 128 C467 35 568 81 720 11" fill="none" stroke="url(#ribbonA)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M-74 386 C75 270 194 422 330 337 C474 247 560 356 733 239" fill="none" stroke="url(#ribbonB)" stroke-width="88" stroke-linecap="round"/>
+  <path d="M-40 254 C103 181 219 280 344 219 C480 153 574 186 703 118" fill="none" stroke="#ffffff" stroke-width="2" stroke-opacity="0.44"/>
+  <path d="M-30 302 C106 238 218 342 339 286 C459 231 569 266 700 193" fill="none" stroke="#9fb4c7" stroke-width="1.2" stroke-opacity="0.18"/>
+
+  <g opacity="0.22">
+    <circle cx="86" cy="80" r="2" fill="#8ba6b9"/>
+    <circle cx="147" cy="132" r="1.6" fill="#8ba6b9"/>
+    <circle cx="534" cy="86" r="2.2" fill="#8ba6b9"/>
+    <circle cx="589" cy="168" r="1.7" fill="#8ba6b9"/>
+    <circle cx="109" cy="411" r="1.8" fill="#ba9a66"/>
+    <circle cx="512" cy="406" r="1.9" fill="#ba9a66"/>
+  </g>
+
+  <g filter="url(#softShadow)">
+    <path d="M278 300 H363" fill="none" stroke="url(#arrow)" stroke-width="8" stroke-linecap="round"/>
+    <path d="M361 276 L390 300 L361 324" fill="none" stroke="url(#arrow)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

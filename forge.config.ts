@@ -7,6 +7,7 @@ import { FuseV1Options, FuseVersion } from "@electron/fuses";
 const productName = "AccordAgents";
 const assetsDir = path.resolve(__dirname, "assets");
 const iconPath = path.join(assetsDir, "icon.icns");
+const dmgBackgroundPath = path.join(assetsDir, "dmg-background.png");
 const entitlementsPath = path.resolve(__dirname, "entitlements.mac.plist");
 const entitlementsInheritPath = path.resolve(__dirname, "entitlements.mac.inherit.plist");
 const appleCodesignIdentity = process.env.APPLE_CODESIGN_IDENTITY;
@@ -110,16 +111,27 @@ const config = {
     new MakerDMG({
       icon: iconPath,
       title: productName,
+      background: dmgBackgroundPath,
+      iconSize: 96,
       format: "ULFO",
+      additionalDMGOptions: {
+        "background-color": "#f4f7fa",
+        window: {
+          size: {
+            width: 658,
+            height: 498
+          }
+        }
+      },
       contents: (options) => [
         {
-          x: 210,
+          x: 182,
           y: 300,
           type: "file",
           path: options.appPath
         },
         {
-          x: 450,
+          x: 476,
           y: 300,
           type: "link",
           path: "/Applications"
