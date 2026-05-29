@@ -81,6 +81,37 @@ function run(command, args, options = {}) {
   });
 }
 
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function runWithRetry(command, args, options = {}) {
+  const attempts = options.attempts ?? 3;
+  const delayMs = options.delayMs ?? 10_000;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const result = spawnSync(command, args, {
+      cwd: rootDir,
+      env: process.env,
+      encoding: "utf8"
+    });
+    if (result.stdout) {
+      process.stdout.write(result.stdout);
+    }
+    if (result.stderr) {
+      process.stderr.write(result.stderr);
+    }
+    if (!result.error && result.status === 0) {
+      return;
+    }
+    if (attempt === attempts) {
+      const details = result.error instanceof Error ? result.error.message : `${command} exited with status ${result.status}`;
+      fail(`Command failed after ${attempts} attempts: ${details}`);
+    }
+    console.warn(`Command failed; retrying in ${Math.round(delayMs / 1000)}s (${attempt}/${attempts}).`);
+    sleep(delayMs);
+  }
+}
+
 function output(command, args) {
   return execFileSync(command, args, {
     cwd: rootDir,
@@ -203,13 +234,13 @@ function verifySignedApp() {
 }
 
 function notarizeAndVerifyDmg(dmgPath) {
-  run("codesign", [
+  runWithRetry("codesign", [
     "--force",
     "--timestamp",
     "--sign",
     process.env.APPLE_CODESIGN_IDENTITY,
     dmgPath
-  ]);
+  ], { attempts: 4, delayMs: 15_000 });
   run("codesign", ["--verify", "--verbose=2", dmgPath]);
 
   run("xcrun", [
