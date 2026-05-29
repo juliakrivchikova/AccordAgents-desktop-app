@@ -1,0 +1,21 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  local-release-note:
+    name: Local release artifacts only
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain release artifact workflow
+        run: |
+          echo "macOS release artifacts are built, signed, notarized, and stapled locally."
+          echo "Run npm run signed:mac-arm64 on a macOS machine with Developer ID credentials."
+          echo "This workflow intentionally does not build, sign, notarize, or publish macOS artifacts."

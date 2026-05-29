@@ -1,7 +1,7 @@
 ---
 name: app-chat-request
 description: >
-  Ask another AI Consensus chat participant for a concrete answer using the
+  Ask another AccordAgents chat participant for a concrete answer using the
   participant request MCP tool. Use this skill when you need to consult, ping,
   request, hand off, or ask another @participant to respond to a question or
   task. Do not rely on plain @mentions when the target is expected to answer.

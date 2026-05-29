@@ -119,7 +119,7 @@ test("codexPrompt chat envelope passes the inner prompt through and does not dup
     canRequestPermissions: true
   }));
 
-  assert.match(wrapped, /You are running for AI Consensus Chat in default mode/);
+  assert.match(wrapped, /You are running for AccordAgents Chat in default mode/);
   assert.match(wrapped, /Read-only file inspection/);
   assert.ok(wrapped.includes(innerPrompt));
   assert.doesNotMatch(wrapped, /Shell commands are blocked for this turn/);
@@ -137,7 +137,7 @@ test("codexPrompt chat envelope reflects plan agent mode in its header", () => {
     canRequestPermissions: true
   }));
 
-  assert.match(wrapped, /You are running for AI Consensus Chat in plan mode/);
+  assert.match(wrapped, /You are running for AccordAgents Chat in plan mode/);
 });
 
 test("codexPrompt chat envelope marks runs without readable context", () => {

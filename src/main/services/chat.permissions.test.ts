@@ -624,7 +624,7 @@ function testService(options: {
   conversation?: Conversation;
   run?: (...args: any[]) => Promise<any>;
 } = {}): { service: ChatService; storage: any; tempRoot: string } {
-  const tempRoot = path.join(tmpdir(), "ai-consensus-chat-permissions-test");
+  const tempRoot = path.join(tmpdir(), "accordagents-chat-permissions-test");
   const storage = {
     current: options.conversation ? clone(options.conversation) : undefined,
     async getConversation(id: string): Promise<Conversation | undefined> {

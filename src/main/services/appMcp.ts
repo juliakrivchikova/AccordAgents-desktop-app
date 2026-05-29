@@ -274,7 +274,7 @@ export class AppMcpService {
         }
       },
       serverInfo: {
-        name: "ai-consensus-app",
+        name: "accordagents-app",
         version: "0.1.0"
       }
     };
@@ -568,7 +568,7 @@ export class AppMcpService {
           name: APP_ROSTER_DESCRIBE_OPTIONS_TOOL,
           title: "Describe Chat Roster Options",
           description:
-            "Return the roles, CLI providers, configured models, current roster, and validation rules available for AI Consensus chat roster changes. This is read-only.",
+            "Return the roles, CLI providers, configured models, current roster, and validation rules available for AccordAgents chat roster changes. This is read-only.",
           inputSchema: {
             type: "object",
             additionalProperties: false,
@@ -585,7 +585,7 @@ export class AppMcpService {
           name: APP_ROSTER_REQUEST_CHANGE_TOOL,
           title: "Request Chat Roster Change",
           description:
-            "Request an AI Consensus chat roster change. The app validates the request and asks User to approve it unless this administrator is already trusted for roster changes in this chat.",
+            "Request an AccordAgents chat roster change. The app validates the request and asks User to approve it unless this administrator is already trusted for roster changes in this chat.",
           inputSchema: {
             type: "object",
             additionalProperties: false,

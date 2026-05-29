@@ -142,7 +142,7 @@ Required behavior:
 
 Storage behavior:
 
-- Conversations are stored in Electron `userData` SQLite database `ai-consensus.sqlite3`.
+- Conversations are stored in Electron `userData` SQLite database `accordagents.sqlite3`.
 - Message bodies are split into `conversation_messages` for paging.
 - Chat history files are also written under `userData/chats/<conversationId>/history.md` and `history.json` so participants can read prior context.
 

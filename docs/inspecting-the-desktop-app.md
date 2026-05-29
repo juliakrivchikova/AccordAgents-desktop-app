@@ -1,6 +1,6 @@
 # Inspecting and driving the desktop app
 
-When you (an AI agent or a human) need to **see**, **screenshot**, **scroll**, **click**, or **read DOM/CSS state** in the running ai-consensus desktop app — for reproducing UI bugs, verifying fixes, or automated UI checks — use the **Chrome DevTools Protocol** against the Electron renderer. Do not use macOS screencapture, AppleScript, CGWindowList, or any window-focus tricks. Those require accessibility/screen-recording permissions the terminal usually lacks, and they are unreliable.
+When you (an AI agent or a human) need to **see**, **screenshot**, **scroll**, **click**, or **read DOM/CSS state** in the running accordagents desktop app — for reproducing UI bugs, verifying fixes, or automated UI checks — use the **Chrome DevTools Protocol** against the Electron renderer. Do not use macOS screencapture, AppleScript, CGWindowList, or any window-focus tricks. Those require accessibility/screen-recording permissions the terminal usually lacks, and they are unreliable.
 
 Electron's renderer process is Chromium. CDP works directly against it.
 
@@ -24,7 +24,7 @@ Skip this for main-process or build issues — those don't need the live UI.
 curl -s --max-time 2 http://127.0.0.1:9222/json
 ```
 
-If this prints a page target titled `AI Consensus`, attach to that process and do not relaunch anything.
+If this prints a page target titled `AccordAgents`, attach to that process and do not relaunch anything.
 
 2. If port 9222 is closed but Vite is already running on 5173, reuse Vite and launch only Electron:
 
@@ -73,10 +73,10 @@ If the app isn't already running with port 9222 open, kill any existing Electron
 
 ```bash
 # Quit the current instance (if any) — find by repo path
-pkill -f "electron .*ai-consensus" 2>/dev/null
+pkill -f "electron .*accordagents" 2>/dev/null
 
 # Relaunch with the debug port
-cd /Users/ysvetlichnaya/IdeaProjects/ai-consensus
+cd /Users/ysvetlichnaya/IdeaProjects/accordagents
 npx concurrently -k \
   "vite --host 127.0.0.1" \
   "wait-on tcp:5173 && npm run build:main && \
@@ -94,14 +94,14 @@ If that returns JSON, you're attached.
 
 ### Option B — only Codex's SQLite is locked
 
-Don't spawn a second Electron instance against the same `~/Library/Application Support/ai-consensus/ai-consensus.sqlite3` — there's a lock. Always quit the existing instance before relaunching with the flag.
+Don't spawn a second Electron instance against the same `~/Library/Application Support/accordagents/accordagents.sqlite3` — there's a lock. Always quit the existing instance before relaunching with the flag.
 
 ## Find the renderer page
 
-CDP exposes one or more "targets" on `http://127.0.0.1:9222/json`. The renderer you want is the one whose `type` is `page` and `title` is `AI Consensus`:
+CDP exposes one or more "targets" on `http://127.0.0.1:9222/json`. The renderer you want is the one whose `type` is `page` and `title` is `AccordAgents`:
 
 ```bash
-curl -s http://127.0.0.1:9222/json | jq -r '.[] | select(.type=="page" and .title=="AI Consensus") | .webSocketDebuggerUrl'
+curl -s http://127.0.0.1:9222/json | jq -r '.[] | select(.type=="page" and .title=="AccordAgents") | .webSocketDebuggerUrl'
 ```
 
 That WebSocket URL (e.g. `ws://127.0.0.1:9222/devtools/page/<id>`) is what you connect to.
@@ -112,7 +112,7 @@ CDP is JSON-RPC over WebSocket. From Node, use the `ws` module. This repo has `s
 
 The helper exposes:
 
-- `attach()` to connect to the `AI Consensus` page target on port 9222.
+- `attach()` to connect to the `AccordAgents` page target on port 9222.
 - `send(method, params)` for raw CDP calls.
 - `evaluate(expression)` for renderer-side JavaScript.
 - `waitForSelector(selector)`, `click(selector)`, and `fill(selector, value)` for UI flows.
@@ -132,8 +132,8 @@ async function attach() {
       res.on("end", () => resolve(JSON.parse(body)));
     }).on("error", reject)
   );
-  const page = targets.find((t) => t.type === "page" && t.title === "AI Consensus");
-  if (!page) throw new Error("AI Consensus page not found among CDP targets");
+  const page = targets.find((t) => t.type === "page" && t.title === "AccordAgents");
+  if (!page) throw new Error("AccordAgents page not found among CDP targets");
   const ws = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((res, rej) => { ws.once("open", res); ws.once("error", rej); });
   let nextId = 1;
@@ -216,7 +216,7 @@ When the user asks "can you see the app?", run:
 curl -s http://127.0.0.1:9222/json | jq -r '.[] | select(.type=="page") | .title'
 ```
 
-If it prints `AI Consensus`, you're attached. Otherwise relaunch per Option A.
+If it prints `AccordAgents`, you're attached. Otherwise relaunch per Option A.
 
 ## What NOT to do
 

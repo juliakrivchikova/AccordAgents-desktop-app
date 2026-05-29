@@ -8,7 +8,7 @@ interface ThemeProviderValue {
   toggleTheme: () => void;
 }
 
-const THEME_STORAGE_KEY = "ai-consensus-theme";
+const THEME_STORAGE_KEY = "accordagents-theme";
 
 const ThemeProviderContext = createContext<ThemeProviderValue | undefined>(undefined);
 

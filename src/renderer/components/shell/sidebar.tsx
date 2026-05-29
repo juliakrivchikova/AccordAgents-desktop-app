@@ -78,7 +78,7 @@ export const Sidebar = ({
       >
         <div className="flex min-w-0 items-center gap-2">
           <Bot className="size-4 shrink-0" aria-hidden />
-          <span className="min-w-0 truncate">AI Consensus</span>
+          <span className="min-w-0 truncate">AccordAgents</span>
         </div>
         {onToggleSidebar && (
           <button

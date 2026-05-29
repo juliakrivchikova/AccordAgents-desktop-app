@@ -7,7 +7,7 @@ import { runCommand } from "./command";
 import { GitService } from "./git";
 
 test("searchRepoFiles ranks basename matches and refreshes when index mtime is unknown", async () => {
-  const repoPath = await mkdtemp(path.join(tmpdir(), "ai-consensus-git-files-"));
+  const repoPath = await mkdtemp(path.join(tmpdir(), "accordagents-git-files-"));
 
   try {
     await runCommand("git", ["init"], { cwd: repoPath, timeoutMs: 8000 });

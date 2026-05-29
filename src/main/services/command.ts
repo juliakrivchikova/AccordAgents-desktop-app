@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
 
 export interface CommandResult {
   command: string;
@@ -19,6 +22,14 @@ export interface CommandOptions {
   onStderr?: (chunk: string) => void;
 }
 
+export function commandEnvironment(extraEnv: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    ...extraEnv,
+    PATH: commandPath(process.env.PATH, extraEnv.PATH)
+  };
+}
+
 export class CommandError extends Error {
   readonly result: CommandResult;
 
@@ -35,7 +46,7 @@ export function runCommand(command: string, args: string[], options: CommandOpti
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
-      env: { ...process.env, ...options.env },
+      env: commandEnvironment(options.env),
       stdio: ["pipe", "pipe", "pipe"]
     });
 
@@ -141,5 +152,68 @@ export async function commandExists(command: string): Promise<{ path?: string; v
     return { path: which.stdout.trim() };
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function commandPath(basePath?: string, extraPath?: string): string {
+  return uniquePathSegments([
+    ...(basePath ?? "").split(path.delimiter),
+    ...(extraPath ?? "").split(path.delimiter),
+    ...macOSUserPathSegments()
+  ]).join(path.delimiter);
+}
+
+function uniquePathSegments(segments: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const segment of segments) {
+    const normalized = segment.trim();
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function macOSUserPathSegments(): string[] {
+  if (process.platform !== "darwin") {
+    return [];
+  }
+
+  const home = homedir();
+  return [
+    path.join(home, ".local", "bin"),
+    path.join(home, ".npm-global", "bin"),
+    path.join(home, ".bun", "bin"),
+    path.join(home, ".volta", "bin"),
+    path.join(home, ".asdf", "shims"),
+    path.join(home, ".cargo", "bin"),
+    ...nvmNodeBinSegments(home),
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin"
+  ].filter((segment) => existsSync(segment));
+}
+
+function nvmNodeBinSegments(home: string): string[] {
+  const versionsRoot = path.join(home, ".nvm", "versions", "node");
+  if (!existsSync(versionsRoot)) {
+    return [];
+  }
+
+  try {
+    return readdirSync(versionsRoot)
+      .map((version) => path.join(versionsRoot, version, "bin"))
+      .filter((segment) => statSync(segment).isDirectory())
+      .sort()
+      .reverse();
+  } catch {
+    return [];
   }
 }

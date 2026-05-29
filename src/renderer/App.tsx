@@ -178,9 +178,9 @@ const CHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 const CHAT_IMAGE_ALLOWED_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const APP_CHAT_REQUEST_PARTICIPANTS_TOOL = "app_chat_request_participants";
 const SHOW_CHAT_SYSTEM_MESSAGES = import.meta.env.VITE_AI_CONSENSUS_SHOW_SYSTEM_MESSAGES === "1";
-const SIDEBAR_COLLAPSED_STORAGE_KEY = "ai-consensus.sidebarCollapsed";
-const LAST_VIEWED_AT_STORAGE_KEY = "ai-consensus.lastViewedAt";
-const DISMISSED_WARNINGS_STORAGE_KEY = "ai-consensus.dismissedWarnings.v1";
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "accordagents.sidebarCollapsed";
+const LAST_VIEWED_AT_STORAGE_KEY = "accordagents.lastViewedAt";
+const DISMISSED_WARNINGS_STORAGE_KEY = "accordagents.dismissedWarnings.v1";
 const GLOBAL_WARNING_DISMISS_SCOPE = "__global__";
 
 type DismissedWarningMap = Record<string, string[]>;

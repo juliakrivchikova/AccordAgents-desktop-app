@@ -18,7 +18,7 @@ import type {
 } from "../../shared/types";
 import { effectiveChatAgentPermissions, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
-import { CommandError, commandExists, runCommand } from "./command";
+import { CommandError, commandEnvironment, commandExists, runCommand } from "./command";
 import type { ParticipantRunResult } from "./providers";
 
 const MAX_CLI_ERROR_CHARS = 500;
@@ -322,7 +322,7 @@ export class CliAgentRunner {
   ): WarmAgentEntry {
     const child = spawn("codex", ["app-server", "--listen", "stdio://"], {
       cwd: repoPath,
-      env: { ...process.env, ...this.appMcpEnv(options) },
+      env: commandEnvironment(this.appMcpEnv(options)),
       stdio: ["pipe", "pipe", "pipe"]
     });
     child.stdout.setEncoding("utf8");
@@ -381,8 +381,8 @@ export class CliAgentRunner {
       }
       await sendRequest("initialize", {
         clientInfo: {
-          name: "ai-consensus",
-          title: "AI Consensus",
+          name: "accordagents",
+          title: "AccordAgents",
           version: "0.1.0"
         },
         capabilities: {
@@ -743,7 +743,7 @@ export class CliAgentRunner {
     const startedAt = Date.now();
     let outputDir: string | undefined;
     try {
-      outputDir = await mkdtemp(path.join(tmpdir(), "ai-consensus-codex-"));
+      outputDir = await mkdtemp(path.join(tmpdir(), "accordagents-codex-"));
       const outputPath = path.join(outputDir, "last-message.txt");
       const resuming = Boolean(options.sessionId);
       const extraReadableDirs = this.normalizedExtraReadableDirs(options.extraReadableDirs);
@@ -1137,7 +1137,7 @@ export class CliAgentRunner {
 
     const child = spawn("claude", args, {
       cwd: repoPath,
-      env: { ...process.env, ...this.appMcpEnv(options) },
+      env: commandEnvironment(this.appMcpEnv(options)),
       stdio: ["pipe", "pipe", "pipe"]
     });
     child.stdout.setEncoding("utf8");
@@ -1787,7 +1787,7 @@ export class CliAgentRunner {
       const mode = this.agentModeForRun(kind, options);
       const readContextAvailable = Boolean(repoPath) || this.normalizedExtraReadableDirs(options.extraReadableDirs).length > 0;
       return [
-        `You are running for AI Consensus Chat in ${mode} mode.`,
+        `You are running for AccordAgents Chat in ${mode} mode.`,
         readContextAvailable
           ? "Read-only file inspection, search, and listing are allowed for the selected repository and app-managed history files described in the prompt. Use these only to gather context."
           : "No repository or app-managed readable directory is available for this run.",

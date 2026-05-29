@@ -1,6 +1,9 @@
 node_modules/
 dist/
+out/
+signed/
 screenshots/
+.env.local
 *.tsbuildinfo
 .DS_Store
 *.log
