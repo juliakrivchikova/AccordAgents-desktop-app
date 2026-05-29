@@ -203,6 +203,15 @@ function verifySignedApp() {
 }
 
 function notarizeAndVerifyDmg(dmgPath) {
+  run("codesign", [
+    "--force",
+    "--timestamp",
+    "--sign",
+    process.env.APPLE_CODESIGN_IDENTITY,
+    dmgPath
+  ]);
+  run("codesign", ["--verify", "--verbose=2", dmgPath]);
+
   run("xcrun", [
     "notarytool",
     "submit",
@@ -218,7 +227,7 @@ function notarizeAndVerifyDmg(dmgPath) {
 
   run("xcrun", ["stapler", "staple", dmgPath]);
   run("xcrun", ["stapler", "validate", dmgPath]);
-  run("spctl", ["-a", "-vv", "--type", "open", dmgPath]);
+  run("spctl", ["-a", "-vv", "--type", "open", "--context", "context:primary-signature", dmgPath]);
 }
 
 function sha256(filePath) {
