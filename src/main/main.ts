@@ -98,7 +98,7 @@ function createWindow(): void {
     height: 920,
     minWidth: 1080,
     minHeight: 720,
-    title: "AI Consensus",
+    title: "AccordAgents",
     backgroundColor: "#f5f2ec",
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
@@ -488,8 +488,8 @@ void app.whenReady().then(async () => {
   });
 }).catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
-  console.error("Failed to start AI Consensus:", error);
-  dialog.showErrorBox("AI Consensus failed to start", message);
+  console.error("Failed to start AccordAgents:", error);
+  dialog.showErrorBox("AccordAgents failed to start", message);
   app.quit();
 });
 

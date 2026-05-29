@@ -3,7 +3,7 @@ const WebSocket = require("ws");
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 9222;
-const DEFAULT_TITLE = "AI Consensus";
+const DEFAULT_TITLE = "AccordAgents";
 
 function getJson(path, { host = DEFAULT_HOST, port = DEFAULT_PORT, timeoutMs = 5000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -31,7 +31,7 @@ async function attach({
 } = {}) {
   const targets = await getJson("/json", { host, port, timeoutMs });
   const page = targets.find((t) => t.type === "page" && t.title === title);
-  if (!page) throw new Error("AI Consensus page not found among CDP targets");
+  if (!page) throw new Error("AccordAgents page not found among CDP targets");
   const ws = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`CDP WebSocket timeout after ${timeoutMs}ms`)), timeoutMs);

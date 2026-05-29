@@ -4,7 +4,7 @@ import { MakerZIP } from "@electron-forge/maker-zip";
 import { FusesPlugin } from "@electron-forge/plugin-fuses";
 import { FuseV1Options, FuseVersion } from "@electron/fuses";
 
-const productName = "AI Consensus";
+const productName = "AccordAgents";
 const assetsDir = path.resolve(__dirname, "assets");
 const iconPath = path.join(assetsDir, "icon.icns");
 const entitlementsPath = path.resolve(__dirname, "entitlements.mac.plist");
@@ -57,7 +57,7 @@ const config = {
   packagerConfig: {
     name: productName,
     executableName: productName,
-    appBundleId: process.env.MACOS_BUNDLE_ID || "com.juliakrivchikova.ai-consensus",
+    appBundleId: process.env.MACOS_BUNDLE_ID || "com.juliakrivchikova.accordagents",
     asar: true,
     icon: iconPath,
     extendInfo: {
@@ -78,7 +78,10 @@ const config = {
       ignoredRootDirectory("out"),
       ignoredRootDirectory("screenshots"),
       ignoredRootDirectory("scripts"),
+      ignoredRootDirectory("signed"),
       ignoredRootDirectory("src"),
+      ignoredRootFile(".env.local"),
+      ignoredRootFile(".env.local.example"),
       ignoredRootFile(".gitignore"),
       ignoredRootFile("AGENTS.md"),
       ignoredRootFile("CLAUDE.md"),

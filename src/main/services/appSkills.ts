@@ -6,11 +6,11 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import type { AgentHealth, AppSkillSyncHealth, ChatProviderKind } from "../../shared/types";
 
-const OWNER_ID = "ai-consensus";
-const MARKER_FILE = ".ai-consensus-generated.json";
-const MANIFEST_FILE = ".ai-consensus-skills.json";
-const TMP_PREFIX = ".ai-consensus-tmp-";
-const LOCK_PREFIX = "ai-consensus-app-skills-";
+const OWNER_ID = "accordagents";
+const MARKER_FILE = ".accordagents-generated.json";
+const MANIFEST_FILE = ".accordagents-skills.json";
+const TMP_PREFIX = ".accordagents-tmp-";
+const LOCK_PREFIX = "accordagents-app-skills-";
 const SCHEMA_VERSION = 1;
 const RENDERER_VERSION = "app-skills-v1";
 const TMP_MAX_AGE_MS = 60 * 60_000;
@@ -505,7 +505,7 @@ export class AppSkillsService {
   private async readMarker(markerPath: string, provider: AppSkillProvider, folderName: string): Promise<{ status: "valid"; marker: GeneratedMarker } | { status: "collision"; message: string }> {
     const status = await this.pathStatus(markerPath);
     if (status === "missing") {
-      return { status: "collision", message: "Target is missing AI Consensus ownership marker." };
+      return { status: "collision", message: "Target is missing AccordAgents ownership marker." };
     }
     if (status !== "file") {
       return { status: "collision", message: "Ownership marker is not a normal file." };
@@ -663,7 +663,7 @@ export class AppSkillsService {
   }
 
   private generatedSkillName(id: string): string {
-    return `ai-consensus-${id}`;
+    return `accordagents-${id}`;
   }
 
   private providers(): AppSkillProvider[] {

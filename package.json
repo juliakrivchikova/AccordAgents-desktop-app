@@ -1,10 +1,10 @@
 {
-  "name": "ai-consensus",
-  "productName": "AI Consensus",
+  "name": "accordagents",
+  "productName": "AccordAgents",
   "version": "0.1.0",
   "private": true,
   "description": "Desktop app for multi-model review, debate, and consensus.",
-  "repository": "https://github.com/juliakrivchikova/ai-consensus.git",
+  "repository": "https://github.com/juliakrivchikova/accordagents.git",
   "main": "dist/main/main/main.js",
   "scripts": {
     "build": "npm run build:main && vite build",
@@ -13,6 +13,7 @@
     "package": "npm run build && electron-forge package",
     "make": "npm run build && electron-forge make",
     "make:mac-arm64": "npm run make -- --platform=darwin --arch=arm64",
+    "signed:mac-arm64": "node scripts/signed-mac-arm64.mjs",
     "start": "npm run build && electron .",
     "test:app-skills": "npm run build:main && node --test dist/main/main/services/appSkills.test.js",
     "test:permissions": "npm run build:main && node --test dist/main/main/services/chat.permissions.test.js dist/main/main/services/chat.repoFileMentions.test.js dist/main/main/services/chat.rename.test.js dist/main/main/services/git.repoFiles.test.js dist/main/main/services/cliAgents.permissions.test.js",

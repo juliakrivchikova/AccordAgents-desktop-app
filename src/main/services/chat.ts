@@ -2071,7 +2071,7 @@ export class ChatService {
   ): CliAgentRoleOptions {
     return {
       name: this.roleRuntimeName(participant, session),
-      description: `${session.roleLabel} participant @${participant.handle} in AI Consensus Chat.`,
+      description: `${session.roleLabel} participant @${participant.handle} in AccordAgents Chat.`,
       instructions: this.nativeRoleInstructions(participant, session),
       promptFallbackPrompt
     };
@@ -2082,7 +2082,7 @@ export class ChatService {
     session: ChatParticipantSession
   ): string {
     return [
-      `You are @${participant.handle} in AI Consensus Chat.`,
+      `You are @${participant.handle} in AccordAgents Chat.`,
       `Role: ${session.roleLabel}.`,
       "Use this role for the whole CLI session.",
       "",
@@ -2210,14 +2210,14 @@ export class ChatService {
   }
 
   private roleRuntimeName(participant: ChatParticipant, session: ChatParticipantSession): string {
-    const base = `ai-consensus-${participant.handle}-${session.roleConfigId}-${participant.id.slice(0, 8)}`
+    const base = `accordagents-${participant.handle}-${session.roleConfigId}-${participant.id.slice(0, 8)}`
       .toLowerCase()
       .replace(/[^a-z0-9_-]+/g, "-")
       .replace(/-+/g, "-")
       .replace(/^-+|-+$/g, "")
       .slice(0, 80)
       .replace(/-+$/g, "");
-    return base || `ai-consensus-${participant.id.slice(0, 8)}`;
+    return base || `accordagents-${participant.id.slice(0, 8)}`;
   }
 
   private applyCliRunMetadata(

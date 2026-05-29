@@ -62,4 +62,5 @@ run("git", ["tag", "-a", tagName, "-m", `Release ${tagName}`], { stdio: "inherit
 console.log(`Pushing ${tagName}.`);
 run("git", ["push", "origin", tagName], { stdio: "inherit" });
 
-console.log(`Release ${tagName} was triggered in GitHub Actions.`);
+console.log(`Release tag ${tagName} was pushed.`);
+console.log("Build signed macOS artifacts locally with npm run signed:mac-arm64, then upload them to the public release repository when it is ready.");

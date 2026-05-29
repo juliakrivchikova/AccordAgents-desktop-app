@@ -31,7 +31,7 @@ export class StorageService {
   private initialized = false;
 
   constructor() {
-    this.dbPath = path.join(app.getPath("userData"), "ai-consensus.sqlite3");
+    this.dbPath = path.join(app.getPath("userData"), "accordagents.sqlite3");
   }
 
   async init(): Promise<void> {

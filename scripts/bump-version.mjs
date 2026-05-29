@@ -54,4 +54,4 @@ run("git", ["commit", "-m", `Bump version to ${nextVersion}`], { stdio: "inherit
 run("git", ["push", "origin", "main"], { stdio: "inherit" });
 
 console.log(`Version ${nextVersion} was committed and pushed to main.`);
-console.log("Run npm run tag-release to create the release tag.");
+console.log("Run npm run signed:mac-arm64 to build local release artifacts, then npm run tag-release to create the release tag.");

@@ -29,7 +29,7 @@ const ROLE: ChatRoleConfig = {
 };
 
 test("validateRepoFileMentions keeps safe repo-relative files and rejects unsafe paths", async () => {
-  const tempRoot = await mkdtemp(path.join(tmpdir(), "ai-consensus-repo-files-"));
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-repo-files-"));
   const repoPath = path.join(tempRoot, "repo");
   const outsidePath = path.join(tempRoot, "outside.txt");
   await mkdir(path.join(repoPath, "src"), { recursive: true });
@@ -60,7 +60,7 @@ test("validateRepoFileMentions keeps safe repo-relative files and rejects unsafe
 });
 
 test("validateRepoFileMentions extracts manually typed repo file tokens", async () => {
-  const tempRoot = await mkdtemp(path.join(tmpdir(), "ai-consensus-repo-file-tokens-"));
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-repo-file-tokens-"));
   const repoPath = path.join(tempRoot, "repo");
   await mkdir(path.join(repoPath, "src"), { recursive: true });
   await mkdir(path.join(repoPath, "docs"), { recursive: true });
@@ -226,7 +226,7 @@ test("sendMessage clears running and emits terminal error when participant run f
 });
 
 test("sendMessage persists image-only messages as metadata plus app-owned files", async () => {
-  const tempRoot = await mkdtemp(path.join(tmpdir(), "ai-consensus-chat-images-"));
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-images-"));
   const participant = chatParticipant();
   const conversation = chatConversation([participant], "/repo");
   const { service, storage } = testService({ conversations: [conversation] });
@@ -479,7 +479,7 @@ test("autoResumeParticipantRequest completes and clears running state", async ()
   conversation.messages.push(requestMessage);
   const { service, storage } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
-  serviceAny.ensureHistoryFiles = async () => "/tmp/ai-consensus-test-history";
+  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
   serviceAny.runParticipantTurnSerialized = async () => [
     participantMessage(requester, "resume-reply", "Final required fixes are listed.")
   ];
