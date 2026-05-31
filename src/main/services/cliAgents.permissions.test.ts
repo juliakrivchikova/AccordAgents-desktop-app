@@ -93,22 +93,50 @@ test("claudeToolConfig disallows web tools when webAccess is false", () => {
   assert.ok(config.disallowedTools.includes("WebFetch"));
 });
 
-test("claudeToolConfig auto mode applies edit and web preset while keeping Bash gated", () => {
+test("claudeToolConfig auto mode uses native auto permission mode with Bash available", () => {
   const runner = makeRunner() as any;
   const config = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
     agentMode: "auto",
     workspaceWrite: false,
     webAccess: false
   }));
-  assert.equal(config.permissionMode, "acceptEdits");
+  assert.equal(config.permissionMode, "auto");
   assert.ok(config.tools.includes("Write"));
   assert.ok(config.tools.includes("Edit"));
   assert.ok(config.tools.includes("WebSearch"));
   assert.ok(config.tools.includes("WebFetch"));
   assert.ok(config.allowedTools.includes("WebSearch"));
   assert.ok(config.allowedTools.includes("WebFetch"));
-  assert.equal(config.tools.includes("Bash"), false);
-  assert.ok(config.disallowedTools.includes("Bash"));
+  // Bash is available so the native auto classifier can decide each command; it is
+  // neither broadly allowlisted (that would bypass the classifier) nor disallowed.
+  assert.ok(config.tools.includes("Bash"));
+  assert.equal(config.allowedTools.includes("Bash"), false);
+  assert.equal(config.disallowedTools.includes("Bash"), false);
+});
+
+test("claudeToolConfig auto mode forwards only deny shell rules and drops allow/ask", () => {
+  const runner = makeRunner() as any;
+  const config = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
+    agentMode: "auto",
+    workspaceWrite: false,
+    webAccess: false,
+    shell: {
+      enabled: true,
+      rules: [
+        { action: "deny", match: "prefix", pattern: "rm -rf" },
+        { action: "allow", match: "prefix", pattern: "curl" },
+        { action: "ask", match: "exact", pattern: "git push" }
+      ]
+    }
+  }));
+  assert.equal(config.permissionMode, "auto");
+  assert.ok(config.tools.includes("Bash"));
+  // deny rule forwarded as a hard stop...
+  assert.ok(config.disallowedTools.some((tool: string) => tool.includes("rm -rf")));
+  // ...but stale allow/ask rules are NOT forwarded (native auto classifier decides).
+  assert.equal(config.allowedTools.some((tool: string) => tool.includes("curl")), false);
+  assert.equal(config.askTools.some((tool: string) => tool.includes("git push")), false);
+  assert.equal(config.allowedTools.includes("Bash"), false);
 });
 
 test("claudeToolConfig leaves plan agent mode untouched regardless of workspaceWrite", () => {

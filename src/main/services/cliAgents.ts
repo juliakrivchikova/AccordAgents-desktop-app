@@ -143,7 +143,7 @@ interface CodexAppServerTurnStartResult {
   };
 }
 
-type ClaudePermissionMode = "default" | "plan" | "acceptEdits";
+type ClaudePermissionMode = "default" | "plan" | "acceptEdits" | "auto";
 
 interface ClaudeToolConfig {
   permissionMode: ClaudePermissionMode;
@@ -999,6 +999,15 @@ export class CliAgentRunner {
           await this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant)
       };
     } catch (error) {
+      if (this.agentModeForRun(kind, options) === "auto" && this.isClaudePermissionModeUnsupported(error)) {
+        // Fail loudly instead of silently downgrading: Auto-review must run as native
+        // Claude auto, not a different mode under the same label.
+        return this.failed(
+          participant,
+          new Error("Claude Code in this environment does not support Auto-review (--permission-mode auto). Upgrade Claude Code, or set this participant to Default or Plan mode."),
+          Date.now() - startedAt
+        );
+      }
       if (options.role && !options.sessionId && this.isClaudeAgentFlagUnsupported(error)) {
         const fallback = await this.runClaudeOneShot(
           participant,
@@ -1697,6 +1706,13 @@ export class CliAgentRunner {
     if (agentMode === "plan") {
       return "plan";
     }
+    if (agentMode === "auto") {
+      // Native Claude auto mode: a classifier auto-approves safe tool calls (incl. Bash)
+      // and blocks dangerous ones without prompting — the headless-friendly analog of
+      // Codex Auto-review. If the installed CLI lacks it, runClaudeOneShot fails the run
+      // loudly with an upgrade message rather than silently running a different mode.
+      return "auto";
+    }
     const permissions = this.permissionsForRun("claude-code", agentMode, options);
     return permissions.workspaceWrite ? "acceptEdits" : "default";
   }
@@ -1744,12 +1760,16 @@ export class CliAgentRunner {
       tools.add("Bash");
       for (const rule of permissions.shell.rules) {
         const toolRule = this.claudeBashPermissionRule(rule);
-        if (rule.action === "allow") {
-          allowedTools.push(toolRule);
-        } else if (rule.action === "ask") {
-          askTools.push(toolRule);
-        } else {
+        if (rule.action === "deny") {
           disallowedTools.push(toolRule);
+        } else if (agentMode !== "auto") {
+          // In Auto-review the native auto classifier owns allow/ask decisions, so only
+          // deny rules are forwarded as hard stops. Outside auto, honor allow/ask too.
+          if (rule.action === "allow") {
+            allowedTools.push(toolRule);
+          } else {
+            askTools.push(toolRule);
+          }
         }
       }
     } else {
@@ -1895,6 +1915,18 @@ export class CliAgentRunner {
     return (
       /(?:unknown|unrecognized|invalid|unsupported).{0,80}--agents?/.test(message) ||
       /--agents?.{0,80}(?:unknown|unrecognized|invalid|unsupported)/.test(message)
+    );
+  }
+
+  private isClaudePermissionModeUnsupported(error: unknown): boolean {
+    // Heuristic: older Claude CLIs without the `auto` permission mode reject the flag
+    // value. Match errors that name permission-mode alongside an invalid/unknown/choices
+    // hint, or an invalid `auto` value near "permission".
+    const message = this.errorText(error).toLowerCase();
+    return (
+      /(?:unknown|unrecognized|invalid|unsupported|choices|must be|expected).{0,80}permission-mode/.test(message) ||
+      /permission-mode.{0,80}(?:unknown|unrecognized|invalid|unsupported|choices|must be|expected)/.test(message) ||
+      /invalid.{0,40}\bauto\b.{0,40}permission/.test(message)
     );
   }
 

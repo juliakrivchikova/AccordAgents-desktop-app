@@ -34,6 +34,12 @@ function chatShellPermissionLine({ agentMode, providerKind, permissions, canRequ
   if (agentMode === "auto" && providerKind === "codex-cli") {
     return "Codex Auto-review mode enables native command execution inside the workspace-write sandbox; eligible provider approvals are handled by Codex Auto-review.";
   }
+  if (agentMode === "auto") {
+    const denyNote = permissions.shell.rules.some((rule) => rule.action === "deny")
+      ? " Configured deny rules remain hard stops for matching commands."
+      : "";
+    return `Auto-review runs Claude under the native auto classifier: it auto-approves safe shell commands and edits without prompting and blocks dangerous ones.${denyNote}`;
+  }
   const requestGuidance = canRequestPermissions
     ? "call `app_permissions_request_change` with a narrow `shellRules` request before refusing."
     : "explain the specific command and shell rule needed before refusing.";

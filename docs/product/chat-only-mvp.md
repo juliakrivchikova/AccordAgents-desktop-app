@@ -330,7 +330,7 @@ Agent modes:
 
 - `default`: normal local CLI behavior with the configured permissions.
 - `plan`: blocks shell commands and file edits even if permissions enable them.
-- `auto`: uses the configured permissions and enables native auto/approval behavior where supported.
+- `auto` (Auto-review): runs the provider's native auto-review preset; repo read, workspace write, web, and shell execution are granted regardless of stored toggles. Codex uses a `workspace-write` sandbox with `approval_policy=on-request` routed to the `guardian_subagent` auto-reviewer. Claude runs under native `--permission-mode auto`, whose classifier auto-approves safe commands and edits without prompting and blocks dangerous ones; if the installed Claude CLI lacks `--permission-mode auto`, the run fails loudly rather than downgrading.
 
 Permission mapping:
 
@@ -339,15 +339,15 @@ Permission mapping:
 - Claude Code receives read tools when repo or history context is available.
 - Claude Code receives edit tools only when `workspaceWrite` is enabled.
 - Claude Code receives `WebSearch` and `WebFetch` only when `webAccess` is enabled.
-- Claude Code receives `Bash` only when shell is enabled, with allow/ask/deny tool rules derived from shell rules.
+- Claude Code receives `Bash` when shell is enabled. In `default` mode allow/ask/deny tool rules are derived from shell rules; in `auto` mode Bash is governed by the native `--permission-mode auto` classifier and only `deny` rules are forwarded as hard stops (allow/ask are ignored).
 - Claude Code receives approved provider-native `allowedTools` tokens through native `--allowedTools`; matching tool names are also exposed through `--tools`.
 
 Permission request app-tool path:
 
-- Every chat participant can call `app_permissions_request_change` to request portable grants (`workspaceWrite` or `webAccess`), command-specific `shellRules`, or Claude-only provider-native `allowedTools` tokens for itself.
-- The app validates the request and shows a user approval item; the MCP tool never grants permissions directly.
-- Approval updates the participant's chat-scoped permissions, or overlays a once grant for the next run, and invalidates the runtime session on the next run through the normal permission/session matching.
-- Broad shell access is not requestable through this tool; agents can request explicit command rules instead.
+- Every chat participant can call `app_permissions_request_change` to request portable grants (`repoRead`, `workspaceWrite`, or `webAccess`), command-specific `shellRules`, or Claude-only provider-native `allowedTools` tokens for itself.
+- The app validates the request. If the effective launch profile already covers it (for example Auto-review repo/read/write/web, or Auto-review shell decisions handled by native auto), the MCP tool returns `already_granted` and does not create a user approval item.
+- Requests outside the effective launch profile create a user approval item. Approval updates the participant's chat-scoped permissions, or overlays a once grant for the next run, and invalidates the runtime session on the next run through the normal permission/session matching.
+- Broad shell access is not requestable through this tool. Outside Auto-review, agents can request explicit command rules; in Auto-review, shell decisions are provider-native and `shellRules` requests do not create user approvals.
 
 Validation:
 
@@ -529,19 +529,27 @@ Do not advertise:
 - Generic autonomous agent orchestration or unattended swarms
 
 ## MVP TODO
-
-- [ ] Rule management.
 - [ ] User skill management.
-- [ ] Stop agent.
-- [ ] Not block when the agent is running, add indicators that chat state is running or run finished.
-- [ ] Role management: create, read, update, delete – should be available via both UI for user and MCP for admin. Role permissions management - only UI.
+- [ ] Accordance skill.
+- [ ] Rule management.
+- [ ] Tool management.
+- [ ] Bug: Context not working (used token percentages)
+- [ ] Bug: when both agents are running and one requests permission - after permission is granted, the agent is not resumed
+  right after, only when another agent run is finished.
+- [ ] Auto mode per chat override.
+- [ ] Polish Role Feature. Polish View/Edit screen. Role management: create, read, update, delete – should be available via both UI for user and MCP for admin. Role permissions management - only UI.
 - [ ] Participant management: when admin creates a participant, it should first check if the participant is already in
   the system. If no, create and make it available for future use. It will allow to attach rules to them and reuse.
-- [ ] Live participant removal: mcp and UI.
+- [ ] Add gemini
 - [ ] User-friendly delivery
+- ✅ Not block when the agent is running, add indicators that chat state is running or run finished.
+- ✅ Stop agent.
 - ✅ File references from messages.
 - ✅ Image pasting.
 - ✅ MCP status tool for agents to indicate what they are doing.
+
+## POST MVP TODO
+
 
 ## MVP Acceptance Checklist
 

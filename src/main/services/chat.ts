@@ -479,6 +479,16 @@ export class ChatService {
     }
 
     const prepared = this.preparePermissionChange(requester, this.normalizePermissionChangeRequest(rawRequest));
+    if (normalizeChatAgentMode(requester.agentMode) === "auto" && prepared.request.kind === "shellRules") {
+      // In Auto-review the provider's native auto classifier decides each shell command,
+      // so an agent shellRules request needs no User approval. Configured deny rules are
+      // still applied at launch as hard stops.
+      return {
+        ok: true,
+        status: "already_granted",
+        summary: "Auto-review handles shell command decisions via the provider's native auto classifier; no shell-rule grant is needed."
+      };
+    }
     if (!this.preparedPermissionChangeHasAdditions(prepared)) {
       return {
         ok: true,
@@ -2139,13 +2149,16 @@ export class ChatService {
   private appToolPromptPolicy(session: ChatParticipantSession): string {
     const agentMode = normalizeChatAgentMode(session.participantAgentMode);
     const permissionPolicyLines = this.canRequestPermissionChanges(session)
-      ? [
-          "Permission MCP tool: `app_permissions_request_change` is available when this participant needs approval for blocked capabilities.",
-          "Required permission workflow: if the current task needs a blocked capability, call `app_permissions_request_change` before answering that the work cannot be done. Use `{ \"kind\": \"portable\", \"permissions\": [\"repoRead\"], \"reason\": \"Need to inspect the referenced repository files.\" }` for repository reads, `{ \"kind\": \"portable\", \"permissions\": [\"webAccess\"], \"reason\": \"Need live web lookup to answer User's trademark question.\" }` for web access, `{ \"kind\": \"portable\", \"permissions\": [\"workspaceWrite\"], \"reason\": \"Need to edit files for the requested change.\" }` for file edits, `{ \"kind\": \"shellRules\", \"rules\": [{ \"action\": \"allow\", \"match\": \"prefix\", \"pattern\": \"git diff\" }], \"reason\": \"Need to inspect diffs.\" }` for shell rules, or `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants.",
-          agentMode === "auto"
-            ? "In Auto-review mode the provider-preset capabilities (repo read, workspace write, web) are already available, so an in-preset request returns already_granted and you may proceed; out-of-preset requests still require User approval. After a permission MCP call, inspect the returned status: if it is pending_user_approval, say only that the permission request is awaiting User approval; if it is already_granted the capability is available."
-            : "After a permission MCP call, inspect the returned status. If the result is pending_user_approval, say only that the permission request is awaiting User approval; do not claim the permission was granted until the tool result or a later app message confirms approval."
-        ]
+      ? agentMode === "auto"
+        ? [
+            "Permission MCP tool: `app_permissions_request_change` is available when this participant needs approval for blocked capabilities.",
+            "In Auto-review mode, repo read, workspace write, web, and shell commands all run under the provider's native auto review. Do not call `app_permissions_request_change` for these, and do not request shellRules; shell decisions are handled by native auto. Portable repo/web/edit requests return already_granted if called anyway. Only genuinely out-of-preset capabilities need a request, for example `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants. After a permission MCP call, inspect the status: pending_user_approval means it is awaiting User approval; already_granted means the capability is available."
+          ]
+        : [
+            "Permission MCP tool: `app_permissions_request_change` is available when this participant needs approval for blocked capabilities.",
+            "Required permission workflow: if the current task needs a blocked capability, call `app_permissions_request_change` before answering that the work cannot be done. Use `{ \"kind\": \"portable\", \"permissions\": [\"repoRead\"], \"reason\": \"Need to inspect the referenced repository files.\" }` for repository reads, `{ \"kind\": \"portable\", \"permissions\": [\"webAccess\"], \"reason\": \"Need live web lookup to answer User's trademark question.\" }` for web access, `{ \"kind\": \"portable\", \"permissions\": [\"workspaceWrite\"], \"reason\": \"Need to edit files for the requested change.\" }` for file edits, `{ \"kind\": \"shellRules\", \"rules\": [{ \"action\": \"allow\", \"match\": \"prefix\", \"pattern\": \"git diff\" }], \"reason\": \"Need to inspect diffs.\" }` for shell rules, or `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants.",
+            "After a permission MCP call, inspect the returned status. If the result is pending_user_approval, say only that the permission request is awaiting User approval; do not claim the permission was granted until the tool result or a later app message confirms approval."
+          ]
       : [
           "Permission changes are not directly available to this participant. If the current task needs a blocked capability, explain the specific capability needed before refusing."
         ];

@@ -300,7 +300,7 @@ test("switching an existing session to auto adopts the mode on the next resumed 
   assert.equal(effective.webAccess, true);
 });
 
-test("auto mode leaves out-of-preset shell permission requests pending", async () => {
+test("auto mode handles shell permission requests via native auto without a user approval", async () => {
   const participant = chatParticipant("claude-code");
   participant.agentMode = "auto";
   const conversation = chatConversation([participant]);
@@ -320,12 +320,13 @@ test("auto mode leaves out-of-preset shell permission requests pending", async (
     reason: "Need shell."
   });
 
-  assert.equal(result.status, "pending_user_approval");
-  const approvals = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).filter(
+  // Auto-review delegates shell decisions to the native auto classifier, so a shellRules
+  // request is reported already-handled and creates no pending User approval.
+  assert.equal(result.status, "already_granted");
+  const approvals = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).filter(
     (approval) => approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL
   );
-  assert.equal(approvals.length, 1);
-  assert.equal(approvals[0].status, "pending");
+  assert.equal(approvals.length, 0);
 });
 
 test("permission resume attaches resumed participant-request reply to the original batch", async () => {

@@ -2712,7 +2712,13 @@ function ChatPermissionsEditor(props: {
   const planMode = props.mode === "plan";
   const autoMode = props.mode === "auto";
   const codexAutoMode = autoMode && props.kind === "codex-cli";
+  const claudeAutoMode = autoMode && props.kind === "claude-code";
   const providerPresetLocked = autoMode;
+  // In Claude Auto-review only deny rules are enforced (the native classifier owns
+  // allow/ask); restrict the editor to deny there.
+  const shellActionOptions = claudeAutoMode
+    ? CHAT_SHELL_ACTION_OPTIONS.filter((option) => option.value === "deny")
+    : CHAT_SHELL_ACTION_OPTIONS;
 
   function updatePermissions(patch: Partial<ChatAgentPermissions>): void {
     props.onChange({ ...permissions, ...patch });
@@ -2734,12 +2740,14 @@ function ChatPermissionsEditor(props: {
   }
 
   function addRule(): void {
+    // In Claude Auto-review only deny rules take effect, so default a new rule to a deny
+    // hard stop there; otherwise keep the allow example.
+    const newRule: ChatShellPermissionRule = claudeAutoMode
+      ? { action: "deny", match: "prefix", pattern: "rm -rf" }
+      : { action: "allow", match: "exact", pattern: "npm run test" };
     updateShell({
       enabled: true,
-      rules: [
-        ...permissions.shell.rules,
-        { action: "allow", match: "exact", pattern: "npm run test" }
-      ]
+      rules: [...permissions.shell.rules, newRule]
     });
   }
 
@@ -2760,8 +2768,8 @@ function ChatPermissionsEditor(props: {
         />
         <ChatPermissionToggle
           label="Run shell"
-          checked={codexAutoMode ? true : permissions.shell.enabled}
-          disabled={codexAutoMode}
+          checked={autoMode ? true : permissions.shell.enabled}
+          disabled={autoMode}
           onChange={(enabled) => updateShell({ enabled })}
         />
         <ChatPermissionToggle
@@ -2780,10 +2788,12 @@ function ChatPermissionsEditor(props: {
       {planMode && <div className="text-xs text-muted-foreground">Plan mode blocks shell commands and file edits while active.</div>}
       {autoMode && (
         <div className="text-xs text-muted-foreground">
-          Auto-review applies the provider preset at runtime. Claude Bash still follows explicit shell rules.
+          {codexAutoMode
+            ? "Auto-review: Codex runs commands in its workspace-write sandbox; eligible approvals go through the auto-reviewer."
+            : "Auto-review: Claude runs under native auto mode — a classifier auto-approves safe commands and edits and blocks dangerous ones. Only deny rules below take effect (allow/ask are ignored)."}
         </div>
       )}
-      {permissions.shell.enabled && (
+      {((!autoMode && permissions.shell.enabled) || claudeAutoMode) && (
         <div className="chat-shell-rule-list">
           <div className="chat-shell-rule-head">
             <span>Shell rules</span>
@@ -2792,16 +2802,23 @@ function ChatPermissionsEditor(props: {
               Add rule
             </Button>
           </div>
-          {permissions.shell.rules.length === 0 ? (
-            <div className="text-xs text-muted-foreground">No command-specific rules. Native CLI approval mode applies.</div>
+          {(claudeAutoMode
+            ? permissions.shell.rules.filter((rule) => rule.action === "deny")
+            : permissions.shell.rules).length === 0 ? (
+            <div className="text-xs text-muted-foreground">
+              {claudeAutoMode
+                ? "No deny rules. Native auto handles command safety; add a deny rule to hard-block specific commands."
+                : "No command-specific rules. Native CLI approval mode applies."}
+            </div>
           ) : (
             permissions.shell.rules.map((rule, index) => (
+              claudeAutoMode && rule.action !== "deny" ? null : (
               <div className="chat-shell-rule-row" key={`${index}-${rule.action}-${rule.match}`}>
                 <AppSelect
                   value={rule.action}
                   placeholder="Action"
                   ariaLabel="Shell rule action"
-                  options={CHAT_SHELL_ACTION_OPTIONS}
+                  options={shellActionOptions}
                   onValueChange={(value) => updateRule(index, { action: value as ChatShellPermissionAction })}
                 />
                 <AppSelect
@@ -2824,6 +2841,7 @@ function ChatPermissionsEditor(props: {
                   onClick={() => removeRule(index)}
                 />
               </div>
+              )
             ))
           )}
         </div>

@@ -75,7 +75,7 @@ export function effectiveChatAgentPermissions(mode: ChatAgentMode, permissions: 
 }
 
 export function effectiveChatAgentPermissionsForProvider(
-  providerKind: ChatProviderKind | undefined,
+  _providerKind: ChatProviderKind | undefined,
   mode: ChatAgentMode,
   permissions: ChatAgentPermissions
 ): ChatAgentPermissions {
@@ -83,12 +83,14 @@ export function effectiveChatAgentPermissionsForProvider(
   if (mode !== "auto") {
     return effectiveChatAgentPermissions(mode, normalized);
   }
-  const shell = providerKind === "codex-cli"
-    ? {
-        ...normalized.shell,
-        enabled: true
-      }
-    : normalized.shell;
+  // Auto-review enables command execution for both providers. Codex runs commands in
+  // its workspace-write sandbox; Claude runs under native `--permission-mode auto`,
+  // whose classifier decides each command — so Bash must be available (in --tools).
+  // Existing deny rules are preserved and still honored.
+  const shell = {
+    ...normalized.shell,
+    enabled: true
+  };
   return {
     ...normalized,
     repoRead: true,
