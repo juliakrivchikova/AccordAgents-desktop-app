@@ -11,12 +11,13 @@ import type {
   AgentHealth,
   ChatAgentMode,
   ChatAgentPermissions,
+  ChatProviderKind,
   ChatShellPermissionRule,
   ConversationKind,
   GitDiffMode,
   ParticipantConfig
 } from "../../shared/types";
-import { effectiveChatAgentPermissions, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
 import { CommandError, commandEnvironment, commandExists, runCommand } from "./command";
 import type { ParticipantRunResult } from "./providers";
@@ -30,6 +31,7 @@ const SESSION_LOG_RETRY_MS = 80;
 const SESSION_LOG_RETRIES = 4;
 const CODEX_APP_SERVER_DISABLED_ENV = "AI_CONSENSUS_CODEX_APP_SERVER";
 const CODEX_APP_SERVER_MCP_TOKEN_ENV = "AI_CONSENSUS_MCP_TOKEN";
+const CODEX_AUTO_APPROVALS_REVIEWER = "guardian_subagent";
 const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 
 export interface CliAgentRunOptions {
@@ -571,12 +573,12 @@ export class CliAgentRunner {
     options: CliAgentRunOptions
   ): Record<string, unknown> {
     const mode = this.agentModeForRun(kind, options);
-    const permissions = this.permissionsForRun(mode, options);
+    const permissions = this.permissionsForRun("codex-cli", mode, options);
     return {
       model: participant.model ?? null,
       cwd: repoPath ?? null,
       approvalPolicy: this.codexAppServerApprovalPolicy(mode),
-      approvalsReviewer: mode === "auto" ? "auto_review" : null,
+      approvalsReviewer: mode === "auto" ? CODEX_AUTO_APPROVALS_REVIEWER : null,
       sandbox: permissions.workspaceWrite ? "workspace-write" : "read-only",
       config: this.codexAppServerConfig(permissions, options),
       developerInstructions: options.role?.instructions ?? null,
@@ -594,13 +596,13 @@ export class CliAgentRunner {
     options: CliAgentRunOptions
   ): Record<string, unknown> {
     const mode = this.agentModeForRun(kind, options);
-    const permissions = this.permissionsForRun(mode, options);
+    const permissions = this.permissionsForRun("codex-cli", mode, options);
     return {
       threadId: sessionId,
       model: participant.model ?? null,
       cwd: repoPath ?? null,
       approvalPolicy: this.codexAppServerApprovalPolicy(mode),
-      approvalsReviewer: mode === "auto" ? "auto_review" : null,
+      approvalsReviewer: mode === "auto" ? CODEX_AUTO_APPROVALS_REVIEWER : null,
       sandbox: permissions.workspaceWrite ? "workspace-write" : "read-only",
       config: this.codexAppServerConfig(permissions, options),
       developerInstructions: options.role?.instructions ?? null,
@@ -640,6 +642,14 @@ export class CliAgentRunner {
     const method = this.stringField(record, "method");
     const params = this.asRecord(record.params);
     if (!method || !params) {
+      return;
+    }
+    if (method === "item/autoApprovalReview/started") {
+      this.emitLiveOutput(pending.onOutput, "tool", "Auto-reviewing approval request\n");
+      return;
+    }
+    if (method === "item/autoApprovalReview/completed") {
+      this.emitLiveOutput(pending.onOutput, "tool", "Auto-review completed\n");
       return;
     }
     if (method === "item/started") {
@@ -748,7 +758,7 @@ export class CliAgentRunner {
       const resuming = Boolean(options.sessionId);
       const extraReadableDirs = this.normalizedExtraReadableDirs(options.extraReadableDirs);
       const mode = this.agentModeForRun(kind, options);
-      const permissions = this.permissionsForRun(mode, options);
+      const permissions = this.permissionsForRun("codex-cli", mode, options);
       const args = resuming
         ? [
             "exec",
@@ -790,6 +800,18 @@ export class CliAgentRunner {
       } else if (kind === "chat" && resuming) {
         args.splice(2, 0, "--skip-git-repo-check");
       }
+      if (resuming) {
+        // `codex exec resume` has no --sandbox flag (unlike the fresh `exec` path), so
+        // re-assert the sandbox via a config override. Without this a resumed session
+        // would keep the sandbox it was first created with, ignoring later workspace
+        // write / agent-mode changes.
+        this.insertCodexOptionBeforePrompt(
+          args,
+          resuming,
+          "-c",
+          `sandbox_mode=${this.tomlString(permissions.workspaceWrite ? "workspace-write" : "read-only")}`
+        );
+      }
       if (mode === "auto") {
         this.insertCodexOptionBeforePrompt(
           args,
@@ -797,7 +819,7 @@ export class CliAgentRunner {
           "-c",
           `approval_policy=${this.tomlString("on-request")}`,
           "-c",
-          `approvals_reviewer=${this.tomlString("auto_review")}`
+          `approvals_reviewer=${this.tomlString(CODEX_AUTO_APPROVALS_REVIEWER)}`
         );
       }
       if (options.role) {
@@ -1547,6 +1569,13 @@ export class CliAgentRunner {
     if (!record) {
       return undefined;
     }
+    const method = this.stringField(record, "method");
+    if (method === "item/autoApprovalReview/started") {
+      return "Auto-reviewing approval request";
+    }
+    if (method === "item/autoApprovalReview/completed") {
+      return "Auto-review completed";
+    }
     const item = this.asRecord(record.item) ?? record;
     const type = `${this.stringField(record, "type") ?? ""} ${this.stringField(item, "type") ?? ""}`.toLowerCase();
     const name = this.stringField(item, "name") ?? this.stringField(item, "tool_name");
@@ -1655,8 +1684,12 @@ export class CliAgentRunner {
     return kind === "chat" ? normalizeChatAgentMode(options.agentMode) : "plan";
   }
 
-  private permissionsForRun(mode: ChatAgentMode, options: CliAgentRunOptions): ChatAgentPermissions {
-    return effectiveChatAgentPermissions(mode, normalizeChatAgentPermissions(options.permissions));
+  private permissionsForRun(
+    providerKind: ChatProviderKind | undefined,
+    mode: ChatAgentMode,
+    options: CliAgentRunOptions
+  ): ChatAgentPermissions {
+    return effectiveChatAgentPermissionsForProvider(providerKind, mode, normalizeChatAgentPermissions(options.permissions));
   }
 
   private claudePermissionMode(kind: ConversationKind, options: CliAgentRunOptions): ClaudePermissionMode {
@@ -1664,7 +1697,7 @@ export class CliAgentRunner {
     if (agentMode === "plan") {
       return "plan";
     }
-    const permissions = this.permissionsForRun(agentMode, options);
+    const permissions = this.permissionsForRun("claude-code", agentMode, options);
     return permissions.workspaceWrite ? "acceptEdits" : "default";
   }
 
@@ -1676,7 +1709,7 @@ export class CliAgentRunner {
   ): ClaudeToolConfig {
     const agentMode = this.agentModeForRun(kind, options);
     const permissionMode = this.claudePermissionMode(kind, options);
-    const permissions = this.permissionsForRun(agentMode, options);
+    const permissions = this.permissionsForRun("claude-code", agentMode, options);
     const tools = new Set<string>();
     const allowedTools: string[] = [];
     const disallowedTools: string[] = [];

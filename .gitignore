@@ -11,3 +11,4 @@ screenshots/
 .codex
 .history
 .gstack/
+.playwright-mcp/

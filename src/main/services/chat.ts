@@ -53,7 +53,7 @@ import type {
 import {
   CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH,
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
-  effectiveChatAgentPermissions,
+  effectiveChatAgentPermissionsForProvider,
   isChatShellPermissionPatternSafe,
   normalizeChatAgentMode,
   normalizeChatAgentPermissions
@@ -120,7 +120,7 @@ interface ChatAttachmentRecord {
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 13;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 14;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const CHAT_ADMINISTRATOR_ROLE_ID = "administrator";
@@ -1551,13 +1551,17 @@ export class ChatService {
           "pending"
         );
         this.setTargetRunPendingMessageId(targetRunId, pendingMessage.id);
-        await this.withChatMutation(conversation, async () => {
-          conversation.messages.push(pendingMessage);
-          conversation.updatedAt = new Date().toISOString();
-          this.queueSnapshot(conversation);
-        });
+        // Register the run as active before persisting the pending bubble, and keep the
+        // persist inside the try so endChatRun always balances beginChatRun. Otherwise a
+        // crash/refresh in the gap can observe a saved "pending" participant message
+        // whose run id is not yet in activeRunIds and sweep it as "Interrupted".
         await this.beginChatRun(conversation, targetRunId);
         try {
+          await this.withChatMutation(conversation, async () => {
+            conversation.messages.push(pendingMessage);
+            conversation.updatedAt = new Date().toISOString();
+            this.queueSnapshot(conversation);
+          });
           const messages = await this.runParticipantTurnSerialized(conversation, participant, triggerMessage, targetRunId, targetController.signal, progress, {
             warnings,
             promptConversation: turnSnapshot,
@@ -1685,7 +1689,7 @@ export class ChatService {
       resumeFallbackSize: resumeFallbackPrompt?.length ?? 0,
       roleInstructionsSize: role?.instructions.length ?? 0
     });
-    const runPath = this.runPathForParticipant(conversation, workspacePath, agentMode, permissions);
+    const runPath = this.runPathForParticipant(conversation, participant, workspacePath, agentMode, permissions);
     const cliParticipant = this.cliParticipantForSession(participant, session);
     let pendingMessage: ChatMessage;
     if (options.existingPendingMessage) {
@@ -1968,8 +1972,8 @@ export class ChatService {
   ): { prompt: string; sections: ChatPromptSectionSizes } {
     const canRequestPermissions = this.canRequestPermissionChanges(session);
     const dynamicHeader = [
-      this.participantRepositoryLine(conversation, options.agentMode, options.permissions),
-      this.participantPermissionPolicy(options.agentMode, options.permissions, canRequestPermissions)
+      this.participantRepositoryLine(conversation, participant.kind, options.agentMode, options.permissions),
+      this.participantPermissionPolicy(participant.kind, options.agentMode, options.permissions, canRequestPermissions)
     ].filter(Boolean).join("\n");
 
     let staticEnvelope = "";
@@ -1990,7 +1994,7 @@ export class ChatService {
       "Triggering message:",
       this.formatMessage(triggerMessage, false)
     ].join("\n\n");
-    const mentionsBlock = this.repoFileMentionsPromptSection(triggerMessage, options.agentMode, options.permissions, canRequestPermissions);
+    const mentionsBlock = this.repoFileMentionsPromptSection(triggerMessage, participant.kind, options.agentMode, options.permissions, canRequestPermissions);
     const attachmentsBlock = this.imageAttachmentsPromptSection(triggerMessage);
     const currentRequestBlock = [
       continuation
@@ -2047,6 +2051,7 @@ export class ChatService {
 
   private repoFileMentionsPromptSection(
     message: ChatMessage,
+    providerKind: ChatParticipant["kind"],
     agentMode: ChatAgentMode,
     runPermissions: ChatAgentPermissions,
     _canRequestPermissions: boolean
@@ -2055,7 +2060,7 @@ export class ChatService {
     if (mentions.length === 0) {
       return "";
     }
-    const permissions = effectiveChatAgentPermissions(agentMode, runPermissions);
+    const permissions = effectiveChatAgentPermissionsForProvider(providerKind, agentMode, runPermissions);
     const header = "Referenced repository files (paths relative to repo root):";
     const paths = mentions.map((mention) => `- ${mention.path}`);
     const guidance = permissions.repoRead
@@ -2132,11 +2137,14 @@ export class ChatService {
   }
 
   private appToolPromptPolicy(session: ChatParticipantSession): string {
+    const agentMode = normalizeChatAgentMode(session.participantAgentMode);
     const permissionPolicyLines = this.canRequestPermissionChanges(session)
       ? [
-          "Permission MCP tool: `app_permissions_request_change` is available when this participant needs User approval for blocked capabilities.",
+          "Permission MCP tool: `app_permissions_request_change` is available when this participant needs approval for blocked capabilities.",
           "Required permission workflow: if the current task needs a blocked capability, call `app_permissions_request_change` before answering that the work cannot be done. Use `{ \"kind\": \"portable\", \"permissions\": [\"repoRead\"], \"reason\": \"Need to inspect the referenced repository files.\" }` for repository reads, `{ \"kind\": \"portable\", \"permissions\": [\"webAccess\"], \"reason\": \"Need live web lookup to answer User's trademark question.\" }` for web access, `{ \"kind\": \"portable\", \"permissions\": [\"workspaceWrite\"], \"reason\": \"Need to edit files for the requested change.\" }` for file edits, `{ \"kind\": \"shellRules\", \"rules\": [{ \"action\": \"allow\", \"match\": \"prefix\", \"pattern\": \"git diff\" }], \"reason\": \"Need to inspect diffs.\" }` for shell rules, or `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants.",
-          "After a permission MCP call, the app will ask User to approve. If the result is pending approval, say only that the permission request is awaiting User approval; do not claim the permission was granted until the tool result or a later app message confirms approval."
+          agentMode === "auto"
+            ? "In Auto-review mode the provider-preset capabilities (repo read, workspace write, web) are already available, so an in-preset request returns already_granted and you may proceed; out-of-preset requests still require User approval. After a permission MCP call, inspect the returned status: if it is pending_user_approval, say only that the permission request is awaiting User approval; if it is already_granted the capability is available."
+            : "After a permission MCP call, inspect the returned status. If the result is pending_user_approval, say only that the permission request is awaiting User approval; do not claim the permission was granted until the tool result or a later app message confirms approval."
         ]
       : [
           "Permission changes are not directly available to this participant. If the current task needs a blocked capability, explain the specific capability needed before refusing."
@@ -2310,8 +2318,12 @@ export class ChatService {
         : this.preferredRoleRuntimeForKind(participantKind),
       participantKind,
       participantModel: this.normalizedModel(existing.participantModel) || undefined,
-      participantAgentMode: normalizeChatAgentMode(existing.participantAgentMode ?? participant.agentMode),
-      participantPermissions: normalizeChatAgentPermissions(existing.participantPermissions ?? participant.permissions),
+      // Adopt the participant's current launch settings so a mode/permission change
+      // takes effect on the next turn. We keep resuming the session (no reset): the
+      // provider re-asserts the profile on resume — the Codex app-server resume params
+      // and the one-shot `exec resume` both send sandbox/approval/web from these.
+      participantAgentMode: normalizeChatAgentMode(participant.agentMode),
+      participantPermissions: normalizeChatAgentPermissions(participant.permissions),
       runtimeConfigVersion,
       roleLabel: role?.label ?? existing.roleLabel,
       roleInstructions: role?.instructions ?? existing.roleInstructions,
@@ -2363,20 +2375,22 @@ export class ChatService {
 
   private runPathForParticipant(
     conversation: Conversation,
+    participant: ChatParticipant,
     workspacePath: string,
     agentMode: ChatAgentMode,
     runPermissions: ChatAgentPermissions
   ): string {
-    const permissions = effectiveChatAgentPermissions(agentMode, runPermissions);
+    const permissions = effectiveChatAgentPermissionsForProvider(participant.kind, agentMode, runPermissions);
     return permissions.repoRead && conversation.repoPath ? conversation.repoPath : workspacePath;
   }
 
   private participantRepositoryLine(
     conversation: Conversation,
+    providerKind: ChatParticipant["kind"],
     agentMode: ChatAgentMode,
     runPermissions: ChatAgentPermissions
   ): string {
-    const permissions = effectiveChatAgentPermissions(agentMode, runPermissions);
+    const permissions = effectiveChatAgentPermissionsForProvider(providerKind, agentMode, runPermissions);
     if (!conversation.repoPath) {
       return "Repository: none selected.";
     }
@@ -2384,12 +2398,13 @@ export class ChatService {
   }
 
   private participantPermissionPolicy(
+    providerKind: ChatParticipant["kind"],
     agentMode: ChatAgentMode,
     runPermissions: ChatAgentPermissions,
     canRequestPermissions: boolean
   ): string {
-    const permissions = effectiveChatAgentPermissions(agentMode, runPermissions);
-    const permissionLines = chatPermissionPromptLines({ agentMode, permissions, canRequestPermissions });
+    const permissions = effectiveChatAgentPermissionsForProvider(providerKind, agentMode, runPermissions);
+    const permissionLines = chatPermissionPromptLines({ agentMode, providerKind, permissions, canRequestPermissions });
     return [
       `Permissions: shell commands ${permissions.shell.enabled ? "allowed" : "blocked"}, workspace edits ${permissions.workspaceWrite ? "allowed" : "blocked"}, web access ${permissions.webAccess ? "allowed" : "blocked"}.`,
       this.repoReadEscalationLine(permissions.repoRead, canRequestPermissions),
@@ -3197,7 +3212,15 @@ export class ChatService {
     if (mode === "plan" && normalizedRequest.kind === "providerNative") {
       throw new Error("Plan mode blocks provider-native tool grants for this participant. Switch the participant to default or auto mode before granting provider-native access.");
     }
-    const current = normalizeChatAgentPermissions(requester.permissions);
+    // Resolve "already granted" against the effective launch profile, not the raw
+    // stored toggles. In Auto-review mode the provider preset already grants web/edit,
+    // so an in-preset request must report already_granted instead of producing a
+    // spurious auto-applied approval and an unnecessary session relaunch.
+    const current = effectiveChatAgentPermissionsForProvider(
+      requester.kind,
+      mode,
+      normalizeChatAgentPermissions(requester.permissions)
+    );
     if (normalizedRequest.kind === "portable") {
       const portablePermissions = normalizedRequest.permissions.filter((permission) => !current[permission]);
       const summaryPermissions = portablePermissions.length > 0 ? portablePermissions : normalizedRequest.permissions;

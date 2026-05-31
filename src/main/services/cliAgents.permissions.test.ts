@@ -9,7 +9,7 @@ function makeRunner(): CliAgentRunner {
 }
 
 function chatOptions(overrides: {
-  agentMode: "default" | "plan";
+  agentMode: "default" | "plan" | "auto";
   workspaceWrite: boolean;
   webAccess?: boolean;
   shell?: ReturnType<typeof defaultChatAgentPermissions>["shell"];
@@ -93,6 +93,24 @@ test("claudeToolConfig disallows web tools when webAccess is false", () => {
   assert.ok(config.disallowedTools.includes("WebFetch"));
 });
 
+test("claudeToolConfig auto mode applies edit and web preset while keeping Bash gated", () => {
+  const runner = makeRunner() as any;
+  const config = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
+    agentMode: "auto",
+    workspaceWrite: false,
+    webAccess: false
+  }));
+  assert.equal(config.permissionMode, "acceptEdits");
+  assert.ok(config.tools.includes("Write"));
+  assert.ok(config.tools.includes("Edit"));
+  assert.ok(config.tools.includes("WebSearch"));
+  assert.ok(config.tools.includes("WebFetch"));
+  assert.ok(config.allowedTools.includes("WebSearch"));
+  assert.ok(config.allowedTools.includes("WebFetch"));
+  assert.equal(config.tools.includes("Bash"), false);
+  assert.ok(config.disallowedTools.includes("Bash"));
+});
+
 test("claudeToolConfig leaves plan agent mode untouched regardless of workspaceWrite", () => {
   const runner = makeRunner() as any;
   const planNoWrite = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
@@ -107,6 +125,58 @@ test("claudeToolConfig leaves plan agent mode untouched regardless of workspaceW
   assert.equal(planWithWrite.permissionMode, "plan");
   // plan mode disables workspaceWrite via effective permissions, so editors stay disallowed
   assert.ok(planWithWrite.disallowedTools.includes("Write"));
+});
+
+test("codex app-server auto mode applies workspace-write web preset and guardian reviewer", () => {
+  const runner = makeRunner() as any;
+  const participant = {
+    kind: "codex-cli",
+    label: "@codex",
+    model: undefined
+  };
+  const params = runner.codexAppServerThreadStartParams(
+    participant,
+    "/repo",
+    "chat",
+    chatOptions({
+      agentMode: "auto",
+      workspaceWrite: false,
+      webAccess: false
+    })
+  );
+
+  assert.equal(params.approvalPolicy, "on-request");
+  assert.equal(params.approvalsReviewer, "guardian_subagent");
+  assert.equal(params.sandbox, "workspace-write");
+  assert.equal(params.config.web_search, "live");
+});
+
+test("codex app-server resume re-asserts the auto preset so a mode switch applies without a fresh session", () => {
+  const runner = makeRunner() as any;
+  const participant = {
+    kind: "codex-cli",
+    label: "@codex",
+    model: undefined
+  };
+  const params = runner.codexAppServerThreadResumeParams(
+    "session-1",
+    participant,
+    "/repo",
+    "chat",
+    chatOptions({
+      agentMode: "auto",
+      workspaceWrite: false,
+      webAccess: false
+    })
+  );
+
+  // Resuming the existing session still launches under the new Auto-review profile,
+  // so switching to auto mid-chat takes effect without dropping the session.
+  assert.equal(params.threadId, "session-1");
+  assert.equal(params.approvalPolicy, "on-request");
+  assert.equal(params.approvalsReviewer, "guardian_subagent");
+  assert.equal(params.sandbox, "workspace-write");
+  assert.equal(params.config.web_search, "live");
 });
 
 test("codexPrompt chat envelope passes the inner prompt through and does not duplicate permission text", () => {

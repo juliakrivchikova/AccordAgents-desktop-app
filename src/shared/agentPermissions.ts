@@ -1,4 +1,4 @@
-import type { ChatAgentMode, ChatAgentPermissions, ChatShellPermissionRule } from "./types";
+import type { ChatAgentMode, ChatAgentPermissions, ChatProviderKind, ChatShellPermissionRule } from "./types";
 
 export const DEFAULT_CHAT_AGENT_MODE: ChatAgentMode = "default";
 export const CHAT_SHELL_RULE_PATTERN_MAX_LENGTH = 160;
@@ -71,6 +71,30 @@ export function effectiveChatAgentPermissions(mode: ChatAgentMode, permissions: 
       ...readOnlyPermissions.shell,
       enabled: false
     }
+  };
+}
+
+export function effectiveChatAgentPermissionsForProvider(
+  providerKind: ChatProviderKind | undefined,
+  mode: ChatAgentMode,
+  permissions: ChatAgentPermissions
+): ChatAgentPermissions {
+  const normalized = normalizeChatAgentPermissions(permissions);
+  if (mode !== "auto") {
+    return effectiveChatAgentPermissions(mode, normalized);
+  }
+  const shell = providerKind === "codex-cli"
+    ? {
+        ...normalized.shell,
+        enabled: true
+      }
+    : normalized.shell;
+  return {
+    ...normalized,
+    repoRead: true,
+    workspaceWrite: true,
+    webAccess: true,
+    shell
   };
 }
 

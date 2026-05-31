@@ -7,6 +7,7 @@ import { ChatService } from "./chat";
 import {
   chatAgentPermissionsEqual,
   defaultChatAgentPermissions,
+  effectiveChatAgentPermissionsForProvider,
   normalizeChatAgentPermissions
 } from "../../shared/agentPermissions";
 import type {
@@ -208,6 +209,125 @@ test("structured permission request creates exactly one approval card", async ()
   assert.equal(approvals[0].resumeContext?.triggerMessageId, "user-message");
 });
 
+test("auto mode treats in-preset permission requests as already granted", async () => {
+  // The Auto-review launch profile already grants repo read / workspace write / web,
+  // so an in-preset request must report already_granted instead of producing a
+  // spurious auto-applied approval and an unnecessary session relaunch (C6).
+  const runs: ParticipantConfig[] = [];
+  const participant = chatParticipant("claude-code", { webAccess: false });
+  participant.agentMode = "auto";
+  const conversation = chatConversation([participant]);
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => {
+      runs.push(runParticipant);
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: "ok",
+        durationMs: 1,
+        sessionId: "session-1"
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  const result = await service.requestPermissionChangeFromTool({
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request"],
+    runId: "auto-run",
+    triggerMessageId: "user-message"
+  }, {
+    kind: "portable",
+    permissions: ["webAccess"],
+    reason: "Need live lookup."
+  });
+
+  assert.equal(result.status, "already_granted");
+  const approvals = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).filter(
+    (approval) => approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL
+  );
+  assert.equal(approvals.length, 0);
+  assert.equal(runs.length, 0);
+  assert.equal(storage.current.messages.some((message: Conversation["messages"][number]) =>
+    message.content.includes("Permission approval needed")
+  ), false);
+});
+
+test("switching an existing session to auto adopts the mode on the next resumed turn", async () => {
+  const runs: Array<{ options: any }> = [];
+  const participant = chatParticipant("codex-cli");
+  assert.equal(participant.agentMode, "default");
+  const conversation = chatConversation([participant]);
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      runs.push({ options });
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: "ok",
+        durationMs: 1,
+        sessionId: "session-1"
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-default", content: "@codex hello" });
+  await waitFor(() => runs.length === 1);
+  // First turn runs in default mode and seeds a provider session id.
+  assert.equal(runs[0].options.agentMode, "default");
+  assert.ok(!runs[0].options.sessionId);
+
+  // Flip the persisted participant to Auto-review, then send another message.
+  const persisted = storage.current.metadata.participants.find((item: ChatParticipant) => item.id === participant.id);
+  persisted.agentMode = "auto";
+
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-auto", content: "@codex again" });
+  await waitFor(() => runs.length === 2);
+  // The new mode must be adopted (not frozen at the session's original mode)...
+  assert.equal(runs[1].options.agentMode, "auto");
+  // ...while still resuming the same provider session (no reset / no lost context).
+  // The provider re-asserts the new profile on resume.
+  assert.equal(runs[1].options.sessionId, "session-1");
+  // The launched options resolve to the Auto-review preset through the shared helper.
+  const effective = effectiveChatAgentPermissionsForProvider("codex-cli", runs[1].options.agentMode, runs[1].options.permissions);
+  assert.equal(effective.workspaceWrite, true);
+  assert.equal(effective.webAccess, true);
+});
+
+test("auto mode leaves out-of-preset shell permission requests pending", async () => {
+  const participant = chatParticipant("claude-code");
+  participant.agentMode = "auto";
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+
+  const result = await service.requestPermissionChangeFromTool({
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request"],
+    runId: "auto-shell-run",
+    triggerMessageId: "user-message"
+  }, {
+    kind: "shellRules",
+    rules: [{ action: "allow", match: "prefix", pattern: "git diff" }],
+    reason: "Need shell."
+  });
+
+  assert.equal(result.status, "pending_user_approval");
+  const approvals = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).filter(
+    (approval) => approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL
+  );
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].status, "pending");
+});
+
 test("permission resume attaches resumed participant-request reply to the original batch", async () => {
   const runs: Array<{ participant: ParticipantConfig; options: any; prompt: string }> = [];
   const participant = chatParticipant("claude-code");
@@ -388,6 +508,104 @@ test("permission resume registers a cancellable chat run controller", async () =
   assert.equal(storage.current.metadata.runId, undefined);
 });
 
+test("approved permission resume ignores duplicate concurrent resume attempts", async () => {
+  const participant = chatParticipant("claude-code");
+  const approval = permissionApproval(participant, {
+    kind: "portable",
+    permissions: ["webAccess"]
+  }, {
+    approvalScope: "once",
+    status: "approved",
+    resumeContext: {
+      runId: "auto-resume-run",
+      triggerMessageId: "user-message"
+    }
+  });
+  const conversation = chatConversation([participant], { pendingAppToolApprovals: [approval] });
+  let runCount = 0;
+  let releaseRun!: () => void;
+  const runCanFinish = new Promise<void>((resolve) => {
+    releaseRun = resolve;
+  });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => {
+      runCount += 1;
+      await runCanFinish;
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: "Finished auto-applied resume.",
+        durationMs: 1,
+        sessionId: "session-1"
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  const first = (service as any).autoResumePermissionApproval(conversation.id, approval.id);
+  const second = (service as any).autoResumePermissionApproval(conversation.id, approval.id);
+  await waitFor(() => runCount === 1);
+  releaseRun();
+  await Promise.all([first, second]);
+
+  assert.equal(runCount, 1);
+  assert.equal(storage.current.metadata.running, false);
+  assert.equal(storage.current.metadata.runId, undefined);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].consumedAt.length > 0, true);
+});
+
+test("permission resume waits behind an in-flight same-participant turn", async () => {
+  const participant = chatParticipant("claude-code");
+  const approval = permissionApproval(participant, {
+    kind: "portable",
+    permissions: ["webAccess"]
+  }, {
+    approvalScope: "once",
+    status: "approved",
+    resumeContext: {
+      runId: "auto-resume-run",
+      triggerMessageId: "user-message"
+    }
+  });
+  const conversation = chatConversation([participant], { pendingAppToolApprovals: [approval] });
+  let runStarted = false;
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => {
+      runStarted = true;
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: "resumed",
+        durationMs: 1,
+        sessionId: "session-1"
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  // Simulate an in-flight turn for the same participant holding the per-participant
+  // serialization queue; the resume must serialize behind it via participantTurnQueues.
+  const queueKey = `${conversation.id}:${participant.id}`;
+  let releaseInFlight!: () => void;
+  (service as any).participantTurnQueues.set(queueKey, new Promise<void>((resolve) => {
+    releaseInFlight = resolve;
+  }));
+
+  const resume = (service as any).autoResumePermissionApproval(conversation.id, approval.id);
+  // Allow the resume to reach the queue wait; it must not start the run while blocked.
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(runStarted, false);
+
+  releaseInFlight();
+  await resume;
+
+  assert.equal(runStarted, true);
+  assert.equal(storage.current.metadata.running, false);
+  assert.equal(storage.current.metadata.runId, undefined);
+});
+
 test("duplicate chat run ids stay active until every owner ends", async () => {
   const participant = chatParticipant("claude-code");
   const conversation = chatConversation([participant]);
@@ -539,7 +757,7 @@ test("approved permission without resumeContext does not auto-run", async () => 
 
 test("participantPermissionPolicy guides blocked capabilities to request before refusing", () => {
   const { service } = testService();
-  const prompt = (service as any).participantPermissionPolicy("default", defaultChatAgentPermissions(), true);
+  const prompt = (service as any).participantPermissionPolicy("claude-code", "default", defaultChatAgentPermissions(), true);
 
   assert.match(prompt, /Shell commands are blocked for this turn/);
   assert.match(prompt, /app_permissions_request_change.*shellRules/);
@@ -552,9 +770,21 @@ test("participantPermissionPolicy guides blocked capabilities to request before 
   assert.doesNotMatch(prompt, /Do not use web search/);
 });
 
+test("participantPermissionPolicy reflects Auto-review preset capabilities", () => {
+  const { service } = testService();
+  const prompt = (service as any).participantPermissionPolicy("codex-cli", "auto", defaultChatAgentPermissions(), true);
+
+  assert.match(prompt, /shell commands allowed/);
+  assert.match(prompt, /workspace edits allowed/);
+  assert.match(prompt, /web access allowed/);
+  assert.match(prompt, /Codex Auto-review mode enables native command execution/);
+  assert.doesNotMatch(prompt, /Web access is blocked/);
+  assert.doesNotMatch(prompt, /Workspace file edits are blocked/);
+});
+
 test("participantPermissionPolicy keeps explicit shell deny rules as hard stops", () => {
   const { service } = testService();
-  const prompt = (service as any).participantPermissionPolicy("default", normalizeChatAgentPermissions({
+  const prompt = (service as any).participantPermissionPolicy("claude-code", "default", normalizeChatAgentPermissions({
     ...defaultChatAgentPermissions(),
     shell: {
       enabled: true,
@@ -570,7 +800,7 @@ test("participantPermissionPolicy keeps explicit shell deny rules as hard stops"
 
 test("participantPermissionPolicy uses explanation fallback when permission requests are unavailable", () => {
   const { service } = testService();
-  const prompt = (service as any).participantPermissionPolicy("default", defaultChatAgentPermissions(), false);
+  const prompt = (service as any).participantPermissionPolicy("claude-code", "default", defaultChatAgentPermissions(), false);
 
   assert.match(prompt, /explain the specific command and shell rule needed before refusing/);
   assert.match(prompt, /explain that `workspaceWrite` is needed before refusing/);
@@ -580,7 +810,7 @@ test("participantPermissionPolicy uses explanation fallback when permission requ
 
 test("participantPermissionPolicy guides blocked repoRead to request before refusing", () => {
   const { service } = testService();
-  const prompt = (service as any).participantPermissionPolicy("default", normalizeChatAgentPermissions({
+  const prompt = (service as any).participantPermissionPolicy("claude-code", "default", normalizeChatAgentPermissions({
     ...defaultChatAgentPermissions(),
     repoRead: false
   }), true);
@@ -591,7 +821,7 @@ test("participantPermissionPolicy guides blocked repoRead to request before refu
 
 test("participantPermissionPolicy does not suggest escalation for agent-mode masked shell and workspace grants", () => {
   const { service } = testService();
-  const prompt = (service as any).participantPermissionPolicy("plan", normalizeChatAgentPermissions({
+  const prompt = (service as any).participantPermissionPolicy("claude-code", "plan", normalizeChatAgentPermissions({
     ...defaultChatAgentPermissions(),
     workspaceWrite: true,
     webAccess: false,
@@ -726,6 +956,16 @@ function permissionApproval(
     updatedAt: NOW,
     ...patch
   };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(predicate(), true);
 }
 
 function clone<T>(value: T): T {

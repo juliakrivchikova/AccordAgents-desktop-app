@@ -10,7 +10,7 @@ These items should be finished before any public launch or paid beta.
 
 ### Product Definition
 
-- [ ] Choose the app name.
+- [x] Choose the app name.
   - [ ] Produce a shortlist and rank candidates.
   - [ ] Check obvious trademark, domain, App Store, GitHub, and search conflicts.
   - [ ] Pick the final product name and tagline.

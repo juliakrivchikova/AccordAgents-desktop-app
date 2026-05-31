@@ -112,7 +112,7 @@ import type {
 import {
   chatAgentPermissionsEqual,
   defaultChatAgentPermissions,
-  effectiveChatAgentPermissions,
+  effectiveChatAgentPermissionsForProvider,
   isChatShellPermissionPatternSafe,
   normalizeChatAgentMode,
   normalizeChatAgentPermissions
@@ -281,7 +281,7 @@ function addDismissedWarningKeys(current: DismissedWarningMap, scope: string, ke
 const CHAT_AGENT_MODE_OPTIONS: Array<{ value: ChatAgentMode; label: string }> = [
   { value: "default", label: "Default" },
   { value: "plan", label: "Plan" },
-  { value: "auto", label: "Auto" }
+  { value: "auto", label: "Auto-review" }
 ];
 const CHAT_SHELL_ACTION_OPTIONS: Array<{ value: ChatShellPermissionAction; label: string }> = [
   { value: "allow", label: "Allow" },
@@ -2664,6 +2664,7 @@ function ChatParticipantDraftRow(props: {
       </FormRow>
       <ChatPermissionsEditor
         mode={props.draft.agentMode}
+        kind={props.draft.kind}
         permissions={props.draft.permissions}
         onChange={(permissions) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { permissions }))}
       />
@@ -2703,11 +2704,15 @@ function ChatParticipantDraftRow(props: {
 
 function ChatPermissionsEditor(props: {
   mode: ChatAgentMode;
+  kind: ChatProviderKind;
   permissions: ChatAgentPermissions;
   onChange: (permissions: ChatAgentPermissions) => void;
 }): JSX.Element {
   const permissions = props.permissions;
   const planMode = props.mode === "plan";
+  const autoMode = props.mode === "auto";
+  const codexAutoMode = autoMode && props.kind === "codex-cli";
+  const providerPresetLocked = autoMode;
 
   function updatePermissions(patch: Partial<ChatAgentPermissions>): void {
     props.onChange({ ...permissions, ...patch });
@@ -2749,26 +2754,35 @@ function ChatPermissionsEditor(props: {
       <div className="chat-permission-toggle-grid">
         <ChatPermissionToggle
           label="Read repo"
-          checked={permissions.repoRead}
+          checked={autoMode ? true : permissions.repoRead}
+          disabled={providerPresetLocked}
           onChange={(repoRead) => updatePermissions({ repoRead })}
         />
         <ChatPermissionToggle
           label="Run shell"
-          checked={permissions.shell.enabled}
+          checked={codexAutoMode ? true : permissions.shell.enabled}
+          disabled={codexAutoMode}
           onChange={(enabled) => updateShell({ enabled })}
         />
         <ChatPermissionToggle
           label="Edit files"
-          checked={permissions.workspaceWrite}
+          checked={autoMode ? true : permissions.workspaceWrite}
+          disabled={providerPresetLocked}
           onChange={(workspaceWrite) => updatePermissions({ workspaceWrite })}
         />
         <ChatPermissionToggle
           label="Web access"
-          checked={permissions.webAccess}
+          checked={autoMode ? true : permissions.webAccess}
+          disabled={providerPresetLocked}
           onChange={(webAccess) => updatePermissions({ webAccess })}
         />
       </div>
       {planMode && <div className="text-xs text-muted-foreground">Plan mode blocks shell commands and file edits while active.</div>}
+      {autoMode && (
+        <div className="text-xs text-muted-foreground">
+          Auto-review applies the provider preset at runtime. Claude Bash still follows explicit shell rules.
+        </div>
+      )}
       {permissions.shell.enabled && (
         <div className="chat-shell-rule-list">
           <div className="chat-shell-rule-head">
@@ -2821,11 +2835,17 @@ function ChatPermissionsEditor(props: {
 function ChatPermissionToggle(props: {
   label: string;
   checked: boolean;
+  disabled?: boolean;
   onChange: (checked: boolean) => void;
 }): JSX.Element {
   return (
     <label className="chat-permission-toggle">
-      <input type="checkbox" checked={props.checked} onChange={(event) => props.onChange(event.target.checked)} />
+      <input
+        type="checkbox"
+        checked={props.checked}
+        disabled={props.disabled}
+        onChange={(event) => props.onChange(event.target.checked)}
+      />
       <span>{props.label}</span>
     </label>
   );
@@ -6800,9 +6820,9 @@ function labelForProviderKind(providers: ProviderSettings[], kind: ProviderKind)
   return providers.find((provider) => provider.kind === kind)?.label ?? kind;
 }
 
-function chatParticipantPermissionSummary(participant: Pick<ChatParticipant, "agentMode" | "permissions">): string {
+function chatParticipantPermissionSummary(participant: Pick<ChatParticipant, "agentMode" | "kind" | "permissions">): string {
   const mode = normalizeChatAgentMode(participant.agentMode);
-  const permissions = effectiveChatAgentPermissions(mode, normalizeChatAgentPermissions(participant.permissions));
+  const permissions = effectiveChatAgentPermissionsForProvider(participant.kind, mode, normalizeChatAgentPermissions(participant.permissions));
   const enabled = [
     permissions.repoRead ? "repo" : "",
     permissions.shell.enabled ? "shell" : "",
@@ -6810,7 +6830,8 @@ function chatParticipantPermissionSummary(participant: Pick<ChatParticipant, "ag
     permissions.webAccess ? "web" : "",
     (permissions.providerNative?.["claude-code"]?.allowedTools.length ?? 0) > 0 ? "native" : ""
   ].filter(Boolean);
-  return `${mode}${enabled.length > 0 ? ` · ${enabled.join(", ")}` : ""}`;
+  const modeLabel = mode === "auto" ? "auto-review" : mode;
+  return `${modeLabel}${enabled.length > 0 ? ` · ${enabled.join(", ")}` : ""}`;
 }
 
 function normalizeChatParticipantDraftForSettings(draft: ChatParticipantDraft, settings: AppSettings): ChatParticipantDraft {

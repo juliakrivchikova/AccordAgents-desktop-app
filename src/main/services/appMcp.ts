@@ -490,7 +490,7 @@ export class AppMcpService {
         name: APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
         title: "Request Chat Permission Change",
         description:
-          "Request User approval to grant this chat participant more capability. Use portable for repoRead/workspaceWrite/webAccess, shellRules for command-specific shell rules, or providerNative for Claude Code allowedTools tokens. Provider-native grants are rejected unless the requester is a Claude Code participant. The app validates the request and shows an approval item; this tool never grants permissions directly.",
+          "Request a permission change for this chat participant. Use portable for repoRead/workspaceWrite/webAccess, shellRules for command-specific shell rules, or providerNative for Claude Code allowedTools tokens. Provider-native grants are rejected unless the requester is a Claude Code participant. The app validates the request and may return already_granted (the capability is already available, e.g. an Auto-review preset capability) or pending_user_approval for User approval.",
         inputSchema: {
           type: "object",
           additionalProperties: false,

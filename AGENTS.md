@@ -29,7 +29,7 @@ Use strict TypeScript and keep types explicit at IPC, service, and shared bounda
 
 ## Testing Guidelines
 
-There is no full test suite or lint runner, but targeted Node service tests exist. Run `make typecheck` and `make build` before submitting broad changes. Run `npm run test:permissions` for chat permissions, cancellation, repo-file mentions, rename, git repo-file listing, or CLI permission behavior, and `npm run test:app-skills` for app-skill service changes. For behavior that touches Electron IPC, provider integrations, git diff handling, conversation storage, or chat concurrency, include manual verification notes in the PR; the concurrent-chat fan-out QA matrix lives in `docs/concurrent-chat-fanout-test-cases.md`. If adding tests, colocate them near the code under test or use `*.test.ts` / `*.test.tsx`, and add the command to `package.json`.
+There is no full test suite or lint runner, but targeted Node service tests exist. Run `make typecheck` and `make build` before submitting broad changes. Run `npm run test:permissions` for chat permissions, cancellation, repo-file mentions, rename, git repo-file listing, or CLI permission behavior, and `npm run test:app-skills` for app-skill service changes. For behavior that touches Electron IPC, provider integrations, git diff handling, conversation storage, or chat concurrency, include manual verification notes in the PR. If adding tests, colocate them near the code under test or use `*.test.ts` / `*.test.tsx`, and add the command to `package.json`.
 
 ## Inspecting the running desktop app
 

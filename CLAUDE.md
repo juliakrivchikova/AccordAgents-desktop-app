@@ -14,7 +14,7 @@ Prefer the Makefile aliases; they wrap the npm scripts in `package.json`.
 - `npm run test:permissions` — Build the main process, then run targeted Node service tests for chat permissions/cancellation, repo file mentions, chat rename, git repo-file listing, and CLI permission handling.
 - `npm run test:app-skills` — Build the main process, then run app-skill service tests.
 
-There is no lint runner. Before submitting changes, run `make typecheck` and (for renderer changes) `make build`. For chat permissions, cancellation, repo-file mentions, rename, git repo-file listing, or CLI permission changes, run `npm run test:permissions`. For app-skill service changes, run `npm run test:app-skills`. Manual verification notes are expected in PRs whenever IPC, provider integrations, git diff handling, or conversation storage are touched. For chat concurrency / fan-out changes, walk through `docs/concurrent-chat-fanout-test-cases.md` as the QA matrix.
+There is no lint runner. Before submitting changes, run `make typecheck` and (for renderer changes) `make build`. For chat permissions, cancellation, repo-file mentions, rename, git repo-file listing, or CLI permission changes, run `npm run test:permissions`. For app-skill service changes, run `npm run test:app-skills`. Manual verification notes are expected in PRs whenever IPC, provider integrations, git diff handling, conversation storage, or chat concurrency are touched.
 
 Debug logs (JSONL of progress events and raw provider/CLI output) are written to Electron's `userData/debug-logs/<date>.jsonl`. The `DebugLogService` enables them automatically when running unpackaged; force on/off with `AI_CONSENSUS_DEBUG_LOGS=1` / `=0`.
 

@@ -1,7 +1,8 @@
-import type { ChatAgentMode, ChatAgentPermissions, ChatShellPermissionRule } from "./types";
+import type { ChatAgentMode, ChatAgentPermissions, ChatProviderKind, ChatShellPermissionRule } from "./types";
 
 export interface ChatPermissionPromptLinesOptions {
   agentMode?: ChatAgentMode;
+  providerKind?: ChatProviderKind;
   permissions: ChatAgentPermissions;
   canRequestPermissions: boolean;
 }
@@ -29,7 +30,10 @@ export function chatShellRulesText(rules: ChatShellPermissionRule[]): string {
   return rules.map((rule) => `${rule.action} ${rule.match} ${JSON.stringify(rule.pattern)}`).join("; ");
 }
 
-function chatShellPermissionLine({ agentMode, permissions, canRequestPermissions }: ChatPermissionPromptLinesOptions): string {
+function chatShellPermissionLine({ agentMode, providerKind, permissions, canRequestPermissions }: ChatPermissionPromptLinesOptions): string {
+  if (agentMode === "auto" && providerKind === "codex-cli") {
+    return "Codex Auto-review mode enables native command execution inside the workspace-write sandbox; eligible provider approvals are handled by Codex Auto-review.";
+  }
   const requestGuidance = canRequestPermissions
     ? "call `app_permissions_request_change` with a narrow `shellRules` request before refusing."
     : "explain the specific command and shell rule needed before refusing.";
