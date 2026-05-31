@@ -542,6 +542,7 @@ Do not advertise:
   the system. If no, create and make it available for future use. It will allow to attach rules to them and reuse.
 - [ ] Add gemini
 - [ ] User-friendly delivery
+- ✅Auto-review mode.
 - ✅ Not block when the agent is running, add indicators that chat state is running or run finished.
 - ✅ Stop agent.
 - ✅ File references from messages.
