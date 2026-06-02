@@ -291,12 +291,20 @@ test("shellRulesAreSelectedSkillReads allows read-only skill-dir reads and rejec
   // Allowed: simple read-only commands scoped to the selected skill directory.
   assert.equal(await check([{ action: "allow", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), true);
   assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -n 1,40p ${dir}/SKILL.md` }]), true);
+  assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -n '1,40p' ${dir}/SKILL.md` }]), true);
+  assert.equal(await check([{ action: "allow", match: "exact", pattern: `head -n 20 ${dir}/SKILL.md` }]), true);
+  assert.equal(await check([{ action: "allow", match: "exact", pattern: `grep -n marker ${dir}/SKILL.md` }]), true);
+  assert.equal(await check([{ action: "allow", match: "exact", pattern: `rg --fixed-strings marker ${dir}` }]), true);
 
   // Rejected: outside the skill dir, mutation, chaining/redirection, in-place edit, deny, empty.
   assert.equal(await check([{ action: "allow", match: "exact", pattern: "cat /etc/passwd" }]), false);
   assert.equal(await check([{ action: "allow", match: "exact", pattern: `rm ${dir}/SKILL.md` }]), false);
   assert.equal(await check([{ action: "allow", match: "exact", pattern: `cat ${dir}/SKILL.md && rm -rf /` }]), false);
   assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -i s/a/b/ ${dir}/SKILL.md` }]), false);
+  assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -n e whoami ${dir}/SKILL.md` }]), false);
+  assert.equal(await check([{ action: "allow", match: "exact", pattern: `rg --pre sh marker ${dir}` }]), false);
+  assert.equal(await check([{ action: "allow", match: "prefix", pattern: `cat ${dir}/SKILL.md` }]), false);
+  assert.equal(await check([{ action: "ask", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), false);
   assert.equal(await check([{ action: "deny", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), false);
   assert.equal(await check([]), false);
 

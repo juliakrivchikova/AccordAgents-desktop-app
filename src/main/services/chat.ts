@@ -4600,7 +4600,7 @@ export class ChatService {
   }
 
   private async shellRuleIsSelectedSkillRead(rule: ChatShellPermissionRule, resolvedSkillDirs: string[]): Promise<boolean> {
-    if (rule.action === "deny") {
+    if (rule.action !== "allow" || rule.match !== "exact") {
       return false;
     }
     const pattern = rule.pattern.trim();
@@ -4610,20 +4610,18 @@ export class ChatService {
     }
     const tokens = pattern.split(/\s+/);
     const program = tokens[0];
-    const readOnlyPrograms = new Set(["cat", "head", "tail", "ls", "rg", "grep"]);
-    if (program === "sed") {
-      // Only the read-only `sed -n` form; never in-place editing.
-      if (tokens.some((token) => token === "-i" || token.startsWith("-i") || token === "--in-place")) {
-        return false;
-      }
-    } else if (!readOnlyPrograms.has(program)) {
+    const args = tokens.slice(1).map((token) => this.stripSimpleShellQuotes(token));
+    if (!program || args.some((token) => /['"]/.test(token))) {
       return false;
     }
     // Validate every token that looks like a filesystem path (absolute, or containing a separator
     // such as a relative escape). Non-path args (flags, sed scripts like `1,40p`) are ignored.
     // Require at least one path arg, every path arg absolute, and all inside a selected skill dir.
-    const pathArgs = tokens.slice(1).filter((token) => path.isAbsolute(token) || token.includes("/"));
+    const pathArgs = args.filter((token) => path.isAbsolute(token) || token.includes("/"));
     if (pathArgs.length === 0) {
+      return false;
+    }
+    if (!this.selectedSkillReadCommandIsSafe(program, args, pathArgs)) {
       return false;
     }
     for (const arg of pathArgs) {
@@ -4631,19 +4629,125 @@ export class ChatService {
         return false;
       }
       // Selected skill dirs are realpaths; global skills are commonly symlinked into the provider's
-      // skill root, so the agent's command path (e.g. ~/.codex/skills/<name>/SKILL.md) is the
-      // symlink, not the target. Compare both the lexical path and its resolved realpath so a
-      // symlinked skill read is recognized.
+      // skill root, so the agent's command path (e.g. ~/.codex/skills/<name>/SKILL.md) is itself a
+      // symlink. Require the resolved realpath of the read target to land inside a selected skill
+      // dir: this still allows symlinked skill dirs, but rejects a path that is lexically inside the
+      // skill dir yet symlinks back out to an arbitrary file (e.g. a planted SKILL.md -> /etc/passwd).
       const real = await realpath(arg).catch(() => undefined);
-      const candidates = real ? [path.resolve(arg), real] : [path.resolve(arg)];
-      const inside = candidates.some((candidate) =>
-        resolvedSkillDirs.some((dir) => candidate === dir || candidate.startsWith(`${dir}${path.sep}`))
-      );
+      if (!real) {
+        return false;
+      }
+      const inside = resolvedSkillDirs.some((dir) => real === dir || real.startsWith(`${dir}${path.sep}`));
       if (!inside) {
         return false;
       }
     }
     return true;
+  }
+
+  private selectedSkillReadCommandIsSafe(program: string, args: string[], pathArgs: string[]): boolean {
+    const nonPathArgs = args.filter((arg) => !pathArgs.includes(arg));
+    if (program === "cat") {
+      return nonPathArgs.every((arg) => /^-[benstuvAET]+$/.test(arg));
+    }
+    if (program === "head" || program === "tail") {
+      return this.headTailArgsAreReadOnly(nonPathArgs);
+    }
+    if (program === "ls") {
+      return nonPathArgs.every((arg) => /^-[AahlLrt1FRd]+$/.test(arg));
+    }
+    if (program === "grep") {
+      return this.grepArgsAreReadOnly(nonPathArgs);
+    }
+    if (program === "rg") {
+      return this.ripgrepArgsAreReadOnly(nonPathArgs);
+    }
+    if (program === "sed") {
+      return this.sedArgsAreReadOnly(nonPathArgs);
+    }
+    return false;
+  }
+
+  private headTailArgsAreReadOnly(args: string[]): boolean {
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index];
+      if (/^-\d+$/.test(arg) || /^[+]?\d+$/.test(arg) || /^-[nc]\d+$/.test(arg)) {
+        continue;
+      }
+      if (arg === "-n" || arg === "-c") {
+        index += 1;
+        if (index >= args.length || !/^[+]?\d+$/.test(args[index])) {
+          return false;
+        }
+        continue;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  private grepArgsAreReadOnly(args: string[]): boolean {
+    const safeLongFlags = new Set(["--fixed-strings", "--ignore-case", "--line-number", "--no-heading", "--word-regexp"]);
+    for (const arg of args) {
+      if (!arg.startsWith("-")) {
+        continue;
+      }
+      if (safeLongFlags.has(arg) || /^-[EinFw]+$/.test(arg)) {
+        continue;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  private ripgrepArgsAreReadOnly(args: string[]): boolean {
+    const safeLongFlags = new Set(["--fixed-strings", "--ignore-case", "--line-number", "--no-heading", "--smart-case", "--word-regexp"]);
+    for (const arg of args) {
+      if (!arg.startsWith("-")) {
+        continue;
+      }
+      if (arg === "--pre" || arg.startsWith("--pre=") || arg === "--pre-glob" || arg.startsWith("--pre-glob=")) {
+        return false;
+      }
+      if (safeLongFlags.has(arg) || /^-[FinSw]+$/.test(arg)) {
+        continue;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  private sedArgsAreReadOnly(args: string[]): boolean {
+    let sawNoPrint = false;
+    let sawScript = false;
+    for (const arg of args) {
+      if (arg === "-n") {
+        sawNoPrint = true;
+        continue;
+      }
+      if (arg === "-i" || arg.startsWith("-i") || arg === "--in-place" || arg.startsWith("--in-place=")) {
+        return false;
+      }
+      if (arg.startsWith("-")) {
+        return false;
+      }
+      if (!/^(\d+|0|,|\$)(\d+|\$)?p$/.test(arg) && !/^(\d+|\$)(,(\d+|\$))?p$/.test(arg)) {
+        return false;
+      }
+      sawScript = true;
+    }
+    return sawNoPrint && sawScript;
+  }
+
+  private stripSimpleShellQuotes(token: string): string {
+    if (token.length >= 2) {
+      const first = token[0];
+      const last = token[token.length - 1];
+      if ((first === "'" && last === "'") || (first === "\"" && last === "\"")) {
+        return token.slice(1, -1);
+      }
+    }
+    return token;
   }
 
   private isDeniedShellPermissionRule(rule: ChatShellPermissionRule): boolean {

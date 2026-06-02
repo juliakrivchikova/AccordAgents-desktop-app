@@ -208,6 +208,12 @@ Screenshots → `screenshots/<descriptive-name>.png` in the repo root. `screensh
 - If a screenshot is needed, use `node scripts/screenshot.cjs <name>.png`. The helper uses CDP screencast frames because `Page.captureScreenshot` has timed out in this Electron app.
 - Close helper WebSocket connections with `app.close()` when a script is done. Do not kill an existing Electron process unless relaunching with `--remote-debugging-port=9222` is necessary.
 
+## Chat and skill QA gotchas
+
+- When validating chat creation or composer behavior, use the visible New chat flow and Start chat button. Do not create a conversation with `window.consensus.createChatConversation()` and then click it from the sidebar as proof of the UI path; that bypasses the renderer's normal `startChat()` state transition and has left the app stuck on `Loading chat` in QA harnesses.
+- It is fine to seed saved participants or fixture data through app APIs when setup would otherwise be noisy, but the behavior under test should still be driven through visible UI controls.
+- Slash skill discovery is async. After typing `/name`, wait until the picker has a matching option or an explicit empty/error state before asserting that no skill appeared. Early DOM reads can see an empty picker before `skills:search` returns.
+
 ## Sanity check
 
 When the user asks "can you see the app?", run:
