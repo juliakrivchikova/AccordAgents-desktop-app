@@ -1,0 +1,834 @@
+/* token overrides styles. Keep token-driven; migrate rules into components as views are extracted. */
+
+
+.app-select-trigger {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  min-height: 32px;
+  padding-top: 0;
+  padding-bottom: 0;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-surface);
+  color: var(--app-text);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.app-select-trigger:focus-visible {
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 18%, transparent);
+}
+
+.icon-button,
+.participant-pill {
+  min-height: 34px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.icon-button {
+  width: 34px;
+  height: 34px;
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
+}
+
+.participant-pill {
+  border: 1px solid var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.participant-pill small {
+  color: var(--app-muted);
+}
+
+.icon-button:hover,
+.participant-pill:hover {
+  background: var(--app-surface-hover);
+}
+
+.participant-pill.selected,
+.decision-option.selected {
+  border-color: var(--app-accent);
+  background: var(--app-accent-soft);
+}
+
+.participant-pill.selected {
+  color: var(--accent-foreground);
+}
+
+.participant-pill.selected small {
+  color: var(--accent-foreground);
+}
+
+.slack-timeline {
+  padding: 20px 24px;
+}
+
+.settings-view-inner {
+  padding: 20px 24px;
+}
+
+.view-heading {
+  margin-bottom: 12px;
+}
+
+.view-heading h2,
+.settings-view h1 {
+  color: var(--app-text-strong);
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.view-heading span,
+.settings-section-head span,
+.message-meta,
+.message-meta span,
+.point-message small {
+  color: var(--app-muted);
+}
+
+.message {
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.message-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 9px;
+}
+
+.message-body,
+.settings-item,
+.plan-source-support,
+.plan-source-detail-card,
+.markdown-table-wrap,
+.markdown-code {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.message-body {
+  padding: 12px 46px 12px 12px;
+}
+
+.message-meta {
+  gap: 8px;
+  margin-bottom: 7px;
+  font-size: 12px;
+}
+
+.message-meta strong,
+.thread-panel-head h2,
+.point-message h3,
+.markdown-text strong {
+  color: var(--app-text-strong);
+}
+
+.message-content,
+.markdown-text {
+  color: var(--app-text);
+  font-size: 14px;
+  line-height: 1.42;
+}
+
+.chat-message .message-body {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.chat-message.selected-thread-root .message-body {
+  border-color: var(--app-accent-border);
+  background: color-mix(in srgb, var(--app-accent-soft) 42%, var(--app-surface));
+}
+
+.markdown-text {
+  gap: 10px;
+}
+
+.markdown-text code {
+  background: var(--app-surface-subtle);
+  color: var(--app-text-strong);
+}
+
+.markdown-code,
+.markdown-table th {
+  background: var(--app-surface-subtle);
+}
+
+.markdown-table th,
+.markdown-table td {
+  border-color: var(--app-border);
+}
+
+.decision-option-body small {
+  background: var(--app-success-soft);
+  color: var(--app-success);
+}
+
+.message-copy-button {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease,
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.message-body:hover .message-copy-button,
+.message-copy-button:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+@media (hover: none) {
+  .message-copy-button {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+}
+
+.message-copy-button,
+.chat-message .message-copy-button {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-muted);
+}
+
+.message-copy-button:hover,
+.chat-message .message-copy-button:hover {
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+}
+
+.slack-action-bar {
+  min-height: 54px;
+  border-top-color: var(--app-border);
+  background: color-mix(in srgb, var(--app-surface) 96%, transparent);
+}
+
+.slack-action-bar.with-composer {
+  align-items: stretch;
+  gap: 8px;
+  padding: 10px 18px 14px;
+}
+
+.run-status-line {
+  color: var(--app-muted);
+  font-size: 13px;
+}
+
+.loading-dot__item {
+  opacity: 0.35;
+  animation: progress-dot 1s ease-in-out infinite;
+}
+
+.typing-dots i,
+.progress-active .message-body::before {
+  background: var(--app-accent);
+}
+
+.progress-active .message-body,
+.point-message.selected .message-body,
+.point-message:hover .message-body {
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 14%, transparent);
+}
+
+.progress-active .message-body::after {
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--app-accent) 10%, transparent), transparent);
+}
+
+.plan-correction-composer {
+  display: grid;
+  width: min(100%, 960px);
+  gap: 8px;
+  margin: 0 auto;
+}
+
+.plan-correction-status {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  padding: 0 2px;
+}
+
+.plan-correction-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px;
+  align-items: end;
+  gap: 8px;
+}
+
+.plan-correction-input-row textarea {
+  min-height: 52px;
+  max-height: 160px;
+  border-radius: 10px;
+}
+
+.plan-correction-submit {
+  width: 40px;
+  height: 40px;
+  align-self: end;
+  border-color: var(--app-border-strong);
+  border-radius: 10px;
+  background: var(--app-surface);
+  color: var(--app-muted);
+  box-shadow:
+    0 1px 1px color-mix(in srgb, var(--shadow-color) 6%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--highlight-color) 20%, transparent);
+}
+
+.plan-correction-submit:not(:disabled) {
+  border-color: var(--app-accent-border);
+  background: color-mix(in srgb, var(--app-accent-soft) 72%, var(--app-surface));
+  color: var(--app-accent);
+}
+
+.plan-correction-submit:not(:disabled):hover {
+  border-color: var(--app-accent);
+  background: var(--app-accent);
+  color: var(--app-surface);
+}
+
+.plan-correction-submit:disabled {
+  opacity: 1;
+  background: var(--app-surface-subtle);
+  color: var(--app-muted-subtle);
+}
+
+.thread-resizer {
+  background: var(--app-bg);
+}
+
+.thread-resizer::before,
+.chat-menu-divider {
+  background: var(--app-border);
+}
+
+.thread-replies,
+.plan-source-details,
+.chat-thread-replies {
+  border-color: var(--app-border);
+}
+
+.slack-thread-panel,
+.chat-thread-panel,
+.chat-composer,
+.chat-thread-head {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+}
+
+.chat-composer {
+  box-shadow: 0 -8px 20px color-mix(in srgb, var(--shadow-color) 7%, transparent);
+}
+
+.mention-menu,
+.chat-participant-popover {
+  z-index: var(--z-menu);
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  box-shadow: var(--shadow-lg);
+  color: var(--app-text);
+}
+
+.mention-menu button {
+  color: var(--app-text);
+}
+
+.mention-menu button:hover,
+.mention-menu button.selected {
+  background: var(--app-surface-hover);
+}
+
+.mention-menu strong {
+  color: var(--app-text-strong);
+}
+
+.mention-menu span {
+  color: var(--app-muted);
+}
+
+.mention-menu kbd {
+  border-color: var(--app-border-strong);
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
+}
+
+.file-mention-chips button {
+  border-color: var(--app-border);
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
+}
+
+.pending-image-item,
+.chat-image-attachment {
+  border-color: var(--app-border);
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
+}
+
+.pending-image-item span,
+.chat-image-attachment small {
+  color: var(--app-muted);
+}
+
+.pending-image-item.error,
+.chat-image-attachment.error {
+  border-color: color-mix(in srgb, var(--app-danger) 42%, var(--app-border));
+  background: color-mix(in srgb, var(--app-danger) 8%, var(--app-surface));
+}
+
+.chat-image-preview-frame {
+  border-color: var(--app-border);
+  background: var(--app-surface-subtle);
+}
+
+.file-mention-icon {
+  color: var(--app-accent);
+}
+
+.repo-file-reference-footer {
+  color: var(--app-muted);
+}
+
+.settings-grid {
+  gap: 12px;
+}
+
+.settings-item,
+.role-config-card,
+.chat-participant-row,
+.saved-participant-option {
+  border: 1px solid var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.saved-participant-option strong {
+  color: var(--app-text-strong);
+}
+
+.saved-participant-option span,
+.saved-participant-option small {
+  color: var(--app-muted);
+}
+
+.saved-participant-option input {
+  accent-color: var(--app-accent);
+}
+
+.saved-participant-option.selected,
+.avatar-choice.selected {
+  border-color: var(--app-accent);
+  background: var(--app-accent-soft);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 12%, transparent);
+}
+
+.saved-participant-option.selected strong {
+  color: var(--accent-foreground);
+}
+
+.saved-participant-option.selected span,
+.saved-participant-option.selected small {
+  color: color-mix(in srgb, var(--accent-foreground) 74%, var(--app-muted));
+}
+
+.avatar-codex,
+.message-avatar.avatar-codex,
+.thread-avatar.avatar-codex,
+.message.system .message-avatar.avatar-codex,
+.message.summary .message-avatar.avatar-codex {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--brand-codex);
+}
+
+.avatar-codex .provider-avatar-image,
+.message-avatar.avatar-codex .provider-avatar-image,
+.thread-avatar.avatar-codex .provider-avatar-image {
+  width: 88%;
+  height: 88%;
+  object-fit: contain;
+  transform: none;
+}
+
+.avatar-custom {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.avatar-custom .custom-avatar-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  margin: auto;
+  border-radius: 0;
+  object-fit: contain;
+  transform: none;
+}
+
+.avatar-choice .avatar-custom {
+  width: 100%;
+  height: 100%;
+}
+
+.message-avatar,
+.thread-avatar,
+.message-avatar.avatar-user,
+.thread-avatar.avatar-user,
+.message-avatar.avatar-arbiter,
+.thread-avatar.avatar-arbiter,
+.message-avatar.avatar-anthropic,
+.thread-avatar.avatar-anthropic,
+.message-avatar.avatar-codex,
+.thread-avatar.avatar-codex,
+.message-avatar.avatar-custom,
+.thread-avatar.avatar-custom,
+.message-avatar.avatar-gemini,
+.thread-avatar.avatar-gemini,
+.message-avatar.avatar-generic,
+.thread-avatar.avatar-generic,
+.message.summary .message-avatar,
+.message.system .message-avatar,
+.message.summary .message-avatar.avatar-arbiter,
+.message.system .message-avatar.avatar-arbiter,
+.message.summary .message-avatar.avatar-codex,
+.message.system .message-avatar.avatar-codex,
+.thread-avatar.typing-avatar {
+  border: 1px solid var(--app-avatar-border);
+  background: var(--app-avatar-bg);
+  color: var(--app-text-strong);
+  box-shadow: var(--app-avatar-shadow);
+}
+
+.message-avatar.avatar-arbiter,
+.thread-avatar.avatar-arbiter,
+.message.summary .message-avatar.avatar-arbiter,
+.message.system .message-avatar.avatar-arbiter {
+  background: color-mix(in srgb, var(--app-success-soft) 62%, var(--app-avatar-bg));
+  color: var(--app-success);
+}
+
+.message-avatar.avatar-anthropic,
+.thread-avatar.avatar-anthropic {
+  background: color-mix(in srgb, var(--app-danger-soft) 58%, var(--app-avatar-bg));
+  color: var(--app-danger);
+}
+
+.message-avatar.avatar-codex,
+.thread-avatar.avatar-codex,
+.message.summary .message-avatar.avatar-codex,
+.message.system .message-avatar.avatar-codex {
+  background: color-mix(in srgb, var(--app-accent-soft) 72%, var(--app-avatar-bg));
+  color: var(--brand-codex);
+}
+
+.message-avatar.avatar-gemini,
+.thread-avatar.avatar-gemini,
+.message-avatar.avatar-generic,
+.thread-avatar.avatar-generic,
+.thread-avatar.typing-avatar {
+  background: color-mix(in srgb, var(--app-accent-soft) 58%, var(--app-avatar-bg));
+  color: var(--app-accent);
+}
+
+.message-avatar.avatar-custom,
+.thread-avatar.avatar-custom {
+  padding: 4px;
+  overflow: hidden;
+}
+
+.message-avatar.avatar-custom .custom-avatar-image,
+.thread-avatar.avatar-custom .custom-avatar-image {
+  width: 100%;
+  height: 100%;
+  border-radius: 6px;
+  object-fit: contain;
+  transform: none;
+}
+
+.role-config-card .settings-item-head {
+  margin-bottom: 2px;
+}
+
+.role-config-card [data-slot="form-row"] {
+  gap: 6px;
+}
+
+.role-config-card [data-slot="textarea"] {
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.repo-status.ok {
+  color: var(--app-success);
+}
+
+.repo-status.bad,
+.inline-error {
+  color: var(--app-danger);
+}
+
+.chat-choice-card {
+  border-color: var(--app-accent-border);
+  border-left-color: var(--app-accent);
+  background: var(--app-surface);
+  box-shadow:
+    0 1px 2px color-mix(in srgb, var(--shadow-color) 7%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--app-accent) 5%, transparent);
+}
+
+.chat-choice-card.answered {
+  border-color: var(--app-success-border);
+  border-left-color: var(--app-success);
+  background: color-mix(in srgb, var(--app-success-soft) 38%, var(--app-surface));
+}
+
+.chat-choice-title-block h3,
+.chat-choice-option-title strong,
+.chat-choice-actions strong,
+.chat-choice-text-panel > span {
+  color: var(--app-text-strong);
+}
+
+.chat-choice-kicker {
+  color: var(--app-accent);
+}
+
+.chat-choice-card.answered .chat-choice-kicker,
+.chat-choice-card.answered .chat-choice-text-panel small {
+  color: var(--app-success);
+}
+
+.chat-choice-status,
+.chat-choice-option-title small {
+  border-color: var(--app-accent-border);
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+
+.chat-choice-status.answered {
+  border-color: var(--app-success-border);
+  background: var(--app-success-soft);
+  color: var(--app-success);
+}
+
+.chat-choice-card > p,
+.chat-choice-option-description,
+.chat-choice-text-panel small,
+.chat-choice-text-panel blockquote {
+  color: var(--app-muted);
+}
+
+.chat-choice-option,
+.custom-answer-option:not(.selected) {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.chat-choice-option:hover {
+  border-color: var(--app-accent-border);
+  background: color-mix(in srgb, var(--app-accent-soft) 28%, var(--app-surface));
+}
+
+.chat-choice-option.selected {
+  border-color: var(--app-accent);
+  background: var(--app-accent-soft);
+  box-shadow: 0 0 0 1px var(--app-accent);
+}
+
+.chat-choice-card.answered .chat-choice-option {
+  border-color: var(--app-border);
+  background: color-mix(in srgb, var(--app-surface-subtle) 60%, var(--app-surface));
+  color: var(--app-muted);
+}
+
+.chat-choice-card.answered .chat-choice-option.selected {
+  border-color: var(--app-success);
+  background: var(--app-success-soft);
+  box-shadow: 0 0 0 1px var(--app-success);
+  color: var(--app-text-strong);
+}
+
+.chat-choice-radio {
+  border-color: var(--app-muted-subtle);
+}
+
+.chat-choice-option.selected .chat-choice-radio {
+  border-color: var(--app-accent);
+}
+
+.chat-choice-option.selected .chat-choice-radio::after {
+  background: var(--app-accent);
+}
+
+.chat-choice-card.answered .chat-choice-radio,
+.chat-choice-card.answered .chat-choice-option.selected .chat-choice-radio {
+  border-color: var(--app-success-border);
+}
+
+.chat-choice-card.answered .chat-choice-option.selected .chat-choice-radio::after {
+  background: var(--app-success);
+}
+
+.chat-choice-card.answered .chat-choice-option:not(.selected) .chat-choice-option-title strong,
+.chat-choice-card.answered .chat-choice-option:not(.selected) .chat-choice-option-description {
+  color: var(--app-muted-subtle);
+}
+
+.chat-choice-card.answered .chat-choice-option.selected .chat-choice-recommended-chip,
+.chat-choice-card.answered .chat-choice-option.selected .chat-choice-override-chip {
+  border-color: var(--app-success-border);
+  background: color-mix(in srgb, var(--app-surface) 82%, var(--app-success-soft));
+  color: var(--app-success);
+}
+
+.chat-choice-card.answered .chat-choice-option:not(.selected) .chat-choice-recommended-chip {
+  border-color: var(--app-accent-border);
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+
+.chat-choice-custom-icon {
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+
+.chat-choice-card.answered .chat-choice-option.selected .chat-choice-custom-icon {
+  background: color-mix(in srgb, var(--app-surface) 82%, var(--app-success-soft));
+  color: var(--app-success);
+}
+
+.chat-choice-card.answered .chat-choice-option:not(.selected) .chat-choice-custom-icon {
+  background: var(--app-surface-hover);
+  color: var(--app-muted-subtle);
+}
+
+.chat-choice-text-panel {
+  border-color: var(--app-accent-border);
+  background: color-mix(in srgb, var(--app-accent-soft) 45%, var(--app-surface));
+}
+
+.chat-choice-card.answered .chat-choice-text-panel {
+  border-color: var(--app-success-border);
+  background: var(--app-success-soft);
+}
+
+.chat-choice-card.answered .chat-choice-text-panel.locked {
+  border-left-color: var(--app-success);
+  background: color-mix(in srgb, var(--app-success-soft) 54%, var(--app-surface));
+}
+
+.chat-choice-text-panel textarea {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.chat-choice-card.answered .chat-choice-text-panel textarea {
+  border-color: var(--app-success-border);
+}
+
+.chat-choice-text-panel textarea:focus {
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 16%, transparent);
+}
+
+.sidebar-history-item.is-selected {
+  border-color: var(--app-accent-border);
+  background-color: var(--app-surface-active);
+  background-image: linear-gradient(var(--app-surface-active), var(--app-surface-active));
+  color: var(--app-text-strong);
+}
+
+.sidebar-history-item.is-loading {
+  border-color: var(--app-accent);
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--app-accent-soft) 72%, var(--app-surface)),
+      var(--app-surface-active)
+    );
+}
+
+.sidebar-history-item.is-loading .text-muted-foreground {
+  color: color-mix(in srgb, var(--app-accent) 74%, var(--app-text-strong));
+}
+
+.status-badge,
+.message-meta .status-badge,
+.message-meta span.status-badge,
+.thread-panel-head .status-badge,
+.thread-panel-head span.status-badge,
+.view-heading span.status-badge {
+  border-color: var(--status-badge-border);
+  background: var(--status-badge-bg);
+  color: var(--status-badge-text);
+}
+
+.thread-panel-head .status-badge,
+.thread-panel-head span.status-badge {
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.status-badge svg {
+  color: currentColor;
+}
+
+.status-badge[data-status-tone="neutral"] {
+  --status-badge-text: var(--app-status-neutral-text);
+  --status-badge-bg: var(--app-status-neutral-bg);
+  --status-badge-border: var(--app-status-neutral-border);
+}
+
+.status-badge[data-status-tone="info"] {
+  --status-badge-text: var(--app-status-info-text);
+  --status-badge-bg: var(--app-status-info-bg);
+  --status-badge-border: var(--app-status-info-border);
+}
+
+.status-badge[data-status-tone="success"] {
+  --status-badge-text: var(--app-status-success-text);
+  --status-badge-bg: var(--app-status-success-bg);
+  --status-badge-border: var(--app-status-success-border);
+}
+
+.status-badge[data-status-tone="warning"] {
+  --status-badge-text: var(--app-status-warning-text);
+  --status-badge-bg: var(--app-status-warning-bg);
+  --status-badge-border: var(--app-status-warning-border);
+}
+
+.status-badge[data-status-tone="danger"] {
+  --status-badge-text: var(--app-status-danger-text);
+  --status-badge-bg: var(--app-status-danger-bg);
+  --status-badge-border: var(--app-status-danger-border);
+}
+
+.status-badge[data-status-tone="muted"] {
+  --status-badge-text: var(--app-status-muted-text);
+  --status-badge-bg: var(--app-status-muted-bg);
+  --status-badge-border: var(--app-status-muted-border);
+}
+
+.status-badge[data-status-emphasis="outline"] {
+  background: transparent;
+}

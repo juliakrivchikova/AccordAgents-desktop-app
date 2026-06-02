@@ -206,18 +206,17 @@ test("sendMessage clears running and emits terminal error when participant run f
   const conversation = chatConversation([participant], "/repo");
   const { service, storage } = testService({ conversations: [conversation] });
   const progress: Array<{ phase: string; message: string }> = [];
-  (service as any).runParticipantBatch = async () => {
+  (service as any).ensureHistoryFiles = async () => tmpdir();
+  (service as any).runParticipantTurnSerialized = async () => {
     throw new Error("participant exploded");
   };
 
-  await assert.rejects(
-    () => service.sendMessage(
-      { conversationId: conversation.id, runId: "run-failure", content: "@drew implement" },
-      undefined,
-      (item) => progress.push({ phase: item.phase, message: item.message })
-    ),
-    /participant exploded/
+  await service.sendMessage(
+    { conversationId: conversation.id, runId: "run-failure", content: "@drew implement" },
+    undefined,
+    (item) => progress.push({ phase: item.phase, message: item.message })
   );
+  await waitFor(() => progress.some((item) => item.phase === "error" && item.message === "participant exploded"));
 
   const saved = await storage.getConversation(conversation.id);
   assert.equal(saved?.metadata.running, false);
@@ -249,7 +248,8 @@ test("sendMessage persists image-only messages as metadata plus app-owned files"
     const userMessage = saved?.messages.find((message) => message.role === "user");
     const attachment = userMessage?.metadata?.imageAttachments?.[0];
 
-    assert.equal(result.conversation.metadata.running, false);
+    assert.notEqual(result.conversation.metadata.running, true);
+    assert.notEqual(saved?.metadata.running, true);
     assert.equal(userMessage?.content, "");
     assert.equal(attachment?.filename, "screenshot.png");
     assert.equal(attachment?.mimeType, "image/png");
@@ -716,6 +716,17 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
       clearTimeout(timer);
     }
   }
+}
+
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 1000): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Timed out waiting for condition.");
 }
 
 function cloneConversation(conversation: Conversation): Conversation {

@@ -1,4 +1,3 @@
-import * as React from "react";
 import type { LucideIcon } from "lucide-react";
 
 import { SegmentedTabs } from "@/renderer/components/segmented-tabs";

@@ -21,5 +21,8 @@ export type { NoticeProps, NoticeTone } from "./notice";
 export { FormRow } from "./form-row";
 export type { FormRowProps } from "./form-row";
 
+export { AppSelect } from "./app-select";
+export type { AppSelectOption } from "./app-select";
+
 export { ResizableTextarea } from "./resizable-textarea";
 export type { ResizableTextareaProps } from "./resizable-textarea";

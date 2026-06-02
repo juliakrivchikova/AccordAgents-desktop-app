@@ -5751,9 +5751,16 @@ export class ChatService {
     try {
       await this.withChatMutation(conversation, async () => {
         if (this.activeConversationRunRefCount(conversation.id, runId) <= 1) {
-          conversation.metadata = withActiveRunIdRemoved(conversation.metadata, runId);
-          if (!this.hasOtherLiveWork(conversation.id, runId) && readActiveRunIds(conversation.metadata).length === 0) {
-            conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
+          const activeRunIds = readActiveRunIds(conversation.metadata);
+          const ownsStoredRunState = activeRunIds.includes(runId) || this.chatRunId(conversation) === runId;
+          if (ownsStoredRunState) {
+            conversation.metadata = withActiveRunIdRemoved(conversation.metadata, runId);
+            const hasOtherLiveWork = this.hasOtherLiveWork(conversation.id, runId);
+            if (hasOtherLiveWork && readActiveRunIds(conversation.metadata).length === 0) {
+              conversation.metadata = { ...conversation.metadata, running: true };
+            } else if (!hasOtherLiveWork && readActiveRunIds(conversation.metadata).length === 0) {
+              conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
+            }
           }
         }
         conversation.updatedAt = new Date().toISOString();

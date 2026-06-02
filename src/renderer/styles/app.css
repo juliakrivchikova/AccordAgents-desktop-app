@@ -1,3 +1,11 @@
+@layer theme, base, components, utilities;
+
 @import "./app-foundation.css";
-@import "./app-views.css";
 @import "./app-theme.css";
+@import "./views/ui-controls.css" layer(components);
+@import "./views/review-layout.css" layer(components);
+@import "./views/chat-setup.css" layer(components);
+@import "./views/chat-conversation.css" layer(components);
+@import "./views/content-markdown.css" layer(components);
+@import "./views/visual-normalization.css" layer(components);
+@import "./views/token-overrides.css" layer(components);
