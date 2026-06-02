@@ -533,7 +533,9 @@ Do not advertise:
 - [ ] Accordance skill.
 - [ ] Rule management.
 - [ ] Tool management.
-- [ ] Bug: Context not working (used token percentages)
+- [ ] Bug: read latest messages from chat history ( or thread)
+- [ ] Bug: when I run accord, the final response should be last message
+- [ ] Bug: Context not working (used token percentages). Also let's add time taken to respond to a message.
 - [ ] Bug: when both agents are running and one requests permission - after permission is granted, the agent is not resumed
   right after, only when another agent run is finished.
 - [ ] Auto mode per chat override.

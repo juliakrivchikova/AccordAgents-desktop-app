@@ -5,7 +5,7 @@ import type { ChatProviderKind } from "../../shared/types";
 // runtime skill capability is deterministic (discovery + effective run root), and provider-native
 // invocation is confirmed as a release-time QA check, not by app runtime or UI logic.
 export const ACCORDAGENTS_SKILL_PROOF_NAME = "accordagents-skill-proof";
-export const ACCORDAGENTS_SKILL_PROOF_OK = "ACCORDAGENTS_SKILL_PROOF_OK";
+export const ACCORDAGENTS_SKILL_PROOF_OK = "ACCORDAGENTS_BODY_TOKEN_6B37D91E";
 
 export function appOwnedSkillProofMarkdown(providerKind: ChatProviderKind): string {
   const provider = providerKind === "codex-cli" ? "Codex" : "Claude";

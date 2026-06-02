@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { UserSkillsService } from "./userSkills";
-import { ACCORDAGENTS_SKILL_PROOF_OK, appOwnedSkillProofMarkdown } from "./userSkillProofs";
+import { ACCORDAGENTS_SKILL_PROOF_NAME, ACCORDAGENTS_SKILL_PROOF_OK, appOwnedSkillProofMarkdown } from "./userSkillProofs";
 import type { ChatProviderKind, UserSkillSearchRequest } from "../../shared/types";
 
 const NOW_REQUEST: UserSkillSearchRequest = {
@@ -219,6 +219,9 @@ test("keeps personal skills discovery-only until a participant is targeted", asy
 });
 
 test("the app-owned proof fixture is a harmless marker-only skill (QA reference)", () => {
+  const normalizedName = ACCORDAGENTS_SKILL_PROOF_NAME.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  const normalizedMarker = ACCORDAGENTS_SKILL_PROOF_OK.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  assert.equal(normalizedMarker.includes(normalizedName), false);
   for (const provider of ["codex-cli", "claude-code"] as ChatProviderKind[]) {
     const markdown = appOwnedSkillProofMarkdown(provider);
     assert.match(markdown, /accordagents-skill-proof/);
