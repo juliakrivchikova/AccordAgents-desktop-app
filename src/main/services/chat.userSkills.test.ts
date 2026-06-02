@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -278,27 +278,44 @@ test("chat:send does not reject when a single participant run fails", async () =
   }
 });
 
-test("shellRulesAreSelectedSkillReads allows read-only skill-dir reads and rejects everything else", () => {
+test("shellRulesAreSelectedSkillReads allows read-only skill-dir reads and rejects everything else", async () => {
   const { service } = testService({
     conversation: chatConversation([chatParticipant()]),
     userSkills: new UserSkillsService(),
     run: async (participant) => ({ participant, ok: true, content: "done", durationMs: 1 })
   });
   const dir = "/tmp/skills/proof";
-  const check = (rules: Array<{ action: string; match: string; pattern: string }>) =>
-    (service as any).shellRulesAreSelectedSkillReads(rules, [dir]) as boolean;
+  const check = (rules: Array<{ action: string; match: string; pattern: string }>, dirs: string[] = [dir]) =>
+    (service as any).shellRulesAreSelectedSkillReads(rules, dirs) as Promise<boolean>;
 
   // Allowed: simple read-only commands scoped to the selected skill directory.
-  assert.equal(check([{ action: "allow", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), true);
-  assert.equal(check([{ action: "allow", match: "exact", pattern: `sed -n 1,40p ${dir}/SKILL.md` }]), true);
+  assert.equal(await check([{ action: "allow", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), true);
+  assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -n 1,40p ${dir}/SKILL.md` }]), true);
 
   // Rejected: outside the skill dir, mutation, chaining/redirection, in-place edit, deny, empty.
-  assert.equal(check([{ action: "allow", match: "exact", pattern: "cat /etc/passwd" }]), false);
-  assert.equal(check([{ action: "allow", match: "exact", pattern: `rm ${dir}/SKILL.md` }]), false);
-  assert.equal(check([{ action: "allow", match: "exact", pattern: `cat ${dir}/SKILL.md && rm -rf /` }]), false);
-  assert.equal(check([{ action: "allow", match: "exact", pattern: `sed -i s/a/b/ ${dir}/SKILL.md` }]), false);
-  assert.equal(check([{ action: "deny", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), false);
-  assert.equal(check([]), false);
+  assert.equal(await check([{ action: "allow", match: "exact", pattern: "cat /etc/passwd" }]), false);
+  assert.equal(await check([{ action: "allow", match: "exact", pattern: `rm ${dir}/SKILL.md` }]), false);
+  assert.equal(await check([{ action: "allow", match: "exact", pattern: `cat ${dir}/SKILL.md && rm -rf /` }]), false);
+  assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -i s/a/b/ ${dir}/SKILL.md` }]), false);
+  assert.equal(await check([{ action: "deny", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), false);
+  assert.equal(await check([]), false);
+
+  // Symlinked global skill: selected dir is the realpath target, but the agent reads via the
+  // symlink path. The matcher must recognize it by resolving the command path's realpath.
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accord-skill-symlink-"));
+  try {
+    const target = path.join(tempRoot, "real-skill");
+    await mkdir(target, { recursive: true });
+    await writeFile(path.join(target, "SKILL.md"), "x", "utf8");
+    const linkRoot = path.join(tempRoot, "codex-skills");
+    await mkdir(linkRoot, { recursive: true });
+    const link = path.join(linkRoot, "proof");
+    await symlink(target, link);
+    const realDir = await realpath(target);
+    assert.equal(await check([{ action: "allow", match: "exact", pattern: `cat ${link}/SKILL.md` }], [realDir]), true);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
 });
 
 function testService(options: {

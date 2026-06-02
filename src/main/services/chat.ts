@@ -552,7 +552,7 @@ export class ChatService {
             requester.id
           )
         : [];
-      if (selectedSkills.length > 0 && this.shellRulesAreSelectedSkillReads(prepared.request.rules, selectedSkills.map((skill) => skill.dir))) {
+      if (selectedSkills.length > 0 && await this.shellRulesAreSelectedSkillReads(prepared.request.rules, selectedSkills.map((skill) => skill.dir))) {
         return {
           ok: true,
           status: "already_granted",
@@ -4586,15 +4586,20 @@ export class ChatService {
   // arguments all live inside one of the validated selected-skill directories. Used to silently
   // allow a skill-load read (e.g. `cat <skill-dir>/SKILL.md`) without a User prompt, while never
   // auto-allowing mutation, chaining/redirection, or reads outside the selected skill dirs.
-  private shellRulesAreSelectedSkillReads(rules: ChatShellPermissionRule[], skillDirs: string[]): boolean {
+  private async shellRulesAreSelectedSkillReads(rules: ChatShellPermissionRule[], skillDirs: string[]): Promise<boolean> {
     if (rules.length === 0 || skillDirs.length === 0) {
       return false;
     }
     const resolvedDirs = skillDirs.map((dir) => path.resolve(dir));
-    return rules.every((rule) => this.shellRuleIsSelectedSkillRead(rule, resolvedDirs));
+    for (const rule of rules) {
+      if (!await this.shellRuleIsSelectedSkillRead(rule, resolvedDirs)) {
+        return false;
+      }
+    }
+    return true;
   }
 
-  private shellRuleIsSelectedSkillRead(rule: ChatShellPermissionRule, resolvedSkillDirs: string[]): boolean {
+  private async shellRuleIsSelectedSkillRead(rule: ChatShellPermissionRule, resolvedSkillDirs: string[]): Promise<boolean> {
     if (rule.action === "deny") {
       return false;
     }
@@ -4621,13 +4626,24 @@ export class ChatService {
     if (pathArgs.length === 0) {
       return false;
     }
-    return pathArgs.every((arg) => {
+    for (const arg of pathArgs) {
       if (!path.isAbsolute(arg)) {
         return false;
       }
-      const resolved = path.resolve(arg);
-      return resolvedSkillDirs.some((dir) => resolved === dir || resolved.startsWith(`${dir}${path.sep}`));
-    });
+      // Selected skill dirs are realpaths; global skills are commonly symlinked into the provider's
+      // skill root, so the agent's command path (e.g. ~/.codex/skills/<name>/SKILL.md) is the
+      // symlink, not the target. Compare both the lexical path and its resolved realpath so a
+      // symlinked skill read is recognized.
+      const real = await realpath(arg).catch(() => undefined);
+      const candidates = real ? [path.resolve(arg), real] : [path.resolve(arg)];
+      const inside = candidates.some((candidate) =>
+        resolvedSkillDirs.some((dir) => candidate === dir || candidate.startsWith(`${dir}${path.sep}`))
+      );
+      if (!inside) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private isDeniedShellPermissionRule(rule: ChatShellPermissionRule): boolean {
