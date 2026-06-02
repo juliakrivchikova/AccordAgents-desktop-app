@@ -37,6 +37,7 @@ import type {
   ChatRoleConfig,
   ChatRosterChangeRequest,
   ChatShellPermissionRule,
+  ChatSkillMention,
   Conversation,
   CreateChatConversationRequest,
   ParticipantConfig,
@@ -83,6 +84,8 @@ import { DebugLogService } from "./debugLogs";
 import type { ParticipantRunResult } from "./providers";
 import { SettingsService } from "./settings";
 import { StorageService } from "./storage";
+import { sanitizeChatSkillMention, UserSkillsService } from "./userSkills";
+import type { UserSkillRunContext } from "./userSkills";
 import {
   clearChatRunMetadata,
   readActiveRunIds,
@@ -102,6 +105,7 @@ interface ChatPromptSectionSizes {
   staticEnvelope: number;
   dynamicHeader: number;
   trigger: number;
+  skills: number;
   mentions: number;
   attachments: number;
   currentRequest: number;
@@ -270,7 +274,8 @@ export class ChatService {
     private readonly cliRunner: CliAgentRunner,
     private readonly debugLogs: DebugLogService,
     private readonly appMcp?: ChatAppMcpGateway,
-    private readonly onConversationSnapshot?: (conversation: Conversation) => void
+    private readonly onConversationSnapshot?: (conversation: Conversation) => void,
+    private readonly userSkills?: UserSkillsService
   ) {}
 
   async hydrateContextUsage(conversation: Conversation): Promise<Conversation> {
@@ -401,6 +406,40 @@ export class ChatService {
     return conversation;
   }
 
+  userSkillRunContext(conversation: Conversation, content: string): UserSkillRunContext {
+    const dispatch = this.resolveDispatchTargetsForContent(conversation, content);
+    const participantProviderKindById: Record<string, ChatProviderKind> = {};
+    const runRootByParticipant: Record<string, string | undefined> = {};
+    const runRootByProvider: Partial<Record<ChatProviderKind, string | undefined>> = {};
+    for (const participant of dispatch.targets) {
+      const agentMode = normalizeChatAgentMode(participant.agentMode);
+      const permissions = effectiveChatAgentPermissionsForProvider(
+        participant.kind,
+        agentMode,
+        normalizeChatAgentPermissions(participant.permissions)
+      );
+      const runRoot = permissions.repoRead ? conversation.repoPath : undefined;
+      participantProviderKindById[participant.id] = participant.kind;
+      runRootByParticipant[participant.id] = runRoot;
+      if (Object.prototype.hasOwnProperty.call(runRootByProvider, participant.kind) && runRootByProvider[participant.kind] !== runRoot) {
+        runRootByProvider[participant.kind] = undefined;
+      } else {
+        runRootByProvider[participant.kind] = runRoot;
+      }
+    }
+    return {
+      repoPath: conversation.repoPath,
+      target: {
+        participantIds: dispatch.targets.map((participant) => participant.id),
+        providerKinds: Array.from(new Set(dispatch.targets.map((participant) => participant.kind))).sort(),
+        hasClearTargets: dispatch.targets.length > 0 && dispatch.unknownHandles.length === 0
+      },
+      participantProviderKindById,
+      runRootByParticipant,
+      runRootByProvider
+    };
+  }
+
   async requestRosterChangeFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
     await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
@@ -495,6 +534,31 @@ export class ChatService {
         status: "already_granted",
         summary: prepared.summary
       };
+    }
+
+    // Reading a selected skill's own files is part of skill invocation and is covered by repoRead.
+    // Codex (which has no non-shell read tool) loads a skill by running a read command like
+    // `cat <skill-dir>/SKILL.md`; with shell off it would otherwise ask the User to grant a shell
+    // rule just to read the skill they selected. Auto-grant when every requested rule is a simple
+    // read-only command scoped to a validated selected-skill directory. Mutating/networked/chained
+    // commands and any path outside the selected skill dirs still require normal approval.
+    if (prepared.request.kind === "shellRules" && actor.triggerMessageId) {
+      const triggerMessage = conversation.messages.find((message) => message.id === actor.triggerMessageId);
+      const selectedSkills = triggerMessage && this.userSkills
+        ? await this.userSkills.resolveInvocableSkillsForParticipant(
+            this.chatSkillMentions(triggerMessage),
+            requester.kind,
+            this.userSkillRunContext(conversation, triggerMessage.content),
+            requester.id
+          )
+        : [];
+      if (selectedSkills.length > 0 && this.shellRulesAreSelectedSkillReads(prepared.request.rules, selectedSkills.map((skill) => skill.dir))) {
+        return {
+          ok: true,
+          status: "already_granted",
+          summary: "Reading the selected skill files is permitted under repoRead; no shell-rule grant is needed."
+        };
+      }
     }
 
     const approval = this.newAppToolApproval(
@@ -1126,18 +1190,39 @@ export class ChatService {
     const warnings: string[] = [];
     const ingest = await this.withChatRunLock(request.conversationId, async () => {
       const conversation = await this.requireChat(request.conversationId);
-      const content = request.content.trim();
+      let content = request.content.trim();
+      const requestedSkillMentions = this.chatSkillMentionsFromRaw(request.skillMentions);
       const preparedImages = await this.prepareImageAttachments(conversation.id, request.imageAttachments);
-      if (!content && preparedImages.attachments.length === 0) {
+      if (!content && preparedImages.attachments.length === 0 && requestedSkillMentions.length === 0) {
         throw new Error("Message is required.");
       }
-      const repoFileMentions = await this.validateRepoFileMentions(conversation, request.repoFileMentions, warnings, content);
+      if (!content && requestedSkillMentions.length > 0) {
+        content = "Use the selected skill(s).";
+      }
+      let repoFileMentions: RepoFileMention[];
+      let dispatch: { targets: ChatParticipant[]; unknownHandles: string[] };
+      let skillValidation: { skillMentions: ChatSkillMention[]; targets: ChatParticipant[]; blocks: string[] };
+      try {
+        repoFileMentions = await this.validateRepoFileMentions(conversation, request.repoFileMentions, warnings, content);
+        dispatch = this.resolveDispatchTargetsForContent(conversation, content);
+        skillValidation = await this.validateChatSkillMentionsForTargets(
+          conversation,
+          content,
+          requestedSkillMentions,
+          dispatch.targets
+        );
+        dispatch = { ...dispatch, targets: skillValidation.targets };
+      } catch (error) {
+        await this.rollbackPreparedImageAttachments(conversation.id, preparedImages, "MessageValidationFailed", error);
+        throw error;
+      }
       const chatThreadRootId = request.chatThreadRootId?.trim() || undefined;
       const threadId = request.threadId?.trim() || randomUUID();
       const userMessage = this.message("user", content, undefined, {
         threadId,
         parentMessageId: request.parentMessageId,
         chatThreadRootId,
+        ...(skillValidation.skillMentions.length > 0 ? { skillMentions: skillValidation.skillMentions } : {}),
         ...(repoFileMentions.length > 0 ? { repoFileMentions } : {}),
         ...(preparedImages.attachments.length > 0 ? { imageAttachments: preparedImages.attachments } : {})
       });
@@ -1145,7 +1230,6 @@ export class ChatService {
         userMessage.metadata = { ...userMessage.metadata, threadId: userMessage.id };
       }
       conversation.messages.push(userMessage);
-      let dispatch = this.resolveMentionTargets(conversation, content);
       for (const unknown of dispatch.unknownHandles) {
         const warning = `No participant named @${unknown}.`;
         warnings.push(warning);
@@ -1155,11 +1239,15 @@ export class ChatService {
           chatThreadRootId
         }));
       }
-      if (dispatch.targets.length === 0 && dispatch.unknownHandles.length === 0) {
-        const adminTarget = this.defaultAdministratorDispatchTarget(conversation);
-        if (adminTarget) {
-          dispatch = { ...dispatch, targets: [adminTarget] };
-        }
+      for (const block of skillValidation.blocks) {
+        conversation.messages.push(this.message("system", block, undefined, {
+          threadId: userMessage.metadata?.threadId ?? threadId,
+          parentMessageId: userMessage.id,
+          chatThreadRootId
+        }));
+      }
+      if (dispatch.targets.length === 0) {
+        conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
       }
       conversation.updatedAt = new Date().toISOString();
       try {
@@ -1192,6 +1280,10 @@ export class ChatService {
       progress,
       dispatchWarnings
     );
+    // Fire-and-track: ingest is already persisted, so return to the renderer now and let the
+    // participant batch run in the background. Completion and per-participant failures surface
+    // through progress and conversation snapshots — a single failed participant must not reject
+    // the `chat:send` call or hold it open for the length of a multi-minute agent run.
     void dispatchPromise
       .then(() => {
         this.emitProgress(runId, progress, "done", "Chat turn finished.", {
@@ -1199,8 +1291,15 @@ export class ChatService {
           total: ingest.dispatch.targets.length
         });
       })
-      .catch((error) => {
+      .catch(async (error) => {
         this.emitChatRunFailure(runId, progress, error);
+        if (!this.chatHasLiveWork(ingest.conversation.id)) {
+          await this.withChatMutation(ingest.conversation, async () => {
+            ingest.conversation.metadata = this.clearedChatRunMetadata(ingest.conversation.metadata);
+            ingest.conversation.updatedAt = new Date().toISOString();
+            await this.saveConversation(ingest.conversation);
+          });
+        }
       })
       .finally(async () => {
         if (dispatchWarnings.length > 0) {
@@ -1446,6 +1545,67 @@ export class ChatService {
     return mentions;
   }
 
+  private async validateChatSkillMentionsForTargets(
+    conversation: Conversation,
+    content: string,
+    rawMentions: ChatSkillMention[] | undefined,
+    targets: ChatParticipant[]
+  ): Promise<{ skillMentions: ChatSkillMention[]; targets: ChatParticipant[]; blocks: string[] }> {
+    const skillMentions = this.chatSkillMentionsFromRaw(rawMentions);
+    if (skillMentions.length === 0) {
+      return { skillMentions: [], targets, blocks: [] };
+    }
+    if (!this.userSkills) {
+      throw new Error("Skill selection is unavailable.");
+    }
+    if (targets.length === 0) {
+      throw new Error("Mention a participant before selecting a skill.");
+    }
+    const context = this.userSkillRunContext(conversation, content);
+    const validTargets: ChatParticipant[] = [];
+    const blocks: string[] = [];
+    for (const participant of targets) {
+      const errors: string[] = [];
+      for (const mention of skillMentions) {
+        const result = await this.userSkills.validateMentionForParticipant(mention, participant.kind, context, participant.id);
+        if (!result.ok) {
+          errors.push(result.message);
+        }
+      }
+      if (errors.length === 0) {
+        validTargets.push(participant);
+      } else {
+        blocks.push(`@${participant.handle} was not run because ${errors.join(" ")}`);
+      }
+    }
+    return { skillMentions, targets: validTargets, blocks };
+  }
+
+  private async skillRunBlockForParticipant(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    triggerMessage: ChatMessage
+  ): Promise<string | undefined> {
+    const skillMentions = this.chatSkillMentions(triggerMessage);
+    if (skillMentions.length === 0) {
+      return undefined;
+    }
+    if (!this.userSkills) {
+      return `@${participant.handle} was not run because skill selection is unavailable.`;
+    }
+    const context = this.userSkillRunContext(conversation, triggerMessage.content);
+    const errors: string[] = [];
+    for (const mention of skillMentions) {
+      const result = await this.userSkills.validateMentionForParticipant(mention, participant.kind, context, participant.id);
+      if (!result.ok) {
+        errors.push(result.message);
+      }
+    }
+    return errors.length > 0
+      ? `@${participant.handle} was not run because ${errors.join(" ")}`
+      : undefined;
+  }
+
   private normalizeRepoFileMentionPath(value: unknown): string | undefined {
     if (typeof value !== "string") {
       return undefined;
@@ -1541,6 +1701,27 @@ export class ChatService {
           participantId: participant.id,
           participantHandle: participant.handle
         });
+        const skillBlock = await this.skillRunBlockForParticipant(conversation, participant, triggerMessage);
+        if (skillBlock) {
+          await this.withChatMutation(conversation, async () => {
+            conversation.messages.push(this.message("system", skillBlock, undefined, {
+              threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
+              parentMessageId: triggerMessage.id,
+              chatThreadRootId: triggerMessage.metadata?.chatThreadRootId
+            }));
+            conversation.updatedAt = new Date().toISOString();
+            this.queueSnapshot(conversation);
+          });
+          this.unregisterTargetRun(targetRunId, targetController);
+          signal?.removeEventListener("abort", onParentAbort);
+          completed += 1;
+          this.emitProgress(runId, progress, "debate", `@${participant.handle} skipped.`, {
+            participantLabel: `@${participant.handle}`,
+            completed,
+            total: participants.length
+          });
+          return;
+        }
         const queueKey = `${conversation.id}:${participant.id}`;
         const wasQueued = this.participantTurnQueues.has(queueKey);
         // Pre-create the pending message inside the shared mutation queue, before
@@ -1794,6 +1975,14 @@ export class ChatService {
         messageId: pendingMessage.id
       }
     });
+    const selectedSkills = this.userSkills
+      ? await this.userSkills.resolveInvocableSkillsForParticipant(
+          this.chatSkillMentions(triggerMessage),
+          participant.kind,
+          this.userSkillRunContext(conversation, triggerMessage.content),
+          participant.id
+        )
+      : [];
     try {
       progressSink.beginAttempt();
       let result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
@@ -1802,6 +1991,7 @@ export class ChatService {
         extraReadableDirs: [workspacePath],
         resumeFallbackPrompt,
         role,
+        selectedSkills,
         appMcp: appMcp
           ? {
               ...appMcp,
@@ -1814,7 +2004,7 @@ export class ChatService {
         warm: {
           conversationId: conversation.id,
           participantId: participant.id,
-          contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions),
+          contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, this.skillRuntimeKey(triggerMessage, participant.kind)),
           idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
         }
       });
@@ -1850,6 +2040,7 @@ export class ChatService {
           extraReadableDirs: [workspacePath],
           resumeFallbackPrompt,
           role: retryRole,
+          selectedSkills,
           appMcp: appMcp
             ? {
                 ...appMcp,
@@ -1862,7 +2053,7 @@ export class ChatService {
           warm: {
             conversationId: conversation.id,
             participantId: participant.id,
-            contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions),
+            contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, this.skillRuntimeKey(triggerMessage, participant.kind)),
             idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
           }
         });
@@ -2002,8 +2193,9 @@ export class ChatService {
       "Triggering message identifiers:",
       this.triggeringMessageIdentifiers(triggerMessage),
       "Triggering message:",
-      this.formatMessage(triggerMessage, false)
+      this.formatMessage(triggerMessage, false, false)
     ].join("\n\n");
+    const skillsBlock = this.skillMentionsPromptSection(triggerMessage, participant.kind);
     const mentionsBlock = this.repoFileMentionsPromptSection(triggerMessage, participant.kind, options.agentMode, options.permissions, canRequestPermissions);
     const attachmentsBlock = this.imageAttachmentsPromptSection(triggerMessage);
     const currentRequestBlock = [
@@ -2016,6 +2208,7 @@ export class ChatService {
     const orderedBlocks = [
       staticEnvelope || dynamicHeader,
       triggerBlock,
+      skillsBlock,
       mentionsBlock,
       attachmentsBlock,
       currentRequestBlock
@@ -2028,6 +2221,7 @@ export class ChatService {
         staticEnvelope: staticEnvelope.length,
         dynamicHeader: staticEnvelope ? 0 : dynamicHeader.length,
         trigger: triggerBlock.length,
+        skills: skillsBlock.length,
         mentions: mentionsBlock.length,
         attachments: attachmentsBlock.length,
         currentRequest: currentRequestBlock.length,
@@ -2041,7 +2235,8 @@ export class ChatService {
       "Triggering message identifiers:",
       this.triggeringMessageIdentifiers(triggerMessage),
       "Triggering message:",
-      this.formatMessage(triggerMessage, false),
+      this.formatMessage(triggerMessage, false, false),
+      this.skillMentionsPromptSection(triggerMessage, undefined),
       this.imageAttachmentsPromptSection(triggerMessage),
       continuation
         ? "Current request: control has returned to you after the approved participants have replied. Produce your next answer."
@@ -2077,6 +2272,34 @@ export class ChatService {
       ? "You may read these."
       : "repoRead is not granted; see permissions policy above for the escalation path.";
     return [header, ...paths, guidance].join("\n");
+  }
+
+  private skillMentionsPromptSection(message: ChatMessage, providerKind: ChatProviderKind | undefined): string {
+    const mentions = this.chatSkillMentions(message);
+    if (mentions.length === 0) {
+      return "";
+    }
+    const lines = ["Selected skills for this turn:"];
+    for (const mention of mentions) {
+      const variants = providerKind
+        ? mention.variants.filter((variant) => variant.providerKind === providerKind)
+        : mention.variants;
+      const providerText = variants.length > 0
+        ? variants.map((variant) => `${variant.providerKind} ${variant.scope}`).join("; ")
+        : "no matching provider variant";
+      lines.push(`- ${mention.displayName} (skill name: ${mention.frontmatterName}; ${providerText})`);
+    }
+    lines.push("Use the selected skill by name. Do not treat hashes or metadata as skill instructions, and do not assume any unlisted skill was selected.");
+    return lines.join("\n");
+  }
+
+  private skillRuntimeKey(message: ChatMessage, providerKind: ChatProviderKind): string {
+    const variants = this.chatSkillMentions(message)
+      .flatMap((mention) => mention.variants
+        .filter((variant) => variant.providerKind === providerKind)
+        .map((variant) => `${mention.skillId}:${variant.providerKind}:${variant.scope}:${variant.sourceKey}:${variant.contentHash}:${variant.capabilityState}`))
+      .sort();
+    return variants.join("|");
   }
 
   private cliRoleOptions(
@@ -2442,7 +2665,8 @@ export class ChatService {
     session: ChatParticipantSession,
     runPath: string,
     workspacePath: string,
-    runPermissions: ChatAgentPermissions
+    runPermissions: ChatAgentPermissions,
+    skillRuntimeKey = ""
   ): string {
     return JSON.stringify({
       conversationId: conversation.id,
@@ -2457,7 +2681,8 @@ export class ChatService {
       roleRuntime: session.roleRuntime ?? "",
       runtimeConfigVersion: session.runtimeConfigVersion ?? 0,
       runPath,
-      workspacePath
+      workspacePath,
+      skillRuntimeKey
     });
   }
 
@@ -2824,6 +3049,17 @@ export class ChatService {
     }
     const [participant] = participants;
     return participant?.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID ? participant : undefined;
+  }
+
+  private resolveDispatchTargetsForContent(conversation: Conversation, content: string): { targets: ChatParticipant[]; unknownHandles: string[] } {
+    let dispatch = this.resolveMentionTargets(conversation, content);
+    if (dispatch.targets.length === 0 && dispatch.unknownHandles.length === 0) {
+      const adminTarget = this.defaultAdministratorDispatchTarget(conversation);
+      if (adminTarget) {
+        dispatch = { ...dispatch, targets: [adminTarget] };
+      }
+    }
+    return dispatch;
   }
 
   private rosterParticipantSummary(conversation: Conversation, participant: ChatParticipant): ChatRosterCurrentParticipant {
@@ -4346,6 +4582,54 @@ export class ChatService {
     return `${rule.action}\0${rule.match}\0${rule.pattern}`;
   }
 
+  // True only when every requested shell rule is a simple, single, read-only command whose path
+  // arguments all live inside one of the validated selected-skill directories. Used to silently
+  // allow a skill-load read (e.g. `cat <skill-dir>/SKILL.md`) without a User prompt, while never
+  // auto-allowing mutation, chaining/redirection, or reads outside the selected skill dirs.
+  private shellRulesAreSelectedSkillReads(rules: ChatShellPermissionRule[], skillDirs: string[]): boolean {
+    if (rules.length === 0 || skillDirs.length === 0) {
+      return false;
+    }
+    const resolvedDirs = skillDirs.map((dir) => path.resolve(dir));
+    return rules.every((rule) => this.shellRuleIsSelectedSkillRead(rule, resolvedDirs));
+  }
+
+  private shellRuleIsSelectedSkillRead(rule: ChatShellPermissionRule, resolvedSkillDirs: string[]): boolean {
+    if (rule.action === "deny") {
+      return false;
+    }
+    const pattern = rule.pattern.trim();
+    // Reject anything that could chain, redirect, substitute, or glob into another command.
+    if (!pattern || /[|&;><`$(){}*?!\\]/.test(pattern)) {
+      return false;
+    }
+    const tokens = pattern.split(/\s+/);
+    const program = tokens[0];
+    const readOnlyPrograms = new Set(["cat", "head", "tail", "ls", "rg", "grep"]);
+    if (program === "sed") {
+      // Only the read-only `sed -n` form; never in-place editing.
+      if (tokens.some((token) => token === "-i" || token.startsWith("-i") || token === "--in-place")) {
+        return false;
+      }
+    } else if (!readOnlyPrograms.has(program)) {
+      return false;
+    }
+    // Validate every token that looks like a filesystem path (absolute, or containing a separator
+    // such as a relative escape). Non-path args (flags, sed scripts like `1,40p`) are ignored.
+    // Require at least one path arg, every path arg absolute, and all inside a selected skill dir.
+    const pathArgs = tokens.slice(1).filter((token) => path.isAbsolute(token) || token.includes("/"));
+    if (pathArgs.length === 0) {
+      return false;
+    }
+    return pathArgs.every((arg) => {
+      if (!path.isAbsolute(arg)) {
+        return false;
+      }
+      const resolved = path.resolve(arg);
+      return resolvedSkillDirs.some((dir) => resolved === dir || resolved.startsWith(`${dir}${path.sep}`));
+    });
+  }
+
   private isDeniedShellPermissionRule(rule: ChatShellPermissionRule): boolean {
     // Provider-native wildcard tokens such as Bash(*) are rejected before this path;
     // shell rules carry the command pattern only.
@@ -4882,6 +5166,7 @@ export class ChatService {
         message.metadata?.chatThreadRootId ? `Chat thread root ID: ${message.metadata.chatThreadRootId}` : "",
         "",
         message.content.trim() || (this.imageAttachments(message).length > 0 ? "(image-only message)" : ""),
+        this.skillMentionsMarkdown(message),
         this.repoFileMentionsMarkdown(message),
         this.imageAttachmentsMarkdown(message),
         ""
@@ -4894,11 +5179,12 @@ export class ChatService {
     return session?.roleLabel ?? participant.roleConfigId;
   }
 
-  private formatMessage(message: ChatMessage, includeRepoFileMentions = true): string {
+  private formatMessage(message: ChatMessage, includeRepoFileMentions = true, includeSkillMentions = true): string {
     const content = message.content.trim() || (this.imageAttachments(message).length > 0 ? "(image-only message)" : "");
     return [
       `[${message.createdAt}] ${this.messageAuthor(message)}`,
       content,
+      includeSkillMentions ? this.skillMentionsMarkdown(message) : "",
       includeRepoFileMentions ? this.repoFileMentionsMarkdown(message) : "",
       this.imageAttachmentsMarkdown(message)
     ].filter(Boolean).join("\n");
@@ -4913,6 +5199,41 @@ export class ChatService {
       "Referenced repository files:",
       ...mentions.map((mention) => `- ${mention.path}`)
     ].join("\n");
+  }
+
+  private skillMentionsMarkdown(message: ChatMessage): string {
+    const mentions = this.chatSkillMentions(message);
+    if (mentions.length === 0) {
+      return "";
+    }
+    return [
+      "Selected skills:",
+      ...mentions.map((mention) => {
+        const providers = mention.variants.map((variant) => `${variant.providerKind}:${variant.contentHash.slice(0, 12)}`).join(", ");
+        return `- ${mention.displayName} (${providers})`;
+      })
+    ].join("\n");
+  }
+
+  private chatSkillMentionsFromRaw(rawMentions: ChatSkillMention[] | undefined): ChatSkillMention[] {
+    if (!Array.isArray(rawMentions)) {
+      return [];
+    }
+    const seen = new Set<string>();
+    const mentions: ChatSkillMention[] = [];
+    for (const rawMention of rawMentions) {
+      const mention = sanitizeChatSkillMention(rawMention);
+      if (!mention || seen.has(mention.skillId)) {
+        continue;
+      }
+      seen.add(mention.skillId);
+      mentions.push(mention);
+    }
+    return mentions;
+  }
+
+  private chatSkillMentions(message: ChatMessage): ChatSkillMention[] {
+    return this.chatSkillMentionsFromRaw(message.metadata?.skillMentions);
   }
 
   private repoFileMentions(message: ChatMessage): RepoFileMention[] {
@@ -5318,6 +5639,7 @@ export class ChatService {
     const metadata = message.metadata
       ? {
           ...message.metadata,
+          skillMentions: this.chatSkillMentions(message),
           imageAttachments: attachments.length > 0 ? attachments.map((attachment) => this.chatImageAttachmentForTool(attachment)) : undefined
         }
       : undefined;
@@ -5787,9 +6109,21 @@ export class ChatService {
     try {
       await this.withChatMutation(conversation, async () => {
         if (this.activeConversationRunRefCount(conversation.id, runId) <= 1) {
-          conversation.metadata = withActiveRunIdRemoved(conversation.metadata, runId);
-          if (!this.hasOtherLiveWork(conversation.id, runId) && readActiveRunIds(conversation.metadata).length === 0) {
-            conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
+          const activeRunIds = readActiveRunIds(conversation.metadata);
+          const compatibilityRunId = typeof conversation.metadata.runId === "string" ? conversation.metadata.runId : undefined;
+          const runIsRepresentedInMetadata = activeRunIds.includes(runId) || compatibilityRunId === runId;
+          if (runIsRepresentedInMetadata) {
+            const nextMetadata = withActiveRunIdRemoved(conversation.metadata, runId);
+            if (!this.hasOtherLiveWork(conversation.id, runId) && readActiveRunIds(nextMetadata).length === 0) {
+              conversation.metadata = this.clearedChatRunMetadata(nextMetadata);
+            } else {
+              const remainingRunId = readActiveRunIds(nextMetadata)[0];
+              conversation.metadata = {
+                ...nextMetadata,
+                running: true,
+                runId: compatibilityRunId ?? remainingRunId ?? runId
+              };
+            }
           }
         }
         conversation.updatedAt = new Date().toISOString();

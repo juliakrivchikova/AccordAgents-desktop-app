@@ -25,7 +25,9 @@ import type {
   ReviseImplementationPlanRequest,
   RetryImplementationPlanSynthesisRequest,
   ReviewRequest,
-  SendChatMessageRequest
+  SendChatMessageRequest,
+  UserSkillDiagnosticsRequest,
+  UserSkillSearchRequest
 } from "../shared/types";
 import { ChatService } from "./services/chat";
 import { CliAgentRunner } from "./services/cliAgents";
@@ -38,6 +40,7 @@ import { GitService } from "./services/git";
 import { ProviderRunner } from "./services/providers";
 import { SettingsService } from "./services/settings";
 import { StorageService } from "./services/storage";
+import { UserSkillsService } from "./services/userSkills";
 
 let mainWindow: BrowserWindow | undefined;
 
@@ -47,6 +50,9 @@ const storageService = new StorageService();
 const providerRunner = new ProviderRunner(settingsService);
 const debugLogService = new DebugLogService();
 const cliAgentRunner = new CliAgentRunner(debugLogService);
+const userSkillsService = new UserSkillsService({
+  internalSourceRoot: appSkillsSourceRoot()
+});
 const appSkillsService = new AppSkillsService({
   sourceRoot: appSkillsSourceRoot(),
   appVersion: app.getVersion(),
@@ -58,7 +64,7 @@ const consensusService = new ConsensusService(gitService, storageService, provid
 });
 const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
-});
+}, userSkillsService);
 appMcpService.setRosterChangeHandler((actor, request) => chatService.requestRosterChangeFromTool(actor, request));
 appMcpService.setRosterOptionsHandler((actor) => chatService.describeRosterOptionsForTool(actor));
 appMcpService.setPermissionChangeHandler((actor, request) => chatService.requestPermissionChangeFromTool(actor, request));
@@ -141,6 +147,33 @@ function registerIpc(): void {
       return [];
     }
     return gitService.searchRepoFiles(conversation.repoPath, query, limit);
+  });
+  ipcMain.handle("skills:search", async (_event, request: UserSkillSearchRequest) => {
+    const conversation = await storageService.getConversation(typeof request?.conversationId === "string" ? request.conversationId : "");
+    if (!conversation || conversation.kind !== "chat") {
+      return {
+        target: { participantIds: [], providerKinds: [], hasClearTargets: false },
+        skills: []
+      };
+    }
+    const content = typeof request?.content === "string" ? request.content : "";
+    return userSkillsService.search(
+      {
+        conversationId: conversation.id,
+        query: typeof request?.query === "string" ? request.query : "",
+        content,
+        limit: typeof request?.limit === "number" ? request.limit : undefined
+      },
+      chatService.userSkillRunContext(conversation, content)
+    );
+  });
+  ipcMain.handle("skills:diagnostics", async (_event, request?: UserSkillDiagnosticsRequest) => {
+    const conversationId = typeof request?.conversationId === "string" ? request.conversationId : "";
+    const conversation = conversationId ? await storageService.getConversation(conversationId) : undefined;
+    return userSkillsService.diagnostics(
+      conversation?.kind === "chat" ? conversation.repoPath : undefined,
+      conversation?.kind === "chat" ? chatService.userSkillRunContext(conversation, "") : undefined
+    );
   });
   ipcMain.handle("conversations:list", () => storageService.listConversations());
   ipcMain.handle("conversations:get", async (_event, id: string) => {

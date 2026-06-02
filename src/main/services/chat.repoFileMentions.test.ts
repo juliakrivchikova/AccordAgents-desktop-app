@@ -210,14 +210,16 @@ test("sendMessage clears running and emits terminal error when participant run f
     throw new Error("participant exploded");
   };
 
-  await assert.rejects(
-    () => service.sendMessage(
-      { conversationId: conversation.id, runId: "run-failure", content: "@drew implement" },
-      undefined,
-      (item) => progress.push({ phase: item.phase, message: item.message })
-    ),
-    /participant exploded/
+  // Fire-and-track: the send resolves after ingest; the participant batch failure is surfaced
+  // through progress and the conversation snapshot, not by rejecting the send call.
+  const result = await service.sendMessage(
+    { conversationId: conversation.id, runId: "run-failure", content: "@drew implement" },
+    undefined,
+    (item) => progress.push({ phase: item.phase, message: item.message })
   );
+  assert.ok(result.conversation);
+
+  await waitFor(() => progress.some((item) => item.phase === "error" && item.message === "participant exploded"));
 
   const saved = await storage.getConversation(conversation.id);
   assert.equal(saved?.metadata.running, false);
@@ -700,6 +702,16 @@ function participantRequestMessage(requester: ChatParticipant): ChatMessage {
       }
     }
   };
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("waitFor timed out");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {

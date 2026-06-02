@@ -706,6 +706,7 @@ test("internal-mechanics phrasing in a draft is delivered as-is without retry", 
     runId: "no-retry-run",
     content: "@drew please update the file"
   });
+  await waitFor(() => runCount === 1);
 
   assert.equal(runCount, 1);
   assert.equal(

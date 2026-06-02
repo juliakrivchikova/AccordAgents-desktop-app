@@ -24,7 +24,9 @@ import type {
   RetryImplementationPlanSynthesisRequest,
   ReviewProgress,
   ReviewRequest,
-  SendChatMessageRequest
+  SendChatMessageRequest,
+  UserSkillDiagnosticsRequest,
+  UserSkillSearchRequest
 } from "../shared/types";
 
 const bridge: AppBridge = {
@@ -40,6 +42,8 @@ const bridge: AppBridge = {
   inspectRepo: (repoPath: string) => ipcRenderer.invoke("git:inspect-repo", repoPath),
   getDiff: (request: GitDiffRequest) => ipcRenderer.invoke("git:get-diff", request),
   searchRepoFiles: (request: RepoFileSearchRequest) => ipcRenderer.invoke("git:search-repo-files", request),
+  searchUserSkills: (request: UserSkillSearchRequest) => ipcRenderer.invoke("skills:search", request),
+  getUserSkillDiagnostics: (request?: UserSkillDiagnosticsRequest) => ipcRenderer.invoke("skills:diagnostics", request),
   listConversations: () => ipcRenderer.invoke("conversations:list"),
   getConversation: (id: string) => ipcRenderer.invoke("conversations:get", id),
   openConversation: (id: string, limit?: number) => ipcRenderer.invoke("conversations:open", id, limit),

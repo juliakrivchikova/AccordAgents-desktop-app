@@ -38,6 +38,86 @@ export interface ChatRoleConfig {
 
 export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code">;
 
+export type UserSkillScope = "personal" | "repo";
+
+export type UserSkillCapabilityState = "invocable" | "discovery-only" | "unsupported";
+
+export interface ChatSkillMentionVariant {
+  providerKind: ChatProviderKind;
+  scope: UserSkillScope;
+  rootKind: UserSkillScope;
+  sourceKey: string;
+  frontmatterName: string;
+  contentHash: string;
+  capabilityState: UserSkillCapabilityState;
+}
+
+export interface ChatSkillMention {
+  skillId: string;
+  displayName: string;
+  frontmatterName: string;
+  description?: string;
+  contentHash: string;
+  capabilityState: UserSkillCapabilityState;
+  variants: ChatSkillMentionVariant[];
+}
+
+export interface UserSkillSummary extends ChatSkillMention {
+  providerKinds: ChatProviderKind[];
+  scopeKinds: UserSkillScope[];
+  statusMessage?: string;
+  ambiguous?: boolean;
+}
+
+export interface UserSkillSearchRequest {
+  conversationId: string;
+  query: string;
+  content?: string;
+  limit?: number;
+}
+
+export interface UserSkillTargetSummary {
+  participantIds: string[];
+  providerKinds: ChatProviderKind[];
+  hasClearTargets: boolean;
+}
+
+export interface UserSkillSearchResult {
+  target: UserSkillTargetSummary;
+  skills: UserSkillSummary[];
+}
+
+export interface UserSkillDiagnosticsRequest {
+  conversationId?: string;
+}
+
+export interface UserSkillDiagnosticRoot {
+  label: string;
+  providerKind: ChatProviderKind;
+  scope: UserSkillScope;
+  exists: boolean;
+  visibleCount: number;
+  hiddenInternalCount: number;
+  malformedCount: number;
+  unsafeSymlinkCount: number;
+  lastError?: string;
+}
+
+export interface UserSkillDiagnostics {
+  roots: UserSkillDiagnosticRoot[];
+  visibleCount: number;
+  hiddenInternalCount: number;
+  malformedCount: number;
+  unsafeSymlinkCount: number;
+  providerCapabilities: Array<{
+    providerKind: ChatProviderKind;
+    capabilityState: UserSkillCapabilityState;
+    runCondition: string;
+    message?: string;
+  }>;
+  lastScanError?: string;
+}
+
 export type ChatRoleRuntime = "claude-agent" | "codex-developer-instructions" | "prompt-fallback";
 
 export type ChatAppToolCapability = "participants.manage" | "participants.request" | "permissions.request";
@@ -348,6 +428,7 @@ export interface ChatMessageMetadata {
   parentMessageId?: string;
   chatThreadRootId?: string;
   mentions?: string[];
+  skillMentions?: ChatSkillMention[];
   repoFileMentions?: RepoFileMention[];
   imageAttachments?: ChatImageAttachment[];
   pendingMentions?: ChatPendingMention[];
@@ -427,6 +508,7 @@ export interface SendChatMessageRequest {
   conversationId: string;
   runId?: string;
   content: string;
+  skillMentions?: ChatSkillMention[];
   repoFileMentions?: RepoFileMention[];
   imageAttachments?: ChatImageInput[];
   threadId?: string;
@@ -806,6 +888,8 @@ export interface AppBridge {
   inspectRepo(repoPath: string): Promise<GitRepoInfo>;
   getDiff(request: GitDiffRequest): Promise<GitDiffResult>;
   searchRepoFiles(request: RepoFileSearchRequest): Promise<RepoFileSearchResult[]>;
+  searchUserSkills(request: UserSkillSearchRequest): Promise<UserSkillSearchResult>;
+  getUserSkillDiagnostics(request?: UserSkillDiagnosticsRequest): Promise<UserSkillDiagnostics>;
   listConversations(): Promise<ConversationSummary[]>;
   getConversation(id: string): Promise<Conversation | undefined>;
   openConversation(id: string, limit?: number): Promise<ConversationOpenResult | undefined>;

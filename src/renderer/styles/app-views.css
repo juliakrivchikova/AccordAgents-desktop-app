@@ -1826,6 +1826,11 @@
   cursor: pointer;
 }
 
+.skill-mention-chips small {
+  color: #6a655e;
+  font-size: 11px;
+}
+
 .file-mention-chips span {
   min-width: 0;
   overflow: hidden;
@@ -1954,6 +1959,28 @@
   color: #20201d;
   text-align: left;
   cursor: pointer;
+}
+
+.skill-mention-menu button {
+  grid-template-columns: 36px minmax(88px, max-content) minmax(0, 1fr) auto auto;
+}
+
+.skill-mention-menu-context {
+  padding: 8px 10px;
+  border-bottom: 1px solid #ebe4d9;
+  color: #6a655e;
+  font-size: 12px;
+}
+
+.skill-mention-menu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.skill-mention-menu small {
+  color: #6a655e;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .mention-menu button.selected,
@@ -3691,6 +3718,12 @@
   border-color: var(--app-border);
   background: var(--app-surface-subtle);
   color: var(--app-text);
+}
+
+.skill-mention-chips small,
+.skill-mention-menu-context,
+.skill-mention-menu small {
+  color: var(--app-muted);
 }
 
 .pending-image-item,

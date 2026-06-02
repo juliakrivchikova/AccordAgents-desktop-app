@@ -87,6 +87,7 @@ import type {
   ChatRoleConfig,
   ChatRoleConfigUpdate,
   ChatRosterChangeOperation,
+  ChatSkillMention,
   Conversation,
   ConversationMessagePage,
   ConversationMessagePageInfo,
@@ -107,7 +108,9 @@ import type {
   RepoFileMention,
   RepoFileSearchResult,
   ReviewProgress,
-  AgentRunProgress
+  AgentRunProgress,
+  UserSkillTargetSummary,
+  UserSkillSummary
 } from "../shared/types";
 import {
   chatAgentPermissionsEqual,
@@ -1033,6 +1036,7 @@ function App(): JSX.Element {
 
   async function sendChatMessage(options: {
     content?: string;
+    skillMentions?: ChatSkillMention[];
     repoFileMentions?: RepoFileMention[];
     imageAttachments?: ChatImageInput[];
     threadId?: string;
@@ -1044,7 +1048,8 @@ function App(): JSX.Element {
     }
     const content = (options.content ?? chatMessageDraft).trim();
     const imageAttachments = options.imageAttachments ?? [];
-    if (!content && imageAttachments.length === 0) {
+    const skillMentions = options.skillMentions ?? [];
+    if (!content && imageAttachments.length === 0 && skillMentions.length === 0) {
       setError("Enter a chat message or attach an image.");
       return false;
     }
@@ -1059,6 +1064,7 @@ function App(): JSX.Element {
         conversationId: conversation.id,
         runId,
         content,
+        skillMentions,
         repoFileMentions: options.repoFileMentions,
         imageAttachments,
         threadId: options.threadId,
@@ -2136,9 +2142,10 @@ function App(): JSX.Element {
                     draft={chatMessageDraft}
                     onDraftChange={setChatMessageDraft}
                     onLoadOlderMessages={() => void loadOlderConversationMessages()}
-                    onSend={(repoFileMentions, imageAttachments) => sendChatMessage({ repoFileMentions, imageAttachments })}
-                    onSendThread={(rootMessage, content, repoFileMentions, imageAttachments) => sendChatMessage({
+                    onSend={(repoFileMentions, imageAttachments, skillMentions) => sendChatMessage({ repoFileMentions, imageAttachments, skillMentions })}
+                    onSendThread={(rootMessage, content, repoFileMentions, imageAttachments, skillMentions) => sendChatMessage({
                       content,
+                      skillMentions,
                       repoFileMentions,
                       imageAttachments,
                       threadId: rootMessage.metadata?.threadId ?? rootMessage.id,
@@ -3055,8 +3062,8 @@ function ChatConversationView(props: {
   draft: string;
   onDraftChange: (value: string) => void;
   onLoadOlderMessages: () => void;
-  onSend: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[]) => Promise<boolean>;
-  onSendThread: (rootMessage: Conversation["messages"][number], content: string, repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[]) => Promise<boolean>;
+  onSend: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => Promise<boolean>;
+  onSendThread: (rootMessage: Conversation["messages"][number], content: string, repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => Promise<boolean>;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: { selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
@@ -3166,9 +3173,9 @@ function ChatConversationView(props: {
     }
   }
 
-  async function sendDraft(repoFileMentions: RepoFileMention[] = [], imageAttachments: ChatImageInput[] = []): Promise<boolean> {
+  async function sendDraft(repoFileMentions: RepoFileMention[] = [], imageAttachments: ChatImageInput[] = [], skillMentions: ChatSkillMention[] = []): Promise<boolean> {
     forceStickToBottomRef.current = true;
-    return props.onSend(repoFileMentions, imageAttachments);
+    return props.onSend(repoFileMentions, imageAttachments, skillMentions);
   }
 
   function scrollToChatBottom(): void {
@@ -3192,12 +3199,12 @@ function ChatConversationView(props: {
     window.setTimeout(scrollToChatBottom, 180);
   }
 
-  async function sendThreadDraft(rootMessage: Conversation["messages"][number], repoFileMentions: RepoFileMention[] = [], imageAttachments: ChatImageInput[] = []): Promise<boolean> {
+  async function sendThreadDraft(rootMessage: Conversation["messages"][number], repoFileMentions: RepoFileMention[] = [], imageAttachments: ChatImageInput[] = [], skillMentions: ChatSkillMention[] = []): Promise<boolean> {
     const content = (threadDrafts[rootMessage.id] ?? "").trim();
-    if (!content && imageAttachments.length === 0) {
+    if (!content && imageAttachments.length === 0 && skillMentions.length === 0) {
       return false;
     }
-    const sent = await props.onSendThread(rootMessage, content, repoFileMentions, imageAttachments);
+    const sent = await props.onSendThread(rootMessage, content, repoFileMentions, imageAttachments, skillMentions);
     if (sent) {
       setThreadDrafts((current) => ({ ...current, [rootMessage.id]: "" }));
     }
@@ -3380,7 +3387,7 @@ function ChatConversationView(props: {
           onDraftChange={props.onDraftChange}
           onSend={sendDraft}
           isRunning={props.isRunning}
-          placeholder="Mention participants with @name or repo files with #path"
+          placeholder="Mention participants with @name, skills with /name, or repo files with #path"
           status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
           testId="chat-main-composer"
         />
@@ -3400,7 +3407,7 @@ function ChatConversationView(props: {
           busy={props.isRunning}
           liveProgressById={liveProgressById}
           onDraftChange={(value) => setThreadDrafts((current) => ({ ...current, [selectedThreadRoot.id]: value }))}
-          onSend={(repoFileMentions, imageAttachments) => sendThreadDraft(selectedThreadRoot, repoFileMentions, imageAttachments)}
+          onSend={(repoFileMentions, imageAttachments, skillMentions) => sendThreadDraft(selectedThreadRoot, repoFileMentions, imageAttachments, skillMentions)}
           onClose={() => setSelectedThreadRootId(undefined)}
           onApproveMentions={props.onApproveMentions}
           onRejectMentions={props.onRejectMentions}
@@ -3427,29 +3434,41 @@ function ChatComposer(props: {
   maxHeight?: number;
   testId?: string;
   onDraftChange: (value: string) => void;
-  onSend: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[]) => boolean | void | Promise<boolean | void>;
+  onSend: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => boolean | void | Promise<boolean | void>;
 }): JSX.Element {
   const [mentionQuery, setMentionQuery] = useState<string | undefined>();
   const [mentionIndex, setMentionIndex] = useState(0);
   const [fileQuery, setFileQuery] = useState<string | undefined>();
   const [fileIndex, setFileIndex] = useState(0);
   const [fileOptions, setFileOptions] = useState<RepoFileSearchResult[]>([]);
+  const [skillQuery, setSkillQuery] = useState<string | undefined>();
+  const [skillIndex, setSkillIndex] = useState(0);
+  const [skillOptions, setSkillOptions] = useState<UserSkillSummary[]>([]);
+  const [skillTarget, setSkillTarget] = useState<UserSkillTargetSummary | undefined>();
+  const [selectedSkillMentions, setSelectedSkillMentions] = useState<ChatSkillMention[]>([]);
   const [selectedFileMentions, setSelectedFileMentions] = useState<RepoFileMention[]>([]);
   const [pendingImages, setPendingImages] = useState<PendingChatImage[]>([]);
   const pendingImagesRef = useRef<PendingChatImage[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileSearchRequestRef = useRef(0);
+  const skillSearchRequestRef = useRef(0);
   const readyImages = pendingImages.filter((image) => image.status === "ready" && image.dataBase64);
   const hasInvalidImages = pendingImages.some((image) => image.status !== "ready");
-  const canSend = !hasInvalidImages && (Boolean(props.draft.trim()) || readyImages.length > 0);
+  const canSend = !hasInvalidImages && (Boolean(props.draft.trim()) || readyImages.length > 0 || selectedSkillMentions.length > 0);
   const mentionOptions = mentionQuery === undefined
     ? []
     : props.participants.filter((participant) => participant.handle.toLowerCase().includes(mentionQuery.toLowerCase()));
   const visibleFileOptions = fileQuery === undefined ? [] : fileOptions;
+  const visibleSkillOptions = skillQuery === undefined ? [] : skillOptions;
+  const skillTargetLabel = skillTarget ? skillPickerTargetLabel(skillTarget, props.participants) : undefined;
 
   useEffect(() => {
     setFileQuery(undefined);
     setFileOptions([]);
+    setSkillQuery(undefined);
+    setSkillOptions([]);
+    setSkillTarget(undefined);
+    setSelectedSkillMentions([]);
     setSelectedFileMentions([]);
     setPendingImages((current) => {
       for (const image of current) {
@@ -3505,13 +3524,46 @@ function ChatComposer(props: {
     return () => window.clearTimeout(timeout);
   }, [fileQuery, props.conversationId, props.repoPath]);
 
+  useEffect(() => {
+    if (skillQuery === undefined || !props.conversationId) {
+      setSkillOptions([]);
+      return;
+    }
+    const requestId = skillSearchRequestRef.current + 1;
+    skillSearchRequestRef.current = requestId;
+    const timeout = window.setTimeout(() => {
+      void window.consensus.searchUserSkills({
+        conversationId: props.conversationId ?? "",
+        query: skillQuery,
+        content: props.draft,
+        limit: 50
+      }).then((result) => {
+        if (skillSearchRequestRef.current === requestId) {
+          setSkillOptions(result.skills);
+          setSkillTarget(result.target);
+          setSkillIndex(0);
+        }
+      }).catch(() => {
+        if (skillSearchRequestRef.current === requestId) {
+          setSkillOptions([]);
+          setSkillTarget(undefined);
+        }
+      });
+    }, 200);
+    return () => window.clearTimeout(timeout);
+  }, [skillQuery, props.conversationId, props.draft]);
+
   function updateDraft(value: string): void {
     props.onDraftChange(value);
     const nextFileQuery = props.conversationId && props.repoPath ? activeFileQuery(value) : undefined;
+    const nextMentionQuery = nextFileQuery === undefined ? activeMentionQuery(value) : undefined;
+    const nextSkillQuery = nextFileQuery === undefined && nextMentionQuery === undefined ? activeSkillQuery(value) : undefined;
     setFileQuery(nextFileQuery);
-    setMentionQuery(nextFileQuery === undefined ? activeMentionQuery(value) : undefined);
+    setMentionQuery(nextMentionQuery);
+    setSkillQuery(nextSkillQuery);
     setMentionIndex(0);
     setFileIndex(0);
+    setSkillIndex(0);
   }
 
   function insertMention(participant: ChatParticipant): void {
@@ -3533,9 +3585,31 @@ function ChatComposer(props: {
     setFileIndex(0);
   }
 
+  function insertSkillMention(skill: UserSkillSummary): void {
+    if (skill.capabilityState !== "invocable" || skill.ambiguous) {
+      return;
+    }
+    props.onDraftChange(removeActiveSkillToken(props.draft));
+    setSelectedSkillMentions((current) => {
+      if (current.some((mention) => mention.skillId === skill.skillId)) {
+        return current;
+      }
+      const { providerKinds: _providerKinds, scopeKinds: _scopeKinds, statusMessage: _statusMessage, ambiguous: _ambiguous, ...mention } = skill;
+      return [...current, mention];
+    });
+    setSkillQuery(undefined);
+    setSkillOptions([]);
+    setSkillTarget(undefined);
+    setSkillIndex(0);
+  }
+
   function removeFileMention(filePath: string): void {
     props.onDraftChange(removeFileMentionToken(props.draft, filePath));
     setSelectedFileMentions((current) => current.filter((mention) => mention.path !== filePath));
+  }
+
+  function removeSkillMention(skillId: string): void {
+    setSelectedSkillMentions((current) => current.filter((mention) => mention.skillId !== skillId));
   }
 
   async function addImageFiles(files: File[]): Promise<void> {
@@ -3618,6 +3692,7 @@ function ChatComposer(props: {
   async function sendDraft(): Promise<void> {
     if (canSend) {
       const fileMentionsToSend = selectedFileMentions;
+      const skillMentionsToSend = selectedSkillMentions;
       const pendingImagesToSend = pendingImages;
       const imageInputs = readyImages.map((image): ChatImageInput => ({
         filename: image.filename,
@@ -3625,10 +3700,12 @@ function ChatComposer(props: {
         dataBase64: image.dataBase64 ?? ""
       }));
       setSelectedFileMentions([]);
+      setSelectedSkillMentions([]);
       setPendingImages([]);
-      const sent = await props.onSend(fileMentionsToSend, imageInputs);
+      const sent = await props.onSend(fileMentionsToSend, imageInputs, skillMentionsToSend);
       if (sent === false) {
         setSelectedFileMentions(fileMentionsToSend);
+        setSelectedSkillMentions(skillMentionsToSend);
         setPendingImages(pendingImagesToSend);
         return;
       }
@@ -3643,6 +3720,18 @@ function ChatComposer(props: {
   return (
     <div className={`chat-composer ${props.className ?? ""}`} data-testid={props.testId}>
       {props.status && <div className="chat-composer-status">{props.status}</div>}
+      {selectedSkillMentions.length > 0 && (
+        <div className="file-mention-chips skill-mention-chips" aria-label="Selected skills">
+          {selectedSkillMentions.map((mention) => (
+            <button type="button" onClick={() => removeSkillMention(mention.skillId)} key={mention.skillId}>
+              <ListChecks size={14} />
+              <span>{mention.displayName}</span>
+              <small>{mention.variants.map((variant) => providerLabel(variant.providerKind)).join(", ")}</small>
+              <X size={13} />
+            </button>
+          ))}
+        </div>
+      )}
       {selectedFileMentions.length > 0 && (
         <div className="file-mention-chips" aria-label="Referenced repository files">
           {selectedFileMentions.map((mention) => (
@@ -3717,6 +3806,33 @@ function ChatComposer(props: {
             ))}
           </div>
         )}
+        {visibleSkillOptions.length > 0 && (
+          <div className="mention-menu skill-mention-menu" role="listbox">
+            {skillTargetLabel && <div className="skill-mention-menu-context">{skillTargetLabel}</div>}
+            {visibleSkillOptions.map((skill, index) => {
+              const disabled = skill.capabilityState !== "invocable" || skill.ambiguous;
+              return (
+                <button
+                  className={index === skillIndex ? "selected" : ""}
+                  disabled={disabled}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    insertSkillMention(skill);
+                  }}
+                  role="option"
+                  aria-selected={index === skillIndex}
+                  key={skill.skillId}
+                >
+                  <span className="file-mention-icon"><ListChecks size={18} /></span>
+                  <strong>{skill.displayName}</strong>
+                  <span>{skill.description ?? skill.statusMessage ?? skill.providerKinds.map(providerLabel).join(", ")}</span>
+                  <small>{skill.providerKinds.map(providerLabel).join(", ")}</small>
+                  {index === 0 && !disabled && <kbd>Enter</kbd>}
+                </button>
+              );
+            })}
+          </div>
+        )}
         <ResizableTextarea
           value={props.draft}
           onChange={(event) => updateDraft(event.target.value)}
@@ -3740,6 +3856,21 @@ function ChatComposer(props: {
             }
           }}
           onKeyDown={(event) => {
+            if (visibleSkillOptions.length > 0 && event.key === "ArrowDown") {
+              event.preventDefault();
+              setSkillIndex((current) => (current + 1) % visibleSkillOptions.length);
+              return;
+            }
+            if (visibleSkillOptions.length > 0 && event.key === "ArrowUp") {
+              event.preventDefault();
+              setSkillIndex((current) => (current - 1 + visibleSkillOptions.length) % visibleSkillOptions.length);
+              return;
+            }
+            if (visibleSkillOptions.length > 0 && (event.key === "Enter" || event.key === "Tab")) {
+              event.preventDefault();
+              insertSkillMention(visibleSkillOptions[skillIndex] ?? visibleSkillOptions[0]);
+              return;
+            }
             if (visibleFileOptions.length > 0 && event.key === "ArrowDown") {
               event.preventDefault();
               setFileIndex((current) => (current + 1) % visibleFileOptions.length);
@@ -3773,6 +3904,7 @@ function ChatComposer(props: {
             if (event.key === "Escape") {
               setMentionQuery(undefined);
               setFileQuery(undefined);
+              setSkillQuery(undefined);
               return;
             }
             if (event.key === "Enter" && !event.shiftKey) {
@@ -3783,6 +3915,7 @@ function ChatComposer(props: {
           onBlur={() => window.setTimeout(() => {
             setMentionQuery(undefined);
             setFileQuery(undefined);
+            setSkillQuery(undefined);
           }, 120)}
           rows={props.rows ?? 2}
           maxHeight={props.maxHeight ?? 260}
@@ -4035,6 +4168,7 @@ function ChatMessageItem(props: {
   const approved = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "approved");
   const choice = message.metadata?.pendingChoice;
   const participantRequest = message.metadata?.participantRequest;
+  const skillMentions = chatMessageSkillMentions(message);
   const repoFileMentions = chatMessageRepoFileMentions(message);
   const imageAttachments = chatMessageImageAttachments(message);
   const allPendingIds = pending.map((mention) => mention.targetParticipantId);
@@ -4128,6 +4262,12 @@ function ChatMessageItem(props: {
             <div className="repo-file-reference-footer">
               <FileText size={14} />
               <span>Referenced: {repoFileMentions.map((mention) => mention.path).join(", ")}</span>
+            </div>
+          )}
+          {skillMentions.length > 0 && (
+            <div className="repo-file-reference-footer skill-reference-footer">
+              <ListChecks size={14} />
+              <span>Skills: {skillMentions.map((mention) => `${mention.displayName} (${mention.variants.map((variant) => providerLabel(variant.providerKind)).join(", ")})`).join(", ")}</span>
             </div>
           )}
           {imageAttachments.length > 0 && (
@@ -4481,7 +4621,7 @@ function ChatThreadPanel(props: {
   busy: boolean;
   liveProgressById: Map<string, AgentRunProgress>;
   onDraftChange: (value: string) => void;
-  onSend: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[]) => boolean | void | Promise<boolean | void>;
+  onSend: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => boolean | void | Promise<boolean | void>;
   onClose: () => void;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
@@ -4550,7 +4690,7 @@ function ChatThreadPanel(props: {
         onDraftChange={props.onDraftChange}
         onSend={props.onSend}
         isRunning={props.busy}
-        placeholder="Reply with @name or #path..."
+        placeholder="Reply with @name, /skill, or #path..."
         rows={3}
         maxHeight={180}
         testId="chat-thread-composer"
@@ -7232,6 +7372,46 @@ function chatMessageRepoFileMentions(message: Conversation["messages"][number]):
   });
 }
 
+function chatMessageSkillMentions(message: Conversation["messages"][number]): ChatSkillMention[] {
+  const mentions = message.metadata?.skillMentions;
+  if (!Array.isArray(mentions)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  return mentions.flatMap((mention): ChatSkillMention[] => {
+    if (
+      !mention ||
+      typeof mention !== "object" ||
+      typeof mention.skillId !== "string" ||
+      typeof mention.displayName !== "string" ||
+      typeof mention.frontmatterName !== "string" ||
+      typeof mention.contentHash !== "string" ||
+      !Array.isArray(mention.variants) ||
+      seen.has(mention.skillId)
+    ) {
+      return [];
+    }
+    seen.add(mention.skillId);
+    return [{
+      skillId: mention.skillId,
+      displayName: mention.displayName,
+      frontmatterName: mention.frontmatterName,
+      description: typeof mention.description === "string" ? mention.description : undefined,
+      contentHash: mention.contentHash,
+      capabilityState: mention.capabilityState,
+      variants: mention.variants.filter((variant) =>
+        variant &&
+        typeof variant === "object" &&
+        (variant.providerKind === "codex-cli" || variant.providerKind === "claude-code") &&
+        (variant.scope === "personal" || variant.scope === "repo") &&
+        typeof variant.sourceKey === "string" &&
+        typeof variant.frontmatterName === "string" &&
+        typeof variant.contentHash === "string"
+      )
+    }];
+  });
+}
+
 function chatMessageImageAttachments(message: Conversation["messages"][number]): ChatImageAttachment[] {
   const attachments = message.metadata?.imageAttachments;
   if (!Array.isArray(attachments)) {
@@ -7527,6 +7707,11 @@ function activeFileQuery(value: string): string | undefined {
   return match ? match[1] : undefined;
 }
 
+function activeSkillQuery(value: string): string | undefined {
+  const match = value.match(/(?:^|\s)\/([A-Za-z0-9_-]*)$/);
+  return match ? match[1] : undefined;
+}
+
 function replaceActiveMention(value: string, handle: string): string {
   const match = value.match(/(?:^|\s)@([A-Za-z0-9_-]*)$/);
   if (!match || match.index === undefined) {
@@ -7556,12 +7741,38 @@ function removeFileMentionToken(value: string, filePath: string): string {
     .trimEnd();
 }
 
+function removeActiveSkillToken(value: string): string {
+  const match = value.match(/(?:^|\s)\/([A-Za-z0-9_-]*)$/);
+  if (!match || match.index === undefined) {
+    return value;
+  }
+  const prefix = value.slice(0, match.index);
+  const leadingSpace = match[0].startsWith(" ") ? " " : "";
+  return `${prefix}${leadingSpace}`.replace(/[ \t]{2,}/g, " ").trimEnd();
+}
+
 function draftHasFileMention(value: string, filePath: string): boolean {
   return new RegExp(`(^|\\s)#${escapeRegExp(filePath)}(?=\\s|$)`).test(value);
 }
 
 function repoFileBasename(filePath: string): string {
   return filePath.split("/").filter(Boolean).pop() ?? filePath;
+}
+
+function skillPickerTargetLabel(target: UserSkillTargetSummary, participants: ChatParticipant[]): string {
+  if (!target.hasClearTargets || target.providerKinds.length === 0) {
+    return "Mention a participant to select a skill";
+  }
+  const handles = target.participantIds
+    .map((id) => participants.find((participant) => participant.id === id)?.handle)
+    .filter((handle): handle is string => Boolean(handle))
+    .map((handle) => `@${handle}`);
+  const providerText = target.providerKinds.map(providerLabel).join(", ");
+  return `For ${handles.length > 0 ? handles.join(", ") : "selected target"} · ${providerText}`;
+}
+
+function providerLabel(providerKind: ChatProviderKind): string {
+  return providerKind === "codex-cli" ? "Codex" : "Claude";
 }
 
 function escapeRegExp(value: string): string {
@@ -8122,6 +8333,18 @@ function installDevMockBridge(): void {
       "src/renderer/App.tsx",
       "src/shared/types.ts"
     ].filter((path) => path.toLowerCase().includes(request.query.toLowerCase())).map((path) => ({ path })),
+    searchUserSkills: async () => ({
+      target: { participantIds: [], providerKinds: [], hasClearTargets: false },
+      skills: []
+    }),
+    getUserSkillDiagnostics: async () => ({
+      roots: [],
+      visibleCount: 0,
+      hiddenInternalCount: 0,
+      malformedCount: 0,
+      unsafeSymlinkCount: 0,
+      providerCapabilities: []
+    }),
     listConversations: async () => [conversation],
     getConversation: async (id) => id === conversation.id ? conversation : undefined,
     openConversation: async (id) => id === conversation.id ? { conversation, messagePage: fullConversationMessagePageInfo(conversation) } : undefined,
