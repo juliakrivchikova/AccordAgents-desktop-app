@@ -4590,7 +4590,14 @@ export class ChatService {
     if (rules.length === 0 || skillDirs.length === 0) {
       return false;
     }
-    const resolvedDirs = skillDirs.map((dir) => path.resolve(dir));
+    const resolvedDirs: string[] = [];
+    for (const dir of skillDirs) {
+      const real = await realpath(dir).catch(() => undefined);
+      if (!real) {
+        return false;
+      }
+      resolvedDirs.push(path.resolve(real));
+    }
     for (const rule of rules) {
       if (!await this.shellRuleIsSelectedSkillRead(rule, resolvedDirs)) {
         return false;
@@ -6230,19 +6237,23 @@ export class ChatService {
       await this.withChatMutation(conversation, async () => {
         if (this.activeConversationRunRefCount(conversation.id, runId) <= 1) {
           const activeRunIds = readActiveRunIds(conversation.metadata);
-          const compatibilityRunId = typeof conversation.metadata.runId === "string" ? conversation.metadata.runId : undefined;
-          const runIsRepresentedInMetadata = activeRunIds.includes(runId) || compatibilityRunId === runId;
-          if (runIsRepresentedInMetadata) {
+          const ownsStoredRunState = activeRunIds.includes(runId) || this.chatRunId(conversation) === runId;
+          if (ownsStoredRunState) {
             const nextMetadata = withActiveRunIdRemoved(conversation.metadata, runId);
-            if (!this.hasOtherLiveWork(conversation.id, runId) && readActiveRunIds(nextMetadata).length === 0) {
-              conversation.metadata = this.clearedChatRunMetadata(nextMetadata);
-            } else {
-              const remainingRunId = readActiveRunIds(nextMetadata)[0];
+            const remainingRunId = readActiveRunIds(nextMetadata)[0];
+            const hasOtherLiveWork = this.hasOtherLiveWork(conversation.id, runId);
+            if (remainingRunId) {
               conversation.metadata = {
                 ...nextMetadata,
                 running: true,
-                runId: compatibilityRunId ?? remainingRunId ?? runId
+                runId: remainingRunId
               };
+            } else if (hasOtherLiveWork) {
+              const metadata: Record<string, unknown> = { ...nextMetadata, running: true };
+              delete metadata.runId;
+              conversation.metadata = metadata;
+            } else {
+              conversation.metadata = this.clearedChatRunMetadata(nextMetadata);
             }
           }
         }

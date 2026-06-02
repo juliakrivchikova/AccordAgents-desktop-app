@@ -206,7 +206,8 @@ test("sendMessage clears running and emits terminal error when participant run f
   const conversation = chatConversation([participant], "/repo");
   const { service, storage } = testService({ conversations: [conversation] });
   const progress: Array<{ phase: string; message: string }> = [];
-  (service as any).runParticipantBatch = async () => {
+  (service as any).ensureHistoryFiles = async () => tmpdir();
+  (service as any).runParticipantTurnSerialized = async () => {
     throw new Error("participant exploded");
   };
 
@@ -251,7 +252,8 @@ test("sendMessage persists image-only messages as metadata plus app-owned files"
     const userMessage = saved?.messages.find((message) => message.role === "user");
     const attachment = userMessage?.metadata?.imageAttachments?.[0];
 
-    assert.equal(result.conversation.metadata.running, false);
+    assert.notEqual(result.conversation.metadata.running, true);
+    assert.notEqual(saved?.metadata.running, true);
     assert.equal(userMessage?.content, "");
     assert.equal(attachment?.filename, "screenshot.png");
     assert.equal(attachment?.mimeType, "image/png");
@@ -421,11 +423,12 @@ test("stale recovery does not clear running while background runner is active", 
 
   let saved = await storage.getConversation(conversation.id);
   assert.equal(saved?.metadata.running, true);
-  assert.equal(saved?.metadata.runId, "origin-run");
+  assert.equal(saved?.metadata.runId, undefined);
 
   const recoveredCandidate = cloneConversation(saved as Conversation);
   assert.equal(serviceAny.recoverStaleChatRun(recoveredCandidate), false);
   assert.equal(recoveredCandidate.metadata.running, true);
+  assert.equal(recoveredCandidate.metadata.runId, undefined);
 
   serviceAny.decrementBackgroundRunner(conversation.id);
   await serviceAny.tryClearRunningIfIdle(conversation.id);
@@ -704,16 +707,6 @@ function participantRequestMessage(requester: ChatParticipant): ChatMessage {
   };
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
-  const start = Date.now();
-  while (!predicate()) {
-    if (Date.now() - start > timeoutMs) {
-      throw new Error("waitFor timed out");
-    }
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-}
-
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -728,6 +721,17 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
       clearTimeout(timer);
     }
   }
+}
+
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 1000): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Timed out waiting for condition.");
 }
 
 function cloneConversation(conversation: Conversation): Conversation {

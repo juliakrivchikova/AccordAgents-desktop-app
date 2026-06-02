@@ -1,0 +1,271 @@
+/* ui controls styles. Keep token-driven; migrate rules into components as views are extracted. */
+
+.icon-button,
+.participant-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    color 120ms ease,
+    border-color 120ms ease;
+}
+
+.icon-button {
+  width: 38px;
+  height: 38px;
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+}
+
+.icon-button.selected {
+  background: var(--app-text-strong);
+  color: var(--app-surface);
+}
+
+.content-area {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.compose-layout {
+  overflow: auto;
+  background: var(--app-surface);
+}
+
+.result-layout {
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: min(100%, 760px);
+  margin: 0 auto;
+  overflow: visible;
+  padding: 24px;
+}
+
+.composer > button:not(.w-full) {
+  align-self: flex-start;
+}
+
+.conversation-panel {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.chat-conversation-panel {
+  overflow: hidden;
+}
+
+.repo-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.repo-status.ok {
+  color: var(--app-success);
+}
+
+.repo-status.bad {
+  color: var(--app-danger);
+}
+
+.participant-pill {
+  min-height: 34px;
+  padding: 8px 10px;
+  border: 1px solid var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+}
+
+.participant-pill.selected {
+  border-color: var(--app-success);
+  background: var(--app-success-soft);
+}
+
+.message-body pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.participant-pill {
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.participant-pill small {
+  margin-left: auto;
+  color: var(--app-muted);
+}
+
+.participant-pill:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.decision-options {
+  display: grid;
+  gap: 8px;
+}
+
+.decision-option {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  min-height: 38px;
+  padding: 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.decision-option.selected {
+  border-color: var(--app-success);
+  background: var(--app-success-soft);
+}
+
+.decision-option input {
+  margin: 3px 0 0;
+}
+
+.decision-option-body {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  line-height: 1.35;
+}
+
+.decision-option-body span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.decision-option-body small {
+  justify-self: start;
+  width: fit-content;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--app-success-soft);
+  color: var(--app-success);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.thread-decision-options {
+  margin: 12px 0 16px 54px;
+}
+
+.decision-message .message-body {
+  border-color: var(--app-warning-border);
+}
+
+.decision-compose {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  margin: 14px 0 0 54px;
+}
+
+.decision-compose textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 10px 11px;
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  line-height: 1.42;
+  outline: none;
+}
+
+.decision-compose textarea:focus {
+  border-color: var(--app-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-success) 16%, transparent);
+}
+
+.decision-compose-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.plan-item-review-box {
+  margin-top: 14px;
+}
+
+.plan-item-review-compose {
+  align-items: stretch;
+}
+
+.plan-item-review-actions {
+  display: grid;
+  gap: 8px;
+  align-content: end;
+}
+
+.settings-view {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+}
+
+.settings-view-inner {
+  width: 100%;
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.settings-section {
+  margin-top: 18px;
+}
+
+.settings-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.settings-section-head h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.settings-section-head span {
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.role-config-list {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.role-config-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
+}

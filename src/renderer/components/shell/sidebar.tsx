@@ -100,7 +100,7 @@ export const Sidebar = ({
         )}
       </div>
 
-      <div className="px-3 pt-3 pb-2">
+      <div className="px-2 pt-3 pb-2">
         <button
           type="button"
           onClick={onNewSession}
@@ -119,7 +119,7 @@ export const Sidebar = ({
         </button>
       </div>
 
-      <div className="px-3 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+      <div className="px-2 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
         Projects
       </div>
 

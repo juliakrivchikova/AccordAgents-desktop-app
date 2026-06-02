@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install dev start build build-main package make-mac-arm64 signed-mac-arm64 typecheck clean
+.PHONY: help install dev start build build-main package make-mac-arm64 signed-mac-arm64 lint-colors lint-unused typecheck clean
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*## "; print "Available targets:"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -28,6 +28,12 @@ make-mac-arm64: ## Build macOS arm64 DMG and ZIP artifacts
 
 signed-mac-arm64: ## Build signed and notarized macOS arm64 DMG into signed/
 	npm run signed:mac-arm64
+
+lint-colors: ## Check renderer style guardrails
+	npm run lint:renderer-styles
+
+lint-unused: ## Check renderer unused locals and orphan files
+	npm run lint:renderer-unused
 
 typecheck: ## Run TypeScript checks
 	npm run typecheck

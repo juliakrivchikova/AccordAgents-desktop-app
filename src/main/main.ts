@@ -100,8 +100,8 @@ async function detectAgentsWithAppSkills(): Promise<AgentHealth[]> {
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 1360,
-    height: 920,
+    width: 1080,
+    height: 720,
     minWidth: 1080,
     minHeight: 720,
     title: "AccordAgents",

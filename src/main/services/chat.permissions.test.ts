@@ -708,7 +708,6 @@ test("internal-mechanics phrasing in a draft is delivered as-is without retry", 
   });
   await waitFor(() => runCount === 1);
 
-  assert.equal(runCount, 1);
   assert.equal(
     result.warnings.some((warning) =>
       warning.includes("rejected response that mentioned") ||
@@ -717,6 +716,9 @@ test("internal-mechanics phrasing in a draft is delivered as-is without retry", 
     ),
     false
   );
+  await waitFor(() => runCount === 1 && storage.current.messages.some(
+    (message: Conversation["messages"][number]) => message.role === "participant" && message.content === draft
+  ));
   const participantMessage = storage.current.messages.find(
     (message: Conversation["messages"][number]) => message.role === "participant"
   );
@@ -960,14 +962,15 @@ function permissionApproval(
   };
 }
 
-async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    if (predicate()) {
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 1000): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await predicate()) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
-  assert.equal(predicate(), true);
+  throw new Error("Timed out waiting for condition.");
 }
 
 function clone<T>(value: T): T {

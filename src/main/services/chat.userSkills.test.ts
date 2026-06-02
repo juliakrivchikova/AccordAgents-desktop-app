@@ -284,29 +284,36 @@ test("shellRulesAreSelectedSkillReads allows read-only skill-dir reads and rejec
     userSkills: new UserSkillsService(),
     run: async (participant) => ({ participant, ok: true, content: "done", durationMs: 1 })
   });
-  const dir = "/tmp/skills/proof";
+  const skillRoot = await mkdtemp(path.join(tmpdir(), "accord-skill-read-"));
+  const dir = path.join(skillRoot, "proof");
   const check = (rules: Array<{ action: string; match: string; pattern: string }>, dirs: string[] = [dir]) =>
     (service as any).shellRulesAreSelectedSkillReads(rules, dirs) as Promise<boolean>;
+  try {
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "SKILL.md"), "marker\n", "utf8");
 
-  // Allowed: simple read-only commands scoped to the selected skill directory.
-  assert.equal(await check([{ action: "allow", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), true);
-  assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -n 1,40p ${dir}/SKILL.md` }]), true);
-  assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -n '1,40p' ${dir}/SKILL.md` }]), true);
-  assert.equal(await check([{ action: "allow", match: "exact", pattern: `head -n 20 ${dir}/SKILL.md` }]), true);
-  assert.equal(await check([{ action: "allow", match: "exact", pattern: `grep -n marker ${dir}/SKILL.md` }]), true);
-  assert.equal(await check([{ action: "allow", match: "exact", pattern: `rg --fixed-strings marker ${dir}` }]), true);
+    // Allowed: simple read-only commands scoped to the selected skill directory.
+    assert.equal(await check([{ action: "allow", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), true);
+    assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -n 1,40p ${dir}/SKILL.md` }]), true);
+    assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -n '1,40p' ${dir}/SKILL.md` }]), true);
+    assert.equal(await check([{ action: "allow", match: "exact", pattern: `head -n 20 ${dir}/SKILL.md` }]), true);
+    assert.equal(await check([{ action: "allow", match: "exact", pattern: `grep -n marker ${dir}/SKILL.md` }]), true);
+    assert.equal(await check([{ action: "allow", match: "exact", pattern: `rg --fixed-strings marker ${dir}` }]), true);
 
-  // Rejected: outside the skill dir, mutation, chaining/redirection, in-place edit, deny, empty.
-  assert.equal(await check([{ action: "allow", match: "exact", pattern: "cat /etc/passwd" }]), false);
-  assert.equal(await check([{ action: "allow", match: "exact", pattern: `rm ${dir}/SKILL.md` }]), false);
-  assert.equal(await check([{ action: "allow", match: "exact", pattern: `cat ${dir}/SKILL.md && rm -rf /` }]), false);
-  assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -i s/a/b/ ${dir}/SKILL.md` }]), false);
-  assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -n e whoami ${dir}/SKILL.md` }]), false);
-  assert.equal(await check([{ action: "allow", match: "exact", pattern: `rg --pre sh marker ${dir}` }]), false);
-  assert.equal(await check([{ action: "allow", match: "prefix", pattern: `cat ${dir}/SKILL.md` }]), false);
-  assert.equal(await check([{ action: "ask", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), false);
-  assert.equal(await check([{ action: "deny", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), false);
-  assert.equal(await check([]), false);
+    // Rejected: outside the skill dir, mutation, chaining/redirection, in-place edit, deny, empty.
+    assert.equal(await check([{ action: "allow", match: "exact", pattern: "cat /etc/passwd" }]), false);
+    assert.equal(await check([{ action: "allow", match: "exact", pattern: `rm ${dir}/SKILL.md` }]), false);
+    assert.equal(await check([{ action: "allow", match: "exact", pattern: `cat ${dir}/SKILL.md && rm -rf /` }]), false);
+    assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -i s/a/b/ ${dir}/SKILL.md` }]), false);
+    assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -n e whoami ${dir}/SKILL.md` }]), false);
+    assert.equal(await check([{ action: "allow", match: "exact", pattern: `rg --pre sh marker ${dir}` }]), false);
+    assert.equal(await check([{ action: "allow", match: "prefix", pattern: `cat ${dir}/SKILL.md` }]), false);
+    assert.equal(await check([{ action: "ask", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), false);
+    assert.equal(await check([{ action: "deny", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), false);
+    assert.equal(await check([]), false);
+  } finally {
+    await rm(skillRoot, { recursive: true, force: true });
+  }
 
   // Symlinked global skill: selected dir is the realpath target, but the agent reads via the
   // symlink path. The matcher must recognize it by resolving the command path's realpath.
