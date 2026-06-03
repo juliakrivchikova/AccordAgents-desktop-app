@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Bot, ChevronDown, ChevronRight, Folder, Loader2, MessageSquare, PanelLeftClose, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, Loader2, MessageSquare, PanelLeftClose, Plus } from "lucide-react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { HistoryLoadingState } from "@/renderer/components/loading-states";
@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import type { ConversationSummary } from "../../../shared/types";
 
 const INITIAL_PROJECT_SESSION_LIMIT = 5;
+const ACCORDAGENTS_MARK_URL = new URL("../../assets/accordagents-mark.svg", import.meta.url).href;
 
 export interface ProjectSessionGroup {
   key: string;
@@ -77,7 +78,7 @@ export const Sidebar = ({
         className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-[var(--app-shell-border)] px-3 text-sm font-semibold text-[var(--app-text-strong)]"
       >
         <div className="flex min-w-0 items-center gap-2">
-          <Bot className="size-4 shrink-0" aria-hidden />
+          <img src={ACCORDAGENTS_MARK_URL} alt="" className="size-4 shrink-0" aria-hidden="true" />
           <span className="min-w-0 truncate">AccordAgents</span>
         </div>
         {onToggleSidebar && (
