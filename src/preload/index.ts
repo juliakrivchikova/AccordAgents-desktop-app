@@ -26,6 +26,7 @@ import type {
   ReviewProgress,
   ReviewRequest,
   SendChatMessageRequest,
+  ToggleChatReactionRequest,
   UserSkillDiagnosticsRequest,
   UserSkillSearchRequest
 } from "../shared/types";
@@ -61,6 +62,7 @@ const bridge: AppBridge = {
   addChatParticipant: (request: AddChatParticipantRequest) => ipcRenderer.invoke("chat:add-participant", request),
   sendChatMessage: (request: SendChatMessageRequest) => ipcRenderer.invoke("chat:send", request),
   readChatAttachment: (request: ReadChatAttachmentRequest) => ipcRenderer.invoke("chat:read-attachment", request),
+  toggleChatReaction: (request: ToggleChatReactionRequest) => ipcRenderer.invoke("chat:toggle-reaction", request),
   respondToChatMentions: (request: RespondToChatMentionsRequest) => ipcRenderer.invoke("chat:respond-to-mentions", request),
   respondToChatChoice: (request: RespondToChatChoiceRequest) => ipcRenderer.invoke("chat:respond-to-choice", request),
   respondToChatAppToolApproval: (request: RespondToChatAppToolApprovalRequest) => ipcRenderer.invoke("chat:respond-to-app-tool-approval", request),

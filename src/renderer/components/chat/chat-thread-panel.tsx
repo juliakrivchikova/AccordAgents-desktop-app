@@ -41,6 +41,7 @@ export function ChatThreadPanel(props: {
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void;
+  onToggleReaction: (messageId: string, emoji: string) => void;
   onStopRun?: (runId: string) => void;
   continuedMentionRequestIds: Set<string>;
 }): JSX.Element {
@@ -70,6 +71,7 @@ export function ChatThreadPanel(props: {
           onApproveMentions={props.onApproveMentions}
           onRejectMentions={props.onRejectMentions}
           onRespondToChoice={props.onRespondToChoice}
+          onToggleReaction={props.onToggleReaction}
           onStopRun={props.onStopRun}
         />
         {props.replies.length > 0 && (
@@ -88,6 +90,7 @@ export function ChatThreadPanel(props: {
                 onApproveMentions={props.onApproveMentions}
                 onRejectMentions={props.onRejectMentions}
                 onRespondToChoice={props.onRespondToChoice}
+                onToggleReaction={props.onToggleReaction}
                 onStopRun={props.onStopRun}
                 key={message.id}
               />

@@ -22,6 +22,8 @@ Debug logs (JSONL of progress events and raw provider/CLI output) are written to
 
 Whenever the user asks you to **see**, **screenshot**, **scroll**, **click**, **type into**, or **read DOM/CSS state in** the running app — for reproducing UI bugs, verifying a renderer fix, or any UI-driven check — follow `docs/inspecting-the-desktop-app.md`. It uses the Chrome DevTools Protocol against Electron's renderer (port 9222). Do NOT use macOS `screencapture`, AppleScript, `CGWindowList`, or any window-focus tricks, and do NOT try to hit `http://127.0.0.1:5173/` directly — that's Vite's bundle without the Electron preload and the React app crashes when loaded that way.
 
+In AccordAgents Chat, use the repo-local `/electron-desktop-qa` skill for this workflow. It requires retrying localhost/CDP launch failures with escalation before reporting desktop UI QA as blocked.
+
 ## Architecture
 
 This is an Electron desktop app that orchestrates a debate between several AI participants over a code diff or question and produces a consensus answer. There are three TS projects compiled separately:

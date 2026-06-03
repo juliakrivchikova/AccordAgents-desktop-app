@@ -138,6 +138,17 @@ export type ChatRoleRuntime = "claude-agent" | "codex-developer-instructions" | 
 
 export type ChatAppToolCapability = "participants.manage" | "participants.request" | "permissions.request";
 
+export type ChatReactionActorKind = "user" | "participant";
+
+export interface ChatReactor {
+  actorId: string;
+  actorLabel: string;
+  actorKind: ChatReactionActorKind;
+  at: string;
+}
+
+export type ChatMessageReactions = Record<string, ChatReactor[]>;
+
 export type AgentContextUsageSource = Extract<ProviderKind, "codex-cli" | "claude-code">;
 
 export interface AgentContextUsage {
@@ -447,6 +458,7 @@ export interface ChatMessageMetadata {
   threadId?: string;
   parentMessageId?: string;
   chatThreadRootId?: string;
+  reactions?: ChatMessageReactions;
   mentions?: string[];
   skillMentions?: ChatSkillMention[];
   repoFileMentions?: RepoFileMention[];
@@ -544,6 +556,12 @@ export interface SendChatMessageRequest {
   threadId?: string;
   parentMessageId?: string;
   chatThreadRootId?: string;
+}
+
+export interface ToggleChatReactionRequest {
+  conversationId: string;
+  messageId: string;
+  emoji: string;
 }
 
 export type ChatImageMimeType = "image/png" | "image/jpeg" | "image/webp";
@@ -934,6 +952,7 @@ export interface AppBridge {
   addChatParticipant(request: AddChatParticipantRequest): Promise<Conversation | undefined>;
   sendChatMessage(request: SendChatMessageRequest): Promise<StartReviewResult>;
   readChatAttachment(request: ReadChatAttachmentRequest): Promise<ReadChatAttachmentResult>;
+  toggleChatReaction(request: ToggleChatReactionRequest): Promise<Conversation | undefined>;
   respondToChatMentions(request: RespondToChatMentionsRequest): Promise<StartReviewResult>;
   respondToChatChoice(request: RespondToChatChoiceRequest): Promise<StartReviewResult>;
   respondToChatAppToolApproval(request: RespondToChatAppToolApprovalRequest): Promise<Conversation | undefined>;

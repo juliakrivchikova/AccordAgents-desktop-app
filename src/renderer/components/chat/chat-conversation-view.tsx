@@ -58,6 +58,7 @@ export function ChatConversationView(props: {
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void;
+  onToggleReaction: (messageId: string, emoji: string) => void;
   onRespondToAppToolApproval: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => Promise<void>;
   onStopRun?: (runId: string) => void;
 }): JSX.Element {
@@ -366,6 +367,7 @@ export function ChatConversationView(props: {
                       onApproveMentions={props.onApproveMentions}
                       onRejectMentions={props.onRejectMentions}
                       onRespondToChoice={props.onRespondToChoice}
+                      onToggleReaction={props.onToggleReaction}
                       onStopRun={props.onStopRun}
                     />
                   )}
@@ -409,6 +411,7 @@ export function ChatConversationView(props: {
           onApproveMentions={props.onApproveMentions}
           onRejectMentions={props.onRejectMentions}
           onRespondToChoice={props.onRespondToChoice}
+          onToggleReaction={props.onToggleReaction}
           onStopRun={props.onStopRun}
           continuedMentionRequestIds={continuedMentionRequestIds}
         />

@@ -14,6 +14,7 @@ export const APP_CHAT_GET_PARTICIPANTS_TOOL = "app_chat_get_participants";
 export const APP_CHAT_READ_MESSAGES_TOOL = "app_chat_read_messages";
 export const APP_CHAT_LIST_ATTACHMENTS_TOOL = "app_chat_list_attachments";
 export const APP_CHAT_READ_ATTACHMENT_TOOL = "app_chat_read_attachment";
+export const APP_CHAT_REACT_TOOL = "app_chat_react";
 
 export interface AppMcpActor {
   conversationId: string;
@@ -51,6 +52,7 @@ type AppChatAttachmentListHandler = (actor: AppMcpActor, request: unknown) => Pr
 type AppChatAttachmentReadHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatParticipantRequestHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatParticipantRequestStatusHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+type AppChatReactHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 
 interface JsonRpcRequest {
   jsonrpc?: unknown;
@@ -86,6 +88,7 @@ export class AppMcpService {
   private chatAttachmentReadHandler?: AppChatAttachmentReadHandler;
   private chatParticipantRequestHandler?: AppChatParticipantRequestHandler;
   private chatParticipantRequestStatusHandler?: AppChatParticipantRequestStatusHandler;
+  private chatReactHandler?: AppChatReactHandler;
 
   setRosterChangeHandler(handler: AppRosterChangeHandler): void {
     this.rosterChangeHandler = handler;
@@ -125,6 +128,10 @@ export class AppMcpService {
 
   setChatParticipantRequestStatusHandler(handler: AppChatParticipantRequestStatusHandler): void {
     this.chatParticipantRequestStatusHandler = handler;
+  }
+
+  setChatReactHandler(handler: AppChatReactHandler): void {
+    this.chatReactHandler = handler;
   }
 
   async start(): Promise<void> {
@@ -483,6 +490,34 @@ export class AppMcpService {
           idempotentHint: true,
           openWorldHint: false
         }
+      },
+      {
+        name: APP_CHAT_REACT_TOOL,
+        title: "React To Chat Message",
+        description:
+          "Add or toggle an emoji reaction on a specific message. To react, call this with the message id from app_chat_read_messages and an allowed emoji.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            messageId: {
+              type: "string",
+              description: "Message id returned by app_chat_read_messages."
+            },
+            emoji: {
+              type: "string",
+              enum: ["✅", "👍", "👀", "🎉", "❌"],
+              description: "Allowed reaction emoji."
+            }
+          },
+          required: ["messageId", "emoji"]
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false
+        }
       }
     ];
     if (hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
@@ -654,7 +689,8 @@ export class AppMcpService {
       record.name !== APP_CHAT_GET_PARTICIPANTS_TOOL &&
       record.name !== APP_CHAT_READ_MESSAGES_TOOL &&
       record.name !== APP_CHAT_LIST_ATTACHMENTS_TOOL &&
-      record.name !== APP_CHAT_READ_ATTACHMENT_TOOL
+      record.name !== APP_CHAT_READ_ATTACHMENT_TOOL &&
+      record.name !== APP_CHAT_REACT_TOOL
     ) {
       throw new Error(`Unknown app tool: ${String(record.name ?? "")}.`);
     }
@@ -687,6 +723,12 @@ export class AppMcpService {
         throw new Error("Chat attachment reading is not available.");
       }
       return this.toolImageResult(await this.chatAttachmentReadHandler(actor, record.arguments));
+    }
+    if (record.name === APP_CHAT_REACT_TOOL) {
+      if (!this.chatReactHandler) {
+        throw new Error("Chat reaction handling is not available.");
+      }
+      return this.toolTextResult(await this.chatReactHandler(actor, record.arguments));
     }
     if (record.name === APP_CHAT_REQUEST_PARTICIPANTS_TOOL) {
       if (!this.chatParticipantRequestHandler) {

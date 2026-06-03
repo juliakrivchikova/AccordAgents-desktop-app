@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
+import { APP_CHAT_REACT_TOOL, APP_PERMISSIONS_REQUEST_CHANGE_TOOL, AppMcpService } from "./appMcp";
 import { ChatService } from "./chat";
 import {
   chatAgentPermissionsEqual,
@@ -850,9 +850,94 @@ test("static chat instructions include structured participant request and reply 
   });
 
   assert.match(instructions, /use `app_chat_request_participants` rather than plain `@mentions`/);
+  assert.match(instructions, /Reaction MCP tool: `app_chat_react` adds or toggles an emoji reaction on a specific message/);
   assert.match(instructions, /When replying to a participant request addressed to you, answer in the active thread/);
   assert.match(instructions, /if request matching is ambiguous, ask for clarification rather than guessing/);
   assert.doesNotMatch(instructions, /app_chat_reply_to_participant_request/);
+});
+
+test("toggleReaction adds and removes a user reaction on a message", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+
+  const added = await service.toggleReaction({
+    conversationId: conversation.id,
+    messageId: "user-message",
+    emoji: "✅"
+  });
+
+  assert.equal(added?.messages[0].metadata?.reactions?.["✅"]?.length, 1);
+  assert.deepEqual(added?.messages[0].metadata?.reactions?.["✅"]?.[0], {
+    actorId: "user",
+    actorLabel: "User",
+    actorKind: "user",
+    at: added?.messages[0].metadata?.reactions?.["✅"]?.[0].at
+  });
+  assert.equal(storage.current.messages[0].metadata.reactions["✅"][0].actorLabel, "User");
+
+  const removed = await service.toggleReaction({
+    conversationId: conversation.id,
+    messageId: "user-message",
+    emoji: "✅"
+  });
+
+  assert.equal(removed?.messages[0].metadata?.reactions, undefined);
+  assert.equal(storage.current.messages[0].metadata.reactions, undefined);
+});
+
+test("app_chat_react toggles a participant reaction and rejects unknown message ids", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: []
+  };
+
+  const added = await service.reactToMessageFromTool(actor, {
+    messageId: "user-message",
+    emoji: "✅"
+  });
+
+  assert.equal(added.status, "added");
+  assert.equal(added.messageId, "user-message");
+  assert.equal(storage.current.messages[0].metadata.reactions["✅"][0].actorLabel, "@codex");
+
+  const removed = await service.reactToMessageFromTool(actor, {
+    messageId: "user-message",
+    emoji: "✅"
+  });
+
+  assert.equal(removed.status, "removed");
+  assert.equal(storage.current.messages[0].metadata.reactions, undefined);
+
+  await assert.rejects(
+    () => service.reactToMessageFromTool(actor, {
+      messageId: "missing-message",
+      emoji: "✅"
+    }),
+    /MessageReactionDenied/
+  );
+});
+
+test("app MCP advertises app_chat_react to chat participants", () => {
+  const appMcp = new AppMcpService();
+  const tools = (appMcp as any).toolsForActor({
+    conversationId: "conversation-1",
+    participantId: "participant-1",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    capabilities: []
+  }) as Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> } }>;
+  const reactionTool = tools.find((tool) => tool.name === APP_CHAT_REACT_TOOL);
+
+  assert.ok(reactionTool);
+  assert.ok(reactionTool.inputSchema?.properties?.messageId);
+  assert.ok(reactionTool.inputSchema?.properties?.emoji);
 });
 
 test("participant behavior rules are merged into session role instructions", async () => {

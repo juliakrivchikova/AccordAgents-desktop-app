@@ -181,7 +181,7 @@ test("buildPromptParts section sizes stay under baseline caps across envelope br
     ["full repo+no-repoRead", fullNoRepoRead]
   ] as const) {
     assert.equal(parts.sections.dynamicHeader, 0, `${label}: dynamicHeader is folded into staticEnvelope when role instructions are included`);
-    assert.ok(parts.sections.staticEnvelope < 7200, `${label}: staticEnvelope too large: ${parts.sections.staticEnvelope}`);
+    assert.ok(parts.sections.staticEnvelope < 7450, `${label}: staticEnvelope too large: ${parts.sections.staticEnvelope}`);
     assert.ok(parts.sections.trigger < 350, `${label}: trigger too large: ${parts.sections.trigger}`);
     assert.ok(parts.sections.currentRequest < 130, `${label}: currentRequest too large: ${parts.sections.currentRequest}`);
   }

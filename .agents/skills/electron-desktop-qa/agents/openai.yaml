@@ -1,0 +1,7 @@
+interface:
+  display_name: "Electron Desktop QA"
+  short_description: "Verify AccordAgents desktop UI through CDP"
+  default_prompt: "Use $electron-desktop-qa to inspect and QA the live AccordAgents Electron desktop app."
+
+policy:
+  allow_implicit_invocation: true

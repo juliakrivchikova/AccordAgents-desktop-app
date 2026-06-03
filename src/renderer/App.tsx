@@ -743,6 +743,26 @@ function App(): JSX.Element {
     }
   }
 
+  async function toggleChatReaction(messageId: string, emoji: string): Promise<void> {
+    if (!conversation || conversation.kind !== "chat") {
+      return;
+    }
+    setError(undefined);
+    try {
+      const saved = await window.consensus.toggleChatReaction({
+        conversationId: conversation.id,
+        messageId,
+        emoji
+      });
+      if (saved) {
+        setConversation(saved);
+        setSummaries((current) => upsertConversationSummary(current, saved));
+      }
+    } catch (caught) {
+      setError(errorText(caught));
+    }
+  }
+
   async function respondToChatChoice(
     sourceMessageId: string,
     choiceId: string,
@@ -1766,6 +1786,7 @@ function App(): JSX.Element {
                     onRespondToChoice={(sourceMessageId, choiceId, response) =>
                       void respondToChatChoice(sourceMessageId, choiceId, response)
                     }
+                    onToggleReaction={(messageId, emoji) => void toggleChatReaction(messageId, emoji)}
                     onRespondToAppToolApproval={respondToChatAppToolApproval}
                     onStopRun={(runId) => void window.consensus.cancelReview(runId)}
                   />

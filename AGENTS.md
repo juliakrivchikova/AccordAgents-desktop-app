@@ -35,6 +35,8 @@ There is no full test suite or lint runner, but targeted Node service tests exis
 
 Whenever the user asks an agent to **see**, **screenshot**, **scroll**, **click**, **type into**, or **read DOM/CSS state in** the live desktop app — for reproducing UI bugs, verifying a renderer fix, or any UI-driven check — follow `docs/inspecting-the-desktop-app.md`. It uses the Chrome DevTools Protocol against Electron's renderer (port 9222). Do not use macOS `screencapture`, AppleScript, `CGWindowList`, or any window-focus tricks, and do not curl `http://127.0.0.1:5173/` directly — that's Vite's bundle without the Electron preload, so the React app crashes when loaded outside Electron.
 
+In AccordAgents Chat, use the repo-local `/electron-desktop-qa` skill for this workflow. It requires retrying localhost/CDP launch failures with escalation before reporting desktop UI QA as blocked.
+
 If live desktop inspection cannot be completed after following that workflow, stop and ask the user how to proceed instead of silently substituting a browser/Vite check. Offer concrete options, such as relaunching Electron with the debug port, using a renderer mock/browser fixture as a limited fallback, or skipping visual verification.
 
 ## Commit & Pull Request Guidelines

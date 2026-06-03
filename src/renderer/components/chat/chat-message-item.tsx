@@ -1,13 +1,15 @@
 import { useState } from "react";
-import { CheckCircle2, Copy, FileText, ListChecks, RefreshCw, Square } from "lucide-react";
+import { CheckCircle2, Copy, FileText, ListChecks, RefreshCw, SmilePlus, Square } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type {
   AgentContextUsage,
   AgentRunProgress,
   ChatParticipant,
   Conversation
 } from "../../../shared/types";
+import { CHAT_REACTION_EMOJIS } from "../../../shared/chatReactions";
 import {
   chatDisplayContent,
   chatMessageImageAttachments,
@@ -48,10 +50,12 @@ export function ChatMessageItem(props: {
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void;
+  onToggleReaction: (messageId: string, emoji: string) => void;
   onStopRun?: (runId: string) => void;
 }): JSX.Element {
   const { message } = props;
   const [copied, setCopied] = useState(false);
+  const [reactionPickerOpen, setReactionPickerOpen] = useState(false);
   const author = authorForMessage(message, "chat");
   const isStreaming = message.status === "pending" && message.role === "participant";
   const streamedContent = props.liveProgress?.partialContent;
@@ -83,6 +87,13 @@ export function ChatMessageItem(props: {
   const avatar = avatarForMessage(message, author, participant);
   const replyCount = props.replyCount ?? 0;
   const canCopy = Boolean(displayContent.trim());
+  const canReact = message.status !== "pending";
+  const reactionEntries = CHAT_REACTION_EMOJIS
+    .map((emoji) => ({
+      emoji,
+      reactors: message.metadata?.reactions?.[emoji] ?? []
+    }))
+    .filter((entry) => entry.reactors.length > 0);
 
   async function copyMessage(): Promise<void> {
     if (!canCopy) {
@@ -106,6 +117,14 @@ export function ChatMessageItem(props: {
       </Button>
     </>
   ) : null;
+
+  function toggleReaction(emoji: string): void {
+    if (!canReact) {
+      return;
+    }
+    setReactionPickerOpen(false);
+    props.onToggleReaction(message.id, emoji);
+  }
 
   return (
     <>
@@ -132,15 +151,38 @@ export function ChatMessageItem(props: {
               onClick={() => props.onStopRun?.(message.metadata!.runId!)}
             />
           ) : (
-            <IconButton
-              className="message-copy-button"
-              size="xs"
-              icon={copied ? CheckCircle2 : Copy}
-              label={copied ? "Copied" : "Copy message"}
-              tooltip={copied ? "Copied" : "Copy message"}
-              disabled={!canCopy}
-              onClick={() => void copyMessage()}
-            />
+            <>
+              {canReact && (
+                <Popover open={reactionPickerOpen} onOpenChange={setReactionPickerOpen}>
+                  <PopoverTrigger asChild>
+                    <IconButton
+                      className="message-reaction-picker-button"
+                      size="xs"
+                      icon={SmilePlus}
+                      label="Add reaction"
+                    />
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="chat-reaction-popover">
+                    <div className="chat-reaction-picker" aria-label="Choose reaction">
+                      {CHAT_REACTION_EMOJIS.map((emoji) => (
+                        <button type="button" className="chat-reaction-option" onClick={() => toggleReaction(emoji)} key={emoji}>
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              )}
+              <IconButton
+                className="message-copy-button"
+                size="xs"
+                icon={copied ? CheckCircle2 : Copy}
+                label={copied ? "Copied" : "Copy message"}
+                tooltip={copied ? "Copied" : "Copy message"}
+                disabled={!canCopy}
+                onClick={() => void copyMessage()}
+              />
+            </>
           )}
           <div className="message-meta">
             <strong>{author}</strong>
@@ -176,6 +218,27 @@ export function ChatMessageItem(props: {
           )}
           {imageAttachments.length > 0 && (
             <ChatImageAttachmentStrip conversationId={props.conversationId} attachments={imageAttachments} />
+          )}
+          {reactionEntries.length > 0 && (
+            <div className="chat-message-reactions" aria-label="Message reactions">
+              {reactionEntries.map((entry) => {
+                const userReacted = entry.reactors.some((reactor) => reactor.actorKind === "user" && reactor.actorId === "user");
+                const actorLabels = entry.reactors.map((reactor) => reactor.actorLabel).join(", ");
+                return (
+                  <button
+                    type="button"
+                    className={`chat-reaction-chip ${userReacted ? "selected" : ""}`}
+                    title={actorLabels}
+                    aria-label={`${entry.emoji} reaction by ${actorLabels}`}
+                    onClick={() => toggleReaction(entry.emoji)}
+                    key={entry.emoji}
+                  >
+                    <span>{entry.emoji}</span>
+                    <strong>{entry.reactors.length}</strong>
+                  </button>
+                );
+              })}
+            </div>
           )}
           {participantRequest && (
             <div className="chat-approval-note">

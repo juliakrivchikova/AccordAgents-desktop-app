@@ -19,6 +19,7 @@ import type {
   ChatImageInput,
   ChatImageMimeType,
   ChatMessage,
+  ChatMessageReactions,
   ChatParticipant,
   ChatParticipantRequestApprovalRequest,
   ChatParticipantRequestBatch,
@@ -49,8 +50,10 @@ import type {
   ReviewProgress,
   RepoFileMention,
   SendChatMessageRequest,
-  StartReviewResult
+  StartReviewResult,
+  ToggleChatReactionRequest
 } from "../../shared/types";
+import { normalizeChatReactionEmoji } from "../../shared/chatReactions";
 import {
   CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH,
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
@@ -73,6 +76,7 @@ import {
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
   APP_CHAT_GET_PARTICIPANTS_TOOL,
   APP_CHAT_LIST_ATTACHMENTS_TOOL,
+  APP_CHAT_REACT_TOOL,
   APP_CHAT_READ_ATTACHMENT_TOOL,
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_CHAT_READ_MESSAGES_TOOL,
@@ -132,6 +136,22 @@ interface ChatAttachmentRecord {
   attachment: ChatImageAttachment;
 }
 
+interface ChatReactionActor {
+  actorId: string;
+  actorLabel: string;
+  actorKind: "user" | "participant";
+}
+
+interface ChatReactionMutationResult {
+  status: "added" | "removed";
+  messageId: string;
+  sequence: number;
+  emoji: string;
+  author: string;
+  contentPreview: string;
+  reactions: ChatMessageReactions;
+}
+
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 15;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
@@ -155,7 +175,8 @@ const CHAT_CONTEXT_MCP_TOOL_NAMES = [
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
   APP_CHAT_READ_MESSAGES_TOOL,
   APP_CHAT_LIST_ATTACHMENTS_TOOL,
-  APP_CHAT_READ_ATTACHMENT_TOOL
+  APP_CHAT_READ_ATTACHMENT_TOOL,
+  APP_CHAT_REACT_TOOL
 ];
 const CHAT_APP_MCP_TOOL_NAMES = [
   ...CHAT_CONTEXT_MCP_TOOL_NAMES,
@@ -944,6 +965,67 @@ export class ChatService {
         totalMessages: readableTotalMessages,
         totalMatchingMessages: filteredMessages.length
       }
+    };
+  }
+
+  async toggleReaction(request: ToggleChatReactionRequest): Promise<Conversation | undefined> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return conversation;
+    }
+    const emoji = normalizeChatReactionEmoji(request.emoji);
+    await this.withChatMutation(conversation, async () => {
+      const messageRecord = this.findMessageRecord(conversation, request.messageId);
+      if (!messageRecord) {
+        throw new Error("Message was not found in this conversation.");
+      }
+      const result = this.toggleReactionOnMessage(conversation, messageRecord.message, messageRecord.sequence, emoji, {
+        actorId: "user",
+        actorLabel: "User",
+        actorKind: "user"
+      });
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+      return result;
+    });
+    return conversation;
+  }
+
+  async reactToMessageFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+    const request = this.normalizeChatReactionRequest(rawRequest);
+    const conversation = await this.requireChat(actor.conversationId);
+    let result: ChatReactionMutationResult | undefined;
+    await this.withChatMutation(conversation, async () => {
+      const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+      if (!requester) {
+        throw new Error("The requesting participant is no longer in this chat.");
+      }
+      const messageRecord = this.findMessageRecord(conversation, request.messageId);
+      if (!messageRecord || (typeof actor.snapshotMaxSequence === "number" && messageRecord.sequence > actor.snapshotMaxSequence)) {
+        throw new Error(
+          "MessageReactionDenied. Problem: messageId was not found in the visible chat snapshot. Cause: the id is wrong, belongs to another conversation, or is newer than this turn. Fix: call app_chat_read_messages and retry with a returned message id."
+        );
+      }
+      result = this.toggleReactionOnMessage(conversation, messageRecord.message, messageRecord.sequence, request.emoji, {
+        actorId: requester.id,
+        actorLabel: `@${requester.handle}`,
+        actorKind: "participant"
+      });
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
+    if (!result) {
+      throw new Error("Reaction was not applied.");
+    }
+    return {
+      ok: true,
+      status: result.status,
+      messageId: result.messageId,
+      sequence: result.sequence,
+      emoji: result.emoji,
+      author: result.author,
+      contentPreview: result.contentPreview,
+      reactions: result.reactions
     };
   }
 
@@ -2404,6 +2486,7 @@ export class ChatService {
     const lines = [
       "App MCP tools: use the connected `ai_consensus` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
       "Read-only chat MCP tools: `app_chat_get_context`, `app_chat_get_participants`, `app_chat_read_messages`, `app_chat_list_attachments`, and `app_chat_read_attachment`. Prefer them over history files for roster, thread, messages, and screenshots.",
+      "Reaction MCP tool: `app_chat_react` adds or toggles an emoji reaction on a specific message. To react, call it with the message `id` from `app_chat_read_messages` and an allowed emoji.",
       "If a message lists attached images, call `app_chat_read_attachment` with the attachment ID before reasoning about visual details.",
       "Participant request MCP tools: `app_chat_request_participants` and `app_chat_get_participant_request_status` are available for asking current chat participants for input and recovering their replies. Request JSON is `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
       "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
@@ -5574,6 +5657,133 @@ export class ChatService {
       }
     }
     return undefined;
+  }
+
+  private findMessageRecord(conversation: Conversation, messageId: string): { message: ChatMessage; sequence: number } | undefined {
+    const normalizedId = messageId.trim();
+    if (!normalizedId) {
+      return undefined;
+    }
+    for (const [sequence, message] of conversation.messages.entries()) {
+      if (message.id === normalizedId) {
+        return { message, sequence };
+      }
+    }
+    return undefined;
+  }
+
+  private normalizeChatReactionRequest(raw: unknown): { messageId: string; emoji: string } {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error("Reaction request must be an object.");
+    }
+    const record = raw as Record<string, unknown>;
+    const messageId = typeof record.messageId === "string" ? record.messageId.trim() : "";
+    if (!messageId) {
+      throw new Error("Reaction request needs messageId from app_chat_read_messages.");
+    }
+    return {
+      messageId,
+      emoji: normalizeChatReactionEmoji(record.emoji)
+    };
+  }
+
+  private toggleReactionOnMessage(
+    conversation: Conversation,
+    message: ChatMessage,
+    sequence: number,
+    emoji: string,
+    actor: ChatReactionActor
+  ): ChatReactionMutationResult {
+    if (message.status === "pending") {
+      throw new Error("Cannot react to a pending message.");
+    }
+    const reactions = this.normalizedChatMessageReactions(message.metadata?.reactions);
+    const existingReactors = reactions[emoji] ?? [];
+    const existingIndex = existingReactors.findIndex((reactor) =>
+      reactor.actorId === actor.actorId && reactor.actorKind === actor.actorKind
+    );
+    const status: ChatReactionMutationResult["status"] = existingIndex >= 0 ? "removed" : "added";
+    const nextReactors = existingIndex >= 0
+      ? existingReactors.filter((_reactor, index) => index !== existingIndex)
+      : [
+          ...existingReactors,
+          {
+            actorId: actor.actorId,
+            actorLabel: actor.actorLabel,
+            actorKind: actor.actorKind,
+            at: new Date().toISOString()
+          }
+        ];
+    const nextReactions: ChatMessageReactions = { ...reactions };
+    if (nextReactors.length > 0) {
+      nextReactions[emoji] = nextReactors;
+    } else {
+      delete nextReactions[emoji];
+    }
+    message.metadata = {
+      ...message.metadata,
+      reactions: Object.keys(nextReactions).length > 0 ? nextReactions : undefined
+    };
+    return {
+      status,
+      messageId: message.id,
+      sequence,
+      emoji,
+      author: this.messageAuthor(message),
+      contentPreview: this.messageContentPreview(message),
+      reactions: nextReactions
+    };
+  }
+
+  private normalizedChatMessageReactions(value: unknown): ChatMessageReactions {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return {};
+    }
+    const reactions: ChatMessageReactions = {};
+    for (const [emoji, rawReactors] of Object.entries(value)) {
+      let normalizedEmoji: string;
+      try {
+        normalizedEmoji = normalizeChatReactionEmoji(emoji);
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(rawReactors)) {
+        continue;
+      }
+      const seenActors = new Set<string>();
+      const reactors: ChatMessageReactions[string] = [];
+      for (const item of rawReactors) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) {
+          continue;
+        }
+        const reactor = item as Record<string, unknown>;
+        const actorId = typeof reactor.actorId === "string" ? reactor.actorId.trim() : "";
+        const actorLabel = typeof reactor.actorLabel === "string" ? reactor.actorLabel.trim() : "";
+        const actorKind = reactor.actorKind === "user"
+          ? "user"
+          : reactor.actorKind === "participant"
+            ? "participant"
+            : undefined;
+        const at = typeof reactor.at === "string" && reactor.at.trim() ? reactor.at.trim() : new Date().toISOString();
+        if (!actorId || !actorLabel || !actorKind) {
+          continue;
+        }
+        const key = `${actorKind}:${actorId}`;
+        if (seenActors.has(key)) {
+          continue;
+        }
+        seenActors.add(key);
+        reactors.push({ actorId, actorLabel, actorKind, at });
+      }
+      if (reactors.length > 0) {
+        reactions[normalizedEmoji] = reactors;
+      }
+    }
+    return reactions;
+  }
+
+  private messageContentPreview(message: ChatMessage): string {
+    return message.content.trim().replace(/\s+/g, " ").slice(0, 160);
   }
 
   private normalizeChatAttachmentListRequest(raw: unknown): { messageId?: string; threadId?: string; limit: number } {

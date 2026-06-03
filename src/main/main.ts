@@ -27,6 +27,7 @@ import type {
   RetryImplementationPlanSynthesisRequest,
   ReviewRequest,
   SendChatMessageRequest,
+  ToggleChatReactionRequest,
   UserSkillDiagnosticsRequest,
   UserSkillSearchRequest
 } from "../shared/types";
@@ -76,6 +77,7 @@ appMcpService.setChatAttachmentListHandler((actor, request) => chatService.listC
 appMcpService.setChatAttachmentReadHandler((actor, request) => chatService.readChatAttachmentForTool(actor, request));
 appMcpService.setChatParticipantRequestHandler((actor, request) => chatService.requestParticipantsFromTool(actor, request));
 appMcpService.setChatParticipantRequestStatusHandler((actor, request) => chatService.participantRequestStatusForTool(actor, request));
+appMcpService.setChatReactHandler((actor, request) => chatService.reactToMessageFromTool(actor, request));
 const activeReviews = new Map<string, AbortController>();
 
 function appSkillsSourceRoot(): string {
@@ -264,6 +266,9 @@ function registerIpc(): void {
   });
   ipcMain.handle("chat:read-attachment", async (_event, request: ReadChatAttachmentRequest) => {
     return chatService.readChatAttachment(request);
+  });
+  ipcMain.handle("chat:toggle-reaction", async (_event, request: ToggleChatReactionRequest) => {
+    return chatService.toggleReaction(request);
   });
   ipcMain.handle("chat:respond-to-mentions", async (_event, request: RespondToChatMentionsRequest) => {
     const runId = request.runId ?? randomUUID();
