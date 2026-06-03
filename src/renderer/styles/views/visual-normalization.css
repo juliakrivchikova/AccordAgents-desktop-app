@@ -102,7 +102,7 @@
 
 .decision-compose textarea:focus {
   border-color: var(--app-info);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-info) 18%, transparent);
+  box-shadow: var(--focus-ring);
 }
 
 .participant-pill.selected,
@@ -310,7 +310,7 @@
 .decision-compose textarea:focus,
 .plan-correction-composer textarea:focus {
   border-color: var(--app-accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 18%, transparent);
+  box-shadow: var(--focus-ring);
 }
 
 .decision-compose textarea:disabled,

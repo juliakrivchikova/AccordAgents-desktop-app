@@ -14,7 +14,7 @@ export const TopBar = ({ title, tabs, leading, actions, className }: TopBarProps
   <header
     data-shell="topbar"
     className={cn(
-      "flex h-12 shrink-0 items-center justify-between gap-2 border-b border-[var(--app-shell-border)] bg-[var(--app-header-bg)] px-3",
+      "flex h-[var(--app-header-height)] shrink-0 items-center justify-between gap-2 border-b border-[var(--app-shell-border)] bg-[var(--app-header-bg)] px-[var(--app-gutter)]",
       className
     )}
   >

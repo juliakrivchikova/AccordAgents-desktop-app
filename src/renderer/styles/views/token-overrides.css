@@ -17,7 +17,7 @@
 
 .app-select-trigger:focus-visible {
   border-color: var(--app-accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 18%, transparent);
+  box-shadow: var(--focus-ring);
 }
 
 .icon-button,
@@ -273,7 +273,7 @@
 .plan-correction-input-row textarea {
   min-height: 52px;
   max-height: 160px;
-  border-radius: 10px;
+  border-radius: var(--radius-control);
 }
 
 .plan-correction-submit {
@@ -281,7 +281,7 @@
   height: 40px;
   align-self: end;
   border-color: var(--app-border-strong);
-  border-radius: 10px;
+  border-radius: var(--radius-control);
   background: var(--app-surface);
   color: var(--app-muted);
   box-shadow:
@@ -792,7 +792,7 @@
 
 .chat-choice-text-panel textarea:focus {
   border-color: var(--app-accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 16%, transparent);
+  box-shadow: var(--focus-ring);
 }
 
 .sidebar-history-item.is-selected {

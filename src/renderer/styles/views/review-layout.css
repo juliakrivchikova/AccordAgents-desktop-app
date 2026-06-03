@@ -207,7 +207,7 @@
   max-height: 180px;
   resize: vertical;
   border: 1px solid var(--app-border);
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   padding: 12px 13px;
   background: var(--app-surface);
   color: var(--app-text-strong);
@@ -217,7 +217,7 @@
 
 .plan-correction-composer textarea:focus {
   border-color: var(--app-success);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-success) 16%, transparent);
+  box-shadow: var(--focus-ring);
 }
 
 .plan-correction-composer textarea:disabled {

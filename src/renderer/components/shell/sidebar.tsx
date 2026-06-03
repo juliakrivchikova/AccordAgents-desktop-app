@@ -75,7 +75,7 @@ export const Sidebar = ({
     >
       <div
         data-shell="sidebar-brand"
-        className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-[var(--app-shell-border)] px-3 text-sm font-semibold text-[var(--app-text-strong)]"
+        className="flex h-[var(--app-header-height)] shrink-0 items-center justify-between gap-2 border-b border-[var(--app-shell-border)] px-[var(--app-gutter)] text-sm font-semibold text-[var(--app-text-strong)]"
       >
         <div className="flex min-w-0 items-center gap-2">
           <img src={ACCORDAGENTS_MARK_URL} alt="" className="size-4 shrink-0" aria-hidden="true" />
@@ -93,7 +93,7 @@ export const Sidebar = ({
             className={cn(
               "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground",
               "transition-colors hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text-strong)]",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
             )}
           >
             <PanelLeftClose className="size-4" aria-hidden />
@@ -101,7 +101,7 @@ export const Sidebar = ({
         )}
       </div>
 
-      <div className="px-2 pt-3 pb-2">
+      <div className="px-[var(--app-gutter-tight)] pt-3 pb-2">
         <button
           type="button"
           onClick={onNewSession}
@@ -112,7 +112,7 @@ export const Sidebar = ({
             "border border-[var(--app-border-strong)] bg-[var(--app-surface)] px-3 text-xs font-medium text-foreground",
             "transition-colors hover:border-[var(--app-accent-border)] hover:bg-[var(--app-surface-hover)]",
             "disabled:cursor-not-allowed disabled:opacity-50",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
           )}
         >
           <MessageSquare className="size-3.5" aria-hidden />
@@ -120,11 +120,11 @@ export const Sidebar = ({
         </button>
       </div>
 
-      <div className="px-2 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+      <div className="px-[var(--app-gutter-tight)] pb-1 pt-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
         Projects
       </div>
 
-      <ScrollArea className="min-h-0 min-w-0 flex-1 px-2 pb-2">
+      <ScrollArea className="min-h-0 min-w-0 flex-1 px-[var(--app-gutter-tight)] pb-2">
         <div className="flex min-w-0 flex-col gap-1">
           {loading ? (
             <HistoryLoadingState />
@@ -149,7 +149,7 @@ export const Sidebar = ({
                       className={cn(
                         "flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left text-sm",
                         "text-[var(--app-text)] transition-colors hover:bg-[var(--app-surface-hover)]",
-                        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                        "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
                       )}
                     >
                       {collapsed ? <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden /> : <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}
@@ -167,7 +167,7 @@ export const Sidebar = ({
                         "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground",
                         "opacity-0 transition-colors hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text-strong)] group-hover:opacity-100",
                         "disabled:cursor-not-allowed disabled:opacity-30",
-                        "focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                        "focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
                       )}
                     >
                       <Plus className="size-3.5" aria-hidden />
@@ -197,7 +197,7 @@ export const Sidebar = ({
                               "border border-transparent transition-colors hover:bg-[var(--app-surface-hover)]",
                               selected && "is-selected text-[var(--app-text-strong)]",
                               pending && "is-loading",
-                              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                              "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
                             )}
                           >
                             <span className="flex w-full min-w-0 items-center gap-1.5 text-[13px] leading-tight">
@@ -217,7 +217,7 @@ export const Sidebar = ({
                           className={cn(
                             "w-full rounded-md px-2 py-1.5 text-left text-[12px] text-muted-foreground",
                             "transition-colors hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text)]",
-                            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                            "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
                           )}
                         >
                           Show {hiddenCount} more

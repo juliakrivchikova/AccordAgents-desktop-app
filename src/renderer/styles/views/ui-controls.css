@@ -6,7 +6,7 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   cursor: pointer;
   transition:
     background 120ms ease,
@@ -72,7 +72,7 @@
   align-items: center;
   gap: 7px;
   margin-top: 10px;
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .repo-status.ok {
@@ -130,7 +130,7 @@
   min-height: 38px;
   padding: 10px;
   border: 1px solid var(--app-border);
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   cursor: pointer;
 }
 
@@ -140,7 +140,10 @@
 }
 
 .decision-option input {
+  width: 16px;
+  height: 16px;
   margin: 3px 0 0;
+  accent-color: var(--app-accent);
 }
 
 .decision-option-body {
@@ -159,10 +162,10 @@
   justify-self: start;
   width: fit-content;
   padding: 3px 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--app-success-soft);
   color: var(--app-success);
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 800;
 }
 
@@ -186,18 +189,18 @@
   width: 100%;
   min-width: 0;
   resize: vertical;
-  border: 1px solid var(--app-border);
-  border-radius: 8px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: var(--radius-control);
   padding: 10px 11px;
   background: var(--app-surface);
   color: var(--app-text-strong);
-  line-height: 1.42;
+  line-height: var(--leading-normal);
   outline: none;
 }
 
 .decision-compose textarea:focus {
   border-color: var(--app-success);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-success) 16%, transparent);
+  box-shadow: var(--focus-ring);
 }
 
 .decision-compose-actions {
@@ -247,12 +250,12 @@
 
 .settings-section-head h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--text-lg);
 }
 
 .settings-section-head span {
   color: var(--app-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .role-config-list {
@@ -266,6 +269,6 @@
   gap: 12px;
   padding: 14px;
   border: 1px solid var(--app-border);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   background: var(--app-surface);
 }

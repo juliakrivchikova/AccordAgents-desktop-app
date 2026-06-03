@@ -16,7 +16,7 @@ export const AppShell = ({ sidebar, topBar, children, sidebarCollapsed = false, 
     data-sidebar-collapsed={sidebarCollapsed ? "true" : undefined}
     className={cn(
       "grid h-full min-h-0 bg-[var(--app-workspace-bg)] text-foreground",
-      sidebarCollapsed ? "grid-cols-[minmax(0,1fr)]" : "grid-cols-[260px_minmax(0,1fr)]",
+      sidebarCollapsed ? "grid-cols-[minmax(0,1fr)]" : "grid-cols-[var(--app-sidebar-width)_minmax(0,1fr)]",
       className
     )}
   >

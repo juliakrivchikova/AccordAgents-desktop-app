@@ -7,8 +7,8 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 
-  --app-header-height: 56px;
-  --app-sidebar-width: 280px;
+  --app-header-height: 48px;
+  --app-sidebar-width: 260px;
   --app-bg: #f6f8fb;
   --app-workspace-bg: #f7f9fc;
   --app-sidebar-bg: #eef2f7;
@@ -100,6 +100,26 @@
   --leading-tight: 1.25;
   --leading-normal: 1.42;
   --leading-relaxed: 1.6;
+
+  /* One horizontal gutter for every shell + content region */
+  --app-gutter: 16px;
+  --app-gutter-tight: 12px;
+
+  /* Control heights */
+  --control-h-sm: 28px;
+  --control-h-md: 32px;
+  --control-h-lg: 38px;
+
+  /* Radius scale — collapses ad-hoc 5/6/7/8/9/14/16 into four values */
+  --radius-control: 8px;
+  --radius-card: 12px;
+  --radius-shell: 16px;
+  --radius-pill: 999px;
+
+  /* One focus ring, reused everywhere (color follows themed --ring) */
+  --focus-ring-width: 3px;
+  --focus-ring-color: color-mix(in srgb, var(--ring) 45%, transparent);
+  --focus-ring: 0 0 0 var(--focus-ring-width) var(--focus-ring-color);
 
   --background: #f7f8fb;
   --foreground: #262a33;
