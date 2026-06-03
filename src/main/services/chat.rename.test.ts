@@ -97,6 +97,39 @@ test("renameConversation rejects when a chat run already owns the run queue", as
   }
 });
 
+test("addParticipant serializes concurrent roster additions without dropping a participant", async () => {
+  const conversation = chatConversation({ title: "Roster chat" });
+  const { service, storage } = testService([conversation]);
+
+  await Promise.all([
+    service.addParticipant({
+      conversationId: conversation.id,
+      participant: {
+        handle: "taylor",
+        roleConfigId: ROLE.id,
+        kind: "claude-code"
+      }
+    }),
+    service.addParticipant({
+      conversationId: conversation.id,
+      participant: {
+        handle: "alex",
+        roleConfigId: ROLE.id,
+        kind: "codex-cli"
+      }
+    })
+  ]);
+
+  const saved = await storage.getConversation(conversation.id);
+  const participants = (saved?.metadata.participants ?? []) as ChatParticipant[];
+  assert.deepEqual(
+    participants.map((participant) => participant.handle).sort(),
+    ["alex", "drew", "taylor"]
+  );
+  assert.equal(saved?.messages.filter((message) => message.content === "Added @taylor to the chat.").length, 1);
+  assert.equal(saved?.messages.filter((message) => message.content === "Added @alex to the chat.").length, 1);
+});
+
 function testService(conversationList: Conversation[]): {
   service: ChatService;
   storage: {

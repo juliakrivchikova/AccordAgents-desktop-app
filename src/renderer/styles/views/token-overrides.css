@@ -341,7 +341,7 @@
 .chat-draft-highlight {
   position: absolute;
   inset: 0;
-  z-index: 1;
+  z-index: 3;
   overflow: hidden;
   border: 0;
   border-radius: 11px;
@@ -357,7 +357,7 @@
 .chat-draft-skill-token {
   border-radius: 6px;
   color: var(--app-accent);
-  font-weight: 650;
+  font-weight: inherit;
   background:
     linear-gradient(
       0deg,
@@ -370,12 +370,19 @@
   position: relative;
   z-index: 2;
   color: transparent;
+  -webkit-text-fill-color: transparent;
   caret-color: var(--app-text-strong);
   background: transparent;
 }
 
+.chat-composer textarea.skill-highlight-textarea::placeholder {
+  color: transparent;
+  opacity: 0;
+}
+
 .chat-composer textarea.skill-highlight-textarea::selection {
   color: transparent;
+  -webkit-text-fill-color: transparent;
   background: color-mix(in srgb, var(--app-accent) 28%, transparent);
 }
 

@@ -3,7 +3,7 @@ import { Plus, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import type { AgentHealth, AppSettings, ChatParticipant } from "../../../shared/types";
+import type { AgentHealth, AppSettings, ChatParticipant, ChatParticipantConfig } from "../../../shared/types";
 import { Avatar } from "../avatar/avatar";
 import {
   avatarForChatAvatarOption,
@@ -11,8 +11,11 @@ import {
 } from "./chat-avatars";
 import { chatRoleLabel } from "./chat-conversation-data";
 import { ChatParticipantDraftRow } from "./chat-participant-draft-row";
-import type { ChatParticipantDraft } from "./chat-participant-drafts";
+import type { AddableSavedParticipantConfig, ChatParticipantDraft } from "./chat-participant-drafts";
 import {
+  addableSavedParticipantConfigs,
+  chatParticipantPermissionSummary,
+  labelForProviderKind,
   normalizedChatDrafts,
   validateChatCliAgents,
   validateChatParticipantDrafts
@@ -24,10 +27,16 @@ export interface ChatParticipantMenuViewProps {
   addValidation?: string;
   isRunning: boolean;
   addParticipantEditor: React.ReactNode;
+  savedParticipants: AddableSavedParticipantConfig[];
+  hasSavedParticipantConfigs: boolean;
   renderParticipantAvatar: (participant: ChatParticipant) => React.ReactNode;
+  renderSavedParticipantAvatar: (participant: ChatParticipantConfig) => React.ReactNode;
   participantRoleLabel: (participant: ChatParticipant) => string;
+  savedParticipantRoleLabel: (participant: ChatParticipantConfig) => string;
+  savedParticipantSummary: (participant: ChatParticipantConfig) => string;
   onDraftChange: (value: string) => void;
   onAddParticipant: () => void;
+  onAddSavedParticipant: (participant: ChatParticipantConfig) => void;
 }
 
 export function ChatParticipantMenu(props: {
@@ -40,14 +49,17 @@ export function ChatParticipantMenu(props: {
   onDraftChange: (value: string) => void;
   onAddParticipantDraftChange: (draft: ChatParticipantDraft) => void;
   onAddParticipant: () => void;
+  onAddSavedParticipant: (participant: ChatParticipantConfig) => void;
 }): JSX.Element {
+  const existingHandles = new Set(props.participants.map((participant) => participant.handle.toLowerCase()));
   const addDraft = normalizedChatDrafts([props.addParticipantDraft]);
   const addValidation = validateChatParticipantDrafts(
     addDraft,
     props.settings.chatRoleConfigs,
-    new Set(props.participants.map((participant) => participant.handle.toLowerCase())),
+    existingHandles,
     props.settings.chatBehaviorRules
   ) ?? validateChatCliAgents(addDraft, props.agents);
+  const savedParticipants = addableSavedParticipantConfigs(props.settings, props.agents, existingHandles);
 
   return (
     <ChatParticipantMenuView
@@ -55,8 +67,13 @@ export function ChatParticipantMenu(props: {
       draft={props.draft}
       addValidation={addValidation}
       isRunning={props.isRunning}
+      savedParticipants={savedParticipants}
+      hasSavedParticipantConfigs={props.settings.chatParticipantConfigs.length > 0}
       renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}
+      renderSavedParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}
       participantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
+      savedParticipantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
+      savedParticipantSummary={(participant) => `${labelForProviderKind(props.settings.providers, participant.kind)} · ${chatParticipantPermissionSummary(participant)}`}
       addParticipantEditor={(
         <ChatParticipantDraftRow
           draft={props.addParticipantDraft}
@@ -68,6 +85,7 @@ export function ChatParticipantMenu(props: {
       )}
       onDraftChange={props.onDraftChange}
       onAddParticipant={props.onAddParticipant}
+      onAddSavedParticipant={props.onAddSavedParticipant}
     />
   );
 }
@@ -117,6 +135,37 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
             </button>
           ))}
         </div>
+        <div className="chat-menu-divider" />
+        <section className="chat-saved-participants">
+          <div className="chat-popover-section-title">Saved participants</div>
+          {props.savedParticipants.length === 0 ? (
+            <div className="chat-saved-participants-empty">
+              {props.hasSavedParticipantConfigs ? "All saved participants are already in this chat." : "No saved participants configured."}
+            </div>
+          ) : (
+            <div className="chat-saved-participant-list">
+              {props.savedParticipants.map(({ config, invalidReason }) => (
+                <div className={`chat-saved-participant-row ${invalidReason ? "disabled" : ""}`} key={config.id}>
+                  {props.renderSavedParticipantAvatar(config)}
+                  <span className="chat-saved-participant-main">
+                    <strong>@{config.handle}</strong>
+                    <span>{props.savedParticipantRoleLabel(config)} · {props.savedParticipantSummary(config)}</span>
+                    {invalidReason && <small>{invalidReason}</small>}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={Boolean(invalidReason) || props.isRunning}
+                    onClick={() => props.onAddSavedParticipant(config)}
+                  >
+                    <Plus size={16} />
+                    Add
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
         <div className="chat-menu-divider" />
         {props.addParticipantEditor}
         {props.addValidation && <div className="inline-error">{props.addValidation}</div>}

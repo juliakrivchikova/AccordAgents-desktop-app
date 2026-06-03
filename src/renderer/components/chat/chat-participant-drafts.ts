@@ -38,6 +38,11 @@ export interface ChatParticipantDraft {
   permissions: ChatAgentPermissions;
 }
 
+export interface AddableSavedParticipantConfig {
+  config: ChatParticipantConfig;
+  invalidReason?: string;
+}
+
 export const CHAT_AGENT_MODE_OPTIONS: Array<{ value: ChatAgentMode; label: string }> = [
   { value: "default", label: "Default" },
   { value: "plan", label: "Plan" },
@@ -89,6 +94,23 @@ export function chatParticipantConfigToDraft(participant: ChatParticipantConfig)
 
 export function selectedChatParticipantDrafts(participants: ChatParticipantConfig[], selectedIds: Set<string>): ChatParticipantDraft[] {
   return participants.filter((participant) => selectedIds.has(participant.id)).map(chatParticipantConfigToDraft);
+}
+
+export function addableSavedParticipantConfigs(
+  settings: AppSettings,
+  agents: AgentHealth[],
+  existingHandles: Set<string>
+): AddableSavedParticipantConfig[] {
+  const normalizedExistingHandles = new Set(Array.from(existingHandles, (handle) => handle.toLowerCase()));
+  return settings.chatParticipantConfigs
+    .filter((participant) => !normalizedExistingHandles.has(participant.handle.toLowerCase()))
+    .map((config) => {
+      const draft = chatParticipantConfigToDraft(config);
+      return {
+        config,
+        invalidReason: validateChatParticipantDrafts([draft], settings.chatRoleConfigs, new Set(), settings.chatBehaviorRules) ?? validateChatCliAgents([draft], agents)
+      };
+    });
 }
 
 export function sameParticipantDraft(draft: ChatParticipantDraft, participant: ChatParticipantConfig): boolean {

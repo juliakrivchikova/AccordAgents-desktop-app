@@ -23,12 +23,10 @@ import type {
   GitRepoInfo
 } from "../../../shared/types";
 import {
-  chatParticipantConfigToDraft,
+  addableSavedParticipantConfigs,
   chatParticipantPermissionSummary,
   labelForProviderKind,
   selectedChatParticipantDrafts,
-  validateChatCliAgents,
-  validateChatParticipantDrafts,
   validateChatStartupDrafts
 } from "./chat-participant-drafts";
 
@@ -52,12 +50,10 @@ export function ChatSetup(props: {
 }): JSX.Element {
   const normalizedDrafts = selectedChatParticipantDrafts(props.settings.chatParticipantConfigs, props.selectedParticipantIds);
   const validation = validateChatStartupDrafts(normalizedDrafts, props.settings.chatRoleConfigs, props.agents, props.settings.chatBehaviorRules);
-  const allParticipantIds = props.settings.chatParticipantConfigs
-    .filter((participant) => {
-      const draft = chatParticipantConfigToDraft(participant);
-      return !(validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs, new Set(), props.settings.chatBehaviorRules) ?? validateChatCliAgents([draft], props.agents));
-    })
-    .map((participant) => participant.id);
+  const savedParticipantOptions = addableSavedParticipantConfigs(props.settings, props.agents, new Set());
+  const allParticipantIds = savedParticipantOptions
+    .filter((participant) => !participant.invalidReason)
+    .map((participant) => participant.config.id);
   return (
     <div className="chat-setup">
       <FormRow label="Chat title">
@@ -120,9 +116,7 @@ export function ChatSetup(props: {
           </div>
         ) : (
           <div className="chat-participant-select-list">
-            {props.settings.chatParticipantConfigs.map((participant) => {
-              const draft = chatParticipantConfigToDraft(participant);
-              const invalidReason = validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs, new Set(), props.settings.chatBehaviorRules) ?? validateChatCliAgents([draft], props.agents);
+            {savedParticipantOptions.map(({ config: participant, invalidReason }) => {
               const selected = props.selectedParticipantIds.has(participant.id);
               return (
                 <label className={`saved-participant-option ${selected ? "selected" : ""} ${invalidReason ? "disabled" : ""}`} key={participant.id}>

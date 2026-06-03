@@ -27,6 +27,7 @@ import type {
   ChatAppToolApprovalScope,
   ChatBehaviorRuleConfigUpdate,
   ChatImageInput,
+  ChatParticipantConfig,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
   ChatSkillMention,
@@ -59,6 +60,7 @@ import {
 import { avatarForChatParticipant } from "./components/chat/chat-avatars";
 import type { ChatParticipantDraft } from "./components/chat/chat-participant-drafts";
 import {
+  chatParticipantConfigToDraft,
   defaultChatParticipantDraft,
   normalizeChatParticipantDraftForSettings,
   normalizedChatDrafts,
@@ -780,28 +782,42 @@ function App(): JSX.Element {
     }
   }
 
-  async function addChatParticipant(): Promise<void> {
-    if (!conversation || conversation.kind !== "chat" || !chatAddParticipantDraft) {
-      return;
+  async function commitChatParticipant(participant: ChatParticipantDraft): Promise<boolean> {
+    if (!conversation || conversation.kind !== "chat") {
+      return false;
     }
     const existingHandles = new Set(chatParticipants(conversation).map((item) => item.handle.toLowerCase()));
-    const validation = validateChatParticipantDrafts([chatAddParticipantDraft], settings.chatRoleConfigs, existingHandles, settings.chatBehaviorRules) ?? validateChatCliAgents([chatAddParticipantDraft], agents);
+    const validation = validateChatParticipantDrafts([participant], settings.chatRoleConfigs, existingHandles, settings.chatBehaviorRules) ?? validateChatCliAgents([participant], agents);
     if (validation) {
       setError(validation);
-      return;
+      return false;
     }
-    const participant = normalizedChatDrafts([chatAddParticipantDraft])[0];
     setError(undefined);
     try {
       const saved = await window.consensus.addChatParticipant({ conversationId: conversation.id, participant });
       if (saved) {
         setConversation(saved);
       }
-      setChatAddParticipantDraft(defaultChatParticipantDraft(settings));
       setSummaries(await window.consensus.listConversations());
+      return true;
     } catch (caught) {
       setError(errorText(caught));
+      return false;
     }
+  }
+
+  async function addChatParticipant(): Promise<void> {
+    const draft = chatAddParticipantDraft ?? defaultChatParticipantDraft(settings);
+    const participant = normalizedChatDrafts([draft])[0];
+    const saved = await commitChatParticipant(participant);
+    if (saved) {
+      setChatAddParticipantDraft(defaultChatParticipantDraft(settings));
+    }
+  }
+
+  async function addSavedChatParticipant(config: ChatParticipantConfig): Promise<void> {
+    const participant = normalizedChatDrafts([chatParticipantConfigToDraft(config)])[0];
+    await commitChatParticipant(participant);
   }
 
   async function respondToChatAppToolApproval(approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope): Promise<void> {
@@ -1552,6 +1568,7 @@ function App(): JSX.Element {
           onDraftChange={setChatMessageDraft}
           onAddParticipantDraftChange={setChatAddParticipantDraft}
           onAddParticipant={() => void addChatParticipant()}
+          onAddSavedParticipant={(participant) => void addSavedChatParticipant(participant)}
         />
       )}
       <ModeToggle />

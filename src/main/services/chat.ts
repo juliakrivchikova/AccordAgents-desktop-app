@@ -399,20 +399,22 @@ export class ChatService {
     if (!conversation || conversation.kind !== "chat") {
       return conversation;
     }
-    const participants = this.chatParticipants(conversation);
-    const nextParticipant = (await this.validateParticipants([request.participant], participants))[0];
-    conversation.metadata = {
-      ...conversation.metadata,
-      participants: [...participants, nextParticipant]
-    };
-    conversation.updatedAt = new Date().toISOString();
-    conversation.messages.push(
-      this.message("system", `Added @${nextParticipant.handle} to the chat.`, undefined, {
-        threadId: "system"
-      })
-    );
-    await this.saveConversation(conversation);
-    return conversation;
+    return this.withChatMutation(conversation, async () => {
+      const participants = this.chatParticipants(conversation);
+      const nextParticipant = (await this.validateParticipants([request.participant], participants))[0];
+      conversation.metadata = {
+        ...conversation.metadata,
+        participants: [...participants, nextParticipant]
+      };
+      conversation.updatedAt = new Date().toISOString();
+      conversation.messages.push(
+        this.message("system", `Added @${nextParticipant.handle} to the chat.`, undefined, {
+          threadId: "system"
+        })
+      );
+      await this.saveConversation(conversation);
+      return conversation;
+    });
   }
 
   userSkillRunContext(conversation: Conversation, content: string): UserSkillRunContext {
