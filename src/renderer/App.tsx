@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   Bot,
   Circle,
+  ListChecks,
   PanelLeftOpen,
   RefreshCw,
   Settings,
@@ -24,6 +25,7 @@ import type {
   AgentHealth,
   AppSettings,
   ChatAppToolApprovalScope,
+  ChatBehaviorRuleConfigUpdate,
   ChatImageInput,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
@@ -111,6 +113,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   roundLimitDefault: 2,
   providers: [],
   chatRoleConfigs: [],
+  chatBehaviorRules: [],
   chatParticipantConfigs: []
 };
 
@@ -597,7 +600,7 @@ function App(): JSX.Element {
     setError(undefined);
     setWarnings([]);
     const participants = selectedChatParticipantDrafts(settings.chatParticipantConfigs, selectedChatParticipantConfigIds);
-    const validation = validateChatStartupDrafts(participants, settings.chatRoleConfigs, agents);
+    const validation = validateChatStartupDrafts(participants, settings.chatRoleConfigs, agents, settings.chatBehaviorRules);
     if (validation) {
       setError(validation);
       return;
@@ -782,7 +785,7 @@ function App(): JSX.Element {
       return;
     }
     const existingHandles = new Set(chatParticipants(conversation).map((item) => item.handle.toLowerCase()));
-    const validation = validateChatParticipantDrafts([chatAddParticipantDraft], settings.chatRoleConfigs, existingHandles) ?? validateChatCliAgents([chatAddParticipantDraft], agents);
+    const validation = validateChatParticipantDrafts([chatAddParticipantDraft], settings.chatRoleConfigs, existingHandles, settings.chatBehaviorRules) ?? validateChatCliAgents([chatAddParticipantDraft], agents);
     if (validation) {
       setError(validation);
       return;
@@ -1396,6 +1399,26 @@ function App(): JSX.Element {
     }
   }
 
+  async function saveChatBehaviorRuleConfig(update: ChatBehaviorRuleConfigUpdate): Promise<void> {
+    setError(undefined);
+    try {
+      const next = await window.consensus.saveChatBehaviorRuleConfig(update);
+      setSettings(next);
+    } catch (caught) {
+      setError(errorText(caught));
+    }
+  }
+
+  async function deleteChatBehaviorRuleConfig(id: string): Promise<void> {
+    setError(undefined);
+    try {
+      const next = await window.consensus.deleteChatBehaviorRuleConfig(id);
+      setSettings(next);
+    } catch (caught) {
+      setError(errorText(caught));
+    }
+  }
+
   async function saveChatParticipantConfig(update: ChatParticipantConfigUpdate): Promise<void> {
     setError(undefined);
     try {
@@ -1565,6 +1588,14 @@ function App(): JSX.Element {
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => {
+                openSettingsSection("behavior-rules");
+              }}
+            >
+              <ListChecks aria-hidden />
+              Rules
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
                 openSettingsSection("participants");
               }}
             >
@@ -1644,6 +1675,8 @@ function App(): JSX.Element {
             agents={agents}
             updateProvider={updateProvider}
             saveChatRoleConfig={saveChatRoleConfig}
+            saveChatBehaviorRuleConfig={saveChatBehaviorRuleConfig}
+            deleteChatBehaviorRuleConfig={deleteChatBehaviorRuleConfig}
             saveChatParticipantConfig={saveChatParticipantConfig}
             deleteChatParticipantConfig={deleteChatParticipantConfig}
             onClose={closeSettings}

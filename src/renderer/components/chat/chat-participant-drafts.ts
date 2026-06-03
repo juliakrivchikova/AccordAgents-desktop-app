@@ -1,6 +1,7 @@
 import type {
   AgentHealth,
   AppSettings,
+  ChatBehaviorRuleConfig,
   ChatAgentMode,
   ChatAgentPermissions,
   ChatParticipant,
@@ -29,6 +30,7 @@ import {
 export interface ChatParticipantDraft {
   handle: string;
   roleConfigId: string;
+  behaviorRuleIds: string[];
   kind: ChatProviderKind;
   model?: string;
   avatarId?: string;
@@ -63,6 +65,7 @@ export function defaultChatParticipantDraft(settings: AppSettings, existingHandl
   return {
     handle,
     roleConfigId,
+    behaviorRuleIds: [],
     kind,
     model: provider?.model,
     avatarId: defaultChatAvatarId(kind, handle || roleConfigId),
@@ -75,6 +78,7 @@ export function chatParticipantConfigToDraft(participant: ChatParticipantConfig)
   return {
     handle: participant.handle,
     roleConfigId: participant.roleConfigId,
+    behaviorRuleIds: normalizeBehaviorRuleIds(participant.behaviorRuleIds),
     kind: participant.kind,
     model: participant.model,
     avatarId: normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle),
@@ -91,6 +95,7 @@ export function sameParticipantDraft(draft: ChatParticipantDraft, participant: C
   return (
     draft.handle === participant.handle &&
     draft.roleConfigId === participant.roleConfigId &&
+    behaviorRuleIdsEqual(draft.behaviorRuleIds, participant.behaviorRuleIds) &&
     draft.kind === participant.kind &&
     (draft.model ?? "") === (participant.model ?? "") &&
     normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle) === normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle) &&
@@ -124,10 +129,14 @@ export function normalizeChatParticipantDraftForSettings(draft: ChatParticipantD
   const provider = settings.providers.find((item) => item.kind === draft.kind) ?? settings.providers.find((item) => item.kind === fallback.kind);
   const kind = provider?.kind === "claude-code" ? "claude-code" : "codex-cli";
   const handle = draft.handle.trim() || (roleConfigId ? generatedChatHandle(settings, kind, roleConfigId) : "");
+  const selectedRuleIds = new Set(normalizeBehaviorRuleIds(draft.behaviorRuleIds));
   return {
     ...draft,
     handle,
     roleConfigId,
+    behaviorRuleIds: settings.chatBehaviorRules
+      .map((rule) => rule.id)
+      .filter((id) => selectedRuleIds.has(id)),
     kind,
     model: draft.model ?? provider?.model,
     avatarId: normalizedChatAvatarId(kind, draft.avatarId, handle || roleConfigId),
@@ -139,7 +148,7 @@ export function normalizeChatParticipantDraftForSettings(draft: ChatParticipantD
 export function updateChatParticipantDraft(
   draft: ChatParticipantDraft,
   settings: AppSettings,
-  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "kind" | "avatarId" | "agentMode" | "permissions">>
+  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "behaviorRuleIds" | "kind" | "avatarId" | "agentMode" | "permissions">>
 ): ChatParticipantDraft {
   let next = { ...draft, ...patch };
   if (!isChatAvatarIdForKind(next.avatarId, next.kind)) {
@@ -160,6 +169,7 @@ export function normalizedChatDrafts(drafts: ChatParticipantDraft[]): ChatPartic
   return drafts.map((draft) => ({
     handle: draft.handle.trim().replace(/^@/, ""),
     roleConfigId: draft.roleConfigId,
+    behaviorRuleIds: normalizeBehaviorRuleIds(draft.behaviorRuleIds),
     kind: draft.kind,
     model: draft.model?.trim() || undefined,
     avatarId: normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle),
@@ -171,7 +181,8 @@ export function normalizedChatDrafts(drafts: ChatParticipantDraft[]): ChatPartic
 export function validateChatParticipantDrafts(
   drafts: ChatParticipantDraft[],
   roles: ChatRoleConfig[],
-  existingHandles: Set<string> = new Set()
+  existingHandles: Set<string> = new Set(),
+  behaviorRules: ChatBehaviorRuleConfig[] = []
 ): string | undefined {
   if (drafts.length === 0) {
     return "Add at least one participant.";
@@ -188,6 +199,10 @@ export function validateChatParticipantDrafts(
     handles.add(normalized);
     if (!roles.some((role) => role.id === draft.roleConfigId)) {
       return "Select a role for every participant.";
+    }
+    const availableRuleIds = new Set(behaviorRules.map((rule) => rule.id));
+    if (draft.behaviorRuleIds.some((id) => !availableRuleIds.has(id))) {
+      return "Select valid behavior rules for every participant.";
     }
     if (draft.kind !== "codex-cli" && draft.kind !== "claude-code") {
       return "Chat supports local CLI participants only.";
@@ -208,7 +223,12 @@ export function validateChatParticipantDrafts(
   return undefined;
 }
 
-export function validateChatStartupDrafts(drafts: ChatParticipantDraft[], roles: ChatRoleConfig[], agents: AgentHealth[]): string | undefined {
+export function validateChatStartupDrafts(
+  drafts: ChatParticipantDraft[],
+  roles: ChatRoleConfig[],
+  agents: AgentHealth[],
+  behaviorRules: ChatBehaviorRuleConfig[] = []
+): string | undefined {
   if (drafts.length === 0) {
     if (!roles.some((role) => role.id === "administrator")) {
       return "Administrator role is required to start an empty chat.";
@@ -218,7 +238,7 @@ export function validateChatStartupDrafts(drafts: ChatParticipantDraft[], roles:
     }
     return undefined;
   }
-  return validateChatParticipantDrafts(drafts, roles) ?? validateChatCliAgents(drafts, agents);
+  return validateChatParticipantDrafts(drafts, roles, new Set(), behaviorRules) ?? validateChatCliAgents(drafts, agents);
 }
 
 export function validateChatCliAgents(drafts: ChatParticipantDraft[], agents: AgentHealth[]): string | undefined {
@@ -229,6 +249,32 @@ export function validateChatCliAgents(drafts: ChatParticipantDraft[], agents: Ag
     }
   }
   return undefined;
+}
+
+function normalizeBehaviorRuleIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const id = item.trim();
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+function behaviorRuleIdsEqual(left: unknown, right: unknown): boolean {
+  const leftIds = normalizeBehaviorRuleIds(left);
+  const rightIds = normalizeBehaviorRuleIds(right);
+  return leftIds.length === rightIds.length && leftIds.every((id, index) => id === rightIds[index]);
 }
 
 function generatedChatHandle(settings: AppSettings, kind: ChatProviderKind, roleConfigId: string, existingHandles: Set<string> = new Set()): string {

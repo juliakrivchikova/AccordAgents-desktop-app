@@ -51,11 +51,11 @@ export function ChatSetup(props: {
   onStart: () => void;
 }): JSX.Element {
   const normalizedDrafts = selectedChatParticipantDrafts(props.settings.chatParticipantConfigs, props.selectedParticipantIds);
-  const validation = validateChatStartupDrafts(normalizedDrafts, props.settings.chatRoleConfigs, props.agents);
+  const validation = validateChatStartupDrafts(normalizedDrafts, props.settings.chatRoleConfigs, props.agents, props.settings.chatBehaviorRules);
   const allParticipantIds = props.settings.chatParticipantConfigs
     .filter((participant) => {
       const draft = chatParticipantConfigToDraft(participant);
-      return !(validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs) ?? validateChatCliAgents([draft], props.agents));
+      return !(validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs, new Set(), props.settings.chatBehaviorRules) ?? validateChatCliAgents([draft], props.agents));
     })
     .map((participant) => participant.id);
   return (
@@ -122,7 +122,7 @@ export function ChatSetup(props: {
           <div className="chat-participant-select-list">
             {props.settings.chatParticipantConfigs.map((participant) => {
               const draft = chatParticipantConfigToDraft(participant);
-              const invalidReason = validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs) ?? validateChatCliAgents([draft], props.agents);
+              const invalidReason = validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs, new Set(), props.settings.chatBehaviorRules) ?? validateChatCliAgents([draft], props.agents);
               const selected = props.selectedParticipantIds.has(participant.id);
               return (
                 <label className={`saved-participant-option ${selected ? "selected" : ""} ${invalidReason ? "disabled" : ""}`} key={participant.id}>

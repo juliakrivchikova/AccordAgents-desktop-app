@@ -12,6 +12,7 @@ import {
 } from "../../shared/agentPermissions";
 import type {
   ChatAppToolApproval,
+  ChatBehaviorRuleConfig,
   ChatParticipant,
   ChatRoleConfig,
   Conversation,
@@ -854,9 +855,45 @@ test("static chat instructions include structured participant request and reply 
   assert.doesNotMatch(instructions, /app_chat_reply_to_participant_request/);
 });
 
+test("participant behavior rules are merged into session role instructions", async () => {
+  const behaviorRule: ChatBehaviorRuleConfig = {
+    id: "concise",
+    label: "Be concise",
+    instructions: "Keep replies short unless User asks for detail.",
+    version: 1,
+    updatedAt: NOW
+  };
+  const { service } = testService({
+    settings: {
+      chatRoleConfigs: [ROLE],
+      chatBehaviorRules: [behaviorRule]
+    }
+  });
+  const participant = {
+    ...chatParticipant("codex-cli"),
+    behaviorRuleIds: [behaviorRule.id]
+  };
+
+  const session = await (service as any).newSessionForParticipant(participant);
+
+  assert.match(session.roleInstructions, /## Participant Behavior Rules/);
+  assert.match(session.roleInstructions, /### Be concise/);
+  assert.match(session.roleInstructions, /Keep replies short unless User asks for detail/);
+  assert.deepEqual(session.participantBehaviorRules, [{
+    id: behaviorRule.id,
+    label: behaviorRule.label,
+    instructions: behaviorRule.instructions,
+    version: behaviorRule.version
+  }]);
+});
+
 function testService(options: {
   conversation?: Conversation;
   run?: (...args: any[]) => Promise<any>;
+  settings?: {
+    chatRoleConfigs: ChatRoleConfig[];
+    chatBehaviorRules?: ChatBehaviorRuleConfig[];
+  };
 } = {}): { service: ChatService; storage: any; tempRoot: string } {
   const tempRoot = path.join(tmpdir(), "accordagents-chat-permissions-test");
   const storage = {
@@ -869,8 +906,11 @@ function testService(options: {
     }
   };
   const settings = {
-    async getPublicSettings(): Promise<{ chatRoleConfigs: ChatRoleConfig[] }> {
-      return { chatRoleConfigs: [ROLE] };
+    async getPublicSettings(): Promise<{ chatRoleConfigs: ChatRoleConfig[]; chatBehaviorRules: ChatBehaviorRuleConfig[] }> {
+      return {
+        chatRoleConfigs: options.settings?.chatRoleConfigs ?? [ROLE],
+        chatBehaviorRules: options.settings?.chatBehaviorRules ?? []
+      };
     }
   };
   const cliRunner = {

@@ -18,8 +18,42 @@
   background: var(--app-surface);
 }
 
-.avatar-picker-field {
+.avatar-picker-field,
+.behavior-rules-field {
   grid-column: 1 / -1;
+}
+
+.chat-behavior-rule-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chat-behavior-rule-option {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 32px;
+  gap: 8px;
+  padding: 6px 9px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chat-behavior-rule-option input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--app-accent);
+}
+
+.chat-behavior-rule-option span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .chat-permissions-panel {

@@ -44,6 +44,17 @@ export function ChatParticipantDraftRow(props: {
   const cliProviders = props.settings.providers.filter((provider) => isCliProviderKind(provider.kind));
   const avatarId = normalizedChatAvatarId(props.draft.kind, props.draft.avatarId, props.draft.handle);
   const avatarOptions = chatAvatarOptionsForKind(props.draft.kind);
+  function toggleBehaviorRule(ruleId: string, checked: boolean): void {
+    const selected = new Set(props.draft.behaviorRuleIds);
+    if (checked) {
+      selected.add(ruleId);
+    } else {
+      selected.delete(ruleId);
+    }
+    const behaviorRuleIds = props.settings.chatBehaviorRules.map((rule) => rule.id).filter((id) => selected.has(id));
+    props.onChange(updateChatParticipantDraft(props.draft, props.settings, { behaviorRuleIds }));
+  }
+
   return (
     <div className="chat-participant-row">
       <FormRow label="Name">
@@ -93,6 +104,24 @@ export function ChatParticipantDraftRow(props: {
           options={CHAT_AGENT_MODE_OPTIONS}
           onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { agentMode: value as ChatAgentMode }))}
         />
+      </FormRow>
+      <FormRow label="Behavior rules" className="behavior-rules-field">
+        {props.settings.chatBehaviorRules.length === 0 ? (
+          <div className="text-xs text-muted-foreground">No behavior rules created.</div>
+        ) : (
+          <div className="chat-behavior-rule-list">
+            {props.settings.chatBehaviorRules.map((rule) => (
+              <label className="chat-behavior-rule-option" key={rule.id}>
+                <input
+                  type="checkbox"
+                  checked={props.draft.behaviorRuleIds.includes(rule.id)}
+                  onChange={(event) => toggleBehaviorRule(rule.id, event.target.checked)}
+                />
+                <span>{rule.label}</span>
+              </label>
+            ))}
+          </div>
+        )}
       </FormRow>
       <ChatPermissionsEditor
         mode={props.draft.agentMode}

@@ -533,6 +533,7 @@ Do not advertise:
 - [ ] Accordance skill.
 - [ ] Rule management.
 - [ ] Tool management.
+- [ ] Bug: mcp__ai_consensus__app_chat_read_messages
 - [ ] Bug: read latest messages from chat history ( or thread)
 - [ ] Bug: when I run accord, the final response should be last message
 - [ ] Bug: Context not working (used token percentages). Also let's add time taken to respond to a message.

@@ -22,6 +22,7 @@ export interface AppSettings {
   roundLimitDefault: number;
   providers: ProviderSettings[];
   chatRoleConfigs: ChatRoleConfig[];
+  chatBehaviorRules: ChatBehaviorRuleConfig[];
   chatParticipantConfigs: ChatParticipantConfig[];
   lastRepoPath?: string;
 }
@@ -34,6 +35,21 @@ export interface ChatRoleConfig {
   builtIn?: boolean;
   appToolCapabilities?: ChatAppToolCapability[];
   updatedAt: string;
+}
+
+export interface ChatBehaviorRuleConfig {
+  id: string;
+  label: string;
+  instructions: string;
+  version: number;
+  updatedAt: string;
+}
+
+export interface ChatBehaviorRuleSnapshot {
+  id: string;
+  label: string;
+  instructions: string;
+  version: number;
 }
 
 export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code">;
@@ -165,6 +181,7 @@ export interface ChatParticipant {
   handle: string;
   roleConfigId: string;
   roleConfigVersion?: number;
+  behaviorRuleIds?: string[];
   kind: ChatProviderKind;
   model?: string;
   avatarId?: string;
@@ -181,6 +198,7 @@ export interface ChatParticipantSession {
   roleRuntime?: ChatRoleRuntime;
   participantKind?: ChatProviderKind;
   participantModel?: string;
+  participantBehaviorRules?: ChatBehaviorRuleSnapshot[];
   participantAgentMode?: ChatAgentMode;
   participantPermissions?: ChatAgentPermissions;
   runtimeConfigVersion?: number;
@@ -225,6 +243,7 @@ export type ChatRosterChangeOperationType = "add";
 export interface ChatRosterChangeParticipantInput {
   handle: string;
   roleConfigId: string;
+  behaviorRuleIds?: string[];
   kind: ChatProviderKind;
   model?: string;
   avatarId?: string;
@@ -350,6 +369,7 @@ export interface ChatRosterCurrentParticipant {
   handle: string;
   roleConfigId: string;
   roleLabel: string;
+  behaviorRuleIds?: string[];
   kind: ChatProviderKind;
   model?: string;
   agentMode?: ChatAgentMode;
@@ -449,10 +469,17 @@ export interface ChatRoleConfigUpdate {
   instructions: string;
 }
 
+export interface ChatBehaviorRuleConfigUpdate {
+  id?: string;
+  label: string;
+  instructions: string;
+}
+
 export interface ChatParticipantConfig {
   id: string;
   handle: string;
   roleConfigId: string;
+  behaviorRuleIds?: string[];
   kind: ChatProviderKind;
   model?: string;
   avatarId?: string;
@@ -465,6 +492,7 @@ export interface ChatParticipantConfigUpdate {
   id?: string;
   handle: string;
   roleConfigId: string;
+  behaviorRuleIds?: string[];
   kind: ChatProviderKind;
   model?: string;
   avatarId?: string;
@@ -478,6 +506,7 @@ export interface CreateChatConversationRequest {
   participants: Array<{
     handle: string;
     roleConfigId: string;
+    behaviorRuleIds?: string[];
     kind: ChatProviderKind;
     model?: string;
     avatarId?: string;
@@ -491,6 +520,7 @@ export interface AddChatParticipantRequest {
   participant: {
     handle: string;
     roleConfigId: string;
+    behaviorRuleIds?: string[];
     kind: ChatProviderKind;
     model?: string;
     avatarId?: string;
@@ -879,6 +909,8 @@ export interface AppBridge {
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;
+  saveChatBehaviorRuleConfig(update: ChatBehaviorRuleConfigUpdate): Promise<AppSettings>;
+  deleteChatBehaviorRuleConfig(id: string): Promise<AppSettings>;
   saveChatParticipantConfig(update: ChatParticipantConfigUpdate): Promise<AppSettings>;
   deleteChatParticipantConfig(id: string): Promise<AppSettings>;
   updateLastRepoPath(repoPath: string): Promise<AppSettings>;

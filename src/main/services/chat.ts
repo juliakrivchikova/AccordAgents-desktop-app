@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { app } from "electron";
@@ -12,6 +12,7 @@ import type {
   ChatAppToolApprovalPolicy,
   ChatAppToolApprovalRequest,
   ChatAppToolApprovalScope,
+  ChatBehaviorRuleSnapshot,
   ChatAppToolCapability,
   ChatChoiceOption,
   ChatImageAttachment,
@@ -34,7 +35,6 @@ import type {
   ChatRosterAvailableProvider,
   ChatRosterCurrentParticipant,
   ChatRoleRuntime,
-  ChatRoleConfig,
   ChatRosterChangeRequest,
   ChatShellPermissionRule,
   ChatSkillMention,
@@ -99,6 +99,15 @@ type ProgressCallback = (progress: ReviewProgress) => void;
 interface ChatParticipantSessionState {
   session: ChatParticipantSession;
   instructionsRefreshed: boolean;
+}
+
+interface ResolvedChatParticipantRole {
+  id: string;
+  label: string;
+  version: number;
+  appToolCapabilities?: ChatAppToolCapability[];
+  instructions: string;
+  behaviorRules: ChatBehaviorRuleSnapshot[];
 }
 
 interface ChatPromptSectionSizes {
@@ -864,6 +873,7 @@ export class ChatService {
           roleConfigId: participant.roleConfigId,
           roleLabel: this.roleLabelForParticipant(conversation, participant),
           roleVersion: role?.version ?? participant.roleConfigVersion,
+          behaviorRuleIds: this.normalizeBehaviorRuleIds(participant.behaviorRuleIds),
           appToolCapabilities: normalizeChatAppToolCapabilities(role?.appToolCapabilities),
           kind: participant.kind,
           model: participant.model,
@@ -2491,8 +2501,8 @@ export class ChatService {
     const existing = this.chatSessions(conversation).find((session) => session.participantId === participant.id);
     const runtimeConfigVersion = this.runtimeConfigVersionFor(participant);
     if (existing) {
-      const role = await this.roleForConfigId(existing.roleConfigId);
-      if (!role) {
+      const resolvedRole = await this.resolvedRoleForParticipant(participant, existing.roleConfigId);
+      if (!resolvedRole) {
         void this.debugLogs.write("chat.session.role-snapshot-refresh-skipped", {
           conversationId: conversation.id,
           participantId: participant.id,
@@ -2500,11 +2510,11 @@ export class ChatService {
         });
       }
       return {
-        session: this.refreshExistingSessionForParticipant(existing, participant, role, runtimeConfigVersion),
-        instructionsRefreshed: Boolean(role && this.roleSnapshotChanged(existing, role)) || existing.runtimeConfigVersion !== runtimeConfigVersion
+        session: this.refreshExistingSessionForParticipant(existing, participant, resolvedRole, runtimeConfigVersion),
+        instructionsRefreshed: Boolean(resolvedRole && this.roleSnapshotChanged(existing, resolvedRole)) || existing.runtimeConfigVersion !== runtimeConfigVersion
       };
     }
-    const role = await this.roleForParticipant(participant);
+    const role = await this.resolvedRoleForParticipant(participant);
     return {
       session: await this.newSessionForParticipant(participant, role, runtimeConfigVersion),
       instructionsRefreshed: false
@@ -2513,10 +2523,10 @@ export class ChatService {
 
   private async newSessionForParticipant(
     participant: ChatParticipant,
-    knownRole?: ChatRoleConfig,
+    knownRole?: ResolvedChatParticipantRole,
     knownRuntimeConfigVersion?: number
   ): Promise<ChatParticipantSession> {
-    const role = knownRole ?? await this.roleForParticipant(participant);
+    const role = knownRole ?? await this.resolvedRoleForParticipantOrThrow(participant);
     const runtimeConfigVersion = knownRuntimeConfigVersion ?? this.runtimeConfigVersionFor(participant);
     return {
       participantId: participant.id,
@@ -2527,6 +2537,7 @@ export class ChatService {
       roleRuntime: this.preferredRoleRuntimeFor(participant),
       participantKind: participant.kind,
       participantModel: participant.model?.trim() || undefined,
+      participantBehaviorRules: role.behaviorRules,
       participantAgentMode: normalizeChatAgentMode(participant.agentMode),
       participantPermissions: normalizeChatAgentPermissions(participant.permissions),
       runtimeConfigVersion,
@@ -2539,7 +2550,7 @@ export class ChatService {
   private refreshExistingSessionForParticipant(
     existing: ChatParticipantSession,
     participant: ChatParticipant,
-    role: ChatRoleConfig | undefined,
+    role: ResolvedChatParticipantRole | undefined,
     runtimeConfigVersion: number
   ): ChatParticipantSession {
     const participantKind = existing.participantKind ?? participant.kind;
@@ -2554,6 +2565,7 @@ export class ChatService {
         : this.preferredRoleRuntimeForKind(participantKind),
       participantKind,
       participantModel: this.normalizedModel(existing.participantModel) || undefined,
+      participantBehaviorRules: role?.behaviorRules ?? existing.participantBehaviorRules ?? [],
       // Adopt the participant's current launch settings so a mode/permission change
       // takes effect on the next turn. We keep resuming the session (no reset): the
       // provider re-asserts the profile on resume — the Codex app-server resume params
@@ -2567,12 +2579,13 @@ export class ChatService {
     };
   }
 
-  private roleSnapshotChanged(session: ChatParticipantSession, role: ChatRoleConfig): boolean {
+  private roleSnapshotChanged(session: ChatParticipantSession, role: ResolvedChatParticipantRole): boolean {
     return (
       session.roleConfigVersion !== role.version ||
       session.roleLabel !== role.label ||
       session.roleInstructions !== role.instructions ||
-      !chatAppToolCapabilitiesEqual(session.roleAppToolCapabilities, role.appToolCapabilities)
+      !chatAppToolCapabilitiesEqual(session.roleAppToolCapabilities, role.appToolCapabilities) ||
+      !this.behaviorRuleSnapshotsEqual(session.participantBehaviorRules, role.behaviorRules)
     );
   }
 
@@ -2677,8 +2690,13 @@ export class ChatService {
       participantPermissions: normalizeChatAgentPermissions(runPermissions),
       roleConfigId: session.roleConfigId,
       roleConfigVersion: session.roleConfigVersion,
+      roleInstructionsHash: this.shortHash(session.roleInstructions),
       roleAppToolCapabilities: normalizeChatAppToolCapabilities(session.roleAppToolCapabilities),
       roleRuntime: session.roleRuntime ?? "",
+      participantBehaviorRules: (session.participantBehaviorRules ?? []).map((rule) => ({
+        id: rule.id,
+        version: rule.version
+      })),
       runtimeConfigVersion: session.runtimeConfigVersion ?? 0,
       runPath,
       workspacePath,
@@ -2686,17 +2704,95 @@ export class ChatService {
     });
   }
 
-  private async roleForParticipant(participant: ChatParticipant): Promise<ChatRoleConfig> {
-    const role = await this.roleForConfigId(participant.roleConfigId);
+  private async resolvedRoleForParticipantOrThrow(participant: ChatParticipant): Promise<ResolvedChatParticipantRole> {
+    const role = await this.resolvedRoleForParticipant(participant);
     if (!role) {
       throw new Error(`Unknown role for @${participant.handle}.`);
     }
     return role;
   }
 
-  private async roleForConfigId(roleConfigId: string): Promise<ChatRoleConfig | undefined> {
-    const roles = (await this.settings.getPublicSettings()).chatRoleConfigs;
-    return roles.find((item) => item.id === roleConfigId);
+  private async resolvedRoleForParticipant(
+    participant: ChatParticipant,
+    roleConfigId: string = participant.roleConfigId
+  ): Promise<ResolvedChatParticipantRole | undefined> {
+    const settings = await this.settings.getPublicSettings();
+    const role = settings.chatRoleConfigs.find((item) => item.id === roleConfigId);
+    if (!role) {
+      return undefined;
+    }
+    const behaviorRules = this.behaviorRuleSnapshotsForParticipant(participant, settings.chatBehaviorRules ?? []);
+    return {
+      id: role.id,
+      label: role.label,
+      version: role.version,
+      appToolCapabilities: normalizeChatAppToolCapabilities(role.appToolCapabilities),
+      instructions: this.roleInstructionsWithBehaviorRules(role.instructions, behaviorRules),
+      behaviorRules
+    };
+  }
+
+  private behaviorRuleSnapshotsForParticipant(
+    participant: ChatParticipant,
+    rules: Array<{ id: string; label: string; instructions: string; version: number }>
+  ): ChatBehaviorRuleSnapshot[] {
+    const selectedIds = this.normalizeBehaviorRuleIds(participant.behaviorRuleIds);
+    return selectedIds
+      .map((id) => rules.find((rule) => rule.id === id))
+      .filter((rule): rule is ChatBehaviorRuleSnapshot => Boolean(rule))
+      .map((rule) => ({
+        id: rule.id,
+        label: rule.label,
+        instructions: rule.instructions,
+        version: rule.version
+      }));
+  }
+
+  private roleInstructionsWithBehaviorRules(roleInstructions: string, behaviorRules: ChatBehaviorRuleSnapshot[]): string {
+    if (behaviorRules.length === 0) {
+      return roleInstructions;
+    }
+    return [
+      roleInstructions,
+      "",
+      "## Participant Behavior Rules",
+      "",
+      "Apply these reusable behavior rules in addition to the role above. If a behavior rule conflicts with the user's current explicit request or higher-priority system/developer instructions, follow the higher-priority instruction.",
+      "",
+      ...behaviorRules.flatMap((rule) => [
+        `### ${rule.label}`,
+        rule.instructions,
+        ""
+      ])
+    ].join("\n").trimEnd();
+  }
+
+  private behaviorRuleSnapshotsEqual(left: ChatBehaviorRuleSnapshot[] | undefined, right: ChatBehaviorRuleSnapshot[] | undefined): boolean {
+    return JSON.stringify(left ?? []) === JSON.stringify(right ?? []);
+  }
+
+  private normalizeBehaviorRuleIds(value: unknown): string[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    for (const item of value) {
+      if (typeof item !== "string") {
+        continue;
+      }
+      const id = item.trim();
+      if (!id || seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      ids.push(id);
+    }
+    return ids;
+  }
+
+  private shortHash(value: string): string {
+    return createHash("sha256").update(value).digest("hex").slice(0, 16);
   }
 
   private confirmationBrevityPolicy(): string {
@@ -2942,7 +3038,8 @@ export class ChatService {
     if (items.length === 0 && existing.length === 0 && !allowEmpty) {
       throw new Error("Add at least one chat participant.");
     }
-    const roles = (await this.settings.getPublicSettings()).chatRoleConfigs;
+    const settings = await this.settings.getPublicSettings();
+    const roles = settings.chatRoleConfigs;
     const handles = new Set(existing.map((participant) => participant.handle.toLowerCase()));
     return items.map((item) => {
       const handle = item.handle.trim().replace(/^@/, "");
@@ -2960,10 +3057,13 @@ export class ChatService {
       if (!roles.some((role) => role.id === item.roleConfigId)) {
         throw new Error(`Unknown role for @${handle}.`);
       }
+      const requestedRuleIds = new Set(this.normalizeBehaviorRuleIds(item.behaviorRuleIds));
+      const behaviorRuleIds = (settings.chatBehaviorRules ?? []).map((rule) => rule.id).filter((id) => requestedRuleIds.has(id));
       return {
         id: randomUUID(),
         handle,
         roleConfigId: item.roleConfigId,
+        behaviorRuleIds,
         kind: item.kind as ChatProviderKind,
         model: item.model?.trim() || undefined,
         avatarId: item.avatarId?.trim() || undefined,
@@ -3068,6 +3168,7 @@ export class ChatService {
       handle: participant.handle,
       roleConfigId: participant.roleConfigId,
       roleLabel: this.roleLabelForParticipant(conversation, participant),
+      behaviorRuleIds: this.normalizeBehaviorRuleIds(participant.behaviorRuleIds),
       kind: participant.kind,
       model: participant.model,
       agentMode: normalizeChatAgentMode(participant.agentMode)
@@ -3111,6 +3212,7 @@ export class ChatService {
           participant: {
             handle,
             roleConfigId,
+            behaviorRuleIds: this.normalizeBehaviorRuleIds(participantRecord.behaviorRuleIds),
             kind,
             model: typeof participantRecord.model === "string" ? participantRecord.model.trim() || undefined : undefined,
             avatarId: typeof participantRecord.avatarId === "string" ? participantRecord.avatarId.trim() || undefined : undefined,
@@ -3133,6 +3235,7 @@ export class ChatService {
         participant: {
           handle: participant.handle,
           roleConfigId: participant.roleConfigId,
+          behaviorRuleIds: this.normalizeBehaviorRuleIds(participant.behaviorRuleIds),
           kind: participant.kind,
           model: participant.model,
           avatarId: participant.avatarId,

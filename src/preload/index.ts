@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type {
   AppBridge,
   AddChatParticipantRequest,
+  ChatBehaviorRuleConfigUpdate,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
   ComposeImplementationPlanRequest,
@@ -33,6 +34,8 @@ const bridge: AppBridge = {
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateProviderSettings: (update: ProviderSettingsUpdate) => ipcRenderer.invoke("settings:update-provider", update),
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => ipcRenderer.invoke("settings:save-chat-role", update),
+  saveChatBehaviorRuleConfig: (update: ChatBehaviorRuleConfigUpdate) => ipcRenderer.invoke("settings:save-chat-behavior-rule", update),
+  deleteChatBehaviorRuleConfig: (id: string) => ipcRenderer.invoke("settings:delete-chat-behavior-rule", id),
   saveChatParticipantConfig: (update: ChatParticipantConfigUpdate) => ipcRenderer.invoke("settings:save-chat-participant", update),
   deleteChatParticipantConfig: (id: string) => ipcRenderer.invoke("settings:delete-chat-participant", id),
   updateLastRepoPath: (repoPath: string) => ipcRenderer.invoke("settings:update-last-repo-path", repoPath),

@@ -4,6 +4,7 @@ import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import type {
   AddChatParticipantRequest,
   AgentHealth,
+  ChatBehaviorRuleConfigUpdate,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
   ComposeImplementationPlanRequest,
@@ -127,6 +128,8 @@ function registerIpc(): void {
   ipcMain.handle("settings:get", () => settingsService.getPublicSettings());
   ipcMain.handle("settings:update-provider", (_event, update: ProviderSettingsUpdate) => settingsService.updateProvider(update));
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));
+  ipcMain.handle("settings:save-chat-behavior-rule", (_event, update: ChatBehaviorRuleConfigUpdate) => settingsService.saveChatBehaviorRuleConfig(update));
+  ipcMain.handle("settings:delete-chat-behavior-rule", (_event, id: string) => settingsService.deleteChatBehaviorRuleConfig(id));
   ipcMain.handle("settings:save-chat-participant", (_event, update: ChatParticipantConfigUpdate) => {
     return settingsService.saveChatParticipantConfig(update);
   });

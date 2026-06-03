@@ -16,6 +16,8 @@ import { Input } from "@/components/ui/input";
 import type {
   AgentHealth,
   AppSettings,
+  ChatBehaviorRuleConfig,
+  ChatBehaviorRuleConfigUpdate,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
   ChatRoleConfig,
@@ -38,7 +40,7 @@ import {
 } from "../chat/chat-participant-drafts";
 import { FormRow, IconButton, ResizableTextarea } from "../primitives";
 
-export type SettingsSection = "local-clis" | "roles" | "participants";
+export type SettingsSection = "local-clis" | "roles" | "behavior-rules" | "participants";
 
 export function SettingsView(props: {
   section: SettingsSection;
@@ -46,11 +48,17 @@ export function SettingsView(props: {
   agents: AgentHealth[];
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => Promise<void>;
+  saveChatBehaviorRuleConfig: (update: ChatBehaviorRuleConfigUpdate) => Promise<void>;
+  deleteChatBehaviorRuleConfig: (id: string) => Promise<void>;
   saveChatParticipantConfig: (update: ChatParticipantConfigUpdate) => Promise<void>;
   deleteChatParticipantConfig: (id: string) => Promise<void>;
   onClose: () => void;
 }): JSX.Element {
-  const title = props.section === "local-clis" ? "Local CLIs" : props.section === "roles" ? "Roles" : "Participants";
+  const title = props.section === "local-clis"
+    ? "Local CLIs"
+    : props.section === "roles"
+      ? "Roles"
+      : props.section === "behavior-rules" ? "Rules" : "Participants";
   const cliProviders = props.settings.providers.filter((provider) => isCli(provider.kind));
   return (
     <section className="settings-view">
@@ -86,6 +94,13 @@ export function SettingsView(props: {
             agents={props.agents}
             onSave={props.saveChatParticipantConfig}
             onDelete={props.deleteChatParticipantConfig}
+          />
+        )}
+        {props.section === "behavior-rules" && (
+          <BehaviorRuleSettingsSection
+            settings={props.settings}
+            onSave={props.saveChatBehaviorRuleConfig}
+            onDelete={props.deleteChatBehaviorRuleConfig}
           />
         )}
         {props.section === "local-clis" && (
@@ -159,6 +174,75 @@ function ParticipantSettingsSection(props: {
   );
 }
 
+function BehaviorRuleSettingsSection(props: {
+  settings: AppSettings;
+  onSave: (update: ChatBehaviorRuleConfigUpdate) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+}): JSX.Element {
+  return (
+    <section className="settings-section">
+      <div className="settings-section-head">
+        <h2>Behavior rules</h2>
+        <span>{props.settings.chatBehaviorRules.length} rules</span>
+      </div>
+      <div className="role-config-list">
+        {props.settings.chatBehaviorRules.map((rule) => (
+          <BehaviorRuleEditor rule={rule} onSave={props.onSave} onDelete={props.onDelete} key={rule.id} />
+        ))}
+        <BehaviorRuleEditor onSave={props.onSave} onDelete={props.onDelete} key={`new-rule-${props.settings.chatBehaviorRules.length}`} />
+      </div>
+    </section>
+  );
+}
+
+function BehaviorRuleEditor({ rule, onSave, onDelete }: {
+  rule?: ChatBehaviorRuleConfig;
+  onSave: (update: ChatBehaviorRuleConfigUpdate) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+}): JSX.Element {
+  const [label, setLabel] = useState(rule?.label ?? "");
+  const [instructions, setInstructions] = useState(rule?.instructions ?? "");
+  const changed = label.trim() !== (rule?.label ?? "") || instructions.trim() !== (rule?.instructions ?? "");
+  const canSave = Boolean(label.trim() && instructions.trim()) && (!rule || changed);
+  return (
+    <article className="role-config-card">
+      <div className="settings-item-head">
+        <div>
+          <strong>{rule ? rule.label : "New rule"}</strong>
+          <small>{rule ? `v${rule.version}` : "reusable behavior"}</small>
+        </div>
+        <div className="settings-item-actions">
+          {rule && (
+            <ConfirmDeleteButton
+              label="Delete"
+              title={`Delete ${rule.label}?`}
+              description="This rule will be removed from saved participants that use it."
+              confirmLabel="Delete rule"
+              onConfirm={() => onDelete(rule.id)}
+            />
+          )}
+          <Button variant="outline" size="sm" disabled={!canSave} onClick={() => void onSave({ id: rule?.id, label, instructions })}>
+            <CheckCircle2 size={16} />
+            Save
+          </Button>
+        </div>
+      </div>
+      <FormRow label="Name">
+        <Input value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Be concise" />
+      </FormRow>
+      <FormRow label="Instructions">
+        <ResizableTextarea
+          value={instructions}
+          onChange={(event) => setInstructions(event.target.value)}
+          rows={3}
+          maxHeight={240}
+          placeholder="Keep replies short unless the user asks for detail."
+        />
+      </FormRow>
+    </article>
+  );
+}
+
 function ChatParticipantConfigEditor(props: {
   participant?: ChatParticipantConfig;
   settings: AppSettings;
@@ -176,7 +260,7 @@ function ChatParticipantConfigEditor(props: {
   );
   const normalized = normalizedChatDrafts([draft])[0];
   const changed = !props.participant || !sameParticipantDraft(normalized, props.participant);
-  const validation = validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs, existingHandles) ?? validateChatCliAgents([normalized], props.agents);
+  const validation = validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs, existingHandles, props.settings.chatBehaviorRules) ?? validateChatCliAgents([normalized], props.agents);
   const canSave = changed && !validation;
 
   useEffect(() => {

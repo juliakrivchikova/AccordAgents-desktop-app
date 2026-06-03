@@ -45,7 +45,8 @@ export function ChatParticipantMenu(props: {
   const addValidation = validateChatParticipantDrafts(
     addDraft,
     props.settings.chatRoleConfigs,
-    new Set(props.participants.map((participant) => participant.handle.toLowerCase()))
+    new Set(props.participants.map((participant) => participant.handle.toLowerCase())),
+    props.settings.chatBehaviorRules
   ) ?? validateChatCliAgents(addDraft, props.agents);
 
   return (

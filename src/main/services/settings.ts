@@ -4,6 +4,8 @@ import path from "node:path";
 import { app, safeStorage } from "electron";
 import type {
   AppSettings,
+  ChatBehaviorRuleConfig,
+  ChatBehaviorRuleConfigUpdate,
   ChatAgentMode,
   ChatAgentPermissions,
   ChatParticipantConfig,
@@ -24,6 +26,7 @@ interface StoredSettings {
   lastRepoPath?: string;
   providers: Array<Omit<ProviderSettings, "hasApiKey"> & { encryptedApiKey?: string }>;
   chatRoleConfigs?: ChatRoleConfig[];
+  chatBehaviorRules?: ChatBehaviorRuleConfig[];
   chatParticipantConfigs?: ChatParticipantConfig[];
 }
 
@@ -1500,6 +1503,7 @@ export class SettingsService {
       roundLimitDefault: stored.roundLimitDefault,
       lastRepoPath: stored.lastRepoPath,
       chatRoleConfigs: stored.chatRoleConfigs ?? DEFAULT_CHAT_ROLES,
+      chatBehaviorRules: stored.chatBehaviorRules ?? [],
       chatParticipantConfigs: stored.chatParticipantConfigs ?? [],
       providers: stored.providers.map((provider) => ({
         kind: provider.kind,
@@ -1586,6 +1590,68 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  async saveChatBehaviorRuleConfig(update: ChatBehaviorRuleConfigUpdate): Promise<AppSettings> {
+    const stored = await this.readStored();
+    const label = update.label.trim();
+    const instructions = update.instructions.trim();
+    if (!label) {
+      throw new Error("Behavior rule name is required.");
+    }
+    if (!instructions) {
+      throw new Error("Behavior rule instructions are required.");
+    }
+
+    const rules = stored.chatBehaviorRules ?? [];
+    const now = new Date().toISOString();
+    const existing = update.id ? rules.find((rule) => rule.id === update.id) : undefined;
+    if (existing) {
+      stored.chatBehaviorRules = rules.map((rule) =>
+        rule.id === existing.id
+          ? {
+              ...rule,
+              label,
+              instructions,
+              version: rule.version + 1,
+              updatedAt: now
+            }
+          : rule
+      );
+    } else {
+      const baseId = this.behaviorRuleIdFromLabel(label);
+      let id = baseId;
+      let suffix = 2;
+      while (rules.some((rule) => rule.id === id)) {
+        id = `${baseId}-${suffix}`;
+        suffix += 1;
+      }
+      stored.chatBehaviorRules = [
+        ...rules,
+        {
+          id,
+          label,
+          instructions,
+          version: 1,
+          updatedAt: now
+        }
+      ];
+    }
+
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
+  async deleteChatBehaviorRuleConfig(id: string): Promise<AppSettings> {
+    const stored = await this.readStored();
+    const normalized = id.trim();
+    stored.chatBehaviorRules = (stored.chatBehaviorRules ?? []).filter((rule) => rule.id !== normalized);
+    stored.chatParticipantConfigs = (stored.chatParticipantConfigs ?? []).map((participant) => ({
+      ...participant,
+      behaviorRuleIds: this.normalizeBehaviorRuleIds(participant.behaviorRuleIds).filter((ruleId) => ruleId !== normalized)
+    }));
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
   async saveChatParticipantConfig(update: ChatParticipantConfigUpdate): Promise<AppSettings> {
     const stored = await this.readStored();
     const participants = stored.chatParticipantConfigs ?? [];
@@ -1597,6 +1663,8 @@ export class SettingsService {
     if (!roles.some((role) => role.id === update.roleConfigId)) {
       throw new Error("Select a role for the participant.");
     }
+    const requestedRuleIds = new Set(this.normalizeBehaviorRuleIds(update.behaviorRuleIds));
+    const behaviorRuleIds = (stored.chatBehaviorRules ?? []).map((rule) => rule.id).filter((id) => requestedRuleIds.has(id));
     if (update.kind !== "codex-cli" && update.kind !== "claude-code") {
       throw new Error("Chat supports local CLI participants only.");
     }
@@ -1614,6 +1682,7 @@ export class SettingsService {
       id: normalizedId || randomUUID(),
       handle,
       roleConfigId: update.roleConfigId,
+      behaviorRuleIds,
       kind: update.kind,
       model: update.model?.trim() || undefined,
       avatarId: update.avatarId?.trim() || undefined,
@@ -1680,6 +1749,7 @@ export class SettingsService {
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
       providers,
       chatRoleConfigs: this.mergeDefaultRoles(settings.chatRoleConfigs),
+      chatBehaviorRules: this.normalizeBehaviorRules(settings.chatBehaviorRules),
       chatParticipantConfigs: this.normalizeParticipantConfigs(settings.chatParticipantConfigs)
     };
   }
@@ -1705,6 +1775,28 @@ export class SettingsService {
       }));
   }
 
+  private normalizeBehaviorRules(rules: ChatBehaviorRuleConfig[] | undefined): ChatBehaviorRuleConfig[] {
+    const seen = new Set<string>();
+    return (Array.isArray(rules) ? rules : [])
+      .filter((rule): rule is ChatBehaviorRuleConfig => {
+        const id = typeof rule.id === "string" ? rule.id.trim() : "";
+        const label = typeof rule.label === "string" ? rule.label.trim() : "";
+        const instructions = typeof rule.instructions === "string" ? rule.instructions.trim() : "";
+        if (!id || !label || !instructions || seen.has(id)) {
+          return false;
+        }
+        seen.add(id);
+        return true;
+      })
+      .map((rule) => ({
+        id: rule.id.trim(),
+        label: rule.label.trim(),
+        instructions: rule.instructions.trim(),
+        version: Number.isFinite(rule.version) && rule.version > 0 ? Math.floor(rule.version) : 1,
+        updatedAt: rule.updatedAt || new Date().toISOString()
+      }));
+  }
+
   private normalizeParticipantConfigs(participants: ChatParticipantConfig[] | undefined): ChatParticipantConfig[] {
     const seenHandles = new Set<string>();
     return (Array.isArray(participants) ? participants : [])
@@ -1722,6 +1814,7 @@ export class SettingsService {
         id: participant.id,
         handle: participant.handle.trim().replace(/^@/, ""),
         roleConfigId: participant.roleConfigId,
+        behaviorRuleIds: this.normalizeBehaviorRuleIds((participant as { behaviorRuleIds?: unknown }).behaviorRuleIds),
         kind: participant.kind,
         model: participant.model?.trim() || undefined,
         avatarId: participant.avatarId?.trim() || undefined,
@@ -1731,6 +1824,26 @@ export class SettingsService {
       }));
   }
 
+  private normalizeBehaviorRuleIds(value: unknown): string[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    for (const item of value) {
+      if (typeof item !== "string") {
+        continue;
+      }
+      const id = item.trim();
+      if (!id || seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      ids.push(id);
+    }
+    return ids;
+  }
+
   private roleIdFromLabel(label: string): string {
     return (
       label
@@ -1738,6 +1851,19 @@ export class SettingsService {
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-+|-+$/g, "")
         .slice(0, 48) || "custom-role"
+    );
+  }
+
+  private behaviorRuleIdFromLabel(label: string): string {
+    const slug = (
+      label
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 48) || "behavior-rule"
+    );
+    return (
+      `${slug}-${randomUUID()}`
     );
   }
 
