@@ -45,7 +45,7 @@ test("permission normalization is idempotent and dedupes structured grants", () 
     },
     providerNative: {
       "claude-code": {
-        allowedTools: ["mcp__ai_consensus__app_chat_read_messages", "mcp__ai_consensus__app_chat_read_messages", "Read"]
+        allowedTools: ["mcp__accord_agents__app_chat_read_messages", "mcp__accord_agents__app_chat_read_messages", "Read"]
       }
     }
   };
@@ -58,7 +58,7 @@ test("permission normalization is idempotent and dedupes structured grants", () 
     { action: "ask", match: "exact", pattern: "npm test" }
   ]);
   assert.deepEqual(normalized.providerNative?.["claude-code"]?.allowedTools, [
-    "mcp__ai_consensus__app_chat_read_messages",
+    "mcp__accord_agents__app_chat_read_messages",
     "Read"
   ]);
   assert.equal(chatAgentPermissionsEqual(normalized, raw as never), true);
@@ -92,7 +92,7 @@ test("applyPreparedPermissionChange is the merge-additions path for shell rules 
   const nativePrepared = service.preparePermissionChange(participantAfterShell, {
     kind: "providerNative",
     provider: "claude-code",
-    allowedTools: ["Read", "mcp__ai_consensus__app_chat_read_messages"]
+    allowedTools: ["Read", "mcp__accord_agents__app_chat_read_messages"]
   });
   service.applyPreparedPermissionChange(conversation, participant.id, nativePrepared);
 
@@ -103,7 +103,7 @@ test("applyPreparedPermissionChange is the merge-additions path for shell rules 
   ]);
   assert.deepEqual(permissions.providerNative?.["claude-code"]?.allowedTools, [
     "Read",
-    "mcp__ai_consensus__app_chat_read_messages"
+    "mcp__accord_agents__app_chat_read_messages"
   ]);
 });
 
@@ -922,6 +922,190 @@ test("app_chat_react toggles a participant reaction and rejects unknown message 
     }),
     /MessageReactionDenied/
   );
+});
+
+test("app_chat_react reaction survives stale chat state refresh", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const staleConversation = clone(conversation);
+  const { service, storage } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: []
+  };
+
+  await service.reactToMessageFromTool(actor, {
+    messageId: "user-message",
+    emoji: "✅"
+  });
+
+  assert.equal(storage.current.messages[0].metadata.reactions["✅"][0].actorLabel, "@codex");
+
+  await (service as any).refreshStoredChatState(staleConversation);
+
+  assert.equal(staleConversation.messages[0].metadata?.reactions?.["✅"]?.[0]?.actorLabel, "@codex");
+
+  const staleConversationWithReaction = clone(staleConversation);
+
+  await service.reactToMessageFromTool(actor, {
+    messageId: "user-message",
+    emoji: "✅"
+  });
+
+  assert.equal(storage.current.messages[0].metadata.reactions, undefined);
+
+  await (service as any).refreshStoredChatState(staleConversationWithReaction);
+
+  assert.equal(staleConversationWithReaction.messages[0].metadata?.reactions, undefined);
+});
+
+function pendingParticipantMessage(
+  participant: ChatParticipant,
+  id: string,
+  runId: string,
+  patch: Partial<{ status: "pending" | "done" | "error"; content: string; metadata: any }> = {}
+): any {
+  return {
+    id,
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: patch.content ?? "",
+    createdAt: NOW,
+    status: patch.status ?? "pending",
+    metadata: patch.metadata ?? { runId }
+  };
+}
+
+test("recoverStaleChatRun leaves a pending message whose run is still live", () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const runId = "live-run";
+  conversation.messages.push(pendingParticipantMessage(participant, "pending-live", runId));
+  const { service } = testService({ conversation });
+  (service as any).chatRunMeta.set(runId, {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    participantHandle: participant.handle
+  });
+
+  const changed = (service as any).recoverStaleChatRun(conversation);
+
+  assert.equal(changed, false);
+  const pending = conversation.messages.find((message: any) => message.id === "pending-live")!;
+  assert.equal(pending.status, "pending");
+  assert.equal(pending.metadata?.staleRunRecovery, undefined);
+});
+
+test("a swept placeholder is marked, and a late result repairs it preserving reactions", () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const runId = "dead-run";
+  conversation.messages.push(pendingParticipantMessage(participant, "pending-dead", runId));
+  const { service } = testService({ conversation });
+
+  const swept = (service as any).recoverStaleChatRun(conversation);
+  assert.equal(swept, true);
+  const placeholder = conversation.messages.find((message: any) => message.id === "pending-dead")!;
+  assert.equal(placeholder.status, "error");
+  assert.equal(placeholder.content, "Interrupted before completion.");
+  assert.equal(placeholder.metadata?.staleRunRecovery?.runId, runId);
+
+  // A ✅ lands on the placeholder while it still shows "Interrupted".
+  placeholder.metadata.reactions = {
+    "✅": [{ actorId: "user", actorLabel: "User", actorKind: "user", at: NOW }]
+  };
+
+  // The real answer finishes late and is appended under the same id.
+  const completed = pendingParticipantMessage(participant, "pending-dead", runId, {
+    status: "done",
+    content: "Here is the real answer.",
+    metadata: { runId }
+  });
+  (service as any).appendParticipantTurnMessages(conversation, participant, [completed]);
+
+  const repaired = conversation.messages.find((message: any) => message.id === "pending-dead")!;
+  assert.equal(repaired.status, "done");
+  assert.equal(repaired.content, "Here is the real answer.");
+  assert.equal(repaired.metadata?.staleRunRecovery, undefined);
+  assert.equal(repaired.metadata?.reactions?.["✅"]?.[0]?.actorLabel, "User");
+});
+
+test("a late result does not resurrect a non-recovery error (user-stopped) message", () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  conversation.messages.push(pendingParticipantMessage(participant, "stopped", "stopped-run", {
+    status: "error",
+    content: "Stopped by user.",
+    metadata: { runId: "stopped-run" }
+  }));
+  const { service } = testService({ conversation });
+
+  (service as any).appendParticipantTurnMessages(conversation, participant, [
+    pendingParticipantMessage(participant, "stopped", "stopped-run", {
+      status: "done",
+      content: "Late answer that should be ignored.",
+      metadata: { runId: "stopped-run" }
+    })
+  ]);
+
+  const after = conversation.messages.find((message: any) => message.id === "stopped")!;
+  assert.equal(after.status, "error");
+  assert.equal(after.content, "Stopped by user.");
+});
+
+test("recoverStaleChatRun keeps run metadata when a pending bubble is live only via the registry", () => {
+  const participant = chatParticipant("codex-cli");
+  const runId = "registry-only-run";
+  const conversation = chatConversation([participant], { activeRunIds: [runId], running: true });
+  conversation.messages.push(pendingParticipantMessage(participant, "pending-registry", runId));
+  const { service } = testService({ conversation });
+  // Stale metadata lists the run, the in-memory activeRunIds Set has lost it, but
+  // the controller/meta registry still tracks it as live.
+  (service as any).chatRunMeta.set(runId, {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    participantHandle: participant.handle
+  });
+
+  const changed = (service as any).recoverStaleChatRun(conversation);
+
+  assert.equal(changed, false);
+  assert.deepEqual(conversation.metadata.activeRunIds, [runId]);
+  assert.equal(conversation.metadata.running, true);
+  const warnings = (conversation.metadata.warnings as string[] | undefined) ?? [];
+  assert.equal(warnings.some((warning) => /interrupt/i.test(warning)), false);
+  assert.equal(conversation.messages.find((message: any) => message.id === "pending-registry")!.status, "pending");
+});
+
+test("a declined late result does not spawn an implicit participant request", () => {
+  const participant = chatParticipant("codex-cli");
+  const other = chatParticipant("claude-code"); // handle "drew"
+  const conversation = chatConversation([participant, other]);
+  conversation.messages.push(pendingParticipantMessage(participant, "stopped", "stopped-run", {
+    status: "error",
+    content: "Stopped by user.",
+    metadata: { runId: "stopped-run" }
+  }));
+  const { service } = testService({ conversation });
+
+  // The stopped run finishes late with content that @-mentions another participant.
+  (service as any).appendParticipantTurnMessages(conversation, participant, [
+    pendingParticipantMessage(participant, "stopped", "stopped-run", {
+      status: "done",
+      content: "@drew please take over.",
+      metadata: { runId: "stopped-run" }
+    })
+  ]);
+
+  const after = conversation.messages.find((message: any) => message.id === "stopped")!;
+  assert.equal(after.content, "Stopped by user.");
+  // No inferred participant-request message should have been appended.
+  assert.equal(conversation.messages.length, 2);
+  assert.equal(conversation.messages.some((message: any) => message.metadata?.participantRequest), false);
 });
 
 test("app MCP advertises app_chat_react to chat participants", () => {

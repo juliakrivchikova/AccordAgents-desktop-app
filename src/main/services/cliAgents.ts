@@ -29,8 +29,8 @@ const CLI_AGENT_RUN_TIMEOUT_MS = 15 * 60_000;
 const WARM_AGENT_KILL_GRACE_MS = 1500;
 const SESSION_LOG_RETRY_MS = 80;
 const SESSION_LOG_RETRIES = 4;
-const CODEX_APP_SERVER_DISABLED_ENV = "AI_CONSENSUS_CODEX_APP_SERVER";
-const CODEX_APP_SERVER_MCP_TOKEN_ENV = "AI_CONSENSUS_MCP_TOKEN";
+const CODEX_APP_SERVER_DISABLED_ENV = "ACCORD_AGENTS_CODEX_APP_SERVER";
+const CODEX_APP_SERVER_MCP_TOKEN_ENV = "ACCORD_AGENTS_MCP_TOKEN";
 const CODEX_AUTO_APPROVALS_REVIEWER = "guardian_subagent";
 const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 
@@ -632,8 +632,8 @@ export class CliAgentRunner {
       web_search: permissions.webAccess ? "live" : "disabled"
     };
     if (options.appMcp) {
-      config["mcp_servers.ai_consensus.url"] = options.appMcp.url;
-      config["mcp_servers.ai_consensus.bearer_token_env_var"] = CODEX_APP_SERVER_MCP_TOKEN_ENV;
+      config["mcp_servers.accord_agents.url"] = options.appMcp.url;
+      config["mcp_servers.accord_agents.bearer_token_env_var"] = CODEX_APP_SERVER_MCP_TOKEN_ENV;
     }
     return config;
   }
@@ -839,9 +839,9 @@ export class CliAgentRunner {
           args,
           resuming,
           "-c",
-          `mcp_servers.ai_consensus.url=${this.tomlString(options.appMcp.url)}`,
+          `mcp_servers.accord_agents.url=${this.tomlString(options.appMcp.url)}`,
           "-c",
-          `mcp_servers.ai_consensus.bearer_token_env_var=${this.tomlString("AI_CONSENSUS_MCP_TOKEN")}`
+          `mcp_servers.accord_agents.bearer_token_env_var=${this.tomlString("ACCORD_AGENTS_MCP_TOKEN")}`
         );
       }
       if (permissions.webAccess) {
@@ -1667,7 +1667,7 @@ export class CliAgentRunner {
   private claudeToolsWithAppMcp(tools: string[], options: CliAgentRunOptions): string[] {
     const next = new Set(tools);
     for (const toolName of options.appMcp?.toolNames ?? []) {
-      next.add(`mcp__ai_consensus__${toolName}`);
+      next.add(`mcp__accord_agents__${toolName}`);
     }
     return Array.from(next);
   }
@@ -1675,7 +1675,7 @@ export class CliAgentRunner {
   private claudeMcpConfigJson(appMcp: CliAgentAppMcpOptions): string {
     return JSON.stringify({
       mcpServers: {
-        ai_consensus: {
+        accord_agents: {
           type: "http",
           url: appMcp.url,
           headers: {
@@ -1792,7 +1792,7 @@ export class CliAgentRunner {
       }
     }
     for (const toolName of options.appMcp?.toolNames ?? []) {
-      allowedTools.push(`mcp__ai_consensus__${toolName}`);
+      allowedTools.push(`mcp__accord_agents__${toolName}`);
     }
     if ((options.selectedSkills?.length ?? 0) > 0) {
       // A selected skill must be loadable by Claude's native Skill tool. Project skills under cwd

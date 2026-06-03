@@ -16,7 +16,7 @@ Prefer the Makefile aliases; they wrap the npm scripts in `package.json`.
 
 There is no lint runner. Before submitting changes, run `make typecheck` and (for renderer changes) `make build`. For chat permissions, cancellation, repo-file mentions, rename, git repo-file listing, or CLI permission changes, run `npm run test:permissions`. For app-skill service changes, run `npm run test:app-skills`. Manual verification notes are expected in PRs whenever IPC, provider integrations, git diff handling, conversation storage, or chat concurrency are touched.
 
-Debug logs (JSONL of progress events and raw provider/CLI output) are written to Electron's `userData/debug-logs/<date>.jsonl`. The `DebugLogService` enables them automatically when running unpackaged; force on/off with `AI_CONSENSUS_DEBUG_LOGS=1` / `=0`.
+Debug logs (JSONL of progress events and raw provider/CLI output) are written to Electron's `userData/debug-logs/<date>.jsonl`. The `DebugLogService` enables them automatically when running unpackaged; force on/off with `ACCORD_AGENTS_DEBUG_LOGS=1` / `=0`.
 
 ## Inspecting the running desktop app
 

@@ -3,6 +3,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { ChatAppToolCapability } from "../../shared/types";
 import { hasChatAppToolCapability } from "../../shared/appTools";
+import { CHAT_REACTION_EMOJIS } from "../../shared/chatReactions";
 
 export const APP_ROSTER_REQUEST_CHANGE_TOOL = "app_roster_request_change";
 export const APP_ROSTER_DESCRIBE_OPTIONS_TOOL = "app_roster_describe_options";
@@ -506,7 +507,7 @@ export class AppMcpService {
             },
             emoji: {
               type: "string",
-              enum: ["✅", "👍", "👀", "🎉", "❌"],
+              enum: [...CHAT_REACTION_EMOJIS],
               description: "Allowed reaction emoji."
             }
           },

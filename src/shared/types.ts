@@ -149,6 +149,11 @@ export interface ChatReactor {
 
 export type ChatMessageReactions = Record<string, ChatReactor[]>;
 
+export interface ChatStaleRunRecovery {
+  runId?: string;
+  at: string;
+}
+
 export type AgentContextUsageSource = Extract<ProviderKind, "codex-cli" | "claude-code">;
 
 export interface AgentContextUsage {
@@ -459,6 +464,7 @@ export interface ChatMessageMetadata {
   parentMessageId?: string;
   chatThreadRootId?: string;
   reactions?: ChatMessageReactions;
+  staleRunRecovery?: ChatStaleRunRecovery;
   mentions?: string[];
   skillMentions?: ChatSkillMention[];
   repoFileMentions?: RepoFileMention[];

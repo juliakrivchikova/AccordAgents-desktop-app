@@ -2218,13 +2218,9 @@ export class ChatService {
       // After refresh-then-merge, the pendingMessage object may or may not be in
       // conversation.messages. mergeStoredChatMessages prefers our in-memory
       // reference when ids match, so the in-place updates (content/status) are
-      // preserved. If the pending message is missing entirely (rare — would mean
-      // a concurrent delete by another mutation), re-append the finalized version
-      // so the response isn't lost.
-      const idx = conversation.messages.findIndex((message) => message.id === pendingMessage.id);
-      if (idx < 0) {
-        conversation.messages.push(pendingMessage);
-      }
+      // preserved. upsertCompletedMessage re-appends when missing and repairs a
+      // stale-recovery placeholder for the same id, carrying its reactions over.
+      this.upsertCompletedMessage(conversation, pendingMessage);
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
     });
@@ -2235,13 +2231,16 @@ export class ChatService {
     participant: ChatParticipant,
     messages: ChatMessage[]
   ): void {
-    const existingIds = new Set(conversation.messages.map((message) => message.id));
+    const accepted: ChatMessage[] = [];
     for (const message of messages) {
-      if (!existingIds.has(message.id)) {
-        conversation.messages.push(message);
+      if (this.upsertCompletedMessage(conversation, message)) {
+        accepted.push(message);
       }
     }
-    this.createImplicitParticipantRequestApproval(conversation, participant, messages);
+    // Only infer participant requests from messages we actually appended/replaced.
+    // A declined late message (e.g. a user-stopped run finishing) must not spawn
+    // implicit request approvals from content the user never sees.
+    this.createImplicitParticipantRequestApproval(conversation, participant, accepted);
   }
 
   private buildPrompt(
@@ -2484,7 +2483,7 @@ export class ChatService {
           "Permission changes are not directly available to this participant. If the current task needs a blocked capability, explain the specific capability needed before refusing."
         ];
     const lines = [
-      "App MCP tools: use the connected `ai_consensus` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
+      "App MCP tools: use the connected `accord_agents` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
       "Read-only chat MCP tools: `app_chat_get_context`, `app_chat_get_participants`, `app_chat_read_messages`, `app_chat_list_attachments`, and `app_chat_read_attachment`. Prefer them over history files for roster, thread, messages, and screenshots.",
       "Reaction MCP tool: `app_chat_react` adds or toggles an emoji reaction on a specific message. To react, call it with the message `id` from `app_chat_read_messages` and an allowed emoji.",
       "If a message lists attached images, call `app_chat_read_attachment` with the attachment ID before reasoning about visual details.",
@@ -2987,7 +2986,10 @@ export class ChatService {
 
   private mergeStoredChatMessages(storedMessages: ChatMessage[], currentMessages: ChatMessage[]): ChatMessage[] {
     const currentById = new Map(currentMessages.map((message) => [message.id, message]));
-    const merged = storedMessages.map((message) => currentById.get(message.id) ?? message);
+    const merged = storedMessages.map((message) => {
+      const current = currentById.get(message.id);
+      return current ? this.mergeStoredChatMessage(message, current) : message;
+    });
     const storedIds = new Set(storedMessages.map((message) => message.id));
     for (const message of currentMessages) {
       if (!storedIds.has(message.id)) {
@@ -2995,6 +2997,65 @@ export class ChatService {
       }
     }
     return merged;
+  }
+
+  private mergeStoredChatMessage(stored: ChatMessage, current: ChatMessage): ChatMessage {
+    const metadata = this.mergeStoredChatMessageReactions(stored.metadata, current.metadata);
+    if (metadata) {
+      current.metadata = metadata;
+    } else {
+      delete current.metadata;
+    }
+    return current;
+  }
+
+  // Stale refresh keeps storage authoritative: the stored reactions win wholesale
+  // so a reaction REMOVAL propagates to a stale in-memory copy. (Union semantics
+  // would re-add a removed reactor.) Carrying a placeholder's reactions onto a
+  // fresh completed message is a different operation — see mergeChatMessageReactions.
+  private mergeStoredChatMessageReactions(
+    storedMetadata: ChatMessage["metadata"] | undefined,
+    currentMetadata: ChatMessage["metadata"] | undefined
+  ): ChatMessage["metadata"] | undefined {
+    if (!currentMetadata && !storedMetadata?.reactions) {
+      return undefined;
+    }
+    const merged: ChatMessage["metadata"] = {
+      ...currentMetadata
+    };
+    if (storedMetadata?.reactions) {
+      merged.reactions = storedMetadata.reactions;
+    } else {
+      delete merged.reactions;
+    }
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  // Union merge for completed-message upsert: carry a placeholder's accumulated
+  // reactions onto the fresh completed message (which has none of its own).
+  // Existing/placeholder reactors win on a duplicate emoji + actor. Both this and
+  // the stale-refresh path share normalizedChatMessageReactions for shape/dedup.
+  private mergeChatMessageReactions(existing: unknown, incoming: unknown): ChatMessageReactions | undefined {
+    const existingReactions = this.normalizedChatMessageReactions(existing);
+    const incomingReactions = this.normalizedChatMessageReactions(incoming);
+    const merged: ChatMessageReactions = {};
+    const emojis = new Set([...Object.keys(existingReactions), ...Object.keys(incomingReactions)]);
+    for (const emoji of emojis) {
+      const seenActors = new Set<string>();
+      const reactors: ChatMessageReactions[string] = [];
+      for (const reactor of [...(existingReactions[emoji] ?? []), ...(incomingReactions[emoji] ?? [])]) {
+        const key = `${reactor.actorKind}:${reactor.actorId}`;
+        if (seenActors.has(key)) {
+          continue;
+        }
+        seenActors.add(key);
+        reactors.push(reactor);
+      }
+      if (reactors.length > 0) {
+        merged[emoji] = reactors;
+      }
+    }
+    return Object.keys(merged).length > 0 ? merged : undefined;
   }
 
   private mergeStoredChatMetadata(
@@ -6387,19 +6448,39 @@ export class ChatService {
     }
     const wasRunning = conversation.metadata.running === true || activeIds.length > 0;
     let pendingSwept = false;
+    let hasLivePending = false;
     for (const message of conversation.messages) {
       if (message.status === "pending" && message.role === "participant") {
+        if (this.isMessageRunLive(message)) {
+          // A late-finishing run still owns this bubble; leave it pending so the
+          // completed answer can replace it rather than be lost behind a sweep.
+          hasLivePending = true;
+          continue;
+        }
         message.status = "error";
         if (!message.content) {
           message.content = "Interrupted before completion.";
         }
+        // Mark the sweep so a late completed result can repair this exact
+        // placeholder, and so we never replace an unrelated error message.
+        message.metadata = {
+          ...message.metadata,
+          staleRunRecovery: {
+            runId: message.metadata?.runId,
+            at: new Date().toISOString()
+          }
+        };
         pendingSwept = true;
       }
     }
-    if (!wasRunning && !pendingSwept) {
+    // Only clear run metadata / flag an interrupt when the run is genuinely done.
+    // If any pending bubble is still backed by a live run, leave run metadata
+    // intact so we don't recreate the "live run looks interrupted/idle" state.
+    const shouldClear = wasRunning && !hasLivePending;
+    if (!pendingSwept && !shouldClear) {
       return false;
     }
-    if (wasRunning) {
+    if (shouldClear) {
       const warnings = sanitizeWarningList(conversation.metadata.warnings);
       if (!warnings.includes(INTERRUPTED_RUN_WARNING)) {
         warnings.push(INTERRUPTED_RUN_WARNING);
@@ -6410,6 +6491,52 @@ export class ChatService {
       });
     }
     conversation.updatedAt = new Date().toISOString();
+    return true;
+  }
+
+  private isMessageRunLive(message: ChatMessage): boolean {
+    const runId = message.metadata?.runId;
+    if (typeof runId !== "string" || !runId) {
+      return false;
+    }
+    return this.activeRunIds.has(runId) || this.chatRunControllers.has(runId) || this.chatRunMeta.has(runId);
+  }
+
+  private hasStaleRunRecoveryMarker(message: ChatMessage): boolean {
+    return Boolean(message.metadata?.staleRunRecovery);
+  }
+
+  // Single finalize/upsert path: append a completed message, or repair a
+  // placeholder we created for the same id (a still-pending bubble, or an error
+  // bubble that stale-run recovery marked). Reactions added to the placeholder
+  // are carried onto the completed message. Never overwrites a real error or a
+  // user-stopped message.
+  private upsertCompletedMessage(conversation: Conversation, message: ChatMessage): boolean {
+    const existingIndex = conversation.messages.findIndex((item) => item.id === message.id);
+    if (existingIndex < 0) {
+      conversation.messages.push(message);
+      return true;
+    }
+    const existing = conversation.messages[existingIndex];
+    if (existing === message) {
+      return true;
+    }
+    const replaceable =
+      existing.status === "pending" ||
+      (existing.status === "error" && this.hasStaleRunRecoveryMarker(existing));
+    if (!replaceable) {
+      return false;
+    }
+    const reactions = this.mergeChatMessageReactions(existing.metadata?.reactions, message.metadata?.reactions);
+    const metadata: ChatMessage["metadata"] = { ...message.metadata };
+    delete metadata.staleRunRecovery;
+    if (reactions) {
+      metadata.reactions = reactions;
+    } else {
+      delete metadata.reactions;
+    }
+    message.metadata = Object.keys(metadata).length > 0 ? metadata : undefined;
+    conversation.messages[existingIndex] = message;
     return true;
   }
 

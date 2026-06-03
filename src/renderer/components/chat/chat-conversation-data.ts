@@ -25,7 +25,7 @@ export const APP_ROSTER_REQUEST_CHANGE_TOOL = "app_roster_request_change";
 export const APP_CHAT_REQUEST_PARTICIPANTS_TOOL = "app_chat_request_participants";
 export const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 
-const SHOW_CHAT_SYSTEM_MESSAGES = import.meta.env.VITE_AI_CONSENSUS_SHOW_SYSTEM_MESSAGES === "1";
+const SHOW_CHAT_SYSTEM_MESSAGES = import.meta.env.VITE_ACCORD_AGENTS_SHOW_SYSTEM_MESSAGES === "1";
 
 export interface ChatThinkingRow {
   key: string;
