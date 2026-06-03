@@ -170,6 +170,70 @@ test("runtime skill revalidation blocks only affected participants", async () =>
   }
 });
 
+test("inline selected skill text is preserved in storage and prompt", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-user-skills-"));
+  const homeDir = path.join(tempRoot, "home");
+  const skillFolder = path.join(homeDir, ".agents/skills/qa");
+  await writeSkill(skillFolder, "qa", "QA", "codex body");
+
+  try {
+    const userSkills = new UserSkillsService({ homeDir });
+    const participant = chatParticipant();
+    const conversation = chatConversation([participant]);
+    const skillSearch = await userSkills.search({
+      conversationId: conversation.id,
+      query: "qa",
+      content: "@admin /qa please",
+      limit: 10
+    }, {
+      target: {
+        hasClearTargets: true,
+        participantIds: [participant.id],
+        providerKinds: ["codex-cli"]
+      },
+      participantProviderKindById: {
+        [participant.id]: "codex-cli"
+      },
+      runRootByParticipant: {
+        [participant.id]: undefined
+      }
+    });
+    assert.equal(skillSearch.skills[0].capabilityState, "invocable");
+
+    let capturedPrompt = "";
+    const { service, storage } = testService({
+      conversation,
+      userSkills,
+      run: async (runParticipant, prompt) => {
+        capturedPrompt = prompt;
+        return {
+          participant: runParticipant,
+          ok: true,
+          content: "done",
+          durationMs: 1
+        };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+
+    await service.sendMessage({
+      conversationId: conversation.id,
+      runId: "inline-skill-run",
+      content: "@admin /qa please",
+      skillMentions: [skillSearch.skills[0]]
+    });
+    await waitFor(() => capturedPrompt !== "");
+
+    const saved = storage.current as Conversation;
+    const userMessage = saved.messages.find((message) => message.role === "user");
+    assert.equal(userMessage?.content, "@admin /qa please");
+    assert.match(capturedPrompt, /@admin \/qa please/);
+    assert.match(capturedPrompt, /inline `\/skill-name` text as the native skill invocation/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("selected skill hashes affect the warm runtime key", () => {
   const { service } = testService({
     conversation: chatConversation([chatParticipant()]),
@@ -209,6 +273,45 @@ test("selected skill hashes affect the warm runtime key", () => {
     (service as any).skillRuntimeKey(baseMessage, "codex-cli"),
     (service as any).skillRuntimeKey(changedMessage, "codex-cli")
   );
+});
+
+test("skill prompt tells Codex to use inline slash invocation and direct selected-skill reads", () => {
+  const { service } = testService({
+    conversation: chatConversation([chatParticipant()]),
+    userSkills: new UserSkillsService(),
+    run: async (participant) => ({ participant, ok: true, content: "done", durationMs: 1 })
+  });
+  const message = {
+    id: "user-message",
+    role: "user",
+    content: "@codex /qa",
+    createdAt: NOW,
+    status: "done",
+    metadata: {
+      skillMentions: [{
+        skillId: "skill-1",
+        displayName: "/qa",
+        frontmatterName: "qa",
+        contentHash: "hash-a",
+        capabilityState: "invocable",
+        variants: [{
+          providerKind: "codex-cli",
+          scope: "personal",
+          rootKind: "personal",
+          sourceKey: "source",
+          frontmatterName: "qa",
+          contentHash: "hash-a",
+          capabilityState: "invocable"
+        }]
+      }]
+    }
+  };
+
+  const promptSection = (service as any).skillMentionsPromptSection(message, "codex-cli") as string;
+  assert.match(promptSection, /inline `\/skill-name` text as the native skill invocation/);
+  assert.match(promptSection, /~\/\.codex\/skills/);
+  assert.match(promptSection, /~\/\.agents\/skills/);
+  assert.match(promptSection, /do not call `app_permissions_request_change` just to read selected skill files/);
 });
 
 test("chat:send returns after ingest without awaiting the participant batch", async () => {
@@ -313,6 +416,28 @@ test("shellRulesAreSelectedSkillReads allows read-only skill-dir reads and rejec
     assert.equal(await check([]), false);
   } finally {
     await rm(skillRoot, { recursive: true, force: true });
+  }
+
+  // Codex commonly spells global skill reads with ~. The matcher expands home-relative paths for
+  // validation but still requires the resolved target to stay inside the selected skill dir.
+  const oldHome = process.env.HOME;
+  const homeRoot = await mkdtemp(path.join(tmpdir(), "accord-skill-home-"));
+  try {
+    process.env.HOME = homeRoot;
+    const skillDir = path.join(homeRoot, ".codex/skills/proof");
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(path.join(skillDir, "SKILL.md"), "x", "utf8");
+    await writeFile(path.join(homeRoot, ".codex/config.json"), "{}", "utf8");
+    const realDir = await realpath(skillDir);
+    assert.equal(await check([{ action: "allow", match: "exact", pattern: "sed -n 1,40p ~/.codex/skills/proof/SKILL.md" }], [realDir]), true);
+    assert.equal(await check([{ action: "allow", match: "exact", pattern: "cat ~/.codex/config.json" }], [realDir]), false);
+  } finally {
+    if (oldHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = oldHome;
+    }
+    await rm(homeRoot, { recursive: true, force: true });
   }
 
   // Symlinked global skill: selected dir is the realpath target, but the agent reads via the

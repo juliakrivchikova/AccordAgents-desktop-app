@@ -62,6 +62,8 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
   const [selectedFileMentions, setSelectedFileMentions] = useState<RepoFileMention[]>([]);
   const [pendingImages, setPendingImages] = useState<PendingChatImage[]>([]);
   const pendingImagesRef = useRef<PendingChatImage[]>([]);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const highlightRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileSearchRequestRef = useRef(0);
   const skillSearchRequestRef = useRef(0);
@@ -74,6 +76,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
   const visibleFileOptions = fileQuery === undefined ? [] : fileOptions;
   const visibleSkillOptions = skillQuery === undefined ? [] : skillOptions;
   const skillTargetLabel = skillTarget ? skillPickerTargetLabel(skillTarget, props.participants) : undefined;
+  const showSkillHighlights = selectedSkillMentions.some((mention) => draftHasSkillMention(props.draft, mention.frontmatterName));
 
   useEffect(() => {
     setFileQuery(undefined);
@@ -109,6 +112,10 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
 
   useEffect(() => {
     setSelectedFileMentions((current) => current.filter((mention) => draftHasFileMention(props.draft, mention.path)));
+  }, [props.draft]);
+
+  useEffect(() => {
+    setSelectedSkillMentions((current) => current.filter((mention) => draftHasSkillMention(props.draft, mention.frontmatterName)));
   }, [props.draft]);
 
   useEffect(() => {
@@ -202,7 +209,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     if (skill.capabilityState !== "invocable" || skill.ambiguous) {
       return;
     }
-    props.onDraftChange(removeActiveSkillToken(props.draft));
+    props.onDraftChange(replaceActiveSkillMention(props.draft, skill.frontmatterName));
     setSelectedSkillMentions((current) => {
       if (current.some((mention) => mention.skillId === skill.skillId)) {
         return current;
@@ -221,8 +228,9 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     setSelectedFileMentions((current) => current.filter((mention) => mention.path !== filePath));
   }
 
-  function removeSkillMention(skillId: string): void {
-    setSelectedSkillMentions((current) => current.filter((mention) => mention.skillId !== skillId));
+  function removeSkillMention(mention: ChatSkillMention): void {
+    props.onDraftChange(removeSkillMentionToken(props.draft, mention.frontmatterName));
+    setSelectedSkillMentions((current) => current.filter((item) => item.skillId !== mention.skillId));
   }
 
   async function addImageFiles(files: File[]): Promise<void> {
@@ -302,6 +310,14 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     });
   }
 
+  function syncHighlightScroll(event: React.UIEvent<HTMLTextAreaElement>): void {
+    if (!highlightRef.current) {
+      return;
+    }
+    highlightRef.current.scrollTop = event.currentTarget.scrollTop;
+    highlightRef.current.scrollLeft = event.currentTarget.scrollLeft;
+  }
+
   async function sendDraft(): Promise<void> {
     if (canSend) {
       const fileMentionsToSend = selectedFileMentions;
@@ -336,7 +352,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
       {selectedSkillMentions.length > 0 && (
         <div className="file-mention-chips skill-mention-chips" aria-label="Selected skills">
           {selectedSkillMentions.map((mention) => (
-            <button type="button" onClick={() => removeSkillMention(mention.skillId)} key={mention.skillId}>
+            <button type="button" onClick={() => removeSkillMention(mention)} key={mention.skillId}>
               <ListChecks size={14} />
               <span>{mention.displayName}</span>
               <small>{mention.variants.map((variant) => providerLabel(variant.providerKind)).join(", ")}</small>
@@ -376,7 +392,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
           ))}
         </div>
       )}
-      <div className="chat-input-wrap">
+      <div className={["chat-input-wrap", showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")}>
         {mentionOptions.length > 0 && (
           <div className="mention-menu" role="listbox">
             {mentionOptions.map((participant, index) => (
@@ -437,7 +453,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
                   key={skill.skillId}
                 >
                   <span className="file-mention-icon"><ListChecks size={18} /></span>
-                  <strong>/{skill.displayName}</strong>
+                  <strong>{skill.displayName}</strong>
                   <span>{skill.description ?? skill.statusMessage ?? "User skill"}</span>
                   <small>{skill.providerKinds.map(providerLabel).join(", ")}</small>
                   {!disabled && index === 0 && <kbd>Enter</kbd>}
@@ -447,8 +463,12 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
           </div>
         )}
         <ResizableTextarea
+          ref={textareaRef}
           value={props.draft}
+          className={showSkillHighlights ? "skill-highlight-textarea" : undefined}
+          spellCheck={!showSkillHighlights}
           onChange={(event) => updateDraft(event.target.value)}
+          onScroll={syncHighlightScroll}
           onPaste={(event) => {
             const files = Array.from(event.clipboardData?.files ?? []);
             if (files.some((file) => file.type.startsWith("image/"))) {
@@ -534,6 +554,11 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
           maxHeight={props.maxHeight ?? 260}
           placeholder={props.placeholder}
         />
+        {showSkillHighlights && (
+          <div ref={highlightRef} className="chat-draft-highlight" aria-hidden="true">
+            {renderSkillHighlightedDraft(props.draft, selectedSkillMentions)}
+          </div>
+        )}
       </div>
       <input
         ref={fileInputRef}
@@ -626,14 +651,62 @@ function removeFileMentionToken(value: string, filePath: string): string {
     .trimEnd();
 }
 
-function removeActiveSkillToken(value: string): string {
+function replaceActiveSkillMention(value: string, skillName: string): string {
   const match = value.match(/(?:^|\s)\/([A-Za-z0-9_-]*)$/);
   if (!match || match.index === undefined) {
-    return value;
+    return `${value}${value.endsWith(" ") || !value ? "" : " "}/${skillName} `;
   }
   const prefix = value.slice(0, match.index);
   const leadingSpace = match[0].startsWith(" ") ? " " : "";
-  return `${prefix}${leadingSpace}`.replace(/[ \t]{2,}/g, " ").trimEnd();
+  return `${prefix}${leadingSpace}/${skillName} `;
+}
+
+function removeSkillMentionToken(value: string, skillName: string): string {
+  const escaped = escapeRegExp(skillName);
+  return value
+    .replace(new RegExp(`(^|\\s)/${escaped}(?=\\s|$)`, "g"), "$1")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trimEnd();
+}
+
+function draftHasSkillMention(value: string, skillName: string): boolean {
+  return new RegExp(`(^|\\s)/${escapeRegExp(skillName)}(?=\\s|$)`).test(value);
+}
+
+function renderSkillHighlightedDraft(value: string, mentions: ChatSkillMention[]): React.ReactNode[] {
+  const byName = new Map<string, ChatSkillMention>();
+  for (const mention of mentions) {
+    byName.set(mention.frontmatterName, mention);
+  }
+  const names = Array.from(byName.keys()).sort((left, right) => right.length - left.length);
+  if (names.length === 0 || !value) {
+    return [value || "\u00a0"];
+  }
+  const pattern = new RegExp(`(^|\\s)/(${names.map(escapeRegExp).join("|")})(?=\\s|$)`, "g");
+  const nodes: React.ReactNode[] = [];
+  let cursor = 0;
+  let index = 0;
+  for (const match of value.matchAll(pattern)) {
+    const leading = match[1] ?? "";
+    const name = match[2] ?? "";
+    const start = (match.index ?? 0) + leading.length;
+    const end = start + name.length + 1;
+    if (start > cursor) {
+      nodes.push(value.slice(cursor, start));
+    }
+    nodes.push(
+      <span className="chat-draft-skill-token" key={`${name}-${index}`}>
+        {value.slice(start, end)}
+      </span>
+    );
+    cursor = end;
+    index += 1;
+  }
+  if (cursor < value.length) {
+    nodes.push(value.slice(cursor));
+  }
+  return nodes.length > 0 ? nodes : [value];
 }
 
 function draftHasFileMention(value: string, filePath: string): boolean {

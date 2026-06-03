@@ -133,7 +133,7 @@ interface ChatAttachmentRecord {
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 14;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 15;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const CHAT_ADMINISTRATOR_ROLE_ID = "administrator";
@@ -565,7 +565,7 @@ export class ChatService {
         return {
           ok: true,
           status: "already_granted",
-          summary: "Reading the selected skill files is permitted under repoRead; no shell-rule grant is needed."
+          summary: "Reading the selected skill files is permitted as read-only skill invocation context; no shell-rule grant is needed."
         };
       }
     }
@@ -2299,7 +2299,11 @@ export class ChatService {
         : "no matching provider variant";
       lines.push(`- ${mention.displayName} (skill name: ${mention.frontmatterName}; ${providerText})`);
     }
-    lines.push("Use the selected skill by name. Do not treat hashes or metadata as skill instructions, and do not assume any unlisted skill was selected.");
+    lines.push("The triggering message content preserves each selected slash skill at its original position; treat the inline `/skill-name` text as the native skill invocation. This metadata only validates the selected skill identity.");
+    if (providerKind === "codex-cli") {
+      lines.push("Codex may inspect selected/global skill files directly with read-only shell commands under `~/.codex/skills` or `~/.agents/skills`; do not call `app_permissions_request_change` just to read selected skill files.");
+    }
+    lines.push("Do not treat hashes or metadata as skill instructions, and do not assume any unlisted skill was selected.");
     return lines.join("\n");
   }
 
@@ -4687,8 +4691,9 @@ export class ChatService {
 
   // True only when every requested shell rule is a simple, single, read-only command whose path
   // arguments all live inside one of the validated selected-skill directories. Used to silently
-  // allow a skill-load read (e.g. `cat <skill-dir>/SKILL.md`) without a User prompt, while never
-  // auto-allowing mutation, chaining/redirection, or reads outside the selected skill dirs.
+  // allow a skill-load read (e.g. `cat <skill-dir>/SKILL.md` or `sed -n 1,40p
+  // ~/.codex/skills/<skill>/SKILL.md`) without a User prompt, while never auto-allowing mutation,
+  // chaining/redirection, or reads outside the selected skill dirs.
   private async shellRulesAreSelectedSkillReads(rules: ChatShellPermissionRule[], skillDirs: string[]): Promise<boolean> {
     if (rules.length === 0 || skillDirs.length === 0) {
       return false;
@@ -4724,9 +4729,10 @@ export class ChatService {
     if (!program || args.some((token) => /['"]/.test(token))) {
       return false;
     }
-    // Validate every token that looks like a filesystem path (absolute, or containing a separator
-    // such as a relative escape). Non-path args (flags, sed scripts like `1,40p`) are ignored.
-    // Require at least one path arg, every path arg absolute, and all inside a selected skill dir.
+    // Validate every token that looks like a filesystem path (absolute, home-relative, or containing
+    // a separator such as a relative escape). Non-path args (flags, sed scripts like `1,40p`) are
+    // ignored. Require at least one path arg, every path arg to resolve absolute, and all inside a
+    // selected skill dir.
     const pathArgs = args.filter((token) => path.isAbsolute(token) || token.includes("/"));
     if (pathArgs.length === 0) {
       return false;
@@ -4735,7 +4741,8 @@ export class ChatService {
       return false;
     }
     for (const arg of pathArgs) {
-      if (!path.isAbsolute(arg)) {
+      const normalizedArg = this.normalizeSkillReadPathArg(arg);
+      if (!normalizedArg) {
         return false;
       }
       // Selected skill dirs are realpaths; global skills are commonly symlinked into the provider's
@@ -4743,7 +4750,7 @@ export class ChatService {
       // symlink. Require the resolved realpath of the read target to land inside a selected skill
       // dir: this still allows symlinked skill dirs, but rejects a path that is lexically inside the
       // skill dir yet symlinks back out to an arbitrary file (e.g. a planted SKILL.md -> /etc/passwd).
-      const real = await realpath(arg).catch(() => undefined);
+      const real = await realpath(normalizedArg).catch(() => undefined);
       if (!real) {
         return false;
       }
@@ -4753,6 +4760,24 @@ export class ChatService {
       }
     }
     return true;
+  }
+
+  private normalizeSkillReadPathArg(arg: string): string | undefined {
+    if (path.isAbsolute(arg)) {
+      return path.resolve(arg);
+    }
+    if (arg === "~") {
+      return this.homePathForSkillReads();
+    }
+    if (arg.startsWith("~/")) {
+      return path.resolve(this.homePathForSkillReads(), arg.slice(2));
+    }
+    return undefined;
+  }
+
+  private homePathForSkillReads(): string {
+    const home = process.env.HOME?.trim();
+    return path.resolve(home || app.getPath("home"));
   }
 
   private selectedSkillReadCommandIsSafe(program: string, args: string[], pathArgs: string[]): boolean {

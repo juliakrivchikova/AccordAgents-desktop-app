@@ -334,6 +334,53 @@
   box-shadow: 0 -8px 20px color-mix(in srgb, var(--shadow-color) 7%, transparent);
 }
 
+.chat-input-wrap.has-skill-highlights {
+  isolation: isolate;
+}
+
+.chat-draft-highlight {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  min-height: 68px;
+  max-height: 180px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 9px 10px;
+  color: var(--app-text);
+  font-size: 13px;
+  line-height: 1.42;
+  pointer-events: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-draft-skill-token {
+  border-radius: 6px;
+  color: var(--app-accent);
+  font-weight: 650;
+  background:
+    linear-gradient(
+      0deg,
+      color-mix(in srgb, var(--app-accent) 12%, transparent),
+      color-mix(in srgb, var(--app-accent) 12%, transparent)
+    );
+}
+
+.chat-composer textarea.skill-highlight-textarea {
+  position: relative;
+  z-index: 2;
+  color: transparent;
+  caret-color: var(--app-text-strong);
+  background: transparent;
+}
+
+.chat-composer textarea.skill-highlight-textarea::selection {
+  color: transparent;
+  background: color-mix(in srgb, var(--app-accent) 28%, transparent);
+}
+
 .mention-menu,
 .chat-participant-popover {
   z-index: var(--z-menu);
