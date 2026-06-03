@@ -10,6 +10,7 @@ import {
   effectiveChatAgentPermissionsForProvider,
   normalizeChatAgentPermissions
 } from "../../shared/agentPermissions";
+import { CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS } from "../../shared/chatBehaviorRules";
 import type {
   ChatAppToolApproval,
   ChatBehaviorRuleConfig,
@@ -1154,6 +1155,167 @@ test("participant behavior rules are merged into session role instructions", asy
     instructions: behaviorRule.instructions,
     version: behaviorRule.version
   }]);
+});
+
+test("behavior rules are reinforced in every turn prompt even when role instructions are omitted", async () => {
+  const behaviorRule: ChatBehaviorRuleConfig = {
+    id: "greeting",
+    label: "Test Rule",
+    instructions: "Always start message with \"hi\".",
+    version: 1,
+    updatedAt: NOW
+  };
+  const { service } = testService({
+    settings: {
+      chatRoleConfigs: [ROLE],
+      chatBehaviorRules: [behaviorRule]
+    }
+  });
+  const participant = {
+    ...chatParticipant("codex-cli"),
+    behaviorRuleIds: [behaviorRule.id]
+  };
+  const session = await (service as any).newSessionForParticipant(participant);
+  const conversation = chatConversation([participant]);
+  const triggerMessage = conversation.messages[0];
+
+  // Simulate a resume turn: native role runtime, so role instructions are not re-sent.
+  const { prompt, sections } = (service as any).buildPromptParts(
+    conversation,
+    participant,
+    session,
+    triggerMessage,
+    "/tmp/workspace",
+    false,
+    { includeRoleInstructions: false, agentMode: "default", permissions: participant.permissions }
+  );
+
+  assert.match(prompt, /Active behavior rules/);
+  assert.match(prompt, /- Test Rule: Always start message with "hi"\./);
+  assert.ok(sections.behaviorRules > 0);
+  // Role instructions are excluded on this turn, so the full role-embedded section must be absent;
+  // only the per-turn reinforcement carries the rule.
+  assert.doesNotMatch(prompt, /## Participant Behavior Rules/);
+});
+
+test("behavior rule prompt reinforcement truncates oversized legacy rule instructions", async () => {
+  const longInstructions = `${"x".repeat(CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS + 20)} sentinel`;
+  const behaviorRule: ChatBehaviorRuleConfig = {
+    id: "large-rule",
+    label: "Large Rule",
+    instructions: longInstructions,
+    version: 1,
+    updatedAt: NOW
+  };
+  const { service } = testService({
+    settings: {
+      chatRoleConfigs: [ROLE],
+      chatBehaviorRules: [behaviorRule]
+    }
+  });
+  const participant = {
+    ...chatParticipant("codex-cli"),
+    behaviorRuleIds: [behaviorRule.id]
+  };
+  const session = await (service as any).newSessionForParticipant(participant);
+  const conversation = chatConversation([participant]);
+  const triggerMessage = conversation.messages[0];
+
+  const { prompt } = (service as any).buildPromptParts(
+    conversation,
+    participant,
+    session,
+    triggerMessage,
+    "/tmp/workspace",
+    false,
+    { includeRoleInstructions: false, agentMode: "default", permissions: participant.permissions }
+  );
+
+  const promptText = prompt as string;
+  const ruleLine = promptText.split("\n").find((line: string) => line.startsWith("- Large Rule: "));
+  assert.ok(ruleLine);
+  const reinforcedInstructions = ruleLine.replace("- Large Rule: ", "");
+  assert.equal(reinforcedInstructions.length <= CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS, true);
+  assert.match(reinforcedInstructions, /\.\.\.$/);
+  assert.doesNotMatch(reinforcedInstructions, /sentinel/);
+});
+
+test("behavior rule reinforcement preserves multi-line rule structure instead of flattening it", async () => {
+  const behaviorRule: ChatBehaviorRuleConfig = {
+    id: "multi-step",
+    label: "Multi Step",
+    instructions: "Follow these steps:\n1. Greet\n2. Answer\n3. Summarize",
+    version: 1,
+    updatedAt: NOW
+  };
+  const { service } = testService({
+    settings: {
+      chatRoleConfigs: [ROLE],
+      chatBehaviorRules: [behaviorRule]
+    }
+  });
+  const participant = {
+    ...chatParticipant("codex-cli"),
+    behaviorRuleIds: [behaviorRule.id]
+  };
+  const session = await (service as any).newSessionForParticipant(participant);
+  const conversation = chatConversation([participant]);
+  const triggerMessage = conversation.messages[0];
+
+  const { prompt } = (service as any).buildPromptParts(
+    conversation,
+    participant,
+    session,
+    triggerMessage,
+    "/tmp/workspace",
+    false,
+    { includeRoleInstructions: false, agentMode: "default", permissions: participant.permissions }
+  );
+
+  const promptText = prompt as string;
+  // Continuation lines stay on their own indented lines under the bullet.
+  assert.ok(promptText.includes("- Multi Step: Follow these steps:\n  1. Greet\n  2. Answer\n  3. Summarize"));
+  // The structure must not be collapsed into a single line.
+  assert.doesNotMatch(promptText, /Follow these steps: 1\. Greet/);
+});
+
+test("behavior rule reinforcement is skipped when role instructions already carry the rules", async () => {
+  const behaviorRule: ChatBehaviorRuleConfig = {
+    id: "concise",
+    label: "Be concise",
+    instructions: "Keep replies short unless User asks for detail.",
+    version: 1,
+    updatedAt: NOW
+  };
+  const { service } = testService({
+    settings: {
+      chatRoleConfigs: [ROLE],
+      chatBehaviorRules: [behaviorRule]
+    }
+  });
+  const participant = {
+    ...chatParticipant("codex-cli"),
+    behaviorRuleIds: [behaviorRule.id]
+  };
+  const session = await (service as any).newSessionForParticipant(participant);
+  const conversation = chatConversation([participant]);
+  const triggerMessage = conversation.messages[0];
+
+  // First / refreshed turn: role instructions are included and embed the rules verbatim.
+  const { prompt, sections } = (service as any).buildPromptParts(
+    conversation,
+    participant,
+    session,
+    triggerMessage,
+    "/tmp/workspace",
+    false,
+    { includeRoleInstructions: true, agentMode: "default", permissions: participant.permissions }
+  );
+
+  assert.match(prompt, /## Participant Behavior Rules/);
+  // No duplicated, divergent reinforcement copy in the same prompt.
+  assert.doesNotMatch(prompt, /Active behavior rules/);
+  assert.equal(sections.behaviorRules, 0);
 });
 
 function testService(options: {

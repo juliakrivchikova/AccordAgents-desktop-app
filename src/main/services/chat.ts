@@ -55,6 +55,11 @@ import type {
 } from "../../shared/types";
 import { normalizeChatReactionEmoji } from "../../shared/chatReactions";
 import {
+  CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS,
+  CHAT_BEHAVIOR_RULE_LABEL_MAX_CHARS,
+  limitChatBehaviorRulePromptText
+} from "../../shared/chatBehaviorRules";
+import {
   CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH,
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
   effectiveChatAgentPermissionsForProvider,
@@ -121,6 +126,7 @@ interface ChatPromptSectionSizes {
   skills: number;
   mentions: number;
   attachments: number;
+  behaviorRules: number;
   currentRequest: number;
   total: number;
 }
@@ -2117,7 +2123,7 @@ export class ChatService {
               agentMode,
               permissions
             })
-          : this.buildRetryEnvelope(triggerMessage, Boolean(options.continuation));
+          : this.buildRetryEnvelope(triggerMessage, Boolean(options.continuation), session);
         const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
           includeRoleInstructions: true,
           agentMode,
@@ -2291,6 +2297,12 @@ export class ChatService {
     const skillsBlock = this.skillMentionsPromptSection(triggerMessage, participant.kind);
     const mentionsBlock = this.repoFileMentionsPromptSection(triggerMessage, participant.kind, options.agentMode, options.permissions, canRequestPermissions);
     const attachmentsBlock = this.imageAttachmentsPromptSection(triggerMessage);
+    // When role instructions are included this turn they already carry the rules
+    // verbatim (the `## Participant Behavior Rules` section), so skip the per-turn
+    // reinforcement to avoid a duplicated, divergent copy in the same prompt.
+    const behaviorRulesBlock = options.includeRoleInstructions
+      ? ""
+      : this.behaviorRuleReinforcementSection(session);
     const currentRequestBlock = [
       continuation
         ? "Current request: control has returned to you after the approved participants have replied. Produce your next answer."
@@ -2304,6 +2316,7 @@ export class ChatService {
       skillsBlock,
       mentionsBlock,
       attachmentsBlock,
+      behaviorRulesBlock,
       currentRequestBlock
     ].filter(Boolean);
     const prompt = orderedBlocks.join("\n\n");
@@ -2317,13 +2330,59 @@ export class ChatService {
         skills: skillsBlock.length,
         mentions: mentionsBlock.length,
         attachments: attachmentsBlock.length,
+        behaviorRules: behaviorRulesBlock.length,
         currentRequest: currentRequestBlock.length,
         total: prompt.length
       }
     };
   }
 
-  private buildRetryEnvelope(triggerMessage: ChatMessage, continuation: boolean): string {
+  // Reinforces attached behavior rules on every turn. Role instructions (which
+  // embed the full rule text) are only delivered to the CLI agent on the first
+  // turn or on refresh; on resume turns the native role runtime does not re-send
+  // them, so without this block a rule silently stops being applied mid-chat.
+  private behaviorRuleReinforcementSection(session: ChatParticipantSession): string {
+    const rules = session.participantBehaviorRules ?? [];
+    if (rules.length === 0) {
+      return "";
+    }
+    const lines = rules.map((rule) => {
+      const label = limitChatBehaviorRulePromptText(rule.label, CHAT_BEHAVIOR_RULE_LABEL_MAX_CHARS);
+      const instructions = this.behaviorRuleInstructionsForPrompt(rule.instructions);
+      // Preserve multi-line rule structure (numbered steps, required formats) by
+      // indenting continuation lines under the bullet instead of flattening them
+      // into one line, which would silently change the rule the model sees on the
+      // very resume turns this reinforcement exists to cover.
+      const [first, ...rest] = instructions.split("\n");
+      const bullet = `- ${label}: ${first}`;
+      return rest.length === 0 ? bullet : [bullet, ...rest.map((line) => `  ${line}`)].join("\n");
+    });
+    return [
+      "Active behavior rules (apply to this reply; if one conflicts with the user's current explicit request or a higher-priority instruction, follow the higher-priority one):",
+      ...lines
+    ].join("\n");
+  }
+
+  // Length-caps a rule's instructions for the per-turn reinforcement block while
+  // preserving line breaks. Settings caps rule size at creation; this is a
+  // backstop for legacy oversized rules. Truncation is marked with an ellipsis,
+  // never silent, so a clipped rule is visible rather than quietly reshaped.
+  private behaviorRuleInstructionsForPrompt(value: string, maxChars = CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS): string {
+    const normalized = value
+      .replace(/\r\n/g, "\n")
+      .replace(/[ \t]+/g, " ")
+      .replace(/ *\n */g, "\n")
+      .trim();
+    if (normalized.length <= maxChars) {
+      return normalized;
+    }
+    if (maxChars <= 3) {
+      return normalized.slice(0, maxChars);
+    }
+    return `${normalized.slice(0, maxChars - 3).trimEnd()}...`;
+  }
+
+  private buildRetryEnvelope(triggerMessage: ChatMessage, continuation: boolean, session: ChatParticipantSession): string {
     return [
       "Triggering message identifiers:",
       this.triggeringMessageIdentifiers(triggerMessage),
@@ -2331,11 +2390,12 @@ export class ChatService {
       this.formatMessage(triggerMessage, false, false),
       this.skillMentionsPromptSection(triggerMessage, undefined),
       this.imageAttachmentsPromptSection(triggerMessage),
+      this.behaviorRuleReinforcementSection(session),
       continuation
         ? "Current request: control has returned to you after the approved participants have replied. Produce your next answer."
         : "Current request: answer the triggering message above.",
       "Write your next message in this chat."
-    ].join("\n\n");
+    ].filter(Boolean).join("\n\n");
   }
 
   private triggeringMessageIdentifiers(message: ChatMessage): string {

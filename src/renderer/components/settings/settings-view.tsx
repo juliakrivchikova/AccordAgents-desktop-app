@@ -25,6 +25,10 @@ import type {
   ProviderKind,
   ProviderSettings
 } from "../../../shared/types";
+import {
+  CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS,
+  CHAT_BEHAVIOR_RULE_LABEL_MAX_CHARS
+} from "../../../shared/chatBehaviorRules";
 import { Avatar } from "../avatar/avatar";
 import { avatarForChatAvatarOption } from "../chat/chat-avatars";
 import { chatRoleLabel } from "../chat/chat-conversation-data";
@@ -202,8 +206,15 @@ function BehaviorRuleEditor({ rule, onSave, onDelete }: {
 }): JSX.Element {
   const [label, setLabel] = useState(rule?.label ?? "");
   const [instructions, setInstructions] = useState(rule?.instructions ?? "");
-  const changed = label.trim() !== (rule?.label ?? "") || instructions.trim() !== (rule?.instructions ?? "");
-  const canSave = Boolean(label.trim() && instructions.trim()) && (!rule || changed);
+  const trimmedLabel = label.trim();
+  const trimmedInstructions = instructions.trim();
+  const validation = trimmedLabel.length > CHAT_BEHAVIOR_RULE_LABEL_MAX_CHARS
+    ? `Rule name must be ${CHAT_BEHAVIOR_RULE_LABEL_MAX_CHARS} characters or less.`
+    : trimmedInstructions.length > CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS
+      ? `Rule instructions must be ${CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS} characters or less.`
+      : undefined;
+  const changed = trimmedLabel !== (rule?.label ?? "") || trimmedInstructions !== (rule?.instructions ?? "");
+  const canSave = Boolean(trimmedLabel && trimmedInstructions) && !validation && (!rule || changed);
   return (
     <article className="role-config-card">
       <div className="settings-item-head">
@@ -228,17 +239,24 @@ function BehaviorRuleEditor({ rule, onSave, onDelete }: {
         </div>
       </div>
       <FormRow label="Name">
-        <Input value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Be concise" />
+        <Input
+          value={label}
+          onChange={(event) => setLabel(event.target.value)}
+          maxLength={CHAT_BEHAVIOR_RULE_LABEL_MAX_CHARS}
+          placeholder="Be concise"
+        />
       </FormRow>
       <FormRow label="Instructions">
         <ResizableTextarea
           value={instructions}
           onChange={(event) => setInstructions(event.target.value)}
+          maxLength={CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS}
           rows={3}
           maxHeight={240}
           placeholder="Keep replies short unless the user asks for detail."
         />
       </FormRow>
+      {validation && <div className="inline-error">{validation}</div>}
     </article>
   );
 }

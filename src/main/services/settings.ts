@@ -19,6 +19,10 @@ import type {
 } from "../../shared/types";
 import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { normalizeChatAppToolCapabilities } from "../../shared/appTools";
+import {
+  CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS,
+  CHAT_BEHAVIOR_RULE_LABEL_MAX_CHARS
+} from "../../shared/chatBehaviorRules";
 
 interface StoredSettings {
   settingsVersion?: number;
@@ -1597,8 +1601,14 @@ export class SettingsService {
     if (!label) {
       throw new Error("Behavior rule name is required.");
     }
+    if (label.length > CHAT_BEHAVIOR_RULE_LABEL_MAX_CHARS) {
+      throw new Error(`Behavior rule name must be ${CHAT_BEHAVIOR_RULE_LABEL_MAX_CHARS} characters or less.`);
+    }
     if (!instructions) {
       throw new Error("Behavior rule instructions are required.");
+    }
+    if (instructions.length > CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS) {
+      throw new Error(`Behavior rule instructions must be ${CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS} characters or less.`);
     }
 
     const rules = stored.chatBehaviorRules ?? [];
