@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import { FileText, ImagePlus, ListChecks, RefreshCw, SendHorizontal, X } from "lucide-react";
+import { ArrowUp, FileText, ImagePlus, ListChecks, RefreshCw, X } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
 import { ResizableTextarea } from "@/renderer/components/primitives";
 import type {
   ChatImageInput,
@@ -392,7 +391,8 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
           ))}
         </div>
       )}
-      <div className={["chat-input-wrap", showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")}>
+      <div className="chat-composer-shell">
+        <div className={["chat-input-wrap", showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")}>
         {mentionOptions.length > 0 && (
           <div className="mention-menu" role="listbox">
             {mentionOptions.map((participant, index) => (
@@ -465,7 +465,10 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
         <ResizableTextarea
           ref={textareaRef}
           value={props.draft}
-          className={showSkillHighlights ? "skill-highlight-textarea" : undefined}
+          className={[
+            "border-0 bg-transparent text-sm leading-normal shadow-none focus-visible:border-0 focus-visible:ring-0 dark:bg-transparent",
+            showSkillHighlights ? "skill-highlight-textarea" : ""
+          ].filter(Boolean).join(" ")}
           spellCheck={!showSkillHighlights}
           onChange={(event) => updateDraft(event.target.value)}
           onScroll={syncHighlightScroll}
@@ -559,25 +562,52 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
             {renderSkillHighlightedDraft(props.draft, selectedSkillMentions)}
           </div>
         )}
+        </div>
+        <div className="chat-composer-toolbar">
+          <div className="chat-composer-tools">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              multiple
+              hidden
+              onChange={(event) => {
+                const files = Array.from(event.currentTarget.files ?? []);
+                event.currentTarget.value = "";
+                void addImageFiles(files);
+              }}
+            />
+            <button
+              type="button"
+              className="composer-icon-button"
+              title="Attach image"
+              aria-label="Attach image"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <ImagePlus size={18} />
+            </button>
+          </div>
+          <div className="chat-composer-actions">
+            <span className="chat-composer-hint" aria-hidden="true">
+              <kbd>↵</kbd>
+              <span>send</span>
+              <em>·</em>
+              <kbd>⇧↵</kbd>
+              <span>newline</span>
+            </span>
+            <button
+              type="button"
+              className="composer-send-button"
+              title="Send"
+              aria-label="Send message"
+              disabled={!canSend}
+              onClick={() => void sendDraft()}
+            >
+              {props.isRunning ? <RefreshCw size={17} className="spin" /> : <ArrowUp size={18} strokeWidth={2.4} />}
+            </button>
+          </div>
+        </div>
       </div>
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/png,image/jpeg,image/webp"
-        multiple
-        hidden
-        onChange={(event) => {
-          const files = Array.from(event.currentTarget.files ?? []);
-          event.currentTarget.value = "";
-          void addImageFiles(files);
-        }}
-      />
-      <Button size="sm" variant="outline" title="Attach image" aria-label="Attach image" onClick={() => fileInputRef.current?.click()}>
-        <ImagePlus size={18} />
-      </Button>
-      <Button size="sm" title="Send" disabled={!canSend} onClick={() => void sendDraft()}>
-        {props.isRunning ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
-      </Button>
     </div>
   );
 }

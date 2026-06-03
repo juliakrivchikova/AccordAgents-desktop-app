@@ -957,16 +957,149 @@
 }
 
 .chat-composer {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   position: relative;
   z-index: 20;
-  grid-template-columns: minmax(0, 1fr) 40px 42px;
-  align-items: end;
-  gap: 10px;
-  padding: 10px 18px 18px;
+  gap: 9px;
+  padding: 12px 18px 18px;
   border-top: 1px solid var(--app-border);
   background: var(--app-surface);
   box-shadow: 0 -10px 24px color-mix(in srgb, var(--shadow-color) 8%, transparent);
+}
+
+.chat-composer-shell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 16px;
+  background: var(--app-surface);
+  box-shadow:
+    var(--shadow-xs),
+    inset 0 1px 0 color-mix(in srgb, var(--highlight-color) 55%, transparent);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.chat-composer-shell:focus-within {
+  border-color: color-mix(in srgb, var(--app-accent) 58%, var(--app-border-strong));
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--app-accent) 16%, transparent),
+    var(--shadow-sm);
+}
+
+.chat-composer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 -8px;
+  padding: 8px 10px 0;
+  border-top: 1px solid var(--app-border);
+}
+
+.chat-composer-tools,
+.chat-composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.composer-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--app-muted);
+  cursor: pointer;
+  transition: background 130ms ease, color 130ms ease, transform 130ms ease;
+}
+
+.composer-icon-button:hover {
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+}
+
+.composer-icon-button:active {
+  transform: translateY(0.5px);
+}
+
+.chat-composer-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--app-muted-subtle);
+  font-size: 11px;
+  opacity: 0;
+  transform: translateX(4px);
+  transition: opacity 160ms ease, transform 160ms ease;
+  user-select: none;
+  pointer-events: none;
+}
+
+.chat-composer-shell:focus-within .chat-composer-hint {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.chat-composer-hint em {
+  font-style: normal;
+  color: var(--app-border-strong);
+}
+
+.chat-composer-hint kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border: 1px solid var(--app-border);
+  border-radius: 5px;
+  background: var(--app-surface-subtle);
+  color: var(--app-muted);
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.composer-send-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--app-primary);
+  color: var(--app-primary-fg);
+  cursor: pointer;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--shadow-color) 24%, transparent);
+  transition: background 130ms ease, transform 130ms ease, box-shadow 130ms ease, color 130ms ease;
+}
+
+.composer-send-button:hover:not(:disabled) {
+  background: var(--app-primary-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 5px 12px color-mix(in srgb, var(--shadow-color) 26%, transparent);
+}
+
+.composer-send-button:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--shadow-color) 24%, transparent);
+}
+
+.composer-send-button:disabled {
+  background: var(--app-surface-active);
+  color: var(--app-muted-subtle);
+  box-shadow: none;
+  cursor: not-allowed;
 }
 
 .chat-thread-panel {
@@ -1005,8 +1138,16 @@
 }
 
 .chat-thread-composer {
-  padding: 12px 18px 18px;
+  padding: 12px 16px 16px;
   box-shadow: none;
+}
+
+.chat-thread-composer .chat-composer-shell {
+  border-radius: 14px;
+}
+
+.chat-thread-composer .chat-composer-hint {
+  display: none;
 }
 
 .chat-composer-status {
@@ -1124,22 +1265,7 @@
 }
 
 .chat-composer textarea {
-  width: 100%;
-  min-height: 68px;
-  max-height: 180px;
-  resize: vertical;
-  border: 1px solid var(--app-border);
-  border-radius: 8px;
-  padding: 12px 13px;
-  background: var(--app-surface);
   color: var(--app-text-strong);
-  line-height: 1.42;
-  outline: none;
-}
-
-.chat-composer textarea:focus {
-  border-color: var(--app-success);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-success) 16%, transparent);
 }
 
 .mention-menu {

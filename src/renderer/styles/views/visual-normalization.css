@@ -294,7 +294,6 @@
 }
 
 .decision-compose textarea,
-.chat-composer textarea,
 .plan-correction-composer textarea {
   border-color: var(--app-border-strong);
   background: var(--app-surface);
@@ -303,23 +302,25 @@
 }
 
 .decision-compose textarea,
-.chat-composer textarea,
 .plan-correction-composer textarea {
   padding: 9px 10px;
   line-height: 1.42;
 }
 
 .decision-compose textarea:focus,
-.chat-composer textarea:focus,
 .plan-correction-composer textarea:focus {
   border-color: var(--app-accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 18%, transparent);
 }
 
 .decision-compose textarea:disabled,
-.chat-composer textarea:disabled,
 .plan-correction-composer textarea:disabled {
   background: var(--app-surface-subtle);
+  color: var(--app-muted-subtle);
+  cursor: not-allowed;
+}
+
+.chat-composer textarea:disabled {
   color: var(--app-muted-subtle);
   cursor: not-allowed;
 }
