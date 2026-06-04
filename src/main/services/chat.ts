@@ -3060,11 +3060,26 @@ export class ChatService {
   }
 
   private mergeStoredChatMessage(stored: ChatMessage, current: ChatMessage): ChatMessage {
-    const metadata = this.mergeStoredChatMessageReactions(stored.metadata, current.metadata);
+    const preferred = this.preferredChatMessageForRefresh(stored, current);
+    const metadata = this.mergeStoredChatMessageReactions(stored.metadata, preferred.metadata);
     if (metadata) {
-      current.metadata = metadata;
+      preferred.metadata = metadata;
     } else {
-      delete current.metadata;
+      delete preferred.metadata;
+    }
+    return preferred;
+  }
+
+  private preferredChatMessageForRefresh(stored: ChatMessage, current: ChatMessage): ChatMessage {
+    if (stored.status === "done" && current.status !== "done") {
+      return stored;
+    }
+    if (
+      stored.status === "error" &&
+      !this.hasStaleRunRecoveryMarker(stored) &&
+      current.status !== "error"
+    ) {
+      return stored;
     }
     return current;
   }

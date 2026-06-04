@@ -963,6 +963,32 @@ test("app_chat_react reaction survives stale chat state refresh", async () => {
   assert.equal(staleConversationWithReaction.messages[0].metadata?.reactions, undefined);
 });
 
+test("refreshStoredChatState preserves stored completed messages over stale pending copies", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const runId = "completed-run";
+  conversation.messages.push(pendingParticipantMessage(participant, "answer", runId, {
+    status: "done",
+    content: "Finished answer.",
+    metadata: { runId }
+  }));
+  const staleConversation = clone(conversation);
+  staleConversation.messages = staleConversation.messages.map((message: any) =>
+    message.id === "answer"
+      ? pendingParticipantMessage(participant, "answer", runId)
+      : message
+  );
+  const { service } = testService({ conversation });
+
+  await (service as any).refreshStoredChatState(staleConversation);
+
+  const answer = staleConversation.messages.find((message: any) => message.id === "answer")!;
+  assert.equal(answer.status, "done");
+  assert.equal(answer.content, "Finished answer.");
+  assert.equal((service as any).recoverStaleChatRun(staleConversation), false);
+  assert.equal(answer.metadata?.staleRunRecovery, undefined);
+});
+
 function pendingParticipantMessage(
   participant: ChatParticipant,
   id: string,
