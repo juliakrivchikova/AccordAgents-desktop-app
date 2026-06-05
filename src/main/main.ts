@@ -78,6 +78,7 @@ appMcpService.setChatAttachmentReadHandler((actor, request) => chatService.readC
 appMcpService.setChatParticipantRequestHandler((actor, request) => chatService.requestParticipantsFromTool(actor, request));
 appMcpService.setChatParticipantRequestStatusHandler((actor, request) => chatService.participantRequestStatusForTool(actor, request));
 appMcpService.setChatReactHandler((actor, request) => chatService.reactToMessageFromTool(actor, request));
+appMcpService.setChatSendMessageHandler((actor, request) => chatService.sendChatMessageFromTool(actor, request));
 const activeReviews = new Map<string, AbortController>();
 
 function appSkillsSourceRoot(): string {

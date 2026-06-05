@@ -32,9 +32,15 @@ export interface AppSkillsServiceOptions {
   tmpMaxAgeMs?: number;
 }
 
+type AppSkillVisibility = "internal" | "public";
+
 interface CanonicalSkill {
   id: string;
   generatedName: string;
+  // The frontmatter name from the source SKILL.md. Preserved verbatim for public skills so
+  // their slash name (e.g. /accord) survives; internal skills render as generatedName instead.
+  canonicalName: string;
+  visibility: AppSkillVisibility;
   normalizedContent: string;
   description: string;
   body: string;
@@ -60,6 +66,7 @@ interface GeneratedMarker {
   canonicalId: string;
   folderName: string;
   provider: AppSkillProvider;
+  visibility: AppSkillVisibility;
   generatedFiles: string[];
   sourceHash: string;
   renderHash: string;
@@ -70,6 +77,7 @@ interface GeneratedMarker {
 interface ManifestEntry {
   canonicalId: string;
   folderName: string;
+  visibility: AppSkillVisibility;
   sourceHash: string;
   renderHash: string;
 }
@@ -413,9 +421,13 @@ export class AppSkillsService {
       const normalizedContent = ensureTrailingNewline(stripOuterMarkdownFence(raw));
       const parsed = parseSkillFrontmatter(normalizedContent);
       const sourceHash = hashText(normalizedContent);
+      const visibility: AppSkillVisibility =
+        scalarFrontmatterValue(parsed.frontmatter, "visibility") === "public" ? "public" : "internal";
       skills.push({
         id: entry.name,
         generatedName: this.generatedSkillName(entry.name),
+        canonicalName: parsed.name,
+        visibility,
         normalizedContent,
         description: parsed.description,
         body: parsed.body,
@@ -437,9 +449,17 @@ export class AppSkillsService {
     };
   }
 
+  private renderedSkillName(skill: CanonicalSkill): string {
+    // Public skills keep their slash name (e.g. accord); internal bridge skills are renamed to
+    // the collision-safe generated name (e.g. accordagents-app-chat-request).
+    return skill.visibility === "public" ? skill.canonicalName : skill.generatedName;
+  }
+
   private renderClaudeSkill(skill: CanonicalSkill): RenderedFile[] {
     const parsed = parseSkillFrontmatter(skill.normalizedContent);
-    const frontmatter = parsed.frontmatter.replace(/^name:\s*.*$/m, `name: ${skill.generatedName}`);
+    const frontmatter = parsed.frontmatter
+      .replace(/^name:\s*.*$/m, `name: ${this.renderedSkillName(skill)}`)
+      .replace(/^visibility:\s*.*\n?/m, "");
     return [{
       path: "SKILL.md",
       content: ensureTrailingNewline(`---\n${frontmatter}\n---${parsed.body}`)
@@ -452,7 +472,7 @@ export class AppSkillsService {
     }
     const skillContent = [
       "---",
-      `name: ${skill.generatedName}`,
+      `name: ${this.renderedSkillName(skill)}`,
       "description: >",
       ...formatFoldedDescription(skill.description),
       "---",
@@ -465,7 +485,7 @@ export class AppSkillsService {
       },
       {
         path: "agents/openai.yaml",
-        content: generateOpenAiYaml(skill.generatedName, condenseOpenAiShortDescription(skill.description))
+        content: generateOpenAiYaml(this.renderedSkillName(skill), condenseOpenAiShortDescription(skill.description))
       }
     ];
   }
@@ -529,6 +549,7 @@ export class AppSkillsService {
       canonicalId: rendered.canonical.id,
       folderName: rendered.canonical.generatedName,
       provider: rendered.provider,
+      visibility: rendered.canonical.visibility,
       generatedFiles: rendered.files.map((file) => file.path),
       sourceHash: rendered.canonical.sourceHash,
       renderHash: rendered.renderHash,
@@ -542,6 +563,7 @@ export class AppSkillsService {
     return {
       canonicalId: rendered.canonical.id,
       folderName: rendered.canonical.generatedName,
+      visibility: rendered.canonical.visibility,
       sourceHash: rendered.canonical.sourceHash,
       renderHash: rendered.renderHash
     };
@@ -889,8 +911,16 @@ function isManifestEntry(value: unknown): value is ManifestEntry {
   return isRecord(value) &&
     typeof value.canonicalId === "string" &&
     typeof value.folderName === "string" &&
+    isOptionalVisibility(value.visibility) &&
     typeof value.sourceHash === "string" &&
     typeof value.renderHash === "string";
+}
+
+// Visibility was added after v1. Treat a missing field as internal so a manifest/marker
+// written by an older app version still validates (and stays hidden) instead of forcing a
+// collision/rewrite.
+function isOptionalVisibility(value: unknown): boolean {
+  return value === undefined || value === "internal" || value === "public";
 }
 
 function isMarker(value: unknown, provider: AppSkillProvider, folderName: string): value is GeneratedMarker {
@@ -902,6 +932,7 @@ function isMarker(value: unknown, provider: AppSkillProvider, folderName: string
     value.owner === OWNER_ID &&
     value.provider === provider &&
     value.folderName === folderName &&
+    isOptionalVisibility(value.visibility) &&
     typeof value.canonicalId === "string" &&
     Array.isArray(value.generatedFiles) &&
     value.generatedFiles.every((item) => typeof item === "string") &&

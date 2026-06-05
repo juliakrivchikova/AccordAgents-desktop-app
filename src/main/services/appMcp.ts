@@ -16,6 +16,7 @@ export const APP_CHAT_READ_MESSAGES_TOOL = "app_chat_read_messages";
 export const APP_CHAT_LIST_ATTACHMENTS_TOOL = "app_chat_list_attachments";
 export const APP_CHAT_READ_ATTACHMENT_TOOL = "app_chat_read_attachment";
 export const APP_CHAT_REACT_TOOL = "app_chat_react";
+export const APP_CHAT_SEND_MESSAGE_TOOL = "app_chat_send_message";
 
 export interface AppMcpActor {
   conversationId: string;
@@ -54,6 +55,7 @@ type AppChatAttachmentReadHandler = (actor: AppMcpActor, request: unknown) => Pr
 type AppChatParticipantRequestHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatParticipantRequestStatusHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatReactHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+type AppChatSendMessageHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 
 interface JsonRpcRequest {
   jsonrpc?: unknown;
@@ -90,6 +92,7 @@ export class AppMcpService {
   private chatParticipantRequestHandler?: AppChatParticipantRequestHandler;
   private chatParticipantRequestStatusHandler?: AppChatParticipantRequestStatusHandler;
   private chatReactHandler?: AppChatReactHandler;
+  private chatSendMessageHandler?: AppChatSendMessageHandler;
 
   setRosterChangeHandler(handler: AppRosterChangeHandler): void {
     this.rosterChangeHandler = handler;
@@ -133,6 +136,10 @@ export class AppMcpService {
 
   setChatReactHandler(handler: AppChatReactHandler): void {
     this.chatReactHandler = handler;
+  }
+
+  setChatSendMessageHandler(handler: AppChatSendMessageHandler): void {
+    this.chatSendMessageHandler = handler;
   }
 
   async start(): Promise<void> {
@@ -408,6 +415,10 @@ export class AppMcpService {
           type: "object",
           additionalProperties: false,
           properties: {
+            messageId: {
+              type: "string",
+              description: "Optional message id. When set, returns only that single message (with metadata.reactions) if it is visible to this turn; other filters are ignored. Use this to read the exact canonical message under approval."
+            },
             threadId: {
               type: "string",
               description: "Optional thread id to read only messages from one chat thread."
@@ -512,6 +523,54 @@ export class AppMcpService {
             }
           },
           required: ["messageId", "emoji"]
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false
+        }
+      },
+      {
+        name: APP_CHAT_SEND_MESSAGE_TOOL,
+        title: "Send Chat Message",
+        description:
+          "Post a participant message authored by you IMMEDIATELY, so other participants and User can see and react to it before your turn ends, and return its messageId and sequence. Use this ONLY when you need a message visible mid-turn — for example to publish something others will react to during this same turn (a canonical resolution) and you need its messageId now. Do NOT use this for an ordinary answer or reply: your normal turn response is already shared with everyone when your turn ends, so sending it with this tool just duplicates it and leaves your turn with nothing to say. The returned messageId can be passed to app_chat_react.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            content: {
+              type: "string",
+              description: "Message content. Must be non-empty after trimming."
+            },
+            threadId: {
+              type: "string",
+              description: "Optional visible thread id to post into. Defaults to the active turn's thread."
+            },
+            parentMessageId: {
+              type: "string",
+              description: "Optional visible parent message id (e.g. User's original request). Must be visible to this turn."
+            },
+            chatThreadRootId: {
+              type: "string",
+              description: "Optional visible thread root message id. Must be visible to this turn."
+            },
+            accordResolution: {
+              type: "object",
+              additionalProperties: false,
+              description: "Optional lightweight metadata for verification/debugging of an /accord resolution. Not an approval engine; the canonical approval is the ✅ reactor set.",
+              properties: {
+                version: { type: "integer", minimum: 1 },
+                sourceMessageId: { type: "string" },
+                selectedParticipantIds: { type: "array", items: { type: "string" } },
+                requiredApproverIds: { type: "array", items: { type: "string" } },
+                supersedesMessageId: { type: "string" },
+                status: { type: "string" }
+              }
+            }
+          },
+          required: ["content"]
         },
         annotations: {
           readOnlyHint: false,
@@ -691,7 +750,8 @@ export class AppMcpService {
       record.name !== APP_CHAT_READ_MESSAGES_TOOL &&
       record.name !== APP_CHAT_LIST_ATTACHMENTS_TOOL &&
       record.name !== APP_CHAT_READ_ATTACHMENT_TOOL &&
-      record.name !== APP_CHAT_REACT_TOOL
+      record.name !== APP_CHAT_REACT_TOOL &&
+      record.name !== APP_CHAT_SEND_MESSAGE_TOOL
     ) {
       throw new Error(`Unknown app tool: ${String(record.name ?? "")}.`);
     }
@@ -730,6 +790,12 @@ export class AppMcpService {
         throw new Error("Chat reaction handling is not available.");
       }
       return this.toolTextResult(await this.chatReactHandler(actor, record.arguments));
+    }
+    if (record.name === APP_CHAT_SEND_MESSAGE_TOOL) {
+      if (!this.chatSendMessageHandler) {
+        throw new Error("Chat message sending is not available.");
+      }
+      return this.toolTextResult(await this.chatSendMessageHandler(actor, record.arguments));
     }
     if (record.name === APP_CHAT_REQUEST_PARTICIPANTS_TOOL) {
       if (!this.chatParticipantRequestHandler) {

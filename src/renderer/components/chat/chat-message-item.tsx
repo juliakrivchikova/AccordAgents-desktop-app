@@ -128,7 +128,7 @@ export function ChatMessageItem(props: {
 
   return (
     <>
-      <article className={`message chat-message ${choice ? "has-choice" : ""} ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""}`}>
+      <article data-message-id={message.id} className={`message chat-message ${choice ? "has-choice" : ""} ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""}`}>
         {message.role === "participant" ? (
           <AgentAvatarWithDetails
             className="message-avatar"

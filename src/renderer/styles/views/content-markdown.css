@@ -374,6 +374,34 @@
   background: transparent;
 }
 
+.message-link {
+  color: var(--app-info);
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  border-radius: 4px;
+}
+
+.message-link:hover,
+.message-link:focus-visible {
+  background: var(--app-info-soft);
+  outline: none;
+}
+
+.message-flash .message-body {
+  animation: message-flash 1.5s ease-out;
+}
+
+@keyframes message-flash {
+  0% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-success) 45%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
 .markdown-list {
   padding-left: 24px;
 }

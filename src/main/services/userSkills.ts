@@ -598,11 +598,18 @@ export class UserSkillsService {
       if (parsed.owner !== "accordagents" || !Array.isArray(parsed.generatedFolders)) {
         return new Set();
       }
+      // Only internal generated folders are hidden from slash discovery. Public app-owned
+      // skills (e.g. /accord) keep their folders but remain discoverable. A missing visibility
+      // field (older manifests) is treated as internal so nothing is unexpectedly revealed.
       return new Set(parsed.generatedFolders.flatMap((entry) => {
-        if (entry && typeof entry === "object" && typeof (entry as { folderName?: unknown }).folderName === "string") {
-          return [(entry as { folderName: string }).folderName];
+        if (!entry || typeof entry !== "object") {
+          return [];
         }
-        return [];
+        const record = entry as { folderName?: unknown; visibility?: unknown };
+        if (typeof record.folderName !== "string" || record.visibility === "public") {
+          return [];
+        }
+        return [record.folderName];
       }));
     } catch {
       return new Set();
@@ -611,8 +618,10 @@ export class UserSkillsService {
 
   private async hasInternalMarker(folderPath: string): Promise<boolean> {
     try {
-      const parsed = JSON.parse(await readFile(path.join(folderPath, INTERNAL_MARKER_FILE), "utf8")) as { owner?: unknown };
-      return parsed.owner === "accordagents";
+      const parsed = JSON.parse(await readFile(path.join(folderPath, INTERNAL_MARKER_FILE), "utf8")) as { owner?: unknown; visibility?: unknown };
+      // Public app-owned skills carry the AccordAgents marker too, but must stay discoverable.
+      // Only internal markers (or older markers without a visibility field) hide the folder.
+      return parsed.owner === "accordagents" && parsed.visibility !== "public";
     } catch {
       return false;
     }

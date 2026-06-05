@@ -479,6 +479,20 @@ export interface ChatMessageMetadata {
   syncedThroughMessageId?: string;
   runId?: string;
   queuedBehind?: { handle: string };
+  appMessageSource?: string;
+  accordResolution?: ChatAccordResolutionMetadata;
+}
+
+// Lightweight, optional metadata a facilitator can attach to a canonical /accord
+// resolution message for verification/debugging. This is NOT an app-state decision
+// engine — approval authority remains the `✅` reactor set on the canonical message.
+export interface ChatAccordResolutionMetadata {
+  version?: number;
+  sourceMessageId?: string;
+  selectedParticipantIds?: string[];
+  requiredApproverIds?: string[];
+  supersedesMessageId?: string;
+  status?: string;
 }
 
 export interface ChatRoleConfigUpdate {

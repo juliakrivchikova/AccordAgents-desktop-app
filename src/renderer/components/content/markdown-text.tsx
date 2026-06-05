@@ -1,5 +1,37 @@
 import type { ReactNode } from "react";
 
+// A clickable reference to another chat message. Authors write `[label](#msg:<id>)` (or a bare
+// `#msg:<id>`); we render a link that scrolls the referenced message into view and flashes it.
+// This keeps the user-facing text clean instead of leaking raw message ids.
+const MESSAGE_LINK_RE = /^\[([^\]\n]+)\]\(#msg:([0-9a-fA-F][0-9a-fA-F-]{5,})\)/;
+const BARE_MESSAGE_RE = /^#msg:([0-9a-fA-F][0-9a-fA-F-]{5,})/;
+
+function focusMessage(messageId: string): void {
+  const el = typeof document !== "undefined"
+    ? document.querySelector(`[data-message-id="${messageId}"]`)
+    : null;
+  if (!el) {
+    return;
+  }
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.add("message-flash");
+  window.setTimeout(() => el.classList.remove("message-flash"), 1500);
+}
+
+function MessageLink({ messageId, label }: { messageId: string; label: string }): JSX.Element {
+  return (
+    <a
+      className="message-link"
+      role="button"
+      tabIndex={0}
+      onClick={(event) => { event.preventDefault(); focusMessage(messageId); }}
+      onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); focusMessage(messageId); } }}
+    >
+      {label}
+    </a>
+  );
+}
+
 type MarkdownBlock =
   | { type: "paragraph"; lines: string[] }
   | { type: "heading"; text: string }
@@ -286,9 +318,31 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
       }
     }
 
+    if (text[index] === "[") {
+      const link = text.slice(index).match(MESSAGE_LINK_RE);
+      if (link) {
+        nodes.push(<MessageLink key={`${keyPrefix}-m-${key}`} messageId={link[2]} label={link[1]} />);
+        key += 1;
+        index += link[0].length;
+        continue;
+      }
+    }
+
+    if (text[index] === "#") {
+      const bare = text.slice(index).match(BARE_MESSAGE_RE);
+      if (bare) {
+        nodes.push(<MessageLink key={`${keyPrefix}-m-${key}`} messageId={bare[1]} label="↳ message" />);
+        key += 1;
+        index += bare[0].length;
+        continue;
+      }
+    }
+
     const nextBold = text.indexOf("**", index + 1);
     const nextCode = text.indexOf("`", index + 1);
-    const nextCandidates = [nextBold, nextCode].filter((candidate) => candidate > -1);
+    const nextLink = text.indexOf("[", index + 1);
+    const nextBare = text.indexOf("#msg:", index + 1);
+    const nextCandidates = [nextBold, nextCode, nextLink, nextBare].filter((candidate) => candidate > -1);
     const next = nextCandidates.length ? Math.min(...nextCandidates) : text.length;
     nodes.push(text.slice(index, next));
     index = next;

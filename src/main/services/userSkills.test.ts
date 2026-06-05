@@ -280,6 +280,71 @@ test("hides AccordAgents internal generated skills by ownership marker", async (
   });
 });
 
+test("keeps public app-owned generated skills discoverable in slash search", async () => {
+  await withTempWorkspace(async ({ homeDir, repoPath }) => {
+    const root = path.join(homeDir, ".agents/skills");
+    const generated = path.join(root, "accordagents-accord");
+    await writeSkill(generated, "accord", "Accord", "body");
+    await writeFile(
+      path.join(generated, ".accordagents-generated.json"),
+      JSON.stringify({ owner: "accordagents", visibility: "public" }),
+      "utf8"
+    );
+    await writeFile(
+      path.join(root, ".accordagents-skills.json"),
+      JSON.stringify({ owner: "accordagents", generatedFolders: [{ folderName: "accordagents-accord", visibility: "public" }] }),
+      "utf8"
+    );
+    const service = new UserSkillsService({ homeDir });
+
+    const search = await service.search({ ...NOW_REQUEST, query: "accord" }, {
+      repoPath,
+      target: {
+        hasClearTargets: true,
+        participantIds: ["codex-1"],
+        providerKinds: ["codex-cli"]
+      },
+      runRootByProvider: { "codex-cli": repoPath }
+    });
+
+    assert.deepEqual(search.skills.map((skill) => skill.frontmatterName), ["accord"]);
+  });
+});
+
+test("flags a collision between public /accord and a user-owned accord skill instead of silently overriding", async () => {
+  await withTempWorkspace(async ({ homeDir, repoPath }) => {
+    const root = path.join(homeDir, ".agents/skills");
+    const generated = path.join(root, "accordagents-accord");
+    await writeSkill(generated, "accord", "Accord (app-owned)", "body");
+    await writeFile(
+      path.join(generated, ".accordagents-generated.json"),
+      JSON.stringify({ owner: "accordagents", visibility: "public" }),
+      "utf8"
+    );
+    await writeFile(
+      path.join(root, ".accordagents-skills.json"),
+      JSON.stringify({ owner: "accordagents", generatedFolders: [{ folderName: "accordagents-accord", visibility: "public" }] }),
+      "utf8"
+    );
+    await writeSkill(path.join(root, "user-accord"), "accord", "Accord (user-owned)", "body");
+    const service = new UserSkillsService({ homeDir });
+
+    const search = await service.search({ ...NOW_REQUEST, query: "accord" }, {
+      repoPath,
+      target: {
+        hasClearTargets: true,
+        participantIds: ["codex-1"],
+        providerKinds: ["codex-cli"]
+      },
+      runRootByProvider: { "codex-cli": repoPath }
+    });
+
+    assert.equal(search.skills.length, 1);
+    assert.equal(search.skills[0].ambiguous, true);
+    assert.equal(search.skills[0].capabilityState, "discovery-only");
+  });
+});
+
 test("discovers symlinked Codex skill folders", async () => {
   await withTempWorkspace(async ({ homeDir, repoPath, tempRoot }) => {
     const outside = path.join(tempRoot, "outside-skill");

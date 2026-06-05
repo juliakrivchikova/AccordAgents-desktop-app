@@ -15,6 +15,7 @@ import type {
   ChatBehaviorRuleSnapshot,
   ChatAppToolCapability,
   ChatChoiceOption,
+  ChatAccordResolutionMetadata,
   ChatImageAttachment,
   ChatImageInput,
   ChatImageMimeType,
@@ -82,6 +83,7 @@ import {
   APP_CHAT_GET_PARTICIPANTS_TOOL,
   APP_CHAT_LIST_ATTACHMENTS_TOOL,
   APP_CHAT_REACT_TOOL,
+  APP_CHAT_SEND_MESSAGE_TOOL,
   APP_CHAT_READ_ATTACHMENT_TOOL,
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_CHAT_READ_MESSAGES_TOOL,
@@ -182,7 +184,8 @@ const CHAT_CONTEXT_MCP_TOOL_NAMES = [
   APP_CHAT_READ_MESSAGES_TOOL,
   APP_CHAT_LIST_ATTACHMENTS_TOOL,
   APP_CHAT_READ_ATTACHMENT_TOOL,
-  APP_CHAT_REACT_TOOL
+  APP_CHAT_REACT_TOOL,
+  APP_CHAT_SEND_MESSAGE_TOOL
 ];
 const CHAT_APP_MCP_TOOL_NAMES = [
   ...CHAT_CONTEXT_MCP_TOOL_NAMES,
@@ -192,6 +195,11 @@ const CHAT_APP_MCP_TOOL_NAMES = [
 ];
 const CHAT_CONTEXT_READ_DEFAULT_LIMIT = 50;
 const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
+// A hard transport ceiling, not a truncation point. The send path rejects over-limit content
+// with an explicit error and never shortens it, so the canonical /accord message keeps the
+// exact text participants approve. Sits well under the MCP body cap (1 MB).
+const CHAT_SEND_MESSAGE_MAX_CONTENT_LENGTH = 200_000;
+const CHAT_SEND_MESSAGE_MAX_PER_RUN = 12;
 const CHAT_IMAGE_MAX_ATTACHMENTS = 5;
 const CHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 const CHAT_IMAGE_MAX_DIMENSION = 8192;
@@ -303,6 +311,7 @@ export class ChatService {
   private readonly chatRunControllers = new Map<string, Set<AbortController>>();
   private readonly chatRunMeta = new Map<string, { conversationId: string; participantId: string; participantHandle: string; pendingMessageId?: string }>();
   private readonly chatMutationQueues = new Map<string, Promise<void>>();
+  private readonly appSendMessageCountsByRun = new Map<string, number>();
 
   constructor(
     private readonly storage: StorageService,
@@ -929,6 +938,12 @@ export class ChatService {
       if (typeof actor.snapshotMaxSequence === "number" && sequence > actor.snapshotMaxSequence) {
         return false;
       }
+      // Read the exact canonical message by id. Snapshot visibility still applies, so a
+      // message newer than this turn (or from another conversation) returns nothing. Other
+      // filters are ignored when messageId is set.
+      if (request.messageId) {
+        return message.id === request.messageId;
+      }
       if (request.threadId && message.metadata?.threadId !== request.threadId) {
         return false;
       }
@@ -953,6 +968,7 @@ export class ChatService {
       conversationId: conversation.id,
       requesterParticipantId: requester.id,
       filters: {
+        messageId: request.messageId,
         threadId: request.threadId,
         beforeSequence: request.beforeSequence,
         afterSequence: request.afterSequence,
@@ -1032,6 +1048,108 @@ export class ChatService {
       author: result.author,
       contentPreview: result.contentPreview,
       reactions: result.reactions
+    };
+  }
+
+  // Post a normal participant message authored by the requester. The created message is a
+  // `done` message (unlike a run's pending final bubble), so other participants can react to
+  // it immediately. Critically, the requester's snapshot is bumped to include the new message
+  // so the facilitator can re-read and self-react to it in the same run (publish -> self-✅).
+  async sendChatMessageFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+    const request = this.normalizeChatSendMessageRequest(rawRequest);
+    const conversation = await this.requireChat(actor.conversationId);
+    if (actor.runId) {
+      const sent = this.appSendMessageCountsByRun.get(actor.runId) ?? 0;
+      if (sent >= CHAT_SEND_MESSAGE_MAX_PER_RUN) {
+        throw new Error(
+          `ChatSendMessageDenied. Problem: this turn already sent the maximum of ${CHAT_SEND_MESSAGE_MAX_PER_RUN} messages. Cause: a loop or repeated publish. Fix: stop publishing and report status.`
+        );
+      }
+    }
+    let created: { id: string; sequence: number; threadId?: string } | undefined;
+    await this.withChatMutation(conversation, async () => {
+      const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+      if (!requester) {
+        throw new Error("The requesting participant is no longer in this chat.");
+      }
+      // Resolve and validate the visible scope. parent/root, when provided, must be a message
+      // visible to this turn; an invisible/wrong-conversation id is rejected.
+      const resolveVisible = (id: string | undefined, label: string): string | undefined => {
+        if (!id) {
+          return undefined;
+        }
+        const record = this.findMessageRecord(conversation, id);
+        if (!record || (typeof actor.snapshotMaxSequence === "number" && record.sequence > actor.snapshotMaxSequence)) {
+          throw new Error(
+            `ChatSendMessageDenied. Problem: ${label} is not visible to this turn. Cause: the id is wrong, belongs to another conversation, or is newer than this turn. Fix: use an id returned by app_chat_read_messages.`
+          );
+        }
+        return id;
+      };
+      const parentMessageId = resolveVisible(request.parentMessageId, "parentMessageId");
+      const chatThreadRootId = resolveVisible(request.chatThreadRootId, "chatThreadRootId");
+      // An explicit threadId must also be a visible scope: it has to match a visible message's
+      // id (a thread root) or the threadId of some visible message. Otherwise a participant could
+      // post into an arbitrary thread id string. When omitted, derive it from visible context.
+      const resolveVisibleThreadId = (threadId: string | undefined): string | undefined => {
+        if (!threadId) {
+          return undefined;
+        }
+        const visible = conversation.messages.some((message, sequence) => {
+          if (typeof actor.snapshotMaxSequence === "number" && sequence > actor.snapshotMaxSequence) {
+            return false;
+          }
+          return message.id === threadId || message.metadata?.threadId === threadId;
+        });
+        if (!visible) {
+          throw new Error(
+            "ChatSendMessageDenied. Problem: threadId is not a visible thread in this turn. Cause: the id is wrong, belongs to another conversation, or is newer than this turn. Fix: use a threadId/messageId returned by app_chat_read_messages, or omit it."
+          );
+        }
+        return threadId;
+      };
+      const threadId = resolveVisibleThreadId(request.threadId)
+        ?? actor.triggerThreadId ?? parentMessageId ?? chatThreadRootId;
+      const message: ChatMessage = {
+        id: randomUUID(),
+        role: "participant",
+        participantId: requester.id,
+        participantLabel: `@${requester.handle}`,
+        content: request.content,
+        createdAt: new Date().toISOString(),
+        status: "done",
+        metadata: {
+          threadId,
+          parentMessageId,
+          chatThreadRootId,
+          appMessageSource: APP_CHAT_SEND_MESSAGE_TOOL,
+          accordResolution: request.accordResolution,
+          runId: actor.runId
+        }
+      };
+      conversation.messages.push(message);
+      const sequence = conversation.messages.length - 1;
+      // P0-1: make the new message visible to this same run so publish -> self-read /
+      // self-react works. The actor object is the stored token grant reference, so this
+      // bump persists for the rest of the turn.
+      if (typeof actor.snapshotMaxSequence === "number" && sequence > actor.snapshotMaxSequence) {
+        actor.snapshotMaxSequence = sequence;
+      }
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+      created = { id: message.id, sequence, threadId };
+    });
+    if (!created) {
+      throw new Error("Message was not created.");
+    }
+    if (actor.runId) {
+      this.appSendMessageCountsByRun.set(actor.runId, (this.appSendMessageCountsByRun.get(actor.runId) ?? 0) + 1);
+    }
+    return {
+      ok: true,
+      messageId: created.id,
+      sequence: created.sequence,
+      threadId: created.threadId
     };
   }
 
@@ -1654,6 +1772,15 @@ export class ChatService {
     const skillMentions = this.chatSkillMentionsFromRaw(rawMentions);
     if (skillMentions.length === 0) {
       return { skillMentions: [], targets, blocks: [] };
+    }
+    // A selected skill is applied to every mentioned participant, so multiple mentions would
+    // run the skill on each of them at once. That is never the intent (e.g. /accord must run
+    // only on the facilitator, which then contacts peers via app_chat_request_participants).
+    // Require exactly one target when a skill is selected.
+    if (targets.length > 1) {
+      throw new Error(
+        "A selected skill runs on a single participant. Mention exactly one participant in this message, or remove the skill. Other participants can be brought in by the running skill itself (for example, /accord contacts them via a participant request)."
+      );
     }
     if (!this.userSkills) {
       throw new Error("Skill selection is unavailable.");
@@ -2546,6 +2673,7 @@ export class ChatService {
       "App MCP tools: use the connected `accord_agents` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
       "Read-only chat MCP tools: `app_chat_get_context`, `app_chat_get_participants`, `app_chat_read_messages`, `app_chat_list_attachments`, and `app_chat_read_attachment`. Prefer them over history files for roster, thread, messages, and screenshots.",
       "Reaction MCP tool: `app_chat_react` adds or toggles an emoji reaction on a specific message. To react, call it with the message `id` from `app_chat_read_messages` and an allowed emoji.",
+      "Send-message MCP tool: `app_chat_send_message` posts your message immediately (visible/reactable before your turn ends) and returns its `messageId`. Use it only for mid-turn visibility, e.g. a canonical resolution. Do not use it for an ordinary reply — your normal turn response already reaches everyone at turn end.",
       "If a message lists attached images, call `app_chat_read_attachment` with the attachment ID before reasoning about visual details.",
       "Participant request MCP tools: `app_chat_request_participants` and `app_chat_get_participant_request_status` are available for asking current chat participants for input and recovering their replies. Request JSON is `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
       "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
@@ -5823,6 +5951,87 @@ export class ChatService {
     };
   }
 
+  private normalizeChatSendMessageRequest(raw: unknown): {
+    content: string;
+    threadId?: string;
+    parentMessageId?: string;
+    chatThreadRootId?: string;
+    accordResolution?: ChatAccordResolutionMetadata;
+  } {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error("Send-message request must be an object.");
+    }
+    const record = raw as Record<string, unknown>;
+    // Preserve the exact submitted content (no trimming/normalization). The trimmed copy is
+    // used only to reject empty/whitespace-only input. Over-limit content is rejected with an
+    // explicit error, never silently shortened, so the canonical message keeps the exact text.
+    const content = typeof record.content === "string" ? record.content : "";
+    if (!content.trim()) {
+      throw new Error("Send-message request needs non-empty content.");
+    }
+    if (content.length > CHAT_SEND_MESSAGE_MAX_CONTENT_LENGTH) {
+      throw new Error(`Send-message content exceeds ${CHAT_SEND_MESSAGE_MAX_CONTENT_LENGTH} characters; it is rejected, not truncated.`);
+    }
+    const optionalId = (value: unknown, field: string): string | undefined => {
+      if (value === undefined || value === null) {
+        return undefined;
+      }
+      if (typeof value !== "string") {
+        throw new Error(`${field} must be a string.`);
+      }
+      return value.trim() || undefined;
+    };
+    return {
+      content,
+      threadId: optionalId(record.threadId, "threadId"),
+      parentMessageId: optionalId(record.parentMessageId, "parentMessageId"),
+      chatThreadRootId: optionalId(record.chatThreadRootId, "chatThreadRootId"),
+      accordResolution: this.normalizeAccordResolutionMetadata(record.accordResolution)
+    };
+  }
+
+  private normalizeAccordResolutionMetadata(raw: unknown): ChatAccordResolutionMetadata | undefined {
+    if (raw === undefined || raw === null) {
+      return undefined;
+    }
+    if (typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error("accordResolution must be an object.");
+    }
+    const record = raw as Record<string, unknown>;
+    const stringArray = (value: unknown): string[] | undefined => {
+      if (value === undefined || value === null) {
+        return undefined;
+      }
+      if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+        throw new Error("accordResolution id arrays must contain only strings.");
+      }
+      return value as string[];
+    };
+    const version = record.version === undefined || record.version === null
+      ? undefined
+      : (typeof record.version === "number" && Number.isInteger(record.version) && record.version >= 1
+          ? record.version
+          : (() => { throw new Error("accordResolution.version must be a positive integer."); })());
+    const optionalString = (value: unknown, field: string): string | undefined => {
+      if (value === undefined || value === null) {
+        return undefined;
+      }
+      if (typeof value !== "string") {
+        throw new Error(`accordResolution.${field} must be a string.`);
+      }
+      return value.trim() || undefined;
+    };
+    const normalized: ChatAccordResolutionMetadata = {
+      version,
+      sourceMessageId: optionalString(record.sourceMessageId, "sourceMessageId"),
+      selectedParticipantIds: stringArray(record.selectedParticipantIds),
+      requiredApproverIds: stringArray(record.requiredApproverIds),
+      supersedesMessageId: optionalString(record.supersedesMessageId, "supersedesMessageId"),
+      status: optionalString(record.status, "status")
+    };
+    return Object.values(normalized).some((value) => value !== undefined) ? normalized : undefined;
+  }
+
   private toggleReactionOnMessage(
     conversation: Conversation,
     message: ChatMessage,
@@ -6323,6 +6532,7 @@ export class ChatService {
   }
 
   private normalizeChatMessageReadRequest(raw: unknown): {
+    messageId?: string;
     threadId?: string;
     beforeSequence?: number;
     afterSequence?: number;
@@ -6332,10 +6542,14 @@ export class ChatService {
       throw new Error("Chat message read request must be an object.");
     }
     const record = (raw ?? {}) as Record<string, unknown>;
+    const messageId = typeof record.messageId === "string"
+      ? record.messageId.trim() || undefined
+      : undefined;
     const threadId = typeof record.threadId === "string"
       ? record.threadId.trim().slice(0, 200) || undefined
       : undefined;
     return {
+      messageId,
       threadId,
       beforeSequence: this.optionalNonNegativeInteger(record.beforeSequence, "beforeSequence"),
       afterSequence: this.optionalNonNegativeInteger(record.afterSequence, "afterSequence"),
@@ -6731,6 +6945,7 @@ export class ChatService {
     }
     this.chatRunControllers.delete(runId);
     this.chatRunMeta.delete(runId);
+    this.appSendMessageCountsByRun.delete(runId);
   }
 
   private async withChatRunLock<T>(

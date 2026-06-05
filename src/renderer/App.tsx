@@ -669,6 +669,17 @@ function App(): JSX.Element {
       setError("Enter a chat message or attach an image.");
       return false;
     }
+    // A selected skill runs on a single participant (the main process enforces this too).
+    // Block multi-mention sends here so the user gets an immediate message without a round-trip.
+    if (skillMentions.length > 0) {
+      const mentioned = chatParticipants(conversation).filter((participant) =>
+        new RegExp(`@${participant.handle}(?![A-Za-z0-9_-])`).test(content)
+      );
+      if (mentioned.length > 1) {
+        setError("A selected skill runs on a single participant. Mention exactly one participant, or remove the skill. Other participants can be brought in by the running skill itself.");
+        return false;
+      }
+    }
     const runId = crypto.randomUUID();
     setError(undefined);
     setWarnings([]);

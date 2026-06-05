@@ -925,6 +925,205 @@ test("app_chat_react toggles a participant reaction and rejects unknown message 
   );
 });
 
+test("app_chat_send_message publishes a participant message and lets the author read+react to it in the same run", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: [],
+    snapshotMaxSequence: 0,
+    runId: "accord-run-1",
+    triggerThreadId: "user-message"
+  };
+
+  const sent = await service.sendChatMessageFromTool(actor, {
+    content: "Canonical resolution.",
+    parentMessageId: "user-message"
+  });
+
+  assert.equal(sent.ok, true);
+  assert.equal(sent.sequence, 1);
+  assert.equal(typeof sent.messageId, "string");
+  assert.equal(storage.current.messages[1].role, "participant");
+  assert.equal(storage.current.messages[1].status, "done");
+  assert.equal(storage.current.messages[1].participantLabel, "@codex");
+  assert.equal(storage.current.messages[1].metadata.appMessageSource, "app_chat_send_message");
+  // P0-1: the author's snapshot is bumped so the new message is visible to the same run.
+  assert.equal(actor.snapshotMaxSequence, 1);
+
+  const read = await service.readChatMessagesForTool(actor, { messageId: sent.messageId });
+  assert.equal((read.messages as unknown[]).length, 1);
+  assert.equal((read.messages as Array<{ id: string }>)[0].id, sent.messageId);
+
+  const reacted = await service.reactToMessageFromTool(actor, {
+    messageId: sent.messageId as string,
+    emoji: "✅"
+  });
+  assert.equal(reacted.status, "added");
+  assert.equal(storage.current.messages[1].metadata.reactions["✅"][0].actorLabel, "@codex");
+});
+
+test("app_chat_send_message preserves exact content and rejects (never truncates) over-limit content", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: [],
+    snapshotMaxSequence: 0,
+    runId: "accord-exact-1"
+  };
+
+  const exact = "\n  Leading and trailing whitespace and\n\nblank lines are preserved.  \n";
+  const sent = await service.sendChatMessageFromTool(actor, { content: exact });
+  assert.equal(storage.current.messages[1].content, exact);
+
+  const huge = "x".repeat(200_001);
+  await assert.rejects(
+    () => service.sendChatMessageFromTool({ ...actor, runId: "accord-exact-2" }, { content: huge }),
+    /rejected, not truncated/
+  );
+  // The rejected send left no partial/shortened message behind.
+  assert.equal(storage.current.messages.length, 2);
+});
+
+test("app_chat_send_message enforces a per-run send limit", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: [],
+    snapshotMaxSequence: 0,
+    runId: "accord-limit-1"
+  };
+
+  for (let i = 0; i < 12; i += 1) {
+    await service.sendChatMessageFromTool(actor, { content: `msg ${i}` });
+  }
+  await assert.rejects(
+    () => service.sendChatMessageFromTool(actor, { content: "one too many" }),
+    /ChatSendMessageDenied/
+  );
+});
+
+test("app_chat_send_message rejects a threadId that is not a visible thread", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: [],
+    snapshotMaxSequence: 0,
+    runId: "accord-thread-1"
+  };
+
+  await assert.rejects(
+    () => service.sendChatMessageFromTool(actor, { content: "hi", threadId: "ghost-thread" }),
+    /ChatSendMessageDenied/
+  );
+  // The existing user message's id is a valid visible thread root.
+  const ok = await service.sendChatMessageFromTool(actor, { content: "hi", threadId: "user-message" });
+  assert.equal(ok.threadId, "user-message");
+});
+
+test("a new canonical message does not inherit reactions from the prior version", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: [],
+    snapshotMaxSequence: 0,
+    runId: "accord-version-1"
+  };
+
+  const first = await service.sendChatMessageFromTool(actor, { content: "Candidate v1." });
+  await service.reactToMessageFromTool(actor, { messageId: first.messageId as string, emoji: "✅" });
+  const second = await service.sendChatMessageFromTool(actor, { content: "Candidate v2." });
+
+  assert.equal(storage.current.messages[1].metadata.reactions["✅"].length, 1);
+  assert.equal(storage.current.messages[2].id, second.messageId);
+  assert.equal(storage.current.messages[2].metadata.reactions, undefined);
+});
+
+test("a selected skill cannot be sent to more than one mentioned participant", async () => {
+  const a = chatParticipant("codex-cli");
+  const b = chatParticipant("claude-code");
+  const conversation = chatConversation([a, b]);
+  const { service } = testService({ conversation });
+  const mention = skillMention("codex-cli");
+
+  await assert.rejects(
+    () => (service as any).validateChatSkillMentionsForTargets(conversation, "@codex @drew /accord", [mention], [a, b]),
+    /runs on a single participant/
+  );
+});
+
+test("app_chat_send_message rejects empty content and invisible parent ids", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: [],
+    snapshotMaxSequence: 0,
+    runId: "accord-run-2"
+  };
+
+  await assert.rejects(
+    () => service.sendChatMessageFromTool(actor, { content: "   " }),
+    /non-empty content/
+  );
+  await assert.rejects(
+    () => service.sendChatMessageFromTool(actor, { content: "hi", parentMessageId: "missing-message" }),
+    /ChatSendMessageDenied/
+  );
+});
+
+test("app_chat_read_messages by messageId hides messages newer than the turn snapshot", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+  // Publisher sees the whole conversation; a second reader is pinned to the original snapshot.
+  const publisher = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: [],
+    snapshotMaxSequence: 0,
+    runId: "accord-run-3"
+  };
+  const sent = await service.sendChatMessageFromTool(publisher, { content: "Canonical." });
+
+  const staleReader = { ...publisher, snapshotMaxSequence: 0, runId: "accord-run-4" };
+  const hidden = await service.readChatMessagesForTool(staleReader, { messageId: sent.messageId });
+  assert.equal((hidden.messages as unknown[]).length, 0);
+
+  const visible = await service.readChatMessagesForTool(publisher, { messageId: sent.messageId });
+  assert.equal((visible.messages as unknown[]).length, 1);
+});
+
 test("app_chat_react reaction survives stale chat state refresh", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
@@ -1468,6 +1667,26 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("Timed out waiting for condition.");
+}
+
+function skillMention(kind: ChatParticipant["kind"]): unknown {
+  return {
+    skillId: "skill-1",
+    displayName: "/accord",
+    frontmatterName: "accord",
+    description: "Accord",
+    contentHash: "hash",
+    capabilityState: "invocable",
+    variants: [{
+      providerKind: kind,
+      scope: "personal",
+      rootKind: "personal",
+      sourceKey: "src",
+      frontmatterName: "accord",
+      contentHash: "hash",
+      capabilityState: "invocable"
+    }]
+  };
 }
 
 function clone<T>(value: T): T {

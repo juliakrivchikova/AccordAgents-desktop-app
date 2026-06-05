@@ -261,6 +261,57 @@ test("rejects traversal paths from stale ownership metadata", async () => {
   });
 });
 
+test("public app skill keeps its frontmatter name, strips visibility, and marks marker+manifest public", async () => {
+  await withTempWorkspace(async ({ homeDir, sourceRoot }) => {
+    await writeSkill(sourceRoot, "accord", publicSkillText("accord body"));
+    await serviceFor(sourceRoot, homeDir).reconcileAgents([CLAUDE_AGENT]);
+
+    const skillsRoot = path.join(homeDir, ".claude", "skills");
+    const folder = path.join(skillsRoot, "accordagents-accord");
+    const skillMd = await readFile(path.join(folder, "SKILL.md"), "utf8");
+    const parsed = parseSkillFrontmatter(skillMd);
+    assert.equal(parsed.name, "accord");
+    assert.doesNotMatch(skillMd, /visibility:/);
+
+    const marker = JSON.parse(await readFile(path.join(folder, ".accordagents-generated.json"), "utf8"));
+    assert.equal(marker.visibility, "public");
+    assert.equal(marker.folderName, "accordagents-accord");
+
+    const manifest = JSON.parse(await readFile(path.join(skillsRoot, ".accordagents-skills.json"), "utf8"));
+    const entry = manifest.generatedFolders.find((item: { folderName: string }) => item.folderName === "accordagents-accord");
+    assert.equal(entry.visibility, "public");
+  });
+});
+
+test("public app skill renders the public name in Codex SKILL.md and openai.yaml", async () => {
+  await withTempWorkspace(async ({ homeDir, sourceRoot }) => {
+    await writeSkill(sourceRoot, "accord", publicSkillText("accord body"));
+    await serviceFor(sourceRoot, homeDir).reconcileAgents([CODEX_AGENT]);
+
+    const folder = path.join(homeDir, ".codex", "skills", "accordagents-accord");
+    const skillMd = await readFile(path.join(folder, "SKILL.md"), "utf8");
+    assert.equal(parseSkillFrontmatter(skillMd).name, "accord");
+
+    const openaiYaml = await readFile(path.join(folder, "agents", "openai.yaml"), "utf8");
+    assert.match(openaiYaml, /display_name: "accord"/);
+    assert.doesNotMatch(openaiYaml, /accordagents-accord/);
+  });
+});
+
+test("internal app skill is renamed to the generated name and marked internal", async () => {
+  await withTempWorkspace(async ({ homeDir, sourceRoot }) => {
+    await writeSkill(sourceRoot, "app-chat-reply", skillText("reply body"));
+    await serviceFor(sourceRoot, homeDir).reconcileAgents([CLAUDE_AGENT]);
+
+    const folder = path.join(homeDir, ".claude", "skills", "accordagents-app-chat-reply");
+    const parsed = parseSkillFrontmatter(await readFile(path.join(folder, "SKILL.md"), "utf8"));
+    assert.equal(parsed.name, "accordagents-app-chat-reply");
+
+    const marker = JSON.parse(await readFile(path.join(folder, ".accordagents-generated.json"), "utf8"));
+    assert.equal(marker.visibility, "internal");
+  });
+});
+
 async function withTempWorkspace(run: (workspace: { tempRoot: string; homeDir: string; sourceRoot: string }) => Promise<void>): Promise<void> {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-app-skills-test-"));
   const homeDir = path.join(tempRoot, "home");
@@ -299,6 +350,22 @@ function skillText(body: string): string {
     "---",
     "",
     "# Reply",
+    "",
+    body,
+    ""
+  ].join("\n");
+}
+
+function publicSkillText(body: string): string {
+  return [
+    "---",
+    "name: accord",
+    "visibility: public",
+    "description: >",
+    "  Facilitate a skeptical multi-participant accord discussion.",
+    "---",
+    "",
+    "# Accord",
     "",
     body,
     ""
