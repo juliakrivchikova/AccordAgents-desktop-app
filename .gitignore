@@ -5,6 +5,7 @@ signed/
 screenshots/
 .env.local
 *.tsbuildinfo
+*.p12
 .DS_Store
 *.log
 .idea/
