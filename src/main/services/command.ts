@@ -208,9 +208,16 @@ function nvmNodeBinSegments(home: string): string[] {
   }
 
   try {
-    return readdirSync(versionsRoot)
-      .map((version) => path.join(versionsRoot, version, "bin"))
-      .filter((segment) => statSync(segment).isDirectory())
+    return readdirSync(versionsRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(versionsRoot, entry.name, "bin"))
+      .filter((segment) => {
+        try {
+          return statSync(segment).isDirectory();
+        } catch {
+          return false;
+        }
+      })
       .sort()
       .reverse();
   } catch {

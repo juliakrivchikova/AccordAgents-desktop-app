@@ -1,10 +1,9 @@
 import type { ReactNode } from "react";
+import { parseMarkdownInline, type MarkdownInlineNode } from "../../../shared/markdownInline";
 
 // A clickable reference to another chat message. Authors write `[label](#msg:<id>)` (or a bare
 // `#msg:<id>`); we render a link that scrolls the referenced message into view and flashes it.
 // This keeps the user-facing text clean instead of leaking raw message ids.
-const MESSAGE_LINK_RE = /^\[([^\]\n]+)\]\(#msg:([0-9a-fA-F][0-9a-fA-F-]{5,})\)/;
-const BARE_MESSAGE_RE = /^#msg:([0-9a-fA-F][0-9a-fA-F-]{5,})/;
 
 function focusMessage(messageId: string): void {
   const el = typeof document !== "undefined"
@@ -26,6 +25,40 @@ function MessageLink({ messageId, label }: { messageId: string; label: string })
       tabIndex={0}
       onClick={(event) => { event.preventDefault(); focusMessage(messageId); }}
       onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); focusMessage(messageId); } }}
+    >
+      {label}
+    </a>
+  );
+}
+
+function openExternalLink(url: string): void {
+  void window.consensus.openExternal(url).catch((error) => {
+    console.error("Failed to open external link.", error);
+  });
+}
+
+function ExternalLink({ url, label }: { url: string; label: string }): JSX.Element {
+  return (
+    <a
+      className="message-link external-link"
+      href={url}
+      onClick={(event) => {
+        event.preventDefault();
+        openExternalLink(url);
+      }}
+      onAuxClick={(event) => {
+        if (event.button !== 1) {
+          return;
+        }
+        event.preventDefault();
+        openExternalLink(url);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === " ") {
+          event.preventDefault();
+          openExternalLink(url);
+        }
+      }}
     >
       {label}
     </a>
@@ -289,64 +322,24 @@ function renderInlineWithBreaks(text: string, keyPrefix: string): ReactNode[] {
 }
 
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  let index = 0;
-  let key = 0;
+  return parseMarkdownInline(text).map((node, index) => renderInlineNode(node, `${keyPrefix}-${index}`));
+}
 
-  while (index < text.length) {
-    if (text.startsWith("**", index)) {
-      const end = text.indexOf("**", index + 2);
-      if (end > index + 2) {
-        nodes.push(
-          <strong key={`${keyPrefix}-b-${key}`}>
-            {renderInline(text.slice(index + 2, end), `${keyPrefix}-b-${key}`)}
-          </strong>
-        );
-        key += 1;
-        index = end + 2;
-        continue;
-      }
-    }
-
-    if (text[index] === "`") {
-      const end = text.indexOf("`", index + 1);
-      if (end > index + 1) {
-        nodes.push(<code key={`${keyPrefix}-c-${key}`}>{text.slice(index + 1, end)}</code>);
-        key += 1;
-        index = end + 1;
-        continue;
-      }
-    }
-
-    if (text[index] === "[") {
-      const link = text.slice(index).match(MESSAGE_LINK_RE);
-      if (link) {
-        nodes.push(<MessageLink key={`${keyPrefix}-m-${key}`} messageId={link[2]} label={link[1]} />);
-        key += 1;
-        index += link[0].length;
-        continue;
-      }
-    }
-
-    if (text[index] === "#") {
-      const bare = text.slice(index).match(BARE_MESSAGE_RE);
-      if (bare) {
-        nodes.push(<MessageLink key={`${keyPrefix}-m-${key}`} messageId={bare[1]} label="↳ message" />);
-        key += 1;
-        index += bare[0].length;
-        continue;
-      }
-    }
-
-    const nextBold = text.indexOf("**", index + 1);
-    const nextCode = text.indexOf("`", index + 1);
-    const nextLink = text.indexOf("[", index + 1);
-    const nextBare = text.indexOf("#msg:", index + 1);
-    const nextCandidates = [nextBold, nextCode, nextLink, nextBare].filter((candidate) => candidate > -1);
-    const next = nextCandidates.length ? Math.min(...nextCandidates) : text.length;
-    nodes.push(text.slice(index, next));
-    index = next;
+function renderInlineNode(node: MarkdownInlineNode, key: string): ReactNode {
+  if (node.type === "text") {
+    return node.text;
   }
-
-  return nodes;
+  if (node.type === "strong") {
+    return <strong key={key}>{node.children.map((child, index) => renderInlineNode(child, `${key}-${index}`))}</strong>;
+  }
+  if (node.type === "code") {
+    return <code key={key}>{node.text}</code>;
+  }
+  if (node.type === "messageLink") {
+    return <MessageLink key={key} messageId={node.messageId} label={node.label ?? "↳ message"} />;
+  }
+  if (node.type === "externalLink") {
+    return <ExternalLink key={key} url={node.url} label={node.label} />;
+  }
+  return null;
 }

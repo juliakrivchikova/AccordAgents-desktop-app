@@ -32,6 +32,7 @@ import type {
 } from "../shared/types";
 
 const bridge: AppBridge = {
+  openExternal: (url: string) => ipcRenderer.invoke("app:open-external", url),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateProviderSettings: (update: ProviderSettingsUpdate) => ipcRenderer.invoke("settings:update-provider", update),
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => ipcRenderer.invoke("settings:save-chat-role", update),

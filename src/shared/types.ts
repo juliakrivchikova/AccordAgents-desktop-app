@@ -944,6 +944,7 @@ export interface StartReviewResult {
 }
 
 export interface AppBridge {
+  openExternal(url: string): Promise<void>;
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;

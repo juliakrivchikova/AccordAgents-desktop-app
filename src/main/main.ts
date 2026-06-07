@@ -1,6 +1,6 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import type {
   AddChatParticipantRequest,
   AgentHealth,
@@ -31,6 +31,7 @@ import type {
   UserSkillDiagnosticsRequest,
   UserSkillSearchRequest
 } from "../shared/types";
+import { normalizeExternalUrlForOpen } from "../shared/externalLinks";
 import { ChatService } from "./services/chat";
 import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
@@ -102,6 +103,10 @@ async function detectAgentsWithAppSkills(): Promise<AgentHealth[]> {
   });
 }
 
+async function openExternalUrl(url: unknown): Promise<void> {
+  await shell.openExternal(normalizeExternalUrlForOpen(url));
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1080,
@@ -128,6 +133,7 @@ function createWindow(): void {
 }
 
 function registerIpc(): void {
+  ipcMain.handle("app:open-external", (_event, url: unknown) => openExternalUrl(url));
   ipcMain.handle("settings:get", () => settingsService.getPublicSettings());
   ipcMain.handle("settings:update-provider", (_event, update: ProviderSettingsUpdate) => settingsService.updateProvider(update));
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));
