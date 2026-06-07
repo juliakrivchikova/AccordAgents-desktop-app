@@ -488,6 +488,16 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 12%, transparent);
 }
 
+.avatar-choice.avatar-choice-claude-logo,
+.avatar-choice.avatar-choice-claude-logo:hover,
+.avatar-choice.avatar-choice-claude-logo.selected {
+  background: #d97757;
+}
+
+.avatar-choice.avatar-choice-claude-logo .avatar-anthropic {
+  background: #d97757;
+}
+
 .saved-participant-option.selected strong {
   color: var(--accent-foreground);
 }

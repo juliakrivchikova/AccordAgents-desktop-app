@@ -1,12 +1,14 @@
 import type { ChatParticipant, ChatProviderKind } from "../../../shared/types";
 
 const CHAT_AVATAR_URLS = {
+  "codex-logo": new URL("../../assets/codex-cli.svg", import.meta.url).href,
   "codex-human": new URL("../../assets/participant-codex-human.png", import.meta.url).href,
   "codex-bunny": new URL("../../assets/participant-codex-bunny.png", import.meta.url).href,
   "codex-cat": new URL("../../assets/participant-codex-cat.png", import.meta.url).href,
   "codex-dog": new URL("../../assets/participant-codex-dog.png", import.meta.url).href,
   "codex-frog": new URL("../../assets/participant-codex-frog.png", import.meta.url).href,
   "codex-hamster": new URL("../../assets/participant-codex-hamster.png", import.meta.url).href,
+  "claude-logo": new URL("../../assets/claude-avatar.webp", import.meta.url).href,
   "claude-human": new URL("../../assets/participant-claude-human.png", import.meta.url).href,
   "claude-bunny": new URL("../../assets/participant-claude-bunny.png", import.meta.url).href,
   "claude-cat": new URL("../../assets/participant-claude-cat.png", import.meta.url).href,
@@ -30,15 +32,19 @@ export interface ChatAvatarOption {
   kind: ChatProviderKind;
   label: string;
   imageUrl: string;
+  avatarKind?: AvatarKind;
+  defaultEligible?: boolean;
 }
 
 const CHAT_AVATAR_OPTIONS: ChatAvatarOption[] = [
+  { id: "codex-logo", kind: "codex-cli", label: "Codex logo", imageUrl: CHAT_AVATAR_URLS["codex-logo"], avatarKind: "codex", defaultEligible: false },
   { id: "codex-human", kind: "codex-cli", label: "Codex human", imageUrl: CHAT_AVATAR_URLS["codex-human"] },
   { id: "codex-bunny", kind: "codex-cli", label: "Codex bunny", imageUrl: CHAT_AVATAR_URLS["codex-bunny"] },
   { id: "codex-cat", kind: "codex-cli", label: "Codex cat", imageUrl: CHAT_AVATAR_URLS["codex-cat"] },
   { id: "codex-dog", kind: "codex-cli", label: "Codex dog", imageUrl: CHAT_AVATAR_URLS["codex-dog"] },
   { id: "codex-frog", kind: "codex-cli", label: "Codex frog", imageUrl: CHAT_AVATAR_URLS["codex-frog"] },
   { id: "codex-hamster", kind: "codex-cli", label: "Codex hamster", imageUrl: CHAT_AVATAR_URLS["codex-hamster"] },
+  { id: "claude-logo", kind: "claude-code", label: "Claude logo", imageUrl: CHAT_AVATAR_URLS["claude-logo"], avatarKind: "anthropic", defaultEligible: false },
   { id: "claude-human", kind: "claude-code", label: "Claude human", imageUrl: CHAT_AVATAR_URLS["claude-human"] },
   { id: "claude-bunny", kind: "claude-code", label: "Claude bunny", imageUrl: CHAT_AVATAR_URLS["claude-bunny"] },
   { id: "claude-cat", kind: "claude-code", label: "Claude cat", imageUrl: CHAT_AVATAR_URLS["claude-cat"] },
@@ -60,7 +66,7 @@ export function isChatAvatarIdForKind(avatarId: string | undefined, kind: ChatPr
 }
 
 export function defaultChatAvatarId(kind: ChatProviderKind, seed = ""): ChatAvatarId {
-  const options = chatAvatarOptionsForKind(kind);
+  const options = chatAvatarOptionsForKind(kind).filter((option) => option.defaultEligible !== false);
   const fallback = kind === "claude-code" ? "claude-human" : "codex-human";
   if (options.length === 0) {
     return fallback;
@@ -79,7 +85,7 @@ export function normalizedChatAvatarId(kind: ChatProviderKind, avatarId: string 
 }
 
 export function avatarForChatAvatarOption(option: ChatAvatarOption, label = option.label): AvatarSpec {
-  return { kind: "custom", label, imageUrl: option.imageUrl };
+  return { kind: option.avatarKind ?? "custom", label, imageUrl: option.imageUrl };
 }
 
 export function avatarForChatParticipant(

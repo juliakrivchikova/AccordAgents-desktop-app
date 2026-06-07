@@ -529,9 +529,7 @@ Do not advertise:
 - Generic autonomous agent orchestration or unattended swarms
 
 ## MVP TODO
-- [ ] Accordance skill.
-- [ ] Rule management.
-- [ ] Auto mode per chat override.
+- [ ] Design improvements
 - 
 - [ ] Bug: read the latest messages from chat history ( or thread)
 - [ ] Bug: when I run accord, the final response should be last message
@@ -539,14 +537,16 @@ Do not advertise:
 - [ ] Bug: when both agents are running and one requests permission - after permission is granted, the agent is not resumed
   right after, only when another agent run is finished.
 - 
+- [ ] Rule management.
+- [ ] Auto mode per chat override.
+- 
 - [ ] Polish Role Feature. Polish View/Edit screen. Role management: create, read, update, delete – should be available via both UI for user and MCP for admin. Role permissions management - only UI.
 - [ ] Participant management: when admin creates a participant, it should first check if the participant is already in
   the system. If no, create and make it available for future use. It will allow to attach rules to them and reuse.
 - 
-- [ ] Design improvements
-- 
 - [ ] Add gemini
 - [ ] User-friendly delivery
+- ✅ Accordance skill.
 - ✅ User skill mentioning
 - ✅Auto-review mode.
 - ✅ Not block when the agent is running, add indicators that chat state is running or run finished.

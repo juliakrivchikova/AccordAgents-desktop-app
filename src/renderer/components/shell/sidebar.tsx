@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 import type { ConversationSummary } from "../../../shared/types";
 
 const INITIAL_PROJECT_SESSION_LIMIT = 5;
-const ACCORDAGENTS_MARK_URL = new URL("../../assets/accordagents-mark.svg", import.meta.url).href;
+const ACCORDAGENTS_MARK_URL = new URL("../../assets/accordagents-mark.png", import.meta.url).href;
 
 export interface ProjectSessionGroup {
   key: string;

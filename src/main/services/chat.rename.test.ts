@@ -3,8 +3,10 @@ import test from "node:test";
 import { ChatService } from "./chat";
 import type {
   ChatParticipant,
+  ChatParticipantConfig,
   ChatRoleConfig,
-  Conversation
+  Conversation,
+  ConversationSummary
 } from "../../shared/types";
 
 const NOW = "2026-05-19T12:00:00.000Z";
@@ -130,9 +132,99 @@ test("addParticipant serializes concurrent roster additions without dropping a p
   assert.equal(saved?.messages.filter((message) => message.content === "Added @alex to the chat.").length, 1);
 });
 
-function testService(conversationList: Conversation[]): {
+test("syncSavedParticipantAvatar refreshes copied chat participant avatars", async () => {
+  const conversation = chatConversation({
+    metadata: {
+      participants: [chatParticipant({ avatarId: "codex-cat" })],
+      participantSessions: []
+    }
+  });
+  const { service, storage, snapshots } = testService([conversation]);
+
+  await service.syncSavedParticipantAvatar(
+    { handle: "drew", kind: "codex-cli" },
+    { id: "saved-drew", handle: "drew", kind: "codex-cli", avatarId: "codex-logo" }
+  );
+
+  const saved = await storage.getConversation(conversation.id);
+  const savedParticipants = (saved?.metadata.participants ?? []) as ChatParticipant[];
+  const snapshotParticipants = (snapshots.at(-1)?.metadata.participants ?? []) as ChatParticipant[];
+  const participant = savedParticipants[0];
+  assert.equal(participant?.avatarId, "codex-logo");
+  assert.equal(saved?.updatedAt, NOW);
+  assert.equal(saved?.messages.length, conversation.messages.length);
+  assert.equal(snapshotParticipants[0]?.avatarId, "codex-logo");
+});
+
+test("hydrateContextUsage refreshes copied participant avatars from saved settings", async () => {
+  const conversation = chatConversation({
+    metadata: {
+      participants: [chatParticipant({ avatarId: "codex-cat" })],
+      participantSessions: []
+    }
+  });
+  const { service, storage, snapshots } = testService([conversation], {
+    participantConfigs: [{
+      id: "saved-drew",
+      handle: "drew",
+      roleConfigId: ROLE.id,
+      kind: "codex-cli",
+      avatarId: "codex-logo",
+      updatedAt: NOW
+    }]
+  });
+
+  const hydrated = await service.hydrateContextUsage(conversation);
+
+  const saved = await storage.getConversation(conversation.id);
+  const hydratedParticipants = (hydrated.metadata.participants ?? []) as ChatParticipant[];
+  const savedParticipants = (saved?.metadata.participants ?? []) as ChatParticipant[];
+  assert.equal(hydratedParticipants[0]?.avatarId, "codex-logo");
+  assert.equal(savedParticipants[0]?.avatarId, "codex-logo");
+  assert.equal(saved?.updatedAt, NOW);
+  assert.equal(((snapshots.at(-1)?.metadata.participants ?? []) as ChatParticipant[])[0]?.avatarId, "codex-logo");
+});
+
+test("hydrateContextUsage preserves newer stored messages when syncing participant avatars", async () => {
+  const staleConversation = chatConversation({
+    metadata: {
+      participants: [chatParticipant({ avatarId: "codex-cat" })],
+      participantSessions: []
+    }
+  });
+  const storedConversation = cloneConversation(staleConversation);
+  storedConversation.messages.push({
+    id: "message-2",
+    role: "participant",
+    participantId: "participant-1",
+    participantLabel: "@drew",
+    content: "Already saved.",
+    createdAt: NOW,
+    status: "done"
+  });
+  const { service, storage } = testService([storedConversation], {
+    participantConfigs: [{
+      id: "saved-drew",
+      handle: "drew",
+      roleConfigId: ROLE.id,
+      kind: "codex-cli",
+      avatarId: "codex-logo",
+      updatedAt: NOW
+    }]
+  });
+
+  const hydrated = await service.hydrateContextUsage(staleConversation);
+
+  const saved = await storage.getConversation(staleConversation.id);
+  assert.equal(saved?.messages.some((message) => message.id === "message-2"), true);
+  assert.equal(hydrated.messages.some((message) => message.id === "message-2"), true);
+  assert.equal(((saved?.metadata.participants ?? []) as ChatParticipant[])[0]?.avatarId, "codex-logo");
+});
+
+function testService(conversationList: Conversation[], options: { participantConfigs?: ChatParticipantConfig[] } = {}): {
   service: ChatService;
   storage: {
+    listConversations(): Promise<ConversationSummary[]>;
     getConversation(id: string): Promise<Conversation | undefined>;
     saveConversation(conversation: Conversation): Promise<void>;
   };
@@ -143,6 +235,17 @@ function testService(conversationList: Conversation[]): {
   const snapshots: Conversation[] = [];
   const historyWrites: string[] = [];
   const storage = {
+    async listConversations(): Promise<ConversationSummary[]> {
+      return Array.from(conversations.values()).map((conversation) => ({
+        id: conversation.id,
+        title: conversation.title,
+        kind: conversation.kind,
+        createdAt: conversation.createdAt,
+        updatedAt: conversation.updatedAt,
+        repoPath: conversation.repoPath,
+        running: Boolean(conversation.metadata.running)
+      }));
+    },
     async getConversation(id: string): Promise<Conversation | undefined> {
       const conversation = conversations.get(id);
       return conversation ? cloneConversation(conversation) : undefined;
@@ -152,8 +255,8 @@ function testService(conversationList: Conversation[]): {
     }
   };
   const settings = {
-    async getPublicSettings(): Promise<{ chatRoleConfigs: ChatRoleConfig[] }> {
-      return { chatRoleConfigs: [ROLE] };
+    async getPublicSettings(): Promise<{ chatRoleConfigs: ChatRoleConfig[]; chatParticipantConfigs: ChatParticipantConfig[] }> {
+      return { chatRoleConfigs: [ROLE], chatParticipantConfigs: options.participantConfigs ?? [] };
     }
   };
   const cliRunner = {
@@ -206,12 +309,13 @@ function chatConversation(patch: Partial<Conversation> = {}): Conversation {
   };
 }
 
-function chatParticipant(): ChatParticipant {
+function chatParticipant(patch: Partial<ChatParticipant> = {}): ChatParticipant {
   return {
     id: "participant-1",
     handle: "drew",
     roleConfigId: ROLE.id,
-    kind: "codex-cli"
+    kind: "codex-cli",
+    ...patch
   };
 }
 

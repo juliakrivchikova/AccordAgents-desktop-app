@@ -176,7 +176,9 @@ export function updateChatParticipantDraft(
   if (!isChatAvatarIdForKind(next.avatarId, next.kind)) {
     next = { ...next, avatarId: defaultChatAvatarId(next.kind, next.handle || next.roleConfigId) };
   }
-  if (!draft.handle.trim() || isGeneratedChatHandle(draft.handle)) {
+  const roleChanged = patch.roleConfigId !== undefined && patch.roleConfigId !== draft.roleConfigId;
+  const kindChanged = patch.kind !== undefined && patch.kind !== draft.kind;
+  if (!draft.handle.trim() || ((roleChanged || kindChanged) && isGeneratedChatHandle(draft.handle))) {
     const handle = generatedChatHandle(settings, next.kind, next.roleConfigId);
     return {
       ...next,

@@ -22,6 +22,7 @@ import type {
   ChatMessage,
   ChatMessageReactions,
   ChatParticipant,
+  ChatParticipantConfig,
   ChatParticipantRequestApprovalRequest,
   ChatParticipantRequestBatch,
   ChatParticipantRequestInput,
@@ -327,13 +328,6 @@ export class ChatService {
     if (conversation.kind !== "chat") {
       return conversation;
     }
-    const recoveredRunState = this.recoverStaleChatRun(conversation);
-    let interruptedRequests = false;
-    for (const message of conversation.messages) {
-      if (this.markOrphanedParticipantRequestInterrupted(message)) {
-        interruptedRequests = true;
-      }
-    }
     const participants = new Map(this.chatParticipants(conversation).map((participant) => [participant.id, participant]));
     const existingUsage = this.agentContextUsageByParticipant(conversation);
     let nextUsage: Record<string, AgentContextUsage> | undefined;
@@ -357,20 +351,36 @@ export class ChatService {
         [participant.id]: usage
       };
     }
-    if (!nextUsage && !interruptedRequests && !recoveredRunState) {
-      return conversation;
-    }
-    const hydrated = {
-      ...conversation,
-      metadata: {
-        ...conversation.metadata,
-        ...(nextUsage ? { agentContextUsageByParticipant: nextUsage } : {})
+
+    let hydrated = conversation;
+    await this.withChatMutation(conversation, async () => {
+      const avatarsSynced = await this.syncConversationParticipantAvatarsFromSettings(conversation);
+      const recoveredRunState = this.recoverStaleChatRun(conversation);
+      let interruptedRequests = false;
+      for (const message of conversation.messages) {
+        if (this.markOrphanedParticipantRequestInterrupted(message)) {
+          interruptedRequests = true;
+        }
       }
-    };
-    if (interruptedRequests || recoveredRunState) {
-      hydrated.updatedAt = new Date().toISOString();
-      await this.saveConversation(hydrated);
-    }
+      if (!nextUsage && !interruptedRequests && !recoveredRunState && !avatarsSynced) {
+        hydrated = conversation;
+        return;
+      }
+      if (nextUsage) {
+        conversation.metadata = {
+          ...conversation.metadata,
+          agentContextUsageByParticipant: {
+            ...this.agentContextUsageByParticipant(conversation),
+            ...nextUsage
+          }
+        };
+      }
+      if (interruptedRequests || recoveredRunState) {
+        conversation.updatedAt = new Date().toISOString();
+      }
+      await this.saveConversation(conversation);
+      hydrated = conversation;
+    });
     return hydrated;
   }
 
@@ -451,6 +461,82 @@ export class ChatService {
       await this.saveConversation(conversation);
       return conversation;
     });
+  }
+
+  async syncSavedParticipantAvatar(
+    previous: Pick<ChatParticipantConfig, "handle" | "kind"> | undefined,
+    next: Pick<ChatParticipantConfig, "id" | "handle" | "kind" | "avatarId">
+  ): Promise<void> {
+    const normalizedPreviousHandle = previous?.handle.trim().replace(/^@/, "").toLowerCase();
+    const normalizedNextHandle = next.handle.trim().replace(/^@/, "").toLowerCase();
+    const handleMatches = new Set([normalizedPreviousHandle, normalizedNextHandle].filter((handle): handle is string => Boolean(handle)));
+    const avatarId = next.avatarId?.trim() || undefined;
+    const summaries = await this.storage.listConversations();
+    for (const summary of summaries) {
+      if (summary.kind !== "chat") {
+        continue;
+      }
+      const conversation = await this.storage.getConversation(summary.id);
+      if (!conversation || conversation.kind !== "chat") {
+        continue;
+      }
+      await this.withChatMutation(conversation, async () => {
+        const participants = this.chatParticipants(conversation);
+        let changed = false;
+        const syncedParticipants = participants.map((participant) => {
+          const sameSavedParticipant = participant.id === next.id;
+          const sameHandleAndKind = participant.kind === next.kind && handleMatches.has(participant.handle.toLowerCase());
+          if (!sameSavedParticipant && !sameHandleAndKind) {
+            return participant;
+          }
+          if ((participant.avatarId?.trim() || undefined) === avatarId) {
+            return participant;
+          }
+          changed = true;
+          return { ...participant, avatarId };
+        });
+        if (!changed) {
+          return;
+        }
+        conversation.metadata = {
+          ...conversation.metadata,
+          participants: syncedParticipants
+        };
+        await this.saveConversation(conversation);
+      });
+    }
+  }
+
+  private async syncConversationParticipantAvatarsFromSettings(conversation: Conversation): Promise<boolean> {
+    const participantConfigs = (await this.settings.getPublicSettings()).chatParticipantConfigs ?? [];
+    if (participantConfigs.length === 0) {
+      return false;
+    }
+    const configsByHandleAndKind = new Map(
+      participantConfigs.map((config) => [this.participantAvatarSyncKey(config.handle, config.kind), config])
+    );
+    const participants = this.chatParticipants(conversation);
+    let changed = false;
+    const syncedParticipants = participants.map((participant) => {
+      const config = configsByHandleAndKind.get(this.participantAvatarSyncKey(participant.handle, participant.kind));
+      if (!config) {
+        return participant;
+      }
+      const avatarId = config.avatarId?.trim() || undefined;
+      if ((participant.avatarId?.trim() || undefined) === avatarId) {
+        return participant;
+      }
+      changed = true;
+      return { ...participant, avatarId };
+    });
+    if (!changed) {
+      return false;
+    }
+    conversation.metadata = {
+      ...conversation.metadata,
+      participants: syncedParticipants
+    };
+    return true;
   }
 
   userSkillRunContext(conversation: Conversation, content: string): UserSkillRunContext {
@@ -6507,6 +6593,10 @@ export class ChatService {
   private chatParticipants(conversation: Conversation): ChatParticipant[] {
     const value = conversation.metadata.participants;
     return Array.isArray(value) ? value.filter((item): item is ChatParticipant => this.isChatParticipant(item)) : [];
+  }
+
+  private participantAvatarSyncKey(handle: string, kind: ChatProviderKind): string {
+    return `${kind}:${handle.trim().replace(/^@/, "").toLowerCase()}`;
   }
 
   private chatAppToolApprovals(conversation: Conversation): ChatAppToolApproval[] {
