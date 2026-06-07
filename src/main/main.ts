@@ -12,6 +12,7 @@ import type {
   ConversationMessagePageRequest,
   CreateChatConversationRequest,
   GitDiffRequest,
+  OpenRepoFileRequest,
   PlanDecisionClarificationRequest,
   PlanItemReviewRequest,
   ProviderKind,
@@ -41,6 +42,7 @@ import { bootstrapAppUpdater } from "./services/appUpdater";
 import { DebugLogService } from "./services/debugLogs";
 import { GitService } from "./services/git";
 import { ProviderRunner } from "./services/providers";
+import { RepoFileOpenerService } from "./services/repoFileOpener";
 import { SettingsService } from "./services/settings";
 import { StorageService } from "./services/storage";
 import { UserSkillsService } from "./services/userSkills";
@@ -50,6 +52,7 @@ let mainWindow: BrowserWindow | undefined;
 const gitService = new GitService();
 const settingsService = new SettingsService();
 const storageService = new StorageService();
+const repoFileOpenerService = new RepoFileOpenerService(storageService, settingsService);
 const providerRunner = new ProviderRunner(settingsService);
 const debugLogService = new DebugLogService();
 const cliAgentRunner = new CliAgentRunner(debugLogService);
@@ -134,7 +137,9 @@ function createWindow(): void {
 
 function registerIpc(): void {
   ipcMain.handle("app:open-external", (_event, url: unknown) => openExternalUrl(url));
+  ipcMain.handle("app:open-repo-file", (_event, request: OpenRepoFileRequest) => repoFileOpenerService.openRepoFile(request));
   ipcMain.handle("settings:get", () => settingsService.getPublicSettings());
+  ipcMain.handle("settings:set-repo-file-open-preference", (_event, action: unknown) => repoFileOpenerService.setOpenPreference(action));
   ipcMain.handle("settings:update-provider", (_event, update: ProviderSettingsUpdate) => settingsService.updateProvider(update));
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));
   ipcMain.handle("settings:save-chat-behavior-rule", (_event, update: ChatBehaviorRuleConfigUpdate) => settingsService.saveChatBehaviorRuleConfig(update));

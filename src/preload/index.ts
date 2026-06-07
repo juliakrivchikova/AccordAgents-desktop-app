@@ -11,11 +11,13 @@ import type {
   Conversation,
   CreateChatConversationRequest,
   GitDiffRequest,
+  OpenRepoFileRequest,
   PlanDecisionClarificationRequest,
   PlanItemReviewRequest,
   ProviderSettingsUpdate,
   ReadChatAttachmentRequest,
   RenameChatConversationRequest,
+  RepoFileOpenAction,
   RepoFileSearchRequest,
   RespondToChatAppToolApprovalRequest,
   RespondToChatChoiceRequest,
@@ -33,6 +35,8 @@ import type {
 
 const bridge: AppBridge = {
   openExternal: (url: string) => ipcRenderer.invoke("app:open-external", url),
+  openRepoFile: (request: OpenRepoFileRequest) => ipcRenderer.invoke("app:open-repo-file", request),
+  setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => ipcRenderer.invoke("settings:set-repo-file-open-preference", action),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateProviderSettings: (update: ProviderSettingsUpdate) => ipcRenderer.invoke("settings:update-provider", update),
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => ipcRenderer.invoke("settings:save-chat-role", update),

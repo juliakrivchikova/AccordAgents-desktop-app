@@ -3,11 +3,13 @@ export type MarkdownInlineNode =
   | { type: "strong"; children: MarkdownInlineNode[] }
   | { type: "code"; text: string }
   | { type: "messageLink"; messageId: string; label?: string }
+  | { type: "fileLink"; path: string; label: string; line?: number; column?: number }
   | { type: "externalLink"; url: string; label: string };
 
 const MESSAGE_LINK_RE = /^\[([^\]\n]+)\]\(#msg:([0-9a-fA-F][0-9a-fA-F-]{5,})\)/;
 const BARE_MESSAGE_RE = /^#msg:([0-9a-fA-F][0-9a-fA-F-]{5,})/;
 const MARKDOWN_EXTERNAL_LINK_RE = /^\[([^\]\n]+)\]\((https?:\/\/[^\s<>)]+)\)/i;
+const MARKDOWN_FILE_LINK_RE = /^\[([^\]\n]+)\]\((<[^>\n]+>|[^)\s]+)\)/;
 const BARE_EXTERNAL_URL_RE = /^https?:\/\/[^\s<>]+/i;
 
 export function parseMarkdownInline(text: string): MarkdownInlineNode[] {
@@ -39,6 +41,15 @@ export function parseMarkdownInline(text: string): MarkdownInlineNode[] {
         nodes.push({ type: "messageLink", messageId: link[2], label: link[1] });
         index += link[0].length;
         continue;
+      }
+      const fileLink = text.slice(index).match(MARKDOWN_FILE_LINK_RE);
+      if (fileLink) {
+        const target = parseFileLinkTarget(fileLink[2]);
+        if (target) {
+          nodes.push({ type: "fileLink", label: fileLink[1], ...target });
+          index += fileLink[0].length;
+          continue;
+        }
       }
       const externalLink = text.slice(index).match(MARKDOWN_EXTERNAL_LINK_RE);
       if (externalLink) {
@@ -90,6 +101,53 @@ export function nextExternalUrlStart(text: string, start: number): number {
   const nextHttps = lowerText.indexOf("https://", start);
   const candidates = [nextHttp, nextHttps].filter((candidate) => candidate > -1);
   return candidates.length ? Math.min(...candidates) : -1;
+}
+
+export function parseFileLinkTarget(rawTarget: string): { path: string; line?: number; column?: number } | undefined {
+  const unwrapped = rawTarget.startsWith("<") && rawTarget.endsWith(">")
+    ? rawTarget.slice(1, -1)
+    : rawTarget;
+  let target = unwrapped.trim();
+  if (
+    !target ||
+    /[\0\r\n\t]/.test(target) ||
+    target.startsWith("#") ||
+    /^https?:\/\//i.test(target) ||
+    /^mailto:/i.test(target)
+  ) {
+    return undefined;
+  }
+
+  let line: number | undefined;
+  let column: number | undefined;
+  const suffix = target.match(/:(\d+)(?::(\d+))?$/);
+  if (suffix) {
+    line = Number.parseInt(suffix[1], 10);
+    column = suffix[2] ? Number.parseInt(suffix[2], 10) : undefined;
+    target = target.slice(0, -suffix[0].length);
+    if (line < 1 || (column !== undefined && column < 1)) {
+      return undefined;
+    }
+  }
+
+  if (!isPathLikeFileTarget(target)) {
+    return undefined;
+  }
+
+  return { path: target, line, column };
+}
+
+function isPathLikeFileTarget(target: string): boolean {
+  if (!target || target.includes("\\")) {
+    return false;
+  }
+  if (target.startsWith("/") || target.startsWith("./") || target.startsWith("../")) {
+    return true;
+  }
+  if (target.includes("/")) {
+    return true;
+  }
+  return /\.[A-Za-z0-9][A-Za-z0-9_-]{0,15}$/.test(target);
 }
 
 function splitBareExternalUrl(value: string): { url: string; suffix: string } {

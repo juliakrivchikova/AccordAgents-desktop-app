@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { parseMarkdownInline, type MarkdownInlineNode } from "../../../shared/markdownInline";
+import { FileLink } from "./repo-file-link";
 
 // A clickable reference to another chat message. Authors write `[label](#msg:<id>)` (or a bare
 // `#msg:<id>`); we render a link that scrolls the referenced message into view and flashes it.
@@ -337,6 +338,9 @@ function renderInlineNode(node: MarkdownInlineNode, key: string): ReactNode {
   }
   if (node.type === "messageLink") {
     return <MessageLink key={key} messageId={node.messageId} label={node.label ?? "↳ message"} />;
+  }
+  if (node.type === "fileLink") {
+    return <FileLink key={key} path={node.path} label={node.label} line={node.line} column={node.column} />;
   }
   if (node.type === "externalLink") {
     return <ExternalLink key={key} url={node.url} label={node.label} />;

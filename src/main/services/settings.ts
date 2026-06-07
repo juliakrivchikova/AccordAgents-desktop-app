@@ -15,7 +15,8 @@ import type {
   ChatRoleConfigUpdate,
   ProviderKind,
   ProviderSettings,
-  ProviderSettingsUpdate
+  ProviderSettingsUpdate,
+  RepoFileOpenAction
 } from "../../shared/types";
 import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { normalizeChatAppToolCapabilities } from "../../shared/appTools";
@@ -28,6 +29,7 @@ interface StoredSettings {
   settingsVersion?: number;
   roundLimitDefault: number;
   lastRepoPath?: string;
+  repoFileOpenAction?: RepoFileOpenAction;
   providers: Array<Omit<ProviderSettings, "hasApiKey"> & { encryptedApiKey?: string }>;
   chatRoleConfigs?: ChatRoleConfig[];
   chatBehaviorRules?: ChatBehaviorRuleConfig[];
@@ -1506,6 +1508,7 @@ export class SettingsService {
     return {
       roundLimitDefault: stored.roundLimitDefault,
       lastRepoPath: stored.lastRepoPath,
+      repoFileOpenAction: stored.repoFileOpenAction,
       chatRoleConfigs: stored.chatRoleConfigs ?? DEFAULT_CHAT_ROLES,
       chatBehaviorRules: stored.chatBehaviorRules ?? [],
       chatParticipantConfigs: stored.chatParticipantConfigs ?? [],
@@ -1724,6 +1727,18 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  async getRepoFileOpenAction(): Promise<RepoFileOpenAction | undefined> {
+    const stored = await this.readStored();
+    return stored.repoFileOpenAction;
+  }
+
+  async setRepoFileOpenAction(action: RepoFileOpenAction | null): Promise<AppSettings> {
+    const stored = await this.readStored();
+    stored.repoFileOpenAction = this.normalizeRepoFileOpenAction(action);
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
   async getApiKey(kind: ProviderKind): Promise<string | undefined> {
     const stored = await this.readStored();
     const encrypted = stored.providers.find((provider) => provider.kind === kind)?.encryptedApiKey;
@@ -1757,6 +1772,7 @@ export class SettingsService {
       settingsVersion: 1,
       roundLimitDefault: this.defaultRoundLimit(settings),
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
+      repoFileOpenAction: this.normalizeRepoFileOpenAction(settings.repoFileOpenAction),
       providers,
       chatRoleConfigs: this.mergeDefaultRoles(settings.chatRoleConfigs),
       chatBehaviorRules: this.normalizeBehaviorRules(settings.chatBehaviorRules),
@@ -1783,6 +1799,10 @@ export class SettingsService {
         ...role,
         appToolCapabilities: normalizeChatAppToolCapabilities(role.appToolCapabilities)
       }));
+  }
+
+  private normalizeRepoFileOpenAction(action: unknown): RepoFileOpenAction | undefined {
+    return action === "open" || action === "reveal" ? action : undefined;
   }
 
   private normalizeBehaviorRules(rules: ChatBehaviorRuleConfig[] | undefined): ChatBehaviorRuleConfig[] {

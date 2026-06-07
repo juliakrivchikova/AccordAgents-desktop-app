@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { X } from "lucide-react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import type {
@@ -11,9 +12,11 @@ import type {
   ChatSkillMention,
   Conversation,
   RepoFileMention,
+  RepoFileOpenAction,
   ReviewProgress
 } from "../../../shared/types";
 import { Avatar } from "../avatar/avatar";
+import { RepoFileLinkContext, RepoFileOpenChooser, type FileLinkRef } from "../content/repo-file-link";
 import { RunStatusLine, TimelineLoadMoreRow } from "../conversation/timeline-primitives";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatAppToolApprovalList } from "./chat-app-tool-approvals";
@@ -60,6 +63,7 @@ export function ChatConversationView(props: {
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void;
   onToggleReaction: (messageId: string, emoji: string) => void;
   onRespondToAppToolApproval: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => Promise<void>;
+  setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   onStopRun?: (runId: string) => void;
 }): JSX.Element {
   const participants = chatParticipants(props.conversation);
@@ -98,6 +102,8 @@ export function ChatConversationView(props: {
   const [submittingApprovalIds, setSubmittingApprovalIds] = useState<ReadonlySet<string>>(new Set<string>());
   const [threadWidth, setThreadWidth] = useState(460);
   const [isResizingThread, setIsResizingThread] = useState(false);
+  const [chooserOpen, setChooserOpen] = useState(false);
+  const [chooserFileRef, setChooserFileRef] = useState<FileLinkRef | null>(null);
   const viewRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -153,6 +159,18 @@ export function ChatConversationView(props: {
     useFlushSync: false
   });
   const chatVirtualItems = chatVirtualizer.getVirtualItems();
+  const repoFileLinkContext = useMemo(() => ({
+    conversationId: props.conversation.id,
+    requestOpenFile: (ref: FileLinkRef) => {
+      const preference = props.settings.repoFileOpenAction;
+      if (preference) {
+        void openRepoFileReference(ref, preference);
+        return;
+      }
+      setChooserFileRef(ref);
+      setChooserOpen(true);
+    }
+  }), [props.conversation.id, props.settings.repoFileOpenAction]);
 
   function updateStickToBottom(): void {
     const timeline = timelineRef.current;
@@ -226,6 +244,37 @@ export function ChatConversationView(props: {
     }
   }
 
+  async function openRepoFileReference(ref: FileLinkRef, action: RepoFileOpenAction): Promise<void> {
+    try {
+      const result = await window.consensus.openRepoFile({
+        conversationId: props.conversation.id,
+        path: ref.path,
+        line: ref.line,
+        column: ref.column,
+        action
+      });
+      if (ref.line && !result.lineNavigationSupported) {
+        toast.info(`Opened ${ref.path}. The default app cannot jump to line ${ref.line}.`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not open the file.");
+    }
+  }
+
+  async function chooseRepoFileOpenAction(action: RepoFileOpenAction): Promise<void> {
+    const ref = chooserFileRef;
+    setChooserOpen(false);
+    if (!ref) {
+      return;
+    }
+    await props.setRepoFileOpenPreference(action);
+    await openRepoFileReference(ref, action);
+  }
+
+  function handleRepoFileChooserOpenChange(open: boolean): void {
+    setChooserOpen(open);
+  }
+
   function startThreadResize(event: ReactPointerEvent<HTMLDivElement>): void {
     const view = viewRef.current;
     if (!view) {
@@ -256,6 +305,8 @@ export function ChatConversationView(props: {
     setThreadDrafts({});
     submittingApprovalIdsRef.current.clear();
     setSubmittingApprovalIds(new Set<string>());
+    setChooserOpen(false);
+    setChooserFileRef(null);
     stickToBottomRef.current = true;
     forceStickToBottomRef.current = true;
     scheduleScrollToChatBottom();
@@ -298,12 +349,13 @@ export function ChatConversationView(props: {
   }, [props.conversation.id]);
 
   return (
-    <div
-      className={`chat-view ${hasThread ? "thread-open" : ""} ${isResizingThread ? "resizing-thread" : ""}`}
-      data-testid="chat-view"
-      ref={viewRef}
-      style={{ "--chat-thread-width": `${threadWidth}px` } as CSSProperties}
-    >
+    <RepoFileLinkContext.Provider value={repoFileLinkContext}>
+      <div
+        className={`chat-view ${hasThread ? "thread-open" : ""} ${isResizingThread ? "resizing-thread" : ""}`}
+        data-testid="chat-view"
+        ref={viewRef}
+        style={{ "--chat-thread-width": `${threadWidth}px` } as CSSProperties}
+      >
       <div className="chat-main">
         <div className={`chat-app-tool-approval-slot ${pendingAppToolApprovals.length > 0 ? "has-approvals" : ""}`}>
           {pendingAppToolApprovals.length > 0 && (
@@ -416,6 +468,13 @@ export function ChatConversationView(props: {
           continuedMentionRequestIds={continuedMentionRequestIds}
         />
       )}
-    </div>
+        <RepoFileOpenChooser
+          fileRef={chooserFileRef}
+          open={chooserOpen}
+          onChoose={(action) => void chooseRepoFileOpenAction(action)}
+          onOpenChange={handleRepoFileChooserOpenChange}
+        />
+      </div>
+    </RepoFileLinkContext.Provider>
   );
 }

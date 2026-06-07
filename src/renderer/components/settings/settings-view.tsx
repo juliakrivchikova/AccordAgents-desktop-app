@@ -23,7 +23,8 @@ import type {
   ChatRoleConfig,
   ChatRoleConfigUpdate,
   ProviderKind,
-  ProviderSettings
+  ProviderSettings,
+  RepoFileOpenAction
 } from "../../../shared/types";
 import {
   CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS,
@@ -44,7 +45,7 @@ import {
 } from "../chat/chat-participant-drafts";
 import { FormRow, IconButton, ResizableTextarea } from "../primitives";
 
-export type SettingsSection = "local-clis" | "roles" | "behavior-rules" | "participants";
+export type SettingsSection = "local-clis" | "file-links" | "roles" | "behavior-rules" | "participants";
 
 export function SettingsView(props: {
   section: SettingsSection;
@@ -56,13 +57,16 @@ export function SettingsView(props: {
   deleteChatBehaviorRuleConfig: (id: string) => Promise<void>;
   saveChatParticipantConfig: (update: ChatParticipantConfigUpdate) => Promise<void>;
   deleteChatParticipantConfig: (id: string) => Promise<void>;
+  setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   onClose: () => void;
 }): JSX.Element {
   const title = props.section === "local-clis"
     ? "Local CLIs"
-    : props.section === "roles"
-      ? "Roles"
-      : props.section === "behavior-rules" ? "Rules" : "Participants";
+    : props.section === "file-links"
+      ? "File links"
+      : props.section === "roles"
+        ? "Roles"
+        : props.section === "behavior-rules" ? "Rules" : "Participants";
   const cliProviders = props.settings.providers.filter((provider) => isCli(provider.kind));
   return (
     <section className="settings-view">
@@ -107,6 +111,12 @@ export function SettingsView(props: {
             onDelete={props.deleteChatBehaviorRuleConfig}
           />
         )}
+        {props.section === "file-links" && (
+          <RepoFileOpenPreferenceSetting
+            action={props.settings.repoFileOpenAction}
+            onChange={props.setRepoFileOpenPreference}
+          />
+        )}
         {props.section === "local-clis" && (
           <section className="settings-section">
             <div className="settings-section-head">
@@ -138,6 +148,44 @@ export function SettingsView(props: {
             </div>
           </section>
         )}
+      </div>
+    </section>
+  );
+}
+
+function RepoFileOpenPreferenceSetting(props: {
+  action?: RepoFileOpenAction;
+  onChange: (action: RepoFileOpenAction | null) => Promise<void>;
+}): JSX.Element {
+  const current = props.action === "reveal" ? "Reveal in Finder" : props.action === "open" ? "Open with default app" : "Ask every time";
+  return (
+    <section className="settings-section">
+      <div className="settings-section-head">
+        <h2>File links</h2>
+        <span>{current}</span>
+      </div>
+      <p className="settings-section-hint">
+        Choose what happens when you click a file reference in chat. macOS opens files with the default app for that
+        file type; change a default in Finder via Get Info, Open with, then Change All.
+      </p>
+      <div className="settings-inline-actions">
+        <Button
+          variant={props.action === "open" ? "default" : "outline"}
+          size="sm"
+          onClick={() => void props.onChange("open")}
+        >
+          Open with default app
+        </Button>
+        <Button
+          variant={props.action === "reveal" ? "default" : "outline"}
+          size="sm"
+          onClick={() => void props.onChange("reveal")}
+        >
+          Reveal in Finder
+        </Button>
+        <Button variant="ghost" size="sm" disabled={!props.action} onClick={() => void props.onChange(null)}>
+          Reset to ask
+        </Button>
       </div>
     </section>
   );

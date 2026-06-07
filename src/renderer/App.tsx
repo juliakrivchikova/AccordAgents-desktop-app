@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   Bot,
   Circle,
+  FileText,
   ListChecks,
   PanelLeftOpen,
   RefreshCw,
@@ -40,6 +41,7 @@ import type {
   PlanDecisionReply,
   ProviderSettings,
   RepoFileMention,
+  RepoFileOpenAction,
   ReviewProgress,
 } from "../shared/types";
 import { ModeToggle } from "./components/mode-toggle";
@@ -1436,6 +1438,16 @@ function App(): JSX.Element {
     }
   }
 
+  async function setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<void> {
+    setError(undefined);
+    try {
+      const next = await window.consensus.setRepoFileOpenPreference(action);
+      setSettings(next);
+    } catch (caught) {
+      setError(errorText(caught));
+    }
+  }
+
   async function saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<void> {
     setError(undefined);
     try {
@@ -1628,6 +1640,14 @@ function App(): JSX.Element {
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => {
+                openSettingsSection("file-links");
+              }}
+            >
+              <FileText aria-hidden />
+              File links
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
                 openSettingsSection("roles");
               }}
             >
@@ -1727,6 +1747,7 @@ function App(): JSX.Element {
             deleteChatBehaviorRuleConfig={deleteChatBehaviorRuleConfig}
             saveChatParticipantConfig={saveChatParticipantConfig}
             deleteChatParticipantConfig={deleteChatParticipantConfig}
+            setRepoFileOpenPreference={setRepoFileOpenPreference}
             onClose={closeSettings}
           />
         ) : initializing ? (
@@ -1799,6 +1820,7 @@ function App(): JSX.Element {
                     }
                     onToggleReaction={(messageId, emoji) => void toggleChatReaction(messageId, emoji)}
                     onRespondToAppToolApproval={respondToChatAppToolApproval}
+                    setRepoFileOpenPreference={setRepoFileOpenPreference}
                     onStopRun={(runId) => void window.consensus.cancelReview(runId)}
                   />
                 ) : (

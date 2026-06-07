@@ -541,6 +541,7 @@
 
 .message-avatar,
 .thread-avatar,
+.message.user .message-avatar.avatar-user,
 .message-avatar.avatar-user,
 .thread-avatar.avatar-user,
 .message-avatar.avatar-arbiter,
@@ -566,6 +567,12 @@
   background: var(--app-avatar-bg);
   color: var(--app-text-strong);
   box-shadow: var(--app-avatar-shadow);
+}
+
+.message.user .message-avatar.avatar-user,
+.message-avatar.avatar-user,
+.thread-avatar.avatar-user {
+  color: var(--app-muted);
 }
 
 .message-avatar.avatar-arbiter,

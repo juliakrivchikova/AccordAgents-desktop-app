@@ -25,6 +25,7 @@ export interface AppSettings {
   chatBehaviorRules: ChatBehaviorRuleConfig[];
   chatParticipantConfigs: ChatParticipantConfig[];
   lastRepoPath?: string;
+  repoFileOpenAction?: RepoFileOpenAction;
 }
 
 export interface ChatRoleConfig {
@@ -937,6 +938,24 @@ export interface ConversationOpenResult {
   messagePage: ConversationMessagePageInfo;
 }
 
+export type RepoFileOpenAction = "open" | "reveal";
+
+export interface OpenRepoFileRequest {
+  conversationId: string;
+  path: string;
+  line?: number;
+  column?: number;
+  action?: RepoFileOpenAction;
+}
+
+export interface OpenRepoFileResult {
+  action: RepoFileOpenAction;
+  path: string;
+  line?: number;
+  column?: number;
+  lineNavigationSupported: boolean;
+}
+
 export interface StartReviewResult {
   conversation: Conversation;
   warnings: string[];
@@ -945,6 +964,8 @@ export interface StartReviewResult {
 
 export interface AppBridge {
   openExternal(url: string): Promise<void>;
+  openRepoFile(request: OpenRepoFileRequest): Promise<OpenRepoFileResult>;
+  setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<AppSettings>;
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;
