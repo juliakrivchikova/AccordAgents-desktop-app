@@ -17,6 +17,7 @@ const hasNotarizeCredentials = Boolean(
   process.env.APPLE_NOTARIZE_PASSWORD &&
   process.env.APPLE_TEAM_ID
 );
+const looseResourceSignSkipPattern = /\.(?:asar|bin|dat|icns|nib|pak)$/i;
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -30,10 +31,15 @@ function ignoredRootFile(name: string): RegExp {
   return new RegExp(`^/${escapeRegExp(name)}$`);
 }
 
+function shouldSkipLooseResourceSigning(filePath: string): boolean {
+  return looseResourceSignSkipPattern.test(filePath);
+}
+
 const osxSignOptions = appleCodesignIdentity
   ? {
     identity: appleCodesignIdentity,
     ...(appleSigningKeychain ? { keychain: appleSigningKeychain } : {}),
+    ignore: shouldSkipLooseResourceSigning,
     hardenedRuntime: true,
     gatekeeperAssess: false,
     optionsForFile: (filePath: string) => {

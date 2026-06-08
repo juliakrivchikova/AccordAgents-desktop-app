@@ -312,7 +312,7 @@ test("MCP attachment reads are bounded by the issued turn snapshot", async () =>
   );
 });
 
-test("respondToMentions clears running and emits terminal error when participant run fails", async () => {
+test("respondToMentions returns after ingest and emits terminal error when participant run fails", async () => {
   const requester = chatParticipant();
   const target = chatParticipant({}, { id: "participant-2", handle: "taylor" });
   const conversation = chatConversation([requester, target], "/repo");
@@ -332,20 +332,22 @@ test("respondToMentions clears running and emits terminal error when participant
     throw new Error("mention exploded");
   };
 
-  await assert.rejects(
-    () => service.respondToMentions(
-      {
-        conversationId: conversation.id,
-        runId: "mention-failure",
-        sourceMessageId: sourceMessage.id,
-        targetParticipantIds: [target.id],
-        approve: true
-      },
-      undefined,
-      (item) => progress.push({ phase: item.phase, message: item.message })
-    ),
-    /mention exploded/
+  await service.respondToMentions(
+    {
+      conversationId: conversation.id,
+      runId: "mention-failure",
+      sourceMessageId: sourceMessage.id,
+      targetParticipantIds: [target.id],
+      approve: true
+    },
+    undefined,
+    (item) => progress.push({ phase: item.phase, message: item.message })
   );
+  await waitFor(async () => {
+    const saved = await storage.getConversation(conversation.id);
+    return saved?.metadata.running === false &&
+      progress.some((item) => item.phase === "error" && item.message === "mention exploded");
+  });
 
   const saved = await storage.getConversation(conversation.id);
   assert.equal(saved?.metadata.running, false);
@@ -353,7 +355,7 @@ test("respondToMentions clears running and emits terminal error when participant
   assert.equal(progress.some((item) => item.phase === "error" && item.message === "mention exploded"), true);
 });
 
-test("respondToChoice clears running and emits terminal error when requester run fails", async () => {
+test("respondToChoice returns after ingest and emits terminal error when requester run fails", async () => {
   const requester = chatParticipant();
   const conversation = chatConversation([requester], "/repo");
   const sourceMessage = participantMessage(requester, "choice-message", "Choose an option.");
@@ -374,25 +376,295 @@ test("respondToChoice clears running and emits terminal error when requester run
     throw new Error("choice exploded");
   };
 
-  await assert.rejects(
-    () => service.respondToChoice(
-      {
-        conversationId: conversation.id,
-        runId: "choice-failure",
-        sourceMessageId: sourceMessage.id,
-        choiceId: "choice-1",
-        selectedOptionId: "yes"
-      },
-      undefined,
-      (item) => progress.push({ phase: item.phase, message: item.message })
-    ),
-    /choice exploded/
+  await service.respondToChoice(
+    {
+      conversationId: conversation.id,
+      runId: "choice-failure",
+      sourceMessageId: sourceMessage.id,
+      choiceId: "choice-1",
+      selectedOptionId: "yes"
+    },
+    undefined,
+    (item) => progress.push({ phase: item.phase, message: item.message })
   );
+  await waitFor(async () => {
+    const saved = await storage.getConversation(conversation.id);
+    return saved?.metadata.running === false &&
+      progress.some((item) => item.phase === "error" && item.message === "choice exploded");
+  });
 
   const saved = await storage.getConversation(conversation.id);
   assert.equal(saved?.metadata.running, false);
   assert.equal(saved?.metadata.runId, undefined);
   assert.equal(progress.some((item) => item.phase === "error" && item.message === "choice exploded"), true);
+});
+
+test("respondToChoice releases chat run queue while requester turn continues", async () => {
+  const requester = chatParticipant();
+  const conversation = chatConversation([requester], "/repo");
+  const sourceMessage = participantMessage(requester, "choice-message", "Choose an option.");
+  sourceMessage.metadata = {
+    ...sourceMessage.metadata,
+    pendingChoice: {
+      id: "choice-1",
+      title: "Decision",
+      question: "Proceed?",
+      options: [{ id: "yes", label: "Yes" }],
+      status: "pending"
+    }
+  };
+  conversation.messages.push(sourceMessage);
+  const { service, storage } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+  let runStarted = false;
+  let releaseRun!: () => void;
+  const runCanFinish = new Promise<void>((resolve) => {
+    releaseRun = resolve;
+  });
+  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  serviceAny.runParticipantTurnSerialized = async () => {
+    runStarted = true;
+    await runCanFinish;
+    return [participantMessage(requester, "choice-reply", "Choice handled.")];
+  };
+
+  await withTimeout(
+    service.respondToChoice({
+      conversationId: conversation.id,
+      runId: "choice-run",
+      sourceMessageId: sourceMessage.id,
+      choiceId: "choice-1",
+      selectedOptionId: "yes"
+    }),
+    250
+  );
+  await waitFor(() => runStarted);
+
+  assert.equal(serviceAny.runQueues.has(conversation.id), false);
+  assert.equal((await storage.getConversation(conversation.id))?.metadata.running, true);
+
+  releaseRun();
+  await waitFor(async () => {
+    const saved = await storage.getConversation(conversation.id);
+    return saved?.metadata.running === false &&
+      saved.messages.some((message) => message.content === "Choice handled.");
+  });
+});
+
+test("respondToChoice waits for persisted ingest and rejects duplicate choice answers", async () => {
+  const requester = chatParticipant();
+  const conversation = chatConversation([requester], "/repo");
+  const sourceMessage = participantMessage(requester, "choice-message", "Choose an option.");
+  sourceMessage.metadata = {
+    ...sourceMessage.metadata,
+    pendingChoice: {
+      id: "choice-1",
+      title: "Decision",
+      question: "Proceed?",
+      options: [{ id: "yes", label: "Yes" }],
+      status: "pending"
+    }
+  };
+  conversation.messages.push(sourceMessage);
+  const { service, storage } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+  let releaseRun!: () => void;
+  const runCanFinish = new Promise<void>((resolve) => {
+    releaseRun = resolve;
+  });
+  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  serviceAny.runParticipantTurnSerialized = async () => {
+    await runCanFinish;
+    return [participantMessage(requester, "choice-reply", "Choice handled.")];
+  };
+
+  const originalSave = storage.saveConversation.bind(storage);
+  let releaseFirstSave!: () => void;
+  let firstSaveStarted = false;
+  let blockFirstSave = true;
+  const firstSaveCanFinish = new Promise<void>((resolve) => {
+    releaseFirstSave = resolve;
+  });
+  storage.saveConversation = async (savedConversation: Conversation): Promise<void> => {
+    await originalSave(savedConversation);
+    if (!blockFirstSave) {
+      return;
+    }
+    blockFirstSave = false;
+    firstSaveStarted = true;
+    await firstSaveCanFinish;
+  };
+
+  const first = service.respondToChoice({
+    conversationId: conversation.id,
+    runId: "choice-run",
+    sourceMessageId: sourceMessage.id,
+    choiceId: "choice-1",
+    selectedOptionId: "yes"
+  });
+  await waitFor(() => firstSaveStarted);
+
+  let firstResolved = false;
+  void first.then(() => {
+    firstResolved = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(firstResolved, false);
+
+  releaseFirstSave();
+  await first;
+
+  await assert.rejects(
+    () => service.respondToChoice({
+      conversationId: conversation.id,
+      runId: "choice-run-duplicate",
+      sourceMessageId: sourceMessage.id,
+      choiceId: "choice-1",
+      selectedOptionId: "yes"
+    }),
+    /Choice request has already been answered/
+  );
+
+  releaseRun();
+  await waitFor(async () => {
+    const saved = await storage.getConversation(conversation.id);
+    return saved?.metadata.running === false &&
+      saved.messages.some((message) => message.content === "Choice handled.");
+  });
+});
+
+test("respondToMentions waits for persisted ingest and rejects duplicate approvals", async () => {
+  const requester = chatParticipant();
+  const target = chatParticipant({}, { id: "participant-2", handle: "taylor" });
+  const conversation = chatConversation([requester, target], "/repo");
+  const sourceMessage = participantMessage(requester, "source-message", "@taylor please review");
+  sourceMessage.metadata = {
+    ...sourceMessage.metadata,
+    pendingMentions: [{
+      targetParticipantId: target.id,
+      targetHandle: target.handle,
+      status: "pending"
+    }]
+  };
+  conversation.messages.push(sourceMessage);
+  const { service, storage } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+  let releaseBatch!: () => void;
+  const batchCanFinish = new Promise<void>((resolve) => {
+    releaseBatch = resolve;
+  });
+  serviceAny.runParticipantBatch = async () => {
+    await batchCanFinish;
+  };
+
+  const originalSave = storage.saveConversation.bind(storage);
+  let releaseFirstSave!: () => void;
+  let firstSaveStarted = false;
+  let blockFirstSave = true;
+  const firstSaveCanFinish = new Promise<void>((resolve) => {
+    releaseFirstSave = resolve;
+  });
+  storage.saveConversation = async (savedConversation: Conversation): Promise<void> => {
+    await originalSave(savedConversation);
+    if (!blockFirstSave) {
+      return;
+    }
+    blockFirstSave = false;
+    firstSaveStarted = true;
+    await firstSaveCanFinish;
+  };
+
+  const first = service.respondToMentions({
+    conversationId: conversation.id,
+    runId: "mention-run",
+    sourceMessageId: sourceMessage.id,
+    targetParticipantIds: [target.id],
+    approve: true
+  });
+  await waitFor(() => firstSaveStarted);
+
+  let firstResolved = false;
+  void first.then(() => {
+    firstResolved = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(firstResolved, false);
+
+  releaseFirstSave();
+  await first;
+
+  await assert.rejects(
+    () => service.respondToMentions({
+      conversationId: conversation.id,
+      runId: "mention-run-duplicate",
+      sourceMessageId: sourceMessage.id,
+      targetParticipantIds: [target.id],
+      approve: true
+    }),
+    /Select at least one pending mention/
+  );
+
+  releaseBatch();
+  await waitFor(async () => {
+    const saved = await storage.getConversation(conversation.id);
+    const savedSource = saved?.messages.find((message) => message.id === sourceMessage.id);
+    return saved?.metadata.running === false &&
+      savedSource?.metadata?.pendingMentions?.[0]?.status === "approved";
+  });
+});
+
+test("respondToMentions keeps parent run cancellable after fast return", async () => {
+  const requester = chatParticipant();
+  const target = chatParticipant({}, { id: "participant-2", handle: "taylor" });
+  const conversation = chatConversation([requester, target], "/repo");
+  const sourceMessage = participantMessage(requester, "source-message", "@taylor please review");
+  sourceMessage.metadata = {
+    ...sourceMessage.metadata,
+    pendingMentions: [{
+      targetParticipantId: target.id,
+      targetHandle: target.handle,
+      status: "pending"
+    }]
+  };
+  conversation.messages.push(sourceMessage);
+  const { service, storage } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+  let batchStarted = false;
+  let batchSignal: AbortSignal | undefined;
+  let releaseBatch!: () => void;
+  const batchCanFinish = new Promise<void>((resolve) => {
+    releaseBatch = resolve;
+  });
+  serviceAny.runParticipantBatch = async (
+    _conversation: Conversation,
+    _participants: ChatParticipant[],
+    _triggerMessage: ChatMessage,
+    _runId: string,
+    signal: AbortSignal | undefined
+  ) => {
+    batchSignal = signal;
+    batchStarted = true;
+    await batchCanFinish;
+  };
+
+  await service.respondToMentions({
+    conversationId: conversation.id,
+    runId: "mention-parent-run",
+    sourceMessageId: sourceMessage.id,
+    targetParticipantIds: [target.id],
+    approve: true
+  });
+
+  assert.equal(service.cancelRun("mention-parent-run"), true);
+  await waitFor(() => batchStarted);
+  assert.equal(batchSignal?.aborted, true);
+
+  releaseBatch();
+  await waitFor(async () => {
+    const saved = await storage.getConversation(conversation.id);
+    return saved?.metadata.running === false &&
+      !serviceAny.chatRunControllers.has("mention-parent-run");
+  });
 });
 
 test("hydrateContextUsage clears inactive stale running state once", async () => {
@@ -493,6 +765,12 @@ test("autoResumeParticipantRequest completes and clears running state", async ()
   ];
 
   await serviceAny.autoResumeParticipantRequest(conversation.id, requestMessage.id);
+  await waitFor(async () => {
+    const saved = await storage.getConversation(conversation.id);
+    const savedRequest = saved?.messages.find((message) => message.id === requestMessage.id);
+    return saved?.metadata.running === false &&
+      savedRequest?.metadata?.participantRequest?.status === "completed";
+  });
   const saved = await storage.getConversation(conversation.id);
   const savedRequest = saved?.messages.find((message) => message.id === requestMessage.id);
 

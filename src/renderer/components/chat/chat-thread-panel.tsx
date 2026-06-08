@@ -34,13 +34,14 @@ export function ChatThreadPanel(props: {
   settings: AppSettings;
   draft: string;
   busy: boolean;
+  submittingChoiceIds?: ReadonlySet<string>;
   liveProgressById: Map<string, AgentRunProgress>;
   onDraftChange: (value: string) => void;
   onSend: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => boolean | void | Promise<boolean | void>;
   onClose: () => void;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
-  onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void;
+  onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void | Promise<void>;
   onToggleReaction: (messageId: string, emoji: string) => void;
   onStopRun?: (runId: string) => void;
   continuedMentionRequestIds: Set<string>;
@@ -65,6 +66,7 @@ export function ChatThreadPanel(props: {
           contextUsage={contextUsageForMessage(props.rootMessage, props.contextUsageByParticipant)}
           sessionId={sessionIdForMessage(props.rootMessage, props.sessionsByParticipant)}
           busy={props.busy}
+          submittingChoiceIds={props.submittingChoiceIds}
           inThread
           hasContinuationReply={props.continuedMentionRequestIds.has(props.rootMessage.id)}
           liveProgress={props.liveProgressById.get(props.rootMessage.id)}
@@ -87,6 +89,7 @@ export function ChatThreadPanel(props: {
                 contextUsage={contextUsageForMessage(message, props.contextUsageByParticipant)}
                 sessionId={sessionIdForMessage(message, props.sessionsByParticipant)}
                 busy={props.busy}
+                submittingChoiceIds={props.submittingChoiceIds}
                 inThread
                 hasContinuationReply={props.continuedMentionRequestIds.has(message.id)}
                 liveProgress={props.liveProgressById.get(message.id)}

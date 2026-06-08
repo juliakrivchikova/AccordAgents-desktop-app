@@ -16,8 +16,9 @@ export function ModeToggle(): JSX.Element {
       <TooltipTrigger asChild>
         <Button
           data-testid="theme-toggle"
-          variant="outline"
+          variant="ghost"
           size="icon-sm"
+          className="topbar-icon-button"
           title={label}
           onClick={toggleTheme}
         >

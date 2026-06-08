@@ -941,6 +941,24 @@
   padding: 4px 10px 2px;
 }
 
+/* Frameless top-bar icon buttons (theme / settings / refresh) — design handoff §3. */
+.topbar-icon-button {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--app-muted);
+}
+
+.topbar-icon-button:hover {
+  background: var(--app-surface-hover) !important;
+  color: var(--app-text-strong);
+}
+
+.topbar-icon-button.is-active {
+  background: var(--app-accent-soft) !important;
+  color: var(--app-accent) !important;
+}
+
 /* Submit ↵ key hint inside the dark choice-card submit button. */
 .chat-choice-submit {
   gap: 6px;

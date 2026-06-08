@@ -260,6 +260,11 @@
 .chat-app-tool-approval-slot.has-approvals {
   display: grid;
   gap: var(--space-3);
+  /* Cap the approval region so a tall permission card (many shell rows) can never
+     consume the whole column and push the Submit footer behind the composer.
+     The slot scrolls internally instead, keeping the timeline and composer in view. */
+  max-height: min(45vh, 540px);
+  overflow-y: auto;
   padding: var(--space-3) var(--app-gutter);
   border-bottom: 1px solid var(--app-border);
   background: var(--app-surface);

@@ -42,6 +42,7 @@ export function ChatMessageItem(props: {
   contextUsage?: AgentContextUsage;
   sessionId?: string;
   busy: boolean;
+  submittingChoiceIds?: ReadonlySet<string>;
   selected?: boolean;
   inThread?: boolean;
   replyCount?: number;
@@ -51,7 +52,7 @@ export function ChatMessageItem(props: {
   onOpenThread?: () => void;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
-  onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void;
+  onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void | Promise<void>;
   onToggleReaction: (messageId: string, emoji: string) => void;
   onStopRun?: (runId: string) => void;
 }): JSX.Element {
@@ -302,7 +303,7 @@ export function ChatMessageItem(props: {
             <ChatChoiceCard
               choice={choice}
               requesterLabel={author}
-              busy={props.busy}
+              submitting={props.submittingChoiceIds?.has(choice.id) === true}
               onConfirm={(response) => props.onRespondToChoice(message.id, choice.id, response)}
             />
             {threadActions}

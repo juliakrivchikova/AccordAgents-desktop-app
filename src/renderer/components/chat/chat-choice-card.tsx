@@ -12,10 +12,10 @@ import {
 export function ChatChoiceCard(props: {
   choice: ChatPendingChoice;
   requesterLabel: string;
-  busy: boolean;
+  submitting: boolean;
   onConfirm: (response: { selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
 }): JSX.Element {
-  const { choice, requesterLabel, busy, onConfirm } = props;
+  const { choice, requesterLabel, submitting, onConfirm } = props;
   const [draftSelection, setDraftSelection] = useState(choice.selectedOptionId ?? "");
   const [customAnswer, setCustomAnswer] = useState(choice.customAnswer ?? "");
   const [note, setNote] = useState(choice.note ?? "");
@@ -26,7 +26,7 @@ export function ChatChoiceCard(props: {
   const requesterMention = requesterLabel.startsWith("@") ? requesterLabel : requesterLabel === "You" ? "User" : requesterLabel;
   const selectedOverridesRecommendation = isAnswered && Boolean(choice.recommendedOptionId) && selectedOptionId !== choice.recommendedOptionId;
   const receiptTime = formatChatChoiceReceiptTime(choice.selectedAt);
-  const canConfirm = !busy && !isAnswered && (isCustomSelected ? Boolean(customAnswer.trim()) : Boolean(selectedOption));
+  const canConfirm = !submitting && !isAnswered && (isCustomSelected ? Boolean(customAnswer.trim()) : Boolean(selectedOption));
   const selectedLabel = isCustomSelected
     ? customAnswer.trim() || "Write your own answer"
     : selectedOption?.label;
@@ -81,7 +81,7 @@ export function ChatChoiceCard(props: {
                 type="radio"
                 name={choice.id}
                 checked={selected}
-                disabled={busy || isAnswered}
+                disabled={submitting || isAnswered}
                 onChange={() => setDraftSelection(option.id)}
               />
               <span className="chat-choice-radio" aria-hidden="true" />
@@ -101,7 +101,7 @@ export function ChatChoiceCard(props: {
             type="radio"
             name={choice.id}
             checked={isCustomSelected}
-            disabled={busy || isAnswered}
+            disabled={submitting || isAnswered}
             onChange={() => setDraftSelection(CHAT_CUSTOM_CHOICE_OPTION_ID)}
           />
           <span className="chat-choice-radio" aria-hidden="true" />
@@ -139,7 +139,7 @@ export function ChatChoiceCard(props: {
             onChange={(event) => setCustomAnswer(event.target.value)}
             placeholder={'e.g. "Use session cookies for web, but issue short-lived JWTs to native clients"'}
             rows={3}
-            disabled={busy || isAnswered}
+            disabled={submitting || isAnswered}
           />
         </label>
       )}
@@ -163,7 +163,7 @@ export function ChatChoiceCard(props: {
             onChange={(event) => setNote(event.target.value)}
             placeholder={`Constraints, caveats, or follow-up questions for ${requesterMention}...`}
             rows={2}
-            disabled={busy || isAnswered}
+            disabled={submitting || isAnswered}
           />
         </label>
       )}

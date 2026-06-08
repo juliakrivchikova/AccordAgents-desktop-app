@@ -1618,8 +1618,9 @@ function App(): JSX.Element {
       <DropdownMenu open={settingsMenuOpen} onOpenChange={setSettingsMenuOpen}>
         <DropdownMenuTrigger asChild>
           <Button
-            variant={activeView === "settings" || settingsMenuOpen ? "default" : "outline"}
+            variant="ghost"
             size="icon-sm"
+            className={`topbar-icon-button${activeView === "settings" || settingsMenuOpen ? " is-active" : ""}`}
             title="Settings"
             aria-label="Settings"
             data-testid="settings-menu-trigger"
@@ -1673,7 +1674,7 @@ function App(): JSX.Element {
           </DropdownMenuGroup>
         </DropdownMenuContent>
       </DropdownMenu>
-      <Button variant="outline" size="icon-sm" title="Refresh" aria-label="Refresh" onClick={() => void refreshAll()}>
+      <Button variant="ghost" size="icon-sm" className="topbar-icon-button" title="Refresh" aria-label="Refresh" onClick={() => void refreshAll()}>
         <RefreshCw aria-hidden />
         <span className="sr-only">Refresh</span>
       </Button>
@@ -1816,7 +1817,7 @@ function App(): JSX.Element {
                       void respondToChatMentions(sourceMessageId, targetParticipantIds, false)
                     }
                     onRespondToChoice={(sourceMessageId, choiceId, response) =>
-                      void respondToChatChoice(sourceMessageId, choiceId, response)
+                      respondToChatChoice(sourceMessageId, choiceId, response)
                     }
                     onToggleReaction={(messageId, emoji) => void toggleChatReaction(messageId, emoji)}
                     onRespondToAppToolApproval={respondToChatAppToolApproval}

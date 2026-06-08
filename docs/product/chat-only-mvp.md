@@ -529,6 +529,14 @@ Do not advertise:
 - Generic autonomous agent orchestration or unattended swarms
 
 ## MVP TODO
+- [ ] allow request participant select bug
+- [ ] images super small
+- [ ] 1.2.3 dropped
+- [ ] skill cursor
+- [ ] claude skill tool not available
+- [ ] user choice card appearance
+- [ ] message link is not always working
+- 
 - [ ] Design improvements
 - 
 - [ ] Bug: read the latest messages from chat history ( or thread)

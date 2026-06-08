@@ -58,7 +58,7 @@ export function ChatConversationView(props: {
   ) => Promise<boolean>;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
-  onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void;
+  onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void | Promise<void>;
   onToggleReaction: (messageId: string, emoji: string) => void;
   onRespondToAppToolApproval: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
@@ -98,6 +98,8 @@ export function ChatConversationView(props: {
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
   const submittingApprovalIdsRef = useRef<Set<string>>(new Set<string>());
   const [submittingApprovalIds, setSubmittingApprovalIds] = useState<ReadonlySet<string>>(new Set<string>());
+  const submittingChoiceIdsRef = useRef<Set<string>>(new Set<string>());
+  const [submittingChoiceIds, setSubmittingChoiceIds] = useState<ReadonlySet<string>>(new Set<string>());
   const [threadWidth, setThreadWidth] = useState(430);
   const [isResizingThread, setIsResizingThread] = useState(false);
   const [chooserOpen, setChooserOpen] = useState(false);
@@ -242,6 +244,24 @@ export function ChatConversationView(props: {
     }
   }
 
+  async function handleChoiceResponse(
+    sourceMessageId: string,
+    choiceId: string,
+    response: ChatChoiceResponse
+  ): Promise<void> {
+    if (submittingChoiceIdsRef.current.has(choiceId)) {
+      return;
+    }
+    submittingChoiceIdsRef.current.add(choiceId);
+    setSubmittingChoiceIds(new Set(submittingChoiceIdsRef.current));
+    try {
+      await props.onRespondToChoice(sourceMessageId, choiceId, response);
+    } finally {
+      submittingChoiceIdsRef.current.delete(choiceId);
+      setSubmittingChoiceIds(new Set(submittingChoiceIdsRef.current));
+    }
+  }
+
   async function openRepoFileReference(ref: FileLinkRef, action: RepoFileOpenAction): Promise<void> {
     try {
       const result = await window.consensus.openRepoFile({
@@ -303,6 +323,8 @@ export function ChatConversationView(props: {
     setThreadDrafts({});
     submittingApprovalIdsRef.current.clear();
     setSubmittingApprovalIds(new Set<string>());
+    submittingChoiceIdsRef.current.clear();
+    setSubmittingChoiceIds(new Set<string>());
     setChooserOpen(false);
     setChooserFileRef(null);
     stickToBottomRef.current = true;
@@ -395,6 +417,7 @@ export function ChatConversationView(props: {
                       contextUsage={contextUsageForMessage(row.message, contextUsageByParticipant)}
                       sessionId={sessionIdForMessage(row.message, sessionsByParticipant)}
                       busy={props.isRunning}
+                      submittingChoiceIds={submittingChoiceIds}
                       selected={row.message.id === selectedThreadRoot?.id}
                       replyCount={threadSummaries.get(row.message.id)?.replies.length ?? 0}
                       latestReplyAt={threadSummaries.get(row.message.id)?.latestReplyAt}
@@ -403,7 +426,7 @@ export function ChatConversationView(props: {
                       onOpenThread={() => setSelectedThreadRootId(row.message.id)}
                       onApproveMentions={props.onApproveMentions}
                       onRejectMentions={props.onRejectMentions}
-                      onRespondToChoice={props.onRespondToChoice}
+                      onRespondToChoice={handleChoiceResponse}
                       onToggleReaction={props.onToggleReaction}
                       onStopRun={props.onStopRun}
                     />
@@ -447,13 +470,14 @@ export function ChatConversationView(props: {
           settings={props.settings}
           draft={threadDrafts[selectedThreadRoot.id] ?? ""}
           busy={props.isRunning}
+          submittingChoiceIds={submittingChoiceIds}
           liveProgressById={liveProgressById}
           onDraftChange={(value) => setThreadDrafts((current) => ({ ...current, [selectedThreadRoot.id]: value }))}
           onSend={(repoFileMentions, imageAttachments, skillMentions) => sendThreadDraft(selectedThreadRoot, repoFileMentions, imageAttachments, skillMentions)}
           onClose={() => setSelectedThreadRootId(undefined)}
           onApproveMentions={props.onApproveMentions}
           onRejectMentions={props.onRejectMentions}
-          onRespondToChoice={props.onRespondToChoice}
+          onRespondToChoice={handleChoiceResponse}
           onToggleReaction={props.onToggleReaction}
           onStopRun={props.onStopRun}
           continuedMentionRequestIds={continuedMentionRequestIds}

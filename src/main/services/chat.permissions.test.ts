@@ -398,6 +398,9 @@ test("permission resume attaches resumed participant-request reply to the origin
   await (service as any).autoResumePermissionApproval(conversation.id, approval.id, (progress: typeof progressEvents[number]) => {
     progressEvents.push(progress);
   });
+  await waitFor(() => runs.length === 1 && storage.current.messages.some(
+    (message: Conversation["messages"][number]) => message.content === "Finished after approval."
+  ));
 
   assert.equal(runs.length, 1);
   assert.equal(runs[0].prompt.includes("Message ID: request-message"), true);
@@ -441,15 +444,16 @@ test("permission resume clears running and emits terminal error when resumed par
   });
   (service as any).ensureHistoryFiles = async () => tempRoot;
 
-  await assert.rejects(
-    () => (service as any).autoResumePermissionApproval(
-      conversation.id,
-      approval.id,
-      (progress: typeof progressEvents[number]) => {
-        progressEvents.push(progress);
-      }
-    ),
-    /resume exploded/
+  await (service as any).autoResumePermissionApproval(
+    conversation.id,
+    approval.id,
+    (progress: typeof progressEvents[number]) => {
+      progressEvents.push(progress);
+    }
+  );
+  await waitFor(() =>
+    progressEvents.some((item) => item.phase === "error" && item.message === "resume exploded") &&
+    storage.current.metadata.running === false
   );
 
   assert.equal(storage.current.metadata.running, false);
@@ -505,6 +509,7 @@ test("permission resume registers a cancellable chat run controller", async () =
 
   assert.equal(service.cancelRun("blocked-run"), true);
   await resume;
+  await waitFor(() => storage.current.metadata.running === false);
 
   assert.equal(capturedSignal?.aborted, true);
   assert.equal(storage.current.metadata.running, false);
@@ -549,8 +554,9 @@ test("approved permission resume ignores duplicate concurrent resume attempts", 
   const first = (service as any).autoResumePermissionApproval(conversation.id, approval.id);
   const second = (service as any).autoResumePermissionApproval(conversation.id, approval.id);
   await waitFor(() => runCount === 1);
-  releaseRun();
   await Promise.all([first, second]);
+  releaseRun();
+  await waitFor(() => storage.current.metadata.running === false);
 
   assert.equal(runCount, 1);
   assert.equal(storage.current.metadata.running, false);
@@ -603,6 +609,7 @@ test("permission resume waits behind an in-flight same-participant turn", async 
 
   releaseInFlight();
   await resume;
+  await waitFor(() => runStarted && storage.current.metadata.running === false);
 
   assert.equal(runStarted, true);
   assert.equal(storage.current.metadata.running, false);
@@ -625,6 +632,105 @@ test("duplicate chat run ids stay active until every owner ends", async () => {
 
   assert.equal(storage.current.metadata.activeRunIds, undefined);
   assert.equal(storage.current.metadata.running, false);
+});
+
+test("ending one active run preserves survivor metadata", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+
+  await (service as any).beginChatRun(conversation, "first-run");
+  await (service as any).beginChatRun(conversation, "second-run");
+  await (service as any).endChatRun(conversation, "first-run");
+
+  assert.deepEqual(storage.current.metadata.activeRunIds, ["second-run"]);
+  assert.equal(storage.current.metadata.running, true);
+  assert.equal(storage.current.metadata.runId, "second-run");
+
+  await (service as any).endChatRun(conversation, "second-run");
+
+  assert.equal(storage.current.metadata.activeRunIds, undefined);
+  assert.equal(storage.current.metadata.running, false);
+  assert.equal(storage.current.metadata.runId, undefined);
+});
+
+test("participant reservation is released if turn controller setup fails", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+  const serviceAny = service as any;
+  const trigger = conversation.messages[0];
+  const reservation = serviceAny.reserveParticipantTurn(conversation.id, participant.id);
+  serviceAny.ensureChatTurnController = () => {
+    throw new Error("controller setup failed");
+  };
+
+  await assert.rejects(
+    () => serviceAny.runParticipantTurnSerialized(conversation, participant, trigger, "failed-run", undefined, undefined, {
+      warnings: [],
+      turnReservation: reservation
+    }),
+    /controller setup failed/
+  );
+
+  const nextReservation = serviceAny.reserveParticipantTurn(conversation.id, participant.id);
+  assert.equal(nextReservation.queued, false);
+  nextReservation.release();
+});
+
+test("same participant sends show queued bubble and serialize provider runs", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  let runCount = 0;
+  let releaseFirst!: () => void;
+  const firstCanFinish = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => {
+      runCount += 1;
+      const runNumber = runCount;
+      if (runNumber === 1) {
+        await firstCanFinish;
+      }
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: `reply ${runNumber}`,
+        durationMs: 1,
+        sessionId: `session-${runNumber}`
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "first-send",
+    content: "@codex first"
+  });
+  await waitFor(() => runCount === 1);
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "second-send",
+    content: "@codex second"
+  });
+  await waitFor(() => storage.current.messages.some(
+    (message: Conversation["messages"][number]) =>
+      message.role === "participant" &&
+      message.status === "pending" &&
+      message.metadata?.queuedBehind?.handle === participant.handle
+  ));
+
+  assert.equal(runCount, 1);
+  releaseFirst();
+  await waitFor(() =>
+    runCount === 2 &&
+    storage.current.messages.some((message: Conversation["messages"][number]) => message.content === "reply 2") &&
+    storage.current.metadata.running === false
+  );
 });
 
 test("participant prose mentioning blocked permissions does not create approval cards", () => {
