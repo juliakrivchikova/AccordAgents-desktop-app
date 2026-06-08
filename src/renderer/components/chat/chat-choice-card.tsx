@@ -64,7 +64,6 @@ export function ChatChoiceCard(props: {
     <section className={`chat-choice-card ${isAnswered ? "answered" : ""}`} aria-label={choice.title}>
       <div className="chat-choice-head">
         <div className="chat-choice-title-block">
-          <span className="chat-choice-kicker">{isAnswered ? "Answered" : "Decision"} · {requesterLabel}</span>
           <h3>{choice.title}</h3>
         </div>
         <span className={`chat-choice-status ${isAnswered ? "answered" : ""}`}>
@@ -177,8 +176,9 @@ export function ChatChoiceCard(props: {
           ) : (
             <span>Select one option to continue.</span>
           )}
-          <Button size="sm" disabled={!canConfirm} onClick={confirmChoice}>
-            {`Send to ${requesterMention}`}
+          <Button size="sm" className="chat-choice-submit" disabled={!canConfirm} onClick={confirmChoice}>
+            <span>Submit</span>
+            <kbd aria-hidden="true">↵</kbd>
           </Button>
         </div>
       )}

@@ -32,7 +32,7 @@ export const FormRow = ({
     {label !== undefined && (
       <Label
         htmlFor={htmlFor}
-        className="text-[11px] font-medium uppercase leading-none tracking-wide text-muted-foreground"
+        className="text-[11.5px] font-semibold leading-none tracking-[0.01em] text-muted-foreground"
       >
         <span>{label}</span>
         {optional ? (

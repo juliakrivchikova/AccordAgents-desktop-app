@@ -106,8 +106,7 @@
   gap: 10px;
   color: var(--app-text);
   font-size: 12px;
-  font-weight: 800;
-  text-transform: uppercase;
+  font-weight: 600;
 }
 
 .chat-shell-rule-row {

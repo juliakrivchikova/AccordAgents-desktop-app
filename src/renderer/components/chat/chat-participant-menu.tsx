@@ -107,9 +107,19 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
           title="Participants"
           aria-label={`${props.participants.length} participants`}
           data-testid="chat-participants-trigger"
-          className="chat-participants-trigger h-7 min-w-0 gap-1.5 px-2 text-xs"
+          className="chat-participants-trigger h-8 min-w-0 gap-2 rounded-full pl-1 pr-2.5 text-xs"
         >
-          <Users size={15} aria-hidden />
+          {props.participants.length > 0 ? (
+            <span className="chat-roster-avatars" aria-hidden>
+              {props.participants.slice(0, 4).map((participant) => (
+                <span className="chat-roster-avatar" key={participant.handle}>
+                  {props.renderParticipantAvatar(participant)}
+                </span>
+              ))}
+            </span>
+          ) : (
+            <Users size={15} aria-hidden />
+          )}
           <span className="tabular-nums">{props.participants.length}</span>
         </Button>
       </PopoverTrigger>

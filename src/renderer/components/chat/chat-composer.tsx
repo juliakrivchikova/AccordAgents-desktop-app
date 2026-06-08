@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { ArrowUp, FileText, ImagePlus, ListChecks, RefreshCw, X } from "lucide-react";
+import { ArrowUp, FileText, ImagePlus, ListChecks, Loader2, RefreshCw, X } from "lucide-react";
 
 import { ResizableTextarea } from "@/renderer/components/primitives";
 import type {
@@ -36,6 +36,8 @@ export interface ChatComposerProps {
   draft: string;
   placeholder: string;
   isRunning: boolean;
+  activeRunCount?: number;
+  onStopAllRuns?: () => void;
   status?: React.ReactNode;
   className?: string;
   rows?: number;
@@ -395,6 +397,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
         <div className={["chat-input-wrap", showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")}>
         {mentionOptions.length > 0 && (
           <div className="mention-menu" role="listbox">
+            <div className="chat-popover-section-title">Participants</div>
             {mentionOptions.map((participant, index) => (
               <button
                 className={index === mentionIndex ? "selected" : ""}
@@ -416,6 +419,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
         )}
         {visibleFileOptions.length > 0 && (
           <div className="mention-menu file-mention-menu" role="listbox">
+            <div className="chat-popover-section-title">Repository files</div>
             {visibleFileOptions.map((file, index) => (
               <button
                 className={index === fileIndex ? "selected" : ""}
@@ -437,6 +441,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
         )}
         {skillQuery !== undefined && (visibleSkillOptions.length > 0 || skillTargetLabel) && (
           <div className="mention-menu skill-mention-menu" role="listbox">
+            <div className="chat-popover-section-title">Skills</div>
             {skillTargetLabel && <div className="skill-mention-menu-context">{skillTargetLabel}</div>}
             {visibleSkillOptions.map((skill, index) => {
               const disabled = skill.capabilityState !== "invocable" || skill.ambiguous;
@@ -586,15 +591,21 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
             >
               <ImagePlus size={18} />
             </button>
+            {(props.activeRunCount ?? 0) > 0 && props.onStopAllRuns && (
+              <button
+                type="button"
+                className="composer-active-run"
+                title="Stop all running participants"
+                aria-label={`Stop ${props.activeRunCount} active ${props.activeRunCount === 1 ? "run" : "runs"}`}
+                onClick={props.onStopAllRuns}
+              >
+                <Loader2 size={13} className="spin" aria-hidden />
+                <span>{props.activeRunCount} active {props.activeRunCount === 1 ? "run" : "runs"}</span>
+                <X size={13} aria-hidden />
+              </button>
+            )}
           </div>
           <div className="chat-composer-actions">
-            <span className="chat-composer-hint" aria-hidden="true">
-              <kbd>↵</kbd>
-              <span>send</span>
-              <em>·</em>
-              <kbd>⇧↵</kbd>
-              <span>newline</span>
-            </span>
             <button
               type="button"
               className="composer-send-button"

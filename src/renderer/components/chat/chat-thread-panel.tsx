@@ -50,8 +50,8 @@ export function ChatThreadPanel(props: {
     <section className="chat-thread-panel" aria-label="Chat thread" data-testid="chat-thread-panel">
       <header className="thread-panel-head chat-thread-head">
         <div>
-          <h2>Thread</h2>
-          <span>{rootAuthor}</span>
+          <h2>{rootAuthor}</h2>
+          <span>{props.replies.length} {props.replies.length === 1 ? "reply" : "replies"}</span>
         </div>
         <div className="thread-panel-actions">
           <IconButton size="sm" icon={X} label="Close thread" tooltip="Close thread" onClick={props.onClose} />
@@ -76,6 +76,9 @@ export function ChatThreadPanel(props: {
         />
         {props.replies.length > 0 && (
           <div className="chat-thread-replies">
+            <div className="chat-thread-divider">
+              <span>{props.replies.length} {props.replies.length === 1 ? "reply" : "replies"}</span>
+            </div>
             {props.replies.map((message) => (
               <ChatMessageItem
                 message={message}

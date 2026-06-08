@@ -357,7 +357,7 @@
   padding: 1px 4px;
   border-radius: 4px;
   background: var(--app-surface-hover);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-code, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
   font-size: 0.94em;
 }
 
@@ -365,8 +365,9 @@
   padding: 10px 11px;
   border: 1px solid var(--app-border);
   border-radius: var(--radius-control);
-  background: var(--app-warning-soft);
+  background: var(--app-surface-subtle);
   overflow-x: auto;
+  font-family: var(--font-code, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
 }
 
 .markdown-code code {
@@ -480,8 +481,7 @@
 }
 
 .plan-source-support-head span {
-  font-weight: 800;
-  text-transform: uppercase;
+  font-weight: 600;
 }
 
 .plan-source-support-head strong {
@@ -591,8 +591,7 @@
 .thread-panel-head span {
   color: var(--app-muted);
   font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
+  font-weight: 600;
 }
 
 .thread-panel-head h2 {

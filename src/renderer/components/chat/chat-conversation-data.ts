@@ -481,6 +481,10 @@ export function providerLabel(providerKind: ChatProviderKind): string {
   return providerKind === "codex-cli" ? "Codex" : "Claude";
 }
 
+export function participantProviderLabel(providerKind: ChatProviderKind): string {
+  return providerKind === "codex-cli" ? "Codex CLI" : "Claude Code";
+}
+
 export function chatDisplayContent(message: Conversation["messages"][number], author: string): string {
   if (message.metadata?.participantRequest) {
     return participantRequestDisplayContent(message.metadata.participantRequest);

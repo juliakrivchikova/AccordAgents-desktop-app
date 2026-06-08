@@ -1,4 +1,5 @@
-import { CheckCircle2 } from "lucide-react";
+import { useState, type KeyboardEvent } from "react";
+import { CornerDownLeft } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import type {
@@ -49,6 +50,48 @@ function ChatAppToolApprovalCard(props: {
     ? props.approval.request.operations.filter((operation) => operation.type === "add")
     : [];
   const approvalKind = permissionRequest ? "Permission request" : participantRequest ? "Participant request" : "App tool request";
+  const chatOptionLabel = permissionRequest
+    ? `Yes, allow @${props.approval.requesterHandle} in this chat`
+    : participantRequest
+      ? `Yes, allow @${props.approval.requesterHandle} to ask ${participantRequest.requests.length === 1 ? `@${participantRequest.requests[0].target.replace(/^@/, "")}` : "these targets"}`
+      : "Yes, allow for this chat";
+  const options: { key: string; label: string; approve: boolean; scope?: ChatAppToolApprovalScope }[] = [
+    { key: "once", label: "Yes, allow once", approve: true, scope: "once" },
+    ...(inferredParticipantRequest ? [] : [{ key: "chat", label: chatOptionLabel, approve: true, scope: "chat" as ChatAppToolApprovalScope }]),
+    { key: "deny", label: `No, tell @${props.approval.requesterHandle} what to do differently`, approve: false }
+  ];
+  const defaultIndex = preferOnceApproval || inferredParticipantRequest ? 0 : Math.min(1, options.length - 1);
+  const [selectedIndex, setSelectedIndex] = useState(defaultIndex);
+
+  function submit(): void {
+    const option = options[Math.min(selectedIndex, options.length - 1)];
+    if (option) {
+      void props.onRespond(props.approval.id, option.approve, option.scope);
+    }
+  }
+
+  function handleOptionsKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
+    if (props.submitting) {
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setSelectedIndex((index) => Math.min(options.length - 1, index + 1));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setSelectedIndex((index) => Math.max(0, index - 1));
+    } else if (/^[1-9]$/.test(event.key)) {
+      const next = Number(event.key) - 1;
+      if (next < options.length) {
+        event.preventDefault();
+        setSelectedIndex(next);
+      }
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      submit();
+    }
+  }
+
   return (
     <section className="chat-app-tool-approval-card" aria-label={props.approval.summary}>
       <div className="chat-app-tool-approval-head">
@@ -80,24 +123,34 @@ function ChatAppToolApprovalCard(props: {
           Approval runs the requested participant{participantRequest.requests.length === 1 ? "" : "s"} and then returns to @{props.approval.requesterHandle} after replies or errors. {inferredParticipantRequest ? "Inferred requests are approved one time." : "Chat grants apply only to this requester and target set."}
         </p>
       )}
-      <div className="chat-app-tool-approval-actions">
-        <Button variant="outline" size="sm" disabled={props.submitting} onClick={() => void props.onRespond(props.approval.id, false)}>
-          Deny
+      <div
+        className="chat-approval-options"
+        role="listbox"
+        tabIndex={0}
+        aria-label="Approval options"
+        onKeyDown={handleOptionsKeyDown}
+      >
+        {options.map((option, index) => (
+          <button
+            type="button"
+            role="option"
+            aria-selected={index === selectedIndex}
+            className={`chat-approval-option ${index === selectedIndex ? "selected" : ""}`}
+            disabled={props.submitting}
+            onMouseEnter={() => setSelectedIndex(index)}
+            onClick={() => setSelectedIndex(index)}
+            key={option.key}
+          >
+            <span className="chat-approval-option-num">{index + 1}</span>
+            <span className="chat-approval-option-label">{option.label}</span>
+          </button>
+        ))}
+      </div>
+      <div className="chat-approval-footer">
+        <Button variant="default" size="sm" className="chat-approval-submit" disabled={props.submitting} onClick={submit}>
+          <span>Submit</span>
+          <CornerDownLeft size={14} aria-hidden />
         </Button>
-        <Button variant={preferOnceApproval ? "default" : "outline"} size="sm" disabled={props.submitting} onClick={() => void props.onRespond(props.approval.id, true, "once")}>
-          <CheckCircle2 size={16} />
-          Allow once
-        </Button>
-        {!inferredParticipantRequest && (
-          <Button variant={preferOnceApproval ? "outline" : "default"} size="sm" disabled={props.submitting} onClick={() => void props.onRespond(props.approval.id, true, "chat")}>
-            <CheckCircle2 size={16} />
-            {permissionRequest
-              ? `Allow @${props.approval.requesterHandle} in this chat`
-              : participantRequest
-                ? `Allow @${props.approval.requesterHandle} to ask ${participantRequest.requests.length === 1 ? `@${participantRequest.requests[0].target.replace(/^@/, "")}` : "these targets"}`
-                : "Allow for chat"}
-          </Button>
-        )}
       </div>
     </section>
   );

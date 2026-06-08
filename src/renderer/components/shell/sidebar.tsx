@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, ChevronRight, Folder, Loader2, MessageSquare, PanelLeftClose, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, PanelLeftClose, Plus, SquarePen } from "lucide-react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { HistoryLoadingState } from "@/renderer/components/loading-states";
@@ -78,7 +78,7 @@ export const Sidebar = ({
         className="flex h-[var(--app-header-height)] shrink-0 items-center justify-between gap-2 border-b border-[var(--app-shell-border)] px-[var(--app-gutter)] text-sm font-semibold text-[var(--app-text-strong)]"
       >
         <div className="flex min-w-0 items-center gap-2">
-          <img src={ACCORDAGENTS_MARK_URL} alt="" className="size-4 shrink-0" aria-hidden="true" />
+          <img src={ACCORDAGENTS_MARK_URL} alt="" className="size-[22px] shrink-0 rounded-[6px]" aria-hidden="true" />
           <span className="min-w-0 truncate">AccordAgents</span>
         </div>
         {onToggleSidebar && (
@@ -108,19 +108,19 @@ export const Sidebar = ({
           disabled={busy}
           data-testid="new-chat"
           className={cn(
-            "inline-flex h-8 w-full items-center justify-center gap-2 rounded-md",
-            "border border-[var(--app-border-strong)] bg-[var(--app-surface)] px-3 text-xs font-medium text-foreground",
-            "transition-colors hover:border-[var(--app-accent-border)] hover:bg-[var(--app-surface-hover)]",
+            "inline-flex h-8 w-full items-center justify-start gap-2 rounded-md",
+            "bg-transparent px-2.5 text-[13px] font-medium text-[var(--app-text-strong)]",
+            "transition-colors hover:bg-[var(--app-surface-hover)]",
             "disabled:cursor-not-allowed disabled:opacity-50",
             "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
           )}
         >
-          <MessageSquare className="size-3.5" aria-hidden />
+          <SquarePen className="size-3.5 text-[var(--app-accent)]" aria-hidden />
           <span>New chat</span>
         </button>
       </div>
 
-      <div className="px-[var(--app-gutter-tight)] pb-1 pt-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+      <div className="px-[var(--app-gutter-tight)] pb-1 pt-2 text-[11.5px] font-semibold tracking-[0.01em] text-muted-foreground">
         Projects
       </div>
 
@@ -153,8 +153,7 @@ export const Sidebar = ({
                       )}
                     >
                       {collapsed ? <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden /> : <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}
-                      <Folder className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-                      <span className="min-w-0 truncate font-medium">{group.label}</span>
+                      <span className="min-w-0 truncate text-[11.5px] font-semibold tracking-[0.01em] text-muted-foreground">{group.label}</span>
                     </button>
                     <button
                       type="button"
@@ -175,7 +174,7 @@ export const Sidebar = ({
                   </div>
 
                   {!collapsed && (
-                    <div className="ml-6 flex min-w-0 flex-col gap-0.5">
+                    <div className="ml-3 flex min-w-0 flex-col gap-0.5">
                       {visibleSessions.map((summary) => {
                         const pending = summary.id === pendingId;
                         const selected = summary.id === activeId || pending;
@@ -203,7 +202,7 @@ export const Sidebar = ({
                             <span className="flex w-full min-w-0 items-center gap-1.5 text-[13px] leading-tight">
                               {(pending || running) && <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />}
                               <span className="min-w-0 flex-1 truncate">{summary.title}</span>
-                              {unread && <span className="size-2 shrink-0 rounded-full bg-sky-400" aria-label="New activity" title="New activity" />}
+                              {unread && <span className="size-2 shrink-0 rounded-full bg-[var(--app-accent)]" aria-label="New activity" title="New activity" />}
                               {relativeTime && <span className="shrink-0 text-[11px] text-muted-foreground">{relativeTime}</span>}
                             </span>
                           </button>

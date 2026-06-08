@@ -137,15 +137,24 @@
   line-height: 1.42;
 }
 
+/* Flat message style (design language): no bubble/card — avatar + left-aligned
+   content directly on the stream surface. Scoped to chat so review/plan keep cards. */
 .chat-message .message-body {
-  border-color: var(--app-border);
-  background: var(--app-surface);
+  border: 0;
+  border-radius: 0;
+  padding: 0 52px 0 0;
+  background: transparent;
+  box-shadow: none;
   color: var(--app-text);
 }
 
+/* Selected thread root: flat, with at most a lilac left-edge cue (no fill bubble). */
 .chat-message.selected-thread-root .message-body {
-  border-color: var(--app-accent-border);
-  background: color-mix(in srgb, var(--app-accent-soft) 42%, var(--app-surface));
+  border: 0;
+  border-left: 2px solid var(--app-accent);
+  border-radius: 0;
+  padding: 0 52px 0 11px;
+  background: transparent;
 }
 
 .markdown-text {
@@ -347,8 +356,8 @@
   border-radius: 11px;
   padding: 8px 10px;
   color: var(--app-text-strong);
-  font-size: var(--text-sm);
-  line-height: var(--leading-normal);
+  font-size: 14.5px;
+  line-height: 1.5;
   pointer-events: none;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -654,17 +663,13 @@
 }
 
 .chat-choice-card {
-  border-color: var(--app-accent-border);
-  border-left-color: var(--app-accent);
+  border-color: var(--app-border);
   background: var(--app-surface);
-  box-shadow:
-    0 1px 2px color-mix(in srgb, var(--shadow-color) 7%, transparent),
-    0 0 0 1px color-mix(in srgb, var(--app-accent) 5%, transparent);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--shadow-color) 10%, transparent);
 }
 
 .chat-choice-card.answered {
   border-color: var(--app-success-border);
-  border-left-color: var(--app-success);
   background: color-mix(in srgb, var(--app-success-soft) 38%, var(--app-surface));
 }
 
@@ -900,4 +905,50 @@
 
 .status-badge[data-status-emphasis="outline"] {
   background: transparent;
+}
+
+/* ============================================================
+   Typography — design language (Space Grotesk display / JetBrains mono)
+   ============================================================ */
+
+/* Display family on brand wordmark + primary titles */
+[data-shell="sidebar-brand"],
+.view-heading h2,
+.settings-view h1,
+.thread-panel-head h2,
+.chat-thread-head h2,
+.point-message h3 {
+  font-family: var(--font-display);
+  letter-spacing: -0.01em;
+}
+
+/* Mono on inline #path / repo-file tokens */
+.file-link,
+.file-link-static {
+  font-family: var(--font-code);
+  font-size: 0.9em;
+}
+
+/* Timestamps use tabular figures so seconds don't jitter */
+.message-meta time,
+.message-meta .message-when,
+.chat-message-when {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Mention popover section labels align with the option rows. */
+.mention-menu .chat-popover-section-title {
+  padding: 4px 10px 2px;
+}
+
+/* Submit ↵ key hint inside the dark choice-card submit button. */
+.chat-choice-submit {
+  gap: 6px;
+}
+
+.chat-choice-submit kbd {
+  font-family: var(--font-code);
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.75;
 }

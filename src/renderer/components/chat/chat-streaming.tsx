@@ -34,12 +34,18 @@ export function StreamingMessageContent(props: {
         <div className="streaming-message-thinking">
           <span>Thinking</span>
           <LoadingDot label="In progress" />
-          <span className="streaming-message-elapsed">{`${elapsedSeconds}s`}</span>
+          <span className="streaming-message-elapsed">{formatElapsed(elapsedSeconds)}</span>
         </div>
       )}
       {props.activity && <div className="streaming-message-activity">{props.activity}</div>}
     </div>
   );
+}
+
+function formatElapsed(totalSeconds: number): string {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
 function useStreamingElapsedSeconds(startedAt: string): number {

@@ -285,9 +285,6 @@
 }
 
 .compose-layout,
-.chat-view,
-.chat-main,
-.chat-timeline,
 .conversation-panel,
 .settings-view {
   background: var(--app-bg);

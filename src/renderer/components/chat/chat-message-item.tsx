@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CheckCircle2, Copy, FileText, ListChecks, RefreshCw, SmilePlus, Square } from "lucide-react";
+import { CheckCircle2, Copy, FileText, ListChecks, MessageSquareReply, RefreshCw, SmilePlus, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -16,9 +16,11 @@ import {
   chatMessageRepoFileMentions,
   chatMessageSkillMentions,
   formatChatReplyDate,
+  participantProviderLabel,
   participantRequestStatusLabel,
   providerLabel
 } from "./chat-conversation-data";
+import { formatChatTime } from "./chat-format";
 import { ChatChoiceCard } from "./chat-choice-card";
 import { ChatImageAttachmentStrip } from "./chat-image-attachments";
 import { StreamingMessageContent } from "./chat-streaming";
@@ -104,18 +106,11 @@ export function ChatMessageItem(props: {
     window.setTimeout(() => setCopied(false), 1400);
   }
 
-  const threadActions = showThreadActions ? (
-    <>
-      {replyCount > 0 && (
-        <Button variant="link" size="sm" onClick={props.onOpenThread}>
-          <span>{replyCount} {replyCount === 1 ? "reply" : "replies"}</span>
-          {props.latestReplyAt && <small>Last reply {formatChatReplyDate(props.latestReplyAt)}</small>}
-        </Button>
-      )}
-      <Button variant="link" size="sm" onClick={props.onOpenThread}>
-        Reply
-      </Button>
-    </>
+  const threadActions = showThreadActions && replyCount > 0 ? (
+    <button type="button" className="chat-thread-pill" onClick={props.onOpenThread}>
+      <span>{replyCount} {replyCount === 1 ? "reply" : "replies"}</span>
+      {props.latestReplyAt && <small>· Last reply {formatChatReplyDate(props.latestReplyAt)}</small>}
+    </button>
   ) : null;
 
   function toggleReaction(emoji: string): void {
@@ -128,7 +123,7 @@ export function ChatMessageItem(props: {
 
   return (
     <>
-      <article data-message-id={message.id} className={`message chat-message ${choice ? "has-choice" : ""} ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""}`}>
+      <article data-message-id={message.id} className={`message chat-message ${choice ? "has-choice" : ""} ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""} ${isStreaming ? "is-running" : ""}`}>
         {message.role === "participant" ? (
           <AgentAvatarWithDetails
             className="message-avatar"
@@ -140,53 +135,65 @@ export function ChatMessageItem(props: {
           <Avatar className="message-avatar" spec={avatar} />
         )}
         <div className="message-body">
-          {isStreaming && message.metadata?.runId && props.onStopRun ? (
-            <IconButton
-              className="message-stop-button"
-              size="xs"
-              variant="outline"
-              icon={Square}
-              label="Stop response"
-              tooltip="Stop response"
-              onClick={() => props.onStopRun?.(message.metadata!.runId!)}
-            />
-          ) : (
-            <>
-              {canReact && (
-                <Popover open={reactionPickerOpen} onOpenChange={setReactionPickerOpen}>
-                  <PopoverTrigger asChild>
-                    <IconButton
-                      className="message-reaction-picker-button"
-                      size="xs"
-                      icon={SmilePlus}
-                      label="Add reaction"
-                    />
-                  </PopoverTrigger>
-                  <PopoverContent align="end" className="chat-reaction-popover">
-                    <div className="chat-reaction-picker" aria-label="Choose reaction">
-                      {CHAT_REACTION_EMOJIS.map((emoji) => (
-                        <button type="button" className="chat-reaction-option" onClick={() => toggleReaction(emoji)} key={emoji}>
-                          {emoji}
-                        </button>
-                      ))}
-                    </div>
-                  </PopoverContent>
-                </Popover>
-              )}
+          <div className="message-actions">
+            {isStreaming && message.metadata?.runId && props.onStopRun && (
               <IconButton
-                className="message-copy-button"
+                className="message-action message-action-stop"
                 size="xs"
-                icon={copied ? CheckCircle2 : Copy}
-                label={copied ? "Copied" : "Copy message"}
-                tooltip={copied ? "Copied" : "Copy message"}
-                disabled={!canCopy}
-                onClick={() => void copyMessage()}
+                icon={X}
+                label="Stop response"
+                tooltip="Stop response"
+                onClick={() => props.onStopRun?.(message.metadata!.runId!)}
               />
-            </>
-          )}
+            )}
+            <IconButton
+              className="message-action"
+              size="xs"
+              icon={copied ? CheckCircle2 : Copy}
+              label={copied ? "Copied" : "Copy message"}
+              tooltip={copied ? "Copied" : "Copy message"}
+              disabled={!canCopy}
+              onClick={() => void copyMessage()}
+            />
+            {canReact && (
+              <Popover open={reactionPickerOpen} onOpenChange={setReactionPickerOpen}>
+                <PopoverTrigger asChild>
+                  <IconButton
+                    className="message-action"
+                    size="xs"
+                    icon={SmilePlus}
+                    label="Add reaction"
+                    tooltip="Add reaction"
+                  />
+                </PopoverTrigger>
+                <PopoverContent align="end" className="chat-reaction-popover">
+                  <div className="chat-reaction-picker" aria-label="Choose reaction">
+                    {CHAT_REACTION_EMOJIS.map((emoji) => (
+                      <button type="button" className="chat-reaction-option" onClick={() => toggleReaction(emoji)} key={emoji}>
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+                </PopoverContent>
+              </Popover>
+            )}
+            {showThreadActions && (
+              <IconButton
+                className="message-action"
+                size="xs"
+                icon={MessageSquareReply}
+                label="Reply in thread"
+                tooltip="Reply in thread"
+                onClick={props.onOpenThread}
+              />
+            )}
+          </div>
           <div className="message-meta">
             <strong>{author}</strong>
-            <span>{new Date(message.createdAt).toLocaleString()}</span>
+            {participant && message.role === "participant" && (
+              <span className="message-provider">{participantProviderLabel(participant.kind)}</span>
+            )}
+            <span className="message-when">{formatChatTime(message.createdAt)}</span>
             {message.status === "error" && <StatusBadge tone="danger">error</StatusBadge>}
             {!props.inThread && message.metadata?.parentMessageId && message.role === "user" && (
               <StatusBadge tone="neutral">reply</StatusBadge>

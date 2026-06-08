@@ -1,3 +1,7 @@
+export function formatChatTime(value: string): string {
+  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
 export function defaultImageFilename(mimeType: string): string {
   if (mimeType === "image/jpeg") {
     return "image.jpg";

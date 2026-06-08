@@ -1,10 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { X } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
 import type {
   AppSettings,
   ChatAppToolApprovalScope,
@@ -100,7 +98,7 @@ export function ChatConversationView(props: {
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
   const submittingApprovalIdsRef = useRef<Set<string>>(new Set<string>());
   const [submittingApprovalIds, setSubmittingApprovalIds] = useState<ReadonlySet<string>>(new Set<string>());
-  const [threadWidth, setThreadWidth] = useState(460);
+  const [threadWidth, setThreadWidth] = useState(430);
   const [isResizingThread, setIsResizingThread] = useState(false);
   const [chooserOpen, setChooserOpen] = useState(false);
   const [chooserFileRef, setChooserFileRef] = useState<FileLinkRef | null>(null);
@@ -365,19 +363,6 @@ export function ChatConversationView(props: {
               onRespond={handleAppToolApproval}
             />
           )}
-          {activeRunIdsForChat.length > 0 && props.onStopRun && (
-            <div className="chat-stop-all-bar">
-              <span>{activeRunIdsForChat.length} active {activeRunIdsForChat.length === 1 ? "run" : "runs"}</span>
-              <Button variant="outline" size="sm" onClick={() => {
-                for (const runId of activeRunIdsForChat) {
-                  props.onStopRun?.(runId);
-                }
-              }}>
-                <X size={14} />
-                Stop all
-              </Button>
-            </div>
-          )}
         </div>
         <div className="chat-timeline virtual-timeline" ref={timelineRef} onScroll={updateStickToBottom}>
           <div className="virtual-timeline-inner" style={{ height: `${chatVirtualizer.getTotalSize()}px` }}>
@@ -436,6 +421,12 @@ export function ChatConversationView(props: {
           onDraftChange={props.onDraftChange}
           onSend={sendDraft}
           isRunning={props.isRunning}
+          activeRunCount={activeRunIdsForChat.length}
+          onStopAllRuns={props.onStopRun ? () => {
+            for (const runId of activeRunIdsForChat) {
+              props.onStopRun?.(runId);
+            }
+          } : undefined}
           placeholder="Mention participants with @name, skills with /name, or repo files with #path"
           status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
           testId="chat-main-composer"
