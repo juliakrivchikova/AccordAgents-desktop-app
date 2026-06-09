@@ -160,7 +160,7 @@ interface ChatReactionMutationResult {
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 15;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 16;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const CHAT_ADMINISTRATOR_ROLE_ID = "administrator";

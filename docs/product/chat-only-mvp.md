@@ -529,9 +529,9 @@ Do not advertise:
 - Generic autonomous agent orchestration or unattended swarms
 
 ## MVP TODO
-- [ ] skill cursor
+- [ ] unrecognized websearch
+- [ ] icons
 - [ ] images super small
-- [ ] claude skill tool not available
 - [ ] message link is not always working
 - 
 - [ ] user choice card appearance

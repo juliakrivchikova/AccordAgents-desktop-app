@@ -155,6 +155,23 @@ test("claudeToolConfig leaves plan agent mode untouched regardless of workspaceW
   assert.ok(planWithWrite.disallowedTools.includes("Write"));
 });
 
+test("claudeToolConfig enables native Skill tool without selected skills", () => {
+  const runner = makeRunner() as any;
+  const chatConfig = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
+    agentMode: "default",
+    workspaceWrite: false
+  }));
+  const reviewConfig = runner.claudeToolConfig("code-review", "/repo", [], chatOptions({
+    agentMode: "default",
+    workspaceWrite: false
+  }));
+
+  assert.ok(chatConfig.tools.includes("Skill"));
+  assert.ok(chatConfig.allowedTools.includes("Skill"));
+  assert.ok(reviewConfig.tools.includes("Skill"));
+  assert.ok(reviewConfig.allowedTools.includes("Skill"));
+});
+
 test("codex app-server auto mode applies workspace-write web preset and guardian reviewer", () => {
   const runner = makeRunner() as any;
   const participant = {

@@ -46,8 +46,8 @@ export interface CliAgentRunOptions {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   // Validated user-visible skills selected for this run, resolved to their real directories
-  // server-side. Enables the provider's skill-loading path (Claude native Skill tool; Codex scoped
-  // read-only skill-file reads) without exposing paths to the renderer.
+  // server-side. Codex uses this for scoped read-only skill-file reads; Claude's native
+  // Skill tool is available for every Claude session.
   selectedSkills?: CliAgentSelectedSkill[];
 }
 
@@ -1794,14 +1794,10 @@ export class CliAgentRunner {
     for (const toolName of options.appMcp?.toolNames ?? []) {
       allowedTools.push(`mcp__accord_agents__${toolName}`);
     }
-    if ((options.selectedSkills?.length ?? 0) > 0) {
-      // A selected skill must be loadable by Claude's native Skill tool. Project skills under cwd
-      // are auto-surfaced, but global (~/.claude/skills) skills require the Skill tool to load on
-      // demand — without it Claude reports the skill body is unavailable. Enable + pre-allow it
-      // (read-only skill load) only when a skill was selected.
-      tools.add("Skill");
-      allowedTools.push("Skill");
-    }
+    // Claude's native Skill tool is read-only skill discovery/loading. It must be present even
+    // when no slash skill was selected so participants can truthfully inspect available skills.
+    tools.add("Skill");
+    allowedTools.push("Skill");
     const disallowedToolSet = new Set(disallowedTools);
     for (const toolRule of providerNativeAllowedTools) {
       const toolName = this.claudeToolNameFromAllowedTool(toolRule);

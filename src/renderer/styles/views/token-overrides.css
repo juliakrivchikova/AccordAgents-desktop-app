@@ -350,7 +350,7 @@
 .chat-draft-highlight {
   position: absolute;
   inset: 0;
-  z-index: 3;
+  z-index: 1;
   overflow: hidden;
   border: 0;
   border-radius: 11px;
@@ -360,7 +360,7 @@
   line-height: 1.5;
   pointer-events: none;
   white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .chat-draft-skill-token {
@@ -378,6 +378,9 @@
 .chat-composer textarea.skill-highlight-textarea {
   position: relative;
   z-index: 2;
+  font-size: 14.5px;
+  line-height: 1.5;
+  overflow-wrap: break-word;
   color: transparent;
   -webkit-text-fill-color: transparent;
   caret-color: var(--app-text-strong);

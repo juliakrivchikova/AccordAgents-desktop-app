@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowUp, FileText, ImagePlus, ListChecks, Loader2, RefreshCw, X } from "lucide-react";
 
 import { ResizableTextarea } from "@/renderer/components/primitives";
@@ -17,6 +17,10 @@ import { defaultImageFilename, formatBytes } from "./chat-format";
 const CHAT_IMAGE_MAX_ATTACHMENTS = 5;
 const CHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 const CHAT_IMAGE_ALLOWED_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const CHAT_COMPOSER_TEXTAREA_STYLE: React.CSSProperties = {
+  fontSize: "14.5px",
+  lineHeight: 1.5
+};
 
 interface PendingChatImage {
   id: string;
@@ -68,6 +72,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileSearchRequestRef = useRef(0);
   const skillSearchRequestRef = useRef(0);
+  const pendingCaretRef = useRef<{ value: string; position: number } | undefined>();
   const readyImages = pendingImages.filter((image) => image.status === "ready" && image.dataBase64);
   const hasInvalidImages = pendingImages.some((image) => image.status !== "ready");
   const canSend = !hasInvalidImages && (Boolean(props.draft.trim()) || readyImages.length > 0 || selectedSkillMentions.length > 0);
@@ -100,6 +105,21 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
   useEffect(() => {
     pendingImagesRef.current = pendingImages;
   }, [pendingImages]);
+
+  useLayoutEffect(() => {
+    const pendingCaret = pendingCaretRef.current;
+    if (!pendingCaret || pendingCaret.value !== props.draft) {
+      return;
+    }
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      return;
+    }
+    const position = Math.min(pendingCaret.position, textarea.value.length);
+    textarea.focus();
+    textarea.setSelectionRange(position, position);
+    pendingCaretRef.current = undefined;
+  }, [props.draft]);
 
   useEffect(() => {
     return () => {
@@ -187,14 +207,19 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     setSkillIndex(0);
   }
 
+  function updateDraftWithCaret(value: string, position = value.length): void {
+    pendingCaretRef.current = { value, position };
+    props.onDraftChange(value);
+  }
+
   function insertMention(participant: ChatParticipant): void {
-    props.onDraftChange(replaceActiveMention(props.draft, participant.handle));
+    updateDraftWithCaret(replaceActiveMention(props.draft, participant.handle));
     setMentionQuery(undefined);
     setMentionIndex(0);
   }
 
   function insertFileMention(file: RepoFileSearchResult): void {
-    props.onDraftChange(replaceActiveFileMention(props.draft, file.path));
+    updateDraftWithCaret(replaceActiveFileMention(props.draft, file.path));
     setSelectedFileMentions((current) => {
       if (current.some((mention) => mention.path === file.path)) {
         return current;
@@ -210,7 +235,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     if (skill.capabilityState !== "invocable" || skill.ambiguous) {
       return;
     }
-    props.onDraftChange(replaceActiveSkillMention(props.draft, skill.frontmatterName));
+    updateDraftWithCaret(replaceActiveSkillMention(props.draft, skill.frontmatterName));
     setSelectedSkillMentions((current) => {
       if (current.some((mention) => mention.skillId === skill.skillId)) {
         return current;
@@ -496,6 +521,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
               event.preventDefault();
             }
           }}
+          style={CHAT_COMPOSER_TEXTAREA_STYLE}
           onKeyDown={(event) => {
             if (visibleFileOptions.length > 0 && event.key === "ArrowDown") {
               event.preventDefault();
