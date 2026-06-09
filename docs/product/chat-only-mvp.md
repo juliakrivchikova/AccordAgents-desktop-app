@@ -529,13 +529,13 @@ Do not advertise:
 - Generic autonomous agent orchestration or unattended swarms
 
 ## MVP TODO
-- [ ] allow request participant select bug
-- [ ] images super small
-- [ ] 1.2.3 dropped
 - [ ] skill cursor
+- [ ] images super small
 - [ ] claude skill tool not available
-- [ ] user choice card appearance
 - [ ] message link is not always working
+- 
+- [ ] user choice card appearance
+- [ ] allow request participant appearance
 - 
 - [ ] Design improvements
 - 

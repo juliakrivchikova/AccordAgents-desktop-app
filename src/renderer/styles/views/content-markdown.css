@@ -407,6 +407,15 @@
 
 .markdown-list {
   padding-left: 24px;
+  list-style-position: outside;
+}
+
+ol.markdown-list {
+  list-style-type: decimal;
+}
+
+ul.markdown-list {
+  list-style-type: disc;
 }
 
 .markdown-list li + li {
