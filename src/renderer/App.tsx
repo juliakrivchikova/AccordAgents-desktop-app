@@ -555,6 +555,72 @@ function App(): JSX.Element {
     }
   }
 
+  async function loadConversationMessagePageForMessage(messageId: string): Promise<boolean> {
+    if (!conversation || !messagePage?.hasMoreBefore || messagePage.oldestSequence === undefined || olderMessagesLoading) {
+      return false;
+    }
+    if (conversation.messages.some((message) => message.id === messageId)) {
+      return true;
+    }
+    const conversationId = conversation.id;
+    const loadedMessages: Conversation["messages"] = [];
+    setOlderMessagesLoading(true);
+    setError(undefined);
+    try {
+      const targetPage = await window.consensus.listConversationMessages({
+        conversationId,
+        aroundMessageId: messageId,
+        limit: 1
+      });
+      const targetSequence = targetPage.newestSequence;
+      if (targetSequence === undefined || targetSequence >= messagePage.oldestSequence) {
+        return false;
+      }
+      let beforeSequence: number | undefined = messagePage.oldestSequence;
+      let lastPage = targetPage;
+      let found = false;
+      while (beforeSequence !== undefined && beforeSequence > targetSequence) {
+        const page = await window.consensus.listConversationMessages({
+          conversationId,
+          beforeSequence,
+          limit: CONVERSATION_MESSAGE_PAGE_SIZE
+        });
+        if (page.messages.length === 0) {
+          break;
+        }
+        loadedMessages.unshift(...page.messages);
+        lastPage = page;
+        if (page.messages.some((message) => message.id === messageId)) {
+          found = true;
+          break;
+        }
+        if (!page.hasMoreBefore || page.oldestSequence === undefined) {
+          break;
+        }
+        beforeSequence = page.oldestSequence;
+      }
+      if (!found) {
+        return false;
+      }
+      setConversation((current) => {
+        if (!current || current.id !== conversationId) {
+          return current;
+        }
+        return {
+          ...current,
+          messages: prependMissingMessages(current.messages, loadedMessages)
+        };
+      });
+      setMessagePage((current) => mergeLoadedMessagePage(current, lastPage));
+      return true;
+    } catch (caught) {
+      setError(errorText(caught));
+      return false;
+    } finally {
+      setOlderMessagesLoading(false);
+    }
+  }
+
   async function selectRepo(): Promise<void> {
     const selected = await window.consensus.selectRepoDirectory();
     if (!selected) {
@@ -1800,6 +1866,7 @@ function App(): JSX.Element {
                     draft={chatMessageDraft}
                     onDraftChange={setChatMessageDraft}
                     onLoadOlderMessages={() => void loadOlderConversationMessages()}
+                    onLoadMessagePageForMessage={loadConversationMessagePageForMessage}
                     onSend={(repoFileMentions, imageAttachments, skillMentions) => sendChatMessage({ repoFileMentions, imageAttachments, skillMentions })}
                     onSendThread={(rootMessage, content, repoFileMentions, imageAttachments, skillMentions) => sendChatMessage({
                       content,

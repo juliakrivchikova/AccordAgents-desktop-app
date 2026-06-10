@@ -1,0 +1,60 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { StorageService } from "./storage";
+
+function fakeStorage(queryJson: (sql: string) => Promise<unknown[]>): StorageService {
+  const storage = Object.create(StorageService.prototype) as any;
+  storage.init = async () => {};
+  storage.queryJson = queryJson;
+  return storage as StorageService;
+}
+
+test("listConversationMessages can page around a target message id", async () => {
+  const queries: string[] = [];
+  const storage = fakeStorage(async (sql) => {
+    queries.push(sql);
+    if (sql.includes("select sequence") && sql.includes("message_id")) {
+      return [{ sequence: 3 }];
+    }
+    if (sql.includes("payload_json as payloadJson")) {
+      return [
+        { sequence: 3, payloadJson: JSON.stringify({ id: "target", role: "user", content: "target", createdAt: "2026-01-01T00:00:03.000Z" }) },
+        { sequence: 2, payloadJson: JSON.stringify({ id: "before", role: "user", content: "before", createdAt: "2026-01-01T00:00:02.000Z" }) },
+        { sequence: 1, payloadJson: JSON.stringify({ id: "older", role: "user", content: "older", createdAt: "2026-01-01T00:00:01.000Z" }) }
+      ];
+    }
+    if (sql.includes("count(*) as totalMessages")) {
+      return [{ totalMessages: 5 }];
+    }
+    return [];
+  });
+
+  const page = await storage.listConversationMessages({ conversationId: "conversation", aroundMessageId: "target", limit: 2 });
+
+  assert.match(queries[1], /sequence <= 3/);
+  assert.deepEqual(page.messages.map((message) => message.id), ["before", "target"]);
+  assert.equal(page.oldestSequence, 2);
+  assert.equal(page.newestSequence, 3);
+  assert.equal(page.hasMoreBefore, true);
+  assert.equal(page.totalMessages, 5);
+});
+
+test("listConversationMessages returns an empty page when target message id is missing", async () => {
+  const storage = fakeStorage(async (sql) => {
+    if (sql.includes("select sequence") && sql.includes("message_id")) {
+      return [];
+    }
+    if (sql.includes("count(*) as totalMessages")) {
+      return [{ totalMessages: 4 }];
+    }
+    throw new Error(`Unexpected query: ${sql}`);
+  });
+
+  const page = await storage.listConversationMessages({ conversationId: "conversation", aroundMessageId: "missing", limit: 2 });
+
+  assert.deepEqual(page.messages, []);
+  assert.equal(page.oldestSequence, undefined);
+  assert.equal(page.newestSequence, undefined);
+  assert.equal(page.hasMoreBefore, false);
+  assert.equal(page.totalMessages, 4);
+});

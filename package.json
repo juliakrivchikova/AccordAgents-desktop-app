@@ -19,6 +19,7 @@
     "test:command": "npm run build:main && node --test dist/main/main/services/command.test.js",
     "test:links": "npm run build:main && node --test dist/main/main/services/externalLinks.test.js dist/main/main/services/markdownInline.test.js",
     "test:settings": "npm run build:main && node --test dist/main/main/services/settings.behaviorRules.test.js",
+    "test:storage": "npm run build:main && node --test dist/main/main/services/storage.messages.test.js",
     "test:user-skills": "npm run build:main && node --test dist/main/main/services/userSkills.test.js dist/main/main/services/chat.userSkills.test.js",
     "test:permissions": "npm run build:main && node --test dist/main/main/services/chat.permissions.test.js dist/main/main/services/chat.repoFileMentions.test.js dist/main/main/services/chat.rename.test.js dist/main/main/services/git.repoFiles.test.js dist/main/main/services/cliAgents.permissions.test.js",
     "lint:renderer-styles": "node scripts/check-renderer-style-guardrails.mjs",

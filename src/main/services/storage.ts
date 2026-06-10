@@ -7,6 +7,7 @@ import type {
   Conversation,
   ConversationMessagePage,
   ConversationMessagePageInfo,
+  ConversationMessagePageRequest,
   ConversationOpenResult,
   ConversationSummary
 } from "../../shared/types";
@@ -147,17 +148,41 @@ export class StorageService {
     };
   }
 
-  async listConversationMessages(request: { conversationId: string; beforeSequence?: number; limit?: number }): Promise<ConversationMessagePage> {
+  async listConversationMessages(request: ConversationMessagePageRequest): Promise<ConversationMessagePage> {
     await this.init();
     const limit = normalizeMessagePageLimit(request.limit);
-    const beforeClause = typeof request.beforeSequence === "number"
-      ? ` and sequence < ${Math.max(0, Math.floor(request.beforeSequence))}`
-      : "";
+    const aroundMessageId = typeof request.aroundMessageId === "string" ? request.aroundMessageId.trim() : "";
+    let sequenceClause = "";
+    if (aroundMessageId) {
+      const targetRows = await this.queryJson<{ sequence: number }>(
+        `
+          select sequence
+          from conversation_messages
+          where conversation_id = ${sqlString(request.conversationId)}
+            and message_id = ${sqlString(aroundMessageId)}
+          limit 1;
+        `
+      );
+      const targetSequence = targetRows[0]?.sequence;
+      if (targetSequence === undefined) {
+        const countRows = await this.queryJson<{ totalMessages: number }>(
+          `select count(*) as totalMessages from conversation_messages where conversation_id = ${sqlString(request.conversationId)};`
+        );
+        return {
+          messages: [],
+          hasMoreBefore: false,
+          totalMessages: countRows[0]?.totalMessages ?? 0
+        };
+      }
+      sequenceClause = ` and sequence <= ${Math.max(0, Math.floor(targetSequence))}`;
+    } else if (typeof request.beforeSequence === "number") {
+      sequenceClause = ` and sequence < ${Math.max(0, Math.floor(request.beforeSequence))}`;
+    }
     const rows = await this.queryJson<{ sequence: number; payloadJson: string }>(
       `
         select sequence, payload_json as payloadJson
         from conversation_messages
-        where conversation_id = ${sqlString(request.conversationId)}${beforeClause}
+        where conversation_id = ${sqlString(request.conversationId)}${sequenceClause}
         order by sequence desc
         limit ${limit + 1};
       `

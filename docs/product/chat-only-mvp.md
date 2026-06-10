@@ -529,10 +529,11 @@ Do not advertise:
 - Generic autonomous agent orchestration or unattended swarms
 
 ## MVP TODO
+- [ ] message link is not always working
+-
 - [ ] unrecognized websearch
 - [ ] icons
 - [ ] images super small
-- [ ] message link is not always working
 - 
 - [ ] user choice card appearance
 - [ ] allow request participant appearance

@@ -919,6 +919,7 @@ export interface Conversation extends ConversationSummary {
 export interface ConversationMessagePageRequest {
   conversationId: string;
   beforeSequence?: number;
+  aroundMessageId?: string;
   limit?: number;
 }
 

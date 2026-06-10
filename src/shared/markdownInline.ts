@@ -6,8 +6,9 @@ export type MarkdownInlineNode =
   | { type: "fileLink"; path: string; label: string; line?: number; column?: number }
   | { type: "externalLink"; url: string; label: string };
 
-const MESSAGE_LINK_RE = /^\[([^\]\n]+)\]\(#msg:([0-9a-fA-F][0-9a-fA-F-]{5,})\)/;
-const BARE_MESSAGE_RE = /^#msg:([0-9a-fA-F][0-9a-fA-F-]{5,})/;
+const MESSAGE_ID_RE_SOURCE = "[A-Za-z0-9][A-Za-z0-9_-]*";
+const MESSAGE_LINK_RE = new RegExp(`^\\[([^\\]\\n]+)\\]\\(#msg:(${MESSAGE_ID_RE_SOURCE})\\)`);
+const BARE_MESSAGE_RE = new RegExp(`^#msg:(${MESSAGE_ID_RE_SOURCE})`);
 const MARKDOWN_EXTERNAL_LINK_RE = /^\[([^\]\n]+)\]\((https?:\/\/[^\s<>)]+)\)/i;
 const MARKDOWN_FILE_LINK_RE = /^\[([^\]\n]+)\]\((<[^>\n]+>|[^)\s]+)\)/;
 const BARE_EXTERNAL_URL_RE = /^https?:\/\/[^\s<>]+/i;

@@ -36,6 +36,22 @@ function fileLinks(nodes: MarkdownInlineNode[]): Array<{ path: string; label: st
   });
 }
 
+function messageLinks(nodes: MarkdownInlineNode[]): Array<{ messageId: string; label?: string }> {
+  return nodes.flatMap((node): Array<{ messageId: string; label?: string }> => {
+    if (node.type === "messageLink") {
+      const link: { messageId: string; label?: string } = { messageId: node.messageId };
+      if (node.label !== undefined) {
+        link.label = node.label;
+      }
+      return [link];
+    }
+    if (node.type === "strong") {
+      return messageLinks(node.children);
+    }
+    return [];
+  });
+}
+
 test("parseMarkdownInline links bare URLs and trims trailing punctuation", () => {
   const nodes = parseMarkdownInline("Visit https://example.com.");
   assert.deepEqual(externalLinks(nodes), [{ url: "https://example.com", label: "https://example.com" }]);
@@ -51,6 +67,15 @@ test("parseMarkdownInline keeps message links out of external link parsing", () 
   const nodes = parseMarkdownInline("See [the message](#msg:abc123).");
   assert.equal(externalLinks(nodes).length, 0);
   assert.deepEqual(nodes[1], { type: "messageLink", messageId: "abc123", label: "the message" });
+});
+
+test("parseMarkdownInline links non-hex message ids", () => {
+  const nodes = parseMarkdownInline("See [the message](#msg:message-2) and #msg:request-message.");
+  assert.deepEqual(messageLinks(nodes), [
+    { messageId: "message-2", label: "the message" },
+    { messageId: "request-message" }
+  ]);
+  assert.deepEqual(nodes[nodes.length - 1], { type: "text", text: "." });
 });
 
 test("parseMarkdownInline finds URLs after bold and code tokens", () => {

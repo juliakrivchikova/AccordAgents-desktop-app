@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { createContext, useContext, type ReactNode } from "react";
 import { parseMarkdownInline, type MarkdownInlineNode } from "../../../shared/markdownInline";
 import { FileLink } from "./repo-file-link";
 
@@ -6,26 +6,43 @@ import { FileLink } from "./repo-file-link";
 // `#msg:<id>`); we render a link that scrolls the referenced message into view and flashes it.
 // This keeps the user-facing text clean instead of leaking raw message ids.
 
-function focusMessage(messageId: string): void {
-  const el = typeof document !== "undefined"
-    ? document.querySelector(`[data-message-id="${messageId}"]`)
-    : null;
+export type MessageFocusHandler = (messageId: string) => boolean | void;
+
+export const MessageLinkContext = createContext<MessageFocusHandler | undefined>(undefined);
+
+export function focusRenderedMessage(root: ParentNode | null | undefined, messageId: string): boolean {
+  if (!root || typeof window === "undefined") {
+    return false;
+  }
+  const el = Array.from(root.querySelectorAll<HTMLElement>("[data-message-id]"))
+    .find((candidate) => candidate.dataset.messageId === messageId);
   if (!el) {
-    return;
+    return false;
   }
   el.scrollIntoView({ behavior: "smooth", block: "center" });
   el.classList.add("message-flash");
   window.setTimeout(() => el.classList.remove("message-flash"), 1500);
+  return true;
 }
 
 function MessageLink({ messageId, label }: { messageId: string; label: string }): JSX.Element {
+  const focusMessage = useContext(MessageLinkContext);
+  const activate = (): void => {
+    if (focusMessage?.(messageId) === true) {
+      return;
+    }
+    if (typeof document !== "undefined") {
+      focusRenderedMessage(document, messageId);
+    }
+  };
+
   return (
     <a
       className="message-link"
       role="button"
       tabIndex={0}
-      onClick={(event) => { event.preventDefault(); focusMessage(messageId); }}
-      onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); focusMessage(messageId); } }}
+      onClick={(event) => { event.preventDefault(); activate(); }}
+      onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); } }}
     >
       {label}
     </a>

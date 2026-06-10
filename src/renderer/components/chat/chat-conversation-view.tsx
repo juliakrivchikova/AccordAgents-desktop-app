@@ -14,6 +14,7 @@ import type {
   ReviewProgress
 } from "../../../shared/types";
 import { Avatar } from "../avatar/avatar";
+import { MessageLinkContext, focusRenderedMessage } from "../content/markdown-text";
 import { RepoFileLinkContext, RepoFileOpenChooser, type FileLinkRef } from "../content/repo-file-link";
 import { RunStatusLine, TimelineLoadMoreRow } from "../conversation/timeline-primitives";
 import { avatarForChatParticipant } from "./chat-avatars";
@@ -48,6 +49,7 @@ export function ChatConversationView(props: {
   draft: string;
   onDraftChange: (value: string) => void;
   onLoadOlderMessages: () => void;
+  onLoadMessagePageForMessage: (messageId: string) => Promise<boolean>;
   onSend: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => Promise<boolean>;
   onSendThread: (
     rootMessage: Conversation["messages"][number],
@@ -106,6 +108,8 @@ export function ChatConversationView(props: {
   const [chooserFileRef, setChooserFileRef] = useState<FileLinkRef | null>(null);
   const viewRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const pendingFocusMessageIdRef = useRef<string | undefined>();
+  const loadingFocusMessageIdRef = useRef<string | undefined>();
   const stickToBottomRef = useRef(true);
   const forceStickToBottomRef = useRef(false);
   const previousMessageCountRef = useRef(topLevelMessages.length);
@@ -207,6 +211,78 @@ export function ChatConversationView(props: {
     });
     window.setTimeout(scrollToChatBottom, 80);
     window.setTimeout(scrollToChatBottom, 180);
+  }
+
+  function scheduleFocusRenderedMessage(messageId: string): void {
+    const focus = (): boolean => focusRenderedMessage(viewRef.current, messageId);
+    window.requestAnimationFrame(() => {
+      if (focus()) {
+        return;
+      }
+      window.requestAnimationFrame(() => {
+        if (focus()) {
+          return;
+        }
+        window.setTimeout(focus, 80);
+        window.setTimeout(focus, 180);
+      });
+    });
+  }
+
+  function focusLoadedChatMessage(messageId: string): boolean {
+    if (focusRenderedMessage(viewRef.current, messageId)) {
+      return true;
+    }
+
+    const rowIndex = chatTimelineRows.findIndex((row) => row.type === "message" && row.message.id === messageId);
+    if (rowIndex >= 0) {
+      chatVirtualizer.scrollToIndex(rowIndex, { align: "center" });
+      scheduleFocusRenderedMessage(messageId);
+      return true;
+    }
+
+    for (const [rootId, summary] of threadSummaries) {
+      if (summary.replies.some((reply) => reply.id === messageId)) {
+        setSelectedThreadRootId(rootId);
+        scheduleFocusRenderedMessage(messageId);
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  async function loadAndFocusMessage(messageId: string): Promise<void> {
+    if (loadingFocusMessageIdRef.current === messageId) {
+      return;
+    }
+    loadingFocusMessageIdRef.current = messageId;
+    pendingFocusMessageIdRef.current = messageId;
+    try {
+      const loaded = await props.onLoadMessagePageForMessage(messageId);
+      if (loaded) {
+        scheduleFocusRenderedMessage(messageId);
+        return;
+      }
+      if (pendingFocusMessageIdRef.current === messageId) {
+        pendingFocusMessageIdRef.current = undefined;
+      }
+    } finally {
+      if (loadingFocusMessageIdRef.current === messageId) {
+        loadingFocusMessageIdRef.current = undefined;
+      }
+    }
+  }
+
+  function focusChatMessage(messageId: string): boolean {
+    if (focusLoadedChatMessage(messageId)) {
+      return true;
+    }
+    if (props.hasOlderMessages && !props.olderMessagesLoading) {
+      void loadAndFocusMessage(messageId);
+      return true;
+    }
+    return false;
   }
 
   async function sendThreadDraft(
@@ -327,6 +403,8 @@ export function ChatConversationView(props: {
     setSubmittingChoiceIds(new Set<string>());
     setChooserOpen(false);
     setChooserFileRef(null);
+    pendingFocusMessageIdRef.current = undefined;
+    loadingFocusMessageIdRef.current = undefined;
     stickToBottomRef.current = true;
     forceStickToBottomRef.current = true;
     scheduleScrollToChatBottom();
@@ -337,6 +415,16 @@ export function ChatConversationView(props: {
       setSelectedThreadRootId(undefined);
     }
   }, [selectedThreadRootId, topLevelMessages]);
+
+  useEffect(() => {
+    const pendingMessageId = pendingFocusMessageIdRef.current;
+    if (!pendingMessageId) {
+      return;
+    }
+    if (focusLoadedChatMessage(pendingMessageId)) {
+      pendingFocusMessageIdRef.current = undefined;
+    }
+  }, [chatTimelineRows, selectedThreadRootId, threadSummaries]);
 
   useLayoutEffect(() => {
     const timeline = timelineRef.current;
@@ -369,127 +457,129 @@ export function ChatConversationView(props: {
   }, [props.conversation.id]);
 
   return (
-    <RepoFileLinkContext.Provider value={repoFileLinkContext}>
-      <div
-        className={`chat-view ${hasThread ? "thread-open" : ""} ${isResizingThread ? "resizing-thread" : ""}`}
-        data-testid="chat-view"
-        ref={viewRef}
-        style={{ "--chat-thread-width": `${threadWidth}px` } as CSSProperties}
-      >
-      <div className="chat-main">
-        <div className={`chat-app-tool-approval-slot ${pendingAppToolApprovals.length > 0 ? "has-approvals" : ""}`}>
-          {pendingAppToolApprovals.length > 0 && (
-            <ChatAppToolApprovalList
-              approvals={pendingAppToolApprovals}
-              submittingIds={submittingApprovalIds}
-              onRespond={handleAppToolApproval}
+    <MessageLinkContext.Provider value={focusChatMessage}>
+      <RepoFileLinkContext.Provider value={repoFileLinkContext}>
+        <div
+          className={`chat-view ${hasThread ? "thread-open" : ""} ${isResizingThread ? "resizing-thread" : ""}`}
+          data-testid="chat-view"
+          ref={viewRef}
+          style={{ "--chat-thread-width": `${threadWidth}px` } as CSSProperties}
+        >
+          <div className="chat-main">
+            <div className={`chat-app-tool-approval-slot ${pendingAppToolApprovals.length > 0 ? "has-approvals" : ""}`}>
+              {pendingAppToolApprovals.length > 0 && (
+                <ChatAppToolApprovalList
+                  approvals={pendingAppToolApprovals}
+                  submittingIds={submittingApprovalIds}
+                  onRespond={handleAppToolApproval}
+                />
+              )}
+            </div>
+            <div className="chat-timeline virtual-timeline" ref={timelineRef} onScroll={updateStickToBottom}>
+              <div className="virtual-timeline-inner" style={{ height: `${chatVirtualizer.getTotalSize()}px` }}>
+                {chatVirtualItems.map((virtualItem) => {
+                  const row = chatTimelineRows[virtualItem.index];
+                  if (!row) {
+                    return null;
+                  }
+                  return (
+                    <div
+                      className="virtual-timeline-item"
+                      data-index={virtualItem.index}
+                      key={virtualItem.key}
+                      ref={chatVirtualizer.measureElement}
+                      style={{ transform: `translateY(${virtualItem.start}px)` }}
+                    >
+                      {row.type === "load-older" ? (
+                        <TimelineLoadMoreRow
+                          loading={props.olderMessagesLoading}
+                          disabled={!props.hasOlderMessages || props.olderMessagesLoading}
+                          onClick={props.onLoadOlderMessages}
+                        />
+                      ) : row.type === "thinking" ? (
+                        <ChatThinkingRowItem row={row.row} />
+                      ) : (
+                        <ChatMessageItem
+                          message={row.message}
+                          conversationId={props.conversation.id}
+                          participants={participants}
+                          contextUsage={contextUsageForMessage(row.message, contextUsageByParticipant)}
+                          sessionId={sessionIdForMessage(row.message, sessionsByParticipant)}
+                          busy={props.isRunning}
+                          submittingChoiceIds={submittingChoiceIds}
+                          selected={row.message.id === selectedThreadRoot?.id}
+                          replyCount={threadSummaries.get(row.message.id)?.replies.length ?? 0}
+                          latestReplyAt={threadSummaries.get(row.message.id)?.latestReplyAt}
+                          hasContinuationReply={continuedMentionRequestIds.has(row.message.id)}
+                          liveProgress={liveProgressById.get(row.message.id)}
+                          onOpenThread={() => setSelectedThreadRootId(row.message.id)}
+                          onApproveMentions={props.onApproveMentions}
+                          onRejectMentions={props.onRejectMentions}
+                          onRespondToChoice={handleChoiceResponse}
+                          onToggleReaction={props.onToggleReaction}
+                          onStopRun={props.onStopRun}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            <ChatComposer
+              participants={participants}
+              conversationId={props.conversation.id}
+              repoPath={props.conversation.repoPath}
+              draft={props.draft}
+              onDraftChange={props.onDraftChange}
+              onSend={sendDraft}
+              isRunning={props.isRunning}
+              activeRunCount={activeRunIdsForChat.length}
+              onStopAllRuns={props.onStopRun ? () => {
+                for (const runId of activeRunIdsForChat) {
+                  props.onStopRun?.(runId);
+                }
+              } : undefined}
+              placeholder="Mention participants with @name, skills with /name, or repo files with #path"
+              status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
+              testId="chat-main-composer"
+              renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}
+              participantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
+            />
+          </div>
+          {selectedThreadRoot && <div className="thread-resizer" role="separator" aria-orientation="vertical" onPointerDown={startThreadResize} />}
+          {selectedThreadRoot && (
+            <ChatThreadPanel
+              rootMessage={selectedThreadRoot}
+              replies={selectedThreadSummary?.replies ?? []}
+              participants={participants}
+              conversationId={props.conversation.id}
+              repoPath={props.conversation.repoPath}
+              contextUsageByParticipant={contextUsageByParticipant}
+              sessionsByParticipant={sessionsByParticipant}
+              settings={props.settings}
+              draft={threadDrafts[selectedThreadRoot.id] ?? ""}
+              busy={props.isRunning}
+              submittingChoiceIds={submittingChoiceIds}
+              liveProgressById={liveProgressById}
+              onDraftChange={(value) => setThreadDrafts((current) => ({ ...current, [selectedThreadRoot.id]: value }))}
+              onSend={(repoFileMentions, imageAttachments, skillMentions) => sendThreadDraft(selectedThreadRoot, repoFileMentions, imageAttachments, skillMentions)}
+              onClose={() => setSelectedThreadRootId(undefined)}
+              onApproveMentions={props.onApproveMentions}
+              onRejectMentions={props.onRejectMentions}
+              onRespondToChoice={handleChoiceResponse}
+              onToggleReaction={props.onToggleReaction}
+              onStopRun={props.onStopRun}
+              continuedMentionRequestIds={continuedMentionRequestIds}
             />
           )}
+          <RepoFileOpenChooser
+            fileRef={chooserFileRef}
+            open={chooserOpen}
+            onChoose={(action) => void chooseRepoFileOpenAction(action)}
+            onOpenChange={handleRepoFileChooserOpenChange}
+          />
         </div>
-        <div className="chat-timeline virtual-timeline" ref={timelineRef} onScroll={updateStickToBottom}>
-          <div className="virtual-timeline-inner" style={{ height: `${chatVirtualizer.getTotalSize()}px` }}>
-            {chatVirtualItems.map((virtualItem) => {
-              const row = chatTimelineRows[virtualItem.index];
-              if (!row) {
-                return null;
-              }
-              return (
-                <div
-                  className="virtual-timeline-item"
-                  data-index={virtualItem.index}
-                  key={virtualItem.key}
-                  ref={chatVirtualizer.measureElement}
-                  style={{ transform: `translateY(${virtualItem.start}px)` }}
-                >
-                  {row.type === "load-older" ? (
-                    <TimelineLoadMoreRow
-                      loading={props.olderMessagesLoading}
-                      disabled={!props.hasOlderMessages || props.olderMessagesLoading}
-                      onClick={props.onLoadOlderMessages}
-                    />
-                  ) : row.type === "thinking" ? (
-                    <ChatThinkingRowItem row={row.row} />
-                  ) : (
-                    <ChatMessageItem
-                      message={row.message}
-                      conversationId={props.conversation.id}
-                      participants={participants}
-                      contextUsage={contextUsageForMessage(row.message, contextUsageByParticipant)}
-                      sessionId={sessionIdForMessage(row.message, sessionsByParticipant)}
-                      busy={props.isRunning}
-                      submittingChoiceIds={submittingChoiceIds}
-                      selected={row.message.id === selectedThreadRoot?.id}
-                      replyCount={threadSummaries.get(row.message.id)?.replies.length ?? 0}
-                      latestReplyAt={threadSummaries.get(row.message.id)?.latestReplyAt}
-                      hasContinuationReply={continuedMentionRequestIds.has(row.message.id)}
-                      liveProgress={liveProgressById.get(row.message.id)}
-                      onOpenThread={() => setSelectedThreadRootId(row.message.id)}
-                      onApproveMentions={props.onApproveMentions}
-                      onRejectMentions={props.onRejectMentions}
-                      onRespondToChoice={handleChoiceResponse}
-                      onToggleReaction={props.onToggleReaction}
-                      onStopRun={props.onStopRun}
-                    />
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-        <ChatComposer
-          participants={participants}
-          conversationId={props.conversation.id}
-          repoPath={props.conversation.repoPath}
-          draft={props.draft}
-          onDraftChange={props.onDraftChange}
-          onSend={sendDraft}
-          isRunning={props.isRunning}
-          activeRunCount={activeRunIdsForChat.length}
-          onStopAllRuns={props.onStopRun ? () => {
-            for (const runId of activeRunIdsForChat) {
-              props.onStopRun?.(runId);
-            }
-          } : undefined}
-          placeholder="Mention participants with @name, skills with /name, or repo files with #path"
-          status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
-          testId="chat-main-composer"
-          renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}
-          participantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
-        />
-      </div>
-      {selectedThreadRoot && <div className="thread-resizer" role="separator" aria-orientation="vertical" onPointerDown={startThreadResize} />}
-      {selectedThreadRoot && (
-        <ChatThreadPanel
-          rootMessage={selectedThreadRoot}
-          replies={selectedThreadSummary?.replies ?? []}
-          participants={participants}
-          conversationId={props.conversation.id}
-          repoPath={props.conversation.repoPath}
-          contextUsageByParticipant={contextUsageByParticipant}
-          sessionsByParticipant={sessionsByParticipant}
-          settings={props.settings}
-          draft={threadDrafts[selectedThreadRoot.id] ?? ""}
-          busy={props.isRunning}
-          submittingChoiceIds={submittingChoiceIds}
-          liveProgressById={liveProgressById}
-          onDraftChange={(value) => setThreadDrafts((current) => ({ ...current, [selectedThreadRoot.id]: value }))}
-          onSend={(repoFileMentions, imageAttachments, skillMentions) => sendThreadDraft(selectedThreadRoot, repoFileMentions, imageAttachments, skillMentions)}
-          onClose={() => setSelectedThreadRootId(undefined)}
-          onApproveMentions={props.onApproveMentions}
-          onRejectMentions={props.onRejectMentions}
-          onRespondToChoice={handleChoiceResponse}
-          onToggleReaction={props.onToggleReaction}
-          onStopRun={props.onStopRun}
-          continuedMentionRequestIds={continuedMentionRequestIds}
-        />
-      )}
-        <RepoFileOpenChooser
-          fileRef={chooserFileRef}
-          open={chooserOpen}
-          onChoose={(action) => void chooseRepoFileOpenAction(action)}
-          onOpenChange={handleRepoFileChooserOpenChange}
-        />
-      </div>
-    </RepoFileLinkContext.Provider>
+      </RepoFileLinkContext.Provider>
+    </MessageLinkContext.Provider>
   );
 }
