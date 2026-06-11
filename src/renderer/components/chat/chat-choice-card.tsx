@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, PencilLine } from "lucide-react";
+import { Check, PencilLine } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -16,7 +16,7 @@ export function ChatChoiceCard(props: {
   onConfirm: (response: { selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
 }): JSX.Element {
   const { choice, requesterLabel, submitting, onConfirm } = props;
-  const [draftSelection, setDraftSelection] = useState(choice.selectedOptionId ?? "");
+  const [draftSelection, setDraftSelection] = useState(choice.selectedOptionId ?? choice.recommendedOptionId ?? "");
   const [customAnswer, setCustomAnswer] = useState(choice.customAnswer ?? "");
   const [note, setNote] = useState(choice.note ?? "");
   const isAnswered = choice.status === "selected";
@@ -25,21 +25,29 @@ export function ChatChoiceCard(props: {
   const selectedOption = choice.options.find((option) => option.id === selectedOptionId);
   const requesterMention = requesterLabel.startsWith("@") ? requesterLabel : requesterLabel === "You" ? "User" : requesterLabel;
   const selectedOverridesRecommendation = isAnswered && Boolean(choice.recommendedOptionId) && selectedOptionId !== choice.recommendedOptionId;
+  const recommendedOption = choice.recommendedOptionId
+    ? choice.options.find((option) => option.id === choice.recommendedOptionId)
+    : undefined;
+  const canSkip = !submitting && !isAnswered && Boolean(recommendedOption);
   const receiptTime = formatChatChoiceReceiptTime(choice.selectedAt);
   const canConfirm = !submitting && !isAnswered && (isCustomSelected ? Boolean(customAnswer.trim()) : Boolean(selectedOption));
-  const selectedLabel = isCustomSelected
-    ? customAnswer.trim() || "Write your own answer"
-    : selectedOption?.label;
   const trimmedCustomAnswer = customAnswer.trim();
   const trimmedNote = note.trim();
   const showCustomAnswerPanel = isCustomSelected && (!isAnswered || Boolean(trimmedCustomAnswer));
   const showNotePanel = !isCustomSelected && Boolean(selectedOption) && (!isAnswered || Boolean(trimmedNote));
 
   useEffect(() => {
-    setDraftSelection(choice.selectedOptionId ?? "");
+    setDraftSelection(choice.selectedOptionId ?? choice.recommendedOptionId ?? "");
     setCustomAnswer(choice.customAnswer ?? "");
     setNote(choice.note ?? "");
-  }, [choice.id, choice.selectedOptionId, choice.customAnswer, choice.note]);
+  }, [choice.id, choice.selectedOptionId, choice.recommendedOptionId, choice.customAnswer, choice.note]);
+
+  function skipChoice(): void {
+    if (!canSkip || !recommendedOption) {
+      return;
+    }
+    onConfirm({ selectedOptionId: recommendedOption.id });
+  }
 
   function confirmChoice(): void {
     if (!canConfirm) {
@@ -64,16 +72,15 @@ export function ChatChoiceCard(props: {
     <section className={`chat-choice-card ${isAnswered ? "answered" : ""}`} aria-label={choice.title}>
       <div className="chat-choice-head">
         <div className="chat-choice-title-block">
+          {isAnswered && (
+            <span className="chat-choice-eyebrow">Answered{receiptTime ? ` · ${receiptTime}` : ""}</span>
+          )}
           <h3>{choice.title}</h3>
         </div>
-        <span className={`chat-choice-status ${isAnswered ? "answered" : ""}`}>
-          {isAnswered && <CheckCircle2 size={14} aria-hidden="true" />}
-          {isAnswered ? `Sent${receiptTime ? ` · ${receiptTime}` : ""}` : "Awaiting answer"}
-        </span>
       </div>
       <p>{choice.question}</p>
       <div className="chat-choice-options" role="radiogroup" aria-label={choice.question}>
-        {choice.options.map((option) => {
+        {choice.options.map((option, index) => {
           const selected = selectedOptionId === option.id;
           return (
             <label className={`chat-choice-option ${selected ? "selected" : ""} ${isAnswered && !selected ? "collapsed" : ""}`} key={option.id}>
@@ -84,7 +91,7 @@ export function ChatChoiceCard(props: {
                 disabled={submitting || isAnswered}
                 onChange={() => setDraftSelection(option.id)}
               />
-              <span className="chat-choice-radio" aria-hidden="true" />
+              <span className="chat-choice-num" aria-hidden="true">{index + 1}.</span>
               <span className="chat-choice-option-body">
                 <span className="chat-choice-option-title">
                   <strong>{option.label}</strong>
@@ -93,6 +100,9 @@ export function ChatChoiceCard(props: {
                 </span>
                 {option.description && (!isAnswered || selected) && <span className="chat-choice-option-description">{option.description}</span>}
               </span>
+              {isAnswered && selected && (
+                <span className="chat-choice-done" aria-hidden="true"><Check size={15} /></span>
+              )}
             </label>
           );
         })}
@@ -104,12 +114,11 @@ export function ChatChoiceCard(props: {
             disabled={submitting || isAnswered}
             onChange={() => setDraftSelection(CHAT_CUSTOM_CHOICE_OPTION_ID)}
           />
-          <span className="chat-choice-radio" aria-hidden="true" />
+          <span className="chat-choice-num chat-choice-custom-icon" aria-hidden="true">
+            <PencilLine size={14} />
+          </span>
           <span className="chat-choice-option-body">
             <span className="chat-choice-option-title">
-              <span className="chat-choice-custom-icon" aria-hidden="true">
-                <PencilLine size={14} />
-              </span>
               <strong>Write your own answer</strong>
               {isAnswered && isCustomSelected && selectedOverridesRecommendation && <small className="chat-choice-override-chip">≠ recommendation</small>}
             </span>
@@ -117,6 +126,9 @@ export function ChatChoiceCard(props: {
               <span className="chat-choice-option-description">None of the suggestions fit — type your own direction for {requesterMention}.</span>
             )}
           </span>
+          {isAnswered && isCustomSelected && (
+            <span className="chat-choice-done" aria-hidden="true"><Check size={15} /></span>
+          )}
         </label>
       </div>
       {showCustomAnswerPanel && isAnswered && (
@@ -169,17 +181,20 @@ export function ChatChoiceCard(props: {
       )}
       {!isAnswered && (
         <div className="chat-choice-actions">
-          {isCustomSelected && !customAnswer.trim() ? (
-            <span>Type your answer to enable send.</span>
-          ) : selectedLabel ? (
-            <span>Selected: <strong>{selectedLabel}</strong></span>
-          ) : (
-            <span>Select one option to continue.</span>
+          {isCustomSelected && !customAnswer.trim() && (
+            <span className="chat-choice-hint">Type your answer to enable send.</span>
           )}
-          <Button size="sm" className="chat-choice-submit" disabled={!canConfirm} onClick={confirmChoice}>
-            <span>Submit</span>
-            <kbd aria-hidden="true">↵</kbd>
-          </Button>
+          <div className="chat-choice-action-buttons">
+            {canSkip && (
+              <button type="button" className="chat-choice-skip" disabled={submitting} onClick={skipChoice}>
+                Skip
+              </button>
+            )}
+            <Button size="sm" className="chat-choice-submit" disabled={!canConfirm} onClick={confirmChoice}>
+              <span>Submit</span>
+              <kbd aria-hidden="true">↵</kbd>
+            </Button>
+          </div>
         </div>
       )}
     </section>

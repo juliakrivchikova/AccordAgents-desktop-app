@@ -99,7 +99,7 @@
 .message-avatar {
   width: 44px;
   height: 44px;
-  border-radius: 9px;
+  border-radius: 10px;
 }
 
 .message-body,
@@ -339,10 +339,6 @@
   background: var(--app-surface);
 }
 
-.chat-composer {
-  box-shadow: 0 -8px 20px color-mix(in srgb, var(--shadow-color) 7%, transparent);
-}
-
 .chat-input-wrap.has-skill-highlights {
   isolation: isolate;
 }
@@ -354,7 +350,9 @@
   overflow: hidden;
   border: 0;
   border-radius: 11px;
-  padding: 8px 10px;
+  /* Must match the textarea's box metrics (see CHAT_COMPOSER_TEXTAREA_STYLE)
+     so the highlighted token stays aligned with the caret. */
+  padding: 3px 4px;
   color: var(--app-text-strong);
   font-size: 14.5px;
   line-height: 1.5;
@@ -533,9 +531,9 @@
 .avatar-codex .provider-avatar-image,
 .message-avatar.avatar-codex .provider-avatar-image,
 .thread-avatar.avatar-codex .provider-avatar-image {
-  width: 88%;
-  height: 88%;
-  object-fit: contain;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
   transform: none;
 }
 
@@ -585,10 +583,10 @@
 .message.summary .message-avatar.avatar-codex,
 .message.system .message-avatar.avatar-codex,
 .thread-avatar.typing-avatar {
-  border: 1px solid var(--app-avatar-border);
+  border: 0;
   background: var(--app-avatar-bg);
   color: var(--app-text-strong);
-  box-shadow: var(--app-avatar-shadow);
+  box-shadow: none;
 }
 
 .message.user .message-avatar.avatar-user,
@@ -672,8 +670,8 @@
 }
 
 .chat-choice-card.answered {
-  border-color: var(--app-success-border);
-  background: color-mix(in srgb, var(--app-success-soft) 38%, var(--app-surface));
+  border-color: var(--app-border);
+  background: var(--app-surface);
 }
 
 .chat-choice-title-block h3,
@@ -687,22 +685,22 @@
   color: var(--app-accent);
 }
 
-.chat-choice-card.answered .chat-choice-kicker,
-.chat-choice-card.answered .chat-choice-text-panel small {
-  color: var(--app-success);
+.chat-choice-card.answered .chat-choice-kicker {
+  color: var(--app-accent);
 }
 
-.chat-choice-status,
+.chat-choice-card.answered .chat-choice-text-panel small {
+  color: var(--app-muted);
+}
+
 .chat-choice-option-title small {
-  border-color: var(--app-accent-border);
   background: var(--app-accent-soft);
   color: var(--app-accent);
 }
 
-.chat-choice-status.answered {
-  border-color: var(--app-success-border);
-  background: var(--app-success-soft);
-  color: var(--app-success);
+.chat-choice-option-title small.chat-choice-override-chip {
+  background: var(--app-surface-hover);
+  color: var(--app-muted);
 }
 
 .chat-choice-card > p,
@@ -712,56 +710,31 @@
   color: var(--app-muted);
 }
 
-.chat-choice-option,
-.custom-answer-option:not(.selected) {
-  border-color: var(--app-border);
-  background: var(--app-surface);
+.chat-choice-option {
+  background: transparent;
   color: var(--app-text);
 }
 
 .chat-choice-option:hover {
-  border-color: var(--app-accent-border);
-  background: color-mix(in srgb, var(--app-accent-soft) 28%, var(--app-surface));
+  background: var(--app-surface-hover);
 }
 
 .chat-choice-option.selected {
-  border-color: var(--app-accent);
-  background: var(--app-accent-soft);
-  box-shadow: 0 0 0 1px var(--app-accent);
+  background: var(--app-surface-hover);
 }
 
 .chat-choice-card.answered .chat-choice-option {
-  border-color: var(--app-border);
-  background: color-mix(in srgb, var(--app-surface-subtle) 60%, var(--app-surface));
+  background: transparent;
   color: var(--app-muted);
 }
 
 .chat-choice-card.answered .chat-choice-option.selected {
-  border-color: var(--app-success);
-  background: var(--app-success-soft);
-  box-shadow: 0 0 0 1px var(--app-success);
+  background: var(--app-surface-hover);
   color: var(--app-text-strong);
 }
 
-.chat-choice-radio {
-  border-color: var(--app-muted-subtle);
-}
-
-.chat-choice-option.selected .chat-choice-radio {
-  border-color: var(--app-accent);
-}
-
-.chat-choice-option.selected .chat-choice-radio::after {
-  background: var(--app-accent);
-}
-
-.chat-choice-card.answered .chat-choice-radio,
-.chat-choice-card.answered .chat-choice-option.selected .chat-choice-radio {
-  border-color: var(--app-success-border);
-}
-
-.chat-choice-card.answered .chat-choice-option.selected .chat-choice-radio::after {
-  background: var(--app-success);
+.chat-choice-done {
+  color: var(--app-accent);
 }
 
 .chat-choice-card.answered .chat-choice-option:not(.selected) .chat-choice-option-title strong,
@@ -769,47 +742,21 @@
   color: var(--app-muted-subtle);
 }
 
-.chat-choice-card.answered .chat-choice-option.selected .chat-choice-recommended-chip,
-.chat-choice-card.answered .chat-choice-option.selected .chat-choice-override-chip {
-  border-color: var(--app-success-border);
-  background: color-mix(in srgb, var(--app-surface) 82%, var(--app-success-soft));
-  color: var(--app-success);
-}
-
-.chat-choice-card.answered .chat-choice-option:not(.selected) .chat-choice-recommended-chip {
-  border-color: var(--app-accent-border);
-  background: var(--app-accent-soft);
-  color: var(--app-accent);
-}
-
-.chat-choice-custom-icon {
-  background: var(--app-accent-soft);
-  color: var(--app-accent);
-}
-
+.chat-choice-custom-icon,
 .chat-choice-card.answered .chat-choice-option.selected .chat-choice-custom-icon {
-  background: color-mix(in srgb, var(--app-surface) 82%, var(--app-success-soft));
-  color: var(--app-success);
+  background: transparent;
+  color: var(--app-muted);
 }
 
-.chat-choice-card.answered .chat-choice-option:not(.selected) .chat-choice-custom-icon {
-  background: var(--app-surface-hover);
-  color: var(--app-muted-subtle);
-}
-
-.chat-choice-text-panel {
-  border-color: var(--app-accent-border);
-  background: color-mix(in srgb, var(--app-accent-soft) 45%, var(--app-surface));
-}
-
+.chat-choice-text-panel,
 .chat-choice-card.answered .chat-choice-text-panel {
-  border-color: var(--app-success-border);
-  background: var(--app-success-soft);
+  border-color: var(--app-border);
+  background: var(--app-surface-subtle);
 }
 
 .chat-choice-card.answered .chat-choice-text-panel.locked {
-  border-left-color: var(--app-success);
-  background: color-mix(in srgb, var(--app-success-soft) 54%, var(--app-surface));
+  border-left-color: var(--app-border-strong);
+  background: var(--app-surface-subtle);
 }
 
 .chat-choice-text-panel textarea {
@@ -819,7 +766,7 @@
 }
 
 .chat-choice-card.answered .chat-choice-text-panel textarea {
-  border-color: var(--app-success-border);
+  border-color: var(--app-border);
 }
 
 .chat-choice-text-panel textarea:focus {
@@ -962,9 +909,22 @@
   color: var(--app-accent) !important;
 }
 
-/* Submit ↵ key hint inside the dark choice-card submit button. */
+/* Solid dark choice-card submit button — design handoff (.aa-perm-submit). */
 .chat-choice-submit {
   gap: 6px;
+  border-color: transparent !important;
+  background: var(--app-text-strong) !important;
+  color: var(--app-surface) !important;
+  box-shadow: none !important;
+}
+
+.chat-choice-submit:hover:not(:disabled) {
+  background: var(--app-text-strong) !important;
+  opacity: 0.88;
+}
+
+.chat-choice-submit:disabled {
+  opacity: 0.45;
 }
 
 .chat-choice-submit kbd {
