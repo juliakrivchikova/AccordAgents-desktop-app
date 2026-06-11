@@ -5,7 +5,6 @@ import {
   Circle,
   FileText,
   ListChecks,
-  PanelLeftOpen,
   RefreshCw,
   Settings,
   Users,
@@ -47,7 +46,7 @@ import type {
 import { ModeToggle } from "./components/mode-toggle";
 import { ThemeProvider } from "./components/theme-provider";
 import { AppLoadingState } from "./components/loading-states";
-import { AppShell, Sidebar, TopBar } from "./components/shell";
+import { AppShell, Sidebar, SidebarPanelIcon, TopBar } from "./components/shell";
 import type { ProjectSessionGroup } from "./components/shell";
 import { SettingsView, type SettingsSection } from "./components/settings/settings-view";
 import { SlackView } from "./components/review/review-view";
@@ -1653,7 +1652,7 @@ function App(): JSX.Element {
       data-testid="sidebar-expand-toggle"
       onClick={() => setSidebarCollapsed(false)}
     >
-      <PanelLeftOpen aria-hidden />
+      <SidebarPanelIcon />
       <span className="sr-only">Show sidebar</span>
     </Button>
   ) : undefined;

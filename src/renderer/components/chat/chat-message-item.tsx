@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CheckCircle2, Copy, FileText, ListChecks, MessageSquareReply, RefreshCw, SmilePlus, X } from "lucide-react";
+import { CheckCircle2, Copy, FileText, ListChecks, RefreshCw, Reply, Smile, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -28,6 +28,9 @@ import { AgentAvatarWithDetails, Avatar, avatarForMessage } from "../avatar/avat
 import { MarkdownText } from "../content/markdown-text";
 import { authorForMessage } from "../conversation/conversation-display";
 import { IconButton, StatusBadge } from "../primitives";
+
+const MESSAGE_ACTION_CLASS = "message-action size-[26px] min-h-[26px] rounded-[8px] border-0 bg-transparent shadow-none";
+const MESSAGE_ACTION_STOP_CLASS = `${MESSAGE_ACTION_CLASS} message-action-stop`;
 
 export type ChatChoiceResponse = {
   selectedOptionId?: string;
@@ -139,7 +142,7 @@ export function ChatMessageItem(props: {
           <div className="message-actions">
             {isStreaming && message.metadata?.runId && props.onStopRun && (
               <IconButton
-                className="message-action message-action-stop"
+                className={MESSAGE_ACTION_STOP_CLASS}
                 size="xs"
                 icon={X}
                 label="Stop response"
@@ -148,7 +151,7 @@ export function ChatMessageItem(props: {
               />
             )}
             <IconButton
-              className="message-action"
+              className={MESSAGE_ACTION_CLASS}
               size="xs"
               icon={copied ? CheckCircle2 : Copy}
               label={copied ? "Copied" : "Copy message"}
@@ -160,9 +163,9 @@ export function ChatMessageItem(props: {
               <Popover open={reactionPickerOpen} onOpenChange={setReactionPickerOpen}>
                 <PopoverTrigger asChild>
                   <IconButton
-                    className="message-action"
+                    className={MESSAGE_ACTION_CLASS}
                     size="xs"
-                    icon={SmilePlus}
+                    icon={Smile}
                     label="Add reaction"
                     tooltip="Add reaction"
                   />
@@ -180,9 +183,9 @@ export function ChatMessageItem(props: {
             )}
             {showThreadActions && (
               <IconButton
-                className="message-action"
+                className={MESSAGE_ACTION_CLASS}
                 size="xs"
-                icon={MessageSquareReply}
+                icon={Reply}
                 label="Reply in thread"
                 tooltip="Reply in thread"
                 onClick={props.onOpenThread}

@@ -99,6 +99,19 @@
   flex: 0 0 auto;
 }
 
+.topbar-chat-title-row [data-slot="button"] {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--app-muted);
+}
+
+.topbar-chat-title-row [data-slot="button"]:hover:not(:disabled),
+.topbar-chat-title-row [data-slot="button"]:focus-visible {
+  background: var(--app-surface-hover) !important;
+  color: var(--app-text-strong);
+}
+
 .topbar-chat-title-editor [data-slot="input"] {
   width: min(360px, 36vw);
   height: 32px;
@@ -646,17 +659,17 @@
 /* Grouped icon-only hover toolbar, floating top-right (design handoff §4). */
 .chat-message .message-actions {
   position: absolute;
-  top: -6px;
+  top: -10px;
   right: 0;
   z-index: 3;
   display: inline-flex;
   align-items: center;
-  gap: 1px;
-  padding: 3px;
+  gap: 2px;
+  padding: 2px;
   border: 1px solid var(--app-border);
-  border-radius: var(--radius-pill);
+  border-radius: 9px;
   background: var(--app-surface);
-  box-shadow: 0 2px 10px color-mix(in srgb, var(--shadow-color) 8%, transparent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--shadow-color) 8%, transparent);
   opacity: 0;
   pointer-events: none;
   transform: translateY(-2px);
@@ -672,11 +685,11 @@
 }
 
 .chat-message .message-action {
-  width: 28px;
-  min-height: 28px;
-  height: 28px;
+  width: 26px;
+  min-height: 26px;
+  height: 26px;
   border: 0 !important;
-  border-radius: var(--radius-pill);
+  border-radius: 8px;
   background: transparent !important;
   box-shadow: none !important;
   color: var(--app-muted);

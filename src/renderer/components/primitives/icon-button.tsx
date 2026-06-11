@@ -15,7 +15,7 @@ const SIZE_TO_BUTTON_SIZE: Record<IconButtonSize, "icon-xs" | "icon-sm" | "icon"
 };
 
 const SIZE_TO_ICON_CLASS: Record<IconButtonSize, string> = {
-  xs: "size-3.5",
+  xs: "size-[15px]",
   sm: "size-4",
   md: "size-4"
 };
@@ -57,7 +57,7 @@ export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(f
       className={cn(className)}
       {...rest}
     >
-      <Icon className={cn(SIZE_TO_ICON_CLASS[size], iconClassName)} aria-hidden />
+      <Icon className={cn(SIZE_TO_ICON_CLASS[size], iconClassName)} strokeWidth={1.75} aria-hidden />
       <span className="sr-only">{label}</span>
     </Button>
   );

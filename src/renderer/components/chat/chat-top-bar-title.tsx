@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Check, PencilLine, X } from "lucide-react";
+import { Check, Pencil, X } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
 import { IconButton } from "../primitives";
@@ -117,8 +117,9 @@ export function ChatTopBarTitle(props: {
         <div className="topbar-chat-title-row">
           <span className="topbar-chat-title-text">{props.conversation.title}</span>
           <IconButton
+            className="border-0 bg-transparent text-[var(--app-muted)] shadow-none hover:border-0 hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text-strong)]"
             size="xs"
-            icon={PencilLine}
+            icon={Pencil}
             label="Edit chat name"
             tooltip={props.isRunning ? "Chat name cannot be edited while participants are running" : "Edit chat name"}
             disabled={props.isRunning}

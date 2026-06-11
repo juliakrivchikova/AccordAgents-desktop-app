@@ -52,6 +52,10 @@
   }
 }
 
+:where(svg.lucide, svg[data-lucide]) {
+  stroke-width: 1.75;
+}
+
 .compose-layout,
 .slack-thread-panel,
 .chat-thread-panel,

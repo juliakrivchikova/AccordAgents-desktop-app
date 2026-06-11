@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { ChevronDown, ChevronRight, Loader2, PanelLeftClose, Plus, SquarePen } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, Pencil, Plus } from "lucide-react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { HistoryLoadingState } from "@/renderer/components/loading-states";
 import { EmptyState } from "@/renderer/components/primitives";
 import { cn } from "@/lib/utils";
+import { SidebarPanelIcon } from "./sidebar-panel-icon";
 import type { ConversationSummary } from "../../../shared/types";
 
 const INITIAL_PROJECT_SESSION_LIMIT = 5;
@@ -96,7 +97,7 @@ export const Sidebar = ({
               "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
             )}
           >
-            <PanelLeftClose className="size-4" aria-hidden />
+            <SidebarPanelIcon />
           </button>
         )}
       </div>
@@ -115,7 +116,7 @@ export const Sidebar = ({
             "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
           )}
         >
-          <SquarePen className="size-3.5 text-[var(--app-accent)]" aria-hidden />
+          <Pencil className="size-[15px] text-[var(--app-accent)]" aria-hidden />
           <span>New chat</span>
         </button>
       </div>
