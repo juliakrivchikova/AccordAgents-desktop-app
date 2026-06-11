@@ -7094,18 +7094,22 @@ export class ChatService {
     if (!pendingSwept && !shouldClear) {
       return false;
     }
+    if (pendingSwept) {
+      conversation.metadata = this.metadataWithInterruptedRunWarning(conversation.metadata);
+    }
     if (shouldClear) {
-      const warnings = sanitizeWarningList(conversation.metadata.warnings);
-      if (!warnings.includes(INTERRUPTED_RUN_WARNING)) {
-        warnings.push(INTERRUPTED_RUN_WARNING);
-      }
-      conversation.metadata = this.clearedChatRunMetadata({
-        ...conversation.metadata,
-        warnings
-      });
+      conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
     }
     conversation.updatedAt = new Date().toISOString();
     return true;
+  }
+
+  private metadataWithInterruptedRunWarning(metadata: Record<string, unknown>): Record<string, unknown> {
+    const warnings = sanitizeWarningList(metadata.warnings);
+    if (warnings.includes(INTERRUPTED_RUN_WARNING)) {
+      return { ...metadata, warnings };
+    }
+    return { ...metadata, warnings: [...warnings, INTERRUPTED_RUN_WARNING] };
   }
 
   private isMessageRunLive(message: ChatMessage): boolean {

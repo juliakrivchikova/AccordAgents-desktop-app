@@ -43,7 +43,7 @@ below and **do not build any user-facing tweak controls** for these:
 
 | Setting | Ship this | Notes |
 |---|---|---|
-| **Message style** | **`flat`** only | Avatar + left-aligned content, full-width. Do NOT build the `hybrid` or `bubble` variants. |
+| **Message style** | **`flat`** only | Avatar + left-aligned content on a constrained readable message column. Do NOT build the `hybrid` or `bubble` variants. |
 | **Avatars** | **`animal`** (image avatars) | Agents use the provided avatar images; the **user** avatar is the in-code grey silhouette on a light chip. Do NOT build the monogram-only mode. |
 | **Provider accent** | **OFF** | No colored provider rail on messages and no provider-tinted participant names. Names render in `--app-text-strong`; provider identity shows only via the avatar + the small "Codex CLI / Claude Code / Gemini" label. (The colored-rail styling exists in the CSS but is disabled — leave it out of the build.) |
 | **Density** | **Comfortable / fixed** | Bake these exact values; do NOT build a density slider: body font **15px**, message vertical gap **18px**, meta margin-bottom **5px**, content gap **9px**, bubble pad (unused in flat) `11px 14px`. |
@@ -154,7 +154,7 @@ Google Fonts import:
 ### Spacing
 - 4px grid. Component gaps 6–15px. Message vertical rhythm `--d-msg-gap` default **20px**
   (driven by a Density tweak, 1–5).
-- Stream max content width: **880px**, centered. Stream padding `18px 28px 8px`.
+- Stream max content width: **880px**, centered. Flat message body max width: **760px** inside that stream. Stream padding `18px 28px 8px`.
 - Composer padding `10px 28px 18px`.
 
 ### Layout widths
@@ -199,7 +199,8 @@ Google Fonts import:
   theme toggle (moon/sun), settings, refresh.
 
 ### 4. Conversation stream (message list)
-Centered 880px column. Message layout has three style modes (a "Message style" tweak): **flat**
+Centered 880px stream with each flat message body capped at 760px so message copy does not
+consume the whole available row. Message layout has three style modes (a "Message style" tweak): **flat**
 (default — avatar + left-aligned content, optional provider rail), **hybrid**, and **bubble**.
 **For production, ship `flat` only** (see Production configuration above). Each message:
 - **Avatar** (38px flat / 36px bubble). Agent avatars are images (animal set) or provider-tinted

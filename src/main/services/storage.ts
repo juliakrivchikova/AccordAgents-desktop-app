@@ -302,7 +302,7 @@ export class StorageService {
         continue;
       }
       const warnings = sanitizeWarningList(conversation.metadata.warnings);
-      if (!warnings.includes(INTERRUPTED_RUN_WARNING)) {
+      if (hasPendingParticipantMessage(conversation) && !warnings.includes(INTERRUPTED_RUN_WARNING)) {
         warnings.push(INTERRUPTED_RUN_WARNING);
       }
       conversation.metadata = clearChatRunMetadata({ ...conversation.metadata, warnings });
@@ -331,6 +331,10 @@ export class StorageService {
   private sqliteArgs(args: string[]): string[] {
     return ["-cmd", `.timeout ${SQLITE_BUSY_TIMEOUT_MS}`, ...args];
   }
+}
+
+function hasPendingParticipantMessage(conversation: Conversation): boolean {
+  return conversation.messages.some((message) => message.role === "participant" && message.status === "pending");
 }
 
 function normalizeMessagePageLimit(limit: number | undefined): number {

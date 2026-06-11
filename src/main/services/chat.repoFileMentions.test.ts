@@ -667,8 +667,32 @@ test("respondToMentions keeps parent run cancellable after fast return", async (
   });
 });
 
-test("hydrateContextUsage clears inactive stale running state once", async () => {
+test("hydrateContextUsage clears inactive stale running state without warning when no pending turn was lost", async () => {
   const conversation = chatConversation([chatParticipant()], "/repo");
+  conversation.metadata = {
+    ...conversation.metadata,
+    running: true,
+    runId: "stale-run"
+  };
+  const { service, storage } = testService({ conversations: [conversation] });
+
+  const hydrated = await service.hydrateContextUsage(cloneConversation(conversation));
+  const saved = await storage.getConversation(conversation.id);
+
+  assert.equal(hydrated.metadata.running, false);
+  assert.equal(hydrated.metadata.runId, undefined);
+  assert.deepEqual(hydrated.metadata.warnings ?? [], []);
+  assert.equal(saved?.metadata.running, false);
+  assert.deepEqual(saved?.metadata.warnings ?? [], []);
+});
+
+test("hydrateContextUsage warns when stale recovery marks a pending participant turn interrupted", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant], "/repo");
+  const pending = participantMessage(participant, "pending-reply", "");
+  pending.status = "pending";
+  pending.metadata = { ...pending.metadata, runId: "stale-run" };
+  conversation.messages.push(pending);
   conversation.metadata = {
     ...conversation.metadata,
     running: true,
@@ -679,12 +703,17 @@ test("hydrateContextUsage clears inactive stale running state once", async () =>
 
   const hydrated = await service.hydrateContextUsage(cloneConversation(conversation));
   const saved = await storage.getConversation(conversation.id);
+  const hydratedReply = hydrated.messages.find((message) => message.id === pending.id);
+  const savedReply = saved?.messages.find((message) => message.id === pending.id);
 
   assert.equal(hydrated.metadata.running, false);
-  assert.equal(hydrated.metadata.runId, undefined);
   assert.deepEqual(hydrated.metadata.warnings, [INTERRUPTED_RUN_WARNING]);
+  assert.equal(hydratedReply?.status, "error");
+  assert.equal(hydratedReply?.content, "Interrupted before completion.");
+  assert.equal(Boolean(hydratedReply?.metadata?.staleRunRecovery), true);
   assert.equal(saved?.metadata.running, false);
   assert.deepEqual(saved?.metadata.warnings, [INTERRUPTED_RUN_WARNING]);
+  assert.equal(savedReply?.status, "error");
 });
 
 test("stale recovery does not clear running while background runner is active", async () => {
@@ -780,8 +809,34 @@ test("autoResumeParticipantRequest completes and clears running state", async ()
   assert.equal(savedRequest?.metadata?.participantRequest?.autoResumeMessageId, "resume-reply");
 });
 
-test("clearInterruptedRuns removes stale run id during startup cleanup", async () => {
+test("clearInterruptedRuns clears stale run metadata without warning when no pending turn was lost", async () => {
   const conversation = chatConversation([chatParticipant()], "/repo");
+  conversation.metadata = {
+    ...conversation.metadata,
+    running: true,
+    runId: "stale-run"
+  };
+  let saved: Conversation | undefined;
+  const storage = Object.create(StorageService.prototype) as any;
+  storage.queryJson = async () => [{ payloadJson: JSON.stringify(conversation) }];
+  storage.saveConversation = async (next: Conversation) => {
+    saved = cloneConversation(next);
+  };
+
+  await (storage as any).clearInterruptedRuns();
+
+  assert.equal(saved?.metadata.running, false);
+  assert.equal(saved?.metadata.runId, undefined);
+  assert.deepEqual(saved?.metadata.warnings, []);
+});
+
+test("clearInterruptedRuns preserves interrupted warning when startup cleanup finds a pending turn", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant], "/repo");
+  const pending = participantMessage(participant, "pending-reply", "");
+  pending.status = "pending";
+  pending.metadata = { ...pending.metadata, runId: "stale-run" };
+  conversation.messages.push(pending);
   conversation.metadata = {
     ...conversation.metadata,
     running: true,
