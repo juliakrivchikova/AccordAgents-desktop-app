@@ -567,6 +567,11 @@ export interface RenameChatConversationRequest {
   title: string;
 }
 
+export interface DismissConversationWarningsRequest {
+  conversationId: string;
+  warnings: string[];
+}
+
 export interface SendChatMessageRequest {
   conversationId: string;
   runId?: string;
@@ -992,6 +997,7 @@ export interface AppBridge {
   savePlanItemReview(request: PlanItemReviewRequest): Promise<Conversation | undefined>;
   createChatConversation(request: CreateChatConversationRequest): Promise<StartReviewResult>;
   renameChatConversation(request: RenameChatConversationRequest): Promise<Conversation | undefined>;
+  dismissConversationWarnings(request: DismissConversationWarningsRequest): Promise<Conversation | undefined>;
   addChatParticipant(request: AddChatParticipantRequest): Promise<Conversation | undefined>;
   sendChatMessage(request: SendChatMessageRequest): Promise<StartReviewResult>;
   readChatAttachment(request: ReadChatAttachmentRequest): Promise<ReadChatAttachmentResult>;

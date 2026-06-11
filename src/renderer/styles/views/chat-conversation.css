@@ -1,8 +1,6 @@
 /* chat conversation styles. Keep token-driven; migrate rules into components as views are extracted. */
 
 .chat-view {
-  --chat-stream-width: 880px;
-  --chat-message-width: 760px;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
@@ -262,10 +260,10 @@
   background: var(--app-surface);
 }
 
-/* Center the conversation stream, then keep message copy on a readable column. */
+/* Let the conversation stream use the available panel width. */
 .chat-timeline > .virtual-timeline-inner {
-  max-width: var(--chat-stream-width);
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
 }
 
 .chat-app-tool-approval-slot {
@@ -653,9 +651,6 @@
 }
 
 .chat-message .message-body {
-  justify-self: start;
-  width: 100%;
-  max-width: var(--chat-message-width);
   padding: 10px 76px 10px 12px;
   background: var(--app-surface);
   overflow: visible;
@@ -1358,14 +1353,14 @@
   box-shadow: 0 -10px 24px color-mix(in srgb, var(--shadow-color) 8%, transparent);
 }
 
-/* Center the main composer under the stream column. */
+/* Keep the main composer aligned with the full-width stream. */
 .chat-main > .chat-composer > .chat-composer-shell,
 .chat-main > .chat-composer > .chat-composer-status,
 .chat-main > .chat-composer > .file-mention-chips,
 .chat-main > .chat-composer > .pending-image-strip {
   width: 100%;
-  max-width: var(--chat-stream-width);
-  margin-inline: auto;
+  max-width: none;
+  margin-inline: 0;
 }
 
 .chat-composer-shell {

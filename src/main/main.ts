@@ -11,6 +11,7 @@ import type {
   ContinueReviewRequest,
   ConversationMessagePageRequest,
   CreateChatConversationRequest,
+  DismissConversationWarningsRequest,
   GitDiffRequest,
   OpenRepoFileRequest,
   PlanDecisionClarificationRequest,
@@ -261,6 +262,9 @@ function registerIpc(): void {
   });
   ipcMain.handle("chat:rename", async (_event, request: RenameChatConversationRequest) => {
     return chatService.renameConversation(request);
+  });
+  ipcMain.handle("chat:dismiss-warnings", async (_event, request: DismissConversationWarningsRequest) => {
+    return chatService.dismissConversationWarnings(request);
   });
   ipcMain.handle("chat:add-participant", async (_event, request: AddChatParticipantRequest) => {
     return chatService.addParticipant(request);

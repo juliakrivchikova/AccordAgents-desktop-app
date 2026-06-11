@@ -716,6 +716,24 @@ test("hydrateContextUsage warns when stale recovery marks a pending participant 
   assert.equal(savedReply?.status, "error");
 });
 
+test("dismissConversationWarnings removes persisted chat metadata warnings", async () => {
+  const conversation = chatConversation([chatParticipant()], "/repo");
+  conversation.metadata = {
+    ...conversation.metadata,
+    warnings: [INTERRUPTED_RUN_WARNING, "Other warning", INTERRUPTED_RUN_WARNING]
+  };
+  const { service, storage } = testService({ conversations: [conversation] });
+
+  const updated = await service.dismissConversationWarnings({
+    conversationId: conversation.id,
+    warnings: [INTERRUPTED_RUN_WARNING]
+  });
+  const saved = await storage.getConversation(conversation.id);
+
+  assert.deepEqual(updated?.metadata.warnings, ["Other warning"]);
+  assert.deepEqual(saved?.metadata.warnings, ["Other warning"]);
+});
+
 test("stale recovery does not clear running while background runner is active", async () => {
   const conversation = chatConversation([chatParticipant()], "/repo");
   const { service, storage } = testService({ conversations: [conversation] });

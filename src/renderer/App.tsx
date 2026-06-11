@@ -1625,13 +1625,26 @@ function App(): JSX.Element {
     setActiveView(settingsReturnView);
   };
   const dismissWarnings = (keys: string[]): void => {
+    const dismissed = keys.filter(Boolean);
+    if (dismissed.length === 0) {
+      return;
+    }
+    const dismissedSet = new Set(dismissed);
     setDismissedWarningKeysByScope((current) => {
-      const next = addDismissedWarningKeys(current, warningScope, keys);
+      const next = addDismissedWarningKeys(current, warningScope, dismissed);
       if (next !== current) {
         persistDismissedWarnings(next);
       }
       return next;
     });
+    setWarnings((current) => current.filter((warning) => !dismissedSet.has(displayNoticeText(warning))));
+    if (conversation?.id) {
+      void window.consensus.dismissConversationWarnings({
+        conversationId: conversation.id,
+        warnings: dismissed
+      })
+        .catch((caught) => setError(errorText(caught)));
+    }
   };
   const dismissWarning = (key: string): void => {
     dismissWarnings([key]);

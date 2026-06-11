@@ -43,6 +43,7 @@ import type {
   ChatSkillMention,
   Conversation,
   CreateChatConversationRequest,
+  DismissConversationWarningsRequest,
   ParticipantConfig,
   ReadChatAttachmentRequest,
   RenameChatConversationRequest,
@@ -442,6 +443,28 @@ export class ChatService {
       rejectIfQueued: true,
       queuedMessage: "Chat name cannot be edited while participants are running."
     });
+  }
+
+  async dismissConversationWarnings(request: DismissConversationWarningsRequest): Promise<Conversation | undefined> {
+    const dismissedWarnings = new Set(sanitizeWarningList(request.warnings));
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || dismissedWarnings.size === 0) {
+      return conversation;
+    }
+    const dismissWarnings = async (): Promise<Conversation> => {
+      const currentWarnings = sanitizeWarningList(conversation.metadata.warnings);
+      const nextWarnings = currentWarnings.filter((warning) => !dismissedWarnings.has(warning));
+      if (JSON.stringify(conversation.metadata.warnings ?? []) === JSON.stringify(nextWarnings)) {
+        return conversation;
+      }
+      conversation.metadata = { ...conversation.metadata, warnings: nextWarnings };
+      await this.saveConversation(conversation);
+      return conversation;
+    };
+    if (conversation.kind === "chat") {
+      return this.withChatMutation(conversation, dismissWarnings);
+    }
+    return dismissWarnings();
   }
 
   async addParticipant(request: AddChatParticipantRequest): Promise<Conversation | undefined> {
