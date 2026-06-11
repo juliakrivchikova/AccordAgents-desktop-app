@@ -530,10 +530,10 @@ Do not advertise:
 
 ## MVP TODO
 - [ ] unrecognized websearch
-- [ ] images super small
 - 
 - [ ] user choice card appearance
 - [ ] allow request participant appearance
+- [ ] grant permission appearance?
 - 
 - [ ] Design improvements
 - 

@@ -95,7 +95,7 @@ export function ChatImageAttachmentStrip(props: {
           setSelectedId(undefined);
         }
       }}>
-        <DialogContent className="chat-image-preview-dialog">
+        <DialogContent className="chat-image-preview-dialog max-w-[min(92vw,1100px)] sm:max-w-[min(92vw,1100px)]">
           <DialogHeader>
             <DialogTitle>{selectedAttachment?.filename ?? "Image"}</DialogTitle>
             <DialogDescription>

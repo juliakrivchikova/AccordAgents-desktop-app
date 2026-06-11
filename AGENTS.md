@@ -18,6 +18,7 @@ Prefer the Makefile aliases when working locally:
 - `make build`: compile the main process and build the renderer.
 - `make typecheck`: run strict TypeScript checks.
 - `make clean`: remove `dist`.
+- `npm run signed:mac-arm64`: build the signed and notarized macOS arm64 DMG; follow `SIGN.md` when a user asks for a signed DMG.
 - `npm run test:permissions`: build the main process and run targeted service tests for chat permissions/cancellation, repo file mentions, chat rename, git repo-file listing, and CLI permission handling.
 - `npm run test:app-skills`: build the main process and run app-skill service tests.
 
