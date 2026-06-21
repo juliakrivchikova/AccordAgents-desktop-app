@@ -1,35 +1,32 @@
 # AccordAgents
 
-AccordAgents is an Electron desktop app for **multi-participant AI chat**. Several
-AI participants (HTTP providers and local CLI agents) discuss a question or a code
-diff, debate individual points, and converge on a consensus answer. It supports
-free-form chat, code review, implementation-plan, and general-question
-conversations.
+AccordAgents is an open-source macOS app for running CLI agents in one shared project workspace (Claude and Codex are currently supported).
+
+Instead of copy-pasting context between separate terminals or chats, you keep files, roles, history, approvals, and decisions in one project thread.
 
 > Status: pre-1.0 (`0.1.x`). Interfaces and on-disk formats may still change.
 
-## Features
+## Why
 
-- **Multiple participants in one conversation** — mix hosted models (OpenAI,
-  Anthropic, Gemini) and local CLI agents (`codex`, `claude`).
-- **Debate-to-consensus** — participants raise findings, an arbiter merges them,
-  and disagreements are resolved point by point.
-- **Conversation kinds** — `chat`, `code-review`, `implementation-plan`, and
-  `general`.
-- **Local-first storage** — conversations live in a local SQLite database under
-  the OS app-data directory. Nothing is sent anywhere except to the AI providers
-  you explicitly configure.
+Use the right agent for the task without rebuilding context every time.
+
+AccordAgents lets multiple agents work from the same project, compare perspectives, and hand work off while you choose how much control they get: approve once, allow repeated requests, or use auto mode for trusted workflows.
+
+## What You Can Do
+
+- Create reusable agent roles and participants
+- Mention agents directly in a project chat
+- Run multiple agents from the same context
+- Compare Claude and Codex perspectives
+- Control permissions, tool use, and handoffs
+- Keep decisions and implementation history in one place
 
 ## Requirements
 
 - Node.js 20+
 - npm
-- macOS or Linux (primary development targets; the signed release pipeline is
-  macOS arm64)
-- Optional: the `codex` and/or `claude` CLIs on your `PATH` if you want to use
-  local CLI participants
-- Optional: API keys for any HTTP providers you want to use (OpenAI, Anthropic,
-  Gemini)
+- macOS (primary development target; the signed release pipeline is macOS arm64)
+- The `claude` and/or `codex` CLIs on your `PATH`
 
 ## Install
 
@@ -55,10 +52,7 @@ make clean
 
 ## Configuration
 
-- **API keys** are entered in the app's Settings. They are encrypted at rest with
-  Electron `safeStorage` and never leave your machine except in requests to the
-  provider you configured. Only a `hasApiKey` boolean is exposed to the renderer.
-- **Local CLI agents** (`codex`, `claude`) are detected via `which`. They run in a
+- **Local CLI agents** (`claude`, `codex`) are detected via `which`. They run in a
   permission-scoped sandbox of the selected repository: read-only by default, with
   file/shell/web access granted only through explicit per-participant approval.
 - See `docs/chat-roles-and-participants.md` for chat roles and participant
@@ -68,7 +62,7 @@ make clean
 
 - Conversations are stored locally in `accordagents.sqlite3` under Electron's
   `userData` directory.
-- Debug logs (raw provider/CLI output) may be written to
+- Debug logs (raw CLI output) may be written to
   `userData/debug-logs/<date>.jsonl` when running unpackaged. Force on/off with
   `ACCORD_AGENTS_DEBUG_LOGS=1` / `=0`.
 - Saved conversations and debug logs contain your prompts, diffs, and raw model
@@ -108,4 +102,4 @@ See [`SECURITY.md`](SECURITY.md) for how to report vulnerabilities.
 
 ## License
 
-Licensed under the [Apache License 2.0](LICENSE).
+Open source. Licensed under the [Apache License 2.0](LICENSE).
