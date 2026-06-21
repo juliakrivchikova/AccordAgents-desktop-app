@@ -1,0 +1,157 @@
+import { useRef, useState } from "react";
+import type {
+  AgentHealth,
+  AppSettings,
+  Conversation,
+  ConversationKind,
+  ConversationMessagePageInfo,
+  ConversationSummary,
+  GitRepoInfo,
+  PlanDecisionReply,
+  ReviewProgress
+} from "../../shared/types";
+import type { SettingsSection } from "../components/settings/settings-view";
+import type { ChatMessageFocusRequest } from "../components/chat/chat-conversation-view";
+import type { ChatParticipantDraft } from "../components/chat/chat-participant-drafts";
+import { DEFAULT_SETTINGS } from "./constants";
+import { readDismissedWarningsFromStorage, readInitialSidebarCollapsed, readLastViewedAtFromStorage } from "./storage";
+import type { DismissedWarningMap } from "./storage";
+
+export type SidebarMode = "history" | "settings";
+export type StateSetter<T> = React.Dispatch<React.SetStateAction<T>>;
+
+export interface AppState {
+  settings: AppSettings;
+  setSettings: StateSetter<AppSettings>;
+  agents: AgentHealth[];
+  setAgents: StateSetter<AgentHealth[]>;
+  summaries: ConversationSummary[];
+  setSummaries: StateSetter<ConversationSummary[]>;
+  conversation: Conversation | undefined;
+  setConversation: StateSetter<Conversation | undefined>;
+  messagePage: ConversationMessagePageInfo | undefined;
+  setMessagePage: StateSetter<ConversationMessagePageInfo | undefined>;
+  olderMessagesLoading: boolean;
+  setOlderMessagesLoading: StateSetter<boolean>;
+  sidebarMode: SidebarMode;
+  setSidebarMode: StateSetter<SidebarMode>;
+  activeSettingsSection: SettingsSection;
+  setActiveSettingsSection: StateSetter<SettingsSection>;
+  sidebarCollapsed: boolean;
+  setSidebarCollapsed: StateSetter<boolean>;
+  selectedThreadId: string | undefined;
+  setSelectedThreadId: StateSetter<string | undefined>;
+  focusedThreadId: string | undefined;
+  setFocusedThreadId: StateSetter<string | undefined>;
+  kind: ConversationKind;
+  setKind: StateSetter<ConversationKind>;
+  question: string;
+  setQuestion: StateSetter<string>;
+  repoPath: string;
+  setRepoPath: StateSetter<string>;
+  repoInfo: GitRepoInfo | undefined;
+  setRepoInfo: StateSetter<GitRepoInfo | undefined>;
+  warnings: string[];
+  setWarnings: StateSetter<string[]>;
+  dismissedWarningKeysByScope: DismissedWarningMap;
+  setDismissedWarningKeysByScope: StateSetter<DismissedWarningMap>;
+  initializing: boolean;
+  setInitializing: StateSetter<boolean>;
+  historyLoading: boolean;
+  setHistoryLoading: StateSetter<boolean>;
+  openingConversationId: string | undefined;
+  setOpeningConversationId: StateSetter<string | undefined>;
+  busy: boolean;
+  setBusy: StateSetter<boolean>;
+  currentRunId: string | undefined;
+  setCurrentRunId: StateSetter<string | undefined>;
+  progressLog: ReviewProgress[];
+  setProgressLog: StateSetter<ReviewProgress[]>;
+  decisionAnswers: Record<string, string>;
+  setDecisionAnswers: StateSetter<Record<string, string>>;
+  resolvedDecisionThreads: Record<string, boolean>;
+  setResolvedDecisionThreads: StateSetter<Record<string, boolean>>;
+  clarificationDrafts: Record<string, string>;
+  setClarificationDrafts: StateSetter<Record<string, string>>;
+  pendingClarifications: Record<string, PlanDecisionReply>;
+  setPendingClarifications: StateSetter<Record<string, PlanDecisionReply>>;
+  planItemReviewDrafts: Record<string, string>;
+  setPlanItemReviewDrafts: StateSetter<Record<string, string>>;
+  planCorrectionDraft: string;
+  setPlanCorrectionDraft: StateSetter<string>;
+  selectedChatParticipantConfigIds: Set<string>;
+  setSelectedChatParticipantConfigIds: StateSetter<Set<string>>;
+  chatMessageDraft: string;
+  setChatMessageDraft: StateSetter<string>;
+  chatAddParticipantDraft: ChatParticipantDraft | undefined;
+  setChatAddParticipantDraft: StateSetter<ChatParticipantDraft | undefined>;
+  chatMessageFocusRequest: ChatMessageFocusRequest | undefined;
+  setChatMessageFocusRequest: StateSetter<ChatMessageFocusRequest | undefined>;
+  error: string | undefined;
+  setError: StateSetter<string | undefined>;
+  unreadConversationIds: Set<string>;
+  setUnreadConversationIds: StateSetter<Set<string>>;
+  progressLogRef: React.MutableRefObject<ReviewProgress[]>;
+  openConversationRequestRef: React.MutableRefObject<number>;
+  chatMessageFocusNonceRef: React.MutableRefObject<number>;
+  lastViewedAtRef: React.MutableRefObject<Record<string, string>>;
+}
+
+export function useAppState(): AppState {
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [agents, setAgents] = useState<AgentHealth[]>([]);
+  const [summaries, setSummaries] = useState<ConversationSummary[]>([]);
+  const [conversation, setConversation] = useState<Conversation | undefined>();
+  const [messagePage, setMessagePage] = useState<ConversationMessagePageInfo | undefined>();
+  const [olderMessagesLoading, setOlderMessagesLoading] = useState(false);
+  const [sidebarMode, setSidebarMode] = useState<SidebarMode>("history");
+  const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(readInitialSidebarCollapsed);
+  const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>();
+  const [focusedThreadId, setFocusedThreadId] = useState<string | undefined>();
+  const [kind, setKind] = useState<ConversationKind>("chat");
+  const [question, setQuestion] = useState("Chat");
+  const [repoPath, setRepoPath] = useState("");
+  const [repoInfo, setRepoInfo] = useState<GitRepoInfo | undefined>();
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [dismissedWarningKeysByScope, setDismissedWarningKeysByScope] = useState<DismissedWarningMap>(readDismissedWarningsFromStorage);
+  const [initializing, setInitializing] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [openingConversationId, setOpeningConversationId] = useState<string | undefined>();
+  const [busy, setBusy] = useState(false);
+  const [currentRunId, setCurrentRunId] = useState<string | undefined>();
+  const [progressLog, setProgressLog] = useState<ReviewProgress[]>([]);
+  const [decisionAnswers, setDecisionAnswers] = useState<Record<string, string>>({});
+  const [resolvedDecisionThreads, setResolvedDecisionThreads] = useState<Record<string, boolean>>({});
+  const [clarificationDrafts, setClarificationDrafts] = useState<Record<string, string>>({});
+  const [pendingClarifications, setPendingClarifications] = useState<Record<string, PlanDecisionReply>>({});
+  const [planItemReviewDrafts, setPlanItemReviewDrafts] = useState<Record<string, string>>({});
+  const [planCorrectionDraft, setPlanCorrectionDraft] = useState("");
+  const [selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds] = useState<Set<string>>(new Set());
+  const [chatMessageDraft, setChatMessageDraft] = useState("");
+  const [chatAddParticipantDraft, setChatAddParticipantDraft] = useState<ChatParticipantDraft | undefined>();
+  const [chatMessageFocusRequest, setChatMessageFocusRequest] = useState<ChatMessageFocusRequest | undefined>();
+  const [error, setError] = useState<string | undefined>();
+  const [unreadConversationIds, setUnreadConversationIds] = useState<Set<string>>(new Set());
+  const progressLogRef = useRef<ReviewProgress[]>([]);
+  const openConversationRequestRef = useRef(0);
+  const chatMessageFocusNonceRef = useRef(0);
+  const lastViewedAtRef = useRef<Record<string, string>>(readLastViewedAtFromStorage());
+
+  return {
+    settings, setSettings, agents, setAgents, summaries, setSummaries, conversation, setConversation,
+    messagePage, setMessagePage, olderMessagesLoading, setOlderMessagesLoading, sidebarMode, setSidebarMode,
+    activeSettingsSection, setActiveSettingsSection, sidebarCollapsed, setSidebarCollapsed, selectedThreadId,
+    setSelectedThreadId, focusedThreadId, setFocusedThreadId, kind, setKind, question, setQuestion, repoPath,
+    setRepoPath, repoInfo, setRepoInfo, warnings, setWarnings, dismissedWarningKeysByScope,
+    setDismissedWarningKeysByScope, initializing, setInitializing, historyLoading, setHistoryLoading,
+    openingConversationId, setOpeningConversationId, busy, setBusy, currentRunId, setCurrentRunId,
+    progressLog, setProgressLog, decisionAnswers, setDecisionAnswers, resolvedDecisionThreads,
+    setResolvedDecisionThreads, clarificationDrafts, setClarificationDrafts, pendingClarifications,
+    setPendingClarifications, planItemReviewDrafts, setPlanItemReviewDrafts, planCorrectionDraft,
+    setPlanCorrectionDraft, selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds,
+    chatMessageDraft, setChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
+    chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
+    setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef, lastViewedAtRef
+  };
+}

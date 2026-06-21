@@ -1,0 +1,327 @@
+/* visual normalization styles. Keep token-driven; migrate rules into components as views are extracted. */
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes progress-dot {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.35;
+  }
+  40% {
+    transform: translateY(-2px);
+    opacity: 1;
+  }
+}
+
+@keyframes progress-rail {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes progress-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  60%,
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes typing-pulse {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.35;
+  }
+  40% {
+    transform: translateY(-2px);
+    opacity: 1;
+  }
+}
+
+:where(svg.lucide, svg[data-lucide]) {
+  stroke-width: 1.75;
+}
+
+.compose-layout,
+.slack-thread-panel,
+.chat-thread-panel,
+.slack-action-bar {
+  border-color: var(--app-border-subtle);
+  background: var(--app-surface);
+}
+
+.icon-button:hover {
+  background: var(--app-surface-hover);
+}
+
+.icon-button.selected {
+  background: var(--app-primary);
+  color: var(--app-surface);
+}
+
+.icon-button {
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
+}
+
+.toggle input:checked + span {
+  background: var(--app-accent);
+  color: var(--app-surface);
+}
+
+.message-meta,
+.view-heading span,
+.point-message small,
+.thread-panel-head span,
+.thread-empty-state,
+.empty-state,
+.settings-item-head small,
+.plan-source-support-head,
+.plan-source-support-row span,
+.plan-source-details summary {
+  color: var(--app-muted);
+}
+
+.decision-compose textarea,
+.participant-pill,
+.typing-bubble {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+}
+
+.decision-compose textarea:focus {
+  border-color: var(--app-info);
+  box-shadow: var(--focus-ring);
+}
+
+.participant-pill.selected,
+.decision-option.selected {
+  border-color: var(--app-info);
+  background: var(--app-info-soft);
+}
+
+.repo-status.ok,
+.decision-option-body small {
+  color: var(--app-success);
+}
+
+.decision-option-body small {
+  background: var(--app-success-soft);
+}
+
+.thread-resizer {
+  background: var(--app-surface);
+}
+
+.thread-resizer::before,
+.message-body,
+.settings-item,
+.plan-source-support,
+.plan-source-detail-card,
+.markdown-table-wrap,
+.markdown-code {
+  border-color: var(--app-border-subtle);
+}
+
+.thread-resizer::before {
+  background: var(--app-border-subtle);
+}
+
+.thread-resizer:hover::before,
+.resizing-thread .thread-resizer::before {
+  background: var(--app-info);
+}
+
+.message-body,
+.settings-item,
+.plan-source-support,
+.markdown-table-wrap {
+  background: var(--app-surface);
+}
+
+.message-meta strong,
+.plan-source-support-head strong,
+.thread-empty-state h2,
+.empty-state h2,
+.message-body,
+.settings-item,
+.markdown-text {
+  color: var(--app-text-strong);
+}
+
+.message-avatar,
+.thread-avatar,
+.avatar-arbiter,
+.message-avatar.avatar-arbiter,
+.thread-avatar.avatar-arbiter,
+.message.summary .message-avatar.avatar-arbiter,
+.message.system .message-avatar.avatar-arbiter,
+.typing-avatar,
+.avatar-generic {
+  background: var(--app-info);
+  color: var(--app-surface);
+}
+
+.message.user .message-avatar,
+.avatar-user,
+.message-avatar.avatar-user,
+.thread-avatar.avatar-user {
+  background: var(--app-primary);
+  color: var(--app-surface);
+}
+
+.message.summary .message-avatar,
+.message.system .message-avatar,
+.thread-avatar {
+  background: var(--app-muted-subtle);
+}
+
+.avatar-anthropic {
+  background: var(--brand-anthropic);
+  color: var(--app-surface);
+}
+
+.avatar-codex {
+  border: 1px solid var(--app-border-subtle);
+  background: var(--app-surface);
+  color: var(--brand-codex);
+  box-shadow: var(--shadow-xs);
+}
+
+.avatar-custom {
+  border: 1px solid var(--app-border-subtle);
+  background: var(--app-surface);
+  color: var(--app-primary);
+  box-shadow: var(--shadow-xs);
+}
+
+.avatar-gemini {
+  background: var(--app-info-soft);
+  color: var(--brand-gemini);
+}
+
+.avatar-anthropic,
+.avatar-codex,
+.avatar-custom {
+  padding: 0;
+  overflow: hidden;
+}
+
+.avatar-anthropic .provider-avatar-image,
+.avatar-codex .provider-avatar-image,
+.avatar-custom .custom-avatar-image {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+}
+
+.avatar-custom .custom-avatar-image {
+  transform: scale(1.2);
+}
+
+.thread-avatar.typing-avatar,
+.thread-avatar.avatar-generic,
+.message-avatar.avatar-generic {
+  background: var(--app-info);
+  color: var(--app-surface);
+}
+
+.progress-active .message-body,
+.point-message.selected .message-body,
+.point-message:hover .message-body {
+  border-color: var(--app-info);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-info) 14%, transparent);
+}
+
+.progress-active .message-body::before,
+.typing-dots i {
+  background: var(--app-info);
+}
+
+.progress-active .message-body::after {
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--app-info) 8%, transparent), transparent);
+}
+
+.point-message .message-body,
+.decision-option,
+.decision-message .message-body {
+  border-color: var(--app-border-subtle);
+}
+
+.markdown-text code {
+  background: var(--app-surface-subtle);
+}
+
+.markdown-code,
+.markdown-table th,
+.plan-source-detail-card {
+  background: var(--app-surface-subtle);
+}
+
+.markdown-table th {
+  color: var(--app-text);
+}
+
+.markdown-table th,
+.markdown-table td {
+  border-color: var(--app-border-subtle);
+}
+
+.thread-replies,
+.plan-source-details {
+  border-color: var(--app-border-subtle);
+}
+
+.compose-layout,
+.conversation-panel,
+.settings-view {
+  background: var(--app-bg);
+}
+
+.decision-compose textarea,
+.plan-correction-composer textarea {
+  border-color: var(--app-border-strong);
+  background: var(--app-surface);
+  color: var(--app-text);
+  font-size: 13px;
+}
+
+.decision-compose textarea,
+.plan-correction-composer textarea {
+  padding: 9px 10px;
+  line-height: 1.42;
+}
+
+.decision-compose textarea:focus,
+.plan-correction-composer textarea:focus {
+  border-color: var(--app-accent);
+  box-shadow: var(--focus-ring);
+}
+
+.decision-compose textarea:disabled,
+.plan-correction-composer textarea:disabled {
+  background: var(--app-surface-subtle);
+  color: var(--app-muted-subtle);
+  cursor: not-allowed;
+}
+
+.chat-composer textarea:disabled {
+  color: var(--app-muted-subtle);
+  cursor: not-allowed;
+}

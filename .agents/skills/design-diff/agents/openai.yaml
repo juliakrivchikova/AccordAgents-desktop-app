@@ -1,0 +1,7 @@
+interface:
+  display_name: "Design Diff"
+  short_description: "Diff a live AccordAgents component against its design handoff"
+  default_prompt: "Use $design-diff to compare the live component against the design handoff and report computed-style deltas, then act on them per the skill's decision tree."
+
+policy:
+  allow_implicit_invocation: true

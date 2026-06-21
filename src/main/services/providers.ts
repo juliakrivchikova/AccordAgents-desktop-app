@@ -1,4 +1,4 @@
-import type { ParticipantConfig, ProviderKind, ProviderModel } from "../../shared/types";
+import type { AgentContextUsage, ChatRoleRuntime, ParticipantConfig, ProviderKind, ProviderModel, ProviderModelCatalog } from "../../shared/types";
 import { SettingsService } from "./settings";
 
 export interface ParticipantRunResult {
@@ -7,6 +7,11 @@ export interface ParticipantRunResult {
   ok: boolean;
   error?: string;
   durationMs?: number;
+  sessionId?: string;
+  sessionRestarted?: boolean;
+  roleRuntime?: ChatRoleRuntime;
+  contextUsage?: AgentContextUsage;
+  warnings?: string[];
 }
 
 function textFromOpenAi(data: unknown): string {
@@ -119,16 +124,21 @@ export class ProviderRunner {
   constructor(private readonly settings: SettingsService) {}
 
   async listModels(kind: ProviderKind): Promise<ProviderModel[]> {
+    return (await this.listModelCatalog(kind)).models;
+  }
+
+  async listModelCatalog(kind: ProviderKind): Promise<ProviderModelCatalog> {
+    const fetchedAt = new Date().toISOString();
     if (kind === "openai") {
-      return this.listOpenAiModels();
+      return { kind, models: await this.listOpenAiModels(), authoritative: true, fetchedAt };
     }
     if (kind === "anthropic") {
-      return this.listAnthropicModels();
+      return { kind, models: await this.listAnthropicModels(), authoritative: true, fetchedAt };
     }
     if (kind === "gemini") {
-      return this.listGeminiModels();
+      return { kind, models: await this.listGeminiModels(), authoritative: true, fetchedAt };
     }
-    return [];
+    return { kind, models: [], authoritative: false, fetchedAt, error: "Model discovery is not available for this provider." };
   }
 
   async run(participant: ParticipantConfig, prompt: string, signal?: AbortSignal): Promise<ParticipantRunResult> {
@@ -247,7 +257,8 @@ export class ProviderRunner {
           id: model.id,
           label: model.id,
           description: model.owned_by ? `Owner: ${model.owned_by}` : undefined,
-          createdAt: model.created ? new Date(model.created * 1000).toISOString() : undefined
+          createdAt: model.created ? new Date(model.created * 1000).toISOString() : undefined,
+          source: "provider-api" as const
         }))
     );
   }
@@ -271,7 +282,8 @@ export class ProviderRunner {
       (data.data ?? []).map((model) => ({
         id: model.id,
         label: model.display_name ? `${model.display_name} (${model.id})` : model.id,
-        createdAt: model.created_at
+        createdAt: model.created_at,
+        source: "provider-api" as const
       }))
     );
   }
@@ -304,7 +316,8 @@ export class ProviderRunner {
         models.push({
           id,
           label: model.displayName ? `${model.displayName} (${id})` : id,
-          description: model.description
+          description: model.description,
+          source: "provider-api"
         });
       }
       pageToken = data.nextPageToken;

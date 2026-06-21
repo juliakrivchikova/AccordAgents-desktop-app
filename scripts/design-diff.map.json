@@ -1,0 +1,40 @@
+{
+  "$comment": "Per-component selector map for scripts/design-diff.cjs. 'design' selectors target the handoff bundle (classes are .aa-*); 'app' selectors target the live renderer (its own classes). The engine compares the COMPUTED STYLE of one representative element per type; it never compares text or the NUMBER of repeated items (rows/chips/pills) — content and counts are expected to differ and are ignored. Add components HERE, not in code. Match by role/structure, not shared class names.",
+  "components": {
+    "choice-card": {
+      "designFile": "AccordAgents Chat (standalone).html",
+      "designRoot": ".aa-perm",
+      "appRoot": ".chat-choice-card",
+      "elements": [
+        { "name": "panel",       "design": ".aa-perm",            "app": ".chat-choice-card",                "props": ["borderRadius", "padding", "gap", "backgroundColor"] },
+        { "name": "option",      "design": ".aa-perm-opt",        "app": ".chat-choice-option",              "props": ["borderRadius", "padding", "gap"] },
+        { "name": "optionSelBg", "design": ".aa-perm-opt.is-sel", "app": ".chat-choice-option.selected",     "props": ["backgroundColor"] },
+        { "name": "optionLabel", "design": ".aa-perm-label",      "app": ".chat-choice-option-title strong", "props": ["fontSize", "fontWeight", "color"] },
+        { "name": "submit",      "design": ".aa-perm-submit",     "app": ".chat-choice-submit",              "props": ["backgroundColor", "color", "borderRadius", "fontSize"], "composed": true }
+      ],
+      "fixtureHtml": "<section class=\"chat-choice-card\" aria-label=\"T\"><div class=\"chat-choice-head\"><div class=\"chat-choice-title-block\"><h3>Which automation to build</h3><p class=\"chat-choice-question\">How far do you want the design-diff to go?</p></div></div><div class=\"chat-choice-options\" role=\"radiogroup\"><label class=\"chat-choice-option selected\"><input type=\"radio\" checked><span class=\"chat-choice-num\">1.</span><span class=\"chat-choice-option-body\"><span class=\"chat-choice-option-title\"><strong>Option A</strong><small class=\"chat-choice-recommended-chip\">Recommended</small></span><span class=\"chat-choice-option-description\">vision self-check skill</span></span></label><label class=\"chat-choice-option\"><input type=\"radio\"><span class=\"chat-choice-num\">2.</span><span class=\"chat-choice-option-body\"><span class=\"chat-choice-option-title\"><strong>Option B</strong></span><span class=\"chat-choice-option-description\">computed-style diff</span></span></label></div><div class=\"chat-choice-actions\"><div class=\"chat-choice-action-buttons\"><button class=\"chat-choice-cancel\">Cancel</button><button class=\"chat-choice-submit\"><span>Submit</span><kbd>↵</kbd></button></div></div></section>"
+    },
+    "review-card": {
+      "designFile": "Review Card (standalone) (1).html",
+      "designRoot": ".aa-rev",
+      "appRoot": ".chat-app-tool-approval-panel.is-review-change",
+      "$elementsComment": "Elements with both design+app are style-compared. Elements with only `app` are impl-only (expect ABSENT IN DESIGN — impl added it). Elements with only `design` are design-only (expect ABSENT IN IMPL — impl dropped it).",
+      "elements": [
+        { "name": "panel",         "design": ".aa-rev",          "app": ".chat-app-tool-approval-panel.is-review-change",                                "props": ["borderRadius", "backgroundColor", "borderColor"] },
+        { "name": "chip",          "design": ".aa-rev-badge",    "app": ".chat-app-tool-review-chip",                                                    "props": ["borderRadius", "padding", "gap", "fontSize", "fontWeight", "backgroundColor"] },
+        { "name": "roleNameInput", "design": ".aa-rev-input",    "app": ".chat-app-tool-review-block.is-role-review .chat-app-tool-review-field input",   "props": ["borderRadius", "padding", "fontSize", "color", "backgroundColor", "borderColor"] },
+        { "name": "footer",        "design": ".aa-rev-foot",     "app": ".chat-app-tool-review-footer",                                                  "props": ["padding", "gap", "backgroundColor", "borderColor"] },
+        { "name": "submit",        "design": ".aa-btn-primary",  "app": ".chat-app-tool-review-submit",                                                  "props": ["borderRadius", "fontSize", "backgroundColor", "color"], "composed": true },
+
+        { "name": "titleBlock",    "app": ".chat-app-tool-review-role-head",                                                                            "props": [] },
+        { "name": "specPanel",     "app": ".chat-app-tool-review-spec",                                                                                 "props": [] },
+        { "name": "specRow",       "app": ".chat-app-tool-review-spec-row",                                                                             "props": [] },
+
+        { "name": "description",   "design": ".aa-rev-textarea", "app": ".chat-app-tool-review-field.is-description textarea", "props": [] },
+        { "name": "charCount",     "design": ".aa-rev-count",    "app": ".chat-app-tool-review-field.is-role-name em",         "props": [] },
+        { "name": "previewToggle", "design": ".aa-rev-seg",      "app": ".chat-app-tool-review-preview-toggle",                "props": [] }
+      ],
+      "fixtureHtml": "<section class=\"chat-app-tool-approval-panel is-review-change\" aria-label=\"Chat Assistant wants to create a role\"><div class=\"chat-app-tool-review-chip\">New role</div><h3>@assistant wants to create a role</h3><fieldset class=\"chat-app-tool-review-fieldset\"><div class=\"chat-app-tool-review-stack\"><div class=\"chat-app-tool-review-block is-role-review is-new-role\"><div class=\"chat-app-tool-review-role-head\"><div class=\"chat-app-tool-review-role-icon\" aria-hidden=\"true\"></div><div><strong>Performance auditor</strong><span>Reusable role template</span></div></div><div class=\"chat-app-tool-review-spec\"><div class=\"chat-app-tool-review-spec-row\"><span>Role type</span><strong>Custom role</strong></div><div class=\"chat-app-tool-review-spec-row\"><span>App tools</span><strong>No app tool grants</strong></div></div><label class=\"chat-app-tool-review-field\"><span>Role name</span><input value=\"Performance auditor\"></label><label class=\"chat-app-tool-review-field is-instructions\"><span><span>Instructions</span><em>28 words</em></span><textarea rows=\"7\">Review performance-sensitive code changes. Focus on avoidable regressions, missing measurements, and risky runtime behavior. Keep findings concrete and tied to files.</textarea></label></div></div></fieldset><div class=\"chat-app-tool-review-footer\"><button class=\"chat-app-tool-review-cancel\">Cancel</button><button class=\"chat-app-tool-review-submit\" data-slot=\"button\">Create role</button></div></section>"
+    }
+  }
+}

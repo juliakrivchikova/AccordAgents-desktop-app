@@ -1,0 +1,282 @@
+/* chat setup styles. Keep token-driven; migrate rules into components as views are extracted. */
+
+.chat-setup,
+.chat-roster-editor {
+  display: grid;
+  gap: 12px;
+}
+
+.chat-setup-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
+.chat-setup-start {
+  min-width: 168px;
+}
+
+.chat-participant-row {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr)) 38px;
+  align-items: end;
+  column-gap: 8px;
+  row-gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface);
+}
+
+.avatar-picker-field,
+.behavior-rules-field {
+  grid-column: 1 / -1;
+}
+
+.chat-participant-row > [data-slot="form-row"] {
+  min-width: 0;
+}
+
+.chat-participant-row .app-select-trigger {
+  width: 100% !important;
+  max-width: 100%;
+}
+
+.chat-participant-row [data-slot="select-value"] {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-behavior-rule-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chat-behavior-rule-option {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 30px;
+  gap: 7px;
+  padding: 5px 9px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chat-behavior-rule-option input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--app-accent);
+}
+
+.chat-behavior-rule-option span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-model-picker {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chat-reasoning-picker {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chat-model-picker-manual {
+  min-width: 0;
+}
+
+.chat-model-picker-status {
+  min-width: 0;
+  color: var(--app-muted);
+  font-size: 11px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.chat-permissions-panel {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--app-surface-muted) 48%, transparent);
+}
+
+.chat-permission-toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.chat-permission-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 8px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chat-permission-toggle span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-permission-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  flex: 0 0 auto;
+  accent-color: var(--app-accent);
+}
+
+.chat-shell-rule-list {
+  display: grid;
+  gap: 8px;
+}
+
+.chat-shell-rule-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--app-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chat-shell-rule-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 0.6fr) minmax(96px, 0.6fr) minmax(180px, 1.8fr) 34px;
+  align-items: center;
+  gap: 8px;
+}
+
+.avatar-choice-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.avatar-choice {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  padding: 3px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: var(--radius-control);
+  background: transparent;
+  cursor: pointer;
+}
+
+.avatar-choice:hover {
+  border-color: var(--app-accent-border);
+  background: color-mix(in srgb, var(--app-surface-hover) 58%, transparent);
+}
+
+.avatar-choice.selected {
+  border-color: var(--app-success);
+  background: var(--app-success-soft);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-success) 14%, transparent);
+}
+
+.avatar-choice-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 0;
+  overflow: visible;
+}
+
+.chat-row-remove {
+  align-self: end;
+}
+
+.participant-config-card .chat-participant-row {
+  margin-top: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.chat-participant-select-list {
+  display: grid;
+  gap: 8px;
+}
+
+.saved-participant-option {
+  display: grid;
+  grid-template-columns: 18px 36px minmax(120px, max-content) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  cursor: pointer;
+}
+
+.saved-participant-option.selected {
+  border-color: var(--app-success);
+  background: var(--app-success-soft);
+}
+
+.saved-participant-option.disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+}
+
+.saved-participant-option input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--app-accent);
+}
+
+.saved-participant-option strong,
+.saved-participant-option span,
+.saved-participant-option small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-participant-option span,
+.saved-participant-option small {
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.saved-participant-option small {
+  grid-column: 4;
+}

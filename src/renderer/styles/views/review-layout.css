@@ -1,0 +1,227 @@
+/* review layout styles. Keep token-driven; migrate rules into components as views are extracted. */
+
+.slack-view {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  height: 100%;
+  min-height: 0;
+}
+
+.slack-view.thread-open {
+  grid-template-columns: minmax(360px, 1fr) 10px minmax(320px, var(--thread-width, 460px));
+}
+
+.slack-view.thread-focused {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.slack-view.resizing-thread {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.slack-timeline {
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px;
+}
+
+.virtual-timeline {
+  contain: strict;
+  overflow-anchor: none;
+}
+
+.virtual-timeline-inner {
+  position: relative;
+  width: 100%;
+}
+
+.virtual-timeline-item {
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  width: 100%;
+  padding-bottom: 14px;
+}
+
+.virtual-timeline-item > .message,
+.virtual-timeline-item > .chat-message,
+.virtual-timeline-item > .chat-thinking-row {
+  margin-bottom: 0;
+}
+
+.virtual-timeline-item:has(.agent-avatar-wrap:hover),
+.virtual-timeline-item:has(.agent-avatar-wrap:focus-within) {
+  z-index: 20;
+}
+
+.timeline-load-more-row {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 10px;
+}
+
+.thread-resizer {
+  grid-row: 1;
+  position: relative;
+  min-width: 10px;
+  cursor: col-resize;
+  background: var(--app-surface-subtle);
+}
+
+.thread-resizer::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 4px;
+  width: 2px;
+  background: var(--app-border);
+}
+
+.thread-resizer:hover::before,
+.resizing-thread .thread-resizer::before {
+  background: var(--app-success);
+}
+
+.slack-thread-panel {
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+  background: var(--app-surface);
+}
+
+.thread-focused .slack-thread-panel {
+  border-left: 0;
+  padding: 24px;
+}
+
+.thread-focused .point-thread {
+  width: min(100%, 980px);
+  margin: 0 auto;
+}
+
+.view-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.view-heading h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.view-heading span {
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.view-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.slack-action-bar {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 56px;
+  padding: 10px 18px;
+  border-top: 1px solid var(--app-border);
+  background: color-mix(in srgb, var(--app-warning-soft) 70%, var(--app-surface));
+}
+
+.slack-action-bar.with-composer {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.run-status-line {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  color: var(--app-muted-subtle);
+}
+
+.run-status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slack-action-spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.decision-action-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+  gap: 14px;
+}
+
+.decision-action-status {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  text-align: right;
+}
+
+.decision-action-status span {
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.decision-action-status strong {
+  color: var(--app-text-strong);
+  font-size: 13px;
+}
+
+.plan-correction-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 8px;
+  width: min(100%, 960px);
+  margin: 0 auto;
+}
+
+.plan-correction-composer textarea {
+  width: 100%;
+  min-height: 54px;
+  max-height: 180px;
+  resize: vertical;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  padding: 12px 13px;
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  line-height: 1.42;
+  outline: none;
+}
+
+.plan-correction-composer textarea:focus {
+  border-color: var(--app-success);
+  box-shadow: var(--focus-ring);
+}
+
+.plan-correction-composer textarea:disabled {
+  background: var(--app-surface-subtle);
+  color: var(--app-muted);
+  cursor: not-allowed;
+}

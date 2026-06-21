@@ -1,0 +1,184 @@
+import type { Dispatch, ReactNode, SetStateAction } from "react";
+import {
+  CheckCircle2,
+  FolderOpen,
+  Play,
+  Plus,
+  RefreshCw,
+  Users,
+  X,
+  XCircle
+} from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  FormRow,
+  IconButton
+} from "../primitives";
+import type {
+  AgentHealth,
+  AppSettings,
+  ChatParticipantConfig,
+  GitRepoInfo
+} from "../../../shared/types";
+import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
+import {
+  addableSavedParticipantConfigs,
+  chatParticipantPermissionSummary,
+  labelForProviderKind,
+  selectedChatParticipantDrafts,
+  validateChatStartupDrafts
+} from "./chat-participant-drafts";
+
+export function ChatSetup(props: {
+  title: string;
+  repoPath: string;
+  repoInfo?: GitRepoInfo;
+  selectedParticipantIds: Set<string>;
+  settings: AppSettings;
+  agents: AgentHealth[];
+  busy: boolean;
+  renderParticipantAvatar: (participant: ChatParticipantConfig) => ReactNode;
+  participantRoleLabel: (participant: ChatParticipantConfig) => string;
+  onTitleChange: (value: string) => void;
+  onRepoPathChange: (value: string) => void;
+  onRepoBlur: () => void;
+  onSelectRepo: () => void;
+  onSelectedParticipantIdsChange: Dispatch<SetStateAction<Set<string>>>;
+  onOpenParticipantsSettings: () => void;
+  onStart: () => void;
+}): JSX.Element {
+  const normalizedDrafts = selectedChatParticipantDrafts(props.settings.chatParticipantConfigs, props.selectedParticipantIds);
+  const validation = validateChatStartupDrafts(normalizedDrafts, props.settings.chatRoleConfigs, props.agents, props.settings.chatBehaviorRules);
+  const savedParticipantOptions = addableSavedParticipantConfigs(props.settings, props.agents, new Set());
+  const allParticipantIds = savedParticipantOptions
+    .filter((participant) => !participant.invalidReason)
+    .map((participant) => participant.config.id);
+  const hasSavedParticipants = props.settings.chatParticipantConfigs.length > 0;
+  return (
+    <div className="chat-setup">
+      <FormRow label="Chat title">
+        <Input value={props.title} onChange={(event) => props.onTitleChange(event.target.value)} />
+      </FormRow>
+      <div className="flex items-end gap-2">
+        <FormRow label="Repository" optional className="flex-1">
+          <Input
+            value={props.repoPath}
+            data-testid="chat-repo-input"
+            onChange={(event) => props.onRepoPathChange(event.target.value)}
+            onBlur={props.onRepoBlur}
+          />
+        </FormRow>
+        <IconButton
+          size="sm"
+          icon={FolderOpen}
+          label="Select repository"
+          tooltip="Select repository"
+          variant="outline"
+          onClick={props.onSelectRepo}
+        />
+      </div>
+      {props.repoInfo && (
+        <div className={`repo-status ${props.repoInfo.isRepo ? "ok" : "bad"}`}>
+          {props.repoInfo.isRepo ? (
+            <>
+              <CheckCircle2 size={16} />
+              {props.repoInfo.currentBranch || "detached"} · {props.repoInfo.statusLines.length} changed paths
+            </>
+          ) : (
+            <>
+              <XCircle size={16} />
+              {props.repoInfo.error || "Not a git repository"}
+            </>
+          )}
+        </div>
+      )}
+      <div className="chat-roster-editor">
+        <div className="settings-section-head">
+          <h2>Participants</h2>
+          <div className="settings-item-actions">
+            {hasSavedParticipants && (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={allParticipantIds.length === 0}
+                  onClick={() => props.onSelectedParticipantIdsChange(new Set(allParticipantIds))}
+                >
+                  <Users size={16} />
+                  Select all
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={props.selectedParticipantIds.size === 0}
+                  onClick={() => props.onSelectedParticipantIdsChange(new Set())}
+                >
+                  <X size={16} />
+                  Clear
+                </Button>
+              </>
+            )}
+            <Button variant="outline" size="sm" onClick={props.onOpenParticipantsSettings}>
+              <Plus size={16} />
+              New participant
+            </Button>
+          </div>
+        </div>
+        {!hasSavedParticipants ? (
+          <div className="empty-state">
+            No saved participants yet. Start with Chat Assistant, or create reusable participants in Settings.
+          </div>
+        ) : (
+          <div className="chat-participant-select-list">
+            {savedParticipantOptions.map(({ config: participant, invalidReason }) => {
+              const selected = props.selectedParticipantIds.has(participant.id);
+              return (
+                <label className={`saved-participant-option ${selected ? "selected" : ""} ${invalidReason ? "disabled" : ""}`} key={participant.id}>
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    disabled={Boolean(invalidReason)}
+                    onChange={(event) => {
+                      props.onSelectedParticipantIdsChange((current) => {
+                        const next = new Set(current);
+                        if (event.target.checked) {
+                          next.add(participant.id);
+                        } else {
+                          next.delete(participant.id);
+                        }
+                        return next;
+                      });
+                    }}
+                  />
+                  {props.renderParticipantAvatar(participant)}
+                  <strong>@{participant.handle}</strong>
+                  <span>{savedParticipantSummary(props.settings, participant, props.participantRoleLabel(participant))}</span>
+                  {invalidReason && <small>{invalidReason}</small>}
+                </label>
+              );
+            })}
+          </div>
+        )}
+      </div>
+      {validation && <div className="inline-error">{validation}</div>}
+      <div className="chat-setup-actions">
+        <Button size="lg" className="chat-setup-start" disabled={props.busy || Boolean(validation)} onClick={props.onStart}>
+          {props.busy ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
+          {props.busy ? "Starting chat..." : "Start chat"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function savedParticipantSummary(settings: AppSettings, participant: ChatParticipantConfig, roleLabel: string): string {
+  return [
+    roleLabel,
+    labelForProviderKind(settings.providers, participant.kind),
+    participant.model,
+    participant.reasoningEffort ? `reasoning ${chatReasoningEffortLabel(participant.reasoningEffort)}` : "",
+    chatParticipantPermissionSummary(participant)
+  ].filter(Boolean).join(" · ");
+}

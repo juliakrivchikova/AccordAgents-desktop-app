@@ -1,0 +1,7 @@
+interface:
+  display_name: "Design Diff (generic)"
+  short_description: "Diff a Claude design HTML against a live web app (or two screenshots)"
+  default_prompt: "Use $design-diff-generic to compare a Claude-produced design file against the live implementation and report computed-style deltas, ignoring content and item counts, then act per the decision tree."
+
+policy:
+  allow_implicit_invocation: true

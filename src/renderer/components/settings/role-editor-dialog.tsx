@@ -1,0 +1,271 @@
+import { useEffect, useState } from "react";
+import { Eye, LockKeyhole, Pencil, Trash2, X } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import type { ChatRoleConfig, ChatRoleConfigUpdate } from "../../../shared/types";
+import { ResizableTextarea } from "../primitives";
+import { MarkdownText } from "../content/markdown-text";
+import {
+  CHAT_ROLE_INSTRUCTIONS_MAX_CHARS,
+  CHAT_ROLE_LABEL_MAX_CHARS,
+  RoleKindBadge,
+  composeRoleInstructions,
+  parseRoleInstructions,
+  roleWordCount,
+  slugFromRoleLabel,
+  type RoleEditorState
+} from "./role-settings-utils";
+
+export function ChatRoleEditorDialog(props: {
+  editor?: RoleEditorState;
+  roles: ChatRoleConfig[];
+  savedParticipantPresetsByRole: Map<string, number>;
+  onSave: (update: ChatRoleConfigUpdate) => Promise<void>;
+  onArchive: (id: string) => Promise<void>;
+  onDuplicate: (role: ChatRoleConfig) => void;
+  onClose: () => void;
+}): JSX.Element {
+  const editingRoleId = props.editor?.type === "edit" ? props.editor.roleId : undefined;
+  const role = editingRoleId ? props.roles.find((item) => item.id === editingRoleId) : undefined;
+  const open = props.editor?.type === "new" || Boolean(role);
+  const roleParts = parseRoleInstructions(role?.instructions ?? "");
+  const initialLabel = props.editor?.type === "new" ? props.editor.initialLabel ?? "" : role?.label ?? "";
+  const initialDescription = props.editor?.type === "new" ? props.editor.initialDescription ?? "" : roleParts.description;
+  const initialInstructions = props.editor?.type === "new" ? props.editor.initialInstructions ?? "" : roleParts.body;
+  const readOnly = props.editor?.type === "edit" && Boolean(role?.builtIn);
+  const initialPreview = props.editor?.type === "edit";
+  const [label, setLabel] = useState(initialLabel);
+  const [description, setDescription] = useState(initialDescription);
+  const [instructions, setInstructions] = useState(initialInstructions);
+  const [preview, setPreview] = useState(initialPreview);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    setLabel(initialLabel);
+    setDescription(initialDescription);
+    setInstructions(initialInstructions);
+    setPreview(initialPreview);
+    setSaving(false);
+    setDeleting(false);
+    setConfirmDelete(false);
+  }, [initialDescription, initialInstructions, initialLabel, initialPreview, open]);
+
+  const trimmedLabel = label.trim();
+  const trimmedDescription = description.trim();
+  const trimmedInstructions = instructions.trim();
+  const composedInstructions = composeRoleInstructions({
+    name: roleParts.frontmatterName || slugFromRoleLabel(trimmedLabel),
+    description: trimmedDescription,
+    body: trimmedInstructions,
+    includeFrontmatter: Boolean(trimmedDescription || roleParts.hadFrontmatter || props.editor?.type === "new")
+  });
+  const validation = trimmedLabel.length > CHAT_ROLE_LABEL_MAX_CHARS
+    ? `Role name must be ${CHAT_ROLE_LABEL_MAX_CHARS} characters or less.`
+    : composedInstructions.length > CHAT_ROLE_INSTRUCTIONS_MAX_CHARS
+      ? `Role instructions must be ${CHAT_ROLE_INSTRUCTIONS_MAX_CHARS.toLocaleString()} characters or less.`
+      : undefined;
+  const changed = props.editor?.type === "new"
+    ? Boolean(trimmedLabel || trimmedDescription || trimmedInstructions)
+    : Boolean(role && (trimmedLabel !== role.label || trimmedDescription !== roleParts.description || trimmedInstructions !== roleParts.body));
+  const canSave = !readOnly && !saving && Boolean(trimmedLabel && trimmedInstructions) && !validation && changed;
+  const wordCount = roleWordCount(instructions);
+  const title = props.editor?.type === "new" ? trimmedLabel || "New role" : role?.label ?? "Role";
+
+  async function save(): Promise<void> {
+    if (!canSave) {
+      return;
+    }
+    setSaving(true);
+    try {
+      await props.onSave({
+        id: props.editor?.type === "edit" ? role?.id : undefined,
+        label: trimmedLabel,
+        instructions: composedInstructions
+      });
+      props.onClose();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Delete (archive) is offered for editable custom roles only; built-ins and new roles cannot be deleted.
+  const usageCount = role ? (props.savedParticipantPresetsByRole.get(role.id) ?? 0) : 0;
+  const showDelete = props.editor?.type === "edit" && Boolean(role) && !role?.builtIn;
+  const canDelete = showDelete && usageCount === 0 && !deleting;
+
+  async function deleteRole(): Promise<void> {
+    if (!role || !canDelete) {
+      return;
+    }
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
+    setDeleting(true);
+    try {
+      await props.onArchive(role.id);
+      props.onClose();
+    } catch {
+      // App-level error state is set by the caller; keep the dialog open so the
+      // failed delete does not look like it succeeded.
+    } finally {
+      setDeleting(false);
+      setConfirmDelete(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => {
+      if (!nextOpen) {
+        props.onClose();
+      }
+    }}>
+      <DialogContent className="roles-editor-dialog" data-testid="settings-role-modal" showCloseButton={false}>
+        <DialogHeader className="roles-editor-head">
+          <div className="roles-editor-title-row">
+            <span className="roles-editor-title-text">
+              <DialogTitle>{title}</DialogTitle>
+            </span>
+            <RoleKindBadge builtIn={Boolean(role?.builtIn && props.editor?.type === "edit")} />
+            <DialogClose asChild>
+              <button type="button" className="roles-editor-close" aria-label="Close role editor" data-testid="settings-role-modal-close">
+                <X size={15} aria-hidden />
+              </button>
+            </DialogClose>
+          </div>
+        </DialogHeader>
+        <div className="roles-editor-body">
+          {readOnly && role && (
+            <div className="roles-readonly-banner" data-testid="settings-role-builtin-banner">
+              <LockKeyhole size={17} aria-hidden />
+              <span>This is a built-in role and is read-only. Duplicate it to create an editable copy.</span>
+              <Button
+                type="button"
+                className="roles-duplicate-button"
+                data-testid="settings-role-duplicate"
+                onClick={() => props.onDuplicate(role)}
+              >
+                Duplicate to edit
+              </Button>
+            </div>
+          )}
+
+          <label className="roles-field-label" htmlFor="role-editor-name">Name</label>
+          <Input
+            id="role-editor-name"
+            className="roles-editor-input"
+            data-testid="settings-role-modal-name"
+            value={label}
+            readOnly={readOnly}
+            maxLength={CHAT_ROLE_LABEL_MAX_CHARS}
+            placeholder="e.g. Security auditor"
+            onChange={(event) => setLabel(event.target.value)}
+          />
+
+          <label className="roles-field-label roles-field-label-spaced" htmlFor="role-editor-description">Description</label>
+          <ResizableTextarea
+            id="role-editor-description"
+            className="roles-editor-description"
+            data-testid="settings-role-modal-description"
+            value={description}
+            readOnly={readOnly}
+            rows={2}
+            maxHeight={160}
+            placeholder="A short summary of what this role is for..."
+            onChange={(event) => setDescription(event.target.value)}
+          />
+
+          <div className="roles-instructions-head">
+            <label className="roles-field-label" htmlFor="role-editor-instructions">Instructions</label>
+            <span>{wordCount} {wordCount === 1 ? "word" : "words"}</span>
+            {!readOnly && (
+              <span className="roles-preview-toggle" aria-label="Instruction editor mode">
+                <button
+                  type="button"
+                  className={preview ? "is-selected" : ""}
+                  data-testid="settings-role-modal-preview"
+                  onClick={() => setPreview(true)}
+                >
+                  <Eye size={14} aria-hidden />
+                  Preview
+                </button>
+                <button
+                  type="button"
+                  className={!preview ? "is-selected" : ""}
+                  data-testid="settings-role-modal-edit"
+                  onClick={() => setPreview(false)}
+                >
+                  <Pencil size={14} aria-hidden />
+                  Edit
+                </button>
+              </span>
+            )}
+          </div>
+
+          {preview || readOnly ? (
+            <div className={`roles-preview-box ${readOnly ? "is-readonly" : ""}`} data-testid="settings-role-modal-preview-content">
+              {trimmedInstructions ? <MarkdownText content={trimmedInstructions} /> : <span>No instructions yet.</span>}
+            </div>
+          ) : (
+            <ResizableTextarea
+              id="role-editor-instructions"
+              className="roles-editor-textarea"
+              data-testid="settings-role-modal-instructions"
+              value={instructions}
+              maxLength={CHAT_ROLE_INSTRUCTIONS_MAX_CHARS}
+              rows={16}
+              maxHeight={520}
+              placeholder="Describe what this role does and how it should behave..."
+              onChange={(event) => setInstructions(event.target.value)}
+            />
+          )}
+          {validation && <div className="inline-error roles-editor-error">{validation}</div>}
+        </div>
+        <DialogFooter className="roles-editor-footer">
+          {showDelete && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className={`roles-editor-delete ${confirmDelete ? "is-confirming" : ""}`}
+              disabled={!canDelete}
+              title={usageCount > 0
+                ? `In use by ${usageCount} saved participant preset${usageCount === 1 ? "" : "s"}. Reassign or remove them first.`
+                : undefined}
+              data-testid="settings-role-modal-delete"
+              onClick={() => void deleteRole()}
+            >
+              <Trash2 size={14} aria-hidden />
+              {deleting ? "Deleting..." : confirmDelete ? "Confirm delete" : "Delete role"}
+            </Button>
+          )}
+          <DialogClose asChild>
+            <Button type="button" variant="outline" size="sm" className="roles-editor-cancel" disabled={saving} data-testid="settings-role-modal-cancel">
+              {readOnly ? "Close" : "Cancel"}
+            </Button>
+          </DialogClose>
+          {!readOnly && (
+            <Button
+              type="button"
+              size="sm"
+              className="roles-editor-save"
+              disabled={!canSave}
+              data-testid="settings-role-modal-save"
+              onClick={() => void save()}
+            >
+              {saving ? "Saving..." : props.editor?.type === "new" ? "Create role" : "Save"}
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
