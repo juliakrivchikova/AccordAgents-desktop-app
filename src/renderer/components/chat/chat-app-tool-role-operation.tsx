@@ -3,7 +3,24 @@ import { AlertTriangle, Eye, Pencil } from "lucide-react";
 
 import type { ChatParticipantConfig, ChatRoleChangeRequest, ChatRoleConfig } from "../../../shared/types";
 import { MarkdownText } from "../content/markdown-text";
-import { wordCount } from "./chat-app-tool-roster";
+import {
+  composeRoleInstructions,
+  parseRoleInstructions,
+  roleWordCount,
+  slugFromRoleLabel
+} from "../settings/role-settings-utils";
+
+type EditableRoleOperation =
+  | Extract<ChatRoleChangeRequest["operations"][number], { type: "create_role" }>
+  | Extract<ChatRoleChangeRequest["operations"][number], { type: "edit_role" }>;
+
+interface RoleReviewFields {
+  label: string;
+  description: string;
+  instructions: string;
+  frontmatterName?: string;
+  hadFrontmatter: boolean;
+}
 
 export function ChatAppToolRoleChangeOperation(props: {
   request: ChatRoleChangeRequest;
@@ -11,15 +28,6 @@ export function ChatAppToolRoleChangeOperation(props: {
   savedParticipants: ChatParticipantConfig[];
   onChange: (request: ChatRoleChangeRequest) => void;
 }): JSX.Element {
-  const [previewInstructions, setPreviewInstructions] = useState(true);
-
-  function updateReason(reason: string): void {
-    props.onChange({
-      ...props.request,
-      reason
-    });
-  }
-
   function updateRole(index: number, patch: { label?: string; instructions?: string }): void {
     props.onChange({
       ...props.request,
@@ -76,77 +84,142 @@ export function ChatAppToolRoleChangeOperation(props: {
         const savedPresetCount = roleConfigId
           ? props.savedParticipants.filter((participant) => participant.roleConfigId === roleConfigId).length
           : 0;
-        const instructionWordCount = wordCount(operation.role.instructions);
         return (
-          <div className={`chat-app-tool-review-block is-role-review ${operation.type === "create_role" ? "is-new-role" : "is-edit-role"}`} key={`${operation.type}-${index}`}>
-            <label className="chat-app-tool-review-field is-role-name">
-              <span className="chat-app-tool-review-field-head">
-                <span>Role name</span>
-                <em>{operation.role.label.length} / 60</em>
-              </span>
-              <input
-                value={operation.role.label}
-                maxLength={60}
-                onChange={(event) => updateRole(index, { label: event.currentTarget.value })}
-              />
-            </label>
-            <label className="chat-app-tool-review-field is-description">
-              <span>Description</span>
-              <textarea
-                value={props.request.reason ?? ""}
-                rows={3}
-                onChange={(event) => updateReason(event.currentTarget.value)}
-              />
-            </label>
-            <div className="chat-app-tool-review-field is-instructions">
-              <span className="chat-app-tool-review-field-head">
-                <span>Instructions</span>
-                <span className="chat-app-tool-review-instructions-meta">
-                  <em>{instructionWordCount} {instructionWordCount === 1 ? "word" : "words"}</em>
-                  <span className="chat-app-tool-review-preview-toggle" role="group" aria-label="Instructions view">
-                    <button
-                      type="button"
-                      className={previewInstructions ? "is-active" : ""}
-                      aria-pressed={previewInstructions}
-                      onClick={() => setPreviewInstructions(true)}
-                    >
-                      <Eye size={13} aria-hidden />
-                      Preview
-                    </button>
-                    <button
-                      type="button"
-                      className={!previewInstructions ? "is-active" : ""}
-                      aria-pressed={!previewInstructions}
-                      onClick={() => setPreviewInstructions(false)}
-                    >
-                      <Pencil size={13} aria-hidden />
-                      Edit
-                    </button>
-                  </span>
-                </span>
-              </span>
-              {previewInstructions ? (
-                <div className="chat-app-tool-review-instructions-preview">
-                  {operation.role.instructions}
-                </div>
-              ) : (
-                <textarea
-                  value={operation.role.instructions}
-                  rows={7}
-                  onChange={(event) => updateRole(index, { instructions: event.currentTarget.value })}
-                />
-              )}
-            </div>
-            {operation.type === "edit_role" && savedPresetCount > 0 && (
-              <div className="chat-app-tool-review-warning">
-                <AlertTriangle size={14} aria-hidden />
-                <span>Editing this role affects participants already using it.</span>
-              </div>
-            )}
-          </div>
+          <EditableRoleReviewOperation
+            key={roleOperationKey(operation, index)}
+            operation={operation}
+            savedPresetCount={savedPresetCount}
+            onChange={(patch) => updateRole(index, patch)}
+          />
         );
       })}
     </div>
   );
 }
 
+function EditableRoleReviewOperation(props: {
+  operation: EditableRoleOperation;
+  savedPresetCount: number;
+  onChange: (patch: { label: string; instructions: string }) => void;
+}): JSX.Element {
+  const [previewInstructions, setPreviewInstructions] = useState(true);
+  const [fields, setFields] = useState<RoleReviewFields>(() => roleFieldsFromOperation(props.operation));
+  const instructionWordCount = roleWordCount(fields.instructions);
+  const trimmedInstructions = fields.instructions.trim();
+
+  function updateFields(patch: Partial<Pick<RoleReviewFields, "label" | "description" | "instructions">>): void {
+    const next = { ...fields, ...patch };
+    setFields(next);
+    props.onChange({
+      label: next.label,
+      instructions: composeOperationInstructions(props.operation.type, next)
+    });
+  }
+
+  function updateDescription(value: string): void {
+    updateFields({ description: normalizeRoleDescriptionInput(value) });
+  }
+
+  return (
+    <div className={`chat-app-tool-review-block is-role-review ${props.operation.type === "create_role" ? "is-new-role" : "is-edit-role"}`}>
+      <label className="chat-app-tool-review-field is-role-name">
+        <span className="chat-app-tool-review-field-head">
+          <span>Role name</span>
+          <em>{fields.label.length} / 60</em>
+        </span>
+        <input
+          value={fields.label}
+          maxLength={60}
+          onChange={(event) => updateFields({ label: event.currentTarget.value })}
+        />
+      </label>
+      <label className="chat-app-tool-review-field is-description">
+        <span>Description</span>
+        <textarea
+          value={fields.description}
+          rows={3}
+          onChange={(event) => updateDescription(event.currentTarget.value)}
+        />
+      </label>
+      <div className="chat-app-tool-review-field is-instructions">
+        <span className="chat-app-tool-review-field-head">
+          <span>Instructions</span>
+          <span className="chat-app-tool-review-instructions-meta">
+            <em>{instructionWordCount} {instructionWordCount === 1 ? "word" : "words"}</em>
+            <span className="chat-app-tool-review-preview-toggle" role="group" aria-label="Instructions view">
+              <button
+                type="button"
+                className={previewInstructions ? "is-active" : ""}
+                aria-pressed={previewInstructions}
+                onClick={() => setPreviewInstructions(true)}
+              >
+                <Eye size={13} aria-hidden />
+                Preview
+              </button>
+              <button
+                type="button"
+                className={!previewInstructions ? "is-active" : ""}
+                aria-pressed={!previewInstructions}
+                onClick={() => setPreviewInstructions(false)}
+              >
+                <Pencil size={13} aria-hidden />
+                Edit
+              </button>
+            </span>
+          </span>
+        </span>
+        {previewInstructions ? (
+          <div className="chat-app-tool-review-instructions-preview">
+            {trimmedInstructions ? <MarkdownText content={trimmedInstructions} /> : <span>No instructions yet.</span>}
+          </div>
+        ) : (
+          <textarea
+            value={fields.instructions}
+            rows={7}
+            onChange={(event) => updateFields({ instructions: event.currentTarget.value })}
+          />
+        )}
+      </div>
+      {props.operation.type === "edit_role" && props.savedPresetCount > 0 && (
+        <div className="chat-app-tool-review-warning">
+          <AlertTriangle size={14} aria-hidden />
+          <span>Editing this role affects participants already using it.</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function roleFieldsFromOperation(operation: EditableRoleOperation): RoleReviewFields {
+  const parts = parseRoleInstructions(operation.role.instructions);
+  return {
+    label: operation.role.label,
+    description: parts.description,
+    instructions: parts.body,
+    frontmatterName: parts.frontmatterName,
+    hadFrontmatter: parts.hadFrontmatter
+  };
+}
+
+function composeOperationInstructions(operationType: EditableRoleOperation["type"], fields: RoleReviewFields): string {
+  const trimmedLabel = fields.label.trim();
+  const trimmedDescription = fields.description.trim();
+  const trimmedInstructions = fields.instructions.trim();
+  return composeRoleInstructions({
+    name: fields.frontmatterName || slugFromRoleLabel(trimmedLabel),
+    description: trimmedDescription,
+    body: trimmedInstructions,
+    includeFrontmatter: Boolean(trimmedDescription || fields.hadFrontmatter || operationType === "create_role")
+  });
+}
+
+function normalizeRoleDescriptionInput(value: string): string {
+  return value.replace(/\r\n/g, "\n").replace(/\n+/g, " ");
+}
+
+function roleOperationKey(operation: EditableRoleOperation, index: number): string {
+  if (operation.type === "edit_role") {
+    return `${operation.type}-${operation.role.roleConfigId}`;
+  }
+  return `${operation.type}-${operation.role.draftRoleRef ?? index}`;
+}
