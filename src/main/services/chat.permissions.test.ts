@@ -577,6 +577,98 @@ test("reported provider session id is persisted even if the first turn fails", a
   assert.equal(runs[1].options.sessionId, earlySessionId);
 });
 
+test("non-batch participant turns record pending bubbles as last-message pointer", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const trigger: ChatMessage = {
+    id: "thread-trigger",
+    role: "user",
+    content: "Thread follow up.",
+    createdAt: NOW,
+    status: "done",
+    metadata: {
+      threadId: "user-message",
+      parentMessageId: "user-message",
+      chatThreadRootId: "user-message"
+    }
+  };
+  conversation.messages.push(trigger);
+  const snapshots: Conversation[] = [];
+  let runStarted = false;
+  let releaseRun!: () => void;
+  const runCanFinish = new Promise<void>((resolve) => {
+    releaseRun = resolve;
+  });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    onSnapshot: (snapshot) => snapshots.push(snapshot),
+    run: async (runParticipant) => {
+      runStarted = true;
+      await runCanFinish;
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: "Thread answer.",
+        durationMs: 1,
+        sessionId: "session-1"
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  const turn = (service as any).runParticipantTurnSerialized(
+    conversation,
+    participant,
+    trigger,
+    "thread-continuation-run",
+    undefined,
+    undefined,
+    { continuation: true, warnings: [] }
+  );
+
+  await waitFor(() =>
+    runStarted &&
+    storage.current.messages.some((message: ChatMessage) =>
+      message.role === "participant" &&
+      message.participantId === participant.id &&
+      message.status === "pending"
+    )
+  );
+
+  const pending = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "participant" &&
+    message.participantId === participant.id &&
+    message.status === "pending"
+  )!;
+  const pendingPointer = storage.current.metadata.lastMessageByParticipant?.[participant.id];
+  assert.equal(pendingPointer?.messageId, pending.id);
+  assert.equal(pendingPointer?.threadRootId, "user-message");
+
+  await waitFor(() =>
+    snapshots.some((snapshot) =>
+      snapshot.metadata.lastMessageByParticipant?.[participant.id]?.messageId === pending.id
+    )
+  );
+  const snapshotPointer = snapshots.find((snapshot) =>
+    snapshot.metadata.lastMessageByParticipant?.[participant.id]?.messageId === pending.id
+  )!.metadata.lastMessageByParticipant![participant.id];
+  assert.equal(snapshotPointer.threadRootId, "user-message");
+
+  releaseRun();
+  const messages = await turn;
+  assert.equal(messages[0]?.id, pending.id);
+  await waitFor(() =>
+    storage.current.messages.some((message: ChatMessage) =>
+      message.id === pending.id &&
+      message.status === "done" &&
+      message.content === "Thread answer."
+    )
+  );
+  const completedPointer = storage.current.metadata.lastMessageByParticipant?.[participant.id];
+  assert.equal(completedPointer?.messageId, pending.id);
+  assert.equal(completedPointer?.threadRootId, "user-message");
+});
+
 test("auto mode handles shell permission requests via native auto without a user approval", async () => {
   const participant = chatParticipant("claude-code");
   participant.agentMode = "auto";
@@ -781,6 +873,15 @@ test("permission resume registers a cancellable chat run controller", async () =
 
   const resume = (service as any).autoResumePermissionApproval(conversation.id, approval.id);
   await started;
+  await waitFor(() => {
+    const pending = storage.current.messages.find((message: ChatMessage) =>
+      message.role === "participant" &&
+      message.participantId === participant.id &&
+      message.status === "pending"
+    );
+    return Boolean(pending && storage.current.metadata.lastMessageByParticipant?.[participant.id]?.messageId === pending.id);
+  });
+  const pendingMessageId = storage.current.metadata.lastMessageByParticipant?.[participant.id]?.messageId;
 
   assert.equal(service.cancelRun("blocked-run"), true);
   await resume;
@@ -793,6 +894,8 @@ test("permission resume registers a cancellable chat run controller", async () =
   assert.equal(stoppedMessage?.status, "error");
   assert.equal(stoppedMessage?.metadata?.terminalReason, "user-stopped");
   assert.equal(stoppedMessage?.content, "@drew stopped by user.");
+  assert.equal(stoppedMessage?.id, pendingMessageId);
+  assert.equal(storage.current.metadata.lastMessageByParticipant?.[participant.id]?.messageId, stoppedMessage?.id);
 });
 
 test("approved permission resume ignores duplicate concurrent resume attempts", async () => {
@@ -3060,6 +3163,7 @@ function testService(options: {
   run?: (...args: any[]) => Promise<any>;
   agents?: AgentHealth[];
   userSkills?: any;
+  onSnapshot?: (conversation: Conversation) => void;
   settings?: {
     chatRoleConfigs: ChatRoleConfig[];
     chatBehaviorRules?: ChatBehaviorRuleConfig[];
@@ -3218,7 +3322,7 @@ function testService(options: {
     }
   };
   return {
-    service: new ChatService(storage as never, settings as never, cliRunner as never, debugLogs as never, undefined, undefined, options.userSkills as never),
+    service: new ChatService(storage as never, settings as never, cliRunner as never, debugLogs as never, undefined, options.onSnapshot, options.userSkills as never),
     storage,
     settingsState,
     tempRoot

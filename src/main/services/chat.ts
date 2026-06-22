@@ -3244,6 +3244,7 @@ export class ChatService {
       this.setTargetRunPendingMessageId(runId, pendingMessage.id);
       await this.withChatMutation(conversation, async () => {
         conversation.messages.push(pendingMessage);
+        this.recordLastMessageByParticipant(conversation, pendingMessage);
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
       });
