@@ -528,6 +528,7 @@
 .message.system .message-avatar.avatar-codex,
 .message.summary .message-avatar.avatar-codex {
   border: 0;
+  padding: 14%;
   background: transparent;
   box-shadow: none;
   color: var(--brand-codex);
@@ -538,7 +539,7 @@
 .thread-avatar.avatar-codex .provider-avatar-image {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   transform: none;
 }
 
