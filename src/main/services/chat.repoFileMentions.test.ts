@@ -8,10 +8,12 @@ import { StorageService } from "./storage";
 import { defaultChatAgentPermissions, effectiveChatAgentPermissionsForProvider, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { INTERRUPTED_RUN_WARNING } from "../../shared/warnings";
 import type {
+  ChatAppToolApproval,
   ChatAppToolApprovalPolicy,
   ChatMessage,
   ChatImageAttachment,
   ChatParticipant,
+  ChatParticipantRequestStatus,
   ChatParticipantSession,
   ChatRoleConfig,
   Conversation
@@ -1184,6 +1186,238 @@ test("requestParticipantsFromTool does not wait on top-level run queue", async (
   }
 });
 
+test("requestParticipantsFromTool reports running without approvalRequired while target is active", async () => {
+  const requester = chatParticipant();
+  const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
+  const conversation = chatConversation([requester, target], "/repo");
+  conversation.messages.push(userMessage("trigger-message", "@drew ask Taylor"));
+  conversation.metadata = {
+    ...conversation.metadata,
+    appToolApprovalPolicies: [participantRequestPolicy(requester, target)]
+  };
+  const { service, storage } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+  let releaseTarget!: () => void;
+  const targetCanFinish = new Promise<void>((resolve) => {
+    releaseTarget = resolve;
+  });
+  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  serviceAny.refreshStoredChatState = async () => undefined;
+  serviceAny.runParticipantTurnSerialized = async () => {
+    await targetCanFinish;
+    return [participantMessage(target, "target-reply", "Reviewed.")];
+  };
+
+  const result = await withTimeout(
+    service.requestParticipantsFromTool({
+      conversationId: conversation.id,
+      participantId: requester.id,
+      roleConfigId: requester.roleConfigId,
+      roleConfigVersion: ROLE.version,
+      capabilities: [],
+      triggerMessageId: "trigger-message",
+      runId: "active-run"
+    } as never, {
+      requests: [{ target: "taylor", prompt: "Review this.", reason: "Need another opinion." }],
+      timeoutMs: 10,
+      resumeRequester: false
+    }),
+    250
+  );
+
+  assert.equal(result.status, "running");
+  assert.equal(result.approvalRequired, false);
+
+  releaseTarget();
+  await waitFor(async () => {
+    const saved = await storage.getConversation(conversation.id);
+    return saved?.messages.some((message) => message.id === "target-reply") === true;
+  });
+});
+
+test("denying one participant request approval terminalizes only matching items", async () => {
+  const requester = chatParticipant();
+  const taylor = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
+  const casey = chatParticipant({ repoRead: true }, { id: "participant-3", handle: "casey" });
+  const conversation = chatConversation([requester, taylor, casey], "/repo");
+  const requestMessage = participantRequestMessageWithItems(requester, [
+    participantRequestItem(taylor, "pending_approval"),
+    participantRequestItem(casey, "pending_approval")
+  ]);
+  conversation.messages.push(requestMessage);
+  conversation.metadata = {
+    ...conversation.metadata,
+    pendingAppToolApprovals: [participantRequestApproval(requester, taylor, requestMessage, "approval-run")]
+  };
+  const { service, storage } = testService({ conversations: [conversation] });
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: "approval-taylor",
+    approve: false
+  });
+
+  const saved = await storage.getConversation(conversation.id);
+  const batch = saved?.messages.find((message) => message.id === requestMessage.id)?.metadata?.participantRequest;
+  const taylorItem = batch?.items.find((item) => item.targetParticipantId === taylor.id);
+  const caseyItem = batch?.items.find((item) => item.targetParticipantId === casey.id);
+
+  assert.equal(taylorItem?.status, "denied");
+  assert.equal(caseyItem?.status, "pending_approval");
+  assert.equal(batch?.status, "pending_approval");
+});
+
+test("participantRequestStatusForTool interrupts orphaned pending approvals", async () => {
+  const requester = chatParticipant();
+  const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
+  const conversation = chatConversation([requester, target], "/repo");
+  const requestMessage = participantRequestMessageWithItems(requester, [
+    participantRequestItem(target, "pending_approval")
+  ]);
+  conversation.messages.push(requestMessage);
+  const { service, storage } = testService({ conversations: [conversation] });
+
+  const result = await service.participantRequestStatusForTool({
+    conversationId: conversation.id,
+    participantId: requester.id,
+    roleConfigId: requester.roleConfigId,
+    roleConfigVersion: ROLE.version,
+    capabilities: []
+  } as never, { requestId: "batch-1" });
+
+  const saved = await storage.getConversation(conversation.id);
+  const batch = saved?.messages.find((message) => message.id === requestMessage.id)?.metadata?.participantRequest;
+  assert.equal((result.requests as Array<{ status: string }>)[0]?.status, "interrupted");
+  assert.equal(batch?.status, "interrupted");
+  assert.equal(batch?.items[0]?.status, "interrupted");
+});
+
+test("superseded participant turn closes older pending interactions for that participant", () => {
+  const requester = chatParticipant();
+  const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
+  const conversation = chatConversation([requester, target], "/repo");
+  const choiceMessage = participantMessage(requester, "choice-message", "Choose.");
+  choiceMessage.metadata = {
+    ...choiceMessage.metadata,
+    pendingChoice: {
+      id: "choice-1",
+      title: "Decision",
+      question: "Proceed?",
+      options: [{ id: "yes", label: "Yes" }],
+      status: "pending"
+    },
+    pendingMentions: [{
+      targetParticipantId: target.id,
+      targetHandle: target.handle,
+      status: "pending"
+    }]
+  };
+  const requestMessage = participantRequestMessageWithItems(requester, [
+    participantRequestItem(target, "running")
+  ]);
+  conversation.messages.push(choiceMessage, requestMessage);
+  const { service } = testService({ conversations: [conversation] });
+
+  (service as any).resolveSupersededParticipantInteractions(conversation, requester.id);
+
+  assert.equal(choiceMessage.metadata?.pendingChoice?.status, "cancelled");
+  assert.equal(choiceMessage.metadata?.pendingMentions?.[0]?.status, "rejected");
+  assert.equal(requestMessage.metadata?.participantRequest?.status, "interrupted");
+  assert.equal(requestMessage.metadata?.participantRequest?.items[0]?.status, "interrupted");
+});
+
+test("stale chat metadata merge cannot resurrect terminal pending states", () => {
+  const requester = chatParticipant();
+  const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
+  const storedMessage = participantRequestMessageWithItems(requester, [
+    participantRequestItem(target, "pending_approval", "2026-05-19T12:02:00.000Z")
+  ]);
+  const storedBatch = storedMessage.metadata?.participantRequest;
+  assert.ok(storedBatch);
+  const storedItem = storedBatch.items[0];
+  assert.ok(storedItem);
+  storedMessage.metadata = {
+    ...storedMessage.metadata,
+    pendingChoice: {
+      id: "choice-1",
+      title: "Decision",
+      question: "Proceed?",
+      options: [{ id: "yes", label: "Yes" }],
+      status: "pending"
+    }
+  };
+  const currentMessage = JSON.parse(JSON.stringify(storedMessage)) as ChatMessage;
+  currentMessage.metadata = {
+    ...currentMessage.metadata,
+    pendingChoice: {
+      id: "choice-1",
+      title: "Decision",
+      question: "Proceed?",
+      options: [{ id: "yes", label: "Yes" }],
+      status: "cancelled",
+      cancelledAt: "2026-05-19T12:01:00.000Z"
+    },
+    participantRequest: {
+      ...storedBatch,
+      status: "denied",
+      updatedAt: "2026-05-19T12:01:00.000Z",
+      items: [{
+        ...storedItem,
+        status: "denied",
+        updatedAt: "2026-05-19T12:01:00.000Z"
+      }]
+    }
+  };
+  const storedApproval: ChatAppToolApproval = {
+    ...participantRequestApproval(requester, target, storedMessage, "approval-run"),
+    updatedAt: "2026-05-19T12:02:00.000Z"
+  };
+  const currentApproval: ChatAppToolApproval = {
+    ...storedApproval,
+    status: "denied",
+    updatedAt: "2026-05-19T12:01:00.000Z"
+  };
+  const { service } = testService();
+  const serviceAny = service as any;
+
+  const mergedMessages = serviceAny.mergeStoredChatMessages([storedMessage], [currentMessage]) as ChatMessage[];
+  const mergedMetadata = serviceAny.mergeStoredChatMetadata(
+    { pendingAppToolApprovals: [storedApproval] },
+    { pendingAppToolApprovals: [currentApproval] }
+  );
+
+  assert.equal(mergedMessages[0]?.metadata?.pendingChoice?.status, "cancelled");
+  assert.equal(mergedMessages[0]?.metadata?.participantRequest?.status, "denied");
+  assert.equal(mergedMessages[0]?.metadata?.participantRequest?.items[0]?.status, "denied");
+  assert.equal((mergedMetadata.pendingAppToolApprovals as ChatAppToolApproval[])[0]?.status, "denied");
+});
+
+test("run-scoped approval cleanup denies approval and interrupts linked request item", () => {
+  const requester = chatParticipant();
+  const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
+  const conversation = chatConversation([requester, target], "/repo");
+  const requestMessage = participantRequestMessageWithItems(requester, [
+    participantRequestItem(target, "pending_approval")
+  ]);
+  conversation.messages.push(requestMessage);
+  conversation.metadata = {
+    ...conversation.metadata,
+    pendingAppToolApprovals: [participantRequestApproval(requester, target, requestMessage, "approval-run")]
+  };
+  const { service } = testService({ conversations: [conversation] });
+
+  const changed = (service as any).markPendingAppToolApprovalsForRunTerminal(
+    conversation,
+    "approval-run",
+    "Run stopped."
+  );
+
+  assert.equal(changed, true);
+  assert.equal((conversation.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0]?.status, "denied");
+  assert.equal(conversation.messages[0]?.metadata?.participantRequest?.status, "interrupted");
+  assert.equal(conversation.messages[0]?.metadata?.participantRequest?.items[0]?.status, "interrupted");
+});
+
 test("requestParticipantsFromTool keeps nested participant request as its own visual thread root", async () => {
   const requester = chatParticipant();
   const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
@@ -1395,6 +1629,44 @@ function participantRequestPolicy(requester: ChatParticipant, target: ChatPartic
   };
 }
 
+function participantRequestApproval(
+  requester: ChatParticipant,
+  target: ChatParticipant,
+  requestMessage: ChatMessage,
+  runId: string
+): ChatAppToolApproval {
+  const batch = requestMessage.metadata?.participantRequest;
+  assert.ok(batch);
+  return {
+    id: `approval-${target.handle}`,
+    conversationId: "conversation-1",
+    requesterParticipantId: requester.id,
+    requesterHandle: requester.handle,
+    requesterRoleConfigId: requester.roleConfigId,
+    toolName: "app_chat_request_participants",
+    capability: "participants.request",
+    status: "pending",
+    request: {
+      requests: [{
+        target: target.handle,
+        prompt: "Review this."
+      }],
+      resumeRequester: true,
+      source: "mcp",
+      requestMessageId: requestMessage.id,
+      batchId: batch.id
+    },
+    summary: `Ask @${target.handle}`,
+    createdAt: NOW,
+    updatedAt: NOW,
+    resumeContext: {
+      runId,
+      triggerMessageId: "trigger-message",
+      participantRequestBatchId: batch.id
+    }
+  };
+}
+
 function userMessage(id: string, content: string): ChatMessage {
   return {
     id,
@@ -1403,6 +1675,56 @@ function userMessage(id: string, content: string): ChatMessage {
     createdAt: NOW,
     status: "done",
     metadata: { threadId: id }
+  };
+}
+
+function participantRequestItem(
+  target: ChatParticipant,
+  status: ChatParticipantRequestStatus,
+  updatedAt = NOW
+) {
+  return {
+    targetParticipantId: target.id,
+    targetHandle: target.handle,
+    prompt: "Review this.",
+    status,
+    createdAt: NOW,
+    updatedAt
+  };
+}
+
+function participantRequestMessageWithItems(
+  requester: ChatParticipant,
+  items: ReturnType<typeof participantRequestItem>[]
+): ChatMessage {
+  return {
+    id: "request-message",
+    role: "participant",
+    participantId: requester.id,
+    participantLabel: `@${requester.handle}`,
+    content: items.map((item) => `@${item.targetHandle} ${item.prompt}`).join("\n"),
+    createdAt: NOW,
+    status: "done",
+    metadata: {
+      threadId: "request-message",
+      participantRequest: {
+        id: "batch-1",
+        requesterParticipantId: requester.id,
+        requesterHandle: requester.handle,
+        source: "mcp",
+        resumeRequester: true,
+        status: items.some((item) => item.status === "pending_approval")
+          ? "pending_approval"
+          : items.some((item) => item.status === "running")
+            ? "running"
+            : items[0]?.status ?? "completed",
+        depth: 1,
+        createdAt: NOW,
+        updatedAt: items.reduce((latest, item) => item.updatedAt > latest ? item.updatedAt : latest, NOW),
+        triggerMessageId: "trigger-message",
+        items
+      }
+    }
   };
 }
 

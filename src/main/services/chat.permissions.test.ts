@@ -1985,6 +1985,11 @@ test("removeParticipant cannot be undone by a later stale chat mutation", async 
     id: "removed-participant",
     handle: "removed"
   };
+  const other = {
+    ...chatParticipant("codex-cli"),
+    id: "other-participant",
+    handle: "other"
+  };
   const removedApproval = participantRequestApproval(assistant, [{
     target: removed.handle,
     prompt: "Please review this."
@@ -2013,7 +2018,7 @@ test("removeParticipant cannot be undone by a later stale chat mutation", async 
     createdAt: NOW,
     updatedAt: NOW
   };
-  const conversation = chatConversation([assistant, removed], {
+  const conversation = chatConversation([assistant, removed, other], {
     pendingAppToolApprovals: [removedApproval],
     appToolApprovalPolicies: [removedPolicy],
     participantSessions: [removedSession]
@@ -2027,14 +2032,15 @@ test("removeParticipant cannot be undone by a later stale chat mutation", async 
     status: "done",
     metadata: {
       pendingMentions: [
-        { targetParticipantId: removed.id, targetHandle: removed.handle, status: "pending" }
+        { targetParticipantId: removed.id, targetHandle: removed.handle, status: "pending" },
+        { targetParticipantId: other.id, targetHandle: other.handle, status: "pending" }
       ]
     }
   }, {
     id: "request-message",
     role: "participant",
     participantId: assistant.id,
-    content: "@removed Please review this.",
+    content: "@removed Please review this.\n@other Please also review.",
     createdAt: NOW,
     status: "done",
     metadata: {
@@ -2048,14 +2054,24 @@ test("removeParticipant cannot be undone by a later stale chat mutation", async 
         depth: 1,
         createdAt: NOW,
         updatedAt: NOW,
-        items: [{
-          targetParticipantId: removed.id,
-          targetHandle: removed.handle,
-          prompt: "Please review this.",
-          status: "pending_approval",
-          createdAt: NOW,
-          updatedAt: NOW
-        }]
+        items: [
+          {
+            targetParticipantId: removed.id,
+            targetHandle: removed.handle,
+            prompt: "Please review this.",
+            status: "pending_approval",
+            createdAt: NOW,
+            updatedAt: NOW
+          },
+          {
+            targetParticipantId: other.id,
+            targetHandle: other.handle,
+            prompt: "Please also review.",
+            status: "pending_approval",
+            createdAt: NOW,
+            updatedAt: NOW
+          }
+        ]
       }
     }
   });
@@ -2070,19 +2086,20 @@ test("removeParticipant cannot be undone by a later stale chat mutation", async 
 
   const saved = storage.current as Conversation;
   assert.deepEqual((saved.metadata.participants as ChatParticipant[]).map((participant) => participant.id), [
-    assistant.id
+    assistant.id,
+    other.id
   ]);
   assert.deepEqual(saved.metadata.participantSessions, []);
   assert.deepEqual(saved.metadata.appToolApprovalPolicies, []);
   assert.equal((saved.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0].status, "denied");
-  assert.equal(
-    saved.messages.find((message) => message.id === "mention-message")?.metadata?.pendingMentions,
-    undefined
+  assert.deepEqual(
+    saved.messages.find((message) => message.id === "mention-message")?.metadata?.pendingMentions?.map((mention) => mention.targetParticipantId),
+    [other.id]
   );
   const requestBatch = saved.messages.find((message) => message.id === "request-message")?.metadata?.participantRequest;
-  assert.equal(requestBatch?.status, "failed");
-  assert.equal(requestBatch?.items[0].status, "failed");
-  assert.equal(requestBatch?.items[0].targetParticipantId, removed.id);
+  assert.equal(requestBatch?.status, "pending_approval");
+  assert.equal(requestBatch?.items.find((item) => item.targetParticipantId === removed.id)?.status, "failed");
+  assert.equal(requestBatch?.items.find((item) => item.targetParticipantId === other.id)?.status, "pending_approval");
 });
 
 test("stale permission approval for a removed requester fails closed", async () => {

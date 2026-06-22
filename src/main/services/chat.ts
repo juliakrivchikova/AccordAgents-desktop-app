@@ -465,7 +465,7 @@ export class ChatService {
       const recoveredRunState = this.recoverStaleChatRun(conversation);
       let interruptedRequests = false;
       for (const message of conversation.messages) {
-        if (this.markOrphanedParticipantRequestInterrupted(message)) {
+        if (this.markOrphanedParticipantRequestInterrupted(conversation, message)) {
           interruptedRequests = true;
         }
       }
@@ -1285,6 +1285,13 @@ export class ChatService {
         this.participantRequestSummary(requester.handle, pendingTargets.map((item) => item.targetHandle)),
         "pending"
       );
+      if (actor.runId && actor.triggerMessageId) {
+        approval.resumeContext = {
+          runId: actor.runId,
+          triggerMessageId: actor.triggerMessageId,
+          participantRequestBatchId: prepared.batch.id
+        };
+      }
       this.upsertAppToolApproval(conversation, approval);
     }
     conversation.updatedAt = new Date().toISOString();
@@ -1294,8 +1301,8 @@ export class ChatService {
     const hasRunningTargets = prepared.batch.items.some((item) => item.status === "running");
     if (!hasRunningTargets) {
       return this.participantRequestToolResult(conversation, prepared.requestMessage.id, {
-        status: "pending_approval",
-        approvalRequired: true
+        status: prepared.batch.status,
+        approvalRequired: pendingTargets.length > 0
       });
     }
 
@@ -1310,22 +1317,25 @@ export class ChatService {
         });
       });
       const latest = await this.requireChat(conversation.id);
-      return this.participantRequestToolResult(latest, prepared.requestMessage.id, { status: "running" });
+      return this.participantRequestToolResult(latest, prepared.requestMessage.id, { status: "running", approvalRequired: false });
     }
 
     const latest = await this.requireChat(conversation.id);
     const latestBatch = latest.messages.find((message) => message.id === prepared.requestMessage.id)?.metadata?.participantRequest;
-    const hasUnfinishedItems = latestBatch?.items.some((item) => item.status === "pending_approval" || item.status === "running" || item.status === "resuming_requester");
+    const hasUnfinishedItems = latestBatch?.items.some((item) => this.isOpenParticipantRequestStatus(item.status));
+    const approvalRequired = latestBatch?.items.some((item) => item.status === "pending_approval") ?? false;
+    let status = latestBatch?.status ?? result.result.batch.status;
     if (!hasUnfinishedItems) {
-      this.updateParticipantRequestBatch(latest, prepared.requestMessage.id, (batch) => ({
+      const completedBatch = this.updateParticipantRequestBatch(latest, prepared.requestMessage.id, (batch) => ({
         ...batch,
         completedInToolCall: true,
         status: "completed",
         updatedAt: new Date().toISOString()
       }));
+      status = completedBatch?.status ?? "completed";
     }
     await this.saveConversation(latest);
-    return this.participantRequestToolResult(latest, prepared.requestMessage.id, { status: hasUnfinishedItems ? "pending_approval" : "completed" });
+    return this.participantRequestToolResult(latest, prepared.requestMessage.id, { status, approvalRequired });
   }
 
   async participantRequestStatusForTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
@@ -1345,7 +1355,7 @@ export class ChatService {
       if (!batch || (requestId && batch.id !== requestId)) {
         continue;
       }
-      if (this.markOrphanedParticipantRequestInterrupted(message)) {
+      if (this.markOrphanedParticipantRequestInterrupted(conversation, message)) {
         changed = true;
       }
     }
@@ -3193,6 +3203,11 @@ export class ChatService {
           this.repairLastMessagePointerAfterRemoval(conversation, pendingMessageId);
         }
       }
+      this.markPendingAppToolApprovalsForRunTerminal(
+        conversation,
+        runId,
+        `@${participant.handle} stopped before pending approval was resolved.`
+      );
       conversation.messages.push(this.message(
         "system",
         `@${participant.handle} stopped by user.`,
@@ -3302,6 +3317,7 @@ export class ChatService {
       );
       this.setTargetRunPendingMessageId(runId, pendingMessage.id);
       await this.withChatMutation(conversation, async () => {
+        this.resolveSupersededParticipantInteractions(conversation, participant.id, pendingMessage.id);
         conversation.messages.push(pendingMessage);
         this.recordLastMessageByParticipant(conversation, pendingMessage);
         conversation.updatedAt = new Date().toISOString();
@@ -3485,6 +3501,13 @@ export class ChatService {
       } else {
         pendingMessage.status = result.ok ? "done" : "error";
       }
+      if (!signal?.aborted && !result.ok) {
+        this.markPendingAppToolApprovalsForRunTerminal(
+          conversation,
+          runId,
+          result.error ?? `@${participant.handle} failed before pending approval was resolved.`
+        );
+      }
       if (!signal?.aborted && !result.ok && result.error) {
         options.warnings.push(`@${participant.handle}: ${result.error}`);
       }
@@ -3532,7 +3555,14 @@ export class ChatService {
       // auto-resume) still needs an immediate snapshot of the finalized pending
       // message, but it must run under `withChatMutation` so concurrent background
       // dispatches' state isn't clobbered by a stale clone.
-      if (!signal?.aborted && !options.existingPendingMessage) {
+      if (signal?.aborted && !options.existingPendingMessage) {
+        this.markPendingAppToolApprovalsForRunTerminal(
+          conversation,
+          runId,
+          `@${participant.handle} stopped before pending approval was resolved.`
+        );
+        await this.finalizePendingParticipantMessage(conversation, pendingMessage);
+      } else if (!signal?.aborted && !options.existingPendingMessage) {
         await this.finalizePendingParticipantMessage(conversation, pendingMessage);
       }
       progressSink.finish();
@@ -3550,6 +3580,7 @@ export class ChatService {
     await this.withChatMutation(conversation, async () => {
       const existingIndex = conversation.messages.findIndex((message) => message.id === existingPendingMessage.id);
       pendingMessage = existingIndex >= 0 ? conversation.messages[existingIndex] : existingPendingMessage;
+      this.resolveSupersededParticipantInteractions(conversation, cliParticipant.id, pendingMessage.id);
       pendingMessage.participantId = cliParticipant.id;
       pendingMessage.participantLabel = cliParticipant.label;
       const metadata: ChatMessageMetadata = {
@@ -4582,7 +4613,7 @@ export class ChatService {
 
   private mergeStoredChatMessage(stored: ChatMessage, current: ChatMessage): ChatMessage {
     const preferred = this.preferredChatMessageForRefresh(stored, current);
-    const metadata = this.mergeStoredChatMessageMetadata(stored.metadata, preferred.metadata);
+    const metadata = this.mergeStoredChatMessageMetadata(stored.metadata, current.metadata);
     if (metadata) {
       preferred.metadata = metadata;
     } else {
@@ -4612,7 +4643,14 @@ export class ChatService {
     storedMetadata: ChatMessage["metadata"] | undefined,
     currentMetadata: ChatMessage["metadata"] | undefined
   ): ChatMessage["metadata"] | undefined {
-    if (!currentMetadata && !storedMetadata?.reactions && !storedMetadata?.pendingMentions && !storedMetadata?.participantRequest && !storedMetadata?.queuedBehind) {
+    if (
+      !currentMetadata &&
+      !storedMetadata?.reactions &&
+      !storedMetadata?.pendingMentions &&
+      !storedMetadata?.pendingChoice &&
+      !storedMetadata?.participantRequest &&
+      !storedMetadata?.queuedBehind
+    ) {
       return undefined;
     }
     const merged: ChatMessage["metadata"] = {
@@ -4629,8 +4667,15 @@ export class ChatService {
     } else {
       delete merged.pendingMentions;
     }
-    if (storedMetadata?.participantRequest) {
-      merged.participantRequest = storedMetadata.participantRequest;
+    const pendingChoice = this.mergeStoredPendingChoice(storedMetadata?.pendingChoice, currentMetadata?.pendingChoice);
+    if (pendingChoice) {
+      merged.pendingChoice = pendingChoice;
+    } else {
+      delete merged.pendingChoice;
+    }
+    const participantRequest = this.mergeStoredParticipantRequest(storedMetadata?.participantRequest, currentMetadata?.participantRequest);
+    if (participantRequest) {
+      merged.participantRequest = participantRequest;
     } else {
       delete merged.participantRequest;
     }
@@ -4667,6 +4712,87 @@ export class ChatService {
 
   private pendingMentionStatusRank(status: ChatPendingMention["status"]): number {
     return status === "pending" ? 0 : 1;
+  }
+
+  private mergeStoredPendingChoice(
+    storedChoice: ChatPendingChoice | undefined,
+    currentChoice: ChatPendingChoice | undefined
+  ): ChatPendingChoice | undefined {
+    if (!storedChoice || !currentChoice) {
+      return currentChoice ?? storedChoice;
+    }
+    if (storedChoice.id !== currentChoice.id) {
+      return this.pendingChoiceTimestamp(currentChoice) >= this.pendingChoiceTimestamp(storedChoice)
+        ? currentChoice
+        : storedChoice;
+    }
+    const storedRank = this.pendingChoiceStatusRank(storedChoice.status);
+    const currentRank = this.pendingChoiceStatusRank(currentChoice.status);
+    if (storedRank !== currentRank) {
+      return currentRank > storedRank ? currentChoice : storedChoice;
+    }
+    if (storedRank > 0) {
+      return this.pendingChoiceTimestamp(currentChoice) >= this.pendingChoiceTimestamp(storedChoice)
+        ? currentChoice
+        : storedChoice;
+    }
+    return currentChoice;
+  }
+
+  private pendingChoiceStatusRank(status: ChatPendingChoice["status"]): number {
+    return status === "pending" ? 0 : 1;
+  }
+
+  private pendingChoiceTimestamp(choice: ChatPendingChoice): string {
+    return choice.selectedAt ?? choice.cancelledAt ?? "";
+  }
+
+  private mergeStoredParticipantRequest(
+    storedBatch: ChatParticipantRequestBatch | undefined,
+    currentBatch: ChatParticipantRequestBatch | undefined
+  ): ChatParticipantRequestBatch | undefined {
+    if (!storedBatch || !currentBatch) {
+      return currentBatch ?? storedBatch;
+    }
+    if (storedBatch.id !== currentBatch.id) {
+      return currentBatch.updatedAt >= storedBatch.updatedAt ? currentBatch : storedBatch;
+    }
+    const currentItemsByTarget = new Map(currentBatch.items.map((item) => [item.targetParticipantId, item]));
+    const items = storedBatch.items.map((storedItem) => {
+      const currentItem = currentItemsByTarget.get(storedItem.targetParticipantId);
+      return currentItem ? this.mergeStoredParticipantRequestItem(storedItem, currentItem) : storedItem;
+    });
+    const storedTargets = new Set(storedBatch.items.map((item) => item.targetParticipantId));
+    for (const currentItem of currentBatch.items) {
+      if (!storedTargets.has(currentItem.targetParticipantId)) {
+        items.push(currentItem);
+      }
+    }
+    const newerBatch = currentBatch.updatedAt >= storedBatch.updatedAt ? currentBatch : storedBatch;
+    const hasOpenItems = items.some((item) => this.isOpenParticipantRequestStatus(item.status));
+    const status = hasOpenItems
+      ? this.rollupParticipantRequestStatus(items)
+      : storedBatch.status === "completed" || currentBatch.status === "completed"
+        ? "completed"
+        : this.rollupParticipantRequestStatus(items);
+    return {
+      ...newerBatch,
+      items,
+      status,
+      updatedAt: currentBatch.updatedAt >= storedBatch.updatedAt ? currentBatch.updatedAt : storedBatch.updatedAt
+    };
+  }
+
+  private mergeStoredParticipantRequestItem(
+    storedItem: ChatParticipantRequestItem,
+    currentItem: ChatParticipantRequestItem
+  ): ChatParticipantRequestItem {
+    const storedOpen = this.isOpenParticipantRequestStatus(storedItem.status);
+    const currentOpen = this.isOpenParticipantRequestStatus(currentItem.status);
+    if (storedOpen !== currentOpen) {
+      return currentOpen ? storedItem : currentItem;
+    }
+    return currentItem.updatedAt >= storedItem.updatedAt ? currentItem : storedItem;
   }
 
   // Union merge for completed-message upsert: carry a placeholder's accumulated
@@ -4744,7 +4870,7 @@ export class ChatService {
       storedMetadata.pendingAppToolApprovals,
       currentMetadata.pendingAppToolApprovals,
       "id",
-      (stored, current) => this.newerMetadataItem(stored, current)
+      (stored, current) => this.newerAppToolApprovalMetadataItem(stored, current)
     );
     if (approvals) {
       merged.pendingAppToolApprovals = approvals;
@@ -4861,6 +4987,24 @@ export class ChatService {
     const storedUpdatedAt = typeof stored.updatedAt === "string" ? stored.updatedAt : "";
     const currentUpdatedAt = typeof current.updatedAt === "string" ? current.updatedAt : "";
     return currentUpdatedAt >= storedUpdatedAt ? current : stored;
+  }
+
+  private newerAppToolApprovalMetadataItem(
+    stored: Record<string, unknown>,
+    current: Record<string, unknown>
+  ): Record<string, unknown> {
+    const storedStatus = typeof stored.status === "string" ? stored.status : undefined;
+    const currentStatus = typeof current.status === "string" ? current.status : undefined;
+    const storedTerminal = storedStatus ? this.isTerminalAppToolApprovalStatus(storedStatus) : false;
+    const currentTerminal = currentStatus ? this.isTerminalAppToolApprovalStatus(currentStatus) : false;
+    if (storedTerminal !== currentTerminal) {
+      return currentTerminal ? current : stored;
+    }
+    return this.newerMetadataItem(stored, current);
+  }
+
+  private isTerminalAppToolApprovalStatus(status: string): boolean {
+    return status === "approved" || status === "denied" || status === "auto-applied";
   }
 
   private metadataStringKey(item: Record<string, unknown>, key: string): string | undefined {
@@ -7268,31 +7412,285 @@ export class ChatService {
     };
   }
 
-  private markOrphanedParticipantRequestInterrupted(message: ChatMessage): boolean {
-    const batch = message.metadata?.participantRequest;
-    if (!batch || (batch.status !== "running" && batch.status !== "resuming_requester")) {
+  private resolveSupersededParticipantInteractions(
+    conversation: Conversation,
+    participantId: string,
+    excludeMessageId?: string
+  ): boolean {
+    const now = new Date().toISOString();
+    const reason = "Superseded by a newer turn from this participant.";
+    let changed = false;
+    for (const message of conversation.messages) {
+      if (message.id === excludeMessageId || !message.metadata) {
+        continue;
+      }
+      let metadata = message.metadata;
+      if (message.participantId === participantId) {
+        const choice = metadata.pendingChoice;
+        if (choice?.status === "pending") {
+          metadata = {
+            ...metadata,
+            pendingChoice: {
+              ...choice,
+              status: "cancelled",
+              cancelledAt: now
+            }
+          };
+          changed = true;
+        }
+        if (metadata.pendingMentions?.some((mention) => mention.status === "pending")) {
+          metadata = {
+            ...metadata,
+            pendingMentions: metadata.pendingMentions.map((mention) =>
+              mention.status === "pending" ? { ...mention, status: "rejected" as const } : mention
+            )
+          };
+          changed = true;
+        }
+      }
+      const batch = metadata.participantRequest;
+      if (batch?.requesterParticipantId === participantId && this.participantRequestHasUnfinishedItems(batch)) {
+        const nextBatch = this.terminalParticipantRequestBatch(batch, "interrupted", reason, now);
+        if (nextBatch !== batch) {
+          metadata = {
+            ...metadata,
+            participantRequest: nextBatch
+          };
+          changed = true;
+        }
+      }
+      if (metadata !== message.metadata) {
+        message.metadata = metadata;
+      }
+    }
+    return changed;
+  }
+
+  private markPendingAppToolApprovalsForRunTerminal(
+    conversation: Conversation,
+    runId: string,
+    reason: string,
+    now = new Date().toISOString()
+  ): boolean {
+    const approvals = this.chatAppToolApprovals(conversation);
+    let changed = false;
+    const nextApprovals = approvals.map((approval) => {
+      if (approval.status !== "pending" || approval.resumeContext?.runId !== runId) {
+        return approval;
+      }
+      changed = true;
+      if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && this.isParticipantRequestApprovalRequest(approval.request)) {
+        this.resolveParticipantRequestApprovalItems(conversation, approval, "interrupted", reason, now);
+      } else if (approval.resumeContext?.participantRequestBatchId) {
+        this.resolveParticipantRequestTargetItem(
+          conversation,
+          approval.resumeContext.participantRequestBatchId,
+          approval.requesterParticipantId,
+          "interrupted",
+          reason,
+          now
+        );
+      }
+      if (approval.toolName === APP_TOOL_PERMISSION_TOOL && this.isToolPermissionRequest(approval.request)) {
+        this.resolveToolPermissionApproval(approval.id, {
+          approve: false,
+          source: "abort",
+          reason
+        });
+      }
+      return {
+        ...approval,
+        status: "denied" as const,
+        error: reason,
+        updatedAt: now
+      };
+    });
+    if (!changed) {
       return false;
     }
-    if (this.participantRequestRunners.has(message.id) || this.participantRequestAutoResumes.has(message.id)) {
+    conversation.metadata = {
+      ...conversation.metadata,
+      pendingAppToolApprovals: nextApprovals
+    };
+    return true;
+  }
+
+  private resolveParticipantRequestApprovalItems(
+    conversation: Conversation,
+    approval: ChatAppToolApproval,
+    status: Extract<ChatParticipantRequestStatus, "denied" | "interrupted" | "failed">,
+    reason: string,
+    now: string
+  ): boolean {
+    if (!this.isParticipantRequestApprovalRequest(approval.request) || !approval.request.requestMessageId) {
+      return false;
+    }
+    const requestedHandles = new Set(approval.request.requests.map((item) => item.target.replace(/^@/, "").toLowerCase()));
+    let changed = false;
+    this.updateParticipantRequestBatch(conversation, approval.request.requestMessageId, (batch) => {
+      const items = batch.items.map((item) => {
+        if (!requestedHandles.has(item.targetHandle.toLowerCase()) || !this.isOpenParticipantRequestStatus(item.status)) {
+          return item;
+        }
+        changed = true;
+        return {
+          ...item,
+          status,
+          error: item.error ?? reason,
+          updatedAt: now
+        };
+      });
+      if (!changed) {
+        return batch;
+      }
+      return {
+        ...batch,
+        items,
+        status: this.rollupParticipantRequestStatus(items),
+        error: batch.error ?? reason,
+        updatedAt: now
+      };
+    });
+    return changed;
+  }
+
+  private resolveParticipantRequestTargetItem(
+    conversation: Conversation,
+    batchId: string,
+    targetParticipantId: string,
+    status: Extract<ChatParticipantRequestStatus, "denied" | "interrupted" | "failed">,
+    reason: string,
+    now: string
+  ): boolean {
+    let changed = false;
+    for (const message of conversation.messages) {
+      const batch = message.metadata?.participantRequest;
+      if (!batch || batch.id !== batchId) {
+        continue;
+      }
+      let messageChanged = false;
+      const items = batch.items.map((item) => {
+        if (item.targetParticipantId !== targetParticipantId || !this.isOpenParticipantRequestStatus(item.status)) {
+          return item;
+        }
+        messageChanged = true;
+        changed = true;
+        return {
+          ...item,
+          status,
+          error: item.error ?? reason,
+          updatedAt: now
+        };
+      });
+      if (!messageChanged) {
+        continue;
+      }
+      message.metadata = {
+        ...message.metadata,
+        participantRequest: {
+          ...batch,
+          items,
+          status: this.rollupParticipantRequestStatus(items),
+          error: batch.error ?? reason,
+          updatedAt: now
+        }
+      };
+    }
+    return changed;
+  }
+
+  private terminalParticipantRequestBatch(
+    batch: ChatParticipantRequestBatch,
+    status: Extract<ChatParticipantRequestStatus, "denied" | "interrupted" | "failed">,
+    reason: string,
+    now: string,
+    shouldUpdate: (item: ChatParticipantRequestItem) => boolean = (item) => this.isOpenParticipantRequestStatus(item.status)
+  ): ChatParticipantRequestBatch {
+    let changed = false;
+    const items = batch.items.map((item) => {
+      if (!shouldUpdate(item)) {
+        return item;
+      }
+      changed = true;
+      return {
+        ...item,
+        status,
+        error: item.error ?? reason,
+        updatedAt: now
+      };
+    });
+    if (!changed) {
+      return batch;
+    }
+    return {
+      ...batch,
+      items,
+      status: this.rollupParticipantRequestStatus(items),
+      error: batch.error ?? reason,
+      updatedAt: now
+    };
+  }
+
+  private markOrphanedParticipantRequestInterrupted(conversation: Conversation, message: ChatMessage): boolean {
+    const batch = message.metadata?.participantRequest;
+    if (!batch) {
+      return false;
+    }
+    const backedPendingTargetIds = this.pendingParticipantRequestApprovalTargetIds(conversation, batch);
+    const hasOrphanedPendingApproval = batch.items.some((item) =>
+      item.status === "pending_approval" && !backedPendingTargetIds.has(item.targetParticipantId)
+    );
+    const canInterruptRunning = batch.status === "running" || batch.status === "resuming_requester";
+    if (!hasOrphanedPendingApproval && !canInterruptRunning) {
+      return false;
+    }
+    if (canInterruptRunning && (this.participantRequestRunners.has(message.id) || this.participantRequestAutoResumes.has(message.id))) {
       return false;
     }
     const now = new Date().toISOString();
-    const nextItems = batch.items.map((item) =>
-      item.status === "running" || item.status === "resuming_requester"
-        ? { ...item, status: "interrupted" as ChatParticipantRequestStatus, updatedAt: now, error: item.error ?? "Request was interrupted before completion." }
-        : item
+    const reason = "Request was interrupted before completion.";
+    const nextBatch = this.terminalParticipantRequestBatch(
+      batch,
+      "interrupted",
+      reason,
+      now,
+      (item) =>
+        item.status === "running" ||
+        item.status === "resuming_requester" ||
+        (item.status === "pending_approval" && !backedPendingTargetIds.has(item.targetParticipantId))
     );
+    if (nextBatch === batch) {
+      return false;
+    }
     message.metadata = {
       ...message.metadata,
-      participantRequest: {
-        ...batch,
-        status: "interrupted",
-        items: nextItems,
-        updatedAt: now,
-        error: batch.error ?? "Request was interrupted before completion."
-      }
+      participantRequest: nextBatch
     };
     return true;
+  }
+
+  private pendingParticipantRequestApprovalTargetIds(
+    conversation: Conversation,
+    batch: ChatParticipantRequestBatch
+  ): Set<string> {
+    const targetIds = new Set<string>();
+    for (const approval of this.chatAppToolApprovals(conversation)) {
+      if (
+        approval.status !== "pending" ||
+        approval.toolName !== APP_CHAT_REQUEST_PARTICIPANTS_TOOL ||
+        !this.isParticipantRequestApprovalRequest(approval.request) ||
+        approval.request.batchId !== batch.id
+      ) {
+        continue;
+      }
+      const requestedHandles = new Set(approval.request.requests.map((item) => item.target.replace(/^@/, "").toLowerCase()));
+      for (const item of batch.items) {
+        if (requestedHandles.has(item.targetHandle.toLowerCase())) {
+          targetIds.add(item.targetParticipantId);
+        }
+      }
+    }
+    return targetIds;
   }
 
   private markParticipantRequestAutoResumeFailed(conversation: Conversation, requestMessageId: string, error: unknown): void {
