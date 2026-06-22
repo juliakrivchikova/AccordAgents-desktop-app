@@ -31,6 +31,8 @@ export interface AppMcpActor {
   roleConfigId: string;
   roleConfigVersion: number;
   capabilities: ChatAppToolCapability[];
+  clientGenerationId?: string;
+  expectedToolNames?: string[];
   triggerMessageId?: string;
   triggerThreadId?: string;
   triggerParentMessageId?: string;
@@ -51,6 +53,22 @@ export interface AppMcpConnection {
 }
 
 export interface AppMcpTokenGrant extends AppMcpActor {}
+
+export interface AppMcpClientStatus {
+  clientGenerationId: string;
+  initialized: boolean;
+  listedTools: boolean;
+  requiredToolsPresent: boolean;
+  missingToolNames: string[];
+  errored: boolean;
+  errorMessage?: string;
+  updatedAt: string;
+}
+
+interface AppMcpClientState extends AppMcpClientStatus {
+  expectedToolNames: string[];
+  listedToolNames: string[];
+}
 
 type AppRosterChangeHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppRosterOptionsHandler = (actor: AppMcpActor) => Promise<unknown>;
@@ -95,6 +113,7 @@ export class AppMcpService {
   private server?: http.Server;
   private url?: string;
   private readonly tokens = new Map<string, AppMcpActor>();
+  private readonly clientStates = new Map<string, AppMcpClientState>();
   private rosterChangeHandler?: AppRosterChangeHandler;
   private rosterOptionsHandler?: AppRosterOptionsHandler;
   private roleChangeHandler?: AppRoleChangeHandler;
@@ -213,6 +232,7 @@ export class AppMcpService {
     this.server = undefined;
     this.url = undefined;
     this.tokens.clear();
+    this.clientStates.clear();
     if (!server) {
       return;
     }
@@ -224,7 +244,9 @@ export class AppMcpService {
       return undefined;
     }
     const token = randomUUID();
-    this.tokens.set(token, this.actorFromGrant(grant));
+    const actor = this.actorFromGrant(grant);
+    this.tokens.set(token, actor);
+    this.ensureClientState(actor);
     return { url: this.url, token };
   }
 
@@ -232,8 +254,15 @@ export class AppMcpService {
     if (!this.url || !this.tokens.has(token)) {
       return undefined;
     }
-    this.tokens.set(token, this.actorFromGrant(grant));
+    const actor = this.actorFromGrant(grant);
+    this.tokens.set(token, actor);
+    this.ensureClientState(actor);
     return { url: this.url, token };
+  }
+
+  clientStatus(clientGenerationId: string): AppMcpClientStatus | undefined {
+    const state = this.clientStates.get(clientGenerationId);
+    return state ? this.publicClientStatus(state) : undefined;
   }
 
   private actorFromGrant(grant: AppMcpTokenGrant): AppMcpActor {
@@ -243,6 +272,8 @@ export class AppMcpService {
       roleConfigId: grant.roleConfigId,
       roleConfigVersion: grant.roleConfigVersion,
       capabilities: [...grant.capabilities],
+      clientGenerationId: grant.clientGenerationId,
+      expectedToolNames: Array.from(new Set(grant.expectedToolNames ?? [])).sort(),
       triggerMessageId: grant.triggerMessageId,
       triggerThreadId: grant.triggerThreadId,
       triggerParentMessageId: grant.triggerParentMessageId,
@@ -307,13 +338,16 @@ export class AppMcpService {
 
     try {
       if (method === "initialize") {
+        this.markClientInitialized(actor);
         return isNotification ? undefined : this.rpcResult(id, this.initializeResult());
       }
       if (method === "notifications/initialized") {
         return undefined;
       }
       if (method === "tools/list") {
-        return isNotification ? undefined : this.rpcResult(id, { tools: this.toolsForActor(actor) });
+        const tools = this.toolsForActor(actor);
+        this.markClientToolsListed(actor, tools);
+        return isNotification ? undefined : this.rpcResult(id, { tools });
       }
       if (method === "tools/call") {
         return isNotification ? undefined : this.rpcResult(id, await this.callTool(actor, request.params));
@@ -321,8 +355,96 @@ export class AppMcpService {
       return isNotification ? undefined : this.rpcError(id, -32601, `Unsupported MCP method: ${method || "unknown"}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (method === "initialize" || method === "tools/list") {
+        this.markClientError(actor, message);
+      }
       return isNotification ? undefined : this.rpcError(id, -32603, message);
     }
+  }
+
+  private ensureClientState(actor: AppMcpActor): AppMcpClientState | undefined {
+    const clientGenerationId = actor.clientGenerationId;
+    if (!clientGenerationId) {
+      return undefined;
+    }
+    const expectedToolNames = Array.from(new Set(actor.expectedToolNames ?? [])).sort();
+    const existing = this.clientStates.get(clientGenerationId);
+    if (existing) {
+      existing.expectedToolNames = expectedToolNames;
+      existing.missingToolNames = this.missingToolNames(expectedToolNames, existing.listedToolNames);
+      existing.requiredToolsPresent = existing.missingToolNames.length === 0;
+      existing.updatedAt = new Date().toISOString();
+      return existing;
+    }
+    const state: AppMcpClientState = {
+      clientGenerationId,
+      expectedToolNames,
+      listedToolNames: [],
+      initialized: false,
+      listedTools: false,
+      requiredToolsPresent: expectedToolNames.length === 0,
+      missingToolNames: expectedToolNames,
+      errored: false,
+      updatedAt: new Date().toISOString()
+    };
+    this.clientStates.set(clientGenerationId, state);
+    return state;
+  }
+
+  private markClientInitialized(actor: AppMcpActor): void {
+    const state = this.ensureClientState(actor);
+    if (!state) {
+      return;
+    }
+    state.initialized = true;
+    state.updatedAt = new Date().toISOString();
+  }
+
+  private markClientToolsListed(actor: AppMcpActor, tools: unknown[]): void {
+    const state = this.ensureClientState(actor);
+    if (!state) {
+      return;
+    }
+    const listedToolNames = new Set(tools.flatMap((tool) => {
+      if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
+        return [];
+      }
+      const name = (tool as { name?: unknown }).name;
+      return typeof name === "string" ? [name] : [];
+    }));
+    state.listedTools = true;
+    state.listedToolNames = Array.from(listedToolNames).sort();
+    state.missingToolNames = this.missingToolNames(state.expectedToolNames, listedToolNames);
+    state.requiredToolsPresent = state.missingToolNames.length === 0;
+    state.updatedAt = new Date().toISOString();
+  }
+
+  private markClientError(actor: AppMcpActor, message: string): void {
+    const state = this.ensureClientState(actor);
+    if (!state) {
+      return;
+    }
+    state.errored = true;
+    state.errorMessage = message.slice(0, 240);
+    state.updatedAt = new Date().toISOString();
+  }
+
+  private missingToolNames(expectedToolNames: string[], listedToolNames: Set<string> | string[] | undefined): string[] {
+    const listed = listedToolNames instanceof Set ? listedToolNames : new Set(listedToolNames ?? []);
+    return expectedToolNames.filter((toolName) => !listed.has(toolName));
+  }
+
+  private publicClientStatus(state: AppMcpClientState): AppMcpClientStatus {
+    return {
+      clientGenerationId: state.clientGenerationId,
+      initialized: state.initialized,
+      listedTools: state.listedTools,
+      requiredToolsPresent: state.requiredToolsPresent,
+      missingToolNames: [...state.missingToolNames],
+      errored: state.errored,
+      errorMessage: state.errorMessage,
+      updatedAt: state.updatedAt
+    };
   }
 
   private initializeResult(): unknown {

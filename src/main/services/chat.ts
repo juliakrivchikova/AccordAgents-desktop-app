@@ -119,6 +119,7 @@ import {
   APP_ROSTER_REQUEST_CHANGE_TOOL,
   APP_TOOL_PERMISSION_TOOL
 } from "./appMcp";
+import type { AppMcpClientStatus } from "./appMcp";
 import { DebugLogService } from "./debugLogs";
 import type { ParticipantRunResult } from "./providers";
 import { SettingsService } from "./settings";
@@ -268,6 +269,8 @@ interface ChatAppMcpGateway {
     roleConfigId: string;
     roleConfigVersion: number;
     capabilities: ChatAppToolCapability[];
+    clientGenerationId?: string;
+    expectedToolNames?: string[];
     triggerMessageId?: string;
     triggerThreadId?: string;
     triggerParentMessageId?: string;
@@ -282,6 +285,7 @@ interface ChatAppMcpGateway {
     runPermissions?: ChatAgentPermissions;
   }): { url: string; token: string } | undefined;
   updateToken?(token: string, grant: ChatAppMcpTokenGrant): { url: string; token: string } | undefined;
+  clientStatus?(clientGenerationId: string): AppMcpClientStatus | undefined;
 }
 
 type ChatAppMcpTokenGrant = Parameters<ChatAppMcpGateway["issueToken"]>[0];
@@ -839,6 +843,10 @@ export class ChatService {
       session.participantPermissions = permissions;
       const runPath = this.runPathForParticipant(conversation, participant, workspacePath, agentMode, permissions);
       const cliParticipant = this.cliParticipantForSession(participant, session);
+      const appMcpToolInventoryKey = this.appMcpToolInventoryKey(this.appMcpToolNames([
+        ...normalizeChatAppToolCapabilities(session.roleAppToolCapabilities),
+        "permissions.request"
+      ]));
       const result = await this.cliRunner.compactSession(cliParticipant, runPath, undefined, "chat", signal, {
         persistSession: true,
         sessionId: session.sessionId,
@@ -852,7 +860,7 @@ export class ChatService {
         warm: {
           conversationId: conversation.id,
           participantId: participant.id,
-          contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions),
+          contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey),
           idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
         }
       });
@@ -3320,12 +3328,17 @@ export class ChatService {
       ...normalizeChatAppToolCapabilities(session.roleAppToolCapabilities),
       "permissions.request"
     ]);
+    const appMcpToolNames = this.appMcpToolNames(appToolCapabilities);
+    const appMcpToolInventoryKey = this.appMcpToolInventoryKey(appMcpToolNames);
+    const appMcpClientGenerationId = this.appMcpClientGenerationId(conversation, participant, session, appMcpToolInventoryKey);
     const appMcpGrant: ChatAppMcpTokenGrant = {
       conversationId: conversation.id,
       participantId: participant.id,
       roleConfigId: session.roleConfigId,
       roleConfigVersion: session.roleConfigVersion,
       capabilities: appToolCapabilities,
+      clientGenerationId: appMcpClientGenerationId,
+      expectedToolNames: appMcpToolNames,
       triggerMessageId: triggerMessage.id,
       triggerThreadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
       triggerParentMessageId: triggerMessage.metadata?.parentMessageId,
@@ -3340,7 +3353,6 @@ export class ChatService {
       historyJsonPath: path.join(workspacePath, "history.json")
     };
     const appMcp = this.issueAppMcpConnection(conversation, participant, appMcpGrant);
-    const appMcpToolNames = this.appMcpToolNames(appToolCapabilities);
     const triggerAttachments = this.imageAttachments(triggerMessage);
     if (triggerAttachments.length > 0) {
       void this.debugLogs.write("chat.attachments.direct-delivery-skipped", {
@@ -3385,7 +3397,9 @@ export class ChatService {
         appMcp: appMcp
           ? {
               ...appMcp,
-              toolNames: appMcpToolNames
+              toolNames: appMcpToolNames,
+              clientGenerationId: appMcpClientGenerationId,
+              clientStatus: (clientGenerationId: string) => this.appMcp?.clientStatus?.(clientGenerationId)
             }
           : undefined,
         agentMode,
@@ -3395,7 +3409,7 @@ export class ChatService {
         warm: {
           conversationId: conversation.id,
           participantId: participant.id,
-          contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, this.skillRuntimeKey(triggerMessage, participant.kind)),
+          contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey, this.skillRuntimeKey(triggerMessage, participant.kind)),
           idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
         }
       });
@@ -3435,7 +3449,9 @@ export class ChatService {
           appMcp: appMcp
             ? {
                 ...appMcp,
-                toolNames: appMcpToolNames
+                toolNames: appMcpToolNames,
+                clientGenerationId: appMcpClientGenerationId,
+                clientStatus: (clientGenerationId: string) => this.appMcp?.clientStatus?.(clientGenerationId)
               }
             : undefined,
           agentMode,
@@ -3445,7 +3461,7 @@ export class ChatService {
           warm: {
             conversationId: conversation.id,
             participantId: participant.id,
-            contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, this.skillRuntimeKey(triggerMessage, participant.kind)),
+            contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey, this.skillRuntimeKey(triggerMessage, participant.kind)),
             idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
           }
         });
@@ -3967,6 +3983,24 @@ export class ChatService {
     });
   }
 
+  private appMcpToolInventoryKey(toolNames: string[]): string {
+    return this.shortHash([...toolNames].sort().join("|"));
+  }
+
+  private appMcpClientGenerationId(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    session: ChatParticipantSession,
+    appMcpToolInventoryKey: string
+  ): string {
+    return [
+      conversation.id,
+      participant.id,
+      appMcpToolInventoryKey,
+      session.appMcpClientGeneration ?? 0
+    ].join(":");
+  }
+
   private canRequestPermissionChanges(session: ChatParticipantSession): boolean {
     return Boolean(this.appMcp) && hasChatAppToolCapability([
       ...normalizeChatAppToolCapabilities(session.roleAppToolCapabilities),
@@ -4018,7 +4052,15 @@ export class ChatService {
     if (this.isKnownRoleRuntime(result.roleRuntime)) {
       session.roleRuntime = result.roleRuntime;
     }
-    if (result.sessionId) {
+    if (result.appMcpClientFailed) {
+      session.sessionId = "";
+      session.appMcpClientGeneration = (session.appMcpClientGeneration ?? 0) + 1;
+      void this.debugLogs.write("chat.app-mcp-client-invalidated", {
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        appMcpClientGeneration: session.appMcpClientGeneration
+      });
+    } else if (result.sessionId) {
       session.sessionId = result.sessionId;
     }
     if (result.sessionRestarted) {
@@ -4102,6 +4144,7 @@ export class ChatService {
       participantAgentMode: normalizeChatAgentMode(participant.agentMode),
       participantPermissions: normalizeChatAgentPermissions(participant.permissions),
       runtimeConfigVersion,
+      appMcpClientGeneration: 0,
       roleLabel: role.label,
       roleInstructions: role.instructions,
       updatedAt: new Date().toISOString()
@@ -4242,6 +4285,7 @@ export class ChatService {
     runPath: string,
     workspacePath: string,
     runPermissions: ChatAgentPermissions,
+    appMcpToolInventoryKey: string,
     skillRuntimeKey = ""
   ): string {
     return JSON.stringify({
@@ -4262,6 +4306,8 @@ export class ChatService {
         version: rule.version
       })),
       runtimeConfigVersion: session.runtimeConfigVersion ?? 0,
+      appMcpClientGeneration: session.appMcpClientGeneration ?? 0,
+      appMcpToolInventoryKey,
       runPath,
       workspacePath,
       skillRuntimeKey

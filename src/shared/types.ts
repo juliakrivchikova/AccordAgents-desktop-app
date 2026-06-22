@@ -238,6 +238,7 @@ export interface ChatParticipantSession {
   participantAgentMode?: ChatAgentMode;
   participantPermissions?: ChatAgentPermissions;
   runtimeConfigVersion?: number;
+  appMcpClientGeneration?: number;
   roleLabel: string;
   roleInstructions: string;
   lastSyncedMessageId?: string;

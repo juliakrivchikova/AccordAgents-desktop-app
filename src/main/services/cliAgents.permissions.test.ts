@@ -366,6 +366,72 @@ test("codex app-server resume re-asserts the auto preset so a mode switch applie
   assert.equal(params.config.web_search, "live");
 });
 
+test("withAppMcpClientStatus warns and flags unestablished app MCP generations", () => {
+  const runner = makeRunner() as any;
+  const participant = {
+    kind: "codex-cli",
+    label: "@codex",
+    model: undefined
+  };
+  const result = runner.withAppMcpClientStatus({
+    participant,
+    ok: true,
+    content: "done"
+  }, participant, {
+    appMcp: {
+      url: "http://127.0.0.1:1/mcp",
+      token: "token",
+      toolNames: ["app_chat_request_participants"],
+      clientGenerationId: "generation-1",
+      clientStatus: () => ({
+        initialized: false,
+        listedTools: false,
+        requiredToolsPresent: false,
+        missingToolNames: ["app_chat_request_participants"],
+        errored: false
+      })
+    }
+  });
+
+  assert.equal(result.appMcpClientFailed, true);
+  assert.equal(result.warnings.some((warning: string) => warning.includes("app tools did not finish MCP setup")), true);
+});
+
+test("withAppMcpClientStatus does not warn for healthy warm reuse after setup", () => {
+  const runner = makeRunner() as any;
+  const participant = {
+    kind: "codex-cli",
+    label: "@codex",
+    model: undefined
+  };
+  const options = {
+    appMcp: {
+      url: "http://127.0.0.1:1/mcp",
+      token: "token",
+      toolNames: ["app_chat_request_participants"],
+      clientGenerationId: "generation-healthy",
+      clientStatus: () => ({
+        initialized: true,
+        listedTools: true,
+        requiredToolsPresent: true,
+        missingToolNames: [],
+        errored: false
+      })
+    }
+  };
+
+  for (let turn = 0; turn < 3; turn += 1) {
+    const result = runner.withAppMcpClientStatus({
+      participant,
+      ok: true,
+      content: `turn ${turn}`
+    }, participant, options);
+
+    assert.equal(result.appMcpClientFailed, undefined);
+    assert.equal(result.warnings, undefined);
+  }
+});
+
 test("codex app-server compact instructions become a scoped compact_prompt override", () => {
   const runner = makeRunner() as any;
   const participant = {

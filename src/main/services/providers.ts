@@ -12,6 +12,7 @@ export interface ParticipantRunResult {
   roleRuntime?: ChatRoleRuntime;
   contextUsage?: AgentContextUsage;
   warnings?: string[];
+  appMcpClientFailed?: boolean;
 }
 
 function textFromOpenAi(data: unknown): string {

@@ -102,6 +102,17 @@ export interface CliAgentAppMcpOptions {
   url: string;
   token: string;
   toolNames: string[];
+  clientGenerationId?: string;
+  clientStatus?: (clientGenerationId: string) => CliAgentAppMcpClientStatus | undefined;
+}
+
+export interface CliAgentAppMcpClientStatus {
+  initialized: boolean;
+  listedTools: boolean;
+  requiredToolsPresent: boolean;
+  missingToolNames: string[];
+  errored: boolean;
+  errorMessage?: string;
 }
 
 export interface CliAgentCompactResult {
@@ -877,7 +888,16 @@ export class CliAgentRunner {
     return this.enqueueWarmRun(entry, async () => {
       this.clearWarmIdleTimer(entry as WarmAgentEntry);
       try {
-        const result = await (entry as WarmAgentEntry).run(prompt, signal, options.onOutput, options.onSessionId, options.timeoutMs);
+        const result = this.withAppMcpClientStatus(
+          await (entry as WarmAgentEntry).run(prompt, signal, options.onOutput, options.onSessionId, options.timeoutMs),
+          participant,
+          options
+        );
+        if (result.appMcpClientFailed) {
+          this.warmAgents.delete(key);
+          await this.closeWarmAgent(entry as WarmAgentEntry, "app-mcp-unavailable");
+          return result;
+        }
         this.scheduleWarmIdleTimer(entry as WarmAgentEntry, warm.idleTimeoutMs);
         return result;
       } catch (error) {
@@ -1761,7 +1781,7 @@ export class CliAgentRunner {
       const lastMessage = await this.readOptionalFile(outputPath);
       const sessionId = this.extractCodexSessionId(result.stdout) ?? options.sessionId;
       this.reportSessionId(options.onSessionId, sessionId);
-      return {
+      return this.withAppMcpClientStatus({
         participant,
         ok: true,
         content: lastMessage.trim() || this.extractCodexText(result.stdout),
@@ -1771,7 +1791,7 @@ export class CliAgentRunner {
         contextUsage:
           this.extractCodexContextUsage(result.stdout, participant) ??
           await this.extractCodexSessionLogContextUsageWithRetry(sessionId, participant)
-      };
+      }, participant, options);
     } catch (error) {
       if (options.role && this.isCodexDeveloperInstructionsUnsupported(error)) {
         const fallback = await this.runCodexOneShot(
@@ -1932,7 +1952,7 @@ export class CliAgentRunner {
       );
       const sessionId = this.extractClaudeSessionId(result.stdout) ?? newSessionId ?? options.sessionId;
       this.reportSessionId(options.onSessionId, sessionId);
-      return {
+      return this.withAppMcpClientStatus({
         participant,
         ok: true,
         content: this.extractClaudeText(result.stdout),
@@ -1942,7 +1962,7 @@ export class CliAgentRunner {
         contextUsage:
           this.extractClaudeContextUsage(result.stdout, participant) ??
           await this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant)
-      };
+      }, participant, options);
     } catch (error) {
       if (this.agentModeForRun(kind, options) === "auto" && this.isClaudePermissionModeUnsupported(error)) {
         // Fail loudly instead of silently downgrading: Auto-review must run as native
@@ -2039,7 +2059,16 @@ export class CliAgentRunner {
     return this.enqueueWarmRun(entry, async () => {
       this.clearWarmIdleTimer(entry as WarmAgentEntry);
       try {
-        const result = await (entry as WarmAgentEntry).run(prompt, signal, options.onOutput, options.onSessionId, options.timeoutMs);
+        const result = this.withAppMcpClientStatus(
+          await (entry as WarmAgentEntry).run(prompt, signal, options.onOutput, options.onSessionId, options.timeoutMs),
+          participant,
+          options
+        );
+        if (result.appMcpClientFailed) {
+          this.warmAgents.delete(key);
+          await this.closeWarmAgent(entry as WarmAgentEntry, "app-mcp-unavailable");
+          return result;
+        }
         this.scheduleWarmIdleTimer(entry as WarmAgentEntry, warm.idleTimeoutMs);
         return result;
       } catch (error) {
@@ -2624,6 +2653,47 @@ export class CliAgentRunner {
     return {
       [CODEX_APP_SERVER_MCP_TOKEN_ENV]: options.appMcp.token
     };
+  }
+
+  private withAppMcpClientStatus(
+    result: ParticipantRunResult,
+    participant: ParticipantConfig,
+    options: CliAgentRunOptions
+  ): ParticipantRunResult {
+    const warning = this.appMcpClientWarning(participant, options);
+    if (!warning) {
+      return result;
+    }
+    return {
+      ...result,
+      appMcpClientFailed: true,
+      warnings: [
+        ...(result.warnings ?? []),
+        warning
+      ]
+    };
+  }
+
+  private appMcpClientWarning(participant: ParticipantConfig, options: CliAgentRunOptions): string | undefined {
+    const appMcp = options.appMcp;
+    if (!appMcp?.clientGenerationId || !appMcp.clientStatus) {
+      return undefined;
+    }
+    const status = appMcp.clientStatus(appMcp.clientGenerationId);
+    if (!status) {
+      return `${participant.label}: app tools did not load for this run; the AccordAgents MCP bridge may be unreachable or stale.`;
+    }
+    if (status.errored) {
+      return `${participant.label}: app tools reported an MCP connection error; the AccordAgents MCP bridge will be refreshed.`;
+    }
+    if (!status.initialized || !status.listedTools) {
+      return `${participant.label}: app tools did not finish MCP setup; the AccordAgents MCP bridge may be unreachable or stale.`;
+    }
+    if (!status.requiredToolsPresent) {
+      const missing = status.missingToolNames.slice(0, 3).join(", ");
+      return `${participant.label}: app tools loaded without required tools${missing ? ` (${missing})` : ""}; the AccordAgents MCP bridge will be refreshed.`;
+    }
+    return undefined;
   }
 
   private shouldPassClaudeAllowedTools(kind: ConversationKind, options: CliAgentRunOptions): boolean {

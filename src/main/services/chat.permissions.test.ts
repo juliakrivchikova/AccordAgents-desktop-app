@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   APP_CHAT_EXPORT_ATTACHMENT_TOOL,
+  APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
   APP_CHAT_REACT_TOOL,
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
@@ -3040,6 +3041,76 @@ test("app MCP advertises app_chat_react to chat participants", () => {
   assert.ok(tools.find((tool) => tool.name === APP_TOOL_PERMISSION_TOOL));
 });
 
+test("appMcpToolNames includes participant request tools for ordinary participants", () => {
+  const { service } = testService();
+  const tools = (service as any).appMcpToolNames([]);
+
+  assert.ok(tools.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL));
+  assert.ok(tools.includes(APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL));
+});
+
+test("app MCP tracks client generation setup and required tools", async () => {
+  const appMcp = new AppMcpService();
+  const actor = {
+    conversationId: "conversation-1",
+    participantId: "participant-1",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    capabilities: [],
+    clientGenerationId: "client-generation-1",
+    expectedToolNames: [
+      APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
+      APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL
+    ]
+  };
+
+  await (appMcp as any).handleRpcRequest(actor, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {}
+  });
+  let status = appMcp.clientStatus("client-generation-1");
+  assert.equal(status?.initialized, true);
+  assert.equal(status?.listedTools, false);
+
+  await (appMcp as any).handleRpcRequest(actor, {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/list",
+    params: {}
+  });
+  status = appMcp.clientStatus("client-generation-1");
+  assert.equal(status?.listedTools, true);
+  assert.equal(status?.requiredToolsPresent, true);
+  assert.deepEqual(status?.missingToolNames, []);
+});
+
+test("app MCP client generation records missing expected tools", async () => {
+  const appMcp = new AppMcpService();
+  const actor = {
+    conversationId: "conversation-1",
+    participantId: "participant-1",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    capabilities: [],
+    clientGenerationId: "client-generation-missing",
+    expectedToolNames: ["missing-tool"]
+  };
+
+  await (appMcp as any).handleRpcRequest(actor, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/list",
+    params: {}
+  });
+  const status = appMcp.clientStatus("client-generation-missing");
+
+  assert.equal(status?.listedTools, true);
+  assert.equal(status?.requiredToolsPresent, false);
+  assert.deepEqual(status?.missingToolNames, ["missing-tool"]);
+});
+
 test("app MCP role request tool is not provider-destructive because app approval gates deletion", () => {
   const appMcp = new AppMcpService();
   const tools = (appMcp as any).toolsForActor({
@@ -3053,6 +3124,35 @@ test("app MCP role request tool is not provider-destructive because app approval
 
   assert.ok(roleRequestTool);
   assert.equal(roleRequestTool.annotations?.destructiveHint, false);
+});
+
+test("app MCP client failure clears provider session and advances generation", () => {
+  const { service } = testService();
+  const participant = chatParticipant("codex-cli");
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "provider-session-1",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    appMcpClientGeneration: 2,
+    updatedAt: NOW
+  };
+  const warnings: string[] = [];
+
+  (service as any).applyCliRunMetadata(session, {
+    participant: { id: participant.id, kind: "codex-cli", label: "@codex" },
+    ok: true,
+    content: "done",
+    sessionId: "provider-session-2",
+    appMcpClientFailed: true,
+    warnings: ["@codex: app tools did not load for this run; the AccordAgents MCP bridge may be unreachable or stale."]
+  }, participant, warnings);
+
+  assert.equal(session.sessionId, "");
+  assert.equal(session.appMcpClientGeneration, 3);
+  assert.deepEqual(warnings, ["@codex: app tools did not load for this run; the AccordAgents MCP bridge may be unreachable or stale."]);
 });
 
 test("participant behavior rules are merged into session role instructions", async () => {
