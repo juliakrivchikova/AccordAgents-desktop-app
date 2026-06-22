@@ -282,7 +282,7 @@ Current attachment support:
 - Up to 8192 px per side.
 - Up to 25,000,000 pixels per image.
 
-Images are stored outside SQLite under app `userData`, scoped by conversation. Message metadata stores attachment information, not image bytes. Attachments can be listed and read by app MCP tools scoped to the issued participant token, so agents can inspect durable attachment IDs without receiving arbitrary local filesystem access.
+Images are stored outside SQLite under app `userData`, scoped by conversation. Message metadata stores attachment information, not image bytes. Attachments can be listed, read, and exported by app MCP tools scoped to the issued participant token, so agents can inspect durable attachment IDs or copy exact image bytes into the selected repository without receiving arbitrary local filesystem access.
 
 Landing page copy can honestly say that AccordAgents supports screenshots and image attachments in chat, with local app-managed storage and scoped agent access.
 
@@ -341,6 +341,10 @@ Read-only app MCP tools include:
 - List visible attachments.
 - Read visible image attachments.
 - Get participant request status.
+
+Repository-writing app MCP tools include:
+
+- Export visible image attachments into an existing directory under the selected repository when the participant run has effective `workspaceWrite`.
 
 Approval-gated tools include:
 
@@ -411,7 +415,7 @@ Important boundaries:
 - App MCP calls use scoped bearer tokens issued per participant session.
 - State-changing app tool requests require validation and user approval.
 - Participant permissions constrain repository access, file edits, shell use, and web access.
-- Image attachment tools expose app-managed attachment IDs, not arbitrary filesystem paths.
+- Image attachment tools expose app-managed attachment IDs, not arbitrary storage paths; exports are constrained to repository-relative targets under the selected repository.
 - Repository file mentions are validated against the selected repository and cannot escape it.
 - Agent sessions are recreated when role versions, provider configuration, model, mode, permissions, app tool capabilities, or runtime config versions change.
 

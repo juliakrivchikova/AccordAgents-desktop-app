@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { copyFile, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { app } from "electron";
 import type {
@@ -56,6 +57,7 @@ import type {
   Conversation,
   CreateChatConversationRequest,
   DismissConversationWarningsRequest,
+  ExportChatAttachmentRequest,
   ParticipantConfig,
   ProviderModelCatalog,
   ReadChatAttachmentRequest,
@@ -98,6 +100,7 @@ import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
 import { CliAgentRunner } from "./cliAgents";
 import type { CliAgentOutputEvent, CliAgentRoleOptions } from "./cliAgents";
 import {
+  APP_CHAT_EXPORT_ATTACHMENT_TOOL,
   APP_CHAT_GET_CONTEXT_TOOL,
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
   APP_CHAT_GET_PARTICIPANTS_TOOL,
@@ -225,6 +228,7 @@ const CHAT_CONTEXT_MCP_TOOL_NAMES = [
   APP_CHAT_READ_MESSAGES_TOOL,
   APP_CHAT_LIST_ATTACHMENTS_TOOL,
   APP_CHAT_READ_ATTACHMENT_TOOL,
+  APP_CHAT_EXPORT_ATTACHMENT_TOOL,
   APP_CHAT_REACT_TOOL,
   APP_CHAT_SEND_MESSAGE_TOOL,
   APP_TOOL_PERMISSION_TOOL
@@ -275,6 +279,7 @@ interface ChatAppMcpGateway {
     participantRequestBatchId?: string;
     historyMarkdownPath?: string;
     historyJsonPath?: string;
+    runPermissions?: ChatAgentPermissions;
   }): { url: string; token: string } | undefined;
   updateToken?(token: string, grant: ChatAppMcpTokenGrant): { url: string; token: string } | undefined;
 }
@@ -298,6 +303,7 @@ interface ChatAppMcpActor {
   participantRequestBatchId?: string;
   historyMarkdownPath?: string;
   historyJsonPath?: string;
+  runPermissions?: ChatAgentPermissions;
 }
 
 interface ChatChoiceDraft {
@@ -2027,6 +2033,56 @@ export class ChatService {
     };
   }
 
+  async exportChatAttachmentForTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+    await this.waitForQueuedSave(actor.conversationId);
+    const conversation = await this.requireChat(actor.conversationId);
+    const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+    if (!requester) {
+      throw new Error("The requesting participant is no longer in this chat.");
+    }
+    const runPermissions = actor.runPermissions
+      ? normalizeChatAgentPermissions(actor.runPermissions)
+      : undefined;
+    if (!runPermissions) {
+      throw new Error(
+        "AttachmentExportDenied. Problem: workspace write permission could not be verified for this participant run. Cause: the app MCP token does not include a run-scoped permission snapshot. Fix: retry in a new participant turn."
+      );
+    }
+    if (!runPermissions.workspaceWrite) {
+      throw new Error(
+        "AttachmentExportDenied. Problem: workspaceWrite is not granted for this participant run. Cause: exporting an attachment writes a file into the selected repository. Fix: request workspaceWrite permission, then retry the export."
+      );
+    }
+    const request = this.normalizeChatAttachmentExportRequest(rawRequest);
+    const record = this.visibleImageAttachmentRecords(conversation, actor).find((item) => item.attachment.id === request.attachmentId);
+    if (!record) {
+      void this.debugLogs.write("chat.attachments.mcp-export-denied", {
+        conversationId: actor.conversationId,
+        participantId: actor.participantId,
+        attachmentId: request.attachmentId,
+        snapshotMaxSequence: actor.snapshotMaxSequence
+      });
+      throw new Error(
+        "AttachmentExportDenied. Problem: this attachment is not visible to the current participant turn. Cause: the attachment id is absent, belongs to another conversation, or is newer than this turn snapshot. Fix: call app_chat_list_attachments for visible attachment IDs, or ask User to resend the image."
+      );
+    }
+
+    const target = await this.resolveAttachmentExportTarget(conversation, record.attachment, request);
+    const sizeBytes = await this.copyAttachmentToExportTarget(conversation.id, record.attachment, target.absolutePath, request.overwrite);
+    return {
+      conversationId: conversation.id,
+      requesterParticipantId: requester.id,
+      messageId: record.message.id,
+      sequence: record.sequence,
+      author: this.messageAuthor(record.message),
+      threadId: record.message.metadata?.threadId,
+      attachment: this.chatImageAttachmentForTool(record.attachment),
+      targetPath: target.relativePath,
+      sizeBytes,
+      overwrite: request.overwrite
+    };
+  }
+
   async respondToAppToolApproval(
     request: RespondToChatAppToolApprovalRequest,
     progress?: ProgressCallback
@@ -3277,6 +3333,7 @@ export class ChatService {
       snapshotMaxSequence: Math.max(0, promptConversation.messages.length - 1),
       continuation: Boolean(options.continuation),
       runId,
+      runPermissions: effectiveChatAgentPermissionsForProvider(participant.kind, agentMode, permissions),
       participantRequestDepth: options.participantRequestDepth ?? 0,
       participantRequestBatchId: options.participantRequestBatchId,
       historyMarkdownPath: path.join(workspacePath, "history.md"),
@@ -8481,7 +8538,7 @@ export class ChatService {
       ...attachments.map((attachment) =>
         `- ${attachment.filename} (${attachment.mimeType}, ${this.formatBytes(attachment.sizeBytes)}, ${attachment.width}x${attachment.height}) attachmentId=${attachment.id}`
       ),
-      `Use \`${APP_CHAT_READ_ATTACHMENT_TOOL}\` with JSON like { "attachmentId": "${attachments[0].id}" } to inspect the image content. Use \`${APP_CHAT_LIST_ATTACHMENTS_TOOL}\` if you need to rediscover visible attachment IDs.`
+      `Use \`${APP_CHAT_READ_ATTACHMENT_TOOL}\` with JSON like { "attachmentId": "${attachments[0].id}" } to inspect the image content. Use \`${APP_CHAT_EXPORT_ATTACHMENT_TOOL}\` with { "attachmentId": "${attachments[0].id}", "targetPath": "relative/path.png" } to copy exact image bytes into the selected repo when workspaceWrite is granted. Use \`${APP_CHAT_LIST_ATTACHMENTS_TOOL}\` if you need to rediscover visible attachment IDs.`
     ].join("\n");
   }
 
@@ -8736,6 +8793,191 @@ export class ChatService {
       throw new Error("AttachmentReadDenied. Problem: attachmentId is required. Cause: the read request did not include an attachmentId. Fix: call app_chat_list_attachments and pass one returned attachmentId.");
     }
     return { attachmentId };
+  }
+
+  private normalizeChatAttachmentExportRequest(raw: unknown): ExportChatAttachmentRequest & { overwrite: boolean } {
+    const attachment = this.normalizeChatAttachmentReadRequest(raw);
+    const record = raw && typeof raw === "object" && !Array.isArray(raw)
+      ? raw as Record<string, unknown>
+      : {};
+    const targetPath = this.normalizeChatAttachmentExportTargetPath(record.targetPath);
+    if (!targetPath) {
+      throw new Error(
+        "AttachmentExportDenied. Problem: targetPath must be a repository-relative file path. Cause: the export request omitted targetPath, used an absolute path, used path traversal, or used an invalid path separator. Fix: pass a path like \"screenshots/image.png\"."
+      );
+    }
+    return {
+      attachmentId: attachment.attachmentId,
+      targetPath,
+      overwrite: record.overwrite === true
+    };
+  }
+
+  private normalizeChatAttachmentExportTargetPath(value: unknown): string | undefined {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.includes("\0") || trimmed.includes("\\") || trimmed.startsWith("/") || trimmed.endsWith("/")) {
+      return undefined;
+    }
+    if (trimmed.split("/").includes("..")) {
+      return undefined;
+    }
+    const normalized = path.posix.normalize(trimmed);
+    if (!normalized || normalized === "." || normalized === ".." || normalized.startsWith("../") || normalized.split("/").includes("..")) {
+      return undefined;
+    }
+    return normalized;
+  }
+
+  private async resolveAttachmentExportTarget(
+    conversation: Conversation,
+    attachment: ChatImageAttachment,
+    request: ExportChatAttachmentRequest
+  ): Promise<{ absolutePath: string; relativePath: string }> {
+    if (!conversation.repoPath) {
+      throw new Error(
+        "AttachmentExportDenied. Problem: no repository is selected for this chat. Cause: attachment export only writes inside the selected repository. Fix: select a repository for the chat, then retry."
+      );
+    }
+    this.validateAttachmentExportExtension(attachment, request.targetPath);
+    let repoRealPath: string;
+    try {
+      repoRealPath = await realpath(conversation.repoPath);
+    } catch {
+      throw new Error(
+        "AttachmentExportDenied. Problem: the selected repository could not be resolved. Cause: the repository path is missing or inaccessible. Fix: select an existing repository, then retry."
+      );
+    }
+    const repoRoot = path.resolve(conversation.repoPath);
+    const absolutePath = path.resolve(repoRoot, request.targetPath);
+    if (!this.isPathInside(repoRoot, absolutePath)) {
+      throw new Error(
+        "AttachmentExportDenied. Problem: targetPath escapes the selected repository. Cause: the export path resolves outside the repository root. Fix: pass a repository-relative path inside the selected repository."
+      );
+    }
+
+    const parentPath = path.dirname(absolutePath);
+    let parentRealPath: string;
+    try {
+      parentRealPath = await realpath(parentPath);
+    } catch {
+      throw new Error(
+        "AttachmentExportDenied. Problem: the target directory does not exist. Cause: attachment export v1 requires an existing parent directory. Fix: create the directory inside the repository, then retry."
+      );
+    }
+    if (!this.isPathInside(repoRealPath, parentRealPath)) {
+      throw new Error(
+        "AttachmentExportDenied. Problem: targetPath escapes the selected repository. Cause: the target directory resolves through a symlink outside the repository. Fix: choose a real directory inside the repository."
+      );
+    }
+
+    await this.assertAttachmentExportTargetWritable(absolutePath, request.targetPath, request.overwrite === true);
+    return {
+      absolutePath,
+      relativePath: path.relative(repoRoot, absolutePath).split(path.sep).join(path.posix.sep)
+    };
+  }
+
+  private validateAttachmentExportExtension(attachment: ChatImageAttachment, targetPath: string): void {
+    const extension = path.posix.extname(targetPath).toLowerCase().replace(/^\./, "");
+    const allowed = attachment.mimeType === "image/jpeg"
+      ? ["jpg", "jpeg"]
+      : [CHAT_IMAGE_EXTENSION_BY_MIME[attachment.mimeType]];
+    if (!allowed.includes(extension)) {
+      throw new Error(
+        `AttachmentExportDenied. Problem: targetPath extension does not match the attachment type. Cause: ${attachment.mimeType} attachments must be written with ${allowed.map((item) => `.${item}`).join(" or ")}. Fix: choose a matching file extension.`
+      );
+    }
+  }
+
+  private async assertAttachmentExportTargetWritable(absolutePath: string, targetPath: string, overwrite: boolean): Promise<void> {
+    let info: Awaited<ReturnType<typeof lstat>> | undefined;
+    try {
+      info = await lstat(absolutePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return;
+      }
+      throw new Error(
+        `AttachmentExportDenied. Problem: targetPath could not be inspected. Cause: ${error instanceof Error ? error.message : String(error)}. Fix: choose a writable file path inside the selected repository.`
+      );
+    }
+    if (info.isSymbolicLink()) {
+      throw new Error(
+        "AttachmentExportDenied. Problem: targetPath points to a symlink. Cause: overwriting symlinks could escape the selected repository. Fix: choose a regular file path inside the selected repository."
+      );
+    }
+    if (info.isDirectory()) {
+      throw new Error(
+        "AttachmentExportDenied. Problem: targetPath points to a directory. Cause: attachment export needs a file path, not a directory. Fix: include a filename such as \"image.png\"."
+      );
+    }
+    if (!info.isFile()) {
+      throw new Error(
+        "AttachmentExportDenied. Problem: targetPath points to an unsupported filesystem entry. Cause: attachment export can only overwrite regular files. Fix: choose a regular file path inside the selected repository."
+      );
+    }
+    if (!overwrite) {
+      throw new Error(
+        `AttachmentExportDenied. Problem: ${targetPath} already exists. Cause: overwrite was not enabled. Fix: choose a different targetPath or retry with overwrite set to true.`
+      );
+    }
+  }
+
+  private async copyAttachmentToExportTarget(
+    conversationId: string,
+    attachment: ChatImageAttachment,
+    absolutePath: string,
+    overwrite: boolean
+  ): Promise<number> {
+    const sourcePath = this.attachmentPath(conversationId, attachment.storageKey);
+    let sourceInfo: Awaited<ReturnType<typeof stat>>;
+    try {
+      sourceInfo = await stat(sourcePath);
+      if (!sourceInfo.isFile()) {
+        throw new Error("source is not a regular file");
+      }
+    } catch (error) {
+      void this.debugLogs.write("chat.attachments.missing", {
+        conversationId,
+        attachmentId: attachment.id,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      throw new Error(
+        "AttachmentMissing. Problem: the attachment metadata exists, but the image file could not be read. Cause: the attachment file is missing or inaccessible in app storage. Fix: ask User to resend the image."
+      );
+    }
+
+    if (!overwrite) {
+      try {
+        await copyFile(sourcePath, absolutePath, fsConstants.COPYFILE_EXCL);
+        return sourceInfo.size;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+          throw new Error(
+            "AttachmentExportDenied. Problem: targetPath already exists. Cause: another file appeared at the destination before export completed. Fix: choose a different targetPath or retry with overwrite set to true."
+          );
+        }
+        throw new Error(
+          `AttachmentExportFailed. Problem: the attachment could not be exported. Cause: ${error instanceof Error ? error.message : String(error)}. Fix: check repository file permissions and retry.`
+        );
+      }
+    }
+
+    const tempPath = `${absolutePath}.${randomUUID()}.tmp`;
+    try {
+      await copyFile(sourcePath, tempPath);
+      await this.assertAttachmentExportTargetWritable(absolutePath, path.basename(absolutePath), true);
+      await rename(tempPath, absolutePath);
+      return sourceInfo.size;
+    } catch (error) {
+      await rm(tempPath, { force: true }).catch(() => undefined);
+      throw new Error(
+        `AttachmentExportFailed. Problem: the attachment could not be exported. Cause: ${error instanceof Error ? error.message : String(error)}. Fix: check repository file permissions and retry.`
+      );
+    }
   }
 
   private async readAttachmentBase64(conversationId: string, attachment: ChatImageAttachment): Promise<string> {

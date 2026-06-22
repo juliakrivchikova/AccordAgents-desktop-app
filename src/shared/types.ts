@@ -787,6 +787,19 @@ export interface ReadChatAttachmentResult {
   dataBase64: string;
 }
 
+export interface ExportChatAttachmentRequest {
+  attachmentId: string;
+  targetPath: string;
+  overwrite?: boolean;
+}
+
+export interface ExportChatAttachmentResult {
+  attachment: Omit<ChatImageAttachment, "storageKey">;
+  targetPath: string;
+  sizeBytes: number;
+  overwrite: boolean;
+}
+
 export interface RespondToChatMentionsRequest {
   conversationId: string;
   sourceMessageId: string;

@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import type { ChatAppToolCapability } from "../../shared/types";
+import type { ChatAgentPermissions, ChatAppToolCapability } from "../../shared/types";
+import { normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { hasChatAppToolCapability } from "../../shared/appTools";
 import { CHAT_REACTION_EMOJIS } from "../../shared/chatReactions";
 
@@ -20,6 +21,7 @@ export const APP_CHAT_GET_PARTICIPANTS_TOOL = "app_chat_get_participants";
 export const APP_CHAT_READ_MESSAGES_TOOL = "app_chat_read_messages";
 export const APP_CHAT_LIST_ATTACHMENTS_TOOL = "app_chat_list_attachments";
 export const APP_CHAT_READ_ATTACHMENT_TOOL = "app_chat_read_attachment";
+export const APP_CHAT_EXPORT_ATTACHMENT_TOOL = "app_chat_export_attachment";
 export const APP_CHAT_REACT_TOOL = "app_chat_react";
 export const APP_CHAT_SEND_MESSAGE_TOOL = "app_chat_send_message";
 
@@ -40,6 +42,7 @@ export interface AppMcpActor {
   participantRequestBatchId?: string;
   historyMarkdownPath?: string;
   historyJsonPath?: string;
+  runPermissions?: ChatAgentPermissions;
 }
 
 export interface AppMcpConnection {
@@ -62,6 +65,7 @@ type AppChatParticipantsHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppChatMessagesHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatAttachmentListHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatAttachmentReadHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+type AppChatAttachmentExportHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatParticipantRequestHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatParticipantRequestStatusHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatReactHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
@@ -104,6 +108,7 @@ export class AppMcpService {
   private chatMessagesHandler?: AppChatMessagesHandler;
   private chatAttachmentListHandler?: AppChatAttachmentListHandler;
   private chatAttachmentReadHandler?: AppChatAttachmentReadHandler;
+  private chatAttachmentExportHandler?: AppChatAttachmentExportHandler;
   private chatParticipantRequestHandler?: AppChatParticipantRequestHandler;
   private chatParticipantRequestStatusHandler?: AppChatParticipantRequestStatusHandler;
   private chatReactHandler?: AppChatReactHandler;
@@ -159,6 +164,10 @@ export class AppMcpService {
 
   setChatAttachmentReadHandler(handler: AppChatAttachmentReadHandler): void {
     this.chatAttachmentReadHandler = handler;
+  }
+
+  setChatAttachmentExportHandler(handler: AppChatAttachmentExportHandler): void {
+    this.chatAttachmentExportHandler = handler;
   }
 
   setChatParticipantRequestHandler(handler: AppChatParticipantRequestHandler): void {
@@ -244,7 +253,8 @@ export class AppMcpService {
       participantRequestDepth: grant.participantRequestDepth,
       participantRequestBatchId: grant.participantRequestBatchId,
       historyMarkdownPath: grant.historyMarkdownPath,
-      historyJsonPath: grant.historyJsonPath
+      historyJsonPath: grant.historyJsonPath,
+      runPermissions: grant.runPermissions ? normalizeChatAgentPermissions(grant.runPermissions) : undefined
     };
   }
 
@@ -579,6 +589,37 @@ export class AppMcpService {
           readOnlyHint: true,
           destructiveHint: false,
           idempotentHint: true,
+          openWorldHint: false
+        }
+      },
+      {
+        name: APP_CHAT_EXPORT_ATTACHMENT_TOOL,
+        title: "Export Chat Attachment",
+        description:
+          "Copy one visible image attachment into the selected repository using a repository-relative targetPath. Requires workspace write permission for this participant run.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            attachmentId: {
+              type: "string",
+              description: "Attachment id from app_chat_list_attachments or message metadata."
+            },
+            targetPath: {
+              type: "string",
+              description: "Repository-relative destination file path, for example screenshots/example.png. Absolute paths and traversal are rejected."
+            },
+            overwrite: {
+              type: "boolean",
+              description: "When true, replace an existing regular file. Existing symlinks and directories are always rejected."
+            }
+          },
+          required: ["attachmentId", "targetPath"]
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
           openWorldHint: false
         }
       },
@@ -979,6 +1020,7 @@ export class AppMcpService {
       record.name !== APP_CHAT_READ_MESSAGES_TOOL &&
       record.name !== APP_CHAT_LIST_ATTACHMENTS_TOOL &&
       record.name !== APP_CHAT_READ_ATTACHMENT_TOOL &&
+      record.name !== APP_CHAT_EXPORT_ATTACHMENT_TOOL &&
       record.name !== APP_CHAT_REACT_TOOL &&
       record.name !== APP_CHAT_SEND_MESSAGE_TOOL
     ) {
@@ -1022,6 +1064,12 @@ export class AppMcpService {
         throw new Error("Chat attachment reading is not available.");
       }
       return this.toolImageResult(await this.chatAttachmentReadHandler(actor, record.arguments));
+    }
+    if (record.name === APP_CHAT_EXPORT_ATTACHMENT_TOOL) {
+      if (!this.chatAttachmentExportHandler) {
+        throw new Error("Chat attachment exporting is not available.");
+      }
+      return this.toolTextResult(await this.chatAttachmentExportHandler(actor, record.arguments));
     }
     if (record.name === APP_CHAT_REACT_TOOL) {
       if (!this.chatReactHandler) {

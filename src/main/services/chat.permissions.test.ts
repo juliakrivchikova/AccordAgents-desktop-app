@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  APP_CHAT_EXPORT_ATTACHMENT_TOOL,
   APP_CHAT_REACT_TOOL,
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
@@ -3024,12 +3025,18 @@ test("app MCP advertises app_chat_react to chat participants", () => {
     roleConfigId: ROLE.id,
     roleConfigVersion: ROLE.version,
     capabilities: []
-  }) as Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> } }>;
+  }) as Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> }; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean } }>;
   const reactionTool = tools.find((tool) => tool.name === APP_CHAT_REACT_TOOL);
+  const exportTool = tools.find((tool) => tool.name === APP_CHAT_EXPORT_ATTACHMENT_TOOL);
 
   assert.ok(reactionTool);
   assert.ok(reactionTool.inputSchema?.properties?.messageId);
   assert.ok(reactionTool.inputSchema?.properties?.emoji);
+  assert.ok(exportTool);
+  assert.equal(exportTool.annotations?.readOnlyHint, false);
+  assert.equal(exportTool.annotations?.destructiveHint, true);
+  assert.ok(exportTool.inputSchema?.properties?.attachmentId);
+  assert.ok(exportTool.inputSchema?.properties?.targetPath);
   assert.ok(tools.find((tool) => tool.name === APP_TOOL_PERMISSION_TOOL));
 });
 
