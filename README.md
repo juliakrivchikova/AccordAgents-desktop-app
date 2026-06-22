@@ -1,6 +1,6 @@
 # AccordAgents
 
-AccordAgents is an open-source macOS app for running CLI agents in one shared project workspace (Claude and Codex are currently supported).
+AccordAgents is an open-source macOS app for coordinating AI agents in one shared project workspace. It currently supports local CLI participants backed by Claude Code and Codex CLI.
 
 Instead of copy-pasting context between separate terminals or chats, you keep files, roles, history, approvals, and decisions in one project thread.
 
@@ -17,7 +17,7 @@ AccordAgents lets multiple agents work from the same project, compare perspectiv
 - Create reusable agent roles and participants
 - Mention agents directly in a project chat
 - Run multiple agents from the same context
-- Compare Claude and Codex perspectives
+- Compare multiple agent perspectives
 - Control permissions, tool use, and handoffs
 - Keep decisions and implementation history in one place
 
@@ -54,7 +54,8 @@ make clean
 
 - **Local CLI agents** (`claude`, `codex`) are detected via `which`. They run in a
   permission-scoped sandbox of the selected repository: read-only by default, with
-  file/shell/web access granted only through explicit per-participant approval.
+  file/shell/web access controlled per participant through approval cards, saved
+  allow rules, or auto mode for trusted workflows.
 - See `docs/chat-roles-and-participants.md` for chat roles and participant
   configuration.
 

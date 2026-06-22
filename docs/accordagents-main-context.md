@@ -33,7 +33,7 @@ The user creates or opens a chat, chooses participants, and talks to them with n
 
 The user decides who responds. Messages use `@handle` mentions to dispatch work. Mentioning one participant runs one participant. Mentioning multiple participants can run them in parallel from the same conversation snapshot. Normal prose mentions are not treated as automatic handoffs unless they are part of the app's explicit participant-request flow.
 
-The product is designed to let several local AI agents participate in the same thread without making the user manually copy context between tools. Codex and Claude can read the same chat history, see relevant repository/file context when allowed, request another participant when they need a second opinion, and ask the user to approve blocked capabilities.
+The product is designed to let several local CLI-backed AI agents participate in the same thread without making the user manually copy context between tools. Codex and Claude can read the same chat history, see relevant repository/file context when allowed, request another participant when they need a second opinion, and ask the user to approve blocked capabilities.
 
 The app is also a control surface. It tracks participant configuration, role versions, model overrides, provider health, approvals, conversation history, repository context, attachments, run state, and local MCP token scope. That makes multi-agent chat more inspectable than manually running several CLI windows and pasting messages between them.
 
@@ -439,14 +439,14 @@ Avoid framing:
 Headline options:
 
 - AccordAgents
-- Local multi-agent chat for Codex CLI and Claude Code
-- One desktop chat for your local AI agents
+- AI agents in one project chat
+- Coordinate local CLI agents in one shared project workspace
 
 Subheadline options:
 
-- Bring Codex CLI and Claude Code into the same macOS chat workspace, assign roles and permissions, and approve every handoff.
-- Mention local CLI agents by name, share repository context and screenshots, and keep the conversation history on your Mac.
-- A human-controlled chat room for local AI agents, with roles, permissions, threads, attachments, and persistent context.
+- Coordinate AI agents in one macOS workspace while files, decisions, permissions, and history stay attached to the project.
+- Mention local CLI agents by name, share repository context and screenshots, and choose when they ask for approval.
+- A human-controlled project chat for AI agents, with roles, configurable permissions, threads, attachments, and persistent context.
 
 Primary CTA options:
 
@@ -464,22 +464,22 @@ Use only CTAs that match the current distribution channel and assets.
 
 ### Short Product Description
 
-AccordAgents is a macOS desktop app for coordinating local CLI agents in one shared chat. Create named participants backed by Codex CLI or Claude Code, give them reusable roles and permission envelopes, mention them with `@handle`, attach repository files or screenshots, and approve participant-to-participant requests before they run.
+AccordAgents is a macOS desktop app for coordinating AI agents in one shared project chat. Create named participants backed by local CLI runtimes, give them reusable roles and permission envelopes, mention them with `@handle`, attach repository files or screenshots, and choose when handoffs or permissions require approval.
 
 ### Positioning Statement
 
-For developers and technical teams using local AI coding CLIs, AccordAgents is a desktop chat workspace that lets Codex CLI and Claude Code participate in the same conversation under user-controlled roles, context, and permissions. Unlike terminal multiplexers or hosted model routers, AccordAgents treats the conversation as the main workspace and keeps agent handoffs explicit.
+For people coordinating project work with multiple AI agents, AccordAgents is a desktop chat workspace that keeps agents in the same conversation under user-controlled roles, context, and permissions. Unlike terminal multiplexers or hosted model routers, AccordAgents treats the conversation as the main workspace and keeps agent handoffs explicit and configurable.
 
 ### Differentiators
 
 - Shared conversation instead of copy-paste between separate CLI sessions.
 - Provider-neutral participant identities backed by local CLI runtimes.
 - User-controlled `@handle` dispatch instead of automatic all-agent fan-out.
-- Approval-gated participant requests and permission escalations.
+- Configurable approvals for participant requests and permission escalations.
 - Per-participant repository, shell, edit, and web permissions.
 - Local app MCP bridge for scoped context and app-controlled tools.
 - Persistent local chat history, threads, file mentions, and image attachments.
-- macOS desktop workflow for developers already using Codex CLI or Claude Code.
+- macOS desktop workflow for people already using local AI CLI agents.
 
 ### Feature Grouping For A Landing Page
 
@@ -487,7 +487,7 @@ Suggested landing sections:
 
 1. Shared local chat.
 
-   Explain that Codex CLI and Claude Code participants can join the same conversation, with handles, roles, avatars, and persistent history.
+   Explain that local CLI-backed participants can join the same conversation, with handles, roles, avatars, and persistent history.
 
 2. Control every run.
 
@@ -495,7 +495,7 @@ Suggested landing sections:
 
 3. Approvals, not swarms.
 
-   Explain participant-to-participant requests, permission requests, roster change requests, and user choice cards.
+   Explain participant-to-participant requests, permission requests, roster change requests, user choice cards, and saved approval behavior.
 
 4. Work with real project context.
 
