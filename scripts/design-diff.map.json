@@ -1,5 +1,7 @@
 {
   "$comment": "Per-component selector map for scripts/design-diff.cjs. 'design' selectors target the handoff bundle (classes are .aa-*); 'app' selectors target the live renderer (its own classes). The engine compares the COMPUTED STYLE of one representative element per type; it never compares text or the NUMBER of repeated items (rows/chips/pills) — content and counts are expected to differ and are ignored. Add components HERE, not in code. Match by role/structure, not shared class names.",
+  "designDir": "../design_handoff_accordagents_chat",
+  "appTitle": "AccordAgents",
   "components": {
     "choice-card": {
       "designFile": "AccordAgents Chat (standalone).html",

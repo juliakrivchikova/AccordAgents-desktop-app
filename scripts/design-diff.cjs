@@ -1,69 +1,60 @@
 #!/usr/bin/env node
 "use strict";
 /**
- * design-diff: compare a live UI component against its design handoff by computed style.
+ * design-diff: compare a design (a self-unpacking design HTML) against a live UI by
+ * computed style.
  *
- * AccordAgents (Electron) preset:
- *   node scripts/design-diff.cjs <component> [--app-port 9222] [--launch]
+ *   node design-diff.cjs <component> --design <design.html> --live-url <url> --map <map.json>
  *
- * Generic (Claude-produced design HTML + a web app over a browser):
- *   node scripts/design-diff.cjs <component> --design <design.html> --live-url <url> --map <map.json>
- *
- * It renders the design HTML headless (Google Chrome) and captures the live side
- * (a running Electron app over CDP via --app-port, or a web app rendered headless
- * via --live-url), then prints a per-property computed-style delta table AND writes
- * a screenshot of each side (design-diff.design.png / design-diff.live.png) so
+ * It renders the design HTML headless (Google Chrome) and captures the live side — a web
+ * app rendered headless via --live-url, or any app already exposing the Chrome DevTools
+ * Protocol on --app-port — then prints a per-property computed-style delta table AND
+ * writes a screenshot of each side (design-diff.design.png / design-diff.live.png) so
  * STRUCTURAL drift the table can't see (extra/missing sections, different layout) is
  * visible at a glance.
  *
- * --launch  : if no debuggable app is on --app-port, start a throwaway Electron
- *             instance, run against it, then tear it down. It does NOT inject a
- *             fixture — if the real component isn't rendered there, the run FAILS.
- * --inject  : smoke-test ONLY. Mounts the map's hand-written fixtureHtml instead of
- *             the live component. The result is a SMOKE run: it is never a pass, it
- *             exits non-zero, and it must not be reported as sign-off. Use it only to
- *             check that the engine itself works, never to verify an implementation.
+ * --app-port  : attach to an app already serving CDP on this port (e.g. Chrome launched
+ *               with --remote-debugging-port). Add --app-title <regex> to pick a window
+ *               by title/url when several are open.
+ * --inject    : smoke-test ONLY. Mounts the map's hand-written fixtureHtml instead of the
+ *               live component. The result is a SMOKE run: never a pass, exits non-zero,
+ *               and must not be reported as sign-off. Use it only to check that the engine
+ *               itself works, never to verify an implementation.
  *
  * IMPORTANT: the table compares the COMPUTED STYLE of ONE representative element per
  * mapped type (a chip, a row, the submit). It does not compare text or the NUMBER of
- * repeated items (rows / chips / pills) — differing content and counts are expected.
- * It DOES flag a mapped element present on one side but absent on the other (that is a
- * structural delta — e.g. the impl added a section the design doesn't have). For
- * anything not in the map, use the emitted screenshots. Components are defined in a map
- * JSON (edit that, not this file).
- * See the design-diff / design-diff-generic SKILL.md files for how to act on deltas.
+ * repeated items (rows / chips / pills) — differing content and counts are expected. It
+ * DOES flag a mapped element present on one side but absent on the other (a structural
+ * delta — e.g. the impl added a section the design doesn't have). For anything not in the
+ * map, use the emitted screenshots. Components are defined in a map JSON (edit that, not
+ * this file). See SKILL.md for how to act on deltas.
  *
  * Exit codes: 0 = real capture, 0 deltas. 1 = real capture with deltas to review (or a
  * hard error). 3 = SMOKE run (--inject) — never sign-off.
- *
- * Engine lives at scripts/design-diff.cjs in the repo root. If it appears missing,
- * you are in a checkout/worktree that lacks it — cd to the dev checkout; do not
- * report "not installed".
  */
 const VERSION = "0.3";
 const http = require("http");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { spawn, spawnSync } = require("child_process");
+const { spawn } = require("child_process");
 const WebSocket = require("ws");
 
-const ROOT = path.resolve(__dirname, "..");
 const DEFAULT_MAP = path.join(__dirname, "design-diff.map.json");
-const HANDOFF_DIR = path.join(ROOT, "design_handoff_accordagents_chat");
 const CHROME = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const DESIGN_SHOT = path.join(ROOT, "design-diff.design.png");
-const LIVE_SHOT = path.join(ROOT, "design-diff.live.png");
+const DESIGN_SHOT = path.join(process.cwd(), "design-diff.design.png");
+const LIVE_SHOT = path.join(process.cwd(), "design-diff.live.png");
+const REPORT = path.join(process.cwd(), "design-diff-report.json");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function parseArgs(argv) {
-  const a = { _: [], appPort: "9222", inject: false, launch: false, shots: true };
+  const a = { _: [], appPort: "9222", inject: false, shots: true };
   for (let i = 0; i < argv.length; i++) {
     const t = argv[i];
     if (t === "--inject") a.inject = true;
-    else if (t === "--launch") a.launch = true;
     else if (t === "--no-shots") a.shots = false;
     else if (t === "--app-port") a.appPort = argv[++i];
+    else if (t === "--app-title") a.appTitle = argv[++i];
     else if (t === "--live-url") a.liveUrl = argv[++i];
     else if (t === "--design") a.design = argv[++i];
     else if (t === "--map") a.map = argv[++i];
@@ -117,7 +108,6 @@ async function findPage(port, match, tries = 40) {
   }
   throw new Error(`no page target on port ${port}`);
 }
-const isAppUp = async (port) => { try { return (await getJSON(port)).some((t) => t.type === "page" && t.webSocketDebuggerUrl); } catch (e) { return false; } };
 function connect(wsUrl) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
@@ -199,9 +189,9 @@ async function renderCapture(chromeBin, url, rootSel, specList, opts = {}) {
   }
 }
 
-// ---- capture from a running Electron app over CDP (AccordAgents preset) ----
-async function attachCapture(appPort, cfg, inject, shotPath) {
-  const appPage = await findPage(appPort, /AccordAgents/);
+// ---- capture from an app already exposing CDP on a port ----
+async function attachCapture(appPort, cfg, inject, titleRe, shotPath) {
+  const appPage = await findPage(appPort, titleRe);
   const acdp = await connect(appPage.webSocketDebuggerUrl);
   await acdp.send("Runtime.enable");
   // wait for the renderer + stylesheets to actually be ready (cold launch can lag)
@@ -227,19 +217,6 @@ async function attachCapture(appPort, cfg, inject, shotPath) {
   return data;
 }
 
-// ---- launch / tear down a throwaway Electron instance (for --launch) ----
-function launchElectron(port) {
-  const udd = fs.mkdtempSync(path.join(os.tmpdir(), "design-diff-app-"));
-  const bin = path.join(ROOT, "node_modules/.bin/electron");
-  const proc = spawn(bin, [".", `--user-data-dir=${udd}`, `--remote-debugging-port=${port}`, "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding", "--disable-background-timer-throttling"], { cwd: ROOT, stdio: "ignore" });
-  return { proc, udd, port };
-}
-function teardownElectron(h) {
-  if (!h) return;
-  try { spawnSync("pkill", ["-f", "user-data-dir=" + h.udd]); } catch (e) { /* ignore */ }
-  try { fs.rmSync(h.udd, { recursive: true, force: true }); } catch (e) { /* ignore */ }
-}
-
 // ---- comparison ----
 const normColor = (v) => String(v).replace(/\s+/g, "");
 function eqVal(key, d, l) {
@@ -255,37 +232,35 @@ function eqVal(key, d, l) {
   const component = args._[0];
   const mapPath = args.map ? path.resolve(process.cwd(), args.map) : DEFAULT_MAP;
   const map = JSON.parse(fs.readFileSync(mapPath, "utf8"));
-  if (!component) { console.error(`usage: node scripts/design-diff.cjs <component> [--app-port 9222 | --live-url <url>] [--design <html>] [--map <json>] [--launch] [--inject]\nknown: ${Object.keys(map.components || {}).join(", ")}`); process.exit(2); }
+  if (!component) { console.error(`usage: node design-diff.cjs <component> --design <html> --live-url <url> [--map <json>] [--app-port <n> --app-title <re>] [--inject]\nknown: ${Object.keys(map.components || {}).join(", ")}`); process.exit(2); }
   const cfg = map.components && map.components[component];
   if (!cfg) { console.error(`unknown component '${component}' in ${mapPath}. known: ${Object.keys(map.components || {}).join(", ")}`); process.exit(2); }
 
-  const designPath = args.design ? path.resolve(process.cwd(), args.design) : path.join(HANDOFF_DIR, cfg.designFile);
+  const mapDir = path.dirname(mapPath);
+  const designDir = map.designDir ? path.resolve(mapDir, map.designDir) : mapDir;
+  const designPath = args.design ? path.resolve(process.cwd(), args.design)
+    : cfg.designFile ? path.resolve(designDir, cfg.designFile)
+    : null;
+  if (!designPath) { console.error("no design file: pass --design <html>, or set designFile (and optional top-level designDir) in the map."); process.exit(2); }
   if (!fs.existsSync(designPath)) { console.error("design file not found: " + designPath); process.exit(2); }
+
   const chromeBin = args.chrome || CHROME;
+  const titleRe = args.appTitle ? new RegExp(args.appTitle) : (map.appTitle ? new RegExp(map.appTitle) : null);
   const liveTarget = args.liveUrl || (":" + args.appPort);
-  console.log(`design-diff v${VERSION} · ${component} · map ${path.basename(mapPath)} · design ${path.basename(designPath)} (found) · live ${liveTarget}${args.launch ? " (--launch)" : ""}${args.inject ? " (--inject SMOKE)" : ""}`);
+  console.log(`design-diff v${VERSION} · ${component} · map ${path.basename(mapPath)} · design ${path.basename(designPath)} (found) · live ${liveTarget}${args.inject ? " (--inject SMOKE)" : ""}`);
 
   // design side: always rendered headless
   const designData = await renderCapture(chromeBin, "file://" + encodeURI(designPath), cfg.designRoot, specs(cfg.elements, "design"), { waitUnpack: true, shotPath: args.shots ? DESIGN_SHOT : undefined });
   if (!designData || !designData._rootFound) { console.error(`design root '${cfg.designRoot}' not found in ${path.basename(designPath)} after unpack.`); process.exit(1); }
 
-  // live side: web app via --live-url, else running Electron via --app-port (optionally launched)
-  let liveData, injected = false, launched = null;
-  try {
-    if (args.liveUrl) {
-      liveData = await renderCapture(chromeBin, args.liveUrl, cfg.appRoot, specs(cfg.elements, "app"), { waitForRoot: true, shotPath: args.shots ? LIVE_SHOT : undefined });
-      if (!liveData || !liveData._rootFound) { console.error(`live root '${cfg.appRoot}' not found at ${args.liveUrl}.`); process.exit(1); }
-    } else {
-      if (args.launch && !(await isAppUp(args.appPort))) {
-        console.log(`  launching a throwaway app on :${args.appPort} ...`);
-        launched = launchElectron(args.appPort);
-        await findPage(args.appPort, /AccordAgents/);
-      }
-      injected = args.inject; // --launch no longer auto-injects; only an explicit --inject does (smoke)
-      liveData = await attachCapture(args.appPort, cfg, injected, args.shots && !injected ? LIVE_SHOT : undefined);
-    }
-  } finally {
-    teardownElectron(launched);
+  // live side: web app via --live-url, else an app already serving CDP on --app-port
+  let liveData, injected = false;
+  if (args.liveUrl) {
+    liveData = await renderCapture(chromeBin, args.liveUrl, cfg.appRoot, specs(cfg.elements, "app"), { waitForRoot: true, shotPath: args.shots ? LIVE_SHOT : undefined });
+    if (!liveData || !liveData._rootFound) { console.error(`live root '${cfg.appRoot}' not found at ${args.liveUrl}.`); process.exit(1); }
+  } else {
+    injected = args.inject;
+    liveData = await attachCapture(args.appPort, cfg, injected, titleRe, args.shots && !injected ? LIVE_SHOT : undefined);
   }
 
   // compare: structural presence first (one row per element), then per-prop style when
@@ -317,7 +292,7 @@ function eqVal(key, d, l) {
       const status = measured ? (keys.every((k, i) => eqVal(k, dvals[i], lvals[i])) ? "match" : "delta") : "unmeasured";
       // In a smoke run (--inject) every value comes from the fixture, so no delta is
       // trustworthy. In a real capture everything is faithful — including composed-
-      // component geometry, which is exactly why a real card (not --inject) is sign-off.
+      // component geometry, which is exactly why a real component (not --inject) is sign-off.
       const lowConf = status === "delta" && injected;
       rows.push({ element: e.name, prop, design: shorthand(prop, dvals, d._found), live: shorthand(prop, lvals, l._found), status, lowConf });
     }
@@ -328,7 +303,7 @@ function eqVal(key, d, l) {
   const matches = rows.filter((r) => r.status === "match");
   const presence = rows.filter((r) => r.note);
 
-  fs.writeFileSync(path.join(ROOT, "design-diff-report.json"), JSON.stringify({
+  fs.writeFileSync(REPORT, JSON.stringify({
     component, design: path.basename(designPath), live: liveTarget, injected,
     smoke: injected, designShot: designData._shot ? DESIGN_SHOT : null, liveShot: liveData._shot ? LIVE_SHOT : null,
     generatedAt: new Date().toISOString(), rows
@@ -337,7 +312,7 @@ function eqVal(key, d, l) {
   console.log("");
   if (injected) {
     console.log("⚠ SMOKE RUN (--inject): measured a hand-written fixture, NOT the live component.");
-    console.log("  This is never sign-off. Render the real card and re-run without --inject.");
+    console.log("  This is never sign-off. Render the real component and re-run without --inject.");
     console.log(`VERDICT: SMOKE — not a real result (${rows.filter((r) => r.status === "delta").length} delta vs fixture, ${matches.length} fixture-match)`);
   } else {
     console.log(`VERDICT: ${genuine.length} to review · ${matches.length} ok${lowc.length ? ` · ${lowc.length} low-confidence` : ""}`);

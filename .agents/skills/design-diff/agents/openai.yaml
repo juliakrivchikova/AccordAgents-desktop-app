@@ -1,7 +1,7 @@
 interface:
   display_name: "Design Diff"
   short_description: "Diff a live AccordAgents component against its design handoff"
-  default_prompt: "Use $design-diff to compare the live component against the design handoff and report computed-style deltas, then act on them per the skill's decision tree."
+  default_prompt: "Use $design-diff to compare the live component against the design handoff, then fix the implementation to match the design per the skill's fix → re-verify loop (converge elements unique to the screen; ask only on shared/pre-existing ones) and re-run until clean."
 
 policy:
   allow_implicit_invocation: true

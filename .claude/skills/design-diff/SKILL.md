@@ -53,7 +53,8 @@ capture. The render step is the work; don't skip it and don't fall back to `--in
 
 ```bash
 # ENGINE smoke check ONLY (proves the engine runs; NOT your UI; always exits 3):
-node scripts/design-diff.cjs <component> --launch --inject
+# attach to your already-launched instance and mount the fixture:
+node scripts/design-diff.cjs <component> --app-port 9222 --inject
 ```
 
 A smoke run prints `VERDICT: SMOKE — not a real result` and exits 3 — it is never
@@ -73,22 +74,22 @@ not installed." Sanity check: `ls scripts/design-diff.cjs`.
 ## Prerequisites
 
 1. A **separate** debuggable instance you launched (not the user's running app), driven
-   until the component is **actually on screen** — then `--app-port`. `--launch` only
-   starts an empty app; it does not render anything for you, so you still do step 2 of
-   the workflow above.
+   until the component is **actually on screen** — then `--app-port`. Launch the instance
+   yourself via `/electron-desktop-qa`; the engine only attaches over CDP, it does not
+   start the app for you, so you still do step 2 of the workflow above.
 2. Google Chrome installed (renders the handoff headless). Override with `CHROME_BIN`.
 
 ## Usage
 
 ```bash
-node scripts/design-diff.cjs <component> [--app-port 9222 | --live-url <url>] [--design <html>] [--launch] [--inject]
+node scripts/design-diff.cjs <component> [--app-port 9222 [--app-title <re>] | --live-url <url>] [--design <html>] [--inject]
 ```
 
-- `--app-port` — attach to a running debuggable Electron app over CDP (default 9222).
+- `--app-port` — attach to a running debuggable app over CDP (default 9222). The repo map
+  sets `appTitle: "AccordAgents"`, so it picks the right window automatically.
+- `--app-title <re>` — pick the CDP window by title/url regex when several are open.
 - `--live-url` — instead render a web URL headless (used by design-diff-generic).
 - `--design <html>` — override the handoff file (e.g. point at a newer export).
-- `--launch` — start a throwaway app if none is on `--app-port`, then tear it down.
-  Does **not** inject a fixture; you must render the real component in it.
 - `--inject` — SMOKE ONLY. Mounts the map's hand-written `fixtureHtml` instead of the
   live component. Always a SMOKE run: never a pass, exits 3, must not be reported as
   sign-off. Use it only to check the engine itself.

@@ -9,7 +9,7 @@ description: >
 
 # Design Diff (generic)
 
-The portable sibling of `design-diff`. Same engine, same decision tree — but the
+The portable sibling of `design-diff`. Same engine, same fix → re-verify loop — but the
 design side is any Claude-produced design HTML (same self-unpacking bundle format)
 and the live side is a web app reached by URL (headless browser) instead of the
 AccordAgents Electron app.
@@ -70,18 +70,41 @@ implementation screenshot — compare by eye:
 - IGNORE content, data values, and the quantity of repeated items.
 - COMPARE styling (radius, spacing, weight, color, alignment), structure, hierarchy,
   and the presence/absence of *kinds* of UI affordances (e.g. brand icons missing).
-- Produce the same categorized list (Missing / Wrong-style / Extra / Content), then
-  apply the decision tree.
+- Produce the same categorized list, then converge per the fix loop below: **Missing**
+  (in design, not impl) → add; **Extra** (in impl, not design) → remove; **Wrong-style** →
+  fix to the design; shared/pre-existing primitive → ask. You're not done until the impl
+  matches the design (or only shared-element asks remain).
 
-## How to act on a DELTA (decision tree)
+## Fix → re-verify loop (this IS the job — fix inconsistencies, don't just report)
 
-1. **Unambiguous miss you introduced** → fix it, then re-run until clean.
-2. **Pre-existing element that already differs** → ask the user; don't change it silently.
-3. **Design conflicts with an established in-app pattern** (possibly wrong/stale) → ask
-   the user whether the design is intentional; don't align to it.
-4. **Deliberate deviation** → leave it; note it.
+Running design-diff means **driving the implementation into full alignment with the
+design** — not handing back a report. **The design is the source of truth.** Loop until clean:
 
-Surface only the leftover ambiguous cases, not the whole table.
+1. Run a **real** capture (`--live-url` against the running app; screenshots-only → the
+   vision fallback above).
+2. Act on **every** non-`ok` row, then re-run — by what the element **is**:
+   - **Unique to this component/screen** (the thing you're aligning) → **converge it to the
+     design, no asking:**
+     - `DELTA` (radius / padding / gap / font / color) → fix the styling to the design value.
+     - `ABSENT IN IMPL` (design has it, impl lacks it) → **add it** to the impl.
+     - `ABSENT IN DESIGN` (impl has it, design doesn't) → **remove it.** An element that is
+       not in the design must not be in the implementation — delete the arbitrary extra.
+   - **Shared / pre-existing element** — a reused primitive (a Cancel / Save / submit Button,
+     a shared input) or anything not unique to this screen — that diverges → **STOP and ask
+     the user.** Changing it ripples across the app; never silently reshape a shared
+     component to one screen. (Composed / `delta (low-conf)` rows are usually this case.)
+   One correctness check before acting on a structural row: rule out a **stale map selector**
+   (if the selector is wrong the row is a measurement bug — fix the map, not the UI).
+   Otherwise the row is real — act on it. List what you added/removed in your summary.
+3. Re-run after each fix. **Repeat until `VERDICT: 0 to review` and exit `0`.**
+
+**A final answer that still has owned `DELTA` / `ABSENT IN DESIGN` / `ABSENT IN IMPL` rows is
+INCOMPLETE — you have not done the job.** Done = a real run exits `0`, the only possible
+leftovers being shared/pre-existing elements parked on a user decision.
+
+> Audit-only exception: if the user explicitly asked you to *audit/report* (not
+> align/implement), a table + read is the right output. Absent that, running design-diff
+> means fixing to green.
 
 ## Limitations
 
