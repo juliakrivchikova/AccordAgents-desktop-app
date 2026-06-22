@@ -237,15 +237,79 @@ test("syncSavedParticipantAvatar refreshes copied chat participant avatars", asy
   const snapshotParticipants = (snapshots.at(-1)?.metadata.participants ?? []) as ChatParticipant[];
   const participant = savedParticipants[0];
   assert.equal(participant?.avatarId, "codex-logo");
+  assert.equal(participant?.participantConfigId, "saved-drew");
   assert.equal(saved?.updatedAt, NOW);
   assert.equal(saved?.messages.length, conversation.messages.length);
   assert.equal(snapshotParticipants[0]?.avatarId, "codex-logo");
 });
 
+test("syncSavedParticipantConfig refreshes copied chat participant behavior rules", async () => {
+  const conversation = chatConversation({
+    metadata: {
+      participants: [chatParticipant({ avatarId: "codex-cat", behaviorRuleIds: ["old-rule"] })],
+      participantSessions: []
+    }
+  });
+  const { service, storage, snapshots } = testService([conversation]);
+
+  await service.syncSavedParticipantConfig(
+    { handle: "drew", kind: "codex-cli" },
+    {
+      id: "saved-drew",
+      handle: "drew",
+      kind: "codex-cli",
+      avatarId: "codex-logo",
+      behaviorRuleIds: ["new-rule"]
+    }
+  );
+
+  const saved = await storage.getConversation(conversation.id);
+  const participant = ((saved?.metadata.participants ?? []) as ChatParticipant[])[0];
+  const snapshotParticipant = ((snapshots.at(-1)?.metadata.participants ?? []) as ChatParticipant[])[0];
+  assert.equal(participant?.participantConfigId, "saved-drew");
+  assert.equal(participant?.avatarId, "codex-logo");
+  assert.deepEqual(participant?.behaviorRuleIds, ["new-rule"]);
+  assert.deepEqual(snapshotParticipant?.behaviorRuleIds, ["new-rule"]);
+});
+
+test("syncSavedParticipantConfig does not legacy-match participants linked to another preset", async () => {
+  const conversation = chatConversation({
+    metadata: {
+      participants: [
+        chatParticipant({
+          participantConfigId: "other-preset",
+          avatarId: "codex-cat",
+          behaviorRuleIds: ["other-rule"]
+        })
+      ],
+      participantSessions: []
+    }
+  });
+  const { service, storage, snapshots } = testService([conversation]);
+
+  await service.syncSavedParticipantConfig(
+    { handle: "drew", kind: "codex-cli" },
+    {
+      id: "saved-drew",
+      handle: "drew",
+      kind: "codex-cli",
+      avatarId: "codex-logo",
+      behaviorRuleIds: ["new-rule"]
+    }
+  );
+
+  const saved = await storage.getConversation(conversation.id);
+  const participant = ((saved?.metadata.participants ?? []) as ChatParticipant[])[0];
+  assert.equal(participant?.participantConfigId, "other-preset");
+  assert.equal(participant?.avatarId, "codex-cat");
+  assert.deepEqual(participant?.behaviorRuleIds, ["other-rule"]);
+  assert.equal(snapshots.length, 0);
+});
+
 test("hydrateContextUsage refreshes copied participant avatars from saved settings", async () => {
   const conversation = chatConversation({
     metadata: {
-      participants: [chatParticipant({ avatarId: "codex-cat" })],
+      participants: [chatParticipant({ avatarId: "codex-cat", behaviorRuleIds: ["old-rule"] })],
       participantSessions: []
     }
   });
@@ -256,6 +320,7 @@ test("hydrateContextUsage refreshes copied participant avatars from saved settin
       roleConfigId: ROLE.id,
       kind: "codex-cli",
       avatarId: "codex-logo",
+      behaviorRuleIds: ["new-rule"],
       updatedAt: NOW
     }]
   });
@@ -267,8 +332,29 @@ test("hydrateContextUsage refreshes copied participant avatars from saved settin
   const savedParticipants = (saved?.metadata.participants ?? []) as ChatParticipant[];
   assert.equal(hydratedParticipants[0]?.avatarId, "codex-logo");
   assert.equal(savedParticipants[0]?.avatarId, "codex-logo");
+  assert.equal(hydratedParticipants[0]?.participantConfigId, "saved-drew");
+  assert.deepEqual(hydratedParticipants[0]?.behaviorRuleIds, ["new-rule"]);
+  assert.deepEqual(savedParticipants[0]?.behaviorRuleIds, ["new-rule"]);
   assert.equal(saved?.updatedAt, NOW);
   assert.equal(((snapshots.at(-1)?.metadata.participants ?? []) as ChatParticipant[])[0]?.avatarId, "codex-logo");
+});
+
+test("removeBehaviorRuleFromChatParticipants removes deleted behavior rules from copied chat participants", async () => {
+  const conversation = chatConversation({
+    metadata: {
+      participants: [chatParticipant({ behaviorRuleIds: ["keep-rule", "deleted-rule"] })],
+      participantSessions: []
+    }
+  });
+  const { service, storage, snapshots } = testService([conversation]);
+
+  await service.removeBehaviorRuleFromChatParticipants("deleted-rule");
+
+  const saved = await storage.getConversation(conversation.id);
+  const participant = ((saved?.metadata.participants ?? []) as ChatParticipant[])[0];
+  const snapshotParticipant = ((snapshots.at(-1)?.metadata.participants ?? []) as ChatParticipant[])[0];
+  assert.deepEqual(participant?.behaviorRuleIds, ["keep-rule"]);
+  assert.deepEqual(snapshotParticipant?.behaviorRuleIds, ["keep-rule"]);
 });
 
 test("hydrateContextUsage refreshes stale stored context usage for existing sessions", async () => {

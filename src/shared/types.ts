@@ -212,6 +212,7 @@ export interface ChatAgentPermissions {
 
 export interface ChatParticipant {
   id: string;
+  participantConfigId?: string;
   handle: string;
   roleConfigId: string;
   roleConfigVersion?: number;
@@ -279,6 +280,7 @@ export interface ChatPendingChoice {
 export type ChatRosterChangeOperationType = "add";
 
 export interface ChatRosterChangeParticipantInput {
+  participantConfigId?: string;
   handle: string;
   roleConfigId: string;
   behaviorRuleIds?: string[];
@@ -489,6 +491,7 @@ export interface ChatRosterAvailableProvider {
 
 export interface ChatRosterCurrentParticipant {
   id: string;
+  participantConfigId?: string;
   handle: string;
   roleConfigId: string;
   roleLabel: string;
@@ -674,6 +677,7 @@ export interface CreateChatConversationRequest {
   repoPath?: string;
   skipDefaultParticipants?: boolean;
   participants: Array<{
+    participantConfigId?: string;
     handle: string;
     roleConfigId: string;
     behaviorRuleIds?: string[];
@@ -689,6 +693,7 @@ export interface CreateChatConversationRequest {
 export interface AddChatParticipantRequest {
   conversationId: string;
   participant: {
+    participantConfigId?: string;
     handle: string;
     roleConfigId: string;
     behaviorRuleIds?: string[];

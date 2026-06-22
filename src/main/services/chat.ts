@@ -461,7 +461,7 @@ export class ChatService {
 
     let hydrated = conversation;
     await this.withChatMutation(conversation, async () => {
-      const avatarsSynced = await this.syncConversationParticipantAvatarsFromSettings(conversation);
+      const participantsSynced = await this.syncConversationParticipantsFromSettings(conversation);
       const recoveredRunState = this.recoverStaleChatRun(conversation);
       let interruptedRequests = false;
       for (const message of conversation.messages) {
@@ -474,7 +474,7 @@ export class ChatService {
       // Heal pointer maps left stale by the pre-fix index-ordering so roster jump targets
       // the participant's true latest message even before they post again.
       const pointersHealed = this.rebuildLastMessagesByParticipantIfChanged(conversation);
-      if (!usageUpdates && !interruptedRequests && !recoveredRunState && !avatarsSynced && !pointersHealed) {
+      if (!usageUpdates && !interruptedRequests && !recoveredRunState && !participantsSynced && !pointersHealed) {
         hydrated = conversation;
         return;
       }
@@ -564,6 +564,7 @@ export class ChatService {
     return participantConfigs
       .filter((participant) => selectedIds.has(participant.id))
       .map((participant) => ({
+        participantConfigId: participant.id,
         handle: participant.handle,
         roleConfigId: participant.roleConfigId,
         behaviorRuleIds: participant.behaviorRuleIds,
@@ -914,10 +915,18 @@ export class ChatService {
     previous: Pick<ChatParticipantConfig, "handle" | "kind"> | undefined,
     next: Pick<ChatParticipantConfig, "id" | "handle" | "kind" | "avatarId">
   ): Promise<void> {
+    await this.syncSavedParticipantConfig(previous, next, { behaviorRules: false });
+  }
+
+  async syncSavedParticipantConfig(
+    previous: Pick<ChatParticipantConfig, "handle" | "kind"> | undefined,
+    next: Pick<ChatParticipantConfig, "id" | "handle" | "kind" | "avatarId" | "behaviorRuleIds">,
+    options: { behaviorRules?: boolean } = {}
+  ): Promise<void> {
     const normalizedPreviousHandle = previous?.handle.trim().replace(/^@/, "").toLowerCase();
     const normalizedNextHandle = next.handle.trim().replace(/^@/, "").toLowerCase();
     const handleMatches = new Set([normalizedPreviousHandle, normalizedNextHandle].filter((handle): handle is string => Boolean(handle)));
-    const avatarId = next.avatarId?.trim() || undefined;
+    const kindMatches = new Set([previous?.kind, next.kind].filter((kind): kind is ChatProviderKind => Boolean(kind)));
     const summaries = await this.storage.listConversations();
     for (const summary of summaries) {
       if (summary.kind !== "chat") {
@@ -931,16 +940,16 @@ export class ChatService {
         const participants = this.chatParticipants(conversation);
         let changed = false;
         const syncedParticipants = participants.map((participant) => {
-          const sameSavedParticipant = participant.id === next.id;
-          const sameHandleAndKind = participant.kind === next.kind && handleMatches.has(participant.handle.toLowerCase());
-          if (!sameSavedParticipant && !sameHandleAndKind) {
+          const sameSavedParticipant = participant.participantConfigId === next.id || participant.id === next.id;
+          const sameLegacyHandleAndKind = !participant.participantConfigId &&
+            kindMatches.has(participant.kind) &&
+            handleMatches.has(participant.handle.toLowerCase());
+          if (!sameSavedParticipant && !sameLegacyHandleAndKind) {
             return participant;
           }
-          if ((participant.avatarId?.trim() || undefined) === avatarId) {
-            return participant;
-          }
-          changed = true;
-          return { ...participant, avatarId };
+          const synced = this.syncParticipantFromSavedConfig(participant, next, options);
+          changed = changed || synced !== participant;
+          return synced;
         });
         if (!changed) {
           return;
@@ -954,27 +963,65 @@ export class ChatService {
     }
   }
 
-  private async syncConversationParticipantAvatarsFromSettings(conversation: Conversation): Promise<boolean> {
+  async removeBehaviorRuleFromChatParticipants(ruleId: string): Promise<void> {
+    const normalized = ruleId.trim();
+    if (!normalized) {
+      return;
+    }
+    const summaries = await this.storage.listConversations();
+    for (const summary of summaries) {
+      if (summary.kind !== "chat") {
+        continue;
+      }
+      const conversation = await this.storage.getConversation(summary.id);
+      if (!conversation || conversation.kind !== "chat") {
+        continue;
+      }
+      await this.withChatMutation(conversation, async () => {
+        const participants = this.chatParticipants(conversation);
+        let changed = false;
+        const syncedParticipants = participants.map((participant) => {
+          const behaviorRuleIds = this.normalizeBehaviorRuleIds(participant.behaviorRuleIds);
+          const nextRuleIds = behaviorRuleIds.filter((id) => id !== normalized);
+          if (nextRuleIds.length === behaviorRuleIds.length) {
+            return participant;
+          }
+          changed = true;
+          return { ...participant, behaviorRuleIds: nextRuleIds };
+        });
+        if (!changed) {
+          return;
+        }
+        conversation.metadata = {
+          ...conversation.metadata,
+          participants: syncedParticipants
+        };
+        await this.saveConversation(conversation);
+      });
+    }
+  }
+
+  private async syncConversationParticipantsFromSettings(conversation: Conversation): Promise<boolean> {
     const participantConfigs = (await this.settings.getPublicSettings()).chatParticipantConfigs ?? [];
     if (participantConfigs.length === 0) {
       return false;
     }
+    const configsById = new Map(participantConfigs.map((config) => [config.id, config]));
     const configsByHandleAndKind = new Map(
-      participantConfigs.map((config) => [this.participantAvatarSyncKey(config.handle, config.kind), config])
+      participantConfigs.map((config) => [this.participantConfigSyncKey(config.handle, config.kind), config])
     );
     const participants = this.chatParticipants(conversation);
     let changed = false;
     const syncedParticipants = participants.map((participant) => {
-      const config = configsByHandleAndKind.get(this.participantAvatarSyncKey(participant.handle, participant.kind));
+      const config = participant.participantConfigId
+        ? configsById.get(participant.participantConfigId)
+        : configsByHandleAndKind.get(this.participantConfigSyncKey(participant.handle, participant.kind));
       if (!config) {
         return participant;
       }
-      const avatarId = config.avatarId?.trim() || undefined;
-      if ((participant.avatarId?.trim() || undefined) === avatarId) {
-        return participant;
-      }
-      changed = true;
-      return { ...participant, avatarId };
+      const synced = this.syncParticipantFromSavedConfig(participant, config);
+      changed = changed || synced !== participant;
+      return synced;
     });
     if (!changed) {
       return false;
@@ -1722,6 +1769,7 @@ export class ChatService {
         const provider = providerByKind.get(participant.kind);
         return {
           id: participant.id,
+          participantConfigId: participant.participantConfigId,
           handle: participant.handle,
           isRequester: participant.id === requester.id,
           roleConfigId: participant.roleConfigId,
@@ -5056,6 +5104,7 @@ export class ChatService {
       const behaviorRuleIds = (settings.chatBehaviorRules ?? []).map((rule) => rule.id).filter((id) => requestedRuleIds.has(id));
       return {
         id: randomUUID(),
+        participantConfigId: item.participantConfigId?.trim() || undefined,
         handle,
         roleConfigId: item.roleConfigId,
         behaviorRuleIds,
@@ -5228,6 +5277,7 @@ export class ChatService {
   private rosterParticipantSummary(conversation: Conversation, participant: ChatParticipant): ChatRosterCurrentParticipant {
     return {
       id: participant.id,
+      participantConfigId: participant.participantConfigId,
       handle: participant.handle,
       roleConfigId: participant.roleConfigId,
       roleLabel: this.roleLabelForParticipant(conversation, participant),
@@ -5288,6 +5338,9 @@ export class ChatService {
         return {
           type: "add",
           participant: {
+            participantConfigId: typeof participantRecord.participantConfigId === "string"
+              ? participantRecord.participantConfigId.trim() || undefined
+              : undefined,
             handle,
             roleConfigId,
             behaviorRuleIds: this.normalizeBehaviorRuleIds(participantRecord.behaviorRuleIds),
@@ -5312,6 +5365,7 @@ export class ChatService {
       operations: participants.map((participant) => ({
         type: "add",
         participant: {
+          participantConfigId: participant.participantConfigId,
           handle: participant.handle,
           roleConfigId: participant.roleConfigId,
           behaviorRuleIds: this.normalizeBehaviorRuleIds(participant.behaviorRuleIds),
@@ -5669,6 +5723,9 @@ export class ChatService {
           type: "add_new_participant_to_chat",
           saveAsPreset: operationRecord.saveAsPreset !== false,
           participant: {
+            participantConfigId: typeof participantRecord.participantConfigId === "string"
+              ? participantRecord.participantConfigId.trim() || undefined
+              : undefined,
             handle: typeof participantRecord.handle === "string" ? participantRecord.handle.trim() : "",
             roleConfigId: typeof participantRecord.roleConfigId === "string" ? participantRecord.roleConfigId.trim() : "",
             behaviorRuleIds: this.normalizeBehaviorRuleIds(participantRecord.behaviorRuleIds),
@@ -5724,6 +5781,7 @@ export class ChatService {
         // meaning "CLI default"); the saved preset itself is never modified.
         const overrides = operation.overrides;
         return {
+          participantConfigId: preset.id,
           handle: preset.handle,
           roleConfigId: preset.roleConfigId,
           behaviorRuleIds: preset.behaviorRuleIds,
@@ -5748,7 +5806,8 @@ export class ChatService {
     });
     const savedHandles = new Set(settings.chatParticipantConfigs.map((participant) => participant.handle.toLowerCase()));
     const presetParticipantConfigs: ChatParticipantConfig[] = [];
-    for (const operation of request.operations) {
+    const savedPresetIdByOperationIndex = new Map<number, string>();
+    for (const [index, operation] of request.operations.entries()) {
       if (operation.type !== "add_new_participant_to_chat" || !operation.saveAsPreset) {
         continue;
       }
@@ -5757,8 +5816,10 @@ export class ChatService {
         throw new Error(`Saved participant @${handle} already exists.`);
       }
       savedHandles.add(handle.toLowerCase());
+      const id = randomUUID();
+      savedPresetIdByOperationIndex.set(index, id);
       presetParticipantConfigs.push({
-        id: randomUUID(),
+        id,
         handle,
         roleConfigId: operation.participant.roleConfigId,
         behaviorRuleIds: operation.participant.behaviorRuleIds,
@@ -5771,11 +5832,14 @@ export class ChatService {
         updatedAt: new Date().toISOString()
       });
     }
-    const participants = await this.validateParticipants(participantInputs, existingParticipants, false, roles);
+    const participants = (await this.validateParticipants(participantInputs, existingParticipants, false, roles)).map((participant, index) => ({
+      ...participant,
+      participantConfigId: participant.participantConfigId ?? savedPresetIdByOperationIndex.get(index)
+    }));
     return {
       request: {
         reason: request.reason,
-        operations: request.operations.map((operation) => {
+        operations: request.operations.map((operation, index) => {
           if (operation.type === "add_existing_participant_to_chat") {
             return operation;
           }
@@ -5783,6 +5847,7 @@ export class ChatService {
             ...operation,
             participant: {
               ...operation.participant,
+              participantConfigId: savedPresetIdByOperationIndex.get(index),
               handle: operation.participant.handle.trim().replace(/^@/, ""),
               permissions: normalizeChatAgentPermissions(operation.participant.permissions)
             }
@@ -5816,6 +5881,7 @@ export class ChatService {
         operations: prepared.participants.map((participant) => ({
           type: "add",
           participant: {
+            participantConfigId: participant.participantConfigId,
             handle: participant.handle,
             roleConfigId: participant.roleConfigId,
             behaviorRuleIds: participant.behaviorRuleIds,
@@ -5861,6 +5927,7 @@ export class ChatService {
         operations: participants.map((participant) => ({
           type: "add",
           participant: {
+            participantConfigId: participant.participantConfigId,
             handle: participant.handle,
             roleConfigId: participant.roleConfigId,
             behaviorRuleIds: participant.behaviorRuleIds,
@@ -9781,7 +9848,35 @@ export class ChatService {
     return Array.isArray(value) ? value.filter((item): item is ChatParticipant => this.isChatParticipant(item)) : [];
   }
 
-  private participantAvatarSyncKey(handle: string, kind: ChatProviderKind): string {
+  private syncParticipantFromSavedConfig(
+    participant: ChatParticipant,
+    config: Pick<ChatParticipantConfig, "id" | "kind" | "avatarId" | "behaviorRuleIds">,
+    options: { behaviorRules?: boolean } = {}
+  ): ChatParticipant {
+    let synced = participant;
+    if (synced.participantConfigId !== config.id) {
+      synced = { ...synced, participantConfigId: config.id };
+    }
+    if (options.behaviorRules !== false) {
+      const behaviorRuleIds = this.normalizeBehaviorRuleIds(config.behaviorRuleIds);
+      if (!this.behaviorRuleIdsEqual(synced.behaviorRuleIds, behaviorRuleIds)) {
+        synced = { ...synced, behaviorRuleIds };
+      }
+    }
+    if (synced.kind === config.kind) {
+      const avatarId = config.avatarId?.trim() || undefined;
+      if ((synced.avatarId?.trim() || undefined) !== avatarId) {
+        synced = { ...synced, avatarId };
+      }
+    }
+    return synced;
+  }
+
+  private behaviorRuleIdsEqual(left: unknown, right: unknown): boolean {
+    return JSON.stringify(this.normalizeBehaviorRuleIds(left)) === JSON.stringify(this.normalizeBehaviorRuleIds(right));
+  }
+
+  private participantConfigSyncKey(handle: string, kind: ChatProviderKind): string {
     return `${kind}:${handle.trim().replace(/^@/, "").toLowerCase()}`;
   }
 

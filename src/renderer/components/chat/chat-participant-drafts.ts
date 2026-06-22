@@ -35,6 +35,7 @@ import {
 } from "./chat-participant-draft-handles";
 
 export interface ChatParticipantDraft {
+  participantConfigId?: string;
   handle: string;
   roleConfigId: string;
   behaviorRuleIds: string[];
@@ -117,6 +118,7 @@ export function defaultChatParticipantDraft(settings: AppSettings, existingHandl
 
 export function chatParticipantConfigToDraft(participant: ChatParticipantConfig): ChatParticipantDraft {
   return {
+    participantConfigId: participant.id,
     handle: participant.handle,
     roleConfigId: participant.roleConfigId,
     behaviorRuleIds: normalizeBehaviorRuleIds(participant.behaviorRuleIds),
@@ -245,6 +247,7 @@ export function updateChatParticipantDraft(
 
 export function normalizedChatDrafts(drafts: ChatParticipantDraft[]): ChatParticipantDraft[] {
   return drafts.map((draft) => ({
+    participantConfigId: draft.participantConfigId?.trim() || undefined,
     handle: draft.handle.trim().replace(/^@/, ""),
     roleConfigId: draft.roleConfigId,
     behaviorRuleIds: normalizeBehaviorRuleIds(draft.behaviorRuleIds),

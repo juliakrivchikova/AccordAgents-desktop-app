@@ -170,7 +170,11 @@ function registerIpc(): void {
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));
   ipcMain.handle("settings:archive-chat-role", (_event, id: string) => settingsService.archiveChatRoleConfig(id));
   ipcMain.handle("settings:save-chat-behavior-rule", (_event, update: ChatBehaviorRuleConfigUpdate) => settingsService.saveChatBehaviorRuleConfig(update));
-  ipcMain.handle("settings:delete-chat-behavior-rule", (_event, id: string) => settingsService.deleteChatBehaviorRuleConfig(id));
+  ipcMain.handle("settings:delete-chat-behavior-rule", async (_event, id: string) => {
+    const nextSettings = await settingsService.deleteChatBehaviorRuleConfig(id);
+    await chatService.removeBehaviorRuleFromChatParticipants(id);
+    return nextSettings;
+  });
   ipcMain.handle("settings:save-chat-participant", async (_event, update: ChatParticipantConfigUpdate) => {
     const previousSettings = await settingsService.getPublicSettings();
     const previous = update.id?.trim()
@@ -180,10 +184,8 @@ function registerIpc(): void {
     const saved = (previous?.id
       ? nextSettings.chatParticipantConfigs.find((participant) => participant.id === previous.id)
       : undefined);
-    const previousAvatarId = previous?.avatarId?.trim() || undefined;
-    const nextAvatarId = saved?.avatarId?.trim() || undefined;
-    if (previous && saved && previous.kind === saved.kind && previousAvatarId !== nextAvatarId) {
-      await chatService.syncSavedParticipantAvatar(previous, saved);
+    if (previous && saved) {
+      await chatService.syncSavedParticipantConfig(previous, saved);
     }
     return nextSettings;
   });
