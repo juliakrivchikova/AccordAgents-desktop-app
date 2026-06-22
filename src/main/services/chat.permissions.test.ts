@@ -1068,6 +1068,10 @@ test("same participant sends show queued bubble and serialize provider runs", as
   const firstCanFinish = new Promise<void>((resolve) => {
     releaseFirst = resolve;
   });
+  let releaseSecond!: () => void;
+  const secondCanFinish = new Promise<void>((resolve) => {
+    releaseSecond = resolve;
+  });
   const { service, storage, tempRoot } = testService({
     conversation,
     run: async (runParticipant) => {
@@ -1075,6 +1079,8 @@ test("same participant sends show queued bubble and serialize provider runs", as
       const runNumber = runCount;
       if (runNumber === 1) {
         await firstCanFinish;
+      } else if (runNumber === 2) {
+        await secondCanFinish;
       }
       return {
         participant: runParticipant,
@@ -1105,14 +1111,91 @@ test("same participant sends show queued bubble and serialize provider runs", as
       message.status === "pending" &&
       message.metadata?.queuedBehind?.handle === participant.handle
   ));
+  const queuedMessage = storage.current.messages.find(
+    (message: Conversation["messages"][number]) =>
+      message.role === "participant" &&
+      message.status === "pending" &&
+      message.metadata?.queuedBehind?.handle === participant.handle
+  );
 
   assert.equal(runCount, 1);
   releaseFirst();
+  await waitFor(() => {
+    const promoted = storage.current.messages.find((message: Conversation["messages"][number]) => message.id === queuedMessage?.id);
+    return runCount === 2 &&
+      promoted?.status === "pending" &&
+      promoted.metadata?.queuedBehind === undefined;
+  });
+
+  releaseSecond();
   await waitFor(() =>
-    runCount === 2 &&
     storage.current.messages.some((message: Conversation["messages"][number]) => message.content === "reply 2") &&
     storage.current.metadata.running === false
   );
+});
+
+test("same participant queued bubble is finalized when startup throws before turn try", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  let runCount = 0;
+  let releaseFirst!: () => void;
+  const firstCanFinish = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => {
+      runCount += 1;
+      await firstCanFinish;
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: "reply 1",
+        durationMs: 1,
+        sessionId: "session-1"
+      };
+    }
+  });
+  const serviceAny = service as any;
+  serviceAny.ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "first-send",
+    content: "@codex first"
+  });
+  await waitFor(() => runCount === 1);
+
+  serviceAny.sessionForParticipant = async () => {
+    throw new Error("session setup failed");
+  };
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "second-send",
+    content: "@codex second"
+  });
+  await waitFor(() => storage.current.messages.some(
+    (message: Conversation["messages"][number]) =>
+      message.role === "participant" &&
+      message.status === "pending" &&
+      message.metadata?.queuedBehind?.handle === participant.handle
+  ));
+  const queuedMessage = storage.current.messages.find(
+    (message: Conversation["messages"][number]) =>
+      message.role === "participant" &&
+      message.status === "pending" &&
+      message.metadata?.queuedBehind?.handle === participant.handle
+  );
+
+  releaseFirst();
+  await waitFor(() => {
+    const finalized = storage.current.messages.find((message: Conversation["messages"][number]) => message.id === queuedMessage?.id);
+    return finalized?.status === "error" &&
+      finalized.metadata?.queuedBehind === undefined &&
+      finalized.content.includes("session setup failed") &&
+      storage.current.metadata.running === false;
+  });
+  assert.equal(runCount, 1);
 });
 
 test("participant prose mentioning blocked permissions does not create approval cards", () => {

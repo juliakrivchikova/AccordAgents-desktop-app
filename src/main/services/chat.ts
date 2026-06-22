@@ -3085,6 +3085,7 @@ export class ChatService {
           if (targetController.signal.aborted) {
             await this.discardStoppedTargetRun(conversation, targetRunId, participant);
           } else {
+            await this.finalizeFailedPrecreatedPendingMessage(conversation, pendingMessage.id, participant, error);
             throw error;
           }
         } finally {
@@ -3211,19 +3212,13 @@ export class ChatService {
     const cliParticipant = this.cliParticipantForSession(participant, session);
     let pendingMessage: ChatMessage;
     if (options.existingPendingMessage) {
-      pendingMessage = options.existingPendingMessage;
-      await this.withChatMutation(conversation, async () => {
-        pendingMessage.participantId = cliParticipant.id;
-        pendingMessage.participantLabel = cliParticipant.label;
-        pendingMessage.metadata = {
-          ...pendingMessage.metadata,
-          requesterParticipantId: options.continuation ? triggerMessage.participantId : pendingMessage.metadata?.requesterParticipantId,
-          approvedContinuation: options.continuation || pendingMessage.metadata?.approvedContinuation,
-          queuedBehind: undefined
-        };
-        conversation.updatedAt = new Date().toISOString();
-        this.queueSnapshot(conversation);
-      });
+      pendingMessage = await this.prepareExistingPendingMessageForRun(
+        conversation,
+        options.existingPendingMessage,
+        cliParticipant,
+        triggerMessage,
+        Boolean(options.continuation)
+      );
     } else {
       pendingMessage = this.message(
         "participant",
@@ -3469,6 +3464,74 @@ export class ChatService {
       }
       progressSink.finish();
     }
+  }
+
+  private async prepareExistingPendingMessageForRun(
+    conversation: Conversation,
+    existingPendingMessage: ChatMessage,
+    cliParticipant: ParticipantConfig,
+    triggerMessage: ChatMessage,
+    continuation: boolean
+  ): Promise<ChatMessage> {
+    let pendingMessage = existingPendingMessage;
+    await this.withChatMutation(conversation, async () => {
+      const existingIndex = conversation.messages.findIndex((message) => message.id === existingPendingMessage.id);
+      pendingMessage = existingIndex >= 0 ? conversation.messages[existingIndex] : existingPendingMessage;
+      pendingMessage.participantId = cliParticipant.id;
+      pendingMessage.participantLabel = cliParticipant.label;
+      const metadata: ChatMessageMetadata = {
+        ...pendingMessage.metadata,
+        requesterParticipantId: continuation ? triggerMessage.participantId : pendingMessage.metadata?.requesterParticipantId,
+        approvedContinuation: continuation || pendingMessage.metadata?.approvedContinuation
+      };
+      delete metadata.queuedBehind;
+      pendingMessage.metadata = Object.keys(metadata).length > 0 ? metadata : undefined;
+      if (existingIndex >= 0) {
+        conversation.messages[existingIndex] = pendingMessage;
+      } else {
+        conversation.messages.push(pendingMessage);
+      }
+      this.recordLastMessageByParticipant(conversation, pendingMessage);
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
+    return pendingMessage;
+  }
+
+  private async finalizeFailedPrecreatedPendingMessage(
+    conversation: Conversation,
+    pendingMessageId: string,
+    participant: ChatParticipant,
+    error: unknown
+  ): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      const existingIndex = conversation.messages.findIndex((message) => message.id === pendingMessageId);
+      if (existingIndex < 0) {
+        return;
+      }
+      const pendingMessage = conversation.messages[existingIndex];
+      if (pendingMessage.role !== "participant" || pendingMessage.status !== "pending") {
+        return;
+      }
+      const metadata: ChatMessageMetadata = { ...pendingMessage.metadata };
+      delete metadata.queuedBehind;
+      pendingMessage.metadata = Object.keys(metadata).length > 0 ? metadata : undefined;
+      pendingMessage.status = "error";
+      if (!pendingMessage.content.trim()) {
+        pendingMessage.content = this.failedPrecreatedPendingMessageContent(participant, error);
+      }
+      conversation.messages[existingIndex] = pendingMessage;
+      this.recordLastMessageByParticipant(conversation, pendingMessage);
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
+  }
+
+  private failedPrecreatedPendingMessageContent(participant: ChatParticipant, error: unknown): string {
+    const diagnostic = sanitizeWarningText(error instanceof Error ? error.message : String(error));
+    return diagnostic
+      ? `@${participant.handle} run failed before a response was produced: ${diagnostic}`
+      : `@${participant.handle} run failed before a response was produced.`;
   }
 
   private markParticipantMessageStoppedByUser(message: ChatMessage, participant: ChatParticipant): void {
@@ -4446,7 +4509,7 @@ export class ChatService {
     storedMetadata: ChatMessage["metadata"] | undefined,
     currentMetadata: ChatMessage["metadata"] | undefined
   ): ChatMessage["metadata"] | undefined {
-    if (!currentMetadata && !storedMetadata?.reactions && !storedMetadata?.pendingMentions && !storedMetadata?.participantRequest) {
+    if (!currentMetadata && !storedMetadata?.reactions && !storedMetadata?.pendingMentions && !storedMetadata?.participantRequest && !storedMetadata?.queuedBehind) {
       return undefined;
     }
     const merged: ChatMessage["metadata"] = {
@@ -4467,6 +4530,11 @@ export class ChatService {
       merged.participantRequest = storedMetadata.participantRequest;
     } else {
       delete merged.participantRequest;
+    }
+    if (storedMetadata?.queuedBehind) {
+      merged.queuedBehind = storedMetadata.queuedBehind;
+    } else {
+      delete merged.queuedBehind;
     }
     return Object.keys(merged).length > 0 ? merged : undefined;
   }
