@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   RefreshCw,
+  Settings,
   XCircle
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -16,7 +17,7 @@ import { SettingsSidebar } from "./components/settings/settings-sidebar";
 import { SlackView } from "./components/review/review-view";
 import { ChatConversationView } from "./components/chat/chat-conversation-view";
 import { ChatParticipantMenu } from "./components/chat/chat-participant-menu";
-import { ChatSetup } from "./components/chat/chat-setup-view";
+import { NewChatScreen } from "./components/chat/new-chat-screen";
 import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
 import { chatRoleLabel } from "./components/chat/chat-conversation-data";
 import { avatarForChatParticipant } from "./components/chat/chat-avatars";
@@ -75,6 +76,7 @@ function App(): JSX.Element {
   const openingConversationDescription = view.openingConversation
     ? `${view.openingConversation.kind === "chat" ? "Chat" : view.openingConversation.kind} · ${view.openingConversation.title}`
     : "Opening the selected conversation from history.";
+  const isNewChatScreen = !state.initializing && !view.hasResultContext;
   const topBarTitle = view.activeChatConversation
     ? (
       <ChatTopBarTitle
@@ -85,7 +87,9 @@ function App(): JSX.Element {
     )
     : view.hasResultContext
       ? state.conversation?.title ?? view.openingConversation?.title ?? "Chat"
-      : "New chat";
+      : isNewChatScreen
+        ? undefined
+        : "New chat";
   const topBarLeading = state.sidebarCollapsed ? (
     <Button
       type="button"
@@ -102,7 +106,15 @@ function App(): JSX.Element {
       <span className="sr-only">Show sidebar</span>
     </Button>
   ) : undefined;
-  const topBarActions = (
+  const topBarActions = isNewChatScreen ? (
+    <>
+      <ModeToggle />
+      <Button variant="ghost" size="icon-sm" className="topbar-icon-button" title="Settings" aria-label="Settings" onClick={() => openSettingsSection(state.activeSettingsSection)}>
+        <Settings aria-hidden />
+        <span className="sr-only">Settings</span>
+      </Button>
+    </>
+  ) : (
     <>
       {state.busy && (
         <Button variant="outline" size="sm" onClick={() => void conversationActions.cancelReview()}>
@@ -170,7 +182,7 @@ function App(): JSX.Element {
           />
         )
       }
-      topBar={state.sidebarMode === "settings" ? null : <TopBar leading={topBarLeading} title={topBarTitle} actions={topBarActions} />}
+      topBar={state.sidebarMode === "settings" ? null : <TopBar leading={topBarLeading} title={topBarTitle} actions={topBarActions} className={isNewChatScreen ? "new-chat-topbar" : undefined} />}
     >
       <AppNotices
         error={state.error}
@@ -207,9 +219,9 @@ function App(): JSX.Element {
       ) : (
         <div className={`content-area ${view.hasResultContext ? "result-layout" : "compose-layout"}`}>
           {!view.hasResultContext && (
-            <section className="composer">
-              <ChatSetup
-                title={state.question}
+            <section className="composer new-chat-composer">
+              <NewChatScreen
+                prompt={state.question}
                 repoPath={state.repoPath}
                 repoInfo={state.repoInfo}
                 selectedParticipantIds={state.selectedChatParticipantConfigIds}
@@ -218,12 +230,12 @@ function App(): JSX.Element {
                 busy={state.busy}
                 renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}
                 participantRoleLabel={(participant) => chatRoleLabel(state.settings.chatRoleConfigs, participant)}
-                onTitleChange={state.setQuestion}
+                onPromptChange={state.setQuestion}
                 onRepoPathChange={(value) => {
                   state.setRepoPath(value);
                   state.setRepoInfo(undefined);
                 }}
-                onRepoBlur={() => void conversationActions.inspectRepo()}
+                onRepoBlur={(path) => void conversationActions.inspectRepo(path)}
                 onSelectRepo={() => void conversationActions.selectRepo()}
                 onSelectedParticipantIdsChange={conversationActions.updateSelectedChatParticipantConfigIds}
                 onOpenParticipantsSettings={() => openSettingsSection("participants")}

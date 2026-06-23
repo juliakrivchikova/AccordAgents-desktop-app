@@ -95,6 +95,7 @@ export interface AppState {
   openConversationRequestRef: React.MutableRefObject<number>;
   chatMessageFocusNonceRef: React.MutableRefObject<number>;
   lastViewedAtRef: React.MutableRefObject<Record<string, string>>;
+  startingChatRef: React.MutableRefObject<boolean>;
 }
 
 export function useAppState(): AppState {
@@ -110,7 +111,7 @@ export function useAppState(): AppState {
   const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>();
   const [focusedThreadId, setFocusedThreadId] = useState<string | undefined>();
   const [kind, setKind] = useState<ConversationKind>("chat");
-  const [question, setQuestion] = useState("Chat");
+  const [question, setQuestion] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const [repoInfo, setRepoInfo] = useState<GitRepoInfo | undefined>();
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -137,6 +138,7 @@ export function useAppState(): AppState {
   const openConversationRequestRef = useRef(0);
   const chatMessageFocusNonceRef = useRef(0);
   const lastViewedAtRef = useRef<Record<string, string>>(readLastViewedAtFromStorage());
+  const startingChatRef = useRef(false);
 
   return {
     settings, setSettings, agents, setAgents, summaries, setSummaries, conversation, setConversation,
@@ -152,6 +154,6 @@ export function useAppState(): AppState {
     setPlanCorrectionDraft, selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds,
     chatMessageDraft, setChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
-    setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef, lastViewedAtRef
+    setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef, lastViewedAtRef, startingChatRef
   };
 }

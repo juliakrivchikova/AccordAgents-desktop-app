@@ -11,7 +11,10 @@ import {
   chatAppToolApprovals,
   chatParticipants
 } from "../components/chat/chat-conversation-data";
-import { chatParticipantMentionHandle } from "../components/conversation/conversation-display";
+import {
+  chatParticipantMentionHandle,
+  isChatAssistantHandle
+} from "../components/conversation/conversation-display";
 import type { ChatParticipantDraft } from "../components/chat/chat-participant-drafts";
 import {
   activeChatRoleConfigs,
@@ -71,31 +74,73 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
   async function startChat(): Promise<void> {
     state.setError(undefined);
     state.setWarnings([]);
-    const participants = selectedChatParticipantDrafts(state.settings.chatParticipantConfigs, state.selectedChatParticipantConfigIds);
+    const initialMessage = state.question.trim();
+    if (!initialMessage) {
+      state.setError("Enter a message to start a chat.");
+      return;
+    }
+    const participants = selectedOrMentionedChatParticipantDrafts(
+      state.settings.chatParticipantConfigs,
+      state.selectedChatParticipantConfigIds,
+      initialMessage
+    );
     const validation = validateChatStartupDrafts(participants, state.settings.chatRoleConfigs, state.agents, state.settings.chatBehaviorRules);
     if (validation) {
       state.setError(validation);
       return;
     }
+    if (state.startingChatRef.current) {
+      return;
+    }
+    state.startingChatRef.current = true;
     const runId = crypto.randomUUID();
     state.setCurrentRunId(runId);
     state.setBusy(true);
+    let createdConversationId: string | undefined;
     try {
       const result = await window.consensus.createChatConversation({
-        title: state.question.trim().slice(0, 80) || "Chat",
+        title: initialMessage.slice(0, 80),
         repoPath: state.repoPath.trim() || undefined,
         skipDefaultParticipants: participants.length === 0,
         participants
       });
+      createdConversationId = result.conversation.id;
       state.setConversation(result.conversation);
       state.setWarnings(result.warnings);
       state.setChatMessageDraft("");
+      const sendResult = await window.consensus.sendChatMessage({
+        conversationId: result.conversation.id,
+        runId,
+        content: initialMessage
+      });
+      state.setConversation(mergeProgressIntoConversation(sendResult.conversation, state.progressLogRef.current.filter((item) => item.runId === runId)));
+      state.setWarnings([...result.warnings, ...sendResult.warnings]);
+      state.setQuestion("");
       await conversationActions.refreshConversations();
     } catch (caught) {
-      state.setError(errorText(caught));
+      const message = errorText(caught);
+      if (createdConversationId) {
+        // Ingest failed before the first message was persisted, so the created
+        // conversation is empty. Soft-delete it and return to the new-chat screen
+        // with the text restored instead of stranding an empty conversation.
+        state.setConversation(undefined);
+        state.setQuestion(initialMessage);
+        try {
+          await window.consensus.setChatArchived({ conversationId: createdConversationId, archived: true });
+          await conversationActions.refreshConversations();
+        } catch {
+          // Best-effort cleanup; leave the empty conversation if archiving fails.
+        }
+      }
+      if (message.toLowerCase().includes("cancel")) {
+        state.setWarnings((current) => [...current, "Chat turn cancelled."]);
+      } else {
+        state.setError(message);
+      }
     } finally {
       state.setBusy(false);
       state.setCurrentRunId(undefined);
+      state.startingChatRef.current = false;
     }
   }
 
@@ -365,6 +410,27 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     toggleChatReaction, respondToChatChoice, addChatParticipant, addSavedChatParticipant,
     updateChatParticipantRuntime, removeChatParticipant, compactChatParticipant, respondToChatAppToolApproval
   };
+}
+
+function selectedOrMentionedChatParticipantDrafts(
+  participants: ChatParticipantConfig[],
+  selectedIds: Set<string>,
+  content: string
+): ChatParticipantDraft[] {
+  const nextSelectedIds = new Set(selectedIds);
+  for (const participant of participants) {
+    if (isChatAssistantHandle(participant.handle)) {
+      continue;
+    }
+    if (new RegExp(`@${escapeRegExp(participant.handle)}(?![A-Za-z0-9_-])`, "i").test(content)) {
+      nextSelectedIds.add(participant.id);
+    }
+  }
+  return selectedChatParticipantDrafts(participants, nextSelectedIds);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function hasMultipleMentionedParticipants(content: string, conversation: Parameters<typeof chatAppToolApprovals>[0]): boolean {

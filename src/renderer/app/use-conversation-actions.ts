@@ -9,6 +9,7 @@ import {
   pendingPlanDecisions
 } from "../components/review/review-conversation-data";
 import {
+  addableSavedParticipantConfigs,
   defaultChatParticipantDraft
 } from "../components/chat/chat-participant-drafts";
 import type { AppState } from "./app-state";
@@ -255,9 +256,11 @@ export function useConversationActions(state: AppState): ConversationActions {
     state.setPlanCorrectionDraft("");
     state.setChatMessageDraft("");
     state.setChatAddParticipantDraft(defaultChatParticipantDraft(state.settings));
-    state.setSelectedChatParticipantConfigIds(new Set());
+    state.setSelectedChatParticipantConfigIds(defaultSelectedChatParticipantConfigIds());
     state.setKind("chat");
-    state.setQuestion("Chat");
+    state.setQuestion("");
+    state.setRepoPath("");
+    state.setRepoInfo(undefined);
     state.setError(undefined);
   }
 
@@ -278,6 +281,14 @@ export function useConversationActions(state: AppState): ConversationActions {
     inspectRepo, rememberRepoPath, cancelReview, newReview, newProjectSession,
     updateSelectedChatParticipantConfigIds: state.setSelectedChatParticipantConfigIds
   };
+
+  function defaultSelectedChatParticipantConfigIds(): Set<string> {
+    const ids = addableSavedParticipantConfigs(state.settings, state.agents, new Set())
+      .filter(({ invalidReason }) => !invalidReason)
+      .slice(0, 2)
+      .map(({ config }) => config.id);
+    return new Set(ids);
+  }
 }
 
 function waitForNextFrame(): Promise<void> {

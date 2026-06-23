@@ -13,6 +13,7 @@ screenshots/
 *.jsonl
 *.sqlite3
 debug-logs/
+.electron-user-data/
 .idea/
 .vscode/
 .codex
