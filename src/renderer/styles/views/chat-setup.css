@@ -319,6 +319,8 @@
 .new-chat-participant-menu {
   right: 0;
   width: min(420px, calc(100vw - 48px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .new-chat-menu-section {

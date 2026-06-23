@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -11,7 +12,6 @@ import {
 import {
   ArrowUp,
   Check,
-  CheckCircle2,
   ChevronDown,
   FolderOpen,
   Plus,
@@ -52,6 +52,8 @@ import {
 
 const ACCORDAGENTS_MARK_URL = new URL("../../assets/accordagents-mark.png", import.meta.url).href;
 const NEW_CHAT_ASSISTANT_PARTICIPANT_ID = "__new-chat-assistant__";
+const NEW_CHAT_MENU_OFFSET = 8;
+const NEW_CHAT_MENU_VIEWPORT_MARGIN = 16;
 
 export function NewChatScreen(props: {
   prompt: string;
@@ -239,19 +241,10 @@ export function NewChatScreen(props: {
         </div>
       </div>
 
-      {props.repoInfo && (
-        <div className={`repo-status new-chat-repo-status ${props.repoInfo.isRepo ? "ok" : "bad"}`}>
-          {props.repoInfo.isRepo ? (
-            <>
-              <CheckCircle2 size={16} aria-hidden />
-              {props.repoInfo.currentBranch || "detached"} · {props.repoInfo.statusLines.length} changed paths
-            </>
-          ) : (
-            <>
-              <XCircle size={16} aria-hidden />
-              {props.repoInfo.error || "Not a git repository"}
-            </>
-          )}
+      {props.repoInfo && !props.repoInfo.isRepo && (
+        <div className="repo-status new-chat-repo-status bad">
+          <XCircle size={16} aria-hidden />
+          {props.repoInfo.error || "Not a git repository"}
         </div>
       )}
 
@@ -355,6 +348,7 @@ function ParticipantPicker(props: {
   const [open, setOpen] = useState(false);
   const [expandedParticipantIds, setExpandedParticipantIds] = useState<Set<string>>(() => new Set());
   const rootRef = useCloseOnOutside<HTMLDivElement>(open, () => setOpen(false));
+  const participantMenuMaxHeight = useNewChatMenuMaxHeight(rootRef, open);
   const participantOptions: Array<AddableSavedParticipantConfig & { locked?: boolean }> = [
     { config: props.assistantParticipant, locked: true },
     ...props.savedParticipantOptions
@@ -407,7 +401,11 @@ function ParticipantPicker(props: {
         <ChevronDown size={14} aria-hidden />
       </button>
       {open && (
-        <div className="new-chat-menu new-chat-participant-menu" role="menu">
+        <div
+          className="new-chat-menu new-chat-participant-menu"
+          role="menu"
+          style={participantMenuMaxHeight === undefined ? undefined : { maxHeight: participantMenuMaxHeight }}
+        >
           {participantOptions.map(({ config: participant, invalidReason, locked }) => {
             const selected = Boolean(locked) || props.selectedParticipantIds.has(participant.id);
             const expanded = expandedParticipantIds.has(participant.id);
@@ -541,6 +539,35 @@ function useCloseOnOutside<T extends HTMLElement>(open: boolean, onClose: () => 
   }, [onClose, open]);
 
   return ref;
+}
+
+function useNewChatMenuMaxHeight<T extends HTMLElement>(rootRef: RefObject<T>, open: boolean): number | undefined {
+  const [maxHeight, setMaxHeight] = useState<number | undefined>();
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setMaxHeight(undefined);
+      return;
+    }
+
+    function updateMaxHeight(): void {
+      const rect = rootRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const topbarBottom = document.querySelector<HTMLElement>("[data-shell='topbar']")?.getBoundingClientRect().bottom ?? 0;
+      const safeTop = Math.max(NEW_CHAT_MENU_VIEWPORT_MARGIN, topbarBottom + NEW_CHAT_MENU_VIEWPORT_MARGIN);
+      setMaxHeight(Math.max(0, Math.floor(rect.top - NEW_CHAT_MENU_OFFSET - safeTop)));
+    }
+
+    updateMaxHeight();
+    window.addEventListener("resize", updateMaxHeight);
+    window.addEventListener("scroll", updateMaxHeight, true);
+    return () => {
+      window.removeEventListener("resize", updateMaxHeight);
+      window.removeEventListener("scroll", updateMaxHeight, true);
+    };
+  }, [open, rootRef]);
+
+  return maxHeight;
 }
 
 function folderName(path: string): string {
