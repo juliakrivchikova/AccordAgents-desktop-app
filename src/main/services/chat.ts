@@ -4008,6 +4008,7 @@ export class ChatService {
       "- Do not emit `Participant requests:` or `Return to requester after replies:` protocol blocks. They are legacy text and are not the current dispatch mechanism.",
       "- When a participant request MCP call returns `pending_approval` or `running`, end your turn unless User explicitly asked you to continue without that answer. The app will return control to you when replies or errors arrive.",
       "- Do not repeatedly poll participant request status in the same turn. Use the status tool only to recover a previous request after a timeout, interruption, approval delay, or resumed session.",
+      ...(session.participantKind === "claude-code" ? ["- Claude Code only: do not use provider-native interactive question, user-input, or structured-question tools to ask User to choose. In AccordAgents Chat, ask choices only by emitting the `User choice:` block format described below."] : []),
       "- When User must pick one option before you can continue, include one dedicated `User choice:` block after your explanation. Format it as lines `T: short title`, `Q: question`, `O1: option label | optional description`, `O2: option label | optional description`, and optionally `R: O1`. Use at least two options. Ask at most one user choice in a message.",
       "- The UI also lets User write a custom answer instead of choosing your suggestions. After User confirms, the app will send the selected option or custom answer back to you in this chat.",
       `- ${this.confirmationBrevityPolicy()}`,
