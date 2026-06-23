@@ -108,6 +108,35 @@ export function NewChatScreen(props: {
   const hasPrompt = props.prompt.trim().length > 0;
   const canStart = hasPrompt && !props.busy && !validation;
 
+  useLayoutEffect(() => {
+    resizeNewChatPrompt(promptRef.current);
+  }, [props.prompt]);
+
+  useLayoutEffect(() => {
+    const textarea = promptRef.current;
+    if (!textarea) return;
+    let frameId: number | undefined;
+    const scheduleResize = (): void => {
+      if (frameId !== undefined) {
+        window.cancelAnimationFrame(frameId);
+      }
+      frameId = window.requestAnimationFrame(() => {
+        frameId = undefined;
+        resizeNewChatPrompt(textarea);
+      });
+    };
+    const resizeObserver = new ResizeObserver(scheduleResize);
+    resizeObserver.observe(textarea);
+    window.addEventListener("resize", scheduleResize);
+    return () => {
+      if (frameId !== undefined) {
+        window.cancelAnimationFrame(frameId);
+      }
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", scheduleResize);
+    };
+  }, []);
+
   useEffect(() => {
     const pendingCaret = pendingCaretRef.current;
     if (!pendingCaret || pendingCaret.value !== props.prompt) {
@@ -253,6 +282,17 @@ export function NewChatScreen(props: {
       {validation && <div className="inline-error new-chat-error">{validation}</div>}
     </div>
   );
+}
+
+function resizeNewChatPrompt(textarea: HTMLTextAreaElement | null): void {
+  if (!textarea) return;
+  const style = window.getComputedStyle(textarea);
+  const minHeight = Number.parseFloat(style.minHeight) || 94;
+  const maxHeight = Number.parseFloat(style.maxHeight) || 220;
+  textarea.style.height = "auto";
+  const nextHeight = Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight);
+  textarea.style.height = `${nextHeight}px`;
+  textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
 }
 
 function FolderPicker(props: {

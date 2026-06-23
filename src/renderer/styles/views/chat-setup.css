@@ -20,8 +20,12 @@
 }
 
 .new-chat-composer {
-  width: min(100%, 760px);
-  padding-top: clamp(36px, 7vh, 72px);
+  --new-chat-card-center-offset: 74px;
+  --new-chat-card-width: 720px;
+  width: min(100%, 800px);
+  min-height: 100%;
+  justify-content: center;
+  padding: 24px;
 }
 
 .new-chat-screen {
@@ -30,6 +34,7 @@
   justify-items: center;
   width: 100%;
   color: var(--app-text);
+  transform: translateY(calc(-1 * var(--new-chat-card-center-offset)));
 }
 
 .new-chat-hero {
@@ -103,7 +108,7 @@
   position: relative;
   z-index: 1;
   display: grid;
-  width: min(100%, 680px);
+  width: min(100%, var(--new-chat-card-width));
   margin-top: 22px;
   padding: 16px;
   border: 1px solid var(--app-border);
@@ -129,9 +134,11 @@
 .new-chat-prompt {
   width: 100%;
   min-height: 94px;
+  max-height: 220px;
   padding: 4px;
   border: 0;
   outline: 0;
+  overflow-y: hidden;
   resize: none;
   background: transparent;
   color: var(--app-text-strong);
@@ -550,7 +557,7 @@
 .new-chat-repo-status {
   position: relative;
   z-index: 1;
-  width: min(100%, 680px);
+  width: min(100%, var(--new-chat-card-width));
 }
 
 .new-chat-error {
@@ -599,6 +606,9 @@
 
 @media (max-width: 720px) {
   .new-chat-composer {
+    --new-chat-card-center-offset: 0px;
+    min-height: auto;
+    justify-content: flex-start;
     padding: 28px 16px 20px;
   }
 
