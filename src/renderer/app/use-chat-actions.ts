@@ -13,7 +13,8 @@ import {
 } from "../components/chat/chat-conversation-data";
 import {
   chatParticipantMentionHandle,
-  isChatAssistantHandle
+  isChatAssistantHandle,
+  isChatAssistantParticipant
 } from "../components/conversation/conversation-display";
 import type { ChatParticipantDraft } from "../components/chat/chat-participant-drafts";
 import {
@@ -419,14 +420,17 @@ function selectedOrMentionedChatParticipantDrafts(
 ): ChatParticipantDraft[] {
   const nextSelectedIds = new Set(selectedIds);
   for (const participant of participants) {
-    if (isChatAssistantHandle(participant.handle)) {
+    if (isChatAssistantParticipant(participant) || isChatAssistantHandle(participant.handle)) {
       continue;
     }
     if (new RegExp(`@${escapeRegExp(participant.handle)}(?![A-Za-z0-9_-])`, "i").test(content)) {
       nextSelectedIds.add(participant.id);
     }
   }
-  return selectedChatParticipantDrafts(participants, nextSelectedIds);
+  return selectedChatParticipantDrafts(
+    participants.filter((participant) => !isChatAssistantParticipant(participant)),
+    nextSelectedIds
+  );
 }
 
 function escapeRegExp(value: string): string {

@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import type { ChatRoleConfig, ChatRoleConfigUpdate } from "../../../shared/types";
 import { ResizableTextarea } from "../primitives";
 import { MarkdownText } from "../content/markdown-text";
+import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
 import {
   CHAT_ROLE_INSTRUCTIONS_MAX_CHARS,
   CHAT_ROLE_LABEL_MAX_CHARS,
@@ -42,7 +43,7 @@ export function ChatRoleEditorDialog(props: {
   const [preview, setPreview] = useState(initialPreview);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
   useEffect(() => {
     if (!open) {
@@ -54,7 +55,7 @@ export function ChatRoleEditorDialog(props: {
     setPreview(initialPreview);
     setSaving(false);
     setDeleting(false);
-    setConfirmDelete(false);
+    setDeleteConfirmOpen(false);
   }, [initialDescription, initialInstructions, initialLabel, initialPreview, open]);
 
   const trimmedLabel = label.trim();
@@ -104,24 +105,17 @@ export function ChatRoleEditorDialog(props: {
     if (!role || !canDelete) {
       return;
     }
-    if (!confirmDelete) {
-      setConfirmDelete(true);
-      return;
-    }
     setDeleting(true);
     try {
       await props.onArchive(role.id);
       props.onClose();
-    } catch {
-      // App-level error state is set by the caller; keep the dialog open so the
-      // failed delete does not look like it succeeded.
     } finally {
       setDeleting(false);
-      setConfirmDelete(false);
     }
   }
 
   return (
+    <>
     <Dialog open={open} onOpenChange={(nextOpen) => {
       if (!nextOpen) {
         props.onClose();
@@ -234,16 +228,16 @@ export function ChatRoleEditorDialog(props: {
               type="button"
               variant="outline"
               size="sm"
-              className={`roles-editor-delete ${confirmDelete ? "is-confirming" : ""}`}
+              className="roles-editor-delete"
               disabled={!canDelete}
               title={usageCount > 0
                 ? `In use by ${usageCount} saved participant preset${usageCount === 1 ? "" : "s"}. Reassign or remove them first.`
                 : undefined}
               data-testid="settings-role-modal-delete"
-              onClick={() => void deleteRole()}
+              onClick={() => setDeleteConfirmOpen(true)}
             >
               <Trash2 size={14} aria-hidden />
-              {deleting ? "Deleting..." : confirmDelete ? "Confirm delete" : "Delete role"}
+              Delete role
             </Button>
           )}
           <DialogClose asChild>
@@ -266,6 +260,17 @@ export function ChatRoleEditorDialog(props: {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    {role && (
+      <DeleteConfirmationDialog
+        open={deleteConfirmOpen}
+        title={`Delete ${role.label}?`}
+        description="Delete this custom role? Existing archived references stay resolvable, but the role will be hidden from settings and pickers."
+        confirmLabel="Delete"
+        pending={deleting}
+        onOpenChange={setDeleteConfirmOpen}
+        onConfirm={deleteRole}
+      />
+    )}
+    </>
   );
 }
-

@@ -8,10 +8,7 @@ import {
   pendingDecisionSelections,
   pendingPlanDecisions
 } from "../components/review/review-conversation-data";
-import {
-  addableSavedParticipantConfigs,
-  defaultChatParticipantDraft
-} from "../components/chat/chat-participant-drafts";
+import { defaultChatParticipantDraft } from "../components/chat/chat-participant-drafts";
 import type { AppState } from "./app-state";
 import { normalizeProjectPath, upsertConversationSummary } from "./conversation-summaries";
 import { persistLastViewedAt } from "./storage";
@@ -283,11 +280,7 @@ export function useConversationActions(state: AppState): ConversationActions {
   };
 
   function defaultSelectedChatParticipantConfigIds(): Set<string> {
-    const ids = addableSavedParticipantConfigs(state.settings, state.agents, new Set())
-      .filter(({ invalidReason }) => !invalidReason)
-      .slice(0, 2)
-      .map(({ config }) => config.id);
-    return new Set(ids);
+    return new Set();
   }
 }
 

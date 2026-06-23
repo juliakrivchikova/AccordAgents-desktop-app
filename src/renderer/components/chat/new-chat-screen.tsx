@@ -47,7 +47,8 @@ import {
   CHAT_ASSISTANT_HANDLE,
   CHAT_ASSISTANT_ROLE_ID,
   chatParticipantDisplayName,
-  chatParticipantMentionHandle
+  chatParticipantMentionHandle,
+  isChatAssistantParticipant
 } from "../conversation/conversation-display";
 
 const ACCORDAGENTS_MARK_URL = new URL("../../assets/accordagents-mark.png", import.meta.url).href;
@@ -82,7 +83,8 @@ export function NewChatScreen(props: {
     [props.agents, props.settings.providers]
   );
   const savedParticipantOptions = useMemo(
-    () => addableSavedParticipantConfigs(props.settings, props.agents, new Set()),
+    () => addableSavedParticipantConfigs(props.settings, props.agents, new Set())
+      .filter(({ config }) => !isChatAssistantParticipant(config)),
     [props.agents, props.settings]
   );
   const mentionParticipants = useMemo<ChatParticipant[]>(
@@ -131,7 +133,7 @@ export function NewChatScreen(props: {
     const nextPrompt = replaceActiveMention(props.prompt, chatParticipantMentionHandle(participant, mentionParticipants));
     pendingCaretRef.current = { value: nextPrompt, position: nextPrompt.length };
     props.onPromptChange(nextPrompt);
-    if (participant.id !== NEW_CHAT_ASSISTANT_PARTICIPANT_ID) {
+    if (!isNewChatAssistantOption(participant)) {
       props.onSelectedParticipantIdsChange((current) => new Set(current).add(participant.id));
     }
     setMentionQuery(undefined);
@@ -499,6 +501,10 @@ function newChatAssistantParticipant(settings: AppSettings, agents: AgentHealth[
     },
     updatedAt: ""
   };
+}
+
+function isNewChatAssistantOption(participant: Pick<ChatParticipantConfig, "id" | "handle" | "roleConfigId">): boolean {
+  return participant.id === NEW_CHAT_ASSISTANT_PARTICIPANT_ID || isChatAssistantParticipant(participant);
 }
 
 function preferredAssistantProviderKind(settings: AppSettings, agents: AgentHealth[]): ChatProviderKind {

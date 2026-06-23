@@ -209,7 +209,7 @@
 }
 
 .participants-role-row-body {
-  padding: 6px 15px 16px;
+  padding: 16px;
   border-top: 1px solid var(--app-border);
 }
 
@@ -222,9 +222,10 @@
 .participant-preset-card {
   display: flex;
   flex-direction: column;
+  align-items: stretch;
   gap: 9px;
   min-height: 172px;
-  padding: 14px;
+  padding: 16px;
   border: 1px solid var(--app-border);
   border-radius: var(--radius-card);
   background: var(--app-surface);
@@ -264,8 +265,14 @@
   background: var(--app-avatar-bg);
 }
 
+.participants-card-avatar.avatar-codex {
+  flex-basis: 44px;
+  padding: 6px;
+}
+
 .participant-preset-title {
   display: grid;
+  flex: 1 1 auto;
   min-width: 0;
   gap: 2px;
 }
@@ -516,9 +523,9 @@
   min-width: 0;
   overflow: hidden;
   font-family: var(--font-mono);
-  font-size: 18px;
+  font-size: 18px !important;
   font-weight: 600;
-  line-height: 1.2;
+  line-height: 1.35 !important;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -910,11 +917,26 @@
   color: var(--destructive) !important;
 }
 
-.participants-editor-delete:hover:not(:disabled),
-.participants-editor-delete.is-confirming {
+.participants-editor-delete:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--destructive) 45%, var(--app-border)) !important;
   background: color-mix(in srgb, var(--destructive) 9%, var(--app-surface)) !important;
   color: var(--destructive) !important;
+}
+
+.settings-delete-dialog {
+  width: min(360px, calc(100vw - 32px)) !important;
+  gap: 14px !important;
+}
+
+.settings-delete-dialog [data-slot="dialog-title"] {
+  line-height: 1.25;
+}
+
+.settings-delete-dialog [data-slot="dialog-footer"] {
+  margin: 0 !important;
+  padding: 12px 0 0 !important;
+  border-top: 1px solid var(--app-border-subtle);
+  background: transparent !important;
 }
 
 .participants-editor-footer [data-slot="button"],

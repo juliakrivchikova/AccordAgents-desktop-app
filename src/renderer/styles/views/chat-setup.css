@@ -32,19 +32,6 @@
   color: var(--app-text);
 }
 
-.new-chat-screen::before {
-  content: "";
-  position: absolute;
-  top: -34px;
-  left: 50%;
-  width: min(560px, 94vw);
-  height: 280px;
-  transform: translateX(-50%);
-  border-radius: 50%;
-  background: radial-gradient(ellipse at center, color-mix(in srgb, var(--app-accent) 10%, transparent), transparent 70%);
-  pointer-events: none;
-}
-
 .new-chat-hero {
   position: relative;
   z-index: 1;
@@ -122,7 +109,7 @@
   border: 1px solid var(--app-border);
   border-radius: 18px;
   background: var(--app-surface);
-  box-shadow: var(--shadow-lg);
+  box-shadow: none;
 }
 
 .new-chat-input-wrap {
@@ -318,7 +305,7 @@
 
 .new-chat-participant-menu {
   right: 0;
-  width: min(420px, calc(100vw - 48px));
+  width: min(520px, calc(100vw - 48px));
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -408,7 +395,7 @@
 .new-chat-participant-main {
   min-width: 0;
   min-height: 54px;
-  padding: 8px 6px 8px 9px;
+  padding: 9px 6px 9px 9px;
 }
 
 .new-chat-participant-row .mini-avatar {
@@ -448,7 +435,9 @@
 }
 
 .new-chat-participant-text strong {
-  min-width: 0;
+  min-width: max-content;
+  max-width: 100%;
+  flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -459,7 +448,7 @@
 }
 
 .new-chat-participant-title span {
-  flex: 0 0 auto;
+  flex: 1 0 auto;
   color: var(--app-muted);
   font-size: 12px;
   font-weight: 500;
@@ -520,7 +509,9 @@
 .new-chat-participant-detail {
   display: inline-flex;
   align-items: center;
-  min-width: 0;
+  flex: 0 1 auto;
+  min-width: max-content;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

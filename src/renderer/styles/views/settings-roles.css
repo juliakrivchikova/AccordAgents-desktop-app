@@ -620,12 +620,6 @@ body:has(.roles-editor-dialog) [data-slot="dialog-overlay"] {
   background: color-mix(in srgb, var(--app-danger) 8%, var(--app-surface)) !important;
 }
 
-.roles-editor-delete.is-confirming {
-  border-color: var(--app-danger) !important;
-  background: var(--app-danger) !important;
-  color: var(--app-surface) !important;
-}
-
 .roles-editor-delete:disabled {
   margin-right: auto;
   border: 1px solid var(--app-border) !important;

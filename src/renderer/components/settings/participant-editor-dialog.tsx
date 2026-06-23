@@ -3,13 +3,14 @@ import { Trash2, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import type { AgentHealth, AppSettings, ChatAgentMode, ChatParticipantConfig, ChatParticipantConfigUpdate, ChatRosterChangeParticipantInput } from "../../../shared/types";
+import type { AgentHealth, AppSettings, ChatAgentMode, ChatParticipantConfig, ChatParticipantConfigUpdate, ChatProviderKind, ChatRosterChangeParticipantInput } from "../../../shared/types";
 import { normalizeChatAgentMode } from "../../../shared/agentPermissions";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import { participantProviderLabel } from "../chat/chat-conversation-data";
 import { ChatParticipantAvatarField, ChatParticipantInlineModelRow, ChatParticipantInlinePermissionsRow, ChatParticipantInlineSelectRow, ChatParticipantSpecRow } from "../chat/chat-participant-config-panel";
 import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
-import { CHAT_AGENT_MODE_OPTIONS, chatAgentModeLabel, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
+import { CHAT_AGENT_MODE_OPTIONS, chatAgentModeLabel, chatCliProviderLabel, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
+import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
 import {
   ParticipantEditorHandleField,
   ParticipantEditorSwitch,
@@ -40,14 +41,14 @@ export function ParticipantEditorDialog(props: {
   const [draft, setDraft] = useState<ChatParticipantDraft>(() => initialDraft(props.settings, participant, existingHandles));
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
   useEffect(() => {
     if (open) {
       setDraft(initialDraft(props.settings, participant, existingHandles));
       setSaving(false);
       setDeleting(false);
-      setConfirmDelete(false);
+      setDeleteConfirmOpen(false);
     }
   }, [existingHandles, open, participant, props.settings]);
 
@@ -63,6 +64,10 @@ export function ParticipantEditorDialog(props: {
   const roleOptions = props.settings.chatRoleConfigs
     .filter((role) => !role.archivedAt || role.id === draft.roleConfigId)
     .map((role) => ({ value: role.id, label: role.archivedAt ? `${role.label} (deleted)` : role.label }));
+  const providerOptions = (["codex-cli", "claude-code"] as ChatProviderKind[]).map((kind) => ({
+    value: kind,
+    label: chatCliProviderLabel(kind)
+  }));
   const editorHandle = normalized.handle || draft.handle.trim().replace(/^@/, "") || "new-participant";
   const draftParticipant: ChatRosterChangeParticipantInput = {
     handle: editorHandle,
@@ -119,24 +124,17 @@ export function ParticipantEditorDialog(props: {
     if (!participant || deleting) {
       return;
     }
-    if (!confirmDelete) {
-      setConfirmDelete(true);
-      return;
-    }
     setDeleting(true);
     try {
       await props.onDelete(participant.id);
       props.onClose();
-    } catch {
-      // App-level error state is set by the caller; keep the dialog open so the
-      // failed delete does not look like it succeeded.
     } finally {
       setDeleting(false);
-      setConfirmDelete(false);
     }
   }
 
   return (
+    <>
     <Dialog open={open} onOpenChange={(nextOpen) => {
       if (!nextOpen) {
         props.onClose();
@@ -180,9 +178,13 @@ export function ParticipantEditorDialog(props: {
               emptyLabel="No roles found"
               onSelect={(value) => patchDraft({ roleConfigId: value })}
             />
-            <ChatParticipantSpecRow label="Provider / CLI">
-              <strong>{participantProviderLabel(draft.kind)}</strong>
-            </ChatParticipantSpecRow>
+            <ChatParticipantInlineSelectRow
+              label="Provider / CLI"
+              value={participantProviderLabel(draft.kind)}
+              current={draft.kind}
+              options={providerOptions}
+              onSelect={(value) => patchDraft({ kind: value as ChatProviderKind })}
+            />
             <ChatParticipantInlineModelRow
               kind={draft.kind}
               model={draft.model}
@@ -239,14 +241,14 @@ export function ParticipantEditorDialog(props: {
               type="button"
               variant="outline"
               size="sm"
-              className={`participants-editor-delete ${confirmDelete ? "is-confirming" : ""}`}
+              className="participants-editor-delete"
               disabled={saving || deleting}
               title="Delete this saved participant preset. Existing chats keep their copied participant."
               data-testid="settings-participant-modal-delete"
-              onClick={() => void deleteParticipant()}
+              onClick={() => setDeleteConfirmOpen(true)}
             >
               <Trash2 size={14} aria-hidden />
-              {deleting ? "Deleting..." : confirmDelete ? "Confirm delete" : "Delete preset"}
+              Delete preset
             </Button>
           )}
           <DialogClose asChild>
@@ -260,5 +262,17 @@ export function ParticipantEditorDialog(props: {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    {participant && (
+      <DeleteConfirmationDialog
+        open={deleteConfirmOpen}
+        title={`Delete @${participant.handle}?`}
+        description="Delete this saved participant preset? Existing chats keep their copied participant."
+        confirmLabel="Delete"
+        pending={deleting}
+        onOpenChange={setDeleteConfirmOpen}
+        onConfirm={deleteParticipant}
+      />
+    )}
+    </>
   );
 }
