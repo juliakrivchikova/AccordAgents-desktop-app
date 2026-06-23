@@ -251,6 +251,7 @@ const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
 // exact text participants approve. Sits well under the MCP body cap (1 MB).
 const CHAT_SEND_MESSAGE_MAX_CONTENT_LENGTH = 200_000;
 const CHAT_SEND_MESSAGE_MAX_PER_RUN = 12;
+const CHAT_REMOVED_MESSAGE_ID_MAX = 100;
 const CHAT_IMAGE_MAX_ATTACHMENTS = 5;
 const CHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 const CHAT_IMAGE_MAX_DIMENSION = 8192;
@@ -3199,13 +3200,13 @@ export class ChatService {
             turnReservation
           });
           if (targetController.signal.aborted) {
-            await this.discardStoppedTargetRun(conversation, targetRunId, participant);
+            await this.discardStoppedTargetRun(conversation, targetRunId, participant, pendingMessage.id);
           } else {
             await appendCompletedTurn(participant, messages);
           }
         } catch (error) {
           if (targetController.signal.aborted) {
-            await this.discardStoppedTargetRun(conversation, targetRunId, participant);
+            await this.discardStoppedTargetRun(conversation, targetRunId, participant, pendingMessage.id);
           } else {
             await this.finalizeFailedPrecreatedPendingMessage(conversation, pendingMessage.id, participant, error);
             throw error;
@@ -3231,9 +3232,14 @@ export class ChatService {
     await this.ensureHistoryFiles(conversation);
   }
 
-  private async discardStoppedTargetRun(conversation: Conversation, runId: string, participant: ChatParticipant): Promise<void> {
+  private async discardStoppedTargetRun(
+    conversation: Conversation,
+    runId: string,
+    participant: ChatParticipant,
+    pendingMessageIdOverride?: string
+  ): Promise<void> {
     const meta = this.chatRunMeta.get(runId);
-    const pendingMessageId = meta?.pendingMessageId;
+    const pendingMessageId = pendingMessageIdOverride ?? meta?.pendingMessageId;
     await this.withChatMutation(conversation, async () => {
       let threadId: string | undefined;
       let chatThreadRootId: string | undefined;
@@ -3243,12 +3249,21 @@ export class ChatService {
           const pending = conversation.messages[idx];
           threadId = pending.metadata?.threadId;
           chatThreadRootId = pending.metadata?.chatThreadRootId;
-          conversation.messages.splice(idx, 1);
-          // The pending bubble was recorded as this participant's last-message pointer when
-          // the turn began. Pointers only ever advance, so removing it would leave the roster
-          // jump aimed at a message that no longer exists (a silent no-op). Repair from the
-          // remaining full history (refreshStoredChatState already merged it here).
-          this.repairLastMessagePointerAfterRemoval(conversation, pendingMessageId);
+          if (pending.role === "participant" && pending.status === "pending") {
+            conversation.messages.splice(idx, 1);
+            this.markChatMessageRemoved(conversation, pendingMessageId);
+            // The pending bubble was recorded as this participant's last-message pointer when
+            // the turn began. Pointers only ever advance, so removing it would leave the roster
+            // jump aimed at a message that no longer exists (a silent no-op). Repair from the
+            // remaining full history (refreshStoredChatState already merged it here).
+            this.repairLastMessagePointerAfterRemoval(conversation, pendingMessageId);
+          } else if (pending.metadata?.queuedBehind) {
+            const { queuedBehind: _queuedBehind, ...metadata } = pending.metadata;
+            conversation.messages[idx] = {
+              ...pending,
+              metadata
+            };
+          }
         }
       }
       this.markPendingAppToolApprovalsForRunTerminal(
@@ -4641,6 +4656,7 @@ export class ChatService {
     // message ids. The merge is O(n) and id-keyed, so a no-op when storage matches.
     conversation.messages = this.mergeStoredChatMessages(stored.messages, conversation.messages);
     conversation.metadata = this.mergeStoredChatMetadata(stored.metadata, conversation.metadata);
+    this.applyRemovedChatMessageTombstones(conversation);
     conversation.updatedAt = stored.updatedAt > conversation.updatedAt ? stored.updatedAt : conversation.updatedAt;
   }
 
@@ -4914,6 +4930,15 @@ export class ChatService {
     if (contextUsage) {
       merged.agentContextUsageByParticipant = contextUsage;
     }
+    const removedMessageIds = this.mergeRemovedChatMessageIds(
+      storedMetadata.removedChatMessageIds,
+      currentMetadata.removedChatMessageIds
+    );
+    if (removedMessageIds.length > 0) {
+      merged.removedChatMessageIds = removedMessageIds;
+    } else {
+      delete merged.removedChatMessageIds;
+    }
     const approvals = this.mergeMetadataItemsByKey(
       storedMetadata.pendingAppToolApprovals,
       currentMetadata.pendingAppToolApprovals,
@@ -4934,6 +4959,58 @@ export class ChatService {
       merged.appToolApprovalPolicies = policies;
     }
     return merged;
+  }
+
+  private mergeRemovedChatMessageIds(storedValue: unknown, currentValue: unknown): string[] {
+    const merged: string[] = [];
+    for (const id of [
+      ...this.normalizedRemovedChatMessageIds(storedValue),
+      ...this.normalizedRemovedChatMessageIds(currentValue)
+    ]) {
+      if (!merged.includes(id)) {
+        merged.push(id);
+      }
+    }
+    return merged.slice(-CHAT_REMOVED_MESSAGE_ID_MAX);
+  }
+
+  private normalizedRemovedChatMessageIds(value: unknown): string[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    const ids: string[] = [];
+    for (const item of value) {
+      if (typeof item === "string" && item && !ids.includes(item)) {
+        ids.push(item);
+      }
+    }
+    return ids.slice(-CHAT_REMOVED_MESSAGE_ID_MAX);
+  }
+
+  private markChatMessageRemoved(conversation: Conversation, messageId: string): void {
+    const existing = this.normalizedRemovedChatMessageIds(conversation.metadata.removedChatMessageIds)
+      .filter((id) => id !== messageId);
+    conversation.metadata = {
+      ...conversation.metadata,
+      removedChatMessageIds: [...existing, messageId].slice(-CHAT_REMOVED_MESSAGE_ID_MAX)
+    };
+  }
+
+  private applyRemovedChatMessageTombstones(conversation: Conversation): boolean {
+    const removedIds = new Set(this.normalizedRemovedChatMessageIds(conversation.metadata.removedChatMessageIds));
+    if (removedIds.size === 0) {
+      return false;
+    }
+    const beforeLength = conversation.messages.length;
+    conversation.messages = conversation.messages.filter((message) => !removedIds.has(message.id));
+    if (conversation.messages.length === beforeLength) {
+      return false;
+    }
+    for (const removedId of removedIds) {
+      this.repairLastMessagePointerAfterRemoval(conversation, removedId);
+    }
+    conversation.updatedAt = new Date().toISOString();
+    return true;
   }
 
   private mergeMetadataItemsByKey(
@@ -7318,11 +7395,43 @@ export class ChatService {
     let turnController: { signal: AbortSignal; cleanup: () => void } | undefined;
     try {
       turnController = this.ensureChatTurnController(conversation, participant, runId, signal);
-      await reservation.wait();
+      await this.waitForParticipantTurnReservation(reservation, turnController.signal);
+      if (turnController.signal.aborted) {
+        throw new Error("Chat run cancelled.");
+      }
       return await this.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, options);
     } finally {
       reservation.release();
       turnController?.cleanup();
+    }
+  }
+
+  private async waitForParticipantTurnReservation(reservation: ParticipantTurnReservation, signal: AbortSignal | undefined): Promise<void> {
+    if (signal?.aborted) {
+      throw new Error("Chat run cancelled.");
+    }
+    if (!signal) {
+      await reservation.wait();
+      return;
+    }
+
+    let abortListener: (() => void) | undefined;
+    try {
+      await Promise.race([
+        reservation.wait(),
+        new Promise<never>((_, reject) => {
+          abortListener = () => reject(new Error("Chat run cancelled."));
+          signal.addEventListener("abort", abortListener, { once: true });
+        })
+      ]);
+    } finally {
+      if (abortListener) {
+        signal.removeEventListener("abort", abortListener);
+      }
+    }
+
+    if (signal.aborted) {
+      throw new Error("Chat run cancelled.");
     }
   }
 
@@ -7332,15 +7441,24 @@ export class ChatService {
     const previousTurn = previous ?? Promise.resolve();
     let releaseCurrent!: () => void;
     let released = false;
+    let previousTurnSettled = !previous;
     const current = new Promise<void>((resolve) => {
       releaseCurrent = resolve;
     });
-    const chained = previousTurn.catch(() => undefined).then(() => current);
+    const previousReady = previousTurn.catch(() => undefined).then(() => {
+      previousTurnSettled = true;
+    });
+    const chained = previousReady.then(() => current);
+    const clearQueueIfTail = (): void => {
+      if (this.participantTurnQueues.get(key) === chained) {
+        this.participantTurnQueues.delete(key);
+      }
+    };
     this.participantTurnQueues.set(key, chained);
     return {
       queued: Boolean(previous),
       wait: async () => {
-        await previousTurn.catch(() => undefined);
+        await previousReady;
       },
       release: () => {
         if (released) {
@@ -7348,8 +7466,10 @@ export class ChatService {
         }
         released = true;
         releaseCurrent();
-        if (this.participantTurnQueues.get(key) === chained) {
-          this.participantTurnQueues.delete(key);
+        if (previousTurnSettled) {
+          clearQueueIfTail();
+        } else {
+          void chained.finally(clearQueueIfTail);
         }
       }
     };
@@ -10154,7 +10274,8 @@ export class ChatService {
     if (!conversation || conversation.kind !== "chat") {
       throw new Error("Chat conversation was not found.");
     }
-    if (this.recoverStaleChatRun(conversation)) {
+    const removedTombstonesApplied = this.applyRemovedChatMessageTombstones(conversation);
+    if (this.recoverStaleChatRun(conversation) || removedTombstonesApplied) {
       await this.saveConversation(conversation);
     }
     return conversation;

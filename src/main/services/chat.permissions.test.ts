@@ -1136,6 +1136,137 @@ test("same participant sends show queued bubble and serialize provider runs", as
   );
 });
 
+test("cancelling same participant queued response removes bubble before earlier turn releases", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  let runCount = 0;
+  let releaseFirst!: () => void;
+  const firstCanFinish = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let releaseThird!: () => void;
+  const thirdCanFinish = new Promise<void>((resolve) => {
+    releaseThird = resolve;
+  });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => {
+      runCount += 1;
+      const runNumber = runCount;
+      if (runNumber === 1) {
+        await firstCanFinish;
+      } else if (runNumber === 2) {
+        await thirdCanFinish;
+      }
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: `reply ${runNumber}`,
+        durationMs: 1,
+        sessionId: `session-${runNumber}`
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "first-send",
+    content: "@codex first"
+  });
+  await waitFor(() => runCount === 1);
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "second-send",
+    content: "@codex second"
+  });
+  await waitFor(() => storage.current.messages.some(
+    (message: ChatMessage) =>
+      message.role === "participant" &&
+      message.status === "pending" &&
+      message.metadata?.queuedBehind?.handle === participant.handle
+  ));
+  const queuedMessage = storage.current.messages.find(
+    (message: ChatMessage) =>
+      message.role === "participant" &&
+      message.status === "pending" &&
+      message.metadata?.queuedBehind?.handle === participant.handle
+  );
+  const queuedRunId = queuedMessage?.metadata?.runId;
+  assert.ok(queuedMessage);
+  assert.ok(queuedRunId);
+
+  assert.equal(service.cancelRun(queuedRunId), true);
+  await waitFor(() => {
+    const activeRunIds = storage.current.metadata.activeRunIds ?? [];
+    return !storage.current.messages.some((message: ChatMessage) => message.id === queuedMessage.id) &&
+      storage.current.messages.some((message: ChatMessage) =>
+        message.role === "system" &&
+        message.content === `@${participant.handle} stopped by user.`
+      ) &&
+      activeRunIds.length === 1 &&
+      !activeRunIds.includes(queuedRunId) &&
+      runCount === 1;
+  });
+  assert.notEqual(
+    storage.current.metadata.lastMessageByParticipant?.[participant.id]?.messageId,
+    queuedMessage.id
+  );
+  assert.equal(
+    ((storage.current.metadata.removedChatMessageIds as string[] | undefined) ?? []).includes(queuedMessage.id),
+    true
+  );
+
+  storage.current.messages.push(clone(queuedMessage));
+  await (service as any).refreshStoredChatState(storage.current);
+  assert.equal(storage.current.messages.some((message: ChatMessage) => message.id === queuedMessage.id), false);
+  assert.equal(
+    storage.current.messages.some((message: ChatMessage) => message.metadata?.queuedBehind?.handle === participant.handle),
+    false
+  );
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "third-send",
+    content: "@codex third"
+  });
+  await waitFor(() => storage.current.messages.some(
+    (message: ChatMessage) =>
+      message.role === "participant" &&
+      message.status === "pending" &&
+      message.metadata?.queuedBehind?.handle === participant.handle
+  ));
+  const thirdQueuedMessage = storage.current.messages.find(
+    (message: ChatMessage) =>
+      message.role === "participant" &&
+      message.status === "pending" &&
+      message.metadata?.queuedBehind?.handle === participant.handle
+  );
+  assert.ok(thirdQueuedMessage);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(runCount, 1);
+
+  releaseFirst();
+  await waitFor(() => {
+    const promoted = storage.current.messages.find((message: ChatMessage) => message.id === thirdQueuedMessage.id);
+    return runCount === 2 &&
+      promoted?.status === "pending" &&
+      promoted.metadata?.queuedBehind === undefined;
+  });
+
+  releaseThird();
+  await waitFor(() =>
+    storage.current.messages.some((message: ChatMessage) =>
+      message.id === thirdQueuedMessage.id &&
+      message.content === "reply 2" &&
+      message.status === "done"
+    ) &&
+    storage.current.metadata.running === false
+  );
+  assert.equal(storage.current.messages.some((message: ChatMessage) => message.id === queuedMessage.id), false);
+});
+
 test("same participant queued bubble is finalized when startup throws before turn try", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
