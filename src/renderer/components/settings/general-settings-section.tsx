@@ -37,7 +37,7 @@ export function GeneralSettingsSection(props: {
               <Fragment key={provider.kind}>
                 {index > 0 && <div className="gen-card-divider" />}
                 <div className="gen-cli-row">
-                  <span className="gen-cli-icon">
+                  <span className={`gen-cli-icon${provider.kind === "claude-code" ? " gen-cli-icon-full" : ""}`}>
                     {iconUrl ? <img src={iconUrl} alt="" /> : null}
                   </span>
                   <div className="gen-cli-text">
