@@ -161,6 +161,10 @@
   border-top: 1px solid var(--app-border-subtle);
 }
 
+.new-chat-card > .pending-image-strip {
+  margin-bottom: 10px;
+}
+
 .new-chat-toolbar-spacer {
   flex: 1 1 auto;
   min-width: 16px;
@@ -200,6 +204,7 @@
 }
 
 .new-chat-chip:focus-visible,
+.new-chat-icon-button:focus-visible,
 .new-chat-send:focus-visible,
 .new-chat-menu-item:focus-visible,
 .new-chat-participant-main:focus-visible,
@@ -218,6 +223,30 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.new-chat-icon-button {
+  display: inline-flex;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--app-text);
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    color 120ms ease,
+    border-color 120ms ease;
+}
+
+.new-chat-icon-button:hover,
+.new-chat-icon-button:focus-visible {
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
 }
 
 .new-chat-participant-trigger {

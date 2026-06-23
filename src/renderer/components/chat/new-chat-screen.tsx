@@ -14,6 +14,7 @@ import {
   Check,
   ChevronDown,
   FolderOpen,
+  ImagePlus,
   Plus,
   RefreshCw,
   XCircle
@@ -22,6 +23,7 @@ import {
 import type {
   AgentHealth,
   AppSettings,
+  ChatImageInput,
   ChatParticipant,
   ChatParticipantConfig,
   ChatProviderKind,
@@ -37,11 +39,16 @@ import {
   validateChatStartupDrafts
 } from "./chat-participant-drafts";
 import { providerLabel } from "./chat-conversation-data";
+import { ChatComposerAttachmentChips } from "./chat-composer-attachment-chips";
 import { ChatComposerMenus } from "./chat-composer-menus";
 import {
   activeMentionQuery,
   replaceActiveMention
 } from "./chat-composer-draft-utils";
+import {
+  revokePendingImageUrls,
+  useChatComposerImages
+} from "./use-chat-composer-images";
 import {
   CHAT_ASSISTANT_DISPLAY_NAME,
   CHAT_ASSISTANT_HANDLE,
@@ -72,12 +79,14 @@ export function NewChatScreen(props: {
   onSelectRepo: () => void;
   onSelectedParticipantIdsChange: Dispatch<SetStateAction<Set<string>>>;
   onOpenParticipantsSettings: () => void;
-  onStart: () => void;
+  onStart: (imageAttachments?: ChatImageInput[]) => boolean | void | Promise<boolean | void>;
 }): JSX.Element {
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingCaretRef = useRef<{ value: string; position: number } | undefined>();
   const [mentionQuery, setMentionQuery] = useState<string | undefined>();
   const [mentionIndex, setMentionIndex] = useState(0);
+  const images = useChatComposerImages(undefined);
   const assistantParticipant = useMemo(
     () => newChatAssistantParticipant(props.settings, props.agents),
     [props.agents, props.settings.providers]
@@ -106,7 +115,7 @@ export function NewChatScreen(props: {
   const normalizedDrafts = selectedChatParticipantDrafts(props.settings.chatParticipantConfigs, props.selectedParticipantIds);
   const validation = validateChatStartupDrafts(normalizedDrafts, props.settings.chatRoleConfigs, props.agents, props.settings.chatBehaviorRules);
   const hasPrompt = props.prompt.trim().length > 0;
-  const canStart = hasPrompt && !props.busy && !validation;
+  const canStart = (hasPrompt || images.readyImages.length > 0) && !images.hasInvalidImages && !props.busy && !validation;
 
   useLayoutEffect(() => {
     resizeNewChatPrompt(promptRef.current);
@@ -169,9 +178,21 @@ export function NewChatScreen(props: {
     setMentionIndex(0);
   }
 
-  function startChat(): void {
+  async function startChat(): Promise<void> {
     if (!canStart) return;
-    props.onStart();
+    const pendingImagesToSend = images.pendingImages;
+    const imageInputs = images.readyImages.map((image): ChatImageInput => ({
+      filename: image.filename,
+      mimeType: image.mimeType,
+      dataBase64: image.dataBase64 ?? ""
+    }));
+    images.setPendingImages([]);
+    const started = await props.onStart(imageInputs);
+    if (started === false) {
+      images.setPendingImages(pendingImagesToSend);
+      return;
+    }
+    revokePendingImageUrls(pendingImagesToSend);
   }
 
   return (
@@ -187,6 +208,14 @@ export function NewChatScreen(props: {
       </div>
 
       <div className="new-chat-card">
+        <ChatComposerAttachmentChips
+          pendingImages={images.pendingImages}
+          removeFileMention={() => undefined}
+          removePendingImage={images.removePendingImage}
+          removeSkillMention={() => undefined}
+          selectedFileMentions={[]}
+          selectedSkillMentions={[]}
+        />
         <div className="new-chat-input-wrap">
           <ChatComposerMenus
             fileIndex={0}
@@ -212,6 +241,25 @@ export function NewChatScreen(props: {
             rows={3}
             data-testid="new-chat-prompt"
             onChange={(event) => updatePrompt(event.target.value)}
+            onPaste={(event) => {
+              const files = Array.from(event.clipboardData?.files ?? []);
+              if (files.some((file) => file.type.startsWith("image/"))) {
+                event.preventDefault();
+                void images.addImageFiles(files);
+              }
+            }}
+            onDrop={(event) => {
+              const files = Array.from(event.dataTransfer?.files ?? []);
+              if (files.some((file) => file.type.startsWith("image/"))) {
+                event.preventDefault();
+                void images.addImageFiles(files);
+              }
+            }}
+            onDragOver={(event) => {
+              if (Array.from(event.dataTransfer.types).includes("Files")) {
+                event.preventDefault();
+              }
+            }}
             onKeyDown={(event) => {
               if (mentionOptions.length > 0 && event.key === "ArrowDown") {
                 event.preventDefault();
@@ -234,13 +282,34 @@ export function NewChatScreen(props: {
               }
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
-                startChat();
+                void startChat();
               }
             }}
             onBlur={() => window.setTimeout(() => setMentionQuery(undefined), 120)}
           />
         </div>
         <div className="new-chat-toolbar">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            multiple
+            hidden
+            onChange={(event) => {
+              const files = Array.from(event.currentTarget.files ?? []);
+              event.currentTarget.value = "";
+              void images.addImageFiles(files);
+            }}
+          />
+          <button
+            type="button"
+            className="new-chat-icon-button"
+            title="Attach image"
+            aria-label="Attach image"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <ImagePlus size={18} aria-hidden />
+          </button>
           <FolderPicker
             repoPath={props.repoPath}
             settings={props.settings}
@@ -265,7 +334,7 @@ export function NewChatScreen(props: {
             title="Start chat"
             aria-label="Start chat"
             data-testid="new-chat-start"
-            onClick={startChat}
+            onClick={() => void startChat()}
           >
             {props.busy ? <RefreshCw className="spin" size={18} aria-hidden /> : <ArrowUp size={18} strokeWidth={2.25} aria-hidden />}
           </button>

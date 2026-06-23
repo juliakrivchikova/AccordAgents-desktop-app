@@ -36,7 +36,7 @@ import type { ConversationActions } from "./use-conversation-actions";
 import { upsertConversationSummary } from "./conversation-summaries";
 
 export interface ChatActions {
-  startChat: () => Promise<void>;
+  startChat: (options?: StartChatOptions) => Promise<boolean>;
   renameChatConversation: (title: string) => Promise<boolean>;
   setChatArchived: (conversationId: string, archived: boolean) => Promise<void>;
   sendChatMessage: (options?: SendChatMessageOptions) => Promise<boolean>;
@@ -63,6 +63,10 @@ export interface SendChatMessageOptions extends ChatRunScopeOptions {
   imageAttachments?: ChatImageInput[];
 }
 
+export interface StartChatOptions {
+  imageAttachments?: ChatImageInput[];
+}
+
 export interface ChatRunScopeOptions {
   threadId?: string;
   parentMessageId?: string;
@@ -72,13 +76,14 @@ export interface ChatRunScopeOptions {
 type ChatChoiceResponse = { cancel?: boolean; selectedOptionId?: string; customAnswer?: string; note?: string };
 
 export function useChatActions(state: AppState, conversationActions: ConversationActions): ChatActions {
-  async function startChat(): Promise<void> {
+  async function startChat(options: StartChatOptions = {}): Promise<boolean> {
     state.setError(undefined);
     state.setWarnings([]);
     const initialMessage = state.question.trim();
-    if (!initialMessage) {
-      state.setError("Enter a message to start a chat.");
-      return;
+    const imageAttachments = options.imageAttachments ?? [];
+    if (!initialMessage && imageAttachments.length === 0) {
+      state.setError("Enter a message or attach an image to start a chat.");
+      return false;
     }
     const participants = selectedOrMentionedChatParticipantDrafts(
       state.settings.chatParticipantConfigs,
@@ -88,10 +93,10 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     const validation = validateChatStartupDrafts(participants, state.settings.chatRoleConfigs, state.agents, state.settings.chatBehaviorRules);
     if (validation) {
       state.setError(validation);
-      return;
+      return false;
     }
     if (state.startingChatRef.current) {
-      return;
+      return false;
     }
     state.startingChatRef.current = true;
     const runId = crypto.randomUUID();
@@ -100,7 +105,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     let createdConversationId: string | undefined;
     try {
       const result = await window.consensus.createChatConversation({
-        title: initialMessage.slice(0, 80),
+        title: initialChatTitle(initialMessage, imageAttachments),
         repoPath: state.repoPath.trim() || undefined,
         skipDefaultParticipants: participants.length === 0,
         participants
@@ -112,12 +117,14 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       const sendResult = await window.consensus.sendChatMessage({
         conversationId: result.conversation.id,
         runId,
-        content: initialMessage
+        content: initialMessage,
+        imageAttachments
       });
       state.setConversation(mergeProgressIntoConversation(sendResult.conversation, state.progressLogRef.current.filter((item) => item.runId === runId)));
       state.setWarnings([...result.warnings, ...sendResult.warnings]);
       state.setQuestion("");
       await conversationActions.refreshConversations();
+      return true;
     } catch (caught) {
       const message = errorText(caught);
       if (createdConversationId) {
@@ -138,6 +145,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       } else {
         state.setError(message);
       }
+      return false;
     } finally {
       state.setBusy(false);
       state.setCurrentRunId(undefined);
@@ -411,6 +419,14 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     toggleChatReaction, respondToChatChoice, addChatParticipant, addSavedChatParticipant,
     updateChatParticipantRuntime, removeChatParticipant, compactChatParticipant, respondToChatAppToolApproval
   };
+}
+
+function initialChatTitle(initialMessage: string, imageAttachments: ChatImageInput[]): string {
+  if (initialMessage) {
+    return initialMessage.slice(0, 80);
+  }
+  const filename = imageAttachments[0]?.filename?.trim();
+  return filename ? `Image: ${filename}`.slice(0, 80) : "Image chat";
 }
 
 function selectedOrMentionedChatParticipantDrafts(
