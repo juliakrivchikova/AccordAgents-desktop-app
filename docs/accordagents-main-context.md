@@ -23,7 +23,7 @@ Open-source positioning note: the project can be described as open-source in pro
 
 ## One-Paragraph Product Promise
 
-AccordAgents is a macOS desktop chat workspace where you can bring local Codex CLI and Claude Code agents into one shared conversation, give each participant a reusable role and permission envelope, and stay in control of every handoff. Mention an agent, attach repository files or screenshots, approve participant-to-participant requests, and keep the full chat history available locally so the same conversation can continue later.
+AccordAgents is a macOS desktop chat workspace where you can bring local Codex CLI and Claude Code agents into one shared conversation, give each participant a reusable role and permission envelope, and stay in control of every handoff. Mention an agent, attach screenshots, approve participant-to-participant requests, and keep the full chat history available locally so the same conversation can continue later.
 
 ## What AccordAgents Is
 
@@ -266,7 +266,7 @@ The composer supports `#path` file mentions when a repository is selected. The a
 
 File mentions are validated so paths cannot escape the repository. If a participant lacks repository read permission, the prompt explains the blocked state and the permission escalation path.
 
-This gives the landing page a concrete feature to show: users can ask about specific project files without manually pasting every path into the prompt.
+This is a concrete app capability, but current landing copy should emphasize rules, decisions, permissions, and history rather than repository file handling.
 
 ### Image Attachments
 
@@ -439,14 +439,14 @@ Avoid framing:
 Headline options:
 
 - AccordAgents
-- AI agents in one project chat
+- AI agents in one project workspace
 - Coordinate local CLI agents in one shared project workspace
 
 Subheadline options:
 
-- Coordinate AI agents in one macOS workspace while files, decisions, permissions, and history stay attached to the project.
+- Coordinate AI agents in one macOS workspace while rules, decisions, permissions, and history stay attached to the project.
 - Mention local CLI agents by name, share repository context and screenshots, and choose when they ask for approval.
-- A human-controlled project chat for AI agents, with roles, configurable permissions, threads, attachments, and persistent context.
+- A human-controlled project workspace for AI agents, with task-focused chats, roles, configurable permissions, attachments, and persistent context.
 
 Primary CTA options:
 
@@ -464,7 +464,7 @@ Use only CTAs that match the current distribution channel and assets.
 
 ### Short Product Description
 
-AccordAgents is a macOS desktop app for coordinating AI agents in one shared project chat. Create named participants backed by local CLI runtimes, give them reusable roles and permission envelopes, mention them with `@handle`, attach repository files or screenshots, and choose when handoffs or permissions require approval.
+AccordAgents is a macOS desktop app for coordinating AI agents in one shared project workspace. Create named participants backed by local CLI runtimes, give them reusable roles and permission envelopes, mention them with `@handle`, attach screenshots, and choose when handoffs or permissions require approval.
 
 ### Positioning Statement
 

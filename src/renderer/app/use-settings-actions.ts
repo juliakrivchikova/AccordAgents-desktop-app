@@ -9,7 +9,7 @@ import { errorText } from "../components/review/review-conversation-data";
 import type { AppState } from "./app-state";
 
 export interface SettingsActions {
-  updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean; model?: string; apiKey?: string; clearApiKey?: boolean }) => Promise<void>;
+  updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean; model?: string }) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => Promise<void>;
@@ -21,7 +21,7 @@ export interface SettingsActions {
 }
 
 export function useSettingsActions(state: AppState): SettingsActions {
-  async function updateProvider(provider: ProviderSettings, patch: { enabled?: boolean; model?: string; apiKey?: string; clearApiKey?: boolean }): Promise<void> {
+  async function updateProvider(provider: ProviderSettings, patch: { enabled?: boolean; model?: string }): Promise<void> {
     await updateSettings(() => window.consensus.updateProviderSettings({ kind: provider.kind, ...patch }));
   }
 

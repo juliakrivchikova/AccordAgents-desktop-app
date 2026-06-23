@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { SettingsService } from "./settings";
 import type { AgentHealth, AppSettings } from "../../shared/types";
@@ -67,6 +70,38 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     writeCount: () => writeCount
   };
 }
+
+test("readStored purges legacy hosted providers and encrypted API keys from settings file", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accordagents-settings-"));
+  const settingsPath = path.join(dir, "settings.json");
+  const service = Object.create(SettingsService.prototype) as any;
+  service.settingsPath = settingsPath;
+
+  await writeFile(
+    settingsPath,
+    `${JSON.stringify({
+      settingsVersion: 1,
+      roundLimitDefault: 3,
+      providers: [
+        { kind: "openai", label: "OpenAI", enabled: true, model: "gpt-5.2", encryptedApiKey: "secret" },
+        { kind: "codex-cli", label: "Codex CLI", enabled: false, model: "gpt-5.2-codex" },
+        { kind: "claude-code", label: "Claude Code", enabled: true, model: "claude-sonnet-4-6" }
+      ],
+      chatRoleConfigs: [],
+      chatBehaviorRules: [],
+      chatParticipantConfigs: []
+    }, null, 2)}\n`,
+    "utf8"
+  );
+
+  const stored = await service.readStored();
+  const persisted = JSON.parse(await readFile(settingsPath, "utf8")) as { providers: Array<Record<string, unknown>> };
+
+  assert.deepEqual(stored.providers.map((provider: { kind: string }) => provider.kind), ["codex-cli", "claude-code"]);
+  assert.deepEqual(persisted.providers.map((provider) => provider.kind), ["codex-cli", "claude-code"]);
+  assert.equal(JSON.stringify(persisted).includes("encryptedApiKey"), false);
+  assert.equal(stored.providers.find((provider: { kind: string }) => provider.kind === "codex-cli")?.enabled, false);
+});
 
 test("behavior rule IDs include entropy so deleted rules cannot be reattached by label reuse", () => {
   const service = Object.create(SettingsService.prototype) as Record<string, (label: string) => string>;

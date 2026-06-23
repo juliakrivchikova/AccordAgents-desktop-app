@@ -296,23 +296,16 @@ function healthLine(health: AgentHealth | undefined): string {
     return "Not installed";
   }
   const base = health.version || health.path || "Installed";
-  const skillSync = appSkillSyncLine(health.appSkillSync);
-  return skillSync ? `${base} · ${skillSync}` : base;
+  const syncIssue = appSkillSyncIssueLine(health.appSkillSync);
+  return syncIssue ? `${base} · ${syncIssue}` : base;
 }
 
-function appSkillSyncLine(sync: AgentHealth["appSkillSync"]): string | undefined {
-  if (!sync || sync.status === "not-installed") {
+function appSkillSyncIssueLine(sync: AgentHealth["appSkillSync"]): string | undefined {
+  if (!sync || sync.status === "not-installed" || sync.status === "synced" || sync.status === "skipped") {
     return undefined;
-  }
-  if (sync.status === "synced") {
-    return sync.skillCount === 1 ? "1 app skill synced" : `${sync.skillCount} app skills synced`;
-  }
-  if (sync.status === "skipped") {
-    return sync.skillCount === 1 ? "1 app skill current" : `${sync.skillCount} app skills current`;
   }
   if (sync.status === "collision") {
     return sync.message ?? "App skill collision";
   }
   return sync.message ?? "App skill sync failed";
 }
-

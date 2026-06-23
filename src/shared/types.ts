@@ -15,7 +15,6 @@ export interface ProviderSettings {
   label: string;
   enabled: boolean;
   model?: string;
-  hasApiKey?: boolean;
 }
 
 export interface AppSettings {
@@ -838,8 +837,6 @@ export interface ProviderSettingsUpdate {
   kind: ProviderKind;
   enabled?: boolean;
   model?: string;
-  apiKey?: string;
-  clearApiKey?: boolean;
 }
 
 export type ProviderModelSource = "cli" | "provider-api" | "configured" | "builtin";

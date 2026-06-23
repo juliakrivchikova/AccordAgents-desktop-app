@@ -59,7 +59,7 @@ const gitService = new GitService();
 const settingsService = new SettingsService();
 const storageService = new StorageService();
 const repoFileOpenerService = new RepoFileOpenerService(storageService, settingsService);
-const providerRunner = new ProviderRunner(settingsService);
+const providerRunner = new ProviderRunner();
 const debugLogService = new DebugLogService();
 setCommandDebugLogger(debugLogService);
 const cliAgentRunner = new CliAgentRunner(debugLogService);

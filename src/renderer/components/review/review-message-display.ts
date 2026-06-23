@@ -150,9 +150,9 @@ function summarizeRawProviderJson(content: string): string | undefined {
     if (data.status === "incomplete") {
       const reason = data.incomplete_details?.reason ?? "unknown reason";
       const model = data.model ? ` from ${data.model}` : "";
-      return `OpenAI returned an incomplete response${model}: ${reason}. No usable text was produced.`;
+      return `Hosted provider returned an incomplete response${model}: ${reason}. No usable text was produced.`;
     }
-    return `OpenAI returned a response object without usable text output${data.status ? ` (status: ${data.status})` : ""}.`;
+    return `Hosted provider returned a response object without usable text output${data.status ? ` (status: ${data.status})` : ""}.`;
   } catch {
     return undefined;
   }

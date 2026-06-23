@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { app, safeStorage } from "electron";
+import { app } from "electron";
 import type {
   AppSettings,
   AgentHealth,
@@ -17,7 +17,6 @@ import type {
   ChatRoleChangeOperation,
   ChatRoleConfig,
   ChatRoleConfigUpdate,
-  ProviderKind,
   ProviderSettings,
   ProviderSettingsUpdate,
   RepoFileOpenAction
@@ -31,13 +30,17 @@ import {
 } from "../../shared/chatBehaviorRules";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
 
+type StoredProviderSettings = ProviderSettings & {
+  encryptedApiKey?: string;
+};
+
 interface StoredSettings {
   settingsVersion?: number;
   roundLimitDefault: number;
   cliAgentRunTimeoutMs?: number;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
-  providers: Array<Omit<ProviderSettings, "hasApiKey"> & { encryptedApiKey?: string }>;
+  providers: StoredProviderSettings[];
   chatRoleConfigs?: ChatRoleConfig[];
   chatBehaviorRules?: ChatBehaviorRuleConfig[];
   chatParticipantConfigs?: ChatParticipantConfig[];
@@ -45,12 +48,11 @@ interface StoredSettings {
 }
 
 const DEFAULT_PROVIDERS: ProviderSettings[] = [
-  { kind: "openai", label: "OpenAI", enabled: false, model: "gpt-5.2" },
-  { kind: "anthropic", label: "Anthropic", enabled: false, model: "claude-sonnet-4-6" },
-  { kind: "gemini", label: "Gemini", enabled: false, model: "gemini-2.5-pro" },
   { kind: "codex-cli", label: "Codex CLI", enabled: true },
   { kind: "claude-code", label: "Claude Code", enabled: true }
 ];
+
+const DEFAULT_PROVIDER_KINDS = new Set<ProviderSettings["kind"]>(DEFAULT_PROVIDERS.map((provider) => provider.kind));
 
 const CHAT_HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 const CHAT_ROLE_LABEL_MAX_CHARS = 80;
@@ -1566,8 +1568,7 @@ export class SettingsService {
         kind: provider.kind,
         label: provider.label,
         enabled: provider.enabled,
-        model: provider.model,
-        hasApiKey: Boolean(provider.encryptedApiKey)
+        model: provider.model
       }))
     };
   }
@@ -1584,12 +1585,6 @@ export class SettingsService {
     }
     if (typeof update.model === "string") {
       provider.model = update.model.trim();
-    }
-    if (update.clearApiKey) {
-      provider.encryptedApiKey = undefined;
-    }
-    if (typeof update.apiKey === "string" && update.apiKey.trim()) {
-      provider.encryptedApiKey = this.encryptSecret(update.apiKey.trim());
     }
 
     await this.writeStored(stored);
@@ -2070,20 +2065,19 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
-  async getApiKey(kind: ProviderKind): Promise<string | undefined> {
-    const stored = await this.readStored();
-    const encrypted = stored.providers.find((provider) => provider.kind === kind)?.encryptedApiKey;
-    if (!encrypted) {
-      return undefined;
-    }
-    return this.decryptSecret(encrypted);
-  }
-
   private async readStored(): Promise<StoredSettings> {
     try {
       const raw = await readFile(this.settingsPath, "utf8");
       const parsed = JSON.parse(raw) as StoredSettings;
-      return this.mergeDefaults(parsed);
+      const merged = this.mergeDefaults(parsed);
+      if (this.hasLegacyProviderData(parsed)) {
+        await this.writeStored(merged).catch((error) => {
+          console.warn(
+            `Failed to purge legacy provider data from settings: ${error instanceof Error ? error.message : String(error)}`
+          );
+        });
+      }
+      return merged;
     } catch {
       return this.mergeDefaults({ settingsVersion: 1, roundLimitDefault: 1, providers: DEFAULT_PROVIDERS });
     }
@@ -2097,7 +2091,12 @@ export class SettingsService {
   private mergeDefaults(settings: StoredSettings): StoredSettings {
     const providers = DEFAULT_PROVIDERS.map((fallback) => {
       const existing = settings.providers?.find((item) => item.kind === fallback.kind);
-      return { ...fallback, ...existing };
+      return {
+        kind: fallback.kind,
+        label: fallback.label,
+        enabled: typeof existing?.enabled === "boolean" ? existing.enabled : fallback.enabled,
+        model: typeof existing?.model === "string" ? existing.model.trim() || fallback.model : fallback.model
+      };
     });
     return {
       settingsVersion: 1,
@@ -2111,6 +2110,13 @@ export class SettingsService {
       chatParticipantConfigs: this.normalizeParticipantConfigs(settings.chatParticipantConfigs),
       chatParticipantSeedState: this.normalizeSeedState(settings.chatParticipantSeedState)
     };
+  }
+
+  private hasLegacyProviderData(settings: StoredSettings): boolean {
+    if (!Array.isArray(settings.providers)) {
+      return false;
+    }
+    return settings.providers.some((provider) => !DEFAULT_PROVIDER_KINDS.has(provider.kind) || "encryptedApiKey" in provider);
   }
 
   private mergeDefaultRoles(roles: ChatRoleConfig[] | undefined): ChatRoleConfig[] {
@@ -2322,19 +2328,5 @@ export class SettingsService {
 
   private normalizeCliAgentRunTimeoutMs(value: unknown): number {
     return normalizeCliAgentRunTimeoutMs(value);
-  }
-
-  private encryptSecret(secret: string): string {
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error("OS-backed secret encryption is not available on this machine.");
-    }
-    return safeStorage.encryptString(secret).toString("base64");
-  }
-
-  private decryptSecret(secret: string): string {
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error("OS-backed secret encryption is not available on this machine.");
-    }
-    return safeStorage.decryptString(Buffer.from(secret, "base64"));
   }
 }
