@@ -101,7 +101,9 @@ export interface UserSkillSummary extends ChatSkillMention {
 }
 
 export interface UserSkillSearchRequest {
-  conversationId: string;
+  conversationId?: string;
+  repoPath?: string;
+  participants?: ChatParticipantInput[];
   query: string;
   content?: string;
   limit?: number;
@@ -671,38 +673,29 @@ export interface ChatParticipantConfigUpdate {
   permissions?: ChatAgentPermissions;
 }
 
+export interface ChatParticipantInput {
+  participantConfigId?: string;
+  handle: string;
+  roleConfigId: string;
+  behaviorRuleIds?: string[];
+  kind: ChatProviderKind;
+  model?: string;
+  reasoningEffort?: ChatReasoningEffort;
+  avatarId?: string;
+  agentMode?: ChatAgentMode;
+  permissions?: ChatAgentPermissions;
+}
+
 export interface CreateChatConversationRequest {
   title?: string;
   repoPath?: string;
   skipDefaultParticipants?: boolean;
-  participants: Array<{
-    participantConfigId?: string;
-    handle: string;
-    roleConfigId: string;
-    behaviorRuleIds?: string[];
-    kind: ChatProviderKind;
-    model?: string;
-    reasoningEffort?: ChatReasoningEffort;
-    avatarId?: string;
-    agentMode?: ChatAgentMode;
-    permissions?: ChatAgentPermissions;
-  }>;
+  participants: ChatParticipantInput[];
 }
 
 export interface AddChatParticipantRequest {
   conversationId: string;
-  participant: {
-    participantConfigId?: string;
-    handle: string;
-    roleConfigId: string;
-    behaviorRuleIds?: string[];
-    kind: ChatProviderKind;
-    model?: string;
-    reasoningEffort?: ChatReasoningEffort;
-    avatarId?: string;
-    agentMode?: ChatAgentMode;
-    permissions?: ChatAgentPermissions;
-  };
+  participant: ChatParticipantInput;
 }
 
 export interface UpdateChatParticipantRuntimeRequest {
@@ -926,7 +919,8 @@ export interface RepoFileMention {
 }
 
 export interface RepoFileSearchRequest {
-  conversationId: string;
+  conversationId?: string;
+  repoPath?: string;
   query: string;
   limit?: number;
 }

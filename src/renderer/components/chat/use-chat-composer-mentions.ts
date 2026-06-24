@@ -2,13 +2,17 @@ import { useEffect, useRef, useState } from "react";
 
 import type {
   ChatParticipant,
+  ChatParticipantInput,
   ChatSkillMention,
   RepoFileMention,
   RepoFileSearchResult,
   UserSkillSummary,
   UserSkillTargetSummary
 } from "../../../shared/types";
-import { chatParticipantMentionHandle } from "../conversation/conversation-display";
+import {
+  chatParticipantDisplayName,
+  chatParticipantMentionHandle
+} from "../conversation/conversation-display";
 import {
   activeFileQuery,
   activeMentionQuery,
@@ -24,12 +28,24 @@ import {
   skillPickerTargetLabel
 } from "./chat-composer-draft-utils";
 
+export type ChatComposerSearchSource =
+  | {
+      type: "conversation";
+      conversationId?: string;
+      repoPath?: string;
+    }
+  | {
+      type: "pre-chat";
+      repoPath?: string;
+      participants: ChatParticipantInput[];
+    };
+
 export function useChatComposerMentions(props: {
-  conversationId?: string;
   draft: string;
+  searchSource: ChatComposerSearchSource;
   onDraftChange: (value: string) => void;
+  onMentionInserted?: (participant: ChatParticipant) => void;
   participants: ChatParticipant[];
-  repoPath?: string;
 }): {
   fileIndex: number;
   fileOptions: RepoFileSearchResult[];
@@ -77,13 +93,24 @@ export function useChatComposerMentions(props: {
   const fileSearchRequestRef = useRef(0);
   const skillSearchRequestRef = useRef(0);
   const pendingCaretRef = useRef<{ value: string; position: number } | undefined>();
+  const fileSearchAvailable = Boolean(props.searchSource.repoPath?.trim()) && (
+    props.searchSource.type === "pre-chat" || Boolean(props.searchSource.conversationId)
+  );
+  const skillSearchAvailable = props.searchSource.type === "pre-chat" || Boolean(props.searchSource.conversationId);
+  const searchResetKey = props.searchSource.type === "conversation"
+    ? `conversation:${props.searchSource.conversationId ?? ""}`
+    : `pre-chat:${props.searchSource.repoPath ?? ""}`;
   const mentionOptions = mentionQuery === undefined
     ? []
-    : props.participants.filter((participant) => participant.handle.toLowerCase().includes(mentionQuery.toLowerCase()));
+    : props.participants.filter((participant) => {
+      const query = mentionQuery.toLowerCase();
+      return participant.handle.toLowerCase().includes(query) ||
+        chatParticipantDisplayName(participant).toLowerCase().includes(query);
+    });
   const visibleFileOptions = fileQuery === undefined ? [] : fileOptions;
   const visibleSkillOptions = skillQuery === undefined ? [] : skillOptions;
   const skillTargetLabel = skillTarget ? skillPickerTargetLabel(skillTarget, props.participants) : undefined;
-  const compactOption = compactCommandOption(skillQuery, skillTarget);
+  const compactOption = props.searchSource.type === "conversation" ? compactCommandOption(skillQuery, skillTarget) : undefined;
   const visibleCommandOptions = compactOption ? [compactOption] : [];
   const visibleSlashOptionCount = visibleCommandOptions.length + visibleSkillOptions.length;
   const showSkillHighlights = selectedSkillMentions.some((mention) => draftHasSkillMention(props.draft, mention.frontmatterName));
@@ -96,7 +123,7 @@ export function useChatComposerMentions(props: {
     setSkillTarget(undefined);
     setSelectedSkillMentions([]);
     setSelectedFileMentions([]);
-  }, [props.conversationId]);
+  }, [searchResetKey]);
 
   useEffect(() => {
     setSelectedFileMentions((current) => current.filter((mention) => draftHasFileMention(props.draft, mention.path)));
@@ -107,18 +134,25 @@ export function useChatComposerMentions(props: {
   }, [props.draft]);
 
   useEffect(() => {
-    if (fileQuery === undefined || !props.conversationId || !props.repoPath) {
+    if (fileQuery === undefined || !fileSearchAvailable) {
       setFileOptions([]);
       return;
     }
     const requestId = fileSearchRequestRef.current + 1;
     fileSearchRequestRef.current = requestId;
     const timeout = window.setTimeout(() => {
-      void window.consensus.searchRepoFiles({
-        conversationId: props.conversationId ?? "",
-        query: fileQuery,
-        limit: 50
-      }).then((results) => {
+      const request = props.searchSource.type === "conversation"
+        ? {
+            conversationId: props.searchSource.conversationId ?? "",
+            query: fileQuery,
+            limit: 50
+          }
+        : {
+            repoPath: props.searchSource.repoPath ?? "",
+            query: fileQuery,
+            limit: 50
+          };
+      void window.consensus.searchRepoFiles(request).then((results) => {
         if (fileSearchRequestRef.current === requestId) {
           setFileOptions(results);
           setFileIndex(0);
@@ -130,22 +164,31 @@ export function useChatComposerMentions(props: {
       });
     }, 200);
     return () => window.clearTimeout(timeout);
-  }, [fileQuery, props.conversationId, props.repoPath]);
+  }, [fileQuery, fileSearchAvailable, props.searchSource]);
 
   useEffect(() => {
-    if (skillQuery === undefined || !props.conversationId) {
+    if (skillQuery === undefined || !skillSearchAvailable) {
       setSkillOptions([]);
       return;
     }
     const requestId = skillSearchRequestRef.current + 1;
     skillSearchRequestRef.current = requestId;
     const timeout = window.setTimeout(() => {
-      void window.consensus.searchUserSkills({
-        conversationId: props.conversationId ?? "",
-        query: skillQuery,
-        content: props.draft,
-        limit: 50
-      }).then((result) => {
+      const request = props.searchSource.type === "conversation"
+        ? {
+            conversationId: props.searchSource.conversationId ?? "",
+            query: skillQuery,
+            content: props.draft,
+            limit: 50
+          }
+        : {
+            repoPath: props.searchSource.repoPath,
+            participants: props.searchSource.participants,
+            query: skillQuery,
+            content: props.draft,
+            limit: 50
+          };
+      void window.consensus.searchUserSkills(request).then((result) => {
         if (skillSearchRequestRef.current === requestId) {
           setSkillOptions(result.skills);
           setSkillTarget(result.target);
@@ -159,13 +202,13 @@ export function useChatComposerMentions(props: {
       });
     }, 200);
     return () => window.clearTimeout(timeout);
-  }, [skillQuery, props.conversationId, props.draft]);
+  }, [skillQuery, skillSearchAvailable, props.draft, props.searchSource]);
 
   function updateDraft(value: string): void {
     props.onDraftChange(value);
-    const nextFileQuery = props.conversationId && props.repoPath ? activeFileQuery(value) : undefined;
+    const nextFileQuery = fileSearchAvailable ? activeFileQuery(value) : undefined;
     const nextMentionQuery = nextFileQuery === undefined ? activeMentionQuery(value) : undefined;
-    const nextSkillQuery = nextFileQuery === undefined && nextMentionQuery === undefined ? activeSkillQuery(value) : undefined;
+    const nextSkillQuery = nextFileQuery === undefined && nextMentionQuery === undefined && skillSearchAvailable ? activeSkillQuery(value) : undefined;
     setFileQuery(nextFileQuery);
     setMentionQuery(nextMentionQuery);
     setSkillQuery(nextSkillQuery);
@@ -181,6 +224,7 @@ export function useChatComposerMentions(props: {
 
   function insertMention(participant: ChatParticipant): void {
     updateDraftWithCaret(replaceActiveMention(props.draft, chatParticipantMentionHandle(participant, props.participants)));
+    props.onMentionInserted?.(participant);
     setMentionQuery(undefined);
     setMentionIndex(0);
   }

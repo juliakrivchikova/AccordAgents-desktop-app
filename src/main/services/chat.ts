@@ -27,6 +27,7 @@ import type {
   ChatParticipant,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
+  ChatParticipantInput,
   ChatExistingParticipantOverrides,
   ChatParticipantChangeRequest,
   ChatParticipantChangeOperation,
@@ -1066,6 +1067,32 @@ export class ChatService {
       runRootByParticipant,
       runRootByProvider
     };
+  }
+
+  async prospectiveUserSkillRunContext(request: {
+    repoPath?: string;
+    participants?: ChatParticipantInput[];
+    content?: string;
+  }): Promise<UserSkillRunContext> {
+    const requestedParticipants = await this.validateParticipants(request.participants ?? [], [], true);
+    const participants = await this.ensureAdministratorParticipant(requestedParticipants);
+    const conversation: Conversation = {
+      id: "prospective-chat",
+      title: "",
+      kind: "chat",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      repoPath: request.repoPath?.trim() || undefined,
+      messages: [],
+      findings: [],
+      metadata: {
+        participants,
+        participantSessions: [],
+        warnings: [],
+        running: false
+      }
+    };
+    return this.userSkillRunContext(conversation, request.content ?? "");
   }
 
   async requestRosterChangeFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {

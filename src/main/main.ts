@@ -212,29 +212,52 @@ function registerIpc(): void {
     const conversationId = typeof request?.conversationId === "string" ? request.conversationId : "";
     const query = typeof request?.query === "string" ? request.query : "";
     const limit = typeof request?.limit === "number" ? request.limit : undefined;
-    const conversation = await storageService.getConversation(conversationId);
-    if (!conversation?.repoPath) {
+    let repoPath = "";
+    if (conversationId) {
+      const conversation = await storageService.getConversation(conversationId);
+      repoPath = conversation?.repoPath ?? "";
+    } else {
+      repoPath = typeof request?.repoPath === "string" ? request.repoPath.trim() : "";
+    }
+    if (!repoPath) {
       return [];
     }
-    return gitService.searchRepoFiles(conversation.repoPath, query, limit);
+    return gitService.searchRepoFiles(repoPath, query, limit);
   });
   ipcMain.handle("skills:search", async (_event, request: UserSkillSearchRequest) => {
-    const conversation = await storageService.getConversation(typeof request?.conversationId === "string" ? request.conversationId : "");
-    if (!conversation || conversation.kind !== "chat") {
-      return {
-        target: { participantIds: [], providerKinds: [], hasClearTargets: false },
-        skills: []
-      };
-    }
+    const conversationId = typeof request?.conversationId === "string" ? request.conversationId : "";
     const content = typeof request?.content === "string" ? request.content : "";
+    if (conversationId) {
+      const conversation = await storageService.getConversation(conversationId);
+      if (!conversation || conversation.kind !== "chat") {
+        return {
+          target: { participantIds: [], providerKinds: [], hasClearTargets: false },
+          skills: []
+        };
+      }
+      return userSkillsService.search(
+        {
+          conversationId: conversation.id,
+          query: typeof request?.query === "string" ? request.query : "",
+          content,
+          limit: typeof request?.limit === "number" ? request.limit : undefined
+        },
+        chatService.userSkillRunContext(conversation, content)
+      );
+    }
     return userSkillsService.search(
       {
-        conversationId: conversation.id,
         query: typeof request?.query === "string" ? request.query : "",
+        repoPath: typeof request?.repoPath === "string" ? request.repoPath : undefined,
+        participants: Array.isArray(request?.participants) ? request.participants : [],
         content,
         limit: typeof request?.limit === "number" ? request.limit : undefined
       },
-      chatService.userSkillRunContext(conversation, content)
+      await chatService.prospectiveUserSkillRunContext({
+        repoPath: typeof request?.repoPath === "string" ? request.repoPath : undefined,
+        participants: Array.isArray(request?.participants) ? request.participants : [],
+        content
+      })
     );
   });
   ipcMain.handle("skills:diagnostics", async (_event, request?: UserSkillDiagnosticsRequest) => {

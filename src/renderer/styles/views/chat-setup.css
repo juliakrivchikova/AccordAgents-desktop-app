@@ -122,6 +122,10 @@
   min-width: 0;
 }
 
+.new-chat-input-wrap.has-skill-highlights {
+  isolation: isolate;
+}
+
 .new-chat-input-wrap .mention-menu {
   top: 32px;
   right: auto;
@@ -149,6 +153,32 @@
 
 .new-chat-prompt::placeholder {
   color: var(--app-muted);
+}
+
+.new-chat-input-wrap .chat-draft-highlight {
+  padding: 4px;
+  border-radius: 0;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.new-chat-prompt.skill-highlight-textarea {
+  position: relative;
+  z-index: 2;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--app-text-strong);
+}
+
+.new-chat-prompt.skill-highlight-textarea::placeholder {
+  color: transparent;
+  opacity: 0;
+}
+
+.new-chat-prompt.skill-highlight-textarea::selection {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background: color-mix(in srgb, var(--app-accent) 28%, transparent);
 }
 
 .new-chat-toolbar {

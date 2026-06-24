@@ -11,18 +11,14 @@ import {
   chatAppToolApprovals,
   chatParticipants
 } from "../components/chat/chat-conversation-data";
-import {
-  chatParticipantMentionHandle,
-  isChatAssistantHandle,
-  isChatAssistantParticipant
-} from "../components/conversation/conversation-display";
+import { chatParticipantMentionHandle } from "../components/conversation/conversation-display";
 import type { ChatParticipantDraft } from "../components/chat/chat-participant-drafts";
 import {
   activeChatRoleConfigs,
   chatParticipantConfigToDraft,
   defaultChatParticipantDraft,
   normalizedChatDrafts,
-  selectedChatParticipantDrafts,
+  selectedOrMentionedChatParticipantDrafts,
   validateChatCliAgents,
   validateChatParticipantDrafts,
   validateChatStartupDrafts
@@ -64,6 +60,8 @@ export interface SendChatMessageOptions extends ChatRunScopeOptions {
 }
 
 export interface StartChatOptions {
+  skillMentions?: ChatSkillMention[];
+  repoFileMentions?: RepoFileMention[];
   imageAttachments?: ChatImageInput[];
 }
 
@@ -81,7 +79,9 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     state.setWarnings([]);
     const initialMessage = state.question.trim();
     const imageAttachments = options.imageAttachments ?? [];
-    if (!initialMessage && imageAttachments.length === 0) {
+    const repoFileMentions = options.repoFileMentions ?? [];
+    const skillMentions = options.skillMentions ?? [];
+    if (!initialMessage && imageAttachments.length === 0 && skillMentions.length === 0) {
       state.setError("Enter a message or attach an image to start a chat.");
       return false;
     }
@@ -118,6 +118,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         conversationId: result.conversation.id,
         runId,
         content: initialMessage,
+        repoFileMentions,
+        skillMentions,
         imageAttachments
       });
       state.setConversation(mergeProgressIntoConversation(sendResult.conversation, state.progressLogRef.current.filter((item) => item.runId === runId)));
@@ -427,30 +429,6 @@ function initialChatTitle(initialMessage: string, imageAttachments: ChatImageInp
   }
   const filename = imageAttachments[0]?.filename?.trim();
   return filename ? `Image: ${filename}`.slice(0, 80) : "Image chat";
-}
-
-function selectedOrMentionedChatParticipantDrafts(
-  participants: ChatParticipantConfig[],
-  selectedIds: Set<string>,
-  content: string
-): ChatParticipantDraft[] {
-  const nextSelectedIds = new Set(selectedIds);
-  for (const participant of participants) {
-    if (isChatAssistantParticipant(participant) || isChatAssistantHandle(participant.handle)) {
-      continue;
-    }
-    if (new RegExp(`@${escapeRegExp(participant.handle)}(?![A-Za-z0-9_-])`, "i").test(content)) {
-      nextSelectedIds.add(participant.id);
-    }
-  }
-  return selectedChatParticipantDrafts(
-    participants.filter((participant) => !isChatAssistantParticipant(participant)),
-    nextSelectedIds
-  );
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function hasMultipleMentionedParticipants(content: string, conversation: Parameters<typeof chatAppToolApprovals>[0]): boolean {

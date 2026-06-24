@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useRef } from "react";
+import React, { useLayoutEffect, useMemo, useRef } from "react";
 import { ArrowUp, ImagePlus, Loader2, RefreshCw, X } from "lucide-react";
 
 import { ResizableTextarea } from "@/renderer/components/primitives";
@@ -44,12 +44,19 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const searchSource = useMemo(
+    () => ({
+      type: "conversation" as const,
+      conversationId: props.conversationId,
+      repoPath: props.repoPath
+    }),
+    [props.conversationId, props.repoPath]
+  );
   const mentions = useChatComposerMentions({
-    conversationId: props.conversationId,
     draft: props.draft,
+    searchSource,
     onDraftChange: props.onDraftChange,
-    participants: props.participants,
-    repoPath: props.repoPath
+    participants: props.participants
   });
   const images = useChatComposerImages(props.conversationId);
   const canSend = !images.hasInvalidImages && (

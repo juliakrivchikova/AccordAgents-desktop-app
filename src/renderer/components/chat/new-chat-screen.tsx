@@ -7,7 +7,8 @@ import {
   type Dispatch,
   type ReactNode,
   type RefObject,
-  type SetStateAction
+  type SetStateAction,
+  type UIEvent
 } from "react";
 import {
   ArrowUp,
@@ -27,7 +28,9 @@ import type {
   ChatParticipant,
   ChatParticipantConfig,
   ChatProviderKind,
-  GitRepoInfo
+  ChatSkillMention,
+  GitRepoInfo,
+  RepoFileMention
 } from "../../../shared/types";
 import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
 import {
@@ -35,26 +38,25 @@ import {
   addableSavedParticipantConfigs,
   chatAgentModeLabel,
   chatInheritedCliSettingLabel,
-  selectedChatParticipantDrafts,
+  selectedOrMentionedChatParticipantDrafts,
   validateChatStartupDrafts
 } from "./chat-participant-drafts";
 import { providerLabel } from "./chat-conversation-data";
 import { ChatComposerAttachmentChips } from "./chat-composer-attachment-chips";
 import { ChatComposerMenus } from "./chat-composer-menus";
 import {
-  activeMentionQuery,
-  replaceActiveMention
+  renderSkillHighlightedDraft
 } from "./chat-composer-draft-utils";
 import {
   revokePendingImageUrls,
   useChatComposerImages
 } from "./use-chat-composer-images";
+import { useChatComposerMentions } from "./use-chat-composer-mentions";
 import {
   CHAT_ASSISTANT_DISPLAY_NAME,
   CHAT_ASSISTANT_HANDLE,
   CHAT_ASSISTANT_ROLE_ID,
   chatParticipantDisplayName,
-  chatParticipantMentionHandle,
   isChatAssistantParticipant
 } from "../conversation/conversation-display";
 
@@ -79,13 +81,11 @@ export function NewChatScreen(props: {
   onSelectRepo: () => void;
   onSelectedParticipantIdsChange: Dispatch<SetStateAction<Set<string>>>;
   onOpenParticipantsSettings: () => void;
-  onStart: (imageAttachments?: ChatImageInput[]) => boolean | void | Promise<boolean | void>;
+  onStart: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => boolean | void | Promise<boolean | void>;
 }): JSX.Element {
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  const highlightRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const pendingCaretRef = useRef<{ value: string; position: number } | undefined>();
-  const [mentionQuery, setMentionQuery] = useState<string | undefined>();
-  const [mentionIndex, setMentionIndex] = useState(0);
   const images = useChatComposerImages(undefined);
   const assistantParticipant = useMemo(
     () => newChatAssistantParticipant(props.settings, props.agents),
@@ -105,17 +105,36 @@ export function NewChatScreen(props: {
     ],
     [assistantParticipant, savedParticipantOptions]
   );
-  const mentionOptions = mentionQuery === undefined
-    ? []
-    : mentionParticipants.filter((participant) => {
-      const query = mentionQuery.toLowerCase();
-      return participant.handle.toLowerCase().includes(query) ||
-        chatParticipantDisplayName(participant).toLowerCase().includes(query);
-    });
-  const normalizedDrafts = selectedChatParticipantDrafts(props.settings.chatParticipantConfigs, props.selectedParticipantIds);
-  const validation = validateChatStartupDrafts(normalizedDrafts, props.settings.chatRoleConfigs, props.agents, props.settings.chatBehaviorRules);
+  const prospectiveParticipantDrafts = useMemo(
+    () => selectedOrMentionedChatParticipantDrafts(
+      props.settings.chatParticipantConfigs,
+      props.selectedParticipantIds,
+      props.prompt
+    ),
+    [props.prompt, props.selectedParticipantIds, props.settings.chatParticipantConfigs]
+  );
+  const searchSource = useMemo(
+    () => ({
+      type: "pre-chat" as const,
+      repoPath: props.repoPath.trim() || undefined,
+      participants: prospectiveParticipantDrafts
+    }),
+    [props.repoPath, prospectiveParticipantDrafts]
+  );
+  const mentions = useChatComposerMentions({
+    draft: props.prompt,
+    searchSource,
+    onDraftChange: props.onPromptChange,
+    participants: mentionParticipants,
+    onMentionInserted: (participant) => {
+      if (!isNewChatAssistantOption(participant)) {
+        props.onSelectedParticipantIdsChange((current) => new Set(current).add(participant.id));
+      }
+    }
+  });
+  const validation = validateChatStartupDrafts(prospectiveParticipantDrafts, props.settings.chatRoleConfigs, props.agents, props.settings.chatBehaviorRules);
   const hasPrompt = props.prompt.trim().length > 0;
-  const canStart = (hasPrompt || images.readyImages.length > 0) && !images.hasInvalidImages && !props.busy && !validation;
+  const canStart = (hasPrompt || images.readyImages.length > 0 || mentions.selectedSkillMentions.length > 0) && !images.hasInvalidImages && !props.busy && !validation;
 
   useLayoutEffect(() => {
     resizeNewChatPrompt(promptRef.current);
@@ -147,7 +166,7 @@ export function NewChatScreen(props: {
   }, []);
 
   useEffect(() => {
-    const pendingCaret = pendingCaretRef.current;
+    const pendingCaret = mentions.pendingCaretRef.current;
     if (!pendingCaret || pendingCaret.value !== props.prompt) {
       return;
     }
@@ -158,37 +177,34 @@ export function NewChatScreen(props: {
     const position = Math.min(pendingCaret.position, textarea.value.length);
     textarea.focus();
     textarea.setSelectionRange(position, position);
-    pendingCaretRef.current = undefined;
-  }, [props.prompt]);
+    mentions.pendingCaretRef.current = undefined;
+  }, [mentions.pendingCaretRef, props.prompt]);
 
-  function updatePrompt(value: string): void {
-    props.onPromptChange(value);
-    setMentionQuery(activeMentionQuery(value));
-    setMentionIndex(0);
-  }
-
-  function insertMention(participant: ChatParticipant): void {
-    const nextPrompt = replaceActiveMention(props.prompt, chatParticipantMentionHandle(participant, mentionParticipants));
-    pendingCaretRef.current = { value: nextPrompt, position: nextPrompt.length };
-    props.onPromptChange(nextPrompt);
-    if (!isNewChatAssistantOption(participant)) {
-      props.onSelectedParticipantIdsChange((current) => new Set(current).add(participant.id));
+  function syncHighlightScroll(event: UIEvent<HTMLTextAreaElement>): void {
+    if (!highlightRef.current) {
+      return;
     }
-    setMentionQuery(undefined);
-    setMentionIndex(0);
+    highlightRef.current.scrollTop = event.currentTarget.scrollTop;
+    highlightRef.current.scrollLeft = event.currentTarget.scrollLeft;
   }
 
   async function startChat(): Promise<void> {
     if (!canStart) return;
+    const fileMentionsToSend = mentions.selectedFileMentions;
+    const skillMentionsToSend = mentions.selectedSkillMentions;
     const pendingImagesToSend = images.pendingImages;
     const imageInputs = images.readyImages.map((image): ChatImageInput => ({
       filename: image.filename,
       mimeType: image.mimeType,
       dataBase64: image.dataBase64 ?? ""
     }));
+    mentions.setSelectedFileMentions([]);
+    mentions.setSelectedSkillMentions([]);
     images.setPendingImages([]);
-    const started = await props.onStart(imageInputs);
+    const started = await props.onStart(fileMentionsToSend, imageInputs, skillMentionsToSend);
     if (started === false) {
+      mentions.setSelectedFileMentions(fileMentionsToSend);
+      mentions.setSelectedSkillMentions(skillMentionsToSend);
       images.setPendingImages(pendingImagesToSend);
       return;
     }
@@ -210,37 +226,40 @@ export function NewChatScreen(props: {
       <div className="new-chat-card">
         <ChatComposerAttachmentChips
           pendingImages={images.pendingImages}
-          removeFileMention={() => undefined}
+          removeFileMention={mentions.removeFileMention}
           removePendingImage={images.removePendingImage}
-          removeSkillMention={() => undefined}
-          selectedFileMentions={[]}
-          selectedSkillMentions={[]}
+          removeSkillMention={mentions.removeSkillMention}
+          selectedFileMentions={mentions.selectedFileMentions}
+          selectedSkillMentions={mentions.selectedSkillMentions}
         />
-        <div className="new-chat-input-wrap">
+        <div className={["new-chat-input-wrap", mentions.showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")}>
           <ChatComposerMenus
-            fileIndex={0}
-            insertCompactCommand={() => undefined}
-            insertFileMention={() => undefined}
-            insertMention={insertMention}
-            insertSkillMention={() => undefined}
-            mentionIndex={mentionIndex}
-            mentionOptions={mentionOptions}
+            fileIndex={mentions.fileIndex}
+            insertCompactCommand={mentions.insertCompactCommand}
+            insertFileMention={mentions.insertFileMention}
+            insertMention={mentions.insertMention}
+            insertSkillMention={mentions.insertSkillMention}
+            mentionIndex={mentions.mentionIndex}
+            mentionOptions={mentions.mentionOptions}
             participantRoleLabel={props.participantRoleLabel}
             renderParticipantAvatar={props.renderParticipantAvatar}
-            skillIndex={0}
-            skillQuery={undefined}
-            visibleCommandOptions={[]}
-            visibleFileOptions={[]}
-            visibleSkillOptions={[]}
+            skillIndex={mentions.skillIndex}
+            skillQuery={mentions.skillQuery}
+            skillTargetLabel={mentions.skillTargetLabel}
+            visibleCommandOptions={mentions.visibleCommandOptions}
+            visibleFileOptions={mentions.visibleFileOptions}
+            visibleSkillOptions={mentions.visibleSkillOptions}
           />
           <textarea
             ref={promptRef}
-            className="new-chat-prompt"
+            className={["new-chat-prompt", mentions.showSkillHighlights ? "skill-highlight-textarea" : ""].filter(Boolean).join(" ")}
             value={props.prompt}
             placeholder="What are you working on?"
             rows={3}
             data-testid="new-chat-prompt"
-            onChange={(event) => updatePrompt(event.target.value)}
+            spellCheck={!mentions.showSkillHighlights}
+            onChange={(event) => mentions.updateDraft(event.target.value)}
+            onScroll={syncHighlightScroll}
             onPaste={(event) => {
               const files = Array.from(event.clipboardData?.files ?? []);
               if (files.some((file) => file.type.startsWith("image/"))) {
@@ -261,23 +280,55 @@ export function NewChatScreen(props: {
               }
             }}
             onKeyDown={(event) => {
-              if (mentionOptions.length > 0 && event.key === "ArrowDown") {
+              if (mentions.visibleFileOptions.length > 0 && event.key === "ArrowDown") {
                 event.preventDefault();
-                setMentionIndex((current) => (current + 1) % mentionOptions.length);
+                mentions.setFileIndex((current) => (current + 1) % mentions.visibleFileOptions.length);
                 return;
               }
-              if (mentionOptions.length > 0 && event.key === "ArrowUp") {
+              if (mentions.visibleFileOptions.length > 0 && event.key === "ArrowUp") {
                 event.preventDefault();
-                setMentionIndex((current) => (current - 1 + mentionOptions.length) % mentionOptions.length);
+                mentions.setFileIndex((current) => (current - 1 + mentions.visibleFileOptions.length) % mentions.visibleFileOptions.length);
                 return;
               }
-              if (mentionOptions.length > 0 && (event.key === "Enter" || event.key === "Tab")) {
+              if (mentions.visibleFileOptions.length > 0 && (event.key === "Enter" || event.key === "Tab")) {
                 event.preventDefault();
-                insertMention(mentionOptions[mentionIndex] ?? mentionOptions[0]);
+                mentions.insertFileMention(mentions.visibleFileOptions[mentions.fileIndex] ?? mentions.visibleFileOptions[0]);
+                return;
+              }
+              if (mentions.visibleSlashOptionCount > 0 && event.key === "ArrowDown") {
+                event.preventDefault();
+                mentions.setSkillIndex((current) => (current + 1) % mentions.visibleSlashOptionCount);
+                return;
+              }
+              if (mentions.visibleSlashOptionCount > 0 && event.key === "ArrowUp") {
+                event.preventDefault();
+                mentions.setSkillIndex((current) => (current - 1 + mentions.visibleSlashOptionCount) % mentions.visibleSlashOptionCount);
+                return;
+              }
+              if (mentions.visibleSlashOptionCount > 0 && (event.key === "Enter" || event.key === "Tab")) {
+                event.preventDefault();
+                mentions.insertSlashOptionAtIndex(mentions.skillIndex);
+                return;
+              }
+              if (mentions.mentionOptions.length > 0 && event.key === "ArrowDown") {
+                event.preventDefault();
+                mentions.setMentionIndex((current) => (current + 1) % mentions.mentionOptions.length);
+                return;
+              }
+              if (mentions.mentionOptions.length > 0 && event.key === "ArrowUp") {
+                event.preventDefault();
+                mentions.setMentionIndex((current) => (current - 1 + mentions.mentionOptions.length) % mentions.mentionOptions.length);
+                return;
+              }
+              if (mentions.mentionOptions.length > 0 && (event.key === "Enter" || event.key === "Tab")) {
+                event.preventDefault();
+                mentions.insertMention(mentions.mentionOptions[mentions.mentionIndex] ?? mentions.mentionOptions[0]);
                 return;
               }
               if (event.key === "Escape") {
-                setMentionQuery(undefined);
+                mentions.setMentionQuery(undefined);
+                mentions.setFileQuery(undefined);
+                mentions.setSkillQuery(undefined);
                 return;
               }
               if (event.key === "Enter" && !event.shiftKey) {
@@ -285,8 +336,17 @@ export function NewChatScreen(props: {
                 void startChat();
               }
             }}
-            onBlur={() => window.setTimeout(() => setMentionQuery(undefined), 120)}
+            onBlur={() => window.setTimeout(() => {
+              mentions.setMentionQuery(undefined);
+              mentions.setFileQuery(undefined);
+              mentions.setSkillQuery(undefined);
+            }, 120)}
           />
+          {mentions.showSkillHighlights && (
+            <div ref={highlightRef} className="chat-draft-highlight" aria-hidden="true">
+              {renderSkillHighlightedDraft(props.prompt, mentions.selectedSkillMentions)}
+            </div>
+          )}
         </div>
         <div className="new-chat-toolbar">
           <input

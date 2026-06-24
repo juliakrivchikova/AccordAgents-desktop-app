@@ -33,6 +33,10 @@ import {
   generatedChatHandle,
   isGeneratedChatHandle
 } from "./chat-participant-draft-handles";
+import {
+  isChatAssistantHandle,
+  isChatAssistantParticipant
+} from "../conversation/conversation-display";
 
 export interface ChatParticipantDraft {
   participantConfigId?: string;
@@ -133,6 +137,26 @@ export function chatParticipantConfigToDraft(participant: ChatParticipantConfig)
 
 export function selectedChatParticipantDrafts(participants: ChatParticipantConfig[], selectedIds: Set<string>): ChatParticipantDraft[] {
   return participants.filter((participant) => selectedIds.has(participant.id)).map(chatParticipantConfigToDraft);
+}
+
+export function selectedOrMentionedChatParticipantDrafts(
+  participants: ChatParticipantConfig[],
+  selectedIds: Set<string>,
+  content: string
+): ChatParticipantDraft[] {
+  const nextSelectedIds = new Set(selectedIds);
+  for (const participant of participants) {
+    if (isChatAssistantParticipant(participant) || isChatAssistantHandle(participant.handle)) {
+      continue;
+    }
+    if (new RegExp(`@${escapeRegExp(participant.handle)}(?![A-Za-z0-9_-])`, "i").test(content)) {
+      nextSelectedIds.add(participant.id);
+    }
+  }
+  return selectedChatParticipantDrafts(
+    participants.filter((participant) => !isChatAssistantParticipant(participant)),
+    nextSelectedIds
+  );
 }
 
 export function addableSavedParticipantConfigs(
@@ -357,4 +381,8 @@ function behaviorRuleIdsEqual(left: unknown, right: unknown): boolean {
   const leftIds = normalizeBehaviorRuleIds(left);
   const rightIds = normalizeBehaviorRuleIds(right);
   return leftIds.length === rightIds.length && leftIds.every((id, index) => id === rightIds[index]);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

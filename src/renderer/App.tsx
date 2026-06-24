@@ -239,7 +239,7 @@ function App(): JSX.Element {
                 onSelectRepo={() => void conversationActions.selectRepo()}
                 onSelectedParticipantIdsChange={conversationActions.updateSelectedChatParticipantConfigIds}
                 onOpenParticipantsSettings={() => openSettingsSection("participants")}
-                onStart={(imageAttachments) => chatActions.startChat({ imageAttachments })}
+                onStart={(repoFileMentions, imageAttachments, skillMentions) => chatActions.startChat({ repoFileMentions, imageAttachments, skillMentions })}
               />
             </section>
           )}

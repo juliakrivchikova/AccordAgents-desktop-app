@@ -16,6 +16,13 @@ const ROLE: ChatRoleConfig = {
   version: 1,
   updatedAt: NOW
 };
+const GENERIC_ROLE: ChatRoleConfig = {
+  id: "generic-participant",
+  label: "Generic participant",
+  instructions: "Answer directly.",
+  version: 1,
+  updatedAt: NOW
+};
 
 test("skill-only send stores explicit content and keeps skill metadata path/content safe", async () => {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-user-skills-"));
@@ -99,41 +106,37 @@ test("skill-only send stores explicit content and keeps skill metadata path/cont
   }
 });
 
-test("runtime skill revalidation blocks only affected participants", async () => {
+test("runtime skill revalidation blocks a single target when the selected variant disappears", async () => {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-user-skills-"));
   const homeDir = path.join(tempRoot, "home");
-  await writeSkill(path.join(homeDir, ".agents/skills/qa"), "qa", "QA", "codex body");
   await writeSkill(path.join(homeDir, ".claude/skills/qa"), "qa", "QA", "claude body");
 
   try {
     const userSkills = new UserSkillsService({ homeDir });
-    const codex = chatParticipant({ id: "codex-participant", handle: "codex", kind: "codex-cli" });
     const claude = chatParticipant({ id: "claude-participant", handle: "claude", kind: "claude-code" });
-    const conversation = chatConversation([codex, claude]);
+    const conversation = chatConversation([claude]);
     const selected = await userSkills.search({
       conversationId: conversation.id,
       query: "qa",
-      content: "@codex @claude",
+      content: "@claude",
       limit: 10
     }, {
       target: {
         hasClearTargets: true,
-        participantIds: [codex.id, claude.id],
-        providerKinds: ["claude-code", "codex-cli"]
+        participantIds: [claude.id],
+        providerKinds: ["claude-code"]
       },
       participantProviderKindById: {
-        [codex.id]: "codex-cli",
         [claude.id]: "claude-code"
       },
       runRootByParticipant: {
-        [codex.id]: undefined,
         [claude.id]: undefined
       }
     });
     assert.equal(selected.skills[0].capabilityState, "invocable");
 
-    // Delete the Claude variant after selection: revalidation should block only the Claude run
-    // (its source no longer exists) while the Codex sibling proceeds.
+    // Delete the Claude variant after selection: send-time revalidation should persist the
+    // user message but block the participant run because the selected skill no longer exists.
     await rm(path.join(homeDir, ".claude/skills/qa"), { recursive: true, force: true });
     const runParticipants: string[] = [];
     const { service, storage } = testService({
@@ -153,13 +156,12 @@ test("runtime skill revalidation blocks only affected participants", async () =>
 
     await service.sendMessage({
       conversationId: conversation.id,
-      runId: "partial-skill-run",
-      content: "@codex @claude",
+      runId: "blocked-skill-run",
+      content: "@claude",
       skillMentions: [selected.skills[0]]
     });
-    await waitFor(() => runParticipants.length >= 1);
 
-    assert.deepEqual(runParticipants, ["codex-cli"]);
+    assert.deepEqual(runParticipants, []);
     assert.equal((storage.current as Conversation).messages.some((message) =>
       message.role === "system" &&
       message.content.includes("@claude was not run") &&
@@ -232,6 +234,56 @@ test("inline selected skill text is preserved in storage and prompt", async () =
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
+});
+
+test("prospective skill context defaults to assistant instead of all participants", async () => {
+  const { service } = testService({
+    conversation: chatConversation([chatParticipant()]),
+    userSkills: new UserSkillsService(),
+    run: async (participant) => ({ participant, ok: true, content: "done", durationMs: 1 })
+  });
+
+  const context = await service.prospectiveUserSkillRunContext({
+    repoPath: "/tmp/repo",
+    participants: [{
+      handle: "worker",
+      roleConfigId: GENERIC_ROLE.id,
+      kind: "claude-code",
+      agentMode: "default",
+      permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
+    }],
+    content: "/qa"
+  });
+
+  assert.equal(context.target.hasClearTargets, true);
+  assert.deepEqual(context.target.providerKinds, ["codex-cli"]);
+  assert.equal(context.target.participantIds.length, 1);
+  assert.equal(context.participantProviderKindById?.[context.target.participantIds[0]], "codex-cli");
+});
+
+test("prospective skill context honors explicit mentioned participant", async () => {
+  const { service } = testService({
+    conversation: chatConversation([chatParticipant()]),
+    userSkills: new UserSkillsService(),
+    run: async (participant) => ({ participant, ok: true, content: "done", durationMs: 1 })
+  });
+
+  const context = await service.prospectiveUserSkillRunContext({
+    repoPath: "/tmp/repo",
+    participants: [{
+      handle: "worker",
+      roleConfigId: GENERIC_ROLE.id,
+      kind: "claude-code",
+      agentMode: "default",
+      permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
+    }],
+    content: "@worker /qa"
+  });
+
+  assert.equal(context.target.hasClearTargets, true);
+  assert.deepEqual(context.target.providerKinds, ["claude-code"]);
+  assert.equal(context.target.participantIds.length, 1);
+  assert.equal(context.participantProviderKindById?.[context.target.participantIds[0]], "claude-code");
 });
 
 test("selected skill hashes affect the warm runtime key", () => {
@@ -473,8 +525,16 @@ function testService(options: {
     }
   };
   const settings = {
-    async getPublicSettings(): Promise<{ chatRoleConfigs: ChatRoleConfig[] }> {
-      return { chatRoleConfigs: [ROLE] };
+    async getPublicSettings(): Promise<{
+      chatRoleConfigs: ChatRoleConfig[];
+      chatBehaviorRules: [];
+      providers: Array<{ kind: string; enabled: boolean }>;
+    }> {
+      return {
+        chatRoleConfigs: [ROLE, GENERIC_ROLE],
+        chatBehaviorRules: [],
+        providers: [{ kind: "codex-cli", enabled: true }]
+      };
     }
   };
   const cliRunner = {
