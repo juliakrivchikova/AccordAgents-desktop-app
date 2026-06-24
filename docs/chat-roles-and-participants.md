@@ -1,6 +1,6 @@
 # Chat Roles and Participants
 
-Roles are reusable instruction templates. Participants are concrete chat actors that bind a role to a handle, CLI provider, model, reasoning effort, avatar, agent mode, permissions, and runtime session state.
+Roles are reusable instruction templates. Participants are concrete chat actors that bind a role to a handle, CLI provider, model, reasoning effort, avatar, agent mode, permissions, and runtime session state. `agentMode` is a permission/run profile such as Custom access, Plan only, or Auto-run; it is separate from the old implementation-plan product flow.
 
 Read this before changing role presets, participant settings, or chat session behavior.
 
@@ -23,7 +23,7 @@ Do not treat these as interchangeable. A role can exist without a participant. A
 - Chat orchestration is handled by `ChatService` in `src/main/services/chat.ts`.
 - App MCP server behavior lives in `src/main/services/appMcp.ts`; role, participant, permission, and compatibility roster mutations still go through `ChatService`.
 - Shared wire types live in `src/shared/types.ts`.
-- Renderer editing UI is currently in `src/renderer/App.tsx`.
+- Renderer editing UI is split across `src/renderer/components/settings`, `src/renderer/components/chat`, and state/action hooks under `src/renderer/app`; `src/renderer/App.tsx` only wires views together.
 
 ## Runtime Flow
 
@@ -41,7 +41,7 @@ If a user message mentions one or more participants, explicit mention routing wi
 
 The important consequence: existing chat sessions are intentionally coherent across turns. A role edit does not blindly rewrite the prompt history of an already-running CLI session. Provider kind is captured in the participant session snapshot. Model, reasoning effort, agent mode, and permissions are refreshed from current participant metadata on the next turn so quick controls apply without resetting provider history. Saved participant avatar and behavior-rule changes sync into linked existing chat participants; legacy chats without `participantConfigId` may match once by handle and provider kind, then backfill the link.
 
-Claude Code participants always receive two tools regardless of stored permission toggles: the read-only `Skill` tool, and the subagent-spawning tool (`Agent`, with the legacy `Task` name also passed for older CLIs). This is a deliberate exception to plan mode: plan mode forces `workspaceWrite`/`shell` off so `Write`/`Edit`/`Bash` are hard-disallowed, but `Agent`/`Task` stay allowed, governed only by the model honoring the plan-mode "no non-readonly tools" reminder. A subagent spawned in plan mode still cannot edit or run shell (those tools are disallowed process-wide), but it can spawn and consume tokens. Spawned subagents inherit the run's permissions and are separate from chat participant requests, so they never appear in chat. Warm sessions keep their prior tool argv until restarted.
+Claude Code participants always receive two tools regardless of stored permission toggles: the read-only `Skill` tool, and the subagent-spawning tool (`Agent`, with the legacy `Task` name also passed for older CLIs). This is a deliberate exception to the `Plan only` permission profile: `Plan only` forces `workspaceWrite`/`shell` off so `Write`/`Edit`/`Bash` are hard-disallowed, but `Agent`/`Task` stay allowed, governed only by the model honoring the "no non-readonly tools" reminder. A subagent spawned under `Plan only` still cannot edit or run shell (those tools are disallowed process-wide), but it can spawn and consume tokens. Spawned subagents inherit the run's permissions and are separate from chat participant requests, so they never appear in chat. Warm sessions keep their prior tool argv until restarted.
 
 ## Prompt Split
 
@@ -58,7 +58,7 @@ Chat participant prompts are split between static session instructions and a thi
 
 - `ChatService` issues a scoped bearer token for each participant run. The token binds to the actual `conversationId`, `participantId`, role id, role version, and resolved app-tool capabilities.
 - MCP tools derive the actor from that token. Tool arguments must never be trusted to identify the conversation or participant.
-- `app_chat_get_context`, `app_chat_get_participants`, and `app_chat_read_messages` are read-only context tools available to every issued participant token. They let agents read the active turn, roster, provider status, and focused message pages without rereading full history files.
+- `app_chat_get_context`, `app_chat_get_participants`, `app_chat_read_messages`, `app_chat_list_attachments`, and `app_chat_read_attachment` are read-only context tools available to every issued participant token. They let agents read the active turn, roster, provider status, focused message pages, and visible image attachments without rereading full history files.
 - Role, participant, roster, and permission mutation tools are filtered by the token's capabilities, and every mutating `tools/call` rechecks the current participant role through `ChatService`.
 - `app_permissions_request_change` is available to every chat participant. It can request portable grants (`repoRead`, `workspaceWrite`, or `webAccess`), command-specific `shellRules`, or Claude-only `providerNative.allowedTools` for the requesting participant only. In Auto-review mode, in-preset portable requests return `already_granted` because the launch profile already grants `repoRead`, `workspaceWrite`, and `webAccess`; out-of-preset requests still create a pending approval.
 - `app_tool_permission` is the Claude Code `--permission-prompt-tool` bridge for default-mode chat runs. Claude Code calls it automatically when an unmatched CLI tool request needs approval; the app creates a User approval card and returns `{ behavior: "allow" | "deny" }` to the blocked tool call. It is runtime plumbing, not a tool that participant prompts should instruct agents to call directly.
@@ -116,7 +116,7 @@ When adding participant fields, update all layers deliberately:
 - `SettingsService.normalizeParticipantConfigs()` for reading old settings safely.
 - `ChatService.validateParticipants()` for conversation creation.
 - `ChatService.sessionForParticipant()` and `warmAgentContextKey()` if the field changes runtime behavior.
-- `src/renderer/App.tsx` for defaults, forms, validation, and display.
+- `src/renderer/app/*` hooks plus `src/renderer/components/settings` and `src/renderer/components/chat` for defaults, forms, validation, and display.
 
 If the field affects CLI behavior, also make sure it is captured in `ChatParticipantSession` or `runtimeConfigVersionFor()` so stale warm sessions are not reused incorrectly.
 

@@ -53,8 +53,8 @@ const { attach } = require("./scripts/cdp.cjs");
 
 (async () => {
   const app = await attach();
-  await app.click("[data-testid='new-session']");
-  await app.fill("textarea", "Message text");
+  await app.click("[data-testid='new-chat']");
+  await app.fill("[data-testid='new-chat-prompt']", "Message text");
   const state = await app.evaluate(`document.body.innerText`);
   console.log(state.result.value);
   app.close();
@@ -69,7 +69,7 @@ The `npm run dev` (and `make dev`) flow does **not** enable CDP by default. Two 
 
 ### Option A — one-shot relaunch with the debug flag
 
-If the app isn't already running with port 9222 open, kill any existing Electron for this repo and start fresh:
+If the app isn't already running with port 9222 open and you are not using the current Electron instance as your AccordAgents Chat host, quit the existing instance for this repo and start fresh:
 
 ```bash
 # Quit the current instance (if any) — find by repo path
@@ -92,7 +92,7 @@ curl -s http://127.0.0.1:9222/json/version
 
 If that returns JSON, you're attached.
 
-### Option B — only Codex's SQLite is locked
+### Option B — only AccordAgents' SQLite is locked
 
 Don't spawn a second Electron instance against the same `~/Library/Application Support/accordagents/accordagents.sqlite3` — there's a lock. Always quit the existing instance before relaunching with the flag.
 
@@ -163,7 +163,8 @@ const { attach } = require("./scripts/cdp.cjs");
 const fs = require("node:fs");
 
 (async () => {
-  const { send, close } = await attach();
+  const app = await attach();
+  const { send } = app;
 
   // Read DOM / computed styles
   const layout = await send("Runtime.evaluate", {
@@ -178,19 +179,19 @@ const fs = require("node:fs");
 
   // Click an element / type / scroll — all expressed as live JS in the page.
   await send("Runtime.evaluate", {
-    expression: `document.querySelector(".history-item").click()`
+    expression: `document.querySelector("[data-testid='project-session']")?.click()`
   });
 
   // Screenshot the live window. In Electron, Page.captureScreenshot can hang;
-  // prefer scripts/screenshot.cjs or Page.startScreencast for reliable captures.
-  const shot = await send("Page.captureScreenshot", { format: "png" });
+  // prefer scripts/screenshot.cjs or app.screenshot() for reliable screencast captures.
+  const shot = await app.screenshot();
   fs.mkdirSync("screenshots", { recursive: true });
-  fs.writeFileSync("screenshots/desktop.png", Buffer.from(shot.data, "base64"));
+  fs.writeFileSync("screenshots/desktop.png", shot.data);
 
   // Reload (e.g., after a CSS change Vite didn't HMR)
   await send("Page.reload");
 
-  close();
+  app.close();
 })();
 ```
 
@@ -221,11 +222,13 @@ instance instead of the running one:
 
 ```bash
 DIR=$(mktemp -d /tmp/accord-qa.XXXX)
-node_modules/.bin/electron . --user-data-dir="$DIR" --remote-debugging-port=9223 \
+VITE_DEV_SERVER_URL=http://127.0.0.1:5173 \
+  node_modules/.bin/electron . --user-data-dir="$DIR" --remote-debugging-port=9223 \
   --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling
 ```
 
 - Use a **distinct port and `--user-data-dir`** so you avoid the SQLite lock and never touch the host's data.
+- For live source-change QA, keep Vite running on port 5173 and pass `VITE_DEV_SERVER_URL` as shown. For packaged/dist QA, run `make build` first and omit `VITE_DEV_SERVER_URL`.
 - The backgrounding flags are not optional. An **unfocused/occluded** Electron window gets its compositor
   throttled, so it produces no new frames. Symptoms: `scripts/screenshot.cjs` (screencast) returns a **stale or
   blank frame** — often byte-for-byte identical across retries — and a raw `Page.captureScreenshot` **times out**,
