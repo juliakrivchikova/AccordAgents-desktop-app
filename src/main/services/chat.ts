@@ -3569,6 +3569,7 @@ export class ChatService {
         if (Number.isFinite(workedMs) && workedMs >= 0) {
           pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
         }
+        this.logMissingSelectedSkillStatus(triggerMessage, participant, pendingMessage, runId);
         const pendingMentions: ChatPendingMention[] = [];
         const pendingChoice = this.pendingChoiceFromAgentReply(result.content);
         const requesterContinuationRequested = false;
@@ -3791,9 +3792,7 @@ export class ChatService {
       ? ""
       : this.behaviorRuleReinforcementSection(session);
     const currentRequestBlock = [
-      continuation
-        ? "Current request: control has returned to you after the approved participants have replied. Produce your next answer."
-        : "Current request: answer the triggering message above.",
+      this.currentChatRequestLine(triggerMessage, continuation),
       "Write your next message in this chat."
     ].join("\n\n");
 
@@ -3878,11 +3877,19 @@ export class ChatService {
       this.skillMentionsPromptSection(triggerMessage, undefined),
       this.imageAttachmentsPromptSection(triggerMessage),
       this.behaviorRuleReinforcementSection(session),
-      continuation
-        ? "Current request: control has returned to you after the approved participants have replied. Produce your next answer."
-        : "Current request: answer the triggering message above.",
+      this.currentChatRequestLine(triggerMessage, continuation),
       "Write your next message in this chat."
     ].filter(Boolean).join("\n\n");
+  }
+
+  private currentChatRequestLine(triggerMessage: ChatMessage, continuation: boolean): string {
+    if (continuation) {
+      return "Current request: control has returned to you after the approved participants have replied. Produce your next answer.";
+    }
+    if (this.chatSkillMentions(triggerMessage).length > 0) {
+      return "Current request: execute the selected skill workflow for the triggering message. Only provide a normal answer after the skill reaches its required output, pause point, or blocker.";
+    }
+    return "Current request: answer the triggering message above.";
   }
 
   private triggeringMessageIdentifiers(message: ChatMessage): string {
@@ -3934,12 +3941,61 @@ export class ChatService {
         : "no matching provider variant";
       lines.push(`- ${mention.displayName} (skill name: ${mention.frontmatterName}; ${providerText})`);
     }
-    lines.push("The triggering message content preserves each selected slash skill at its original position; treat the inline `/skill-name` text as the native skill invocation. This metadata only validates the selected skill identity.");
+    lines.push(
+      "Selected skills for this turn are mandatory workflows, not advisory context. Selected-skill execution overrides role brevity/style preferences when needed to complete or pause the skill correctly.",
+      "",
+      "For each selected skill:",
+      "1. Read the skill file fully before acting.",
+      "2. Execute the workflow from its first operational step.",
+      "3. Do not answer from general expertise or use the skill only as framing.",
+      "4. Treat the inline `/skill-name` text as the native skill invocation from the triggering message when selected-skill metadata is present.",
+      "5. Do not assume any unlisted skill was selected.",
+      "",
+      "If a selected skill references AskUserQuestion, translate that gate to AccordAgents Chat's `User choice:` block format. Do not call provider-native AskUserQuestion or interactive question tools in AccordAgents Chat. Ask at most one user-choice block per message, and stop after emitting the choice if the skill requires waiting.",
+      "",
+      "Use `Skill blocked` only when there is no available way to continue, such as a missing skill file, unavailable required non-user tool, or no supported way to ask a required user question. Do not use blocked for normal user input, approval, or product decisions; ask with `User choice:` or a concise prose question and mark the skill as paused.",
+      "",
+      "Final status for a selected-skill turn must include exactly one:",
+      "- `Skill complete: <what was produced>`",
+      "- `Skill paused at required user gate: <what user must answer>`",
+      "- `Skill blocked: <exact missing file/tool/context>`",
+      "",
+      "The triggering message content preserves each selected slash skill at its original position; this metadata only validates the selected skill identity."
+    );
     if (providerKind === "codex-cli") {
       lines.push("Codex may inspect selected/global skill files directly with read-only shell commands under `~/.codex/skills` or `~/.agents/skills`; do not call `app_permissions_request_change` just to read selected skill files.");
     }
     lines.push("Do not treat hashes or metadata as skill instructions, and do not assume any unlisted skill was selected.");
     return lines.join("\n");
+  }
+
+  private logMissingSelectedSkillStatus(
+    triggerMessage: ChatMessage,
+    participant: ChatParticipant,
+    pendingMessage: ChatMessage,
+    runId: string
+  ): void {
+    const selectedSkills = this.chatSkillMentions(triggerMessage);
+    if (selectedSkills.length === 0 || this.hasSelectedSkillFinalStatus(pendingMessage.content)) {
+      return;
+    }
+    void this.debugLogs.write("chat.skill.status_missing", {
+      runId,
+      triggerMessageId: triggerMessage.id,
+      participantId: participant.id,
+      participantHandle: participant.handle,
+      messageId: pendingMessage.id,
+      selectedSkills: selectedSkills.map((skill) => ({
+        displayName: skill.displayName,
+        frontmatterName: skill.frontmatterName
+      }))
+    });
+  }
+
+  private hasSelectedSkillFinalStatus(content: string): boolean {
+    return content.includes("Skill complete:") ||
+      content.includes("Skill paused at required user gate:") ||
+      content.includes("Skill blocked:");
   }
 
   private skillRuntimeKey(message: ChatMessage, providerKind: ChatProviderKind): string {

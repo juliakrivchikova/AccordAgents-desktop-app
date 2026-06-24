@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import type { ChatParticipant, ChatRoleConfig, Conversation, ParticipantConfig } from "../../shared/types";
+import type { ChatMessage, ChatParticipant, ChatParticipantSession, ChatRoleConfig, ChatSkillMention, Conversation, ParticipantConfig } from "../../shared/types";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { ChatService } from "./chat";
 import { UserSkillsService } from "./userSkills";
@@ -360,10 +360,114 @@ test("skill prompt tells Codex to use inline slash invocation and direct selecte
   };
 
   const promptSection = (service as any).skillMentionsPromptSection(message, "codex-cli") as string;
+  assert.match(promptSection, /Selected skills for this turn are mandatory workflows, not advisory context/);
+  assert.match(promptSection, /Selected-skill execution overrides role brevity\/style preferences/);
+  assert.match(promptSection, /Read the skill file fully before acting/);
+  assert.match(promptSection, /Execute the workflow from its first operational step/);
+  assert.match(promptSection, /Do not answer from general expertise or use the skill only as framing/);
   assert.match(promptSection, /inline `\/skill-name` text as the native skill invocation/);
+  assert.match(promptSection, /AskUserQuestion/);
+  assert.match(promptSection, /`User choice:` block format/);
+  assert.match(promptSection, /Do not call provider-native AskUserQuestion or interactive question tools/);
+  assert.match(promptSection, /Use `Skill blocked` only when there is no available way to continue/);
+  assert.match(promptSection, /Do not use blocked for normal user input, approval, or product decisions/);
+  assert.match(promptSection, /`Skill complete: <what was produced>`/);
+  assert.match(promptSection, /`Skill paused at required user gate: <what user must answer>`/);
+  assert.match(promptSection, /`Skill blocked: <exact missing file\/tool\/context>`/);
   assert.match(promptSection, /~\/\.codex\/skills/);
   assert.match(promptSection, /~\/\.agents\/skills/);
   assert.match(promptSection, /do not call `app_permissions_request_change` just to read selected skill files/);
+});
+
+test("current request line is conditional for selected skill prompts and retry envelopes", () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const { service } = testService({
+    conversation,
+    userSkills: new UserSkillsService(),
+    run: async (runParticipant) => ({ participant: runParticipant, ok: true, content: "done", durationMs: 1 })
+  });
+  const session = chatSession(participant);
+  const options = {
+    includeRoleInstructions: false,
+    agentMode: "default",
+    permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
+  };
+  const skillMessage = chatMessage({
+    content: "@admin /qa",
+    metadata: {
+      skillMentions: [skillMention()]
+    }
+  });
+  const normalMessage = chatMessage({ content: "@admin hello" });
+
+  const skillPrompt = (service as any).buildPromptParts(
+    conversation,
+    participant,
+    session,
+    skillMessage,
+    "/tmp/accordagents-history",
+    false,
+    options
+  ).prompt as string;
+  assert.match(skillPrompt, /Current request: execute the selected skill workflow for the triggering message/);
+  assert.doesNotMatch(skillPrompt, /Current request: answer the triggering message above/);
+
+  const normalPrompt = (service as any).buildPromptParts(
+    conversation,
+    participant,
+    session,
+    normalMessage,
+    "/tmp/accordagents-history",
+    false,
+    options
+  ).prompt as string;
+  assert.match(normalPrompt, /Current request: answer the triggering message above/);
+  assert.doesNotMatch(normalPrompt, /Current request: execute the selected skill workflow/);
+
+  const retrySkillPrompt = (service as any).buildRetryEnvelope(skillMessage, false, session) as string;
+  assert.match(retrySkillPrompt, /Current request: execute the selected skill workflow for the triggering message/);
+
+  const retryNormalPrompt = (service as any).buildRetryEnvelope(normalMessage, false, session) as string;
+  assert.match(retryNormalPrompt, /Current request: answer the triggering message above/);
+
+  const continuationPrompt = (service as any).buildRetryEnvelope(skillMessage, true, session) as string;
+  assert.match(continuationPrompt, /Current request: control has returned to you after the approved participants have replied/);
+  assert.doesNotMatch(continuationPrompt, /Current request: execute the selected skill workflow/);
+});
+
+test("selected skill replies missing final status only write a debug log", () => {
+  const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const participant = chatParticipant();
+  const { service } = testService({
+    conversation: chatConversation([participant]),
+    userSkills: new UserSkillsService(),
+    run: async (runParticipant) => ({ participant: runParticipant, ok: true, content: "done", durationMs: 1 }),
+    debugWrite: async (event, payload) => {
+      debugEvents.push({ event, payload });
+    }
+  });
+  const triggerMessage = chatMessage({
+    metadata: {
+      skillMentions: [skillMention()]
+    }
+  });
+  const pendingMessage = chatMessage({
+    id: "participant-message",
+    role: "participant",
+    content: "done without required marker"
+  });
+
+  assert.doesNotThrow(() => {
+    (service as any).logMissingSelectedSkillStatus(triggerMessage, participant, pendingMessage, "run-1");
+  });
+  assert.equal(debugEvents.length, 1);
+  assert.equal(debugEvents[0].event, "chat.skill.status_missing");
+  assert.equal(debugEvents[0].payload.runId, "run-1");
+
+  pendingMessage.content = "Skill complete: implemented";
+  (service as any).logMissingSelectedSkillStatus(triggerMessage, participant, pendingMessage, "run-2");
+  assert.equal(debugEvents.length, 1);
 });
 
 test("chat:send returns after ingest without awaiting the participant batch", async () => {
@@ -514,6 +618,7 @@ function testService(options: {
   conversation: Conversation;
   userSkills: UserSkillsService;
   run: (participant: ParticipantConfig, prompt: string) => Promise<any>;
+  debugWrite?: (event: string, payload: Record<string, unknown>) => Promise<void>;
 }): { service: ChatService; storage: any } {
   const storage = {
     current: clone(options.conversation),
@@ -544,13 +649,64 @@ function testService(options: {
     run: options.run
   };
   const debugLogs = {
-    async write(): Promise<void> {
+    async write(event: string, payload: Record<string, unknown>): Promise<void> {
+      if (options.debugWrite) {
+        await options.debugWrite(event, payload);
+        return;
+      }
       return undefined;
     }
   };
   return {
     service: new ChatService(storage as never, settings as never, cliRunner as never, debugLogs as never, undefined, undefined, options.userSkills),
     storage
+  };
+}
+
+function chatSession(participant: ChatParticipant): ChatParticipantSession {
+  return {
+    participantId: participant.id,
+    sessionId: "",
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: ROLE.version,
+    roleRuntime: "prompt-fallback",
+    participantKind: participant.kind,
+    participantAgentMode: participant.agentMode,
+    participantPermissions: participant.permissions,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    updatedAt: NOW
+  };
+}
+
+function chatMessage(patch: Partial<ChatMessage> = {}): ChatMessage {
+  return {
+    id: patch.id ?? "user-message",
+    role: patch.role ?? "user",
+    content: patch.content ?? "@admin /qa",
+    createdAt: patch.createdAt ?? NOW,
+    status: patch.status ?? "done",
+    metadata: patch.metadata,
+    ...patch
+  };
+}
+
+function skillMention(): ChatSkillMention {
+  return {
+    skillId: "skill-1",
+    displayName: "/qa",
+    frontmatterName: "qa",
+    contentHash: "hash-a",
+    capabilityState: "invocable",
+    variants: [{
+      providerKind: "codex-cli",
+      scope: "personal",
+      rootKind: "personal",
+      sourceKey: "source",
+      frontmatterName: "qa",
+      contentHash: "hash-a",
+      capabilityState: "invocable"
+    }]
   };
 }
 
