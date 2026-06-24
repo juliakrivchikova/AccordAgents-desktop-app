@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { StorageService } from "./storage";
+import type { ChatMessage, Conversation } from "../../shared/types";
+import { INTERRUPTED_RUN_WARNING } from "../../shared/warnings";
 
 function fakeStorage(queryJson: (sql: string) => Promise<unknown[]>): StorageService {
   const storage = Object.create(StorageService.prototype) as any;
@@ -118,3 +120,202 @@ test("listConversationMessages returns an empty page when target message id is m
   assert.equal(page.hasMoreBefore, false);
   assert.equal(page.totalMessages, 4);
 });
+
+test("normalizeInferredParticipantRequestThreads runs once and avoids blob queryJson", async () => {
+  const legacy = legacyInferredConversation();
+  const { storage, queryJsonSql, queryTextSql, runSqlStatements, saved } = maintenanceStorage({
+    ids: [legacy.id],
+    payloads: new Map([[legacy.id, JSON.stringify(legacy)]])
+  });
+
+  await (storage as any).normalizeInferredParticipantRequestThreads();
+
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].messages.find((message) => message.id === "legacy-request")?.metadata?.hiddenFromTimeline, true);
+  assert.equal(saved[0].messages.find((message) => message.id === "legacy-reply")?.metadata?.chatThreadRootId, "source-root");
+  assert.equal(queryJsonSql.length, 1);
+  assert.match(queryJsonSql[0], /select id from conversations/);
+  assert.doesNotMatch(queryJsonSql[0], /payload_json as payloadJson/);
+  assert.ok(queryTextSql.some((sql) => sql.includes("select payload_json from conversations")));
+  assert.ok(runSqlStatements.some((sql) => sql.includes("inferred-participant-request-threads-v1") && sql.includes("complete")));
+});
+
+test("normalizeInferredParticipantRequestThreads skips when migration is marked complete", async () => {
+  const { storage, queryJsonSql, queryTextSql, runSqlStatements } = maintenanceStorage({
+    metaValue: "complete"
+  });
+
+  await (storage as any).normalizeInferredParticipantRequestThreads();
+
+  assert.deepEqual(queryJsonSql, []);
+  assert.equal(queryTextSql.length, 1);
+  assert.match(queryTextSql[0], /schema_meta/);
+  assert.deepEqual(runSqlStatements, []);
+});
+
+test("normalizeInferredParticipantRequestThreads marks zero-row migration complete", async () => {
+  const { storage, runSqlStatements } = maintenanceStorage({ ids: [] });
+
+  await (storage as any).normalizeInferredParticipantRequestThreads();
+
+  assert.ok(runSqlStatements.some((sql) => sql.includes("inferred-participant-request-threads-v1") && sql.includes("complete")));
+});
+
+test("normalizeInferredParticipantRequestThreads does not mark complete when saving fails", async () => {
+  const legacy = legacyInferredConversation();
+  const { storage, runSqlStatements } = maintenanceStorage({
+    ids: [legacy.id],
+    payloads: new Map([[legacy.id, JSON.stringify(legacy)]]),
+    saveError: new Error("write failed")
+  });
+
+  await assert.rejects(() => (storage as any).normalizeInferredParticipantRequestThreads(), /write failed/);
+
+  assert.equal(runSqlStatements.some((sql) => sql.includes("inferred-participant-request-threads-v1")), false);
+});
+
+test("clearInterruptedRuns reads payloads by id instead of queryJson blobs", async () => {
+  const conversation = basicConversation("running-conversation", [
+    {
+      id: "pending",
+      role: "participant",
+      participantId: "participant",
+      participantLabel: "@participant",
+      content: "contains newline\nand separator \u001f safely",
+      createdAt: "2026-01-01T00:00:01.000Z",
+      status: "pending",
+      metadata: {}
+    }
+  ]);
+  conversation.metadata = { running: true, runId: "stale-run" };
+  const { storage, queryJsonSql, saved } = maintenanceStorage({
+    ids: [conversation.id],
+    payloads: new Map([[conversation.id, JSON.stringify(conversation)]])
+  });
+
+  await (storage as any).clearInterruptedRuns();
+
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].metadata.running, false);
+  assert.equal(saved[0].metadata.runId, undefined);
+  assert.deepEqual(saved[0].metadata.warnings, [INTERRUPTED_RUN_WARNING]);
+  assert.equal(queryJsonSql.length, 1);
+  assert.match(queryJsonSql[0], /select id from conversations/);
+  assert.doesNotMatch(queryJsonSql[0], /payload_json as payloadJson/);
+});
+
+function maintenanceStorage(options: {
+  ids?: string[];
+  payloads?: Map<string, string>;
+  metaValue?: string;
+  saveError?: Error;
+}): {
+  storage: StorageService;
+  queryJsonSql: string[];
+  queryTextSql: string[];
+  runSqlStatements: string[];
+  saved: Conversation[];
+} {
+  const queryJsonSql: string[] = [];
+  const queryTextSql: string[] = [];
+  const runSqlStatements: string[] = [];
+  const saved: Conversation[] = [];
+  const storage = Object.create(StorageService.prototype) as any;
+  storage.queryJson = async (sql: string) => {
+    queryJsonSql.push(sql);
+    if (sql.includes("select id from conversations")) {
+      return (options.ids ?? []).map((id) => ({ id }));
+    }
+    throw new Error(`Unexpected queryJson: ${sql}`);
+  };
+  storage.queryText = async (sql: string) => {
+    queryTextSql.push(sql);
+    if (sql.includes("schema_meta")) {
+      return options.metaValue ?? "";
+    }
+    if (sql.includes("select payload_json from conversations")) {
+      const id = sql.match(/where id = '([^']+)'/)?.[1];
+      return id ? options.payloads?.get(id) ?? "" : "";
+    }
+    throw new Error(`Unexpected queryText: ${sql}`);
+  };
+  storage.runSql = async (sql: string) => {
+    runSqlStatements.push(sql);
+  };
+  storage.saveConversation = async (conversation: Conversation) => {
+    if (options.saveError) {
+      throw options.saveError;
+    }
+    saved.push(JSON.parse(JSON.stringify(conversation)) as Conversation);
+  };
+  return { storage: storage as StorageService, queryJsonSql, queryTextSql, runSqlStatements, saved };
+}
+
+function legacyInferredConversation(): Conversation {
+  const source: ChatMessage = {
+    id: "source",
+    role: "participant",
+    participantId: "participant-drew",
+    participantLabel: "@drew",
+    content: "Ask Taylor.\nIncludes separator \u001f in legacy content.",
+    createdAt: "2026-01-01T00:00:01.000Z",
+    status: "done",
+    metadata: { chatThreadRootId: "source-root" }
+  };
+  const request: ChatMessage = {
+    id: "legacy-request",
+    role: "participant",
+    participantId: "participant-drew",
+    participantLabel: "@drew",
+    content: "Taylor request",
+    createdAt: "2026-01-01T00:00:02.000Z",
+    status: "done",
+    metadata: {
+      participantRequest: {
+        id: "batch",
+        requesterParticipantId: "participant-drew",
+        requesterHandle: "drew",
+        source: "inferred",
+        resumeRequester: true,
+        status: "answered",
+        depth: 1,
+        createdAt: "2026-01-01T00:00:02.000Z",
+        updatedAt: "2026-01-01T00:00:03.000Z",
+        triggerMessageId: "source",
+        items: [{
+          targetParticipantId: "participant-taylor",
+          targetHandle: "taylor",
+          prompt: "Review this.",
+          status: "answered",
+          replyMessageId: "legacy-reply",
+          createdAt: "2026-01-01T00:00:02.000Z",
+          updatedAt: "2026-01-01T00:00:03.000Z"
+        }]
+      }
+    }
+  };
+  const reply: ChatMessage = {
+    id: "legacy-reply",
+    role: "participant",
+    participantId: "participant-taylor",
+    participantLabel: "@taylor",
+    content: "Reviewed.",
+    createdAt: "2026-01-01T00:00:03.000Z",
+    status: "done",
+    metadata: { chatThreadRootId: "legacy-request" }
+  };
+  return basicConversation("legacy-conversation", [source, request, reply]);
+}
+
+function basicConversation(id: string, messages: ChatMessage[]): Conversation {
+  return {
+    id,
+    title: id,
+    kind: "chat",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:04.000Z",
+    messages,
+    findings: [],
+    metadata: {}
+  };
+}
