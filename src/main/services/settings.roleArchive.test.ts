@@ -60,6 +60,24 @@ function settingsServiceWith(
   return { service, stored: () => stored, writeCount: () => writeCount };
 }
 
+test("default Chat Assistant does not offer itself for off-setup task work", () => {
+  const { service } = settingsServiceWith();
+  const roles = (service as any).mergeDefaultRoles(undefined) as ChatRoleConfig[];
+  const assistant = roles.find((role) => role.id === "administrator");
+
+  assert.ok(assistant);
+  assert.match(assistant.instructions, /help User set up and adjust roles and participants in this chat/);
+  assert.match(assistant.instructions, /Understand role and participant setup requests/);
+  assert.match(assistant.instructions, /When User describes a problem, task, or question, use that description to suggest or add the most suitable participant who can help/);
+  assert.match(assistant.instructions, /Do not interact with, request, or hand off to another participant unless User explicitly asks you to do that/);
+  assert.match(assistant.instructions, /If the chat already contains a suitable participant, tell User that participant is available and that User can address them directly with `@handle`/);
+  assert.match(assistant.instructions, /Do not offer Chat Assistant as an option for doing the task/);
+  assert.match(assistant.instructions, /Only handle the task yourself if User explicitly asks Chat Assistant/);
+  assert.match(assistant.instructions, /Do not create a `User choice` block just to offer whether Chat Assistant should handle an off-setup task/);
+  assert.doesNotMatch(assistant.instructions, /set up and adjust who participates/);
+  assert.doesNotMatch(assistant.instructions, /\b(?:create|edit|manage|set up|adjust)\s+(?:rules|prompts)\b/i);
+});
+
 test("archives an unused custom role and retains the record", async () => {
   const { service, stored, writeCount } = settingsServiceWith({ chatRoleConfigs: [makeRole()] });
   const settings: AppSettings = await service.archiveChatRoleConfig("custom-reviewer");

@@ -1550,6 +1550,90 @@ test("participantPermissionPolicy does not suggest escalation for agent-mode mas
   assert.doesNotMatch(prompt, /workspaceWrite/);
 });
 
+test("injected Chat Assistant defaults to no repository access", async () => {
+  const { service } = testService({
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE] },
+    agents: [{ kind: "codex-cli", installed: true } as AgentHealth]
+  });
+
+  const [assistant] = await (service as any).ensureAdministratorParticipant([]);
+
+  assert.equal(assistant.roleConfigId, ADMIN_ROLE.id);
+  assert.equal(assistant.handle, "assistant");
+  assert.equal(assistant.permissions.repoRead, false);
+  assert.equal(assistant.permissions.workspaceWrite, false);
+  assert.equal(assistant.permissions.webAccess, false);
+  assert.equal(assistant.permissions.shell.enabled, false);
+});
+
+test("Chat Assistant prompt suppresses repo edit shell escalation while preserving web guidance", async () => {
+  const appMcp = new AppMcpService();
+  const { service } = testService({
+    appMcp,
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE] }
+  });
+  const assistant = {
+    ...chatParticipant("codex-cli", { repoRead: false, webAccess: false }),
+    id: "assistant-participant",
+    handle: "assistant",
+    roleConfigId: ADMIN_ROLE.id
+  };
+  const conversation = {
+    ...chatConversation([assistant]),
+    repoPath: "/repo"
+  };
+  const triggerMessage: ChatMessage = {
+    ...conversation.messages[0],
+    content: "Please inspect #src/main.ts",
+    metadata: {
+      repoFileMentions: [{ path: "src/main.ts" }]
+    }
+  };
+  const session = await (service as any).newSessionForParticipant(assistant);
+  const { prompt } = (service as any).buildPromptParts(
+    conversation,
+    assistant,
+    session,
+    triggerMessage,
+    "/tmp/workspace",
+    false,
+    { includeRoleInstructions: false, agentMode: "default", permissions: assistant.permissions }
+  );
+
+  assert.match(prompt, /Repository access, file edits, and shell commands are not Chat Assistant's default behavior/);
+  assert.match(prompt, /generic participant/);
+  assert.match(prompt, /Web access is blocked/);
+  assert.match(prompt, /app_permissions_request_change.*webAccess/);
+  assert.match(prompt, /Referenced repository files/);
+  assert.match(prompt, /Chat Assistant does not read repository files by default/);
+  assert.doesNotMatch(prompt, /Repository: \/repo/);
+  assert.doesNotMatch(prompt, /repoRead/);
+  assert.doesNotMatch(prompt, /workspaceWrite/);
+  assert.doesNotMatch(prompt, /shellRules/);
+});
+
+test("chat creation does not seed a visible Chat Assistant setup message", async () => {
+  const { service, storage } = testService({
+    agents: [{ kind: "codex-cli", installed: true } as AgentHealth],
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE] }
+  });
+
+  const result = await service.createConversation({
+    title: "Fresh chat",
+    participants: [],
+    skipDefaultParticipants: true
+  });
+  const participants = result.conversation.metadata.participants as ChatParticipant[];
+
+  assert.equal(participants.some((participant) => participant.roleConfigId === ADMIN_ROLE.id), true);
+  assert.equal(result.conversation.messages.length, 1);
+  assert.equal(result.conversation.messages[0].role, "system");
+  assert.equal(result.conversation.messages.some((message) => message.role === "participant"), false);
+  assert.equal(storage.current.messages.some((message: ChatMessage) =>
+    message.metadata?.appMessageSource === "chat-assistant-cold-start"
+  ), false);
+});
+
 test("static chat instructions include structured participant request and reply guidance", () => {
   const { service } = testService();
   const instructions = (service as any).staticChatInstructions({
@@ -3501,6 +3585,7 @@ function testService(options: {
   run?: (...args: any[]) => Promise<any>;
   agents?: AgentHealth[];
   userSkills?: any;
+  appMcp?: AppMcpService;
   onSnapshot?: (conversation: Conversation) => void;
   settings?: {
     chatRoleConfigs: ChatRoleConfig[];
@@ -3660,7 +3745,7 @@ function testService(options: {
     }
   };
   return {
-    service: new ChatService(storage as never, settings as never, cliRunner as never, debugLogs as never, undefined, options.onSnapshot, options.userSkills as never),
+    service: new ChatService(storage as never, settings as never, cliRunner as never, debugLogs as never, options.appMcp as never, options.onSnapshot, options.userSkills as never),
     storage,
     settingsState,
     tempRoot

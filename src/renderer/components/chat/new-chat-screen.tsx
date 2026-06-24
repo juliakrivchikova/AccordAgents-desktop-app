@@ -600,7 +600,7 @@ function newChatAssistantParticipant(settings: AppSettings, agents: AgentHealth[
     kind: preferredAssistantProviderKind(settings, agents),
     agentMode: "default",
     permissions: {
-      repoRead: true,
+      repoRead: false,
       workspaceWrite: false,
       webAccess: false,
       shell: {
