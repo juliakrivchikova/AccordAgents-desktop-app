@@ -4,7 +4,7 @@ AccordAgents is an open-source macOS app for coordinating AI agents in one share
 
 Instead of copy-pasting context between separate terminals or chats, you keep roles, rules, history, approvals, and decisions in one project workspace.
 
-> Status: pre-1.0 (`0.1.x`). Interfaces and on-disk formats may still change.
+> Status: pre-1.0 (`0.5.x`). Interfaces and on-disk formats may still change.
 
 ## Why
 

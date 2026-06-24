@@ -126,6 +126,7 @@ export function NewChatScreen(props: {
     searchSource,
     onDraftChange: props.onPromptChange,
     participants: mentionParticipants,
+    savedPrompts: props.settings.chatSavedPrompts,
     onMentionInserted: (participant) => {
       if (!isNewChatAssistantOption(participant)) {
         props.onSelectedParticipantIdsChange((current) => new Set(current).add(participant.id));
@@ -238,6 +239,7 @@ export function NewChatScreen(props: {
             insertCompactCommand={mentions.insertCompactCommand}
             insertFileMention={mentions.insertFileMention}
             insertMention={mentions.insertMention}
+            insertSavedPrompt={mentions.insertSavedPrompt}
             insertSkillMention={mentions.insertSkillMention}
             mentionIndex={mentions.mentionIndex}
             mentionOptions={mentions.mentionOptions}
@@ -248,6 +250,7 @@ export function NewChatScreen(props: {
             skillTargetLabel={mentions.skillTargetLabel}
             visibleCommandOptions={mentions.visibleCommandOptions}
             visibleFileOptions={mentions.visibleFileOptions}
+            visiblePromptOptions={mentions.visiblePromptOptions}
             visibleSkillOptions={mentions.visibleSkillOptions}
           />
           <textarea

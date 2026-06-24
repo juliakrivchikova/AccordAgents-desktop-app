@@ -4,6 +4,7 @@ import type {
   ChatBehaviorRuleConfigUpdate,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
+  ChatSavedPromptConfigUpdate,
   ProviderSettings,
   RepoFileOpenAction
 } from "../../../shared/types";
@@ -14,9 +15,10 @@ import { ParticipantsSettingsScreen } from "./participants-settings-screen";
 import { RolesSettingsSection } from "./roles-settings-section";
 import { GeneralSettingsSection } from "./general-settings-section";
 import { BehaviorRuleSettingsSection } from "./behavior-rules-settings-section";
+import { SavedPromptsSettingsSection } from "./saved-prompts-settings-section";
 import { X } from "lucide-react";
 
-export type SettingsSection = "general" | "roles" | "behavior-rules" | "participants";
+export type SettingsSection = "general" | "roles" | "behavior-rules" | "saved-prompts" | "participants";
 
 export function SettingsView(props: {
   section: SettingsSection;
@@ -27,6 +29,8 @@ export function SettingsView(props: {
   archiveChatRoleConfig: (id: string) => Promise<void>;
   saveChatBehaviorRuleConfig: (update: ChatBehaviorRuleConfigUpdate) => Promise<void>;
   deleteChatBehaviorRuleConfig: (id: string) => Promise<void>;
+  saveChatSavedPromptConfig: (update: ChatSavedPromptConfigUpdate) => Promise<void>;
+  deleteChatSavedPromptConfig: (id: string) => Promise<void>;
   saveChatParticipantConfig: (update: ChatParticipantConfigUpdate) => Promise<void>;
   deleteChatParticipantConfig: (id: string) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
@@ -39,7 +43,9 @@ export function SettingsView(props: {
     ? "General"
     : props.section === "roles"
       ? "Roles"
-      : props.section === "behavior-rules" ? "Rules" : "Participants";
+      : props.section === "behavior-rules"
+        ? "Rules"
+        : props.section === "saved-prompts" ? "Prompts" : "Participants";
   const sectionClass = props.section === "participants"
     ? "settings-view-participants"
     : props.section === "roles"
@@ -97,6 +103,13 @@ export function SettingsView(props: {
             settings={props.settings}
             onSave={props.saveChatBehaviorRuleConfig}
             onDelete={props.deleteChatBehaviorRuleConfig}
+          />
+        )}
+        {props.section === "saved-prompts" && (
+          <SavedPromptsSettingsSection
+            settings={props.settings}
+            onSave={props.saveChatSavedPromptConfig}
+            onDelete={props.deleteChatSavedPromptConfig}
           />
         )}
         {props.section === "general" && (

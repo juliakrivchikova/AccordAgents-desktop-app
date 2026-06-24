@@ -5,6 +5,7 @@ import type {
   AddChatParticipantRequest,
   AgentHealth,
   ChatBehaviorRuleConfigUpdate,
+  ChatSavedPromptConfigUpdate,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
@@ -177,6 +178,8 @@ function registerIpc(): void {
     await chatService.removeBehaviorRuleFromChatParticipants(id);
     return nextSettings;
   });
+  ipcMain.handle("settings:save-chat-saved-prompt", (_event, update: ChatSavedPromptConfigUpdate) => settingsService.saveChatSavedPromptConfig(update));
+  ipcMain.handle("settings:delete-chat-saved-prompt", (_event, id: string) => settingsService.deleteChatSavedPromptConfig(id));
   ipcMain.handle("settings:save-chat-participant", async (_event, update: ChatParticipantConfigUpdate) => {
     const previousSettings = await settingsService.getPublicSettings();
     const previous = update.id?.trim()

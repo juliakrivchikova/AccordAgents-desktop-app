@@ -3623,6 +3623,7 @@ function testService(options: {
     ],
     chatRoleConfigs: clone(settingsState.chatRoleConfigs),
     chatBehaviorRules: clone(settingsState.chatBehaviorRules),
+    chatSavedPrompts: [],
     chatParticipantConfigs: clone(settingsState.chatParticipantConfigs),
     chatParticipantSeedState: {}
   });

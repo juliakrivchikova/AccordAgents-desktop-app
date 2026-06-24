@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is an Electron desktop app built with TypeScript, React, and Vite. Main-process code lives in `src/main`, with service classes under `src/main/services`. The preload bridge is in `src/preload`, shared types and utilities are in `src/shared`, and the React renderer is in `src/renderer`. Renderer assets belong in `src/renderer/assets`, and app-wide styles are in `src/renderer/styles/app.css`. Build output goes to `dist`; do not edit generated files by hand.
+This is an Electron desktop app built with TypeScript, React, and Vite. Main-process code lives in `src/main`, with service classes under `src/main/services`. The preload bridge is in `src/preload`, shared types and utilities are in `src/shared`, and the React renderer is in `src/renderer`. Renderer assets belong in `src/renderer/assets`. The app-wide style entrypoint is `src/renderer/styles/app.css`, which imports foundation/theme files and view-specific CSS under `src/renderer/styles/views`. Build output goes to `dist`; do not edit generated files by hand.
 
 For chat role presets, saved participants, and runtime participant sessions, read `docs/chat-roles-and-participants.md` before changing role or participant behavior.
 
@@ -19,7 +19,7 @@ Prefer the Makefile aliases when working locally:
 - `make typecheck`: run strict TypeScript checks.
 - `make clean`: remove `dist`.
 - `npm run signed:mac-arm64`: build the signed and notarized macOS arm64 DMG; follow `SIGN.md` when a user asks for a signed DMG.
-- `npm run test:permissions`: build the main process and run targeted service tests for chat permissions/cancellation, repo file mentions, chat rename, git repo-file listing, and CLI permission handling.
+- `npm run test:permissions`: build the main process and run targeted service tests for chat permissions/cancellation, role archive behavior, repo file mentions, participant request threads, chat rename, git repo-file listing, CLI permission handling, and warnings.
 - `npm run test:app-skills`: build the main process and run app-skill service tests.
 
 Equivalent npm scripts are in `package.json`, for example `npm run dev`, `npm run build`, and `npm run typecheck`.
@@ -30,7 +30,7 @@ Use strict TypeScript and keep types explicit at IPC, service, and shared bounda
 
 ## Testing Guidelines
 
-There is no full test suite or lint runner, but targeted Node service tests exist. Run `make typecheck` and `make build` before submitting broad changes. Run `npm run test:permissions` for chat permissions, cancellation, repo-file mentions, rename, git repo-file listing, or CLI permission behavior, and `npm run test:app-skills` for app-skill service changes. For behavior that touches Electron IPC, provider integrations, git diff handling, conversation storage, or chat concurrency, include manual verification notes in the PR. If adding tests, colocate them near the code under test or use `*.test.ts` / `*.test.tsx`, and add the command to `package.json`.
+There is no full test suite or single full-project lint runner, but targeted Node service tests and renderer lint guardrails exist. Run `make typecheck` and `make build` before submitting broad changes. Use `make lint-colors`, `make lint-lines`, and `make lint-unused` for renderer style, line-count, and unused/orphan checks. Run `npm run test:permissions` for chat permissions, cancellation, role archive behavior, repo-file mentions, participant request threads, rename, git repo-file listing, CLI permission behavior, or warnings, and `npm run test:app-skills` for app-skill service changes. For behavior that touches Electron IPC, provider integrations, git diff handling, conversation storage, or chat concurrency, include manual verification notes in the PR. If adding tests, colocate them near the code under test or use `*.test.ts` / `*.test.tsx`, and add the command to `package.json`.
 
 ## Inspecting the running desktop app
 

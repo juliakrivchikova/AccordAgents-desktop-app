@@ -20,6 +20,8 @@ const MAX_MESSAGE_PAGE_LIMIT = 200;
 const SQLITE_BUSY_TIMEOUT_MS = 30_000;
 const SQLITE_COMMAND_TIMEOUT_MS = 45_000;
 const SQLITE_MIGRATION_TIMEOUT_MS = 120_000;
+const SCHEMA_META_COMPLETE = "complete";
+const INFERRED_REQUEST_THREAD_MIGRATION_KEY = "inferred-participant-request-threads-v1";
 
 function sqlString(value: string | undefined | null): string {
   if (value === undefined || value === null) {
@@ -54,6 +56,10 @@ export class StorageService {
         payload_json text not null
       );
       create index if not exists idx_conversations_updated_at on conversations(updated_at);
+      create table if not exists schema_meta (
+        key text primary key,
+        value text not null
+      );
       create table if not exists conversation_messages (
         conversation_id text not null,
         sequence integer not null,
@@ -292,13 +298,17 @@ export class StorageService {
   }
 
   private async clearInterruptedRuns(): Promise<void> {
-    const rows = await this.queryJson<{ payloadJson: string }>(
-      "select payload_json as payloadJson from conversations where payload_json like '%\"running\":true%' or payload_json like '%\"activeRunIds\":[%';"
+    const ids = await this.queryConversationIds(
+      "payload_json like '%\"running\":true%' or payload_json like '%\"activeRunIds\":[%'"
     );
-    for (const row of rows) {
+    for (const id of ids) {
+      const payloadJson = await this.readConversationPayloadById(id);
+      if (!payloadJson) {
+        continue;
+      }
       let conversation: Conversation;
       try {
-        conversation = JSON.parse(row.payloadJson) as Conversation;
+        conversation = JSON.parse(payloadJson) as Conversation;
       } catch {
         continue;
       }
@@ -318,13 +328,20 @@ export class StorageService {
   }
 
   private async normalizeInferredParticipantRequestThreads(): Promise<void> {
-    const rows = await this.queryJson<{ payloadJson: string }>(
-      "select payload_json as payloadJson from conversations where payload_json like '%\"source\":\"inferred\"%';"
-    );
-    for (const row of rows) {
+    const completed = await this.getSchemaMeta(INFERRED_REQUEST_THREAD_MIGRATION_KEY);
+    if (completed === SCHEMA_META_COMPLETE) {
+      return;
+    }
+
+    const ids = await this.queryConversationIds("payload_json like '%\"source\":\"inferred\"%'");
+    for (const id of ids) {
+      const payloadJson = await this.readConversationPayloadById(id);
+      if (!payloadJson) {
+        continue;
+      }
       let conversation: Conversation;
       try {
-        conversation = JSON.parse(row.payloadJson) as Conversation;
+        conversation = JSON.parse(payloadJson) as Conversation;
       } catch {
         continue;
       }
@@ -333,6 +350,32 @@ export class StorageService {
       }
       await this.saveConversation(conversation);
     }
+    await this.setSchemaMeta(INFERRED_REQUEST_THREAD_MIGRATION_KEY, SCHEMA_META_COMPLETE);
+  }
+
+  private async queryConversationIds(whereSql: string): Promise<string[]> {
+    const rows = await this.queryJson<{ id: string }>(`select id from conversations where ${whereSql};`);
+    return rows.flatMap((row) => typeof row.id === "string" && row.id.trim() ? [row.id] : []);
+  }
+
+  private async readConversationPayloadById(id: string): Promise<string | undefined> {
+    const payloadJson = await this.queryText(
+      `select payload_json from conversations where id = ${sqlString(id)} limit 1;`
+    );
+    return payloadJson || undefined;
+  }
+
+  private async getSchemaMeta(key: string): Promise<string | undefined> {
+    const value = await this.queryText(`select value from schema_meta where key = ${sqlString(key)} limit 1;`);
+    return value || undefined;
+  }
+
+  private async setSchemaMeta(key: string, value: string): Promise<void> {
+    await this.runSql(`
+      insert into schema_meta (key, value)
+      values (${sqlString(key)}, ${sqlString(value)})
+      on conflict(key) do update set value = excluded.value;
+    `);
   }
 
   private async queryJson<T>(sql: string): Promise<T[]> {

@@ -204,6 +204,8 @@ function App(): JSX.Element {
           archiveChatRoleConfig={settingsActions.archiveChatRoleConfig}
           saveChatBehaviorRuleConfig={settingsActions.saveChatBehaviorRuleConfig}
           deleteChatBehaviorRuleConfig={settingsActions.deleteChatBehaviorRuleConfig}
+          saveChatSavedPromptConfig={settingsActions.saveChatSavedPromptConfig}
+          deleteChatSavedPromptConfig={settingsActions.deleteChatSavedPromptConfig}
           saveChatParticipantConfig={settingsActions.saveChatParticipantConfig}
           deleteChatParticipantConfig={settingsActions.deleteChatParticipantConfig}
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}

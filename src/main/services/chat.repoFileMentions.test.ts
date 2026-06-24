@@ -1113,7 +1113,12 @@ test("clearInterruptedRuns clears stale run metadata without warning when no pen
   };
   let saved: Conversation | undefined;
   const storage = Object.create(StorageService.prototype) as any;
-  storage.queryJson = async () => [{ payloadJson: JSON.stringify(conversation) }];
+  storage.queryJson = async (sql: string) => {
+    assert.match(sql, /select id from conversations/);
+    assert.doesNotMatch(sql, /payload_json as payloadJson/);
+    return [{ id: conversation.id }];
+  };
+  storage.queryText = async () => JSON.stringify(conversation);
   storage.saveConversation = async (next: Conversation) => {
     saved = cloneConversation(next);
   };
@@ -1139,7 +1144,12 @@ test("clearInterruptedRuns preserves interrupted warning when startup cleanup fi
   };
   let saved: Conversation | undefined;
   const storage = Object.create(StorageService.prototype) as any;
-  storage.queryJson = async () => [{ payloadJson: JSON.stringify(conversation) }];
+  storage.queryJson = async (sql: string) => {
+    assert.match(sql, /select id from conversations/);
+    assert.doesNotMatch(sql, /payload_json as payloadJson/);
+    return [{ id: conversation.id }];
+  };
+  storage.queryText = async () => JSON.stringify(conversation);
   storage.saveConversation = async (next: Conversation) => {
     saved = cloneConversation(next);
   };

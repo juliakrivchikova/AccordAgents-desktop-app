@@ -2,6 +2,7 @@ import type {
   ChatBehaviorRuleConfigUpdate,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
+  ChatSavedPromptConfigUpdate,
   ProviderSettings,
   RepoFileOpenAction
 } from "../../shared/types";
@@ -16,6 +17,8 @@ export interface SettingsActions {
   archiveChatRoleConfig: (id: string) => Promise<void>;
   saveChatBehaviorRuleConfig: (update: ChatBehaviorRuleConfigUpdate) => Promise<void>;
   deleteChatBehaviorRuleConfig: (id: string) => Promise<void>;
+  saveChatSavedPromptConfig: (update: ChatSavedPromptConfigUpdate) => Promise<void>;
+  deleteChatSavedPromptConfig: (id: string) => Promise<void>;
   saveChatParticipantConfig: (update: ChatParticipantConfigUpdate) => Promise<void>;
   deleteChatParticipantConfig: (id: string) => Promise<void>;
 }
@@ -47,6 +50,14 @@ export function useSettingsActions(state: AppState): SettingsActions {
 
   async function deleteChatBehaviorRuleConfig(id: string): Promise<void> {
     await updateSettings(() => window.consensus.deleteChatBehaviorRuleConfig(id));
+  }
+
+  async function saveChatSavedPromptConfig(update: ChatSavedPromptConfigUpdate): Promise<void> {
+    await updateSettings(() => window.consensus.saveChatSavedPromptConfig(update));
+  }
+
+  async function deleteChatSavedPromptConfig(id: string): Promise<void> {
+    await updateSettings(() => window.consensus.deleteChatSavedPromptConfig(id));
   }
 
   async function saveChatParticipantConfig(update: ChatParticipantConfigUpdate): Promise<void> {
@@ -105,6 +116,8 @@ export function useSettingsActions(state: AppState): SettingsActions {
     archiveChatRoleConfig,
     saveChatBehaviorRuleConfig,
     deleteChatBehaviorRuleConfig,
+    saveChatSavedPromptConfig,
+    deleteChatSavedPromptConfig,
     saveChatParticipantConfig,
     deleteChatParticipantConfig
   };

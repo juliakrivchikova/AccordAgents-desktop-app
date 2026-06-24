@@ -257,6 +257,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
             />
             <ChatComposer
               participants={participants}
+              savedPrompts={props.settings.chatSavedPrompts}
               conversationId={props.conversation.id}
               repoPath={props.conversation.repoPath}
               draft={props.draft}
@@ -269,7 +270,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
                   props.onStopRun?.(runId);
                 }
               } : undefined}
-              placeholder="Mention participants with @name, skills with /name, or repo files with #path"
+              placeholder="Mention participants with @name, prompts or skills with /name, or repo files with #path"
               status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
               testId="chat-main-composer"
               renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}

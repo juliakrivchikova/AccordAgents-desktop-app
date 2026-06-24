@@ -121,13 +121,14 @@ export function ChatThreadPanel(props: {
       <ChatComposer
         className="chat-thread-composer"
         participants={props.participants}
+        savedPrompts={props.settings.chatSavedPrompts}
         conversationId={props.conversationId}
         repoPath={props.repoPath}
         draft={props.draft}
         onDraftChange={props.onDraftChange}
         onSend={props.onSend}
         isRunning={props.busy}
-        placeholder="Reply with @name, /skill, or #path..."
+        placeholder="Reply with @name, /prompt, /skill, or #path..."
         rows={3}
         maxHeight={180}
         testId="chat-thread-composer"

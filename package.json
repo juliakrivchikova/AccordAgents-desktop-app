@@ -19,7 +19,7 @@
     "test:app-skills": "npm run build:main && node --test dist/main/main/services/appSkills.test.js",
     "test:command": "npm run build:main && node --test dist/main/main/services/command.test.js",
     "test:links": "npm run build:main && node --test dist/main/main/services/externalLinks.test.js dist/main/main/services/markdownInline.test.js",
-    "test:settings": "npm run build:main && node --test dist/main/main/services/settings.behaviorRules.test.js dist/main/main/services/settings.roleArchive.test.js",
+    "test:settings": "npm run build:main && node --test dist/main/main/services/settings.behaviorRules.test.js dist/main/main/services/settings.roleArchive.test.js dist/main/main/services/settings.savedPrompts.test.js dist/main/main/services/slashSuggestions.test.js",
     "test:storage": "npm run build:main && node --test dist/main/main/services/storage.messages.test.js",
     "test:chat-compact": "npm run build:main && node --test dist/main/main/services/chat.compact.test.js",
     "test:user-skills": "npm run build:main && node --test dist/main/main/services/userSkills.test.js dist/main/main/services/chat.userSkills.test.js",

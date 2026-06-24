@@ -89,6 +89,17 @@ export function replaceActiveSkillMention(value: string, skillName: string): str
   return `${prefix}${leadingSpace}/${skillName} `;
 }
 
+export function replaceActiveSlashToken(value: string, replacement: string): string {
+  const insertion = replacement.trim();
+  const match = value.match(/(?:^|\s)\/([A-Za-z0-9_-]*)$/);
+  if (!match || match.index === undefined) {
+    return `${value}${value.endsWith(" ") || !value ? "" : " "}${insertion}`;
+  }
+  const prefix = value.slice(0, match.index);
+  const leadingSpace = match[0].startsWith(" ") ? " " : "";
+  return `${prefix}${leadingSpace}${insertion}`;
+}
+
 export function removeSkillMentionToken(value: string, skillName: string): string {
   const escaped = escapeRegExp(skillName);
   return value

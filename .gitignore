@@ -26,3 +26,8 @@ design-diff.live.png
 .claude/worktrees/
 design_handoff_accordagents_chat/
 docs/product/
+
+# Local analysis reports
+security-check-summary.md
+traffic-raw.json
+traffic-summary.md

@@ -23,6 +23,7 @@ export interface AppSettings {
   providers: ProviderSettings[];
   chatRoleConfigs: ChatRoleConfig[];
   chatBehaviorRules: ChatBehaviorRuleConfig[];
+  chatSavedPrompts: ChatSavedPromptConfig[];
   chatParticipantConfigs: ChatParticipantConfig[];
   chatParticipantSeedState?: ChatParticipantSeedState;
   lastRepoPath?: string;
@@ -46,6 +47,15 @@ export interface ChatBehaviorRuleConfig {
   id: string;
   label: string;
   instructions: string;
+  version: number;
+  updatedAt: string;
+}
+
+export interface ChatSavedPromptConfig {
+  id: string;
+  label: string;
+  trigger: string;
+  body: string;
   version: number;
   updatedAt: string;
 }
@@ -646,6 +656,13 @@ export interface ChatBehaviorRuleConfigUpdate {
   instructions: string;
 }
 
+export interface ChatSavedPromptConfigUpdate {
+  id?: string;
+  label: string;
+  trigger: string;
+  body: string;
+}
+
 export interface ChatParticipantConfig {
   id: string;
   handle: string;
@@ -1207,6 +1224,8 @@ export interface AppBridge {
   archiveChatRoleConfig(id: string): Promise<AppSettings>;
   saveChatBehaviorRuleConfig(update: ChatBehaviorRuleConfigUpdate): Promise<AppSettings>;
   deleteChatBehaviorRuleConfig(id: string): Promise<AppSettings>;
+  saveChatSavedPromptConfig(update: ChatSavedPromptConfigUpdate): Promise<AppSettings>;
+  deleteChatSavedPromptConfig(id: string): Promise<AppSettings>;
   saveChatParticipantConfig(update: ChatParticipantConfigUpdate): Promise<AppSettings>;
   deleteChatParticipantConfig(id: string): Promise<AppSettings>;
   updateLastRepoPath(repoPath: string): Promise<AppSettings>;
