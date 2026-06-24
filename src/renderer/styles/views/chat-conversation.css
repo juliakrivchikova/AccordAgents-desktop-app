@@ -1598,30 +1598,33 @@
 .chat-app-tool-avatar-grid {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
+  justify-items: center;
   gap: 6px;
 }
 
 .chat-app-tool-avatar-choice {
   display: inline-flex;
-  padding: 3px;
-  border: 1.5px solid transparent;
+  padding: 0;
+  border: 0;
   border-radius: 10px;
   background: transparent;
   cursor: pointer;
 }
 
+/* Selection/hover is an outset ring that hugs the avatar — no inset border,
+   padding gap, or competing background layer. */
 .chat-app-tool-avatar-choice:hover {
-  background: var(--app-surface-hover);
+  box-shadow: 0 0 0 1.5px var(--app-border);
 }
 
 .chat-app-tool-avatar-choice.selected {
-  border-color: var(--app-border);
-  background: var(--app-surface-hover);
+  box-shadow: 0 0 0 2px var(--app-accent);
 }
 
 .chat-app-tool-avatar-choice-img {
   width: 36px;
   height: 36px;
+  border-radius: 10px;
 }
 
 .chat-app-tool-inline-handle {

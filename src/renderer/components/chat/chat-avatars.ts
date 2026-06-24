@@ -10,7 +10,7 @@ const CHAT_AVATAR_URLS = {
   "codex-dog": new URL("../../assets/participant-codex-dog.png", import.meta.url).href,
   "codex-frog": new URL("../../assets/participant-codex-frog.png", import.meta.url).href,
   "codex-hamster": new URL("../../assets/participant-codex-hamster.png", import.meta.url).href,
-  "claude-logo": new URL("../../assets/claude-avatar.webp", import.meta.url).href,
+  "claude-logo": new URL("../../assets/claude-avatar.png", import.meta.url).href,
   "claude-human": new URL("../../assets/participant-claude-human.png", import.meta.url).href,
   "claude-bunny": new URL("../../assets/participant-claude-bunny.png", import.meta.url).href,
   "claude-cat": new URL("../../assets/participant-claude-cat.png", import.meta.url).href,
@@ -44,6 +44,7 @@ const CHAT_AVATAR_URLS = {
 } as const;
 
 export type AvatarKind = "user" | "arbiter" | "anthropic" | "codex" | "gemini" | "generic" | "custom";
+export type AvatarMediaMode = "glyph" | "photo";
 export type ChatAvatarId = keyof typeof CHAT_AVATAR_URLS;
 
 export interface AvatarSpec {
@@ -51,6 +52,7 @@ export interface AvatarSpec {
   label: string;
   initials?: string;
   imageUrl?: string;
+  mediaMode?: AvatarMediaMode;
 }
 
 export interface ChatAvatarOption {
@@ -59,6 +61,7 @@ export interface ChatAvatarOption {
   label: string;
   imageUrl: string;
   avatarKind?: AvatarKind;
+  mediaMode: AvatarMediaMode;
   defaultEligible?: boolean;
 }
 
@@ -66,44 +69,44 @@ export interface ChatAvatarOption {
 // (chatAvatarOptionsForKind preserves array order): logo first, then people
 // (human + the generated human avatars), then animals.
 const CHAT_AVATAR_OPTIONS: ChatAvatarOption[] = [
-  { id: "codex-logo", kind: "codex-cli", label: "Codex logo", imageUrl: CHAT_AVATAR_URLS["codex-logo"], avatarKind: "codex", defaultEligible: false },
-  { id: "codex-human", kind: "codex-cli", label: "Codex human", imageUrl: CHAT_AVATAR_URLS["codex-human"] },
-  { id: "generated-avatar-01", kind: "codex-cli", label: "Generated avatar 1", imageUrl: CHAT_AVATAR_URLS["generated-avatar-01"], defaultEligible: false },
-  { id: "generated-avatar-02", kind: "codex-cli", label: "Generated avatar 2", imageUrl: CHAT_AVATAR_URLS["generated-avatar-02"], defaultEligible: false },
-  { id: "generated-avatar-03", kind: "codex-cli", label: "Generated avatar 3", imageUrl: CHAT_AVATAR_URLS["generated-avatar-03"], defaultEligible: false },
-  { id: "generated-avatar-04", kind: "codex-cli", label: "Generated avatar 4", imageUrl: CHAT_AVATAR_URLS["generated-avatar-04"], defaultEligible: false },
-  { id: "generated-avatar-05", kind: "codex-cli", label: "Generated avatar 5", imageUrl: CHAT_AVATAR_URLS["generated-avatar-05"], defaultEligible: false },
-  { id: "generated-avatar-06", kind: "codex-cli", label: "Generated avatar 6", imageUrl: CHAT_AVATAR_URLS["generated-avatar-06"], defaultEligible: false },
-  { id: "generated-avatar-07", kind: "codex-cli", label: "Generated avatar 7", imageUrl: CHAT_AVATAR_URLS["generated-avatar-07"], defaultEligible: false },
-  { id: "generated-avatar-08", kind: "codex-cli", label: "Generated avatar 8", imageUrl: CHAT_AVATAR_URLS["generated-avatar-08"], defaultEligible: false },
-  { id: "generated-avatar-21", kind: "codex-cli", label: "Generated avatar 21", imageUrl: CHAT_AVATAR_URLS["generated-avatar-21"], defaultEligible: false },
-  { id: "generated-avatar-22", kind: "codex-cli", label: "Generated avatar 22", imageUrl: CHAT_AVATAR_URLS["generated-avatar-22"], defaultEligible: false },
-  { id: "generated-avatar-23", kind: "codex-cli", label: "Generated avatar 23", imageUrl: CHAT_AVATAR_URLS["generated-avatar-23"], defaultEligible: false },
-  { id: "generated-avatar-24", kind: "codex-cli", label: "Generated avatar 24", imageUrl: CHAT_AVATAR_URLS["generated-avatar-24"], defaultEligible: false },
-  { id: "codex-bunny", kind: "codex-cli", label: "Codex bunny", imageUrl: CHAT_AVATAR_URLS["codex-bunny"] },
-  { id: "codex-cat", kind: "codex-cli", label: "Codex cat", imageUrl: CHAT_AVATAR_URLS["codex-cat"] },
-  { id: "codex-dog", kind: "codex-cli", label: "Codex dog", imageUrl: CHAT_AVATAR_URLS["codex-dog"] },
-  { id: "codex-frog", kind: "codex-cli", label: "Codex frog", imageUrl: CHAT_AVATAR_URLS["codex-frog"] },
-  { id: "codex-hamster", kind: "codex-cli", label: "Codex hamster", imageUrl: CHAT_AVATAR_URLS["codex-hamster"] },
-  { id: "claude-logo", kind: "claude-code", label: "Claude logo", imageUrl: CHAT_AVATAR_URLS["claude-logo"], avatarKind: "anthropic", defaultEligible: false },
-  { id: "claude-human", kind: "claude-code", label: "Claude human", imageUrl: CHAT_AVATAR_URLS["claude-human"] },
-  { id: "generated-avatar-09", kind: "claude-code", label: "Generated avatar 9", imageUrl: CHAT_AVATAR_URLS["generated-avatar-09"], defaultEligible: false },
-  { id: "generated-avatar-10", kind: "claude-code", label: "Generated avatar 10", imageUrl: CHAT_AVATAR_URLS["generated-avatar-10"], defaultEligible: false },
-  { id: "generated-avatar-11", kind: "claude-code", label: "Generated avatar 11", imageUrl: CHAT_AVATAR_URLS["generated-avatar-11"], defaultEligible: false },
-  { id: "generated-avatar-12", kind: "claude-code", label: "Generated avatar 12", imageUrl: CHAT_AVATAR_URLS["generated-avatar-12"], defaultEligible: false },
-  { id: "generated-avatar-13", kind: "claude-code", label: "Generated avatar 13", imageUrl: CHAT_AVATAR_URLS["generated-avatar-13"], defaultEligible: false },
-  { id: "generated-avatar-14", kind: "claude-code", label: "Generated avatar 14", imageUrl: CHAT_AVATAR_URLS["generated-avatar-14"], defaultEligible: false },
-  { id: "generated-avatar-15", kind: "claude-code", label: "Generated avatar 15", imageUrl: CHAT_AVATAR_URLS["generated-avatar-15"], defaultEligible: false },
-  { id: "generated-avatar-16", kind: "claude-code", label: "Generated avatar 16", imageUrl: CHAT_AVATAR_URLS["generated-avatar-16"], defaultEligible: false },
-  { id: "generated-avatar-17", kind: "claude-code", label: "Generated avatar 17", imageUrl: CHAT_AVATAR_URLS["generated-avatar-17"], defaultEligible: false },
-  { id: "generated-avatar-18", kind: "claude-code", label: "Generated avatar 18", imageUrl: CHAT_AVATAR_URLS["generated-avatar-18"], defaultEligible: false },
-  { id: "generated-avatar-19", kind: "claude-code", label: "Generated avatar 19", imageUrl: CHAT_AVATAR_URLS["generated-avatar-19"], defaultEligible: false },
-  { id: "generated-avatar-20", kind: "claude-code", label: "Generated avatar 20", imageUrl: CHAT_AVATAR_URLS["generated-avatar-20"], defaultEligible: false },
-  { id: "claude-bunny", kind: "claude-code", label: "Claude bunny", imageUrl: CHAT_AVATAR_URLS["claude-bunny"] },
-  { id: "claude-cat", kind: "claude-code", label: "Claude cat", imageUrl: CHAT_AVATAR_URLS["claude-cat"] },
-  { id: "claude-dog", kind: "claude-code", label: "Claude dog", imageUrl: CHAT_AVATAR_URLS["claude-dog"] },
-  { id: "claude-frog", kind: "claude-code", label: "Claude frog", imageUrl: CHAT_AVATAR_URLS["claude-frog"] },
-  { id: "claude-hamster", kind: "claude-code", label: "Claude hamster", imageUrl: CHAT_AVATAR_URLS["claude-hamster"] }
+  { id: "codex-logo", kind: "codex-cli", label: "Codex logo", imageUrl: CHAT_AVATAR_URLS["codex-logo"], avatarKind: "codex", mediaMode: "glyph", defaultEligible: false },
+  { id: "codex-human", kind: "codex-cli", label: "Codex human", imageUrl: CHAT_AVATAR_URLS["codex-human"], mediaMode: "photo" },
+  { id: "generated-avatar-01", kind: "codex-cli", label: "Generated avatar 1", imageUrl: CHAT_AVATAR_URLS["generated-avatar-01"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-02", kind: "codex-cli", label: "Generated avatar 2", imageUrl: CHAT_AVATAR_URLS["generated-avatar-02"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-03", kind: "codex-cli", label: "Generated avatar 3", imageUrl: CHAT_AVATAR_URLS["generated-avatar-03"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-04", kind: "codex-cli", label: "Generated avatar 4", imageUrl: CHAT_AVATAR_URLS["generated-avatar-04"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-05", kind: "codex-cli", label: "Generated avatar 5", imageUrl: CHAT_AVATAR_URLS["generated-avatar-05"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-06", kind: "codex-cli", label: "Generated avatar 6", imageUrl: CHAT_AVATAR_URLS["generated-avatar-06"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-07", kind: "codex-cli", label: "Generated avatar 7", imageUrl: CHAT_AVATAR_URLS["generated-avatar-07"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-08", kind: "codex-cli", label: "Generated avatar 8", imageUrl: CHAT_AVATAR_URLS["generated-avatar-08"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-21", kind: "codex-cli", label: "Generated avatar 21", imageUrl: CHAT_AVATAR_URLS["generated-avatar-21"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-22", kind: "codex-cli", label: "Generated avatar 22", imageUrl: CHAT_AVATAR_URLS["generated-avatar-22"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-23", kind: "codex-cli", label: "Generated avatar 23", imageUrl: CHAT_AVATAR_URLS["generated-avatar-23"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-24", kind: "codex-cli", label: "Generated avatar 24", imageUrl: CHAT_AVATAR_URLS["generated-avatar-24"], mediaMode: "photo", defaultEligible: false },
+  { id: "codex-bunny", kind: "codex-cli", label: "Codex bunny", imageUrl: CHAT_AVATAR_URLS["codex-bunny"], mediaMode: "photo" },
+  { id: "codex-cat", kind: "codex-cli", label: "Codex cat", imageUrl: CHAT_AVATAR_URLS["codex-cat"], mediaMode: "photo" },
+  { id: "codex-dog", kind: "codex-cli", label: "Codex dog", imageUrl: CHAT_AVATAR_URLS["codex-dog"], mediaMode: "photo" },
+  { id: "codex-frog", kind: "codex-cli", label: "Codex frog", imageUrl: CHAT_AVATAR_URLS["codex-frog"], mediaMode: "photo" },
+  { id: "codex-hamster", kind: "codex-cli", label: "Codex hamster", imageUrl: CHAT_AVATAR_URLS["codex-hamster"], mediaMode: "photo" },
+  { id: "claude-logo", kind: "claude-code", label: "Claude logo", imageUrl: CHAT_AVATAR_URLS["claude-logo"], avatarKind: "anthropic", mediaMode: "glyph", defaultEligible: false },
+  { id: "claude-human", kind: "claude-code", label: "Claude human", imageUrl: CHAT_AVATAR_URLS["claude-human"], mediaMode: "photo" },
+  { id: "generated-avatar-09", kind: "claude-code", label: "Generated avatar 9", imageUrl: CHAT_AVATAR_URLS["generated-avatar-09"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-10", kind: "claude-code", label: "Generated avatar 10", imageUrl: CHAT_AVATAR_URLS["generated-avatar-10"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-11", kind: "claude-code", label: "Generated avatar 11", imageUrl: CHAT_AVATAR_URLS["generated-avatar-11"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-12", kind: "claude-code", label: "Generated avatar 12", imageUrl: CHAT_AVATAR_URLS["generated-avatar-12"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-13", kind: "claude-code", label: "Generated avatar 13", imageUrl: CHAT_AVATAR_URLS["generated-avatar-13"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-14", kind: "claude-code", label: "Generated avatar 14", imageUrl: CHAT_AVATAR_URLS["generated-avatar-14"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-15", kind: "claude-code", label: "Generated avatar 15", imageUrl: CHAT_AVATAR_URLS["generated-avatar-15"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-16", kind: "claude-code", label: "Generated avatar 16", imageUrl: CHAT_AVATAR_URLS["generated-avatar-16"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-17", kind: "claude-code", label: "Generated avatar 17", imageUrl: CHAT_AVATAR_URLS["generated-avatar-17"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-18", kind: "claude-code", label: "Generated avatar 18", imageUrl: CHAT_AVATAR_URLS["generated-avatar-18"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-19", kind: "claude-code", label: "Generated avatar 19", imageUrl: CHAT_AVATAR_URLS["generated-avatar-19"], mediaMode: "photo", defaultEligible: false },
+  { id: "generated-avatar-20", kind: "claude-code", label: "Generated avatar 20", imageUrl: CHAT_AVATAR_URLS["generated-avatar-20"], mediaMode: "photo", defaultEligible: false },
+  { id: "claude-bunny", kind: "claude-code", label: "Claude bunny", imageUrl: CHAT_AVATAR_URLS["claude-bunny"], mediaMode: "photo" },
+  { id: "claude-cat", kind: "claude-code", label: "Claude cat", imageUrl: CHAT_AVATAR_URLS["claude-cat"], mediaMode: "photo" },
+  { id: "claude-dog", kind: "claude-code", label: "Claude dog", imageUrl: CHAT_AVATAR_URLS["claude-dog"], mediaMode: "photo" },
+  { id: "claude-frog", kind: "claude-code", label: "Claude frog", imageUrl: CHAT_AVATAR_URLS["claude-frog"], mediaMode: "photo" },
+  { id: "claude-hamster", kind: "claude-code", label: "Claude hamster", imageUrl: CHAT_AVATAR_URLS["claude-hamster"], mediaMode: "photo" }
 ];
 
 export function chatAvatarOptionsForKind(kind: ChatProviderKind): ChatAvatarOption[] {
@@ -160,7 +163,7 @@ export function mapChatAvatarIdToKind(kind: ChatProviderKind, avatarId: string |
 }
 
 export function avatarForChatAvatarOption(option: ChatAvatarOption, label = option.label): AvatarSpec {
-  return { kind: option.avatarKind ?? "custom", label, imageUrl: option.imageUrl };
+  return { kind: option.avatarKind ?? "custom", label, imageUrl: option.imageUrl, mediaMode: option.mediaMode };
 }
 
 export function avatarForChatParticipant(
@@ -168,11 +171,11 @@ export function avatarForChatParticipant(
   label = chatParticipantDisplayName(participant)
 ): AvatarSpec {
   if (label === CHAT_ASSISTANT_DISPLAY_NAME) {
-    return { kind: "custom", label, imageUrl: CHAT_AVATAR_URLS["accordagents-mark"] };
+    return { kind: "custom", label, imageUrl: CHAT_AVATAR_URLS["accordagents-mark"], mediaMode: "glyph" };
   }
   const avatarId = normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle);
   const option = chatAvatarOption(avatarId);
-  return option ? avatarForChatAvatarOption(option, label) : { kind: "generic", label, initials: initials(label) };
+  return option ? avatarForChatAvatarOption(option, label) : { kind: "generic", label, initials: initials(label), mediaMode: "glyph" };
 }
 
 function stableHash(value: string): number {

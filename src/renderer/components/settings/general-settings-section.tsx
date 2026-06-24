@@ -7,7 +7,7 @@ import { CLI_AGENT_RUN_TIMEOUT_MAX_MS, CLI_AGENT_RUN_TIMEOUT_MIN_MS, cliAgentRun
 
 const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
   "codex-cli": new URL("../../assets/codex-cli.svg", import.meta.url).href,
-  "claude-code": new URL("../../assets/claude-avatar.webp", import.meta.url).href
+  "claude-code": new URL("../../assets/claude-avatar.png", import.meta.url).href
 };
 
 export function GeneralSettingsSection(props: {

@@ -144,7 +144,7 @@ export function ChatParticipantDraftRow(props: {
             return (
               <button
                 type="button"
-                className={`avatar-choice ${option.id === "claude-logo" ? "avatar-choice-claude-logo" : ""} ${selected ? "selected" : ""}`}
+                className={`avatar-choice ${selected ? "selected" : ""}`}
                 title={option.label}
                 aria-label={option.label}
                 aria-pressed={selected}

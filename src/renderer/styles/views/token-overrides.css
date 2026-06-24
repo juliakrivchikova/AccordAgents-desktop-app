@@ -503,16 +503,6 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 12%, transparent);
 }
 
-.avatar-choice.avatar-choice-claude-logo,
-.avatar-choice.avatar-choice-claude-logo:hover,
-.avatar-choice.avatar-choice-claude-logo.selected {
-  background: var(--brand-anthropic);
-}
-
-.avatar-choice.avatar-choice-claude-logo .avatar-anthropic {
-  background: var(--brand-anthropic);
-}
-
 .saved-participant-option.selected strong {
   color: var(--accent-foreground);
 }
@@ -520,49 +510,6 @@
 .saved-participant-option.selected span,
 .saved-participant-option.selected small {
   color: color-mix(in srgb, var(--accent-foreground) 74%, var(--app-muted));
-}
-
-.avatar-codex,
-.message-avatar.avatar-codex,
-.thread-avatar.avatar-codex,
-.message.system .message-avatar.avatar-codex,
-.message.summary .message-avatar.avatar-codex {
-  border: 0;
-  padding: 14%;
-  background: transparent;
-  box-shadow: none;
-  color: var(--brand-codex);
-}
-
-.avatar-codex .provider-avatar-image,
-.message-avatar.avatar-codex .provider-avatar-image,
-.thread-avatar.avatar-codex .provider-avatar-image {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  transform: none;
-}
-
-.avatar-custom {
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-  overflow: visible;
-}
-
-.avatar-custom .custom-avatar-image {
-  display: block;
-  width: 100%;
-  height: 100%;
-  margin: auto;
-  border-radius: 0;
-  object-fit: contain;
-  transform: none;
-}
-
-.avatar-choice .avatar-custom {
-  width: 100%;
-  height: 100%;
 }
 
 .message-avatar,
@@ -611,8 +558,8 @@
 
 .message-avatar.avatar-anthropic,
 .thread-avatar.avatar-anthropic {
-  background: color-mix(in srgb, var(--app-danger-soft) 58%, var(--app-avatar-bg));
-  color: var(--app-danger);
+  background: var(--brand-anthropic);
+  color: var(--app-surface);
 }
 
 .message-avatar.avatar-codex,
@@ -623,8 +570,6 @@
   color: var(--brand-codex);
 }
 
-.message-avatar.avatar-gemini,
-.thread-avatar.avatar-gemini,
 .message-avatar.avatar-generic,
 .thread-avatar.avatar-generic,
 .thread-avatar.typing-avatar {
@@ -632,19 +577,10 @@
   color: var(--app-accent);
 }
 
-.message-avatar.avatar-custom,
-.thread-avatar.avatar-custom {
-  padding: 4px;
-  overflow: hidden;
-}
-
-.message-avatar.avatar-custom .custom-avatar-image,
-.thread-avatar.avatar-custom .custom-avatar-image {
-  width: 100%;
-  height: 100%;
-  border-radius: 6px;
-  object-fit: contain;
-  transform: none;
+.message-avatar.avatar-gemini,
+.thread-avatar.avatar-gemini {
+  background: var(--app-info-soft);
+  color: var(--brand-gemini);
 }
 
 .role-config-card .settings-item-head {
@@ -1034,8 +970,8 @@
 }
 
 .chat-thread-avatar.avatar-anthropic {
-  background: color-mix(in srgb, var(--app-danger-soft) 58%, var(--app-avatar-bg));
-  color: var(--app-danger);
+  background: var(--brand-anthropic);
+  color: var(--app-surface);
 }
 
 .chat-thread-avatar.avatar-codex {
@@ -1043,24 +979,14 @@
   color: var(--brand-codex);
 }
 
-.chat-thread-avatar.avatar-gemini,
 .chat-thread-avatar.avatar-generic {
   background: color-mix(in srgb, var(--app-accent-soft) 58%, var(--app-avatar-bg));
   color: var(--app-accent);
 }
 
-.chat-thread-avatar.avatar-custom {
-  background: transparent;
-  color: inherit;
-  overflow: hidden;
-}
-
-.chat-thread-avatar.avatar-custom .custom-avatar-image {
-  width: 100%;
-  height: 100%;
-  border-radius: 6px;
-  object-fit: contain;
-  transform: none;
+.chat-thread-avatar.avatar-gemini {
+  background: var(--app-info-soft);
+  color: var(--brand-gemini);
 }
 
 .chat-thread-avatar {

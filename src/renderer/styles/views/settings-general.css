@@ -96,15 +96,11 @@
   display: block;
 }
 
-/* Full-bleed brand tiles (e.g. Claude) fill the chip and inherit its rounded corners. */
+/* Claude's normalized asset is a transparent white mark, so the chip supplies
+   the terracotta disc (like the Avatar component) and insets the mark via the
+   base .gen-cli-icon img rule. */
 .settings-view .gen-cli-icon-full {
-  background: transparent;
-}
-
-.settings-view .gen-cli-icon-full img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+  background: var(--brand-anthropic);
 }
 
 .settings-view .gen-cli-text {

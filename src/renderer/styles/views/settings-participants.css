@@ -97,6 +97,7 @@
 .participants-mini-avatar {
   width: 26px;
   height: 26px;
+  border-radius: 6px;
 }
 
 .participants-avatar-stack-more {
@@ -263,11 +264,6 @@
   border-radius: var(--radius-control);
   overflow: hidden;
   background: var(--app-avatar-bg);
-}
-
-.participants-card-avatar.avatar-codex {
-  flex-basis: 44px;
-  padding: 6px;
 }
 
 .participant-preset-title {

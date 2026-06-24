@@ -305,17 +305,9 @@
   width: 24px !important;
   height: 24px !important;
   padding: 0 !important;
-  background: var(--app-avatar-bg);
-}
-
-.new-chat-avatar-stack-item .mini-avatar.avatar-codex {
-  padding: 3px !important;
-  background: color-mix(in srgb, var(--app-accent-soft) 72%, var(--app-avatar-bg));
-}
-
-.new-chat-participant-row .mini-avatar.avatar-codex {
-  padding: 4px !important;
-  background: color-mix(in srgb, var(--app-accent-soft) 72%, var(--app-avatar-bg));
+  /* No per-context disc background: inherit the base per-kind discs
+     (anthropic -> terracotta, codex -> accent-soft, etc.) so Claude's white
+     mark stays visible and every kind matches the rest of the app. */
 }
 
 .new-chat-send {
@@ -470,13 +462,6 @@
   height: 30px !important;
   padding: 0 !important;
   flex: 0 0 auto;
-}
-
-.new-chat-avatar-stack-item .mini-avatar img,
-.new-chat-participant-row .mini-avatar img {
-  width: 100% !important;
-  height: 100% !important;
-  object-fit: cover;
 }
 
 .new-chat-participant-text {
@@ -918,8 +903,7 @@
   justify-content: center;
   width: 46px;
   height: 46px;
-  border-radius: 0;
-  overflow: visible;
+  border-radius: var(--radius-control);
 }
 
 .chat-row-remove {
