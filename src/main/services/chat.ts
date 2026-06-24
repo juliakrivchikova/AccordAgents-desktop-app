@@ -523,10 +523,6 @@ export class ChatService {
         );
     const requestedParticipants = await this.validateParticipants(participantInputs, [], true);
     const participants = await this.ensureAdministratorParticipant(requestedParticipants);
-    const assistantParticipant = participants.find((participant) => participant.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID);
-    const setupMessage = assistantParticipant
-      ? this.chatAssistantSetupMessage(requestedParticipants, assistantParticipant, !hasRequestedParticipants && !skipDefaultParticipants)
-      : undefined;
     const conversation: Conversation = {
       id: randomUUID(),
       title: this.normalizeChatTitle(request.title ?? ""),
@@ -537,8 +533,7 @@ export class ChatService {
       messages: [
         this.message("system", this.chatIntro(participants), undefined, {
           threadId: "system"
-        }),
-        ...(setupMessage ? [setupMessage] : [])
+        })
       ],
       findings: [],
       metadata: {
@@ -583,39 +578,6 @@ export class ChatService {
             }
           : participant.permissions
       }));
-  }
-
-  private chatAssistantSetupMessage(
-    setupParticipants: ChatParticipant[],
-    assistantParticipant: ChatParticipant,
-    addedDefaults: boolean
-  ): ChatMessage {
-    const handles = setupParticipants.map((participant) => `@${participant.handle}`);
-    const content = handles.length > 0
-      ? [
-          "Hi, I'm Chat Assistant.",
-          addedDefaults
-            ? `I added ${this.formatHandleList(handles)} as ${handles.length === 1 ? "a generic participant" : "generic participants"}.`
-            : `You're starting with ${this.formatHandleList(handles)}.`,
-          "Describe your problem, or tell me exactly who else you want in this chat, and I can help customize the participants."
-        ].join("\n\n")
-      : [
-          "Hi, I'm Chat Assistant.",
-          "Describe your problem, or tell me who you want in this chat, and I can help add participants."
-        ].join("\n\n");
-    return {
-      id: randomUUID(),
-      role: "participant",
-      participantId: assistantParticipant.id,
-      participantLabel: `@${assistantParticipant.handle}`,
-      content,
-      createdAt: new Date().toISOString(),
-      status: "done",
-      metadata: {
-        threadId: "system",
-        appMessageSource: "chat-assistant-cold-start"
-      }
-    };
   }
 
   async renameConversation(request: RenameChatConversationRequest): Promise<Conversation | undefined> {
@@ -3792,10 +3754,7 @@ export class ChatService {
     options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions }
   ): { prompt: string; sections: ChatPromptSectionSizes } {
     const canRequestPermissions = this.canRequestPermissionChanges(session);
-    const dynamicHeader = [
-      this.participantRepositoryLine(conversation, participant.kind, options.agentMode, options.permissions),
-      this.participantPermissionPolicy(participant.kind, options.agentMode, options.permissions, canRequestPermissions)
-    ].filter(Boolean).join("\n");
+    const dynamicHeader = this.participantDynamicHeader(conversation, participant, session, options);
 
     let staticEnvelope = "";
     if (options.includeRoleInstructions) {
@@ -3816,7 +3775,14 @@ export class ChatService {
       this.formatMessage(triggerMessage, false, false)
     ].join("\n\n");
     const skillsBlock = this.skillMentionsPromptSection(triggerMessage, participant.kind);
-    const mentionsBlock = this.repoFileMentionsPromptSection(triggerMessage, participant.kind, options.agentMode, options.permissions, canRequestPermissions);
+    const mentionsBlock = this.repoFileMentionsPromptSection(
+      triggerMessage,
+      participant.kind,
+      options.agentMode,
+      options.permissions,
+      canRequestPermissions,
+      this.isAdministratorSession(session)
+    );
     const attachmentsBlock = this.imageAttachmentsPromptSection(triggerMessage);
     // When role instructions are included this turn they already carry the rules
     // verbatim (the `## Participant Behavior Rules` section), so skip the per-turn
@@ -3933,7 +3899,8 @@ export class ChatService {
     providerKind: ChatParticipant["kind"],
     agentMode: ChatAgentMode,
     runPermissions: ChatAgentPermissions,
-    _canRequestPermissions: boolean
+    _canRequestPermissions: boolean,
+    suppressRepoEscalation = false
   ): string {
     const mentions = this.repoFileMentions(message);
     if (mentions.length === 0) {
@@ -3942,7 +3909,11 @@ export class ChatService {
     const permissions = effectiveChatAgentPermissionsForProvider(providerKind, agentMode, runPermissions);
     const header = "Referenced repository files (paths relative to repo root):";
     const paths = mentions.map((mention) => `- ${mention.path}`);
-    const guidance = permissions.repoRead
+    const guidance = suppressRepoEscalation
+      ? permissions.repoRead
+        ? "Repository access is enabled; read these only if User explicitly asked Chat Assistant to handle the task."
+        : "Chat Assistant does not read repository files by default; suggest adding a generic participant or ask User to enable repository access if they insist Chat Assistant handle the task."
+      : permissions.repoRead
       ? "You may read these."
       : "repoRead is not granted; see permissions policy above for the escalation path.";
     return [header, ...paths, guidance].join("\n");
@@ -4050,8 +4021,14 @@ export class ChatService {
 
   private appToolPromptPolicy(session: ChatParticipantSession): string {
     const agentMode = normalizeChatAgentMode(session.participantAgentMode);
-    const permissionPolicyLines = this.canRequestPermissionChanges(session)
-      ? agentMode === "auto"
+    const canRequestPermissions = this.canRequestPermissionChanges(session);
+    const permissionPolicyLines = canRequestPermissions
+      ? this.isAdministratorSession(session)
+        ? [
+            "Permission MCP tool: `app_permissions_request_change` is available when Chat Assistant needs approval for web access or another explicitly user-requested non-default capability.",
+            "Do not use permission requests for repository access, file editing, or shell commands by default. For code or repository tasks, first suggest adding a generic participant; proceed only if User explicitly asks Chat Assistant to handle it and enables the needed participant permissions."
+          ]
+        : agentMode === "auto"
         ? [
             "Permission MCP tool: `app_permissions_request_change` is available when this participant needs approval for blocked capabilities.",
             "In Auto-review mode, repo read, workspace write, web, and shell commands all run under the provider's native auto review. Do not call `app_permissions_request_change` for these, and do not request shellRules; shell decisions are handled by native auto. Portable repo/web/edit requests return already_granted if called anyway. Only genuinely out-of-preset capabilities need a request, for example `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants. After a permission MCP call, inspect the status: pending_user_approval means it is awaiting User approval; already_granted means the capability is available."
@@ -4108,6 +4085,10 @@ export class ChatService {
 
   private appMcpToolInventoryKey(toolNames: string[]): string {
     return this.shortHash([...toolNames].sort().join("|"));
+  }
+
+  private isAdministratorSession(session: ChatParticipantSession): boolean {
+    return session.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID;
   }
 
   private appMcpClientGenerationId(
@@ -4360,6 +4341,36 @@ export class ChatService {
   ): string {
     const permissions = effectiveChatAgentPermissionsForProvider(participant.kind, agentMode, runPermissions);
     return permissions.repoRead && conversation.repoPath ? conversation.repoPath : workspacePath;
+  }
+
+  private participantDynamicHeader(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    session: ChatParticipantSession,
+    options: { agentMode: ChatAgentMode; permissions: ChatAgentPermissions }
+  ): string {
+    const canRequestPermissions = this.canRequestPermissionChanges(session);
+    if (this.isAdministratorSession(session)) {
+      return this.chatAssistantPermissionPolicy(participant.kind, options.agentMode, options.permissions, canRequestPermissions);
+    }
+    return [
+      this.participantRepositoryLine(conversation, participant.kind, options.agentMode, options.permissions),
+      this.participantPermissionPolicy(participant.kind, options.agentMode, options.permissions, canRequestPermissions)
+    ].filter(Boolean).join("\n");
+  }
+
+  private chatAssistantPermissionPolicy(
+    providerKind: ChatParticipant["kind"],
+    agentMode: ChatAgentMode,
+    runPermissions: ChatAgentPermissions,
+    canRequestPermissions: boolean
+  ): string {
+    const permissions = effectiveChatAgentPermissionsForProvider(providerKind, agentMode, runPermissions);
+    const permissionLines = chatPermissionPromptLines({ agentMode, providerKind, permissions, canRequestPermissions });
+    return [
+      "Repository access, file edits, and shell commands are not Chat Assistant's default behavior. For code or repository tasks, first suggest adding a generic participant; if User explicitly asks Chat Assistant to handle the task, User can enable repository, edit, or shell permissions in participant controls.",
+      permissionLines.web
+    ].filter(Boolean).join(" ");
   }
 
   private participantRepositoryLine(
@@ -5244,7 +5255,7 @@ export class ChatService {
         avatarId: undefined,
         agentMode: "default",
         permissions: {
-          repoRead: true,
+          repoRead: false,
           workspaceWrite: false,
           webAccess: false,
           shell: {
