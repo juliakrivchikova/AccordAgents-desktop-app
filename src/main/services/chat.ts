@@ -76,6 +76,7 @@ import type {
   RemoveChatParticipantRequest
 } from "../../shared/types";
 import { isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
+import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
 import { normalizeChatReactionEmoji } from "../../shared/chatReactions";
 import {
   CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS,
@@ -6700,16 +6701,21 @@ export class ChatService {
       triggerMessageId: actor.triggerMessageId,
       items
     };
+    const requestMetadata: ChatMessageMetadata = {
+      threadId: actor.triggerThreadId ?? actor.triggerMessageId ?? batchId,
+      parentMessageId: actor.triggerMessageId,
+      sourceMessageId: actor.triggerMessageId,
+      participantRequest: batch
+    };
+    if (source === "inferred") {
+      requestMetadata.hiddenFromTimeline = true;
+      requestMetadata.chatThreadRootId = actor.triggerChatThreadRootId ?? actor.triggerMessageId;
+    }
     const requestMessage = this.message(
       "participant",
       this.formatParticipantRequestMessage(requester.handle, items),
       { id: requester.id, kind: requester.kind, label: `@${requester.handle}`, model: requester.model },
-      {
-        threadId: actor.triggerThreadId ?? actor.triggerMessageId ?? batchId,
-        parentMessageId: actor.triggerMessageId,
-        sourceMessageId: actor.triggerMessageId,
-        participantRequest: batch
-      }
+      requestMetadata
     );
     const request: ChatParticipantRequestApprovalRequest = {
       requests,
@@ -6947,11 +6953,12 @@ export class ChatService {
         return;
       }
       try {
+        const requestRootId = participantRequestVisibleRootId(conversation.messages, requestMessage);
         const targetTriggerMessage: ChatMessage = {
           ...requestMessage,
           metadata: {
             ...requestMessage.metadata,
-            chatThreadRootId: requestMessage.id
+            chatThreadRootId: requestRootId
           }
         };
         const messages = await this.runParticipantTurnSerialized(conversation, target, targetTriggerMessage, runId, undefined, undefined, {
@@ -7082,12 +7089,15 @@ export class ChatService {
             )
           : undefined;
         const participantRequestBatch = participantRequestMessage?.metadata?.participantRequest;
+        const participantRequestRootId = participantRequestMessage
+          ? participantRequestVisibleRootId(conversation.messages, participantRequestMessage)
+          : undefined;
         const resumeTrigger: ChatMessage = participantRequestMessage
           ? {
               ...trigger,
               metadata: {
                 ...trigger.metadata,
-                chatThreadRootId: participantRequestMessage.id
+                chatThreadRootId: participantRequestRootId
               }
             }
           : trigger;
@@ -7110,7 +7120,7 @@ export class ChatService {
           {
             threadId: trigger.metadata?.threadId ?? trigger.id,
             parentMessageId: trigger.id,
-            chatThreadRootId: participantRequestMessage?.id ?? trigger.metadata?.chatThreadRootId,
+            chatThreadRootId: participantRequestRootId ?? trigger.metadata?.chatThreadRootId,
             sourceMessageId: trigger.id
           }
         ));
@@ -7314,6 +7324,7 @@ export class ChatService {
           status: "resuming_requester",
           updatedAt: now
         }));
+        const participantRequestRootId = participantRequestVisibleRootId(conversation.messages, requestMessage);
         const trigger = this.message(
           "system",
           [
@@ -7324,7 +7335,7 @@ export class ChatService {
           {
             threadId: requestMessage.metadata?.threadId ?? requestMessage.id,
             parentMessageId: requestMessage.id,
-            chatThreadRootId: requestMessage.id,
+            chatThreadRootId: participantRequestRootId,
             sourceMessageId: requestMessage.id
           }
         );

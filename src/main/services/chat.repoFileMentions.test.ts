@@ -6,6 +6,7 @@ import test from "node:test";
 import { ChatService } from "./chat";
 import { StorageService } from "./storage";
 import { defaultChatAgentPermissions, effectiveChatAgentPermissionsForProvider, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { normalizeInferredParticipantRequestThreads } from "../../shared/chatParticipantRequestThreads";
 import { INTERRUPTED_RUN_WARNING } from "../../shared/warnings";
 import type {
   ChatAppToolApproval,
@@ -1535,6 +1536,197 @@ test("requestParticipantsFromTool roots running recipient replies under the requ
   assert.equal(targetReply?.metadata?.threadId, "outer-thread");
   assert.equal(targetReply?.metadata?.parentMessageId, requestMessage.id);
   assert.equal(targetReply?.metadata?.chatThreadRootId, requestMessage.id);
+});
+
+test("inferred participant request carrier is hidden and rooted to the source visual root", () => {
+  const requester = chatParticipant();
+  const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
+  const conversation = chatConversation([requester, target], "/repo");
+  const source = {
+    ...participantMessage(requester, "source-message", "Taylor should check this. @taylor please verify."),
+    metadata: {
+      threadId: "outer-thread",
+      parentMessageId: "outer-root",
+      chatThreadRootId: "outer-root"
+    }
+  };
+  const { service } = testService({ conversations: [conversation] });
+
+  (service as any).appendParticipantTurnMessages(conversation, requester, [source]);
+
+  const requestMessage = conversation.messages.find((message) => message.metadata?.participantRequest);
+  const batch = requestMessage?.metadata?.participantRequest;
+  assert.ok(requestMessage);
+  assert.equal(batch?.source, "inferred");
+  assert.equal(batch?.triggerMessageId, "source-message");
+  assert.equal(requestMessage.metadata?.hiddenFromTimeline, true);
+  assert.equal(requestMessage.metadata?.threadId, "outer-thread");
+  assert.equal(requestMessage.metadata?.parentMessageId, "source-message");
+  assert.equal(requestMessage.metadata?.sourceMessageId, "source-message");
+  assert.equal(requestMessage.metadata?.chatThreadRootId, "outer-root");
+});
+
+test("runParticipantRequest roots inferred recipient replies under the source visual root", async () => {
+  const requester = chatParticipant();
+  const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
+  const conversation = chatConversation([requester, target], "/repo");
+  conversation.messages.push({
+    ...participantMessage(requester, "source-message", "Taylor should check this. @taylor please verify."),
+    metadata: {
+      threadId: "outer-thread",
+      parentMessageId: "outer-root",
+      chatThreadRootId: "outer-root"
+    }
+  }, {
+    id: "request-message",
+    role: "participant",
+    participantId: requester.id,
+    participantLabel: `@${requester.handle}`,
+    content: "@taylor Review this.",
+    createdAt: NOW,
+    status: "done",
+    metadata: {
+      threadId: "outer-thread",
+      parentMessageId: "source-message",
+      sourceMessageId: "source-message",
+      chatThreadRootId: "outer-root",
+      hiddenFromTimeline: true,
+      participantRequest: {
+        id: "batch-1",
+        requesterParticipantId: requester.id,
+        requesterHandle: requester.handle,
+        source: "inferred",
+        resumeRequester: false,
+        status: "running",
+        depth: 1,
+        createdAt: NOW,
+        updatedAt: NOW,
+        triggerMessageId: "source-message",
+        items: [{
+          targetParticipantId: target.id,
+          targetHandle: target.handle,
+          prompt: "Review this.",
+          status: "running",
+          createdAt: NOW,
+          updatedAt: NOW
+        }]
+      }
+    }
+  });
+  const { service, storage } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+  let capturedTrigger: ChatMessage | undefined;
+  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  serviceAny.refreshStoredChatState = async () => undefined;
+  serviceAny.runParticipantTurnSerialized = async (
+    _conversation: Conversation,
+    participant: ChatParticipant,
+    trigger: ChatMessage
+  ) => {
+    capturedTrigger = trigger;
+    return [{
+      ...participantMessage(participant, "target-reply", "Reviewed."),
+      metadata: {
+        threadId: trigger.metadata?.threadId ?? trigger.id,
+        parentMessageId: trigger.id,
+        chatThreadRootId: trigger.metadata?.chatThreadRootId,
+        sourceMessageId: trigger.id
+      }
+    }];
+  };
+
+  await serviceAny.runParticipantRequest(conversation.id, "request-message", "run-1", 1);
+
+  const saved = await storage.getConversation(conversation.id);
+  const targetReply = saved?.messages.find((message) => message.id === "target-reply");
+  const requestBatch = saved?.messages.find((message) => message.id === "request-message")?.metadata?.participantRequest;
+  assert.equal(capturedTrigger?.id, "request-message");
+  assert.equal(capturedTrigger?.metadata?.chatThreadRootId, "outer-root");
+  assert.equal(targetReply?.metadata?.threadId, "outer-thread");
+  assert.equal(targetReply?.metadata?.parentMessageId, "request-message");
+  assert.equal(targetReply?.metadata?.chatThreadRootId, "outer-root");
+  assert.equal(targetReply?.metadata?.sourceMessageId, "request-message");
+  assert.equal(requestBatch?.status, "answered");
+  assert.equal(requestBatch?.items[0].replyMessageId, "target-reply");
+});
+
+test("normalizeInferredParticipantRequestThreads hides legacy carriers and reroots descendants", () => {
+  const requester = chatParticipant();
+  const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
+  const conversation = chatConversation([requester, target], "/repo");
+  conversation.messages.push({
+    ...participantMessage(requester, "source-message", "Taylor should check this. @taylor please verify."),
+    metadata: {
+      threadId: "outer-thread",
+      parentMessageId: "outer-root",
+      chatThreadRootId: "outer-root"
+    }
+  }, {
+    id: "request-message",
+    role: "participant",
+    participantId: requester.id,
+    participantLabel: `@${requester.handle}`,
+    content: "@taylor Review this.",
+    createdAt: NOW,
+    status: "done",
+    metadata: {
+      threadId: "outer-thread",
+      parentMessageId: "source-message",
+      sourceMessageId: "source-message",
+      participantRequest: {
+        id: "batch-1",
+        requesterParticipantId: requester.id,
+        requesterHandle: requester.handle,
+        source: "inferred",
+        resumeRequester: true,
+        status: "answered",
+        depth: 1,
+        createdAt: NOW,
+        updatedAt: NOW,
+        triggerMessageId: "source-message",
+        items: [{
+          targetParticipantId: target.id,
+          targetHandle: target.handle,
+          prompt: "Review this.",
+          status: "answered",
+          replyMessageId: "target-reply",
+          createdAt: NOW,
+          updatedAt: NOW
+        }]
+      }
+    }
+  }, {
+    ...participantMessage(target, "target-reply", "Reviewed."),
+    metadata: {
+      threadId: "outer-thread",
+      parentMessageId: "request-message",
+      chatThreadRootId: "request-message",
+      sourceMessageId: "request-message"
+    }
+  }, {
+    id: "resume-message",
+    role: "system",
+    content: "Auto-resumed Drew after participant request.",
+    createdAt: NOW,
+    status: "done",
+    metadata: {
+      threadId: "outer-thread",
+      parentMessageId: "request-message",
+      chatThreadRootId: "request-message",
+      sourceMessageId: "request-message"
+    }
+  });
+
+  const changed = normalizeInferredParticipantRequestThreads(conversation);
+
+  const requestMessage = conversation.messages.find((message) => message.id === "request-message");
+  const targetReply = conversation.messages.find((message) => message.id === "target-reply");
+  const resumeMessage = conversation.messages.find((message) => message.id === "resume-message");
+  assert.equal(changed, true);
+  assert.equal(requestMessage?.metadata?.hiddenFromTimeline, true);
+  assert.equal(requestMessage?.metadata?.chatThreadRootId, "outer-root");
+  assert.equal(targetReply?.metadata?.chatThreadRootId, "outer-root");
+  assert.equal(resumeMessage?.metadata?.chatThreadRootId, "outer-root");
 });
 
 function testService(options: { canRequestPermissions?: boolean; conversations?: Conversation[]; onSnapshot?: (conversation: Conversation) => void } = {}): {

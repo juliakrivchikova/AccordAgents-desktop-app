@@ -6,6 +6,7 @@ import type {
   AppSettings,
   ChatImageInput,
   ChatParticipant,
+  ChatParticipantRequestBatch,
   ChatParticipantSession,
   ChatSkillMention,
   Conversation,
@@ -49,6 +50,7 @@ export function ChatThreadPanel(props: {
   onCompactParticipant: ParticipantCompactHandler;
   onStopRun?: (runId: string) => void;
   continuedMentionRequestIds: Set<string>;
+  inferredParticipantRequestsByTrigger: Map<string, ChatParticipantRequestBatch[]>;
 }): JSX.Element {
   const mentionDirectory = chatMentionDirectory(props.participants, props.settings.chatRoleConfigs, props.sessionsByParticipant, props.contextUsageByParticipant);
   const replyLabel = `${props.replies.length} ${props.replies.length === 1 ? "reply" : "replies"}`;
@@ -76,6 +78,7 @@ export function ChatThreadPanel(props: {
           submittingChoiceIds={props.submittingChoiceIds}
           inThread
           hasContinuationReply={props.continuedMentionRequestIds.has(props.rootMessage.id)}
+          inferredParticipantRequests={props.inferredParticipantRequestsByTrigger.get(props.rootMessage.id)}
           liveProgress={props.liveProgressById.get(props.rootMessage.id)}
           onApproveMentions={props.onApproveMentions}
           onRejectMentions={props.onRejectMentions}
@@ -101,6 +104,7 @@ export function ChatThreadPanel(props: {
                 submittingChoiceIds={props.submittingChoiceIds}
                 inThread
                 hasContinuationReply={props.continuedMentionRequestIds.has(message.id)}
+                inferredParticipantRequests={props.inferredParticipantRequestsByTrigger.get(message.id)}
                 liveProgress={props.liveProgressById.get(message.id)}
                 onApproveMentions={props.onApproveMentions}
                 onRejectMentions={props.onRejectMentions}
