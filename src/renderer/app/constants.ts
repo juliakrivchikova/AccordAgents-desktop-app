@@ -7,6 +7,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   providers: [],
   chatRoleConfigs: [],
   chatBehaviorRules: [],
+  chatSavedPrompts: [],
   chatParticipantConfigs: []
 };
 

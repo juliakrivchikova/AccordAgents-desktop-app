@@ -7,6 +7,8 @@ import type {
   AgentHealth,
   ChatBehaviorRuleConfig,
   ChatBehaviorRuleConfigUpdate,
+  ChatSavedPromptConfig,
+  ChatSavedPromptConfigUpdate,
   ChatAgentMode,
   ChatAgentPermissions,
   ChatAppToolCapability,
@@ -28,6 +30,13 @@ import {
   CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS,
   CHAT_BEHAVIOR_RULE_LABEL_MAX_CHARS
 } from "../../shared/chatBehaviorRules";
+import {
+  CHAT_SAVED_PROMPT_BODY_MAX_CHARS,
+  CHAT_SAVED_PROMPT_LABEL_MAX_CHARS,
+  CHAT_SAVED_PROMPT_TRIGGER_MAX_CHARS,
+  isValidChatSavedPromptTrigger,
+  normalizeChatSavedPromptTrigger
+} from "../../shared/chatSavedPrompts";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
 
 type StoredProviderSettings = ProviderSettings & {
@@ -43,6 +52,7 @@ interface StoredSettings {
   providers: StoredProviderSettings[];
   chatRoleConfigs?: ChatRoleConfig[];
   chatBehaviorRules?: ChatBehaviorRuleConfig[];
+  chatSavedPrompts?: ChatSavedPromptConfig[];
   chatParticipantConfigs?: ChatParticipantConfig[];
   chatParticipantSeedState?: ChatParticipantSeedState;
 }
@@ -1570,6 +1580,7 @@ export class SettingsService {
       repoFileOpenAction: stored.repoFileOpenAction,
       chatRoleConfigs: stored.chatRoleConfigs ?? DEFAULT_CHAT_ROLES,
       chatBehaviorRules: stored.chatBehaviorRules ?? [],
+      chatSavedPrompts: stored.chatSavedPrompts ?? [],
       chatParticipantConfigs: stored.chatParticipantConfigs ?? [],
       chatParticipantSeedState: stored.chatParticipantSeedState,
       providers: stored.providers.map((provider) => ({
@@ -1893,6 +1904,83 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  async saveChatSavedPromptConfig(update: ChatSavedPromptConfigUpdate): Promise<AppSettings> {
+    const stored = await this.readStored();
+    const label = update.label.trim();
+    const trigger = normalizeChatSavedPromptTrigger(update.trigger);
+    const body = update.body.trim();
+    if (!label) {
+      throw new Error("Saved prompt name is required.");
+    }
+    if (label.length > CHAT_SAVED_PROMPT_LABEL_MAX_CHARS) {
+      throw new Error(`Saved prompt name must be ${CHAT_SAVED_PROMPT_LABEL_MAX_CHARS} characters or less.`);
+    }
+    if (!trigger) {
+      throw new Error("Saved prompt slash trigger is required.");
+    }
+    if (trigger.length > CHAT_SAVED_PROMPT_TRIGGER_MAX_CHARS) {
+      throw new Error(`Saved prompt slash trigger must be ${CHAT_SAVED_PROMPT_TRIGGER_MAX_CHARS} characters or less.`);
+    }
+    if (!isValidChatSavedPromptTrigger(trigger)) {
+      throw new Error("Saved prompt slash trigger may use letters, numbers, underscores, and hyphens only.");
+    }
+    if (!body) {
+      throw new Error("Saved prompt body is required.");
+    }
+    if (body.length > CHAT_SAVED_PROMPT_BODY_MAX_CHARS) {
+      throw new Error(`Saved prompt body must be ${CHAT_SAVED_PROMPT_BODY_MAX_CHARS} characters or less.`);
+    }
+
+    const prompts = stored.chatSavedPrompts ?? [];
+    const normalizedId = update.id?.trim();
+    const duplicate = prompts.find((prompt) =>
+      prompt.id !== normalizedId && prompt.trigger.toLowerCase() === trigger.toLowerCase()
+    );
+    if (duplicate) {
+      throw new Error(`Saved prompt /${trigger} already exists.`);
+    }
+
+    const now = new Date().toISOString();
+    const existing = normalizedId ? prompts.find((prompt) => prompt.id === normalizedId) : undefined;
+    if (existing) {
+      stored.chatSavedPrompts = prompts.map((prompt) =>
+        prompt.id === existing.id
+          ? {
+              ...prompt,
+              label,
+              trigger,
+              body,
+              version: prompt.version + 1,
+              updatedAt: now
+            }
+          : prompt
+      );
+    } else {
+      stored.chatSavedPrompts = [
+        ...prompts,
+        {
+          id: this.savedPromptIdFromLabel(label),
+          label,
+          trigger,
+          body,
+          version: 1,
+          updatedAt: now
+        }
+      ];
+    }
+
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
+  async deleteChatSavedPromptConfig(id: string): Promise<AppSettings> {
+    const stored = await this.readStored();
+    const normalized = id.trim();
+    stored.chatSavedPrompts = (stored.chatSavedPrompts ?? []).filter((prompt) => prompt.id !== normalized);
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
   async saveChatParticipantConfig(update: ChatParticipantConfigUpdate): Promise<AppSettings> {
     const stored = await this.readStored();
     const participants = stored.chatParticipantConfigs ?? [];
@@ -2115,6 +2203,7 @@ export class SettingsService {
       providers,
       chatRoleConfigs: this.mergeDefaultRoles(settings.chatRoleConfigs),
       chatBehaviorRules: this.normalizeBehaviorRules(settings.chatBehaviorRules),
+      chatSavedPrompts: this.normalizeSavedPrompts(settings.chatSavedPrompts),
       chatParticipantConfigs: this.normalizeParticipantConfigs(settings.chatParticipantConfigs),
       chatParticipantSeedState: this.normalizeSeedState(settings.chatParticipantSeedState)
     };
@@ -2171,6 +2260,40 @@ export class SettingsService {
         instructions: rule.instructions.trim(),
         version: Number.isFinite(rule.version) && rule.version > 0 ? Math.floor(rule.version) : 1,
         updatedAt: rule.updatedAt || new Date().toISOString()
+      }));
+  }
+
+  private normalizeSavedPrompts(prompts: ChatSavedPromptConfig[] | undefined): ChatSavedPromptConfig[] {
+    const seenIds = new Set<string>();
+    const seenTriggers = new Set<string>();
+    return (Array.isArray(prompts) ? prompts : [])
+      .filter((prompt): prompt is ChatSavedPromptConfig => {
+        const id = typeof prompt.id === "string" ? prompt.id.trim() : "";
+        const label = typeof prompt.label === "string" ? prompt.label.trim() : "";
+        const trigger = typeof prompt.trigger === "string" ? normalizeChatSavedPromptTrigger(prompt.trigger) : "";
+        const body = typeof prompt.body === "string" ? prompt.body.trim() : "";
+        const normalizedTrigger = trigger.toLowerCase();
+        if (
+          !id ||
+          !label ||
+          !isValidChatSavedPromptTrigger(trigger) ||
+          !body ||
+          seenIds.has(id) ||
+          seenTriggers.has(normalizedTrigger)
+        ) {
+          return false;
+        }
+        seenIds.add(id);
+        seenTriggers.add(normalizedTrigger);
+        return true;
+      })
+      .map((prompt) => ({
+        id: prompt.id.trim(),
+        label: prompt.label.trim().slice(0, CHAT_SAVED_PROMPT_LABEL_MAX_CHARS),
+        trigger: normalizeChatSavedPromptTrigger(prompt.trigger).slice(0, CHAT_SAVED_PROMPT_TRIGGER_MAX_CHARS),
+        body: prompt.body.trim().slice(0, CHAT_SAVED_PROMPT_BODY_MAX_CHARS),
+        version: Number.isFinite(prompt.version) && prompt.version > 0 ? Math.floor(prompt.version) : 1,
+        updatedAt: prompt.updatedAt || new Date().toISOString()
       }));
   }
 
@@ -2322,6 +2445,17 @@ export class SettingsService {
     return (
       `${slug}-${randomUUID()}`
     );
+  }
+
+  private savedPromptIdFromLabel(label: string): string {
+    const slug = (
+      label
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 48) || "saved-prompt"
+    );
+    return `${slug}-${randomUUID()}`;
   }
 
   private defaultRoundLimit(settings: StoredSettings): number {

@@ -2,6 +2,7 @@ import { FileText, ListChecks, Minimize2 } from "lucide-react";
 
 import type {
   ChatParticipant,
+  ChatSavedPromptConfig,
   RepoFileSearchResult,
   UserSkillSummary
 } from "../../../shared/types";
@@ -17,6 +18,7 @@ export function ChatComposerMenus(props: {
   insertCompactCommand: () => void;
   insertFileMention: (file: RepoFileSearchResult) => void;
   insertMention: (participant: ChatParticipant) => void;
+  insertSavedPrompt: (prompt: ChatSavedPromptConfig) => void;
   insertSkillMention: (skill: UserSkillSummary) => void;
   mentionIndex: number;
   mentionOptions: ChatParticipant[];
@@ -27,6 +29,7 @@ export function ChatComposerMenus(props: {
   skillTargetLabel?: string;
   visibleCommandOptions: SlashCommandOption[];
   visibleFileOptions: RepoFileSearchResult[];
+  visiblePromptOptions: ChatSavedPromptConfig[];
   visibleSkillOptions: UserSkillSummary[];
 }): JSX.Element {
   return (
@@ -75,9 +78,14 @@ export function ChatComposerMenus(props: {
           ))}
         </div>
       )}
-      {props.skillQuery !== undefined && (props.visibleCommandOptions.length > 0 || props.visibleSkillOptions.length > 0 || props.skillTargetLabel) && (
+      {props.skillQuery !== undefined && (
+        props.visibleCommandOptions.length > 0 ||
+        props.visiblePromptOptions.length > 0 ||
+        props.visibleSkillOptions.length > 0 ||
+        props.skillTargetLabel
+      ) && (
         <div className="mention-menu skill-mention-menu" role="listbox">
-          <div className="chat-popover-section-title">Skills</div>
+          <div className="chat-popover-section-title">Slash</div>
           {props.skillTargetLabel && <div className="skill-mention-menu-context">{props.skillTargetLabel}</div>}
           {props.visibleCommandOptions.map((command, index) => (
             <button
@@ -97,8 +105,29 @@ export function ChatComposerMenus(props: {
               {index === 0 && <kbd>Enter</kbd>}
             </button>
           ))}
-          {props.visibleSkillOptions.map((skill, index) => {
+          {props.visiblePromptOptions.map((prompt, index) => {
             const optionIndex = props.visibleCommandOptions.length + index;
+            return (
+              <button
+                className={optionIndex === props.skillIndex ? "selected" : ""}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  props.insertSavedPrompt(prompt);
+                }}
+                role="option"
+                aria-selected={optionIndex === props.skillIndex}
+                key={prompt.id}
+              >
+                <span className="file-mention-icon"><FileText size={18} /></span>
+                <strong>{prompt.label}</strong>
+                <span>/{prompt.trigger}</span>
+                <small>Prompt</small>
+                {optionIndex === 0 && <kbd>Enter</kbd>}
+              </button>
+            );
+          })}
+          {props.visibleSkillOptions.map((skill, index) => {
+            const optionIndex = props.visibleCommandOptions.length + props.visiblePromptOptions.length + index;
             const disabled = skill.capabilityState !== "invocable" || skill.ambiguous;
             return (
               <button
@@ -115,7 +144,7 @@ export function ChatComposerMenus(props: {
                 <span className="file-mention-icon"><ListChecks size={18} /></span>
                 <strong>{skill.displayName}</strong>
                 <span>{skill.description ?? skill.statusMessage ?? "User skill"}</span>
-                <small>{skill.providerKinds.map(providerLabel).join(", ")}</small>
+                <small title={skill.providerKinds.map(providerLabel).join(", ")}>Skill</small>
                 {!disabled && optionIndex === 0 && <kbd>Enter</kbd>}
               </button>
             );

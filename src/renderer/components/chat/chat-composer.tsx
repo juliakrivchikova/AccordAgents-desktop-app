@@ -5,6 +5,7 @@ import { ResizableTextarea } from "@/renderer/components/primitives";
 import type {
   ChatImageInput,
   ChatParticipant,
+  ChatSavedPromptConfig,
   ChatSkillMention,
   RepoFileMention
 } from "../../../shared/types";
@@ -22,6 +23,7 @@ import { useChatComposerMentions } from "./use-chat-composer-mentions";
 
 export interface ChatComposerProps {
   participants: ChatParticipant[];
+  savedPrompts: ChatSavedPromptConfig[];
   conversationId?: string;
   repoPath?: string;
   draft: string;
@@ -56,7 +58,8 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     draft: props.draft,
     searchSource,
     onDraftChange: props.onDraftChange,
-    participants: props.participants
+    participants: props.participants,
+    savedPrompts: props.savedPrompts
   });
   const images = useChatComposerImages(props.conversationId);
   const canSend = !images.hasInvalidImages && (
@@ -131,6 +134,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
           insertCompactCommand={mentions.insertCompactCommand}
           insertFileMention={mentions.insertFileMention}
           insertMention={mentions.insertMention}
+          insertSavedPrompt={mentions.insertSavedPrompt}
           insertSkillMention={mentions.insertSkillMention}
           mentionIndex={mentions.mentionIndex}
           mentionOptions={mentions.mentionOptions}
@@ -141,6 +145,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
           skillTargetLabel={mentions.skillTargetLabel}
           visibleCommandOptions={mentions.visibleCommandOptions}
           visibleFileOptions={mentions.visibleFileOptions}
+          visiblePromptOptions={mentions.visiblePromptOptions}
           visibleSkillOptions={mentions.visibleSkillOptions}
         />
         <ResizableTextarea

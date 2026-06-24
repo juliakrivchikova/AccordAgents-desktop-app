@@ -26,6 +26,7 @@ function chatServiceWithRoles(roles: ChatRoleConfig[]) {
         providers: [],
         chatRoleConfigs: roles,
         chatBehaviorRules: [],
+        chatSavedPrompts: [],
         chatParticipantConfigs: [],
         chatParticipantSeedState: {}
       };

@@ -39,6 +39,7 @@ function settingsServiceWith(
     providers: [],
     chatRoleConfigs: initial.chatRoleConfigs ?? [],
     chatBehaviorRules: [],
+    chatSavedPrompts: [],
     chatParticipantConfigs: initial.chatParticipantConfigs ?? [],
     chatParticipantSeedState: {}
   };
@@ -54,6 +55,7 @@ function settingsServiceWith(
     providers: stored.providers,
     chatRoleConfigs: stored.chatRoleConfigs,
     chatBehaviorRules: stored.chatBehaviorRules,
+    chatSavedPrompts: stored.chatSavedPrompts,
     chatParticipantConfigs: stored.chatParticipantConfigs,
     chatParticipantSeedState: stored.chatParticipantSeedState
   });

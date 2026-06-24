@@ -43,6 +43,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     providers: [],
     chatRoleConfigs: [],
     chatBehaviorRules: [],
+    chatSavedPrompts: [],
     chatParticipantConfigs: [],
     chatParticipantSeedState: {},
     ...initial
@@ -60,6 +61,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     providers: stored.providers,
     chatRoleConfigs: stored.chatRoleConfigs,
     chatBehaviorRules: stored.chatBehaviorRules,
+    chatSavedPrompts: stored.chatSavedPrompts,
     chatParticipantConfigs: stored.chatParticipantConfigs,
     chatParticipantSeedState: stored.chatParticipantSeedState
   });
@@ -124,6 +126,7 @@ test("saveChatBehaviorRuleConfig rejects oversized behavior rules", async () => 
     providers: [],
     chatRoleConfigs: [],
     chatBehaviorRules: [],
+    chatSavedPrompts: [],
     chatParticipantConfigs: []
   });
   service.writeStored = async () => {
@@ -135,6 +138,7 @@ test("saveChatBehaviorRuleConfig rejects oversized behavior rules", async () => 
     providers: [],
     chatRoleConfigs: [],
     chatBehaviorRules: [],
+    chatSavedPrompts: [],
     chatParticipantConfigs: []
   });
 

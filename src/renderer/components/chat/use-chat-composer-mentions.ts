@@ -3,12 +3,20 @@ import { useEffect, useRef, useState } from "react";
 import type {
   ChatParticipant,
   ChatParticipantInput,
+  ChatSavedPromptConfig,
   ChatSkillMention,
   RepoFileMention,
   RepoFileSearchResult,
   UserSkillSummary,
   UserSkillTargetSummary
 } from "../../../shared/types";
+import {
+  matchingChatSavedPrompts
+} from "../../../shared/chatSavedPrompts";
+import {
+  slashSuggestionAtIndex,
+  slashSuggestionCount
+} from "../../../shared/slashSuggestions";
 import {
   chatParticipantDisplayName,
   chatParticipantMentionHandle
@@ -25,6 +33,7 @@ import {
   replaceActiveFileMention,
   replaceActiveMention,
   replaceActiveSkillMention,
+  replaceActiveSlashToken,
   skillPickerTargetLabel
 } from "./chat-composer-draft-utils";
 
@@ -46,12 +55,14 @@ export function useChatComposerMentions(props: {
   onDraftChange: (value: string) => void;
   onMentionInserted?: (participant: ChatParticipant) => void;
   participants: ChatParticipant[];
+  savedPrompts: ChatSavedPromptConfig[];
 }): {
   fileIndex: number;
   fileOptions: RepoFileSearchResult[];
   insertCompactCommand: () => void;
   insertFileMention: (file: RepoFileSearchResult) => void;
   insertMention: (participant: ChatParticipant) => void;
+  insertSavedPrompt: (prompt: ChatSavedPromptConfig) => void;
   insertSkillMention: (skill: UserSkillSummary) => void;
   insertSlashOptionAtIndex: (index: number) => void;
   mentionIndex: number;
@@ -76,6 +87,7 @@ export function useChatComposerMentions(props: {
   updateDraft: (value: string) => void;
   visibleCommandOptions: NonNullable<ReturnType<typeof compactCommandOption>>[];
   visibleFileOptions: RepoFileSearchResult[];
+  visiblePromptOptions: ChatSavedPromptConfig[];
   visibleSkillOptions: UserSkillSummary[];
   visibleSlashOptionCount: number;
 } {
@@ -108,11 +120,18 @@ export function useChatComposerMentions(props: {
         chatParticipantDisplayName(participant).toLowerCase().includes(query);
     });
   const visibleFileOptions = fileQuery === undefined ? [] : fileOptions;
+  const visiblePromptOptions = skillQuery === undefined
+    ? []
+    : matchingChatSavedPrompts(props.savedPrompts, skillQuery, { includeBody: false });
   const visibleSkillOptions = skillQuery === undefined ? [] : skillOptions;
   const skillTargetLabel = skillTarget ? skillPickerTargetLabel(skillTarget, props.participants) : undefined;
   const compactOption = props.searchSource.type === "conversation" ? compactCommandOption(skillQuery, skillTarget) : undefined;
   const visibleCommandOptions = compactOption ? [compactOption] : [];
-  const visibleSlashOptionCount = visibleCommandOptions.length + visibleSkillOptions.length;
+  const visibleSlashOptionCount = slashSuggestionCount({
+    commands: visibleCommandOptions,
+    prompts: visiblePromptOptions,
+    skills: visibleSkillOptions
+  });
   const showSkillHighlights = selectedSkillMentions.some((mention) => draftHasSkillMention(props.draft, mention.frontmatterName));
 
   useEffect(() => {
@@ -255,6 +274,14 @@ export function useChatComposerMentions(props: {
     setSkillIndex(0);
   }
 
+  function insertSavedPrompt(prompt: ChatSavedPromptConfig): void {
+    updateDraftWithCaret(replaceActiveSlashToken(props.draft, prompt.body));
+    setSkillQuery(undefined);
+    setSkillOptions([]);
+    setSkillTarget(undefined);
+    setSkillIndex(0);
+  }
+
   function insertCompactCommand(): void {
     updateDraftWithCaret(replaceActiveSkillMention(props.draft, "compact"));
     setSkillQuery(undefined);
@@ -264,13 +291,20 @@ export function useChatComposerMentions(props: {
   }
 
   function insertSlashOptionAtIndex(index: number): void {
-    if (index < visibleCommandOptions.length) {
-      insertCompactCommand();
+    const selection = slashSuggestionAtIndex({
+      commands: visibleCommandOptions,
+      prompts: visiblePromptOptions,
+      skills: visibleSkillOptions
+    }, index);
+    if (!selection) {
       return;
     }
-    const skill = visibleSkillOptions[index - visibleCommandOptions.length];
-    if (skill) {
-      insertSkillMention(skill);
+    if (selection.kind === "command") {
+      insertCompactCommand();
+    } else if (selection.kind === "prompt") {
+      insertSavedPrompt(selection.item);
+    } else {
+      insertSkillMention(selection.item);
     }
   }
 
@@ -290,6 +324,7 @@ export function useChatComposerMentions(props: {
     insertCompactCommand,
     insertFileMention,
     insertMention,
+    insertSavedPrompt,
     insertSkillMention,
     insertSlashOptionAtIndex,
     mentionIndex,
@@ -314,6 +349,7 @@ export function useChatComposerMentions(props: {
     updateDraft,
     visibleCommandOptions,
     visibleFileOptions,
+    visiblePromptOptions,
     visibleSkillOptions,
     visibleSlashOptionCount
   };

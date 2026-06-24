@@ -1,0 +1,10 @@
+.settings-view .saved-prompt-card .behavior-rule-card-head span {
+  max-width: 44%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompts-editor-dialog .rules-editor-textarea {
+  min-height: 240px !important;
+}
