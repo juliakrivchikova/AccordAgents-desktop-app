@@ -2,7 +2,7 @@ import { createContext, useContext, type ReactNode } from "react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { parseMarkdownInline, type MarkdownInlineNode } from "../../../shared/markdownInline";
 import { markdownBlocks, type MarkdownBlock } from "./markdown-blocks";
-import { FileLink } from "./repo-file-link";
+import { FileLink } from "./local-file-link";
 import { MentionDirectoryContext, ParticipantHoverCard, profileHandleLabel, useHoverCard } from "./participant-hover-card";
 
 // A clickable reference to another chat message. Authors write `[label](#msg:<id>)` (or a bare

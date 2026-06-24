@@ -14,7 +14,8 @@ import type {
   CreateChatConversationRequest,
   DismissConversationWarningsRequest,
   GitDiffRequest,
-  OpenRepoFileRequest,
+  InspectLocalFileRequest,
+  OpenLocalFileRequest,
   PlanDecisionClarificationRequest,
   PlanItemReviewRequest,
   ProviderKind,
@@ -48,7 +49,7 @@ import { ensureLoginShellEnvPrimed, setCommandDebugLogger } from "./services/com
 import { DebugLogService } from "./services/debugLogs";
 import { GitService } from "./services/git";
 import { ProviderRunner } from "./services/providers";
-import { RepoFileOpenerService } from "./services/repoFileOpener";
+import { LocalFileOpenerService } from "./services/localFileOpener";
 import { SettingsService } from "./services/settings";
 import { StorageService } from "./services/storage";
 import { UserSkillsService } from "./services/userSkills";
@@ -58,7 +59,7 @@ let mainWindow: BrowserWindow | undefined;
 const gitService = new GitService();
 const settingsService = new SettingsService();
 const storageService = new StorageService();
-const repoFileOpenerService = new RepoFileOpenerService(storageService, settingsService);
+const localFileOpenerService = new LocalFileOpenerService(storageService, settingsService);
 const providerRunner = new ProviderRunner();
 const debugLogService = new DebugLogService();
 setCommandDebugLogger(debugLogService);
@@ -158,9 +159,10 @@ function createWindow(): void {
 function registerIpc(): void {
   ipcMain.handle("app:get-version", () => app.getVersion());
   ipcMain.handle("app:open-external", (_event, url: unknown) => openExternalUrl(url));
-  ipcMain.handle("app:open-repo-file", (_event, request: OpenRepoFileRequest) => repoFileOpenerService.openRepoFile(request));
+  ipcMain.handle("app:inspect-local-file", (_event, request: InspectLocalFileRequest) => localFileOpenerService.inspectLocalFile(request));
+  ipcMain.handle("app:open-local-file", (_event, request: OpenLocalFileRequest) => localFileOpenerService.openLocalFile(request));
   ipcMain.handle("settings:get", () => settingsService.getPublicSettings());
-  ipcMain.handle("settings:set-repo-file-open-preference", (_event, action: unknown) => repoFileOpenerService.setOpenPreference(action));
+  ipcMain.handle("settings:set-repo-file-open-preference", (_event, action: unknown) => localFileOpenerService.setOpenPreference(action));
   ipcMain.handle("settings:set-cli-agent-run-timeout", async (_event, timeoutMs: number) => {
     const next = await settingsService.setCliAgentRunTimeoutMs(timeoutMs);
     cliAgentRunner.setRunTimeoutMs(next.cliAgentRunTimeoutMs);

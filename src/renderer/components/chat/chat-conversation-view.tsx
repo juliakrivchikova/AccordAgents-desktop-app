@@ -10,9 +10,9 @@ import type {
   RepoFileMention
 } from "../../../shared/types";
 import { Avatar } from "../avatar/avatar";
+import { LocalFileLinkContext, LocalFileOpenChooser } from "../content/local-file-link";
 import { MessageLinkContext } from "../content/markdown-text";
 import { MentionDirectoryContext } from "../content/participant-hover-card";
-import { RepoFileLinkContext, RepoFileOpenChooser } from "../content/repo-file-link";
 import { RunStatusLine } from "../conversation/timeline-primitives";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatComposer } from "./chat-composer";
@@ -34,7 +34,7 @@ import { ChatConversationTimeline } from "./chat-conversation-timeline";
 import type { ChatConversationViewProps, ChatMessageFocusRequest } from "./chat-conversation-types";
 import { ChatThreadPanel } from "./chat-thread-panel";
 import { useChatConversationViewport } from "./use-chat-conversation-viewport";
-import { useChatRepoFileOpen } from "./use-chat-repo-file-open";
+import { useChatLocalFileOpen } from "./use-chat-local-file-open";
 import { useSubmittingIdSet } from "./use-submitting-id-set";
 
 export type { ChatMessageFocusRequest } from "./chat-conversation-types";
@@ -71,7 +71,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   const [isResizingThread, setIsResizingThread] = useState(false);
   const approvalSubmission = useSubmittingIdSet();
   const choiceSubmission = useSubmittingIdSet();
-  const repoFileOpen = useChatRepoFileOpen({
+  const localFileOpen = useChatLocalFileOpen({
     conversationId: props.conversation.id,
     repoFileOpenAction: props.settings.repoFileOpenAction,
     setRepoFileOpenPreference: props.setRepoFileOpenPreference
@@ -197,12 +197,12 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     setThreadDrafts({});
     approvalSubmission.resetSubmittingIds();
     choiceSubmission.resetSubmittingIds();
-    repoFileOpen.resetRepoFileChooser();
+    localFileOpen.resetLocalFileChooser();
   }, [
     props.conversation.id,
     approvalSubmission.resetSubmittingIds,
     choiceSubmission.resetSubmittingIds,
-    repoFileOpen.resetRepoFileChooser
+    localFileOpen.resetLocalFileChooser
   ]);
 
   useEffect(() => {
@@ -214,7 +214,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   return (
     <MentionDirectoryContext.Provider value={mentionDirectory}>
     <MessageLinkContext.Provider value={viewport.focusChatMessage}>
-      <RepoFileLinkContext.Provider value={repoFileOpen.repoFileLinkContext}>
+      <LocalFileLinkContext.Provider value={localFileOpen.localFileLinkContext}>
         <div
           className={`chat-view ${hasThread ? "thread-open" : ""} ${isResizingThread ? "resizing-thread" : ""}`}
           data-testid="chat-view"
@@ -305,14 +305,14 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               inferredParticipantRequestsByTrigger={inferredParticipantRequestsByTrigger}
             />
           )}
-          <RepoFileOpenChooser
-            fileRef={repoFileOpen.chooserFileRef}
-            open={repoFileOpen.chooserOpen}
-            onChoose={(action) => void repoFileOpen.chooseRepoFileOpenAction(action)}
-            onOpenChange={repoFileOpen.handleRepoFileChooserOpenChange}
+          <LocalFileOpenChooser
+            fileRef={localFileOpen.chooserFileRef}
+            open={localFileOpen.chooserOpen}
+            onChoose={(action) => void localFileOpen.chooseLocalFileOpenAction(action)}
+            onOpenChange={localFileOpen.handleLocalFileChooserOpenChange}
           />
         </div>
-      </RepoFileLinkContext.Provider>
+      </LocalFileLinkContext.Provider>
     </MessageLinkContext.Provider>
     </MentionDirectoryContext.Provider>
   );

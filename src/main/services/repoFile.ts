@@ -1,10 +1,9 @@
 import { lstat, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
-// Shared, safe resolution of a repository-relative or absolute file reference against a
-// selected repo. Used both by chat repo-file mention validation and by the open-file IPC path
-// so the security checks (repo containment, symlink escape, directory/regular-file) live in one
-// place.
+// Shared file reference resolution helpers. Repository file references stay repo-contained
+// because they can become agent prompt context. Local file references are opener-only, but still
+// report whether the target resolves outside the selected workspace so the UI can require consent.
 
 export type RepoFileResolutionFailureReason =
   | "invalid-path"
@@ -17,6 +16,17 @@ export type RepoFileResolutionFailureReason =
 export type RepoFileResolution =
   | { ok: true; absolutePath: string }
   | { ok: false; reason: RepoFileResolutionFailureReason };
+
+export type LocalFileResolutionFailureReason =
+  | "invalid-path"
+  | "base-missing"
+  | "not-found"
+  | "directory"
+  | "not-regular-file";
+
+export type LocalFileResolution =
+  | { ok: true; absolutePath: string; realPath: string; insideWorkspace: boolean }
+  | { ok: false; reason: LocalFileResolutionFailureReason };
 
 function isPathInside(parentPath: string, childPath: string): boolean {
   const relative = path.relative(parentPath, childPath);
@@ -66,6 +76,67 @@ export async function resolveRepoFile(repoPath: string, rawPath: unknown): Promi
       return { ok: false, reason: "not-regular-file" };
     }
     return { ok: true, absolutePath };
+  } catch {
+    return { ok: false, reason: "not-found" };
+  }
+}
+
+export async function resolveLocalFile(basePath: string | undefined, rawPath: unknown): Promise<LocalFileResolution> {
+  if (typeof rawPath !== "string") {
+    return { ok: false, reason: "invalid-path" };
+  }
+  const trimmed = rawPath.trim();
+  if (!trimmed || trimmed.includes("\0")) {
+    return { ok: false, reason: "invalid-path" };
+  }
+
+  let absolutePath: string;
+  let baseRealPath: string | undefined;
+  if (path.isAbsolute(trimmed)) {
+    absolutePath = path.resolve(trimmed);
+  } else {
+    if (typeof basePath !== "string" || !basePath.trim()) {
+      return { ok: false, reason: "base-missing" };
+    }
+    try {
+      const baseInfo = await stat(basePath);
+      if (!baseInfo.isDirectory()) {
+        return { ok: false, reason: "base-missing" };
+      }
+      baseRealPath = await realpath(basePath);
+    } catch {
+      return { ok: false, reason: "base-missing" };
+    }
+    absolutePath = path.resolve(basePath, trimmed);
+  }
+
+  if (!baseRealPath && typeof basePath === "string" && basePath.trim()) {
+    try {
+      const baseInfo = await stat(basePath);
+      if (baseInfo.isDirectory()) {
+        baseRealPath = await realpath(basePath);
+      }
+    } catch {
+      baseRealPath = undefined;
+    }
+  }
+
+  try {
+    const linkInfo = await lstat(absolutePath);
+    if (linkInfo.isDirectory()) {
+      return { ok: false, reason: "directory" };
+    }
+    const realFilePath = await realpath(absolutePath);
+    const fileInfo = await stat(absolutePath);
+    if (!fileInfo.isFile()) {
+      return { ok: false, reason: "not-regular-file" };
+    }
+    return {
+      ok: true,
+      absolutePath,
+      realPath: realFilePath,
+      insideWorkspace: baseRealPath ? isPathInside(baseRealPath, realFilePath) : false
+    };
   } catch {
     return { ok: false, reason: "not-found" };
   }

@@ -1153,18 +1153,36 @@ export interface ConversationOpenResult {
 }
 
 export type RepoFileOpenAction = "open" | "reveal";
+export type LocalFileOpenAction = RepoFileOpenAction;
 
-export interface OpenRepoFileRequest {
+export interface InspectLocalFileRequest {
   conversationId: string;
   path: string;
   line?: number;
   column?: number;
-  action?: RepoFileOpenAction;
 }
 
-export interface OpenRepoFileResult {
-  action: RepoFileOpenAction;
+export interface InspectLocalFileResult {
   path: string;
+  absolutePath: string;
+  insideWorkspace: boolean;
+  line?: number;
+  column?: number;
+}
+
+export interface OpenLocalFileRequest {
+  conversationId: string;
+  path: string;
+  line?: number;
+  column?: number;
+  action?: LocalFileOpenAction;
+}
+
+export interface OpenLocalFileResult {
+  action: LocalFileOpenAction;
+  path: string;
+  absolutePath: string;
+  insideWorkspace: boolean;
   line?: number;
   column?: number;
   lineNavigationSupported: boolean;
@@ -1179,7 +1197,8 @@ export interface StartReviewResult {
 export interface AppBridge {
   getAppVersion(): Promise<string>;
   openExternal(url: string): Promise<void>;
-  openRepoFile(request: OpenRepoFileRequest): Promise<OpenRepoFileResult>;
+  inspectLocalFile(request: InspectLocalFileRequest): Promise<InspectLocalFileResult>;
+  openLocalFile(request: OpenLocalFileRequest): Promise<OpenLocalFileResult>;
   setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<AppSettings>;
   setCliAgentRunTimeoutMs(timeoutMs: number): Promise<AppSettings>;
   getSettings(): Promise<AppSettings>;

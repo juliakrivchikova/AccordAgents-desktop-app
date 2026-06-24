@@ -9,17 +9,19 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog";
-import type { RepoFileOpenAction } from "../../../shared/types";
+import type { LocalFileOpenAction } from "../../../shared/types";
 
 export interface FileLinkRef {
   path: string;
+  absolutePath?: string;
+  insideWorkspace?: boolean;
   line?: number;
   column?: number;
 }
 
 // Provided by the chat view so file links inside rendered markdown can request an open action.
 // When absent (e.g. the review view), file links render as static, non-clickable text.
-export const RepoFileLinkContext = createContext<{
+export const LocalFileLinkContext = createContext<{
   conversationId?: string;
   requestOpenFile?: (ref: FileLinkRef) => void;
 }>({});
@@ -35,7 +37,7 @@ function fileLinkTitle(ref: FileLinkRef): string {
 }
 
 export function FileLink({ path, label, line, column }: FileLinkRef & { label: string }): JSX.Element {
-  const { requestOpenFile } = useContext(RepoFileLinkContext);
+  const { requestOpenFile } = useContext(LocalFileLinkContext);
   const ref: FileLinkRef = { path, line, column };
 
   if (!requestOpenFile) {
@@ -68,12 +70,29 @@ export function FileLink({ path, label, line, column }: FileLinkRef & { label: s
   );
 }
 
-export function RepoFileOpenChooser(props: {
+export function LocalFileOpenChooser(props: {
   fileRef?: FileLinkRef | null;
   open: boolean;
-  onChoose: (action: RepoFileOpenAction) => void;
+  onChoose: (action: LocalFileOpenAction) => void;
   onOpenChange: (open: boolean) => void;
 }): JSX.Element {
+  const isOutsideWorkspace = props.fileRef?.insideWorkspace === false;
+  const displayPath = isOutsideWorkspace
+    ? props.fileRef?.absolutePath ?? props.fileRef?.path ?? ""
+    : props.fileRef?.path ?? "";
+  const openButton = (
+    <Button variant="outline" onClick={() => props.onChoose("open")}>
+      <ExternalLink size={16} />
+      Open with default app
+    </Button>
+  );
+  const revealButton = (
+    <Button variant="outline" onClick={() => props.onChoose("reveal")}>
+      <FolderOpen size={16} />
+      Reveal in Finder
+    </Button>
+  );
+
   // Always render the Dialog and drive it by `open` so Radix owns the close lifecycle (exit
   // animation + body pointer-events/focus cleanup). Radix skips the portal entirely while
   // closed, so an absent `fileRef` is harmless. Do not unmount this by nulling `fileRef`.
@@ -83,18 +102,13 @@ export function RepoFileOpenChooser(props: {
         <DialogHeader>
           <DialogTitle>Open file reference</DialogTitle>
           <DialogDescription>
-            How should AccordAgents open <code>{props.fileRef?.path ?? ""}</code>? You can change this later in Settings.
+            How should AccordAgents open <code>{displayPath}</code>?
+            {isOutsideWorkspace ? " This file is outside the selected workspace." : " You can change this later in Settings."}
           </DialogDescription>
         </DialogHeader>
         <div className="repo-file-open-actions">
-          <Button variant="outline" onClick={() => props.onChoose("open")}>
-            <ExternalLink size={16} />
-            Open with default app
-          </Button>
-          <Button variant="outline" onClick={() => props.onChoose("reveal")}>
-            <FolderOpen size={16} />
-            Reveal in Finder
-          </Button>
+          {isOutsideWorkspace ? revealButton : openButton}
+          {isOutsideWorkspace ? openButton : revealButton}
         </div>
         <p className="repo-file-open-hint">
           To change the default app for this file type, reveal it in Finder, open Get Info, choose Open with, then
