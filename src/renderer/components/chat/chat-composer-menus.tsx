@@ -119,8 +119,8 @@ export function ChatComposerMenus(props: {
                 key={prompt.id}
               >
                 <span className="file-mention-icon"><FileText size={18} /></span>
-                <strong>{prompt.label}</strong>
-                <span>/{prompt.trigger}</span>
+                <strong>/{prompt.trigger}</strong>
+                <span>{prompt.label}</span>
                 <small>Prompt</small>
                 {optionIndex === 0 && <kbd>Enter</kbd>}
               </button>
