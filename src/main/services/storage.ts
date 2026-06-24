@@ -12,6 +12,7 @@ import type {
   ConversationSummary
 } from "../../shared/types";
 import { clearChatRunMetadata } from "../../shared/chatRunState";
+import { normalizeInferredParticipantRequestThreads as normalizeInferredParticipantRequestThreadMetadata } from "../../shared/chatParticipantRequestThreads";
 import { INTERRUPTED_RUN_WARNING, sanitizeConversationWarnings, sanitizeWarningList } from "../../shared/warnings";
 
 const DEFAULT_MESSAGE_PAGE_LIMIT = 80;
@@ -67,6 +68,7 @@ export class StorageService {
     await this.ensureColumn("conversations", "body_json", "text");
     await this.backfillConversationBodiesAndMessages();
     this.initialized = true;
+    await this.normalizeInferredParticipantRequestThreads();
     await this.clearInterruptedRuns();
   }
 
@@ -311,6 +313,24 @@ export class StorageService {
       }
       conversation.metadata = clearChatRunMetadata({ ...conversation.metadata, warnings });
       conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+    }
+  }
+
+  private async normalizeInferredParticipantRequestThreads(): Promise<void> {
+    const rows = await this.queryJson<{ payloadJson: string }>(
+      "select payload_json as payloadJson from conversations where payload_json like '%\"source\":\"inferred\"%';"
+    );
+    for (const row of rows) {
+      let conversation: Conversation;
+      try {
+        conversation = JSON.parse(row.payloadJson) as Conversation;
+      } catch {
+        continue;
+      }
+      if (!normalizeInferredParticipantRequestThreadMetadata(conversation)) {
+        continue;
+      }
       await this.saveConversation(conversation);
     }
   }

@@ -20,6 +20,7 @@ import {
   chatAppToolApprovals,
   chatContinuedMentionRequestIds,
   chatContextUsageByParticipant,
+  chatInferredParticipantRequestBatchesByTrigger,
   chatMentionDirectory,
   chatParticipants,
   chatRoleLabel,
@@ -56,6 +57,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   ]);
   const topLevelMessages = useMemo(() => chatTopLevelMessages(props.conversation), [props.conversation.messages]);
   const threadSummaries = useMemo(() => chatThreadSummaryMap(props.conversation), [props.conversation.messages]);
+  const inferredParticipantRequestsByTrigger = useMemo(() => chatInferredParticipantRequestBatchesByTrigger(props.conversation), [props.conversation.messages]);
   const continuedMentionRequestIds = useMemo(() => chatContinuedMentionRequestIds(props.conversation), [props.conversation.messages]);
   const contextUsageByParticipant = useMemo(() => chatContextUsageByParticipant(props.conversation), [props.conversation.metadata]);
   const sessionsByParticipant = useMemo(() => chatSessionsByParticipant(props.conversation), [props.conversation.metadata]);
@@ -225,6 +227,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               contextUsageByParticipant={contextUsageByParticipant}
               continuedMentionRequestIds={continuedMentionRequestIds}
               hasOlderMessages={props.hasOlderMessages}
+              inferredParticipantRequestsByTrigger={inferredParticipantRequestsByTrigger}
               isRunning={props.isRunning}
               liveProgressById={liveProgressById}
               olderMessagesLoading={props.olderMessagesLoading}
@@ -299,6 +302,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               onCompactParticipant={props.onCompactParticipant}
               onStopRun={props.onStopRun}
               continuedMentionRequestIds={continuedMentionRequestIds}
+              inferredParticipantRequestsByTrigger={inferredParticipantRequestsByTrigger}
             />
           )}
           <RepoFileOpenChooser

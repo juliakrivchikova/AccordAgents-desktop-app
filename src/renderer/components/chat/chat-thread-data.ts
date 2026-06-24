@@ -1,21 +1,29 @@
-import { isChatMessageHiddenFromTimeline } from "../../../shared/chatTimelineVisibility";
-import type { Conversation } from "../../../shared/types";
+import {
+  chatInferredParticipantRequestBatchesByTrigger as sharedInferredParticipantRequestBatchesByTrigger,
+  chatMessageHiddenFromTimeline,
+  chatMessageVisualThreadRootId,
+  chatParticipantRequestReplyRootMap
+} from "../../../shared/chatParticipantRequestThreads";
+import type { ChatParticipantRequestBatch, Conversation } from "../../../shared/types";
 
 const SHOW_CHAT_SYSTEM_MESSAGES = import.meta.env.VITE_ACCORD_AGENTS_SHOW_SYSTEM_MESSAGES === "1";
 
 export function chatTopLevelMessages(conversation: Conversation): Conversation["messages"] {
   const participantRequestReplyRoots = chatParticipantRequestReplyRootMap(conversation);
-  return conversation.messages.filter((message) => !isHiddenChatMessage(message) && !chatVisualThreadRootId(message, participantRequestReplyRoots));
+  return conversation.messages.filter((message) =>
+    !chatMessageHiddenFromTimeline(conversation, message, { showSystemMessages: SHOW_CHAT_SYSTEM_MESSAGES }) &&
+    !chatMessageVisualThreadRootId(conversation, message, participantRequestReplyRoots)
+  );
 }
 
 export function chatThreadSummaryMap(conversation: Conversation): Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }> {
   const summaries = new Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }>();
   const participantRequestReplyRoots = chatParticipantRequestReplyRootMap(conversation);
   for (const message of conversation.messages) {
-    if (isHiddenChatMessage(message)) {
+    if (chatMessageHiddenFromTimeline(conversation, message, { showSystemMessages: SHOW_CHAT_SYSTEM_MESSAGES })) {
       continue;
     }
-    const rootId = chatVisualThreadRootId(message, participantRequestReplyRoots);
+    const rootId = chatMessageVisualThreadRootId(conversation, message, participantRequestReplyRoots);
     if (!rootId) {
       continue;
     }
@@ -30,6 +38,10 @@ export function chatThreadSummaryMap(conversation: Conversation): Map<string, { 
     summary.replies.sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
   }
   return summaries;
+}
+
+export function chatInferredParticipantRequestBatchesByTrigger(conversation: Conversation): Map<string, ChatParticipantRequestBatch[]> {
+  return sharedInferredParticipantRequestBatchesByTrigger(conversation);
 }
 
 export function chatContinuedMentionRequestIds(conversation: Conversation): Set<string> {
@@ -53,38 +65,4 @@ export function formatChatChoiceReceiptTime(value: string | undefined): string |
     return undefined;
   }
   return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true }).toUpperCase();
-}
-
-function isHiddenChatMessage(message: Conversation["messages"][number]): boolean {
-  return isChatMessageHiddenFromTimeline(message, { showSystemMessages: SHOW_CHAT_SYSTEM_MESSAGES });
-}
-
-function chatParticipantRequestReplyRootMap(conversation: Conversation): Map<string, string> {
-  const roots = new Map<string, string>();
-  for (const message of conversation.messages) {
-    const batch = message.metadata?.participantRequest;
-    if (!batch) {
-      continue;
-    }
-    for (const item of batch.items) {
-      if (item.replyMessageId) {
-        roots.set(item.replyMessageId, message.id);
-      }
-    }
-  }
-  return roots;
-}
-
-function chatVisualThreadRootId(message: Conversation["messages"][number], participantRequestReplyRoots = new Map<string, string>()): string | undefined {
-  if (message.metadata?.chatThreadRootId) {
-    return message.metadata.chatThreadRootId;
-  }
-  const participantRequestRootId = participantRequestReplyRoots.get(message.id);
-  if (participantRequestRootId) {
-    return participantRequestRootId;
-  }
-  if (message.role === "user" && message.metadata?.parentMessageId) {
-    return message.metadata.threadId ?? message.metadata.parentMessageId;
-  }
-  return undefined;
 }

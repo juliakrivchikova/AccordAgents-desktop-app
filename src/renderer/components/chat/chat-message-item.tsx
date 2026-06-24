@@ -6,6 +6,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import type {
   AgentContextUsage,
   AgentRunProgress,
+  ChatParticipantRequestBatch,
   ChatParticipant,
   Conversation
 } from "../../../shared/types";
@@ -57,6 +58,7 @@ export function ChatMessageItem(props: {
   replyPreviewMessages?: Conversation["messages"];
   latestReplyAt?: string;
   hasContinuationReply?: boolean;
+  inferredParticipantRequests?: ChatParticipantRequestBatch[];
   liveProgress?: AgentRunProgress;
   onOpenThread?: () => void;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
@@ -82,6 +84,10 @@ export function ChatMessageItem(props: {
   const approved = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "approved");
   const choice = message.metadata?.pendingChoice;
   const participantRequest = message.metadata?.participantRequest;
+  const participantRequests = [
+    ...(participantRequest ? [participantRequest] : []),
+    ...(props.inferredParticipantRequests ?? [])
+  ];
   const skillMentions = chatMessageSkillMentions(message);
   const repoFileMentions = chatMessageRepoFileMentions(message);
   const imageAttachments = chatMessageImageAttachments(message);
@@ -328,12 +334,12 @@ export function ChatMessageItem(props: {
               })}
             </div>
           )}
-          {participantRequest && (
-            <div className="chat-approval-note">
-              <span>{participantRequestStatusLabel(participantRequest)}</span>
-              {participantRequest.source === "inferred" && <StatusBadge tone="neutral">inferred request</StatusBadge>}
+          {participantRequests.map((request) => (
+            <div className="chat-approval-note" key={request.id}>
+              <span>{participantRequestStatusLabel(request)}</span>
+              {request.source === "inferred" && <StatusBadge tone="neutral">inferred request</StatusBadge>}
             </div>
-          )}
+          ))}
           {approved.length > 0 && (
             <div className="chat-approval-note">
               <span>Approved: {approved.map((mention) => chatParticipantReference(mention.targetHandle)).join(", ")}</span>

@@ -9,6 +9,7 @@ import type {
   ChatAppToolApprovalRequest,
   ChatAppToolApprovalScope,
   ChatParticipant,
+  ChatParticipantRequestBatch,
   ChatParticipantSession,
   Conversation
 } from "../../../shared/types";
@@ -31,6 +32,7 @@ export function ChatConversationTimeline(props: {
   contextUsageByParticipant: Map<string, AgentContextUsage>;
   continuedMentionRequestIds: Set<string>;
   hasOlderMessages: boolean;
+  inferredParticipantRequestsByTrigger: Map<string, ChatParticipantRequestBatch[]>;
   isRunning: boolean;
   liveProgressById: Map<string, AgentRunProgress>;
   olderMessagesLoading: boolean;
@@ -115,6 +117,7 @@ export function ChatConversationTimeline(props: {
                   replyPreviewMessages={props.threadSummaries.get(row.message.id)?.replies}
                   latestReplyAt={props.threadSummaries.get(row.message.id)?.latestReplyAt}
                   hasContinuationReply={props.continuedMentionRequestIds.has(row.message.id)}
+                  inferredParticipantRequests={props.inferredParticipantRequestsByTrigger.get(row.message.id)}
                   liveProgress={props.liveProgressById.get(row.message.id)}
                   onOpenThread={() => props.onOpenThread(row.message.id)}
                   onApproveMentions={props.onApproveMentions}
