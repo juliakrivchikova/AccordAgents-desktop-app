@@ -414,9 +414,13 @@
   color: var(--app-text);
 }
 
-.mention-menu button:hover,
-.mention-menu button.selected {
+.mention-menu button:hover {
   background: var(--app-surface-hover);
+}
+
+.mention-menu button.selected {
+  background: color-mix(in srgb, var(--app-accent) 10%, var(--app-surface));
+  box-shadow: inset 3px 0 0 var(--app-accent);
 }
 
 .mention-menu strong {

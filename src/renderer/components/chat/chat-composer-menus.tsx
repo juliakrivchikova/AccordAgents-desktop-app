@@ -1,3 +1,4 @@
+import { useEffect, useRef, type MutableRefObject, type ReactNode } from "react";
 import { FileText, ListChecks, Minimize2 } from "lucide-react";
 
 import type {
@@ -23,7 +24,8 @@ export function ChatComposerMenus(props: {
   mentionIndex: number;
   mentionOptions: ChatParticipant[];
   participantRoleLabel: (participant: ChatParticipant) => string;
-  renderParticipantAvatar: (participant: ChatParticipant) => React.ReactNode;
+  renderParticipantAvatar: (participant: ChatParticipant) => ReactNode;
+  slashMenuPlacement?: "above" | "below";
   skillIndex: number;
   skillQuery: string | undefined;
   skillTargetLabel?: string;
@@ -32,13 +34,24 @@ export function ChatComposerMenus(props: {
   visiblePromptOptions: ChatSavedPromptConfig[];
   visibleSkillOptions: UserSkillSummary[];
 }): JSX.Element {
+  const mentionRefs = useActiveOptionScroll(props.mentionIndex, props.mentionOptions.length);
+  const fileRefs = useActiveOptionScroll(props.fileIndex, props.visibleFileOptions.length);
+  const slashOptionCount = props.visibleCommandOptions.length + props.visiblePromptOptions.length + props.visibleSkillOptions.length;
+  const slashRefs = useActiveOptionScroll(props.skillIndex, slashOptionCount);
+  const slashMenuClassName = [
+    "mention-menu",
+    "skill-mention-menu",
+    props.slashMenuPlacement === "below" ? "opens-below" : ""
+  ].filter(Boolean).join(" ");
+
   return (
     <>
       {props.mentionOptions.length > 0 && (
-        <div className="mention-menu" role="listbox">
+        <div className="mention-menu" role="listbox" aria-label="Participants">
           <div className="chat-popover-section-title">Participants</div>
           {props.mentionOptions.map((participant, index) => (
             <button
+              ref={setOptionRef(mentionRefs, index)}
               className={index === props.mentionIndex ? "selected" : ""}
               onMouseDown={(event) => {
                 event.preventDefault();
@@ -57,10 +70,11 @@ export function ChatComposerMenus(props: {
         </div>
       )}
       {props.visibleFileOptions.length > 0 && (
-        <div className="mention-menu file-mention-menu" role="listbox">
+        <div className="mention-menu file-mention-menu" role="listbox" aria-label="Repository files">
           <div className="chat-popover-section-title">Repository files</div>
           {props.visibleFileOptions.map((file, index) => (
             <button
+              ref={setOptionRef(fileRefs, index)}
               className={index === props.fileIndex ? "selected" : ""}
               onMouseDown={(event) => {
                 event.preventDefault();
@@ -84,11 +98,12 @@ export function ChatComposerMenus(props: {
         props.visibleSkillOptions.length > 0 ||
         props.skillTargetLabel
       ) && (
-        <div className="mention-menu skill-mention-menu" role="listbox">
+        <div className={slashMenuClassName} role="listbox" aria-label="Slash commands, prompts, and skills">
           <div className="chat-popover-section-title">Slash</div>
           {props.skillTargetLabel && <div className="skill-mention-menu-context">{props.skillTargetLabel}</div>}
           {props.visibleCommandOptions.map((command, index) => (
             <button
+              ref={setOptionRef(slashRefs, index)}
               className={index === props.skillIndex ? "selected" : ""}
               onMouseDown={(event) => {
                 event.preventDefault();
@@ -109,6 +124,7 @@ export function ChatComposerMenus(props: {
             const optionIndex = props.visibleCommandOptions.length + index;
             return (
               <button
+                ref={setOptionRef(slashRefs, optionIndex)}
                 className={optionIndex === props.skillIndex ? "selected" : ""}
                 onMouseDown={(event) => {
                   event.preventDefault();
@@ -131,6 +147,7 @@ export function ChatComposerMenus(props: {
             const disabled = skill.capabilityState !== "invocable" || skill.ambiguous;
             return (
               <button
+                ref={setOptionRef(slashRefs, optionIndex)}
                 className={optionIndex === props.skillIndex ? "selected" : ""}
                 disabled={disabled}
                 onMouseDown={(event) => {
@@ -153,4 +170,28 @@ export function ChatComposerMenus(props: {
       )}
     </>
   );
+}
+
+function useActiveOptionScroll(activeIndex: number, optionCount: number): MutableRefObject<Array<HTMLButtonElement | null>> {
+  const refs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  useEffect(() => {
+    refs.current.length = optionCount;
+    const selected = refs.current[activeIndex];
+    if (!selected) {
+      return;
+    }
+    selected.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeIndex, optionCount]);
+
+  return refs;
+}
+
+function setOptionRef(
+  refs: MutableRefObject<Array<HTMLButtonElement | null>>,
+  index: number
+): (node: HTMLButtonElement | null) => void {
+  return (node) => {
+    refs.current[index] = node;
+  };
 }

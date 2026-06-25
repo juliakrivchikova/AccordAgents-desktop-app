@@ -245,6 +245,7 @@ export function NewChatScreen(props: {
             mentionOptions={mentions.mentionOptions}
             participantRoleLabel={props.participantRoleLabel}
             renderParticipantAvatar={props.renderParticipantAvatar}
+            slashMenuPlacement="below"
             skillIndex={mentions.skillIndex}
             skillQuery={mentions.skillQuery}
             skillTargetLabel={mentions.skillTargetLabel}

@@ -285,7 +285,6 @@ export function ChatAppToolApprovalCard(props: {
                 aria-selected={index === selectedIndex}
                 className={`chat-approval-option ${index === selectedIndex ? "selected" : ""}`}
                 disabled={props.submitting}
-                onMouseEnter={() => setSelectedIndex(index)}
                 onClick={() => setSelectedIndex(index)}
                 key={option.key}
               >

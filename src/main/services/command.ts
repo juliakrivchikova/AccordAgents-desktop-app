@@ -27,10 +27,15 @@ export interface CommandOptions {
   input?: string;
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
+  envOptions?: CommandEnvironmentOptions;
   primeLoginShellEnv?: boolean;
   signal?: AbortSignal;
   onStdout?: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
+}
+
+export interface CommandEnvironmentOptions {
+  dropProcessEnvKeysAbsentFromLoginShell?: readonly string[];
 }
 
 let loginShellEnv: NodeJS.ProcessEnv | undefined;
@@ -52,14 +57,21 @@ export async function ensureLoginShellEnvPrimed(): Promise<NodeJS.ProcessEnv> {
   return loginShellEnvPrime;
 }
 
-export function commandEnvironment(extraEnv: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+export function commandEnvironment(extraEnv: NodeJS.ProcessEnv = {}, options: CommandEnvironmentOptions = {}): NodeJS.ProcessEnv {
   const shellEnv = loginShellEnv ?? {};
-  return {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     ...shellEnv,
     ...extraEnv,
     PATH: commandPath(shellEnv.PATH ?? process.env.PATH, extraEnv.PATH)
   };
+  for (const key of options.dropProcessEnvKeysAbsentFromLoginShell ?? []) {
+    if (hasOwn(extraEnv, key) || hasOwn(shellEnv, key)) {
+      continue;
+    }
+    delete env[key];
+  }
+  return env;
 }
 
 export class CommandError extends Error {
@@ -81,7 +93,7 @@ export async function runCommand(command: string, args: string[], options: Comma
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
-      env: commandEnvironment(options.env),
+      env: commandEnvironment(options.env, options.envOptions),
       stdio: ["pipe", "pipe", "pipe"]
     });
 
@@ -179,6 +191,10 @@ export async function runCommand(command: string, args: string[], options: Comma
     }
     child.stdin.end();
   });
+}
+
+function hasOwn(object: NodeJS.ProcessEnv, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(object, key);
 }
 
 export function parseLoginShellEnvOutput(stdout: string, startSentinel: string, endSentinel: string): NodeJS.ProcessEnv {
