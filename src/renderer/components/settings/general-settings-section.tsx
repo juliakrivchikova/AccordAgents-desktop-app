@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown, ExternalLink, FolderOpen, HelpCircle } from "lucide-react";
+import { Check, ChevronDown, Code2, ExternalLink, FolderOpen, HelpCircle } from "lucide-react";
 
 import type { AgentHealth, ProviderKind, ProviderSettings, RepoFileOpenAction } from "../../../shared/types";
 import { CLI_AGENT_RUN_TIMEOUT_MAX_MS, CLI_AGENT_RUN_TIMEOUT_MIN_MS, cliAgentRunTimeoutHours } from "../../../shared/cliAgentRunSettings";
@@ -66,8 +66,7 @@ export function GeneralSettingsSection(props: {
             <div className="gen-row-text">
               <div className="gen-row-title">Default file open destination</div>
               <div className="gen-row-desc">
-                What happens when you click a file reference in chat. macOS opens each file with the default app for its
-                file type.
+                What happens when you click an inside-workspace file reference in chat.
               </div>
             </div>
             <FileOpenDropdown action={props.repoFileOpenAction} onChange={props.setRepoFileOpenPreference} />
@@ -87,14 +86,15 @@ export function GeneralSettingsSection(props: {
 }
 
 const FILE_OPEN_OPTIONS: Array<{
-  key: "open" | "reveal" | "ask";
+  key: "open" | "reveal" | "intellij-idea" | "ask";
   value: RepoFileOpenAction | null;
   pillLabel: string;
   menuLabel: string;
   icon: typeof ExternalLink;
 }> = [
   { key: "open", value: "open", pillLabel: "Open with default app", menuLabel: "Open with default app", icon: ExternalLink },
-  { key: "reveal", value: "reveal", pillLabel: "Reveal in Finder", menuLabel: "Reveal in Finder", icon: FolderOpen },
+  { key: "reveal", value: "reveal", pillLabel: "Reveal in file manager", menuLabel: "Reveal in file manager", icon: FolderOpen },
+  { key: "intellij-idea", value: "intellij-idea", pillLabel: "Open in IntelliJ IDEA", menuLabel: "Open in IntelliJ IDEA", icon: Code2 },
   { key: "ask", value: null, pillLabel: "Ask every time", menuLabel: "Reset to ask", icon: HelpCircle }
 ];
 
@@ -106,8 +106,16 @@ function FileOpenDropdown(props: {
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const currentKey = props.action === "open" ? "open" : props.action === "reveal" ? "reveal" : "ask";
-  const current = FILE_OPEN_OPTIONS.find((option) => option.key === currentKey) ?? FILE_OPEN_OPTIONS[2];
+  const currentKey = props.action === "open"
+    ? "open"
+    : props.action === "reveal"
+      ? "reveal"
+      : props.action === "intellij-idea"
+        ? "intellij-idea"
+        : "ask";
+  const current = FILE_OPEN_OPTIONS.find((option) => option.key === currentKey)
+    ?? FILE_OPEN_OPTIONS.find((option) => option.key === "ask")
+    ?? FILE_OPEN_OPTIONS[0];
 
   const closeMenu = (returnFocus: boolean): void => {
     setOpen(false);
@@ -282,10 +290,6 @@ function CliAgentRunTimeoutControl(props: {
       {validation && <div className="gen-timeout-error">{validation}</div>}
     </div>
   );
-}
-
-function isCli(kind: ProviderKind): boolean {
-  return kind === "codex-cli" || kind === "claude-code";
 }
 
 function healthLine(health: AgentHealth | undefined): string {
