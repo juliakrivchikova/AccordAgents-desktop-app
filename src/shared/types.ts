@@ -1169,7 +1169,7 @@ export interface ConversationOpenResult {
   messagePage: ConversationMessagePageInfo;
 }
 
-export type RepoFileOpenAction = "open" | "reveal";
+export type RepoFileOpenAction = "open" | "reveal" | "intellij-idea";
 export type LocalFileOpenAction = RepoFileOpenAction;
 
 export interface InspectLocalFileRequest {
@@ -1202,6 +1202,7 @@ export interface OpenLocalFileResult {
   insideWorkspace: boolean;
   line?: number;
   column?: number;
+  fallbackMessage?: string;
   lineNavigationSupported: boolean;
 }
 

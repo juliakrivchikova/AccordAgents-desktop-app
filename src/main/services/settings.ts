@@ -2238,7 +2238,7 @@ export class SettingsService {
   }
 
   private normalizeRepoFileOpenAction(action: unknown): RepoFileOpenAction | undefined {
-    return action === "open" || action === "reveal" ? action : undefined;
+    return action === "open" || action === "reveal" || action === "intellij-idea" ? action : undefined;
   }
 
   private normalizeBehaviorRules(rules: ChatBehaviorRuleConfig[] | undefined): ChatBehaviorRuleConfig[] {

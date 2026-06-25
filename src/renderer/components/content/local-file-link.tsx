@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import { ExternalLink, FolderOpen } from "lucide-react";
+import { Code2, ExternalLink, FolderOpen } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -101,7 +101,13 @@ export function LocalFileOpenChooser(props: {
   const revealButton = (
     <Button variant="outline" onClick={() => props.onChoose("reveal")}>
       <FolderOpen size={16} />
-      Reveal in Finder
+      Reveal in file manager
+    </Button>
+  );
+  const intellijButton = (
+    <Button variant="outline" onClick={() => props.onChoose("intellij-idea")}>
+      <Code2 size={16} />
+      Open in IntelliJ IDEA
     </Button>
   );
 
@@ -121,10 +127,10 @@ export function LocalFileOpenChooser(props: {
         <div className="repo-file-open-actions">
           {isOutsideWorkspace ? revealButton : openButton}
           {isOutsideWorkspace ? openButton : revealButton}
+          {intellijButton}
         </div>
         <p className="repo-file-open-hint">
-          To change the default app for this file type, reveal it in Finder, open Get Info, choose Open with, then
-          Change All.
+          To change the default app for this file type, reveal it in your file manager and update the system Open with setting.
         </p>
       </DialogContent>
     </Dialog>

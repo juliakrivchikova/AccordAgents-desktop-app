@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import type { LocalFileOpenAction, RepoFileOpenAction } from "../../../shared/types";
+import type { LocalFileOpenAction, OpenLocalFileResult, RepoFileOpenAction } from "../../../shared/types";
 import type { FileLinkRef } from "../content/local-file-link";
 
 export function useChatLocalFileOpen(props: {
@@ -22,7 +22,10 @@ export function useChatLocalFileOpen(props: {
   const [chooserOpen, setChooserOpen] = useState(false);
   const [chooserFileRef, setChooserFileRef] = useState<FileLinkRef | null>(null);
 
-  const openLocalFileReference = useCallback(async (ref: FileLinkRef, action: LocalFileOpenAction): Promise<void> => {
+  const openLocalFileReference = useCallback(async (
+    ref: FileLinkRef,
+    action: LocalFileOpenAction
+  ): Promise<OpenLocalFileResult | undefined> => {
     try {
       const result = await window.consensus.openLocalFile({
         conversationId: props.conversationId,
@@ -31,11 +34,16 @@ export function useChatLocalFileOpen(props: {
         column: ref.column,
         action
       });
+      if (result.fallbackMessage) {
+        toast.info(result.fallbackMessage);
+      }
       if (ref.line && !result.lineNavigationSupported) {
         toast.info(`Opened ${result.absolutePath}. The default app cannot jump to line ${ref.line}.`);
       }
+      return result;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not open the file.");
+      return undefined;
     }
   }, [props.conversationId]);
 
@@ -69,10 +77,10 @@ export function useChatLocalFileOpen(props: {
     if (!ref) {
       return;
     }
-    if (ref.insideWorkspace) {
+    const result = await openLocalFileReference(ref, action);
+    if (ref.insideWorkspace && result?.action === action) {
       await props.setRepoFileOpenPreference(action);
     }
-    await openLocalFileReference(ref, action);
   }, [chooserFileRef, openLocalFileReference, props.setRepoFileOpenPreference]);
 
   const handleLocalFileChooserOpenChange = useCallback((open: boolean): void => {
