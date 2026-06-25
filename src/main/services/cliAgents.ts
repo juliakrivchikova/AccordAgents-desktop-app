@@ -2827,7 +2827,10 @@ export class CliAgentRunner {
     const providerNativeAllowedTools = permissions.providerNative?.["claude-code"]?.allowedTools ?? [];
     const readContextAvailable = Boolean(repoPath) || extraReadableDirs.length > 0;
     const readTools = ["Read", "Grep", "Glob", "LS"];
-    const editTools = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+    // Claude Code 2.1 validates --disallowedTools strictly and rejects MultiEdit as
+    // unknown. Current builds expose ordinary file mutation through Edit/Write and
+    // notebook mutation through NotebookEdit.
+    const editTools = ["Edit", "Write", "NotebookEdit"];
     const webTools = ["WebSearch", "WebFetch"];
 
     if (readContextAvailable) {
