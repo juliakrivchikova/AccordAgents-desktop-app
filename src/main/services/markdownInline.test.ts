@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseMarkdownInline, type MarkdownInlineNode } from "../../shared/markdownInline";
+import {
+  parseInlineCodeFileLinkTarget,
+  parseMarkdownInline,
+  type MarkdownInlineNode
+} from "../../shared/markdownInline";
 
 function externalLinks(nodes: MarkdownInlineNode[]): Array<{ url: string; label: string }> {
   return nodes.flatMap((node): Array<{ url: string; label: string }> => {
@@ -131,4 +135,41 @@ test("parseMarkdownInline does not treat anchors, URLs, mailto, or plain words a
   const nodes = parseMarkdownInline("[anchor](#section) [site](https://example.com) [mail](mailto:a@example.com) [plain](word)");
   assert.equal(fileLinks(nodes).length, 0);
   assert.deepEqual(externalLinks(nodes), [{ url: "https://example.com", label: "site" }]);
+});
+
+test("parseInlineCodeFileLinkTarget accepts strict source-like paths", () => {
+  assert.deepEqual(
+    parseInlineCodeFileLinkTarget("src/renderer/components/settings/general-settings-section.tsx"),
+    { path: "src/renderer/components/settings/general-settings-section.tsx" }
+  );
+  assert.deepEqual(
+    parseInlineCodeFileLinkTarget("src/shared/types.ts:120:4"),
+    { path: "src/shared/types.ts", line: 120, column: 4 }
+  );
+  assert.deepEqual(
+    parseInlineCodeFileLinkTarget("app/[id]/page.tsx"),
+    { path: "app/[id]/page.tsx" }
+  );
+  assert.deepEqual(
+    parseInlineCodeFileLinkTarget("src/routes/[slug]/+page.svelte"),
+    { path: "src/routes/[slug]/+page.svelte" }
+  );
+});
+
+test("parseInlineCodeFileLinkTarget rejects illustrative launcher tokens and broad paths", () => {
+  assert.equal(parseInlineCodeFileLinkTarget("idea.sh"), undefined);
+  assert.equal(parseInlineCodeFileLinkTarget("/opt/idea*/bin/idea.sh"), undefined);
+  assert.equal(parseInlineCodeFileLinkTarget("/Applications/IntelliJ IDEA.app"), undefined);
+  assert.equal(parseInlineCodeFileLinkTarget("C:\\Program Files\\JetBrains\\idea64.exe"), undefined);
+  assert.equal(parseInlineCodeFileLinkTarget("~/.local/share/JetBrains/Toolbox/scripts"), undefined);
+  assert.equal(parseInlineCodeFileLinkTarget("package.json"), undefined);
+});
+
+test("parseMarkdownInline keeps inline code as code for renderer-side linkification", () => {
+  const nodes = parseMarkdownInline("Open `src/renderer/components/settings/general-settings-section.tsx`.");
+  assert.deepEqual(nodes, [
+    { type: "text", text: "Open " },
+    { type: "code", text: "src/renderer/components/settings/general-settings-section.tsx" },
+    { type: "text", text: "." }
+  ]);
 });

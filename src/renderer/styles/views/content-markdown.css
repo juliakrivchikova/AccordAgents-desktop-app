@@ -366,6 +366,15 @@
   font-size: 0.94em;
 }
 
+.markdown-text .file-link-inline-code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--app-surface-hover);
+  font-family: var(--font-code, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
+  font-size: 0.94em;
+  text-decoration: none;
+}
+
 .markdown-code {
   padding: 10px 11px;
   border: 1px solid var(--app-border);

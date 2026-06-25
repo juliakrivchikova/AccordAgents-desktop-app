@@ -1,6 +1,10 @@
 import { createContext, useContext, type ReactNode } from "react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { parseMarkdownInline, type MarkdownInlineNode } from "../../../shared/markdownInline";
+import {
+  parseInlineCodeFileLinkTarget,
+  parseMarkdownInline,
+  type MarkdownInlineNode
+} from "../../../shared/markdownInline";
 import { markdownBlocks, type MarkdownBlock } from "./markdown-blocks";
 import { FileLink } from "./local-file-link";
 import { MentionDirectoryContext, ParticipantHoverCard, profileHandleLabel, useHoverCard } from "./participant-hover-card";
@@ -217,6 +221,19 @@ function renderInlineNode(node: MarkdownInlineNode, key: string): ReactNode {
     return <strong key={key}>{node.children.map((child, index) => renderInlineNode(child, `${key}-${index}`))}</strong>;
   }
   if (node.type === "code") {
+    const fileTarget = parseInlineCodeFileLinkTarget(node.text);
+    if (fileTarget) {
+      return (
+        <FileLink
+          key={key}
+          path={fileTarget.path}
+          label={node.text}
+          line={fileTarget.line}
+          column={fileTarget.column}
+          variant="inline-code"
+        />
+      );
+    }
     return <code key={key}>{node.text}</code>;
   }
   if (node.type === "mention") {

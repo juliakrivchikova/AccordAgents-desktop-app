@@ -7,12 +7,68 @@ export type MarkdownInlineNode =
   | { type: "fileLink"; path: string; label: string; line?: number; column?: number }
   | { type: "externalLink"; url: string; label: string };
 
+export interface FileLinkTarget {
+  path: string;
+  line?: number;
+  column?: number;
+}
+
 const MESSAGE_ID_RE_SOURCE = "[A-Za-z0-9][A-Za-z0-9_-]*";
 const MESSAGE_LINK_RE = new RegExp(`^\\[([^\\]\\n]+)\\]\\(#msg:(${MESSAGE_ID_RE_SOURCE})\\)`);
 const BARE_MESSAGE_RE = new RegExp(`^#msg:(${MESSAGE_ID_RE_SOURCE})`);
 const MARKDOWN_EXTERNAL_LINK_RE = /^\[([^\]\n]+)\]\((https?:\/\/[^\s<>)]+)\)/i;
 const MARKDOWN_FILE_LINK_RE = /^\[([^\]\n]+)\]\((<[^>\n]+>|[^)\s]+)\)/;
 const BARE_EXTERNAL_URL_RE = /^https?:\/\/[^\s<>]+/i;
+const FILE_LINE_SUFFIX_RE = /:(\d+)(?::(\d+))?$/;
+const INLINE_CODE_GLOB_RE = /[*?]/;
+const INLINE_CODE_FILE_EXTENSIONS = new Set([
+  "c",
+  "cc",
+  "cfg",
+  "cjs",
+  "cpp",
+  "css",
+  "cts",
+  "dart",
+  "ex",
+  "exs",
+  "go",
+  "gradle",
+  "h",
+  "hpp",
+  "html",
+  "ini",
+  "java",
+  "js",
+  "json",
+  "jsx",
+  "kt",
+  "lock",
+  "lua",
+  "mjs",
+  "md",
+  "mts",
+  "php",
+  "proto",
+  "py",
+  "rb",
+  "rs",
+  "scala",
+  "scss",
+  "sh",
+  "sql",
+  "svelte",
+  "swift",
+  "tf",
+  "toml",
+  "ts",
+  "tsx",
+  "txt",
+  "vue",
+  "xml",
+  "yaml",
+  "yml"
+]);
 // Mirrors the backend handle charset in chat.ts (extractMentions), but only at a word
 // boundary so email local-parts like `user@example.com` are not treated as mentions.
 const MENTION_RE = /^@([A-Za-z0-9][A-Za-z0-9_-]{0,31})/;
@@ -122,11 +178,11 @@ export function nextExternalUrlStart(text: string, start: number): number {
   return candidates.length ? Math.min(...candidates) : -1;
 }
 
-export function parseFileLinkTarget(rawTarget: string): { path: string; line?: number; column?: number } | undefined {
+export function parseFileLinkTarget(rawTarget: string): FileLinkTarget | undefined {
   const unwrapped = rawTarget.startsWith("<") && rawTarget.endsWith(">")
     ? rawTarget.slice(1, -1)
     : rawTarget;
-  let target = unwrapped.trim();
+  const target = unwrapped.trim();
   if (
     !target ||
     /[\0\r\n\t]/.test(target) ||
@@ -137,23 +193,62 @@ export function parseFileLinkTarget(rawTarget: string): { path: string; line?: n
     return undefined;
   }
 
+  const parsed = parseTargetWithLineSuffix(target);
+  if (!parsed || !isPathLikeFileTarget(parsed.path)) {
+    return undefined;
+  }
+
+  return parsed;
+}
+
+export function parseInlineCodeFileLinkTarget(rawTarget: string): FileLinkTarget | undefined {
+  const target = rawTarget.trim();
+  if (
+    !target ||
+    /[\0\r\n\t\s]/.test(target) ||
+    target.includes("\\") ||
+    INLINE_CODE_GLOB_RE.test(target) ||
+    target.startsWith("#") ||
+    /^https?:\/\//i.test(target) ||
+    /^mailto:/i.test(target)
+  ) {
+    return undefined;
+  }
+
+  const parsed = parseTargetWithLineSuffix(target);
+  if (!parsed || !hasSlashPathSignal(parsed.path) || !hasInlineCodeFileExtension(parsed.path)) {
+    return undefined;
+  }
+
+  return parsed;
+}
+
+function parseTargetWithLineSuffix(target: string): FileLinkTarget | undefined {
+  let path = target;
   let line: number | undefined;
   let column: number | undefined;
-  const suffix = target.match(/:(\d+)(?::(\d+))?$/);
+  const suffix = path.match(FILE_LINE_SUFFIX_RE);
   if (suffix) {
     line = Number.parseInt(suffix[1], 10);
     column = suffix[2] ? Number.parseInt(suffix[2], 10) : undefined;
-    target = target.slice(0, -suffix[0].length);
+    path = path.slice(0, -suffix[0].length);
     if (line < 1 || (column !== undefined && column < 1)) {
       return undefined;
     }
   }
 
-  if (!isPathLikeFileTarget(target)) {
+  if (!path) {
     return undefined;
   }
 
-  return { path: target, line, column };
+  const parsed: FileLinkTarget = { path };
+  if (line !== undefined) {
+    parsed.line = line;
+  }
+  if (column !== undefined) {
+    parsed.column = column;
+  }
+  return parsed;
 }
 
 function isPathLikeFileTarget(target: string): boolean {
@@ -167,6 +262,19 @@ function isPathLikeFileTarget(target: string): boolean {
     return true;
   }
   return /\.[A-Za-z0-9][A-Za-z0-9_-]{0,15}$/.test(target);
+}
+
+function hasSlashPathSignal(target: string): boolean {
+  return target.startsWith("/") || target.startsWith("./") || target.startsWith("../") || target.includes("/");
+}
+
+function hasInlineCodeFileExtension(target: string): boolean {
+  const basename = target.split("/").pop() ?? "";
+  const dotIndex = basename.lastIndexOf(".");
+  if (dotIndex < 1 || dotIndex === basename.length - 1) {
+    return false;
+  }
+  return INLINE_CODE_FILE_EXTENSIONS.has(basename.slice(dotIndex + 1).toLowerCase());
 }
 
 function splitBareExternalUrl(value: string): { url: string; suffix: string } {

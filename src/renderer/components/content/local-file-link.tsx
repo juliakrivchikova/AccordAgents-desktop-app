@@ -36,13 +36,25 @@ function fileLinkTitle(ref: FileLinkRef): string {
   return ref.path;
 }
 
-export function FileLink({ path, label, line, column }: FileLinkRef & { label: string }): JSX.Element {
+export function FileLink({
+  path,
+  label,
+  line,
+  column,
+  variant
+}: FileLinkRef & { label: string; variant?: "inline-code" }): JSX.Element {
   const { requestOpenFile } = useContext(LocalFileLinkContext);
   const ref: FileLinkRef = { path, line, column };
+  const className = variant === "inline-code"
+    ? "message-link file-link file-link-inline-code"
+    : "message-link file-link";
 
   if (!requestOpenFile) {
     return (
-      <span className="file-link file-link-static" title={fileLinkTitle(ref)}>
+      <span
+        className={variant === "inline-code" ? "file-link file-link-static file-link-inline-code" : "file-link file-link-static"}
+        title={fileLinkTitle(ref)}
+      >
         {label}
       </span>
     );
@@ -50,7 +62,7 @@ export function FileLink({ path, label, line, column }: FileLinkRef & { label: s
 
   return (
     <a
-      className="message-link file-link"
+      className={className}
       role="button"
       tabIndex={0}
       title={fileLinkTitle(ref)}
