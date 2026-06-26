@@ -827,11 +827,15 @@ export class AppMcpService {
         name: APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
         title: "Request Chat Permission Change",
         description:
-          "Request a permission change for this chat participant. Use portable for repoRead/workspaceWrite/webAccess, shellRules for command-specific shell rules, or providerNative for Claude Code allowedTools tokens. Provider-native grants are rejected unless the requester is a Claude Code participant. The app validates the request and may return already_granted (the capability is already available, e.g. an Auto-review preset capability) or pending_user_approval for User approval.",
+          "Request a permission change for this chat participant, or pass a prior requestId to recover its status idempotently. Use portable for repoRead/workspaceWrite/webAccess, shellRules for command-specific shell rules, or providerNative for Claude Code allowedTools tokens. Provider-native grants are rejected unless the requester is a Claude Code participant. The app validates the request and may return already_granted (the capability is already available for this run) or pending_user_approval for User approval.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
           properties: {
+            requestId: {
+              type: "string",
+              description: "Stable permission request id returned by an earlier call. When present, the tool returns that request's current status instead of creating a new request."
+            },
             kind: {
               type: "string",
               enum: ["portable", "shellRules", "providerNative"],
@@ -888,8 +892,7 @@ export class AppMcpService {
               },
               description: "Literal Claude Code allowedTools tokens to request when kind is providerNative."
             }
-          },
-          required: ["kind"]
+          }
         },
         annotations: {
           readOnlyHint: false,

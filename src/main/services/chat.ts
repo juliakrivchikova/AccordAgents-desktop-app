@@ -39,6 +39,7 @@ import type {
   ChatParticipantSession,
   ChatPermissionChangeRequest,
   ChatPermissionGrant,
+  ChatPermissionRequestToolResult,
   ChatPendingChoice,
   ChatPendingMention,
   ChatProviderKind,
@@ -1124,7 +1125,7 @@ export class ChatService {
     };
   }
 
-  async requestPermissionChangeFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+  async requestPermissionChangeFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<ChatPermissionRequestToolResult> {
     await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
@@ -1135,8 +1136,14 @@ export class ChatService {
       throw new Error("The issued app-tool token does not grant permission requests.");
     }
 
-    const prepared = this.preparePermissionChange(requester, this.normalizePermissionChangeRequest(rawRequest));
-    if (normalizeChatAgentMode(requester.agentMode) === "auto" && prepared.request.kind === "shellRules") {
+    const requestId = this.permissionRequestIdFromRaw(rawRequest);
+    if (requestId) {
+      return this.permissionRequestStatusForTool(conversation, requester, requestId, actor);
+    }
+
+    const runPermissions = actor.runPermissions ? normalizeChatAgentPermissions(actor.runPermissions) : undefined;
+    const prepared = this.preparePermissionChange(requester, this.normalizePermissionChangeRequest(rawRequest), runPermissions);
+    if (!runPermissions && normalizeChatAgentMode(requester.agentMode) === "auto" && prepared.request.kind === "shellRules") {
       // In Auto-review the provider's native auto classifier decides each shell command,
       // so an agent shellRules request needs no User approval. Configured deny rules are
       // still applied at launch as hard stops.
@@ -1152,6 +1159,11 @@ export class ChatService {
         status: "already_granted",
         summary: prepared.summary
       };
+    }
+
+    const existingApproval = this.findReplayablePermissionApproval(conversation, requester, prepared.request, actor);
+    if (existingApproval) {
+      return this.permissionRequestStatusResult(existingApproval);
     }
 
     // Reading a selected skill's own files is part of skill invocation and is covered by repoRead.
@@ -1205,8 +1217,11 @@ export class ChatService {
     return {
       ok: true,
       status: "pending_user_approval",
+      requestId: approval.id,
       approvalId: approval.id,
-      summary: prepared.summary
+      summary: prepared.summary,
+      request: prepared.request,
+      updatedAt: approval.updatedAt
     };
   }
 
@@ -6299,6 +6314,88 @@ export class ChatService {
     return [prompt, "", PARTICIPANT_REQUEST_SCRUTINY_APPENDIX].join("\n");
   }
 
+  private permissionRequestIdFromRaw(rawRequest: unknown): string | undefined {
+    if (!rawRequest || typeof rawRequest !== "object" || Array.isArray(rawRequest)) {
+      return undefined;
+    }
+    const requestId = (rawRequest as Record<string, unknown>).requestId;
+    return typeof requestId === "string" ? requestId.trim() || undefined : undefined;
+  }
+
+  private permissionRequestStatusForTool(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    requestId: string,
+    actor: ChatAppMcpActor
+  ): ChatPermissionRequestToolResult {
+    const approval = this.chatAppToolApprovals(conversation).find((item) =>
+      item.id === requestId &&
+      item.requesterParticipantId === requester.id &&
+      item.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
+      this.isPermissionChangeRequest(item.request) &&
+      (!actor.runId || item.resumeContext?.runId === actor.runId)
+    );
+    if (!approval) {
+      return {
+        ok: false,
+        status: "not_found",
+        requestId,
+        error: "Permission request was not found for this participant run."
+      };
+    }
+    return this.permissionRequestStatusResult(approval);
+  }
+
+  private permissionRequestStatusResult(approval: ChatAppToolApproval): ChatPermissionRequestToolResult {
+    const status: ChatPermissionRequestToolResult["status"] =
+      approval.status === "pending"
+        ? "pending_user_approval"
+        : approval.status === "approved"
+          ? "approved"
+          : approval.status === "denied"
+            ? "denied"
+            : "already_granted";
+    return {
+      ok: true,
+      status,
+      requestId: approval.id,
+      approvalId: approval.id,
+      summary: approval.summary,
+      request: this.isPermissionChangeRequest(approval.request) ? approval.request : undefined,
+      approvalScope: approval.approvalScope,
+      updatedAt: approval.updatedAt,
+      ...(approval.error ? { error: approval.error } : {})
+    };
+  }
+
+  private findReplayablePermissionApproval(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    request: ChatPermissionChangeRequest,
+    actor: ChatAppMcpActor
+  ): ChatAppToolApproval | undefined {
+    return this.chatAppToolApprovals(conversation).find((approval) => {
+      if (
+        approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL ||
+        approval.requesterParticipantId !== requester.id ||
+        !this.isPermissionChangeRequest(approval.request)
+      ) {
+        return false;
+      }
+      if (actor.runId) {
+        if (approval.resumeContext?.runId !== actor.runId) {
+          return false;
+        }
+      } else if (approval.status !== "pending") {
+        return false;
+      }
+      return (
+        this.permissionChangeRequestCovers(approval.request, request) &&
+        this.permissionChangeRequestCovers(request, approval.request)
+      );
+    });
+  }
+
   private hasPendingPermissionApproval(
     conversation: Conversation,
     participant: ChatParticipant,
@@ -6555,7 +6652,8 @@ export class ChatService {
 
   private preparePermissionChange(
     requester: ChatParticipant | undefined,
-    request: ChatAppToolApprovalRequest
+    request: ChatAppToolApprovalRequest,
+    currentPermissionsOverride?: ChatAgentPermissions
   ): PreparedPermissionChange {
     if (!requester) {
       throw new Error("The requesting participant is no longer in this chat.");
@@ -6578,11 +6676,13 @@ export class ChatService {
     // stored toggles. In Auto-review mode the provider preset already grants web/edit,
     // so an in-preset request must report already_granted instead of producing a
     // spurious auto-applied approval and an unnecessary session relaunch.
-    const current = effectiveChatAgentPermissionsForProvider(
-      requester.kind,
-      mode,
-      normalizeChatAgentPermissions(requester.permissions)
-    );
+    const current = currentPermissionsOverride
+      ? normalizeChatAgentPermissions(currentPermissionsOverride)
+      : effectiveChatAgentPermissionsForProvider(
+          requester.kind,
+          mode,
+          normalizeChatAgentPermissions(requester.permissions)
+        );
     if (normalizedRequest.kind === "portable") {
       const portablePermissions = normalizedRequest.permissions.filter((permission) => !current[permission]);
       const summaryPermissions = portablePermissions.length > 0 ? portablePermissions : normalizedRequest.permissions;

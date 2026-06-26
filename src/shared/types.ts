@@ -546,6 +546,25 @@ export type ChatAppToolApprovalStatus = "pending" | "approved" | "denied" | "aut
 
 export type ChatAppToolApprovalScope = "once" | "chat";
 
+export type ChatPermissionRequestToolStatus =
+  | "pending_user_approval"
+  | "approved"
+  | "denied"
+  | "already_granted"
+  | "not_found";
+
+export interface ChatPermissionRequestToolResult {
+  ok: boolean;
+  status: ChatPermissionRequestToolStatus;
+  requestId?: string;
+  approvalId?: string;
+  summary?: string;
+  request?: ChatPermissionChangeRequest;
+  approvalScope?: ChatAppToolApprovalScope;
+  updatedAt?: string;
+  error?: string;
+}
+
 export type ChatAppToolApprovalRequest =
   | ChatRosterChangeRequest
   | ChatRoleChangeRequest

@@ -241,6 +241,184 @@ test("structured permission request creates exactly one approval card", async ()
   assert.equal(approvals[0].resumeContext?.triggerMessageId, "user-message");
 });
 
+test("permission request has stable requestId and idempotent replay after approval", async () => {
+  const participant = chatParticipant("claude-code", { webAccess: false });
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const],
+    runId: "remote-run-1",
+    triggerMessageId: "user-message",
+    runPermissions: defaultChatAgentPermissions()
+  };
+  const request = {
+    kind: "portable",
+    permissions: ["webAccess"],
+    reason: "Need live web lookup from the remote worker."
+  };
+
+  const first = await service.requestPermissionChangeFromTool(actor, request);
+  assert.equal(first.status, "pending_user_approval");
+  assert.equal(typeof first.requestId, "string");
+  assert.equal(first.requestId, first.approvalId);
+
+  const duplicate = await service.requestPermissionChangeFromTool(actor, request);
+  assert.equal(duplicate.status, "pending_user_approval");
+  assert.equal(duplicate.requestId, first.requestId);
+  assert.equal(
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .filter((approval) => approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL).length,
+    1
+  );
+  assert.equal(
+    storage.current.messages.filter((message: ChatMessage) => message.content.startsWith("Permission approval needed")).length,
+    1
+  );
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: first.requestId ?? "",
+    approve: true,
+    scope: "once"
+  });
+
+  const lookup = await service.requestPermissionChangeFromTool(actor, { requestId: first.requestId });
+  assert.equal(lookup.status, "approved");
+  assert.equal(lookup.requestId, first.requestId);
+  assert.equal(lookup.approvalScope, "once");
+
+  const replayAfterDecision = await service.requestPermissionChangeFromTool(actor, request);
+  assert.equal(replayAfterDecision.status, "approved");
+  assert.equal(replayAfterDecision.requestId, first.requestId);
+  assert.equal(
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .filter((approval) => approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL).length,
+    1
+  );
+});
+
+test("permission request status lookup returns denied decisions idempotently", async () => {
+  const participant = chatParticipant("claude-code", { webAccess: false });
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const],
+    runId: "remote-run-2",
+    triggerMessageId: "user-message",
+    runPermissions: defaultChatAgentPermissions()
+  };
+
+  const pending = await service.requestPermissionChangeFromTool(actor, {
+    kind: "portable",
+    permissions: ["webAccess"]
+  });
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.requestId ?? "",
+    approve: false
+  });
+
+  const lookup = await service.requestPermissionChangeFromTool(actor, { requestId: pending.requestId });
+  assert.equal(lookup.status, "denied");
+  assert.equal(lookup.requestId, pending.requestId);
+});
+
+test("permission request status lookup is scoped to the actor run", async () => {
+  const participant = chatParticipant("claude-code", { webAccess: false });
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const],
+    runId: "remote-run-a",
+    triggerMessageId: "user-message",
+    runPermissions: defaultChatAgentPermissions()
+  };
+
+  const pending = await service.requestPermissionChangeFromTool(actor, {
+    kind: "portable",
+    permissions: ["webAccess"]
+  });
+  const otherRunLookup = await service.requestPermissionChangeFromTool({
+    ...actor,
+    runId: "remote-run-b"
+  }, {
+    requestId: pending.requestId
+  });
+
+  assert.equal(otherRunLookup.ok, false);
+  assert.equal(otherRunLookup.status, "not_found");
+  assert.equal(otherRunLookup.requestId, pending.requestId);
+});
+
+test("permission request already_granted uses run-scoped permissions when present", async () => {
+  const participant = {
+    ...chatParticipant("codex-cli", { webAccess: true }),
+    agentMode: "auto" as const
+  };
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+
+  const result = await service.requestPermissionChangeFromTool({
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request"],
+    runId: "remote-run-3",
+    triggerMessageId: "user-message",
+    runPermissions: defaultChatAgentPermissions()
+  }, {
+    kind: "portable",
+    permissions: ["webAccess"]
+  });
+
+  assert.equal(result.status, "pending_user_approval");
+  assert.equal(
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .filter((approval) => approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL).length,
+    1
+  );
+});
+
+test("permission request returns already_granted when run-scoped permissions cover it", async () => {
+  const participant = chatParticipant("claude-code", { webAccess: false });
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+
+  const result = await service.requestPermissionChangeFromTool({
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request"],
+    runId: "remote-run-4",
+    triggerMessageId: "user-message",
+    runPermissions: { ...defaultChatAgentPermissions(), webAccess: true }
+  }, {
+    kind: "portable",
+    permissions: ["webAccess"]
+  });
+
+  assert.equal(result.status, "already_granted");
+  assert.equal(
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .filter((approval) => approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL).length,
+    0
+  );
+});
+
 test("tool permission request waits for user approval and returns allow once", async () => {
   const participant = chatParticipant("claude-code");
   const conversation = chatConversation([participant]);
