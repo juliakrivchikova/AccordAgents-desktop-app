@@ -17,6 +17,7 @@ import type {
   ChatParticipantRequestStatus,
   ChatParticipantSession,
   ChatRoleConfig,
+  ChatSkillMention,
   Conversation
 } from "../../shared/types";
 
@@ -206,6 +207,49 @@ test("buildPromptParts section sizes stay under baseline caps across envelope br
   assert.match(slimRepoRead.prompt, /Repository: \/repo \(repoRead allowed\)/);
   assert.match(slimNoRepoRead.prompt, /Repository: \/repo \(repoRead blocked\)/);
   assert.match(slimNoRepoRead.prompt, /repoRead.*app_permissions_request_change/);
+});
+
+test("buildPrompt adds addressee guidance for multiple resolved participant mentions", () => {
+  const drew = chatParticipant({}, { id: "participant-drew", handle: "drew" });
+  const taylor = chatParticipant({}, { id: "participant-taylor", handle: "taylor" });
+  const conversation = chatConversation([drew, taylor], "/repo");
+  const triggerMessage = userMessage("trigger-1", "@drew @taylor what do you both think?");
+  conversation.messages.push(triggerMessage);
+  const service = testService({ canRequestPermissions: true }).service as any;
+  const prompt = service.buildPrompt(conversation, drew, chatSession(drew), triggerMessage, "/workspace", false, {
+    includeRoleInstructions: false,
+    agentMode: "default",
+    permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
+  }) as string;
+
+  assert.match(prompt, /First determine who the message is addressed to\./);
+  assert.match(prompt, /my handle is the primary\/direct addressee/);
+  assert.match(prompt, /app context says this is a participant request addressed to me/);
+  assert.match(prompt, /Reply only "Noted" if/);
+  assert.match(prompt, /even if my handle appears inside the requested action/);
+});
+
+test("buildPrompt addressee guidance ignores non-participant mentions and selected skills", () => {
+  const drew = chatParticipant({}, { id: "participant-drew", handle: "drew" });
+  const taylor = chatParticipant({}, { id: "participant-taylor", handle: "taylor" });
+  const conversation = chatConversation([drew, taylor], "/repo");
+  const triggerMessage = userMessage("trigger-1", "@drew inspect @src/foo.ts with /qa.");
+  triggerMessage.metadata = {
+    ...triggerMessage.metadata,
+    repoFileMentions: [{ path: "src/foo.ts" }],
+    skillMentions: [skillMention()]
+  };
+  conversation.messages.push(triggerMessage);
+  const service = testService({ canRequestPermissions: true }).service as any;
+  const prompt = service.buildPrompt(conversation, drew, chatSession(drew), triggerMessage, "/workspace", false, {
+    includeRoleInstructions: false,
+    agentMode: "default",
+    permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
+  }) as string;
+
+  assert.doesNotMatch(prompt, /First determine who the message is addressed to\./);
+  assert.match(prompt, /Referenced repository files/);
+  assert.match(prompt, /Selected skills for this turn/);
 });
 
 test("sendMessage clears running and emits terminal error when participant run fails", async () => {
@@ -1989,6 +2033,25 @@ function participantRequestMessage(requester: ChatParticipant): ChatMessage {
         }]
       }
     }
+  };
+}
+
+function skillMention(): ChatSkillMention {
+  return {
+    skillId: "skill-1",
+    displayName: "/qa",
+    frontmatterName: "qa",
+    contentHash: "hash-a",
+    capabilityState: "invocable",
+    variants: [{
+      providerKind: "codex-cli",
+      scope: "personal",
+      rootKind: "personal",
+      sourceKey: "source",
+      frontmatterName: "qa",
+      contentHash: "hash-a",
+      capabilityState: "invocable"
+    }]
   };
 }
 

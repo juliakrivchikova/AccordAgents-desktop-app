@@ -154,6 +154,7 @@ interface ChatPromptSectionSizes {
   staticEnvelope: number;
   dynamicHeader: number;
   trigger: number;
+  addressee: number;
   skills: number;
   mentions: number;
   attachments: number;
@@ -3497,7 +3498,7 @@ export class ChatService {
               agentMode,
               permissions
             })
-          : this.buildRetryEnvelope(triggerMessage, Boolean(options.continuation), session);
+          : this.buildRetryEnvelope(promptConversation, triggerMessage, Boolean(options.continuation), session);
         const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
           includeRoleInstructions: true,
           agentMode,
@@ -3775,6 +3776,7 @@ export class ChatService {
       "Triggering message:",
       this.formatMessage(triggerMessage, false, false)
     ].join("\n\n");
+    const addresseeBlock = this.multiParticipantAddresseePromptSection(conversation, triggerMessage);
     const skillsBlock = this.skillMentionsPromptSection(triggerMessage, participant.kind);
     const mentionsBlock = this.repoFileMentionsPromptSection(
       triggerMessage,
@@ -3799,6 +3801,7 @@ export class ChatService {
     const orderedBlocks = [
       staticEnvelope || dynamicHeader,
       triggerBlock,
+      addresseeBlock,
       skillsBlock,
       mentionsBlock,
       attachmentsBlock,
@@ -3813,6 +3816,7 @@ export class ChatService {
         staticEnvelope: staticEnvelope.length,
         dynamicHeader: staticEnvelope ? 0 : dynamicHeader.length,
         trigger: triggerBlock.length,
+        addressee: addresseeBlock.length,
         skills: skillsBlock.length,
         mentions: mentionsBlock.length,
         attachments: attachmentsBlock.length,
@@ -3868,18 +3872,36 @@ export class ChatService {
     return `${normalized.slice(0, maxChars - 3).trimEnd()}...`;
   }
 
-  private buildRetryEnvelope(triggerMessage: ChatMessage, continuation: boolean, session: ChatParticipantSession): string {
+  private buildRetryEnvelope(conversation: Conversation, triggerMessage: ChatMessage, continuation: boolean, session: ChatParticipantSession): string {
     return [
       "Triggering message identifiers:",
       this.triggeringMessageIdentifiers(triggerMessage),
       "Triggering message:",
       this.formatMessage(triggerMessage, false, false),
+      this.multiParticipantAddresseePromptSection(conversation, triggerMessage),
       this.skillMentionsPromptSection(triggerMessage, undefined),
       this.imageAttachmentsPromptSection(triggerMessage),
       this.behaviorRuleReinforcementSection(session),
       this.currentChatRequestLine(triggerMessage, continuation),
       "Write your next message in this chat."
     ].filter(Boolean).join("\n\n");
+  }
+
+  private multiParticipantAddresseePromptSection(conversation: Conversation, message: ChatMessage): string {
+    const mentionedParticipants = this.resolveMentionTargets(conversation, message.content).targets;
+    if (mentionedParticipants.length <= 1) {
+      return "";
+    }
+    return [
+      "First determine who the message is addressed to.",
+      "",
+      "Handle the request only if:",
+      "- my handle is the primary/direct addressee, or",
+      "- the app context says this is a participant request addressed to me.",
+      "",
+      "Reply only \"Noted\" if:",
+      "- the message is addressed to another participant, even if my handle appears inside the requested action."
+    ].join("\n");
   }
 
   private currentChatRequestLine(triggerMessage: ChatMessage, continuation: boolean): string {
