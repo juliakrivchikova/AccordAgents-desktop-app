@@ -593,6 +593,7 @@ export interface ChatAppToolApproval {
     runId: string;
     triggerMessageId: string;
     participantRequestBatchId?: string;
+    remoteRun?: boolean;
   };
   consumedAt?: string;
   error?: string;

@@ -50,6 +50,7 @@ import { ensureLoginShellEnvPrimed, setCommandDebugLogger } from "./services/com
 import { DebugLogService } from "./services/debugLogs";
 import { GitService } from "./services/git";
 import { ProviderRunner } from "./services/providers";
+import { RemoteRunService } from "./services/remoteRuns";
 import { LocalFileOpenerService } from "./services/localFileOpener";
 import { SettingsService } from "./services/settings";
 import { StorageService } from "./services/storage";
@@ -87,6 +88,7 @@ const consensusService = new ConsensusService(gitService, storageService, provid
 const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
 }, userSkillsService);
+new RemoteRunService(chatService);
 appMcpService.setRosterChangeHandler((actor, request) => chatService.requestRosterChangeFromTool(actor, request));
 appMcpService.setRosterOptionsHandler((actor) => chatService.describeRosterOptionsForTool(actor));
 appMcpService.setRoleChangeHandler((actor, request) => chatService.requestRoleChangeFromTool(actor, request));

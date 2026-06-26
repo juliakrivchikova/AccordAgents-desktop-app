@@ -102,6 +102,7 @@ import {
 import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
 import { CliAgentRunner } from "./cliAgents";
 import type { CliAgentOutputEvent, CliAgentRoleOptions } from "./cliAgents";
+import type { RemoteRunApplyRecordResult, RemoteRunReplayRecord } from "./remoteRuns";
 import {
   APP_CHAT_EXPORT_ATTACHMENT_TOOL,
   APP_CHAT_GET_CONTEXT_TOOL,
@@ -377,6 +378,12 @@ interface ToolPermissionDecision {
   source: "user" | "policy" | "timeout" | "abort";
 }
 
+export interface ChatAppToolApprovalDecisionEvent {
+  conversationId: string;
+  approval: ChatAppToolApproval;
+  status: Extract<ChatAppToolApproval["status"], "approved" | "denied">;
+}
+
 interface ParticipantRequestRunResult {
   batch: ChatParticipantRequestBatch;
   replies: Array<{
@@ -392,6 +399,16 @@ interface ParticipantTurnReservation {
   wait: () => Promise<void>;
   release: () => void;
 }
+
+interface RemoteRunReplayState {
+  cursorSeq: number;
+  appliedRecordIds: string[];
+  permissionRequestIdsByRecordId?: Record<string, string>;
+  terminalState?: string;
+  updatedAt?: string;
+}
+
+type RemoteRunReplayStateByRun = Record<string, RemoteRunReplayState>;
 
 export class ChatService {
   private readonly saveQueues = new Map<string, Promise<void>>();
@@ -411,6 +428,7 @@ export class ChatService {
   private readonly chatRunMeta = new Map<string, { conversationId: string; participantId: string; participantHandle: string; pendingMessageId?: string }>();
   private readonly chatMutationQueues = new Map<string, Promise<void>>();
   private readonly appSendMessageCountsByRun = new Map<string, number>();
+  private readonly appToolApprovalDecisionListeners = new Set<(event: ChatAppToolApprovalDecisionEvent) => Promise<void> | void>();
 
   constructor(
     private readonly storage: StorageService,
@@ -421,6 +439,27 @@ export class ChatService {
     private readonly onConversationSnapshot?: (conversation: Conversation) => void,
     private readonly userSkills?: UserSkillsService
   ) {}
+
+  onAppToolApprovalDecision(listener: (event: ChatAppToolApprovalDecisionEvent) => Promise<void> | void): () => void {
+    this.appToolApprovalDecisionListeners.add(listener);
+    return () => {
+      this.appToolApprovalDecisionListeners.delete(listener);
+    };
+  }
+
+  private async emitAppToolApprovalDecision(event: ChatAppToolApprovalDecisionEvent): Promise<void> {
+    for (const listener of this.appToolApprovalDecisionListeners) {
+      try {
+        await listener(event);
+      } catch (error) {
+        await this.debugLogs.write("chat.app-tool-approval-decision-listener.error", {
+          conversationId: event.conversationId,
+          approvalId: event.approval.id,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+  }
 
   async hydrateContextUsage(conversation: Conversation): Promise<Conversation> {
     if (conversation.kind !== "chat") {
@@ -1136,9 +1175,27 @@ export class ChatService {
       throw new Error("The issued app-tool token does not grant permission requests.");
     }
 
+    const applied = await this.applyPermissionChangeRequestFromTool(conversation, requester, actor, rawRequest);
+    if (applied.mutated) {
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+    }
+    return applied.result;
+  }
+
+  private async applyPermissionChangeRequestFromTool(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    actor: ChatAppMcpActor,
+    rawRequest: unknown,
+    options: { requestId?: string; remoteRun?: boolean } = {}
+  ): Promise<{ result: ChatPermissionRequestToolResult; mutated: boolean }> {
     const requestId = this.permissionRequestIdFromRaw(rawRequest);
     if (requestId) {
-      return this.permissionRequestStatusForTool(conversation, requester, requestId, actor);
+      return {
+        result: this.permissionRequestStatusForTool(conversation, requester, requestId, actor),
+        mutated: false
+      };
     }
 
     const runPermissions = actor.runPermissions ? normalizeChatAgentPermissions(actor.runPermissions) : undefined;
@@ -1148,22 +1205,31 @@ export class ChatService {
       // so an agent shellRules request needs no User approval. Configured deny rules are
       // still applied at launch as hard stops.
       return {
-        ok: true,
-        status: "already_granted",
-        summary: "Auto-review handles shell command decisions via the provider's native auto classifier; no shell-rule grant is needed."
+        result: {
+          ok: true,
+          status: "already_granted",
+          summary: "Auto-review handles shell command decisions via the provider's native auto classifier; no shell-rule grant is needed."
+        },
+        mutated: false
       };
     }
     if (!this.preparedPermissionChangeHasAdditions(prepared)) {
       return {
-        ok: true,
-        status: "already_granted",
-        summary: prepared.summary
+        result: {
+          ok: true,
+          status: "already_granted",
+          summary: prepared.summary
+        },
+        mutated: false
       };
     }
 
     const existingApproval = this.findReplayablePermissionApproval(conversation, requester, prepared.request, actor);
     if (existingApproval) {
-      return this.permissionRequestStatusResult(existingApproval);
+      return {
+        result: this.permissionRequestStatusResult(existingApproval),
+        mutated: false
+      };
     }
 
     // Reading a selected skill's own files is part of skill invocation and is covered by repoRead.
@@ -1184,9 +1250,12 @@ export class ChatService {
         : [];
       if (selectedSkills.length > 0 && await this.shellRulesAreSelectedSkillReads(prepared.request.rules, selectedSkills.map((skill) => skill.dir))) {
         return {
-          ok: true,
-          status: "already_granted",
-          summary: "Reading the selected skill files is permitted as read-only skill invocation context; no shell-rule grant is needed."
+          result: {
+            ok: true,
+            status: "already_granted",
+            summary: "Reading the selected skill files is permitted as read-only skill invocation context; no shell-rule grant is needed."
+          },
+          mutated: false
         };
       }
     }
@@ -1200,11 +1269,15 @@ export class ChatService {
       prepared.summary,
       "pending"
     );
+    if (options.requestId) {
+      approval.id = options.requestId;
+    }
     if (actor.runId && actor.triggerMessageId) {
       approval.resumeContext = {
         runId: actor.runId,
         triggerMessageId: actor.triggerMessageId,
-        participantRequestBatchId: actor.participantRequestBatchId
+        participantRequestBatchId: actor.participantRequestBatchId,
+        remoteRun: options.remoteRun || undefined
       };
     }
     this.upsertAppToolApproval(conversation, approval);
@@ -1212,17 +1285,120 @@ export class ChatService {
       threadId: "system"
     }));
     conversation.updatedAt = new Date().toISOString();
-    await this.saveConversation(conversation);
-    this.queueSnapshot(conversation);
     return {
-      ok: true,
-      status: "pending_user_approval",
-      requestId: approval.id,
-      approvalId: approval.id,
-      summary: prepared.summary,
-      request: prepared.request,
-      updatedAt: approval.updatedAt
+      result: {
+        ok: true,
+        status: "pending_user_approval",
+        requestId: approval.id,
+        approvalId: approval.id,
+        summary: prepared.summary,
+        request: prepared.request,
+        updatedAt: approval.updatedAt
+      },
+      mutated: true
     };
+  }
+
+  async applyRemoteRunReplayRecord(record: RemoteRunReplayRecord): Promise<RemoteRunApplyRecordResult> {
+    const conversation = await this.storage.getConversation(record.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      throw new Error("Remote run replay conversation was not found.");
+    }
+    return this.withChatMutation(conversation, async () => {
+      const state = this.remoteRunReplayState(conversation, record.runId);
+      if (state.appliedRecordIds.includes(record.id)) {
+        return {
+          applied: false,
+          runId: record.runId,
+          seq: record.seq,
+          cursorSeq: state.cursorSeq,
+          permissionResult: this.remoteReplayDuplicatePermissionResult(conversation, record, state)
+        };
+      }
+
+      let permissionResult: ChatPermissionRequestToolResult | undefined;
+      if (record.kind === "output_text") {
+        const participant = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
+        if (!participant) {
+          throw new Error("Remote run output references a participant that is no longer in this chat.");
+        }
+        const message = this.message(
+          "participant",
+          record.content,
+          {
+            id: participant.id,
+            kind: participant.kind,
+            label: `@${participant.handle}`,
+            model: participant.model,
+            reasoningEffort: participant.reasoningEffort
+          },
+          {
+            runId: record.runId,
+            sourceMessageId: record.sourceMessageId,
+            threadId: record.threadId,
+            chatThreadRootId: record.chatThreadRootId,
+            appMessageSource: "remote-run-spool"
+          }
+        );
+        conversation.messages.push(message);
+        this.recordLastMessageByParticipant(conversation, message);
+      } else if (record.kind === "permission_pending") {
+        const requester = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
+        if (!requester) {
+          throw new Error("Remote run permission request references a participant that is no longer in this chat.");
+        }
+        const applied = await this.applyPermissionChangeRequestFromTool(
+          conversation,
+          requester,
+          {
+            conversationId: record.conversationId,
+            participantId: record.participantId,
+            roleConfigId: requester.roleConfigId,
+            roleConfigVersion: record.roleConfigVersion ?? requester.roleConfigVersion ?? 0,
+            capabilities: ["permissions.request"],
+            triggerMessageId: record.triggerMessageId,
+            runId: record.runId,
+            runPermissions: record.runPermissions
+          },
+          record.request,
+          { requestId: record.requestId ?? record.id, remoteRun: true }
+        );
+        permissionResult = applied.result;
+      }
+
+      const nextState = this.remoteRunReplayState(conversation, record.runId);
+      const permissionRequestIdsByRecordId = { ...(nextState.permissionRequestIdsByRecordId ?? {}) };
+      if (record.kind === "permission_pending" && permissionResult?.requestId) {
+        permissionRequestIdsByRecordId[record.id] = permissionResult.requestId;
+      }
+      this.setRemoteRunReplayState(conversation, record.runId, {
+        ...nextState,
+        cursorSeq: Math.max(nextState.cursorSeq, record.seq),
+        appliedRecordIds: this.remoteRunAppliedRecordIds([...nextState.appliedRecordIds, record.id]),
+        permissionRequestIdsByRecordId,
+        terminalState: record.kind === "terminal_state" ? record.status : nextState.terminalState,
+        updatedAt: new Date().toISOString()
+      });
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      return {
+        applied: true,
+        runId: record.runId,
+        seq: record.seq,
+        cursorSeq: Math.max(nextState.cursorSeq, record.seq),
+        permissionResult
+      };
+    });
+  }
+
+  // Durable replay cursor for a remote run, so RemoteRunService can seed its
+  // scan position after a restart instead of rescanning from seq 0.
+  async getRemoteRunCursorSeq(conversationId: string, runId: string): Promise<number> {
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return 0;
+    }
+    return this.remoteRunReplayState(conversation, runId).cursorSeq;
   }
 
   async requestToolPermissionFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
@@ -2175,13 +2351,19 @@ export class ChatService {
       if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && this.isParticipantRequestApprovalRequest(approval.request)) {
         this.applyParticipantRequestApprovalDecision(conversation, approval, "denied", request.scope);
       }
-      this.upsertAppToolApproval(conversation, {
+      const deniedApproval: ChatAppToolApproval = {
         ...approval,
         status: "denied",
         updatedAt: now
-      });
+      };
+      this.upsertAppToolApproval(conversation, deniedApproval);
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
+      await this.emitAppToolApprovalDecision({
+        conversationId: conversation.id,
+        approval: deniedApproval,
+        status: "denied"
+      });
       const deniedParticipantRequest = this.isParticipantRequestApprovalRequest(approval.request) ? approval.request : undefined;
       if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && deniedParticipantRequest?.requestMessageId) {
         const requestMessageId = deniedParticipantRequest.requestMessageId;
@@ -2480,7 +2662,14 @@ export class ChatService {
     ));
     conversation.updatedAt = now;
     await this.saveConversation(conversation);
-    if (isPermissionApproval && updatedApproval.resumeContext) {
+    if (isPermissionApproval) {
+      await this.emitAppToolApprovalDecision({
+        conversationId: conversation.id,
+        approval: updatedApproval,
+        status: "approved"
+      });
+    }
+    if (isPermissionApproval && updatedApproval.resumeContext && updatedApproval.resumeContext.remoteRun !== true) {
       void this.autoResumePermissionApproval(conversation.id, updatedApproval.id, progress).catch((error) => {
         this.emitProgress(updatedApproval.resumeContext?.runId ?? updatedApproval.id, progress, "error", error instanceof Error ? error.message : String(error));
         void this.debugLogs.write("chat.permission-approval.auto-resume.error", {
@@ -5069,7 +5258,119 @@ export class ChatService {
     if (policies) {
       merged.appToolApprovalPolicies = policies;
     }
+    const remoteRunReplay = this.mergeRemoteRunReplayStateByRun(
+      storedMetadata.remoteRunReplay,
+      currentMetadata.remoteRunReplay
+    );
+    if (Object.keys(remoteRunReplay).length > 0) {
+      merged.remoteRunReplay = remoteRunReplay;
+    } else {
+      delete merged.remoteRunReplay;
+    }
     return merged;
+  }
+
+  private remoteRunReplayState(conversation: Conversation, runId: string): RemoteRunReplayState {
+    return this.remoteRunReplayStateByRun(conversation.metadata.remoteRunReplay)[runId] ?? {
+      cursorSeq: 0,
+      appliedRecordIds: []
+    };
+  }
+
+  private setRemoteRunReplayState(conversation: Conversation, runId: string, state: RemoteRunReplayState): void {
+    conversation.metadata = {
+      ...conversation.metadata,
+      remoteRunReplay: {
+        ...this.remoteRunReplayStateByRun(conversation.metadata.remoteRunReplay),
+        [runId]: {
+          ...state,
+          appliedRecordIds: this.remoteRunAppliedRecordIds(state.appliedRecordIds),
+          permissionRequestIdsByRecordId: this.remoteRunStringMap(state.permissionRequestIdsByRecordId)
+        }
+      }
+    };
+  }
+
+  private mergeRemoteRunReplayStateByRun(storedValue: unknown, currentValue: unknown): RemoteRunReplayStateByRun {
+    const stored = this.remoteRunReplayStateByRun(storedValue);
+    const current = this.remoteRunReplayStateByRun(currentValue);
+    const runIds = new Set([...Object.keys(stored), ...Object.keys(current)]);
+    const merged: RemoteRunReplayStateByRun = {};
+    for (const runId of runIds) {
+      const storedState = stored[runId] ?? { cursorSeq: 0, appliedRecordIds: [] };
+      const currentState = current[runId] ?? { cursorSeq: 0, appliedRecordIds: [] };
+      const appliedRecordIds = this.remoteRunAppliedRecordIds([
+        ...storedState.appliedRecordIds,
+        ...currentState.appliedRecordIds
+      ]);
+      merged[runId] = {
+        cursorSeq: Math.max(storedState.cursorSeq, currentState.cursorSeq),
+        appliedRecordIds,
+        permissionRequestIdsByRecordId: {
+          ...(storedState.permissionRequestIdsByRecordId ?? {}),
+          ...(currentState.permissionRequestIdsByRecordId ?? {})
+        },
+        terminalState: currentState.terminalState ?? storedState.terminalState,
+        updatedAt: currentState.updatedAt && storedState.updatedAt
+          ? currentState.updatedAt >= storedState.updatedAt
+            ? currentState.updatedAt
+            : storedState.updatedAt
+          : currentState.updatedAt ?? storedState.updatedAt
+      };
+    }
+    return merged;
+  }
+
+  private remoteRunReplayStateByRun(value: unknown): RemoteRunReplayStateByRun {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return {};
+    }
+    const states: RemoteRunReplayStateByRun = {};
+    for (const [runId, rawState] of Object.entries(value as Record<string, unknown>)) {
+      if (!runId || !rawState || typeof rawState !== "object" || Array.isArray(rawState)) {
+        continue;
+      }
+      const record = rawState as Record<string, unknown>;
+      const cursorSeq = typeof record.cursorSeq === "number" && Number.isFinite(record.cursorSeq)
+        ? Math.max(0, Math.floor(record.cursorSeq))
+        : 0;
+      const terminalState = typeof record.terminalState === "string" ? record.terminalState : undefined;
+      const updatedAt = typeof record.updatedAt === "string" ? record.updatedAt : undefined;
+      states[runId] = {
+        cursorSeq,
+        appliedRecordIds: this.remoteRunAppliedRecordIds(record.appliedRecordIds),
+        permissionRequestIdsByRecordId: this.remoteRunStringMap(record.permissionRequestIdsByRecordId),
+        terminalState,
+        updatedAt
+      };
+    }
+    return states;
+  }
+
+  private remoteRunAppliedRecordIds(value: unknown): string[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    const ids: string[] = [];
+    for (const item of value) {
+      if (typeof item === "string" && item && !ids.includes(item)) {
+        ids.push(item);
+      }
+    }
+    return ids.slice(-2_000);
+  }
+
+  private remoteRunStringMap(value: unknown): Record<string, string> {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return {};
+    }
+    const map: Record<string, string> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (key && typeof item === "string" && item) {
+        map[key] = item;
+      }
+    }
+    return map;
   }
 
   private mergeRemovedChatMessageIds(storedValue: unknown, currentValue: unknown): string[] {
@@ -6366,6 +6667,31 @@ export class ChatService {
       updatedAt: approval.updatedAt,
       ...(approval.error ? { error: approval.error } : {})
     };
+  }
+
+  private remoteReplayDuplicatePermissionResult(
+    conversation: Conversation,
+    record: RemoteRunReplayRecord,
+    state: RemoteRunReplayState
+  ): ChatPermissionRequestToolResult | undefined {
+    if (record.kind !== "permission_pending") {
+      return undefined;
+    }
+    const requester = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
+    if (!requester) {
+      return undefined;
+    }
+    const requestId = state.permissionRequestIdsByRecordId?.[record.id] ?? record.requestId ?? record.id;
+    return this.permissionRequestStatusForTool(conversation, requester, requestId, {
+      conversationId: record.conversationId,
+      participantId: record.participantId,
+      roleConfigId: requester.roleConfigId,
+      roleConfigVersion: record.roleConfigVersion ?? requester.roleConfigVersion ?? 0,
+      capabilities: ["permissions.request"],
+      triggerMessageId: record.triggerMessageId,
+      runId: record.runId,
+      runPermissions: record.runPermissions
+    });
   }
 
   private findReplayablePermissionApproval(
