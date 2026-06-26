@@ -1,9 +1,21 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown, Code2, ExternalLink, FolderOpen, HelpCircle } from "lucide-react";
+import { Bell, Check, ChevronDown, Code2, ExternalLink, FolderOpen, HelpCircle } from "lucide-react";
 
-import type { AgentHealth, ProviderKind, ProviderSettings, RepoFileOpenAction } from "../../../shared/types";
+import type {
+  AgentHealth,
+  ChatCompletionNotificationSettings,
+  ChatCompletionNotificationSettingsUpdate,
+  ProviderKind,
+  ProviderSettings,
+  RepoFileOpenAction
+} from "../../../shared/types";
 import { CLI_AGENT_RUN_TIMEOUT_MAX_MS, CLI_AGENT_RUN_TIMEOUT_MIN_MS, cliAgentRunTimeoutHours } from "../../../shared/cliAgentRunSettings";
+import {
+  CHAT_COMPLETION_NOTIFICATION_MAX_THRESHOLD_MS,
+  CHAT_COMPLETION_NOTIFICATION_MIN_THRESHOLD_MS,
+  chatCompletionNotificationThresholdMinutes
+} from "../../../shared/chatCompletionNotifications";
 
 const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
   "codex-cli": new URL("../../assets/codex-cli.svg", import.meta.url).href,
@@ -15,9 +27,11 @@ export function GeneralSettingsSection(props: {
   agents: AgentHealth[];
   repoFileOpenAction?: RepoFileOpenAction;
   cliAgentRunTimeoutMs: number;
+  chatCompletionNotifications: ChatCompletionNotificationSettings;
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
+  setChatCompletionNotifications: (update: ChatCompletionNotificationSettingsUpdate) => Promise<void>;
 }): JSX.Element {
   const detectedCount = props.providers.filter(
     (provider) => props.agents.find((agent) => agent.kind === provider.kind)?.installed
@@ -78,6 +92,17 @@ export function GeneralSettingsSection(props: {
               <div className="gen-row-desc">Automatically stop an agent run after this many hours.</div>
             </div>
             <CliAgentRunTimeoutControl timeoutMs={props.cliAgentRunTimeoutMs} onChange={props.setCliAgentRunTimeoutMs} />
+          </div>
+          <div className="gen-card-divider" />
+          <div className="gen-row gen-row-notifications">
+            <div className="gen-row-text">
+              <div className="gen-row-title">Participant completion notifications</div>
+              <div className="gen-row-desc">Notify when a participant finishes a long turn. Optional webhook payload excludes response text.</div>
+            </div>
+            <ChatCompletionNotificationsControl
+              settings={props.chatCompletionNotifications}
+              onChange={props.setChatCompletionNotifications}
+            />
           </div>
         </div>
       </section>
@@ -290,6 +315,103 @@ function CliAgentRunTimeoutControl(props: {
       {validation && <div className="gen-timeout-error">{validation}</div>}
     </div>
   );
+}
+
+function ChatCompletionNotificationsControl(props: {
+  settings: ChatCompletionNotificationSettings;
+  onChange: (update: ChatCompletionNotificationSettingsUpdate) => Promise<void>;
+}): JSX.Element {
+  const currentMinutes = chatCompletionNotificationThresholdMinutes(props.settings.thresholdMs);
+  const [enabled, setEnabled] = useState(props.settings.enabled);
+  const [minutes, setMinutes] = useState(String(currentMinutes));
+  const [webhookUrl, setWebhookUrl] = useState(props.settings.webhookUrl ?? "");
+  const minMinutes = CHAT_COMPLETION_NOTIFICATION_MIN_THRESHOLD_MS / 60_000;
+  const maxMinutes = CHAT_COMPLETION_NOTIFICATION_MAX_THRESHOLD_MS / 60_000;
+  const trimmedMinutes = minutes.trim();
+  const parsedMinutes = Number(trimmedMinutes);
+  const trimmedWebhookUrl = webhookUrl.trim();
+  const minuteValidation = trimmedMinutes === ""
+    ? undefined
+    : !Number.isFinite(parsedMinutes) || !Number.isInteger(parsedMinutes)
+      ? "Use a whole number of minutes."
+      : parsedMinutes < minMinutes || parsedMinutes > maxMinutes
+        ? `Use ${minMinutes} to ${maxMinutes} minutes.`
+        : undefined;
+  const webhookValidation = trimmedWebhookUrl && !isHttpUrl(trimmedWebhookUrl)
+    ? "Use an http or https URL."
+    : undefined;
+  const thresholdMs = parsedMinutes * 60_000;
+  const normalizedWebhookUrl = trimmedWebhookUrl || undefined;
+  const canSave = !minuteValidation && !webhookValidation && trimmedMinutes !== "" && (
+    enabled !== props.settings.enabled ||
+    thresholdMs !== props.settings.thresholdMs ||
+    normalizedWebhookUrl !== props.settings.webhookUrl
+  );
+
+  useEffect(() => {
+    setEnabled(props.settings.enabled);
+    setMinutes(String(currentMinutes));
+    setWebhookUrl(props.settings.webhookUrl ?? "");
+  }, [props.settings.enabled, props.settings.thresholdMs, props.settings.webhookUrl, currentMinutes]);
+
+  return (
+    <div className="gen-row-control gen-notifications">
+      <div className="gen-notifications-top">
+        <label className="toggle gen-notifications-toggle">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(event) => setEnabled(event.target.checked)}
+          />
+          <span />
+        </label>
+        <div className="gen-timeout-field gen-notifications-minutes">
+          <input
+            className="gen-timeout-input"
+            inputMode="numeric"
+            value={minutes}
+            aria-label="Notification threshold in minutes"
+            onChange={(event) => setMinutes(event.target.value)}
+          />
+          <span className="gen-timeout-unit">Minutes</span>
+        </div>
+      </div>
+      <div className="gen-notifications-webhook">
+        <span className="gen-notifications-webhook-icon"><Bell size={15} /></span>
+        <input
+          className="gen-notifications-webhook-input"
+          value={webhookUrl}
+          placeholder="Phone webhook URL"
+          aria-label="Phone webhook URL"
+          onChange={(event) => setWebhookUrl(event.target.value)}
+        />
+      </div>
+      {(minuteValidation || webhookValidation) && (
+        <div className="gen-timeout-error">{minuteValidation ?? webhookValidation}</div>
+      )}
+      <button
+        type="button"
+        className={`gen-timeout-save gen-notifications-save ${canSave ? "is-dirty" : ""}`}
+        disabled={!canSave}
+        onClick={() => void props.onChange({
+          enabled,
+          thresholdMs,
+          webhookUrl: normalizedWebhookUrl
+        })}
+      >
+        Save
+      </button>
+    </div>
+  );
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 function healthLine(health: AgentHealth | undefined): string {

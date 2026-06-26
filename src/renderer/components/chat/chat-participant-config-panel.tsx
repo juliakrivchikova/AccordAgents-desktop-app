@@ -7,13 +7,21 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../../shared/agentPermissions";
 import type {
   ChatAgentPermissions,
+  ChatParticipantRequestPermission,
   ChatProviderKind,
   ChatRosterChangeParticipantInput,
   ProviderModelCatalog
 } from "../../../shared/types";
 import { Avatar } from "../avatar/avatar";
+import { AppSelect } from "../primitives";
 import { avatarForChatAvatarOption, avatarForChatParticipant, chatAvatarOptionsForKind, normalizedChatAvatarId } from "./chat-avatars";
 import { chatInheritedCliSettingLabel } from "./chat-participant-drafts";
+
+const PARTICIPANT_REQUEST_PERMISSION_OPTIONS = [
+  { value: "ask", label: "Ask each time" },
+  { value: "allow", label: "Allow without approval" },
+  { value: "deny", label: "Deny" }
+];
 
 export function ChatParticipantSpecRow(props: {
   label: string;
@@ -311,6 +319,16 @@ export function ChatParticipantInlinePermissionsRow(props: {
               <span>{toggle.label}</span>
             </label>
           ))}
+          <div className="chat-app-tool-inline-select">
+            <span>Request participants</span>
+            <AppSelect
+              value={permissions.requestParticipants}
+              placeholder="Request participants"
+              ariaLabel="Request participants permission"
+              options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
+              onValueChange={(value) => props.onChange({ ...permissions, requestParticipants: value as ChatParticipantRequestPermission })}
+            />
+          </div>
         </PopoverContent>
       </Popover>
     </ChatParticipantSpecRow>
@@ -335,6 +353,11 @@ export function rosterPermissionGrantLabels(participant: ChatRosterChangePartici
   }
   if (permissions.shell.enabled) {
     labels.push(permissions.shell.rules.length > 0 ? "shell rules" : "shell access");
+  }
+  if (permissions.requestParticipants === "allow") {
+    labels.push("request participants");
+  } else if (permissions.requestParticipants === "deny") {
+    labels.push("participant requests denied");
   }
   const claudeToolCount = permissions.providerNative?.["claude-code"]?.allowedTools.length ?? 0;
   if (claudeToolCount > 0) {

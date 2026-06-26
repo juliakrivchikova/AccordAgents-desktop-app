@@ -543,59 +543,6 @@ export class AppMcpService {
         }
       },
       {
-        name: APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
-        title: "Request Chat Participants",
-        description:
-          "Ask one or more current chat participants to respond to a concrete prompt. The app validates policy, may request User approval, runs approved participants, and can return replies if they finish before timeout.",
-        inputSchema: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            requests: {
-              type: "array",
-              minItems: 1,
-              maxItems: 4,
-              items: {
-                type: "object",
-                additionalProperties: false,
-                properties: {
-                  target: {
-                    type: "string",
-                    description: "Target participant handle, with or without @."
-                  },
-                  prompt: {
-                    type: "string",
-                    description: "Concrete question or task for the target participant."
-                  },
-                  reason: {
-                    type: "string",
-                    description: "Optional brief reason this participant input is needed."
-                  }
-                },
-                required: ["target", "prompt"]
-              }
-            },
-            timeoutMs: {
-              type: "integer",
-              minimum: 1000,
-              maximum: 300000,
-              description: "Optional bounded wait for replies. Defaults to 120000ms."
-            },
-            resumeRequester: {
-              type: "boolean",
-              description: "Whether the app should return control to the requester if replies arrive after this tool call returns. Defaults to true."
-            }
-          },
-          required: ["requests"]
-        },
-        annotations: {
-          readOnlyHint: false,
-          destructiveHint: false,
-          idempotentHint: false,
-          openWorldHint: false
-        }
-      },
-      {
         name: APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
         title: "Get Participant Request Status",
         description:
@@ -822,6 +769,61 @@ export class AppMcpService {
         }
       }
     ];
+    if (hasChatAppToolCapability(actor.capabilities, "participants.request")) {
+      tools.push({
+        name: APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
+        title: "Request Chat Participants",
+        description:
+          "Ask one or more current chat participants to respond to a concrete prompt. The app validates policy, may request User approval, runs approved participants, and can return replies if they finish before timeout.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            requests: {
+              type: "array",
+              minItems: 1,
+              maxItems: 4,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  target: {
+                    type: "string",
+                    description: "Target participant handle, with or without @."
+                  },
+                  prompt: {
+                    type: "string",
+                    description: "Concrete question or task for the target participant."
+                  },
+                  reason: {
+                    type: "string",
+                    description: "Optional brief reason this participant input is needed."
+                  }
+                },
+                required: ["target", "prompt"]
+              }
+            },
+            timeoutMs: {
+              type: "integer",
+              minimum: 1000,
+              maximum: 300000,
+              description: "Optional bounded wait for replies. Defaults to 120000ms."
+            },
+            resumeRequester: {
+              type: "boolean",
+              description: "Whether the app should return control to the requester if replies arrive after this tool call returns. Defaults to true."
+            }
+          },
+          required: ["requests"]
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false
+        }
+      });
+    }
     if (hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
       tools.push({
         name: APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
@@ -1206,6 +1208,9 @@ export class AppMcpService {
       return this.toolTextResult(await this.chatSendMessageHandler(actor, record.arguments));
     }
     if (record.name === APP_CHAT_REQUEST_PARTICIPANTS_TOOL) {
+      if (!hasChatAppToolCapability(actor.capabilities, "participants.request")) {
+        throw new Error("This participant is not allowed to request other participants.");
+      }
       if (!this.chatParticipantRequestHandler) {
         throw new Error("Chat participant request handling is not available.");
       }

@@ -204,6 +204,8 @@ export function chatParticipantPermissionSummary(participant: Pick<ChatParticipa
     permissions.shell.enabled ? "shell" : "",
     permissions.workspaceWrite ? "edit" : "",
     permissions.webAccess ? "web" : "",
+    permissions.requestParticipants === "allow" ? "request allow" : "",
+    permissions.requestParticipants === "deny" ? "request deny" : "",
     (permissions.providerNative?.["claude-code"]?.allowedTools.length ?? 0) > 0 ? "native tools" : ""
   ].filter(Boolean);
   return `${chatAgentModeLabel(mode)}${enabled.length > 0 ? ` · ${enabled.join(", ")}` : ""}`;

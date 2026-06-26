@@ -11,11 +11,13 @@ import type {
   ChatAgentMode,
   ChatAgentPermissions,
   ChatParticipant,
+  ChatParticipantRequestPermission,
   ChatProviderKind,
   ChatReasoningEffort,
   ProviderModelCatalog
 } from "../../../shared/types";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
+import { AppSelect } from "../primitives";
 import {
   CHAT_AGENT_MODE_OPTIONS,
   chatInheritedCliSettingLabel
@@ -24,6 +26,11 @@ import {
 const REASONING_DEFAULT_VALUE = "__default__";
 const MODEL_DEFAULT_VALUE = "__default_model__";
 const MODEL_MANUAL_VALUE = "__manual_model__";
+const PARTICIPANT_REQUEST_PERMISSION_OPTIONS = [
+  { value: "ask", label: "Ask" },
+  { value: "allow", label: "Allow" },
+  { value: "deny", label: "Deny" }
+];
 
 export function ParticipantRuntimeControls(props: {
   participant: ChatParticipant;
@@ -60,7 +67,9 @@ export function ParticipantRuntimeControls(props: {
     effectivePermissions.repoRead ? "repo read" : "",
     effectivePermissions.shell.enabled ? "shell" : "",
     effectivePermissions.workspaceWrite ? "edit" : "",
-    effectivePermissions.webAccess ? "web" : ""
+    effectivePermissions.webAccess ? "web" : "",
+    effectivePermissions.requestParticipants === "allow" ? "request allow" : "",
+    effectivePermissions.requestParticipants === "deny" ? "request deny" : ""
   ].filter(Boolean);
 
   return (
@@ -268,6 +277,17 @@ function PermissionsToggleRow(props: {
           <span>{toggle.label}</span>
         </label>
       ))}
+      <div className="chat-rt-request-permission">
+        <span>Request participants</span>
+        <AppSelect
+          value={permissions.requestParticipants}
+          placeholder="Request participants"
+          ariaLabel="Request participants permission"
+          disabled={props.disabled}
+          options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
+          onValueChange={(value) => set({ requestParticipants: value as ChatParticipantRequestPermission })}
+        />
+      </div>
     </div>
   );
 }

@@ -6,6 +6,7 @@ import type {
   AgentHealth,
   ChatBehaviorRuleConfigUpdate,
   ChatSavedPromptConfigUpdate,
+  ChatCompletionNotificationSettingsUpdate,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
@@ -33,6 +34,7 @@ import type {
   RetryImplementationPlanSynthesisRequest,
   ReviewRequest,
   SendChatMessageRequest,
+  StartChatAccordRequest,
   ToggleChatReactionRequest,
   UpdateChatParticipantRuntimeRequest,
   RemoveChatParticipantRequest,
@@ -46,6 +48,7 @@ import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
 import { AppSkillsService } from "./services/appSkills";
 import { bootstrapAppUpdater } from "./services/appUpdater";
+import { ChatCompletionNotificationService } from "./services/chatCompletionNotifications";
 import { ensureLoginShellEnvPrimed, setCommandDebugLogger } from "./services/command";
 import { DebugLogService } from "./services/debugLogs";
 import { GitService } from "./services/git";
@@ -65,6 +68,7 @@ const providerRunner = new ProviderRunner();
 const debugLogService = new DebugLogService();
 setCommandDebugLogger(debugLogService);
 const cliAgentRunner = new CliAgentRunner(debugLogService);
+const chatCompletionNotificationService = new ChatCompletionNotificationService(settingsService, debugLogService);
 void settingsService.getCliAgentRunTimeoutMs()
   .then((timeoutMs) => cliAgentRunner.setRunTimeoutMs(timeoutMs))
   .catch((error) => {
@@ -86,6 +90,7 @@ const consensusService = new ConsensusService(gitService, storageService, provid
 });
 const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
+  chatCompletionNotificationService.handleConversationSnapshot(conversation);
 }, userSkillsService);
 appMcpService.setRosterChangeHandler((actor, request) => chatService.requestRosterChangeFromTool(actor, request));
 appMcpService.setRosterOptionsHandler((actor) => chatService.describeRosterOptionsForTool(actor));
@@ -168,6 +173,9 @@ function registerIpc(): void {
     const next = await settingsService.setCliAgentRunTimeoutMs(timeoutMs);
     cliAgentRunner.setRunTimeoutMs(next.cliAgentRunTimeoutMs);
     return next;
+  });
+  ipcMain.handle("settings:set-chat-completion-notifications", (_event, update: ChatCompletionNotificationSettingsUpdate) => {
+    return settingsService.setChatCompletionNotificationSettings(update);
   });
   ipcMain.handle("settings:update-provider", (_event, update: ProviderSettingsUpdate) => settingsService.updateProvider(update));
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));
@@ -363,6 +371,31 @@ function registerIpc(): void {
         { ...request, runId },
         controller.signal,
         (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+      );
+    } catch (error) {
+      const phase = controller.signal.aborted ? "cancelled" : "error";
+      mainWindow?.webContents.send("conversations:review-progress", {
+        runId,
+        phase,
+        message: error instanceof Error ? error.message : String(error),
+        createdAt: new Date().toISOString()
+      });
+      throw error;
+    } finally {
+      activeReviews.delete(runId);
+    }
+  });
+  ipcMain.handle("chat:start-accord", async (_event, request: StartChatAccordRequest) => {
+    const runId = randomUUID();
+    const controller = new AbortController();
+    activeReviews.set(runId, controller);
+
+    try {
+      return await chatService.startAccord(
+        request,
+        controller.signal,
+        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress),
+        runId
       );
     } catch (error) {
       const phase = controller.signal.aborted ? "cancelled" : "error";

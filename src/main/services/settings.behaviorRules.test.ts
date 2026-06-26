@@ -13,6 +13,7 @@ import {
   CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
   CLI_AGENT_RUN_TIMEOUT_MIN_MS
 } from "../../shared/cliAgentRunSettings";
+import { CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS } from "../../shared/chatCompletionNotifications";
 
 const CODEX_AGENT: AgentHealth = {
   kind: "codex-cli",
@@ -40,6 +41,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     settingsVersion: 1,
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
+    chatCompletionNotifications: { enabled: false, thresholdMs: CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS },
     providers: [],
     chatRoleConfigs: [],
     chatBehaviorRules: [],
@@ -58,6 +60,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
   service.getPublicSettings = async () => ({
     roundLimitDefault: stored.roundLimitDefault,
     cliAgentRunTimeoutMs: service.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
+    chatCompletionNotifications: stored.chatCompletionNotifications,
     providers: stored.providers,
     chatRoleConfigs: stored.chatRoleConfigs,
     chatBehaviorRules: stored.chatBehaviorRules,
@@ -123,6 +126,7 @@ test("saveChatBehaviorRuleConfig rejects oversized behavior rules", async () => 
     settingsVersion: 1,
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
+    chatCompletionNotifications: { enabled: false, thresholdMs: CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS },
     providers: [],
     chatRoleConfigs: [],
     chatBehaviorRules: [],
@@ -135,6 +139,7 @@ test("saveChatBehaviorRuleConfig rejects oversized behavior rules", async () => 
   service.getPublicSettings = async () => ({
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
+    chatCompletionNotifications: { enabled: false, thresholdMs: CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS },
     providers: [],
     chatRoleConfigs: [],
     chatBehaviorRules: [],

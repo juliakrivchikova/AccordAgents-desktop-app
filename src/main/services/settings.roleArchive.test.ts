@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SettingsService } from "./settings";
 import type { AppSettings, ChatParticipantConfig, ChatRoleConfig } from "../../shared/types";
+import { CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS } from "../../shared/chatCompletionNotifications";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS } from "../../shared/cliAgentRunSettings";
 
 function makeRole(over: Partial<ChatRoleConfig> = {}): ChatRoleConfig {
@@ -36,6 +37,7 @@ function settingsServiceWith(
     settingsVersion: 1,
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
+    chatCompletionNotifications: { enabled: false, thresholdMs: CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS },
     providers: [],
     chatRoleConfigs: initial.chatRoleConfigs ?? [],
     chatBehaviorRules: [],
@@ -52,6 +54,7 @@ function settingsServiceWith(
   service.getPublicSettings = async (): Promise<AppSettings> => ({
     roundLimitDefault: stored.roundLimitDefault,
     cliAgentRunTimeoutMs: stored.cliAgentRunTimeoutMs,
+    chatCompletionNotifications: stored.chatCompletionNotifications,
     providers: stored.providers,
     chatRoleConfigs: stored.chatRoleConfigs,
     chatBehaviorRules: stored.chatBehaviorRules,

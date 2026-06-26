@@ -2176,7 +2176,7 @@ test("removeParticipant clears stale participant state in the same mutation", as
   assert.equal(approvals.find((approval) => approval.id === removedTargetApproval.id)?.status, "denied");
   assert.equal(approvals.find((approval) => approval.id === unrelatedApproval.id)?.status, "pending");
   assert.equal(approvals.find((approval) => approval.id === removedPermissionApproval.id)?.error, "Participant was removed from this chat.");
-  assert.deepEqual((saved.metadata.appToolApprovalPolicies as ChatAppToolApprovalPolicy[]).map((policy) => policy.id), ["unrelated-policy"]);
+  assert.deepEqual((saved.metadata.appToolApprovalPolicies as ChatAppToolApprovalPolicy[]).map((policy) => policy.id), []);
 
   const mentionMessage = saved.messages.find((message) => message.id === "mention-message") as ChatMessage;
   assert.deepEqual(mentionMessage.metadata?.pendingMentions?.map((mention) => mention.targetParticipantId), [other.id]);
@@ -3273,12 +3273,15 @@ test("app MCP advertises app_chat_react to chat participants", () => {
   assert.ok(tools.find((tool) => tool.name === APP_TOOL_PERMISSION_TOOL));
 });
 
-test("appMcpToolNames includes participant request tools for ordinary participants", () => {
+test("appMcpToolNames exposes participant request only with participants.request capability", () => {
   const { service } = testService();
-  const tools = (service as any).appMcpToolNames([]);
+  const defaultTools = (service as any).appMcpToolNames([]);
+  const requestTools = (service as any).appMcpToolNames(["participants.request"]);
 
-  assert.ok(tools.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL));
-  assert.ok(tools.includes(APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL));
+  assert.equal(defaultTools.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL), false);
+  assert.ok(defaultTools.includes(APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL));
+  assert.ok(requestTools.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL));
+  assert.ok(requestTools.includes(APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL));
 });
 
 test("app MCP tracks client generation setup and required tools", async () => {
@@ -3288,7 +3291,7 @@ test("app MCP tracks client generation setup and required tools", async () => {
     participantId: "participant-1",
     roleConfigId: ROLE.id,
     roleConfigVersion: ROLE.version,
-    capabilities: [],
+    capabilities: ["participants.request"],
     clientGenerationId: "client-generation-1",
     expectedToolNames: [
       APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
@@ -3580,6 +3583,205 @@ test("behavior rule reinforcement is skipped when role instructions already carr
   assert.equal(sections.behaviorRules, 0);
 });
 
+test("participant request permission ask creates approval card", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "ask" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  const { service, storage } = testService({ conversation });
+
+  const result = await service.requestParticipantsFromTool(participantRequestActor(requester), {
+    requests: [{ target: target.handle, prompt: "Please review." }],
+    timeoutMs: 1000
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "pending_approval");
+  assert.equal(result.approvalRequired, true);
+  const requestMessage = storage.current.messages.find((message: ChatMessage) => message.metadata?.participantRequest);
+  assert.equal(requestMessage?.metadata?.participantRequest?.items[0]?.status, "pending_approval");
+  const approval = storage.current.metadata.pendingAppToolApprovals?.find((item: ChatAppToolApproval) =>
+    item.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL
+  );
+  assert.equal(approval?.status, "pending");
+});
+
+test("participant request permission allow runs without approval", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "allow" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  const runs: ParticipantConfig[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (participant) => {
+      runs.push(participant);
+      return {
+        participant,
+        ok: true,
+        content: "Reviewed.",
+        durationMs: 1
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  const result = await service.requestParticipantsFromTool(participantRequestActor(requester), {
+    requests: [{ target: target.handle, prompt: "Please review." }],
+    timeoutMs: 5000
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.approvalRequired, false);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].id, target.id);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals, undefined);
+});
+
+test("participant request permission deny blocks requests even with stale capability", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "deny" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  const { service, storage } = testService({ conversation });
+
+  const result = await service.requestParticipantsFromTool(participantRequestActor(requester), {
+    requests: [{ target: target.handle, prompt: "Please review." }]
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(String(result.error), /disabled/);
+  assert.equal(storage.current.messages.some((message: ChatMessage) => message.metadata?.participantRequest), false);
+});
+
+test("agent modes do not promote participant request permission", () => {
+  const ask = normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestParticipants: "ask" });
+  const deny = normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestParticipants: "deny" });
+
+  assert.equal(effectiveChatAgentPermissionsForProvider("codex-cli", "auto", ask).requestParticipants, "ask");
+  assert.equal(effectiveChatAgentPermissionsForProvider("codex-cli", "plan", ask).requestParticipants, "ask");
+  assert.equal(effectiveChatAgentPermissionsForProvider("codex-cli", "auto", deny).requestParticipants, "deny");
+});
+
+test("legacy participant-request policies and accord metadata are cleared on chat load", async () => {
+  const requester = chatParticipant("codex-cli");
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target], {
+    accordLaunch: {
+      id: "launch-1",
+      facilitatorId: requester.id,
+      targetIds: [target.id],
+      requiredApproverIds: [requester.id, target.id],
+      runId: "run-1",
+      expiresAt: "2099-01-01T00:00:00.000Z"
+    },
+    accordRun: {
+      facilitatorId: requester.id,
+      expiresAt: "2099-01-01T00:00:00.000Z"
+    },
+    appToolApprovalPolicies: [
+      {
+        ...participantRequestPolicy(requester, target),
+        accordLaunchId: "launch-1",
+        expiresAt: "2099-01-01T00:00:00.000Z"
+      }
+    ]
+  });
+  const { service, storage } = testService({ conversation });
+
+  const loaded = await (service as any).requireChat(conversation.id);
+
+  assert.equal(loaded.metadata.accordLaunch, undefined);
+  assert.equal(loaded.metadata.accordRun, undefined);
+  assert.deepEqual(loaded.metadata.appToolApprovalPolicies, []);
+  assert.deepEqual(storage.current.metadata.appToolApprovalPolicies, []);
+});
+
+test("startAccord creates structured accord skill mention and dispatches only the facilitator", async () => {
+  const facilitator = chatParticipant("codex-cli");
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([facilitator, target]);
+  const accordMention = skillMention("codex-cli");
+  const searches: any[] = [];
+  const validations: any[] = [];
+  const runs: Array<{ participant: ParticipantConfig; prompt: string }> = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    userSkills: {
+      async search(request: any, context: any): Promise<any> {
+        searches.push({ request, context });
+        return {
+          target: context.target,
+          skills: [accordMention]
+        };
+      },
+      async validateMentionForParticipant(mention: any, providerKind: ChatProviderKind, context: any, participantId: string): Promise<any> {
+        validations.push({ mention, providerKind, context, participantId });
+        return { ok: true, mention };
+      },
+      async resolveInvocableSkillsForParticipant(): Promise<any[]> {
+        return [{ name: "accord", dir: "/tmp/accord-skill" }];
+      }
+    },
+    run: async (runParticipant, prompt) => {
+      runs.push({ participant: runParticipant, prompt });
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: "Accord started.",
+        durationMs: 1,
+        sessionId: "session-1"
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  const result = await service.startAccord({
+    conversationId: conversation.id,
+    facilitatorParticipantId: facilitator.id,
+    targetParticipantIds: [target.id],
+    subject: "Pick the launch shape."
+  }, undefined, undefined, "accord-run");
+
+  await waitFor(() => runs.length === 1);
+  assert.equal(result.runId, "accord-run");
+  assert.equal(runs[0].participant.id, facilitator.id);
+  assert.equal(searches[0].context.target.participantIds.length, 1);
+  assert.equal(searches[0].context.target.participantIds[0], facilitator.id);
+  assert.equal(validations[0].participantId, facilitator.id);
+
+  const userMessage = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "user" && message.content.includes("/accord")
+  ) as ChatMessage | undefined;
+  assert.ok(userMessage);
+  assert.equal(userMessage.metadata?.skillMentions?.[0]?.frontmatterName, "accord");
+  assert.match(userMessage.content, /@codex \/accord/);
+  assert.match(userMessage.content, /Selected accord participants: drew\./);
+  assert.doesNotMatch(userMessage.content, /@drew/);
+
+  const facilitatorAfterStart = storage.current.metadata.participants.find((participant: ChatParticipant) => participant.id === facilitator.id);
+  assert.equal(facilitatorAfterStart.permissions.requestParticipants, "allow");
+  assert.deepEqual(storage.current.metadata.appToolApprovalPolicies, undefined);
+  assert.equal(result.sourceMessageId, userMessage.id);
+});
+
+test("manual accord structured skill mention flips only the dispatched facilitator", () => {
+  const facilitator = chatParticipant("codex-cli");
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([facilitator, target]);
+  const { service } = testService({ conversation });
+
+  const nextTargets = (service as any).allowParticipantRequestsForManualAccordIfSelected(
+    conversation,
+    [skillMention("codex-cli")],
+    [facilitator]
+  ) as ChatParticipant[];
+
+  assert.equal(nextTargets.length, 1);
+  assert.equal(nextTargets[0].id, facilitator.id);
+  assert.equal(nextTargets[0].permissions?.requestParticipants, "allow");
+  const participants = conversation.metadata.participants as ChatParticipant[];
+  assert.equal(participants.find((participant) => participant.id === facilitator.id)?.permissions?.requestParticipants, "allow");
+  assert.equal(participants.find((participant) => participant.id === target.id)?.permissions?.requestParticipants, "ask");
+});
+
 function testService(options: {
   conversation?: Conversation;
   run?: (...args: any[]) => Promise<any>;
@@ -3617,6 +3819,7 @@ function testService(options: {
   const publicSettings = (): AppSettings => ({
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: 24 * 60 * 60_000,
+    chatCompletionNotifications: { enabled: false, thresholdMs: 5 * 60_000 },
     providers: [
       { kind: "codex-cli", label: "Codex CLI", enabled: true },
       { kind: "claude-code", label: "Claude Code", enabled: true }
@@ -3816,6 +4019,40 @@ function permissionApproval(
     createdAt: NOW,
     updatedAt: NOW,
     ...patch
+  };
+}
+
+function participantRequestPolicy(
+  participant: ChatParticipant,
+  target: ChatParticipant,
+  patch: Partial<ChatAppToolApprovalPolicy> = {}
+): ChatAppToolApprovalPolicy {
+  return {
+    id: patch.id ?? "participant-request-policy-1",
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    toolName: APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
+    capability: "participants.request",
+    targetParticipantId: target.id,
+    scope: "chat",
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...patch
+  };
+}
+
+function participantRequestActor(participant: ChatParticipant): any {
+  return {
+    conversationId: "conversation-1",
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: ["participants.request"],
+    triggerMessageId: "user-message",
+    triggerThreadId: "user-message",
+    snapshotMaxSequence: 0,
+    continuation: false,
+    participantRequestDepth: 0
   };
 }
 

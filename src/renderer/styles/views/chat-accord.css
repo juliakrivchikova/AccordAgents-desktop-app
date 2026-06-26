@@ -1,0 +1,84 @@
+.chat-accord-dialog[data-slot="dialog-content"] {
+  width: min(560px, calc(100vw - 32px));
+  max-width: min(560px, calc(100vw - 32px));
+}
+
+.chat-accord-form {
+  display: grid;
+  gap: 16px;
+}
+
+.chat-accord-field {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-accord-field .app-select-trigger {
+  width: 100%;
+}
+
+.chat-accord-target-list {
+  display: grid;
+  gap: 8px;
+  max-height: min(260px, 34vh);
+  overflow: auto;
+  padding: 2px;
+}
+
+.chat-accord-target {
+  display: grid;
+  grid-template-columns: 18px 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 6px 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.chat-accord-target input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--app-accent);
+}
+
+.chat-accord-target span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-accord-dialog .chat-accord-subject {
+  min-height: 112px;
+  resize: vertical;
+}
+
+.chat-accord-grant-note,
+.chat-accord-validation {
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.chat-accord-grant-note {
+  color: var(--app-muted);
+}
+
+.chat-accord-validation {
+  color: var(--app-danger);
+}
+
+.chat-accord-spinner {
+  width: 14px;
+  height: 14px;
+  animation: chat-accord-spin 0.8s linear infinite;
+}
+
+@keyframes chat-accord-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

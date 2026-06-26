@@ -845,6 +845,28 @@
   accent-color: var(--app-accent);
 }
 
+.chat-permission-select-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(12rem, 16rem);
+  gap: 6px 10px;
+  align-items: center;
+}
+
+.chat-permission-select-row > span {
+  min-width: 0;
+  color: var(--app-text-strong);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chat-permission-select-row > small {
+  grid-column: 1 / -1;
+  min-width: 0;
+  color: var(--app-text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .chat-shell-rule-list {
   display: grid;
   gap: 8px;

@@ -667,6 +667,7 @@ function newChatAssistantParticipant(settings: AppSettings, agents: AgentHealth[
       repoRead: false,
       workspaceWrite: false,
       webAccess: false,
+      requestParticipants: "ask",
       shell: {
         enabled: false,
         rules: []

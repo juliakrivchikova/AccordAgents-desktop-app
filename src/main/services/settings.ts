@@ -12,6 +12,8 @@ import type {
   ChatAgentMode,
   ChatAgentPermissions,
   ChatAppToolCapability,
+  ChatCompletionNotificationSettings,
+  ChatCompletionNotificationSettingsUpdate,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
   ChatParticipantSeedState,
@@ -25,6 +27,7 @@ import type {
 } from "../../shared/types";
 import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { normalizeChatAppToolCapabilities } from "../../shared/appTools";
+import { normalizeChatCompletionNotificationSettings } from "../../shared/chatCompletionNotifications";
 import { normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
 import {
   CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS,
@@ -47,6 +50,7 @@ interface StoredSettings {
   settingsVersion?: number;
   roundLimitDefault: number;
   cliAgentRunTimeoutMs?: number;
+  chatCompletionNotifications?: ChatCompletionNotificationSettings;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
   providers: StoredProviderSettings[];
@@ -1576,6 +1580,7 @@ export class SettingsService {
     return {
       roundLimitDefault: stored.roundLimitDefault,
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
+      chatCompletionNotifications: normalizeChatCompletionNotificationSettings(stored.chatCompletionNotifications),
       lastRepoPath: stored.lastRepoPath,
       repoFileOpenAction: stored.repoFileOpenAction,
       chatRoleConfigs: stored.chatRoleConfigs ?? DEFAULT_CHAT_ROLES,
@@ -2161,6 +2166,18 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  async getChatCompletionNotificationSettings(): Promise<ChatCompletionNotificationSettings> {
+    const stored = await this.readStored();
+    return normalizeChatCompletionNotificationSettings(stored.chatCompletionNotifications);
+  }
+
+  async setChatCompletionNotificationSettings(update: ChatCompletionNotificationSettingsUpdate): Promise<AppSettings> {
+    const stored = await this.readStored();
+    stored.chatCompletionNotifications = normalizeChatCompletionNotificationSettings(update);
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
   private async readStored(): Promise<StoredSettings> {
     try {
       const raw = await readFile(this.settingsPath, "utf8");
@@ -2198,6 +2215,7 @@ export class SettingsService {
       settingsVersion: 1,
       roundLimitDefault: this.defaultRoundLimit(settings),
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(settings.cliAgentRunTimeoutMs),
+      chatCompletionNotifications: normalizeChatCompletionNotificationSettings(settings.chatCompletionNotifications),
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
       repoFileOpenAction: this.normalizeRepoFileOpenAction(settings.repoFileOpenAction),
       providers,

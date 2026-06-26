@@ -44,6 +44,7 @@ export interface ChatActions {
   updateChatParticipantRuntime: (participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions">) => Promise<void>;
   removeChatParticipant: (participantId: string) => Promise<void>;
   compactChatParticipant: (participantId: string, options?: ChatRunScopeOptions) => Promise<boolean>;
+  startChatAccord: (options: StartChatAccordOptions) => Promise<boolean>;
   respondToChatAppToolApproval: (
     approvalId: string,
     approve: boolean,
@@ -69,6 +70,12 @@ export interface ChatRunScopeOptions {
   threadId?: string;
   parentMessageId?: string;
   chatThreadRootId?: string;
+}
+
+export interface StartChatAccordOptions {
+  facilitatorParticipantId: string;
+  targetParticipantIds: string[];
+  subject: string;
 }
 
 type ChatChoiceResponse = { cancel?: boolean; selectedOptionId?: string; customAnswer?: string; note?: string };
@@ -358,6 +365,34 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
   }
 
+  async function startChatAccord(options: StartChatAccordOptions): Promise<boolean> {
+    if (!state.conversation || state.conversation.kind !== "chat") return false;
+    state.setError(undefined);
+    state.setWarnings([]);
+    try {
+      const result = await window.consensus.startChatAccord({
+        conversationId: state.conversation.id,
+        facilitatorParticipantId: options.facilitatorParticipantId,
+        targetParticipantIds: options.targetParticipantIds,
+        subject: options.subject
+      });
+      const saved = await window.consensus.getConversation(state.conversation.id);
+      if (saved) {
+        state.setConversation((current) =>
+          current?.id === saved.id
+            ? mergeProgressIntoConversation(saved, state.progressLogRef.current.filter((item) => item.runId === result.runId))
+            : current
+        );
+        state.setSummaries((current) => upsertConversationSummary(current, saved));
+      }
+      await conversationActions.refreshConversations();
+      return true;
+    } catch (caught) {
+      state.setError(errorText(caught));
+      return false;
+    }
+  }
+
   async function respondToChatAppToolApproval(approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope, draftOverride?: ChatAppToolApprovalRequest): Promise<void> {
     if (!state.conversation || state.conversation.kind !== "chat") return;
     state.setError(undefined);
@@ -419,7 +454,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
   return {
     startChat, renameChatConversation, setChatArchived, sendChatMessage, respondToChatMentions,
     toggleChatReaction, respondToChatChoice, addChatParticipant, addSavedChatParticipant,
-    updateChatParticipantRuntime, removeChatParticipant, compactChatParticipant, respondToChatAppToolApproval
+    updateChatParticipantRuntime, removeChatParticipant, compactChatParticipant, startChatAccord, respondToChatAppToolApproval
   };
 }
 

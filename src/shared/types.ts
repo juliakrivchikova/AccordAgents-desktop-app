@@ -20,6 +20,7 @@ export interface ProviderSettings {
 export interface AppSettings {
   roundLimitDefault: number;
   cliAgentRunTimeoutMs: number;
+  chatCompletionNotifications: ChatCompletionNotificationSettings;
   providers: ProviderSettings[];
   chatRoleConfigs: ChatRoleConfig[];
   chatBehaviorRules: ChatBehaviorRuleConfig[];
@@ -28,6 +29,18 @@ export interface AppSettings {
   chatParticipantSeedState?: ChatParticipantSeedState;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
+}
+
+export interface ChatCompletionNotificationSettings {
+  enabled: boolean;
+  thresholdMs: number;
+  webhookUrl?: string;
+}
+
+export interface ChatCompletionNotificationSettingsUpdate {
+  enabled: boolean;
+  thresholdMs: number;
+  webhookUrl?: string;
 }
 
 export interface ChatRoleConfig {
@@ -196,6 +209,8 @@ export type ChatAgentMode = "default" | "plan" | "auto";
 
 export type ChatReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
+export type ChatParticipantRequestPermission = "ask" | "allow" | "deny";
+
 export type ChatShellPermissionAction = "allow" | "ask" | "deny";
 
 export type ChatShellPermissionMatch = "exact" | "prefix";
@@ -210,6 +225,7 @@ export interface ChatAgentPermissions {
   repoRead: boolean;
   workspaceWrite: boolean;
   webAccess: boolean;
+  requestParticipants: ChatParticipantRequestPermission;
   shell: {
     enabled: boolean;
     rules: ChatShellPermissionRule[];
@@ -750,6 +766,18 @@ export interface SetChatArchivedRequest {
   archived: boolean;
 }
 
+export interface StartChatAccordRequest {
+  conversationId: string;
+  facilitatorParticipantId: string;
+  targetParticipantIds: string[];
+  subject: string;
+}
+
+export interface StartChatAccordResult {
+  runId: string;
+  sourceMessageId: string;
+}
+
 export interface DismissConversationWarningsRequest {
   conversationId: string;
   warnings: string[];
@@ -1219,6 +1247,7 @@ export interface AppBridge {
   openLocalFile(request: OpenLocalFileRequest): Promise<OpenLocalFileResult>;
   setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<AppSettings>;
   setCliAgentRunTimeoutMs(timeoutMs: number): Promise<AppSettings>;
+  setChatCompletionNotifications(update: ChatCompletionNotificationSettingsUpdate): Promise<AppSettings>;
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;
@@ -1248,6 +1277,7 @@ export interface AppBridge {
   createChatConversation(request: CreateChatConversationRequest): Promise<StartReviewResult>;
   renameChatConversation(request: RenameChatConversationRequest): Promise<Conversation | undefined>;
   setChatArchived(request: SetChatArchivedRequest): Promise<Conversation | undefined>;
+  startChatAccord(request: StartChatAccordRequest): Promise<StartChatAccordResult>;
   dismissConversationWarnings(request: DismissConversationWarningsRequest): Promise<Conversation | undefined>;
   addChatParticipant(request: AddChatParticipantRequest): Promise<Conversation | undefined>;
   updateChatParticipantRuntime(request: UpdateChatParticipantRuntimeRequest): Promise<Conversation | undefined>;

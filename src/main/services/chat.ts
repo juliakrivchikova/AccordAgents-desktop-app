@@ -70,6 +70,8 @@ import type {
   ReviewProgress,
   RepoFileMention,
   SendChatMessageRequest,
+  StartChatAccordRequest,
+  StartChatAccordResult,
   StartReviewResult,
   ToggleChatReactionRequest,
   UpdateChatParticipantRuntimeRequest,
@@ -89,6 +91,7 @@ import {
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
   effectiveChatAgentPermissionsForProvider,
   isChatShellPermissionPatternSafe,
+  normalizeChatParticipantRequestPermission,
   normalizeChatAgentMode,
   normalizeChatAgentPermissions
 } from "../../shared/agentPermissions";
@@ -227,7 +230,6 @@ const PARTICIPANT_REQUEST_SCRUTINY_APPENDIX =
 const CHAT_CONTEXT_MCP_TOOL_NAMES = [
   APP_CHAT_GET_CONTEXT_TOOL,
   APP_CHAT_GET_PARTICIPANTS_TOOL,
-  APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
   APP_CHAT_READ_MESSAGES_TOOL,
   APP_CHAT_LIST_ATTACHMENTS_TOOL,
@@ -239,6 +241,7 @@ const CHAT_CONTEXT_MCP_TOOL_NAMES = [
 ];
 const CHAT_APP_MCP_TOOL_NAMES = [
   ...CHAT_CONTEXT_MCP_TOOL_NAMES,
+  APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
   APP_ROLES_DESCRIBE_OPTIONS_TOOL,
   APP_ROLES_REQUEST_CHANGE_TOOL,
@@ -502,51 +505,102 @@ export class ChatService {
 
   async createConversation(request: CreateChatConversationRequest): Promise<StartReviewResult> {
     const now = new Date().toISOString();
-    const agents = await this.cliRunner.detectAgents().catch((): AgentHealth[] => []);
-    const installedCliKinds = agents
-      .filter((agent) => agent.installed && (agent.kind === "codex-cli" || agent.kind === "claude-code"))
-      .map((agent) => agent.kind);
-    if (installedCliKinds.length === 0) {
-      throw new Error("Install Codex CLI or Claude Code before creating a chat.");
-    }
-    const settings = await this.settings.ensureGenericChatParticipantSeeds(agents);
-    const hasRequestedParticipants = request.participants.length > 0;
-    const skipDefaultParticipants = request.skipDefaultParticipants === true;
-    const participantInputs = hasRequestedParticipants
-      ? request.participants
-      : skipDefaultParticipants
-        ? []
-        : this.seededParticipantInputs(
-          settings.chatParticipantConfigs,
-          settings.chatParticipantSeedState,
-          installedCliKinds,
-          Boolean(request.repoPath?.trim())
-        );
-    const requestedParticipants = await this.validateParticipants(participantInputs, [], true);
-    const participants = await this.ensureAdministratorParticipant(requestedParticipants);
-    const conversation: Conversation = {
-      id: randomUUID(),
-      title: this.normalizeChatTitle(request.title ?? ""),
-      kind: "chat",
-      createdAt: now,
-      updatedAt: now,
-      repoPath: request.repoPath?.trim() || undefined,
-      messages: [
-        this.message("system", this.chatIntro(participants), undefined, {
-          threadId: "system"
-        })
-      ],
-      findings: [],
-      metadata: {
-        participants,
-        participantSessions: [],
-        warnings: [],
-        running: false
+    const requestedTitle = request.title ?? "";
+    const requestedRepoPath = request.repoPath?.trim() || undefined;
+    await this.debugLogs.write("chat.create.requested", {
+      titlePreview: requestedTitle.trim().replace(/\s+/g, " ").slice(0, 160),
+      titleLength: requestedTitle.length,
+      repoPath: requestedRepoPath,
+      requestedParticipantCount: request.participants.length,
+      skipDefaultParticipants: request.skipDefaultParticipants === true
+    }).catch(() => undefined);
+
+    let conversation: Conversation | undefined;
+    let stage = "initializing";
+    try {
+      const agents = await this.cliRunner.detectAgents().catch((): AgentHealth[] => []);
+      const installedCliKinds = agents
+        .filter((agent) => agent.installed && (agent.kind === "codex-cli" || agent.kind === "claude-code"))
+        .map((agent) => agent.kind);
+      if (installedCliKinds.length === 0) {
+        throw new Error("Install Codex CLI or Claude Code before creating a chat.");
       }
+      const settings = await this.settings.ensureGenericChatParticipantSeeds(agents);
+      const hasRequestedParticipants = request.participants.length > 0;
+      const skipDefaultParticipants = request.skipDefaultParticipants === true;
+      const participantInputs = hasRequestedParticipants
+        ? request.participants
+        : skipDefaultParticipants
+          ? []
+          : this.seededParticipantInputs(
+            settings.chatParticipantConfigs,
+            settings.chatParticipantSeedState,
+            installedCliKinds,
+            Boolean(requestedRepoPath)
+          );
+      const requestedParticipants = await this.validateParticipants(participantInputs, [], true);
+      const participants = await this.ensureAdministratorParticipant(requestedParticipants);
+      conversation = {
+        id: randomUUID(),
+        title: this.normalizeChatTitle(requestedTitle),
+        kind: "chat",
+        createdAt: now,
+        updatedAt: now,
+        repoPath: requestedRepoPath,
+        messages: [
+          this.message("system", this.chatIntro(participants), undefined, {
+            threadId: "system"
+          })
+        ],
+        findings: [],
+        metadata: {
+          participants,
+          participantSessions: [],
+          warnings: [],
+          running: false
+        }
+      };
+      this.rebuildLastMessagesByParticipant(conversation);
+      const logPayload = this.chatCreateLogPayload(conversation);
+      stage = "saving";
+      await this.debugLogs.write("chat.create.save-started", logPayload).catch(() => undefined);
+      await this.saveConversation(conversation);
+      stage = "saved";
+      await this.debugLogs.write("chat.create.saved", logPayload).catch(() => undefined);
+      return { conversation, warnings: [] };
+    } catch (error) {
+      await this.debugLogs.write("chat.create.failed", {
+        conversationId: conversation?.id,
+        stage,
+        titlePreview: conversation
+          ? conversation.title
+          : requestedTitle.trim().replace(/\s+/g, " ").slice(0, 160),
+        repoPath: conversation?.repoPath ?? requestedRepoPath,
+        participantCount: conversation ? this.chatParticipants(conversation).length : undefined,
+        error: error instanceof Error ? error.message : String(error)
+      }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private chatCreateLogPayload(conversation: Conversation): Record<string, unknown> {
+    const participants = this.chatParticipants(conversation);
+    return {
+      conversationId: conversation.id,
+      titlePreview: conversation.title.trim().replace(/\s+/g, " ").slice(0, 160),
+      titleLength: conversation.title.length,
+      repoPath: conversation.repoPath,
+      createdAt: conversation.createdAt,
+      updatedAt: conversation.updatedAt,
+      participantCount: participants.length,
+      participants: participants.map((participant) => ({
+        id: participant.id,
+        handle: participant.handle,
+        kind: participant.kind,
+        roleConfigId: participant.roleConfigId
+      })),
+      messageCount: conversation.messages.length
     };
-    this.rebuildLastMessagesByParticipant(conversation);
-    await this.saveConversation(conversation);
-    return { conversation, warnings: [] };
   }
 
   private seededParticipantInputs(
@@ -1294,6 +1348,9 @@ export class ChatService {
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
       throw new Error("The requesting participant is no longer in this chat.");
+    }
+    if (!hasChatAppToolCapability(actor.capabilities, "participants.request")) {
+      return this.participantRequestFailedToolResult("This participant is not allowed to request other participants.");
     }
 
     let prepared: PreparedParticipantRequest;
@@ -2200,20 +2257,7 @@ export class ChatService {
         updatedAt: now
       });
       if (participantScope === "chat") {
-        const targetIds = this.participantRequestApprovalTargetIds(conversation, approval.request);
-        for (const targetParticipantId of targetIds) {
-          this.upsertAppToolApprovalPolicy(conversation, {
-            id: randomUUID(),
-            participantId: approval.requesterParticipantId,
-            roleConfigId: approval.requesterRoleConfigId,
-            toolName: approval.toolName,
-            capability: approval.capability,
-            targetParticipantId,
-            scope: "chat",
-            createdAt: now,
-            updatedAt: now
-          });
-        }
+        this.setParticipantRequestPermission(conversation, approval.requesterParticipantId, "allow");
       }
       const requestMessageId = approval.request.requestMessageId;
       if (requestMessageId) {
@@ -2479,6 +2523,93 @@ export class ChatService {
     return conversation;
   }
 
+  async startAccord(
+    request: StartChatAccordRequest,
+    signal?: AbortSignal,
+    progress?: ProgressCallback,
+    runId: string = randomUUID()
+  ): Promise<StartChatAccordResult> {
+    const warnings: string[] = [];
+    const ingest = await this.withChatRunLock(request.conversationId, async () => {
+      const conversation = await this.requireChat(request.conversationId);
+      let prepared!: {
+        conversation: Conversation;
+        facilitator: ChatParticipant;
+        userMessage: ChatMessage;
+      };
+      await this.withChatMutation(conversation, async () => {
+        const nowIso = new Date().toISOString();
+        if (conversation.metadata.archived === true) {
+          throw new Error("Archived chats cannot start an accord.");
+        }
+        const participants = this.chatParticipants(conversation);
+        const facilitator = participants.find((participant) => participant.id === request.facilitatorParticipantId);
+        if (!facilitator) {
+          throw new Error("Accord facilitator is no longer in this chat.");
+        }
+        const subject = request.subject.trim();
+        if (!subject) {
+          throw new Error("Accord subject is required.");
+        }
+        const targetIds = Array.from(new Set(request.targetParticipantIds.map((id) => id.trim()).filter(Boolean)));
+        if (targetIds.length === 0) {
+          throw new Error("Choose at least one accord participant.");
+        }
+        if (targetIds.includes(facilitator.id)) {
+          throw new Error("The facilitator cannot also be a selected accord participant.");
+        }
+        const targets = targetIds.map((id) => participants.find((participant) => participant.id === id));
+        if (targets.some((target) => !target)) {
+          throw new Error("One or more selected accord participants are no longer in this chat.");
+        }
+        const selectedTargets = targets as ChatParticipant[];
+        const content = this.accordStartMessageContent(facilitator, selectedTargets, subject);
+        const accordSkill = await this.resolveAccordSkillMention(conversation, facilitator, content);
+        const updatedFacilitator = this.setParticipantRequestPermission(conversation, facilitator.id, "allow") ?? facilitator;
+        const userMessage = this.message("user", content, undefined, {
+          threadId: randomUUID(),
+          skillMentions: [accordSkill]
+        });
+        userMessage.metadata = { ...userMessage.metadata, threadId: userMessage.id };
+        conversation.messages.push(userMessage);
+        conversation.updatedAt = nowIso;
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+        prepared = { conversation, facilitator: updatedFacilitator, userMessage };
+      });
+      return prepared;
+    });
+
+    this.emitProgress(runId, progress, "initial", `Starting accord with @${ingest.facilitator.handle}.`, {
+      total: 1,
+      completed: 0
+    });
+    const dispatchPromise = this.runParticipantBatch(
+      ingest.conversation,
+      [ingest.facilitator],
+      ingest.userMessage,
+      runId,
+      signal,
+      progress,
+      warnings,
+      { targetRunIds: new Map([[ingest.facilitator.id, runId]]) }
+    );
+    void dispatchPromise
+      .then(() => {
+        this.emitProgress(runId, progress, "done", "Accord facilitator finished.", {
+          completed: 1,
+          total: 1
+        });
+      })
+      .catch(async (error) => {
+        this.emitChatRunFailure(runId, progress, error);
+      });
+    return {
+      runId,
+      sourceMessageId: ingest.userMessage.id
+    };
+  }
+
   async sendMessage(request: SendChatMessageRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
     const runId = request.runId ?? randomUUID();
     const compactCommand = this.compactCommand(request.content);
@@ -2563,6 +2694,10 @@ export class ChatService {
           chatThreadRootId
         }));
       }
+      dispatch = {
+        ...dispatch,
+        targets: this.allowParticipantRequestsForManualAccordIfSelected(conversation, skillValidation.skillMentions, dispatch.targets)
+      };
       if (dispatch.targets.length === 0) {
         conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
       }
@@ -3091,7 +3226,8 @@ export class ChatService {
     runId: string,
     signal: AbortSignal | undefined,
     progress: ProgressCallback | undefined,
-    warnings: string[]
+    warnings: string[],
+    options: { targetRunIds?: ReadonlyMap<string, string> } = {}
   ): Promise<void> {
     let completed = 0;
     const turnSnapshot = this.clone(conversation);
@@ -3110,7 +3246,7 @@ export class ChatService {
     };
     await Promise.all(
       participants.map(async (participant) => {
-        const targetRunId = randomUUID();
+        const targetRunId = options.targetRunIds?.get(participant.id) ?? randomUUID();
         const targetController = new AbortController();
         const onParentAbort = (): void => {
           if (!targetController.signal.aborted) {
@@ -3394,9 +3530,13 @@ export class ChatService {
     // or scoped back to role config, default-mode escalation silently denies every
     // un-pre-approved tool call. Keep it always-on (or give the bridge its own
     // capability) if you change this.
+    const requestParticipantsPermission = normalizeChatParticipantRequestPermission(permissions.requestParticipants);
+    const roleAppToolCapabilities = normalizeChatAppToolCapabilities(session.roleAppToolCapabilities)
+      .filter((capability) => capability !== "participants.request");
     const appToolCapabilities = normalizeChatAppToolCapabilities([
-      ...normalizeChatAppToolCapabilities(session.roleAppToolCapabilities),
-      "permissions.request"
+      ...roleAppToolCapabilities,
+      "permissions.request",
+      ...(requestParticipantsPermission === "deny" ? [] : ["participants.request" as const])
     ]);
     const appMcpToolNames = this.appMcpToolNames(appToolCapabilities);
     const appMcpToolInventoryKey = this.appMcpToolInventoryKey(appMcpToolNames);
@@ -3565,11 +3705,13 @@ export class ChatService {
       if (!signal?.aborted && !result.ok && result.error) {
         options.warnings.push(`@${participant.handle}: ${result.error}`);
       }
-      if (!signal?.aborted && result.ok) {
+      if (!signal?.aborted) {
         const workedMs = Date.parse(now) - Date.parse(pendingMessage.createdAt);
         if (Number.isFinite(workedMs) && workedMs >= 0) {
           pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
         }
+      }
+      if (!signal?.aborted && result.ok) {
         this.logMissingSelectedSkillStatus(triggerMessage, participant, pendingMessage, runId);
         const pendingMentions: ChatPendingMention[] = [];
         const pendingChoice = this.pendingChoiceFromAgentReply(result.content);
@@ -4125,7 +4267,7 @@ export class ChatService {
       "Reaction MCP tool: `app_chat_react` adds or toggles an emoji reaction on a specific message. To react, call it with the message `id` from `app_chat_read_messages` and an allowed emoji.",
       "Send-message MCP tool: `app_chat_send_message` posts your message immediately (visible/reactable before your turn ends) and returns its `messageId`. Use it only for mid-turn visibility, e.g. a canonical resolution. Do not use it for an ordinary reply — your normal turn response already reaches everyone at turn end.",
       "If a message lists attached images, call `app_chat_read_attachment` with the attachment ID before reasoning about visual details.",
-      "Participant request MCP tools: `app_chat_request_participants` and `app_chat_get_participant_request_status` are available for asking current chat participants for input and recovering their replies. Request JSON is `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
+      "Participant request MCP tools: when `app_chat_request_participants` is available, use it to ask current chat participants for input; `app_chat_get_participant_request_status` recovers their replies. Request JSON is `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
       "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
       "If `app_chat_request_participants` returns replies before timeout, use them in this turn. If it returns `pending_approval` or `running`, stop after a brief status note; the app will auto-resume you after replies or errors arrive.",
       ...permissionPolicyLines
@@ -4153,6 +4295,9 @@ export class ChatService {
     return CHAT_APP_MCP_TOOL_NAMES.filter((toolName) => {
       if (CHAT_CONTEXT_MCP_TOOL_NAMES.includes(toolName)) {
         return true;
+      }
+      if (toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL) {
+        return hasChatAppToolCapability(capabilities, "participants.request");
       }
       if (toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL) {
         return hasChatAppToolCapability(capabilities, "permissions.request");
@@ -5336,6 +5481,7 @@ export class ChatService {
           repoRead: false,
           workspaceWrite: false,
           webAccess: false,
+          requestParticipants: "ask",
           shell: {
             enabled: false,
             rules: []
@@ -6224,8 +6370,7 @@ export class ChatService {
             continuation: false,
             participantRequestDepth: 0
           },
-          "inferred",
-          { ignoreApprovalPolicies: true }
+          "inferred"
         );
       } catch (error) {
         void this.debugLogs.write("chat.participant-request.inferred-create-error", {
@@ -6242,35 +6387,38 @@ export class ChatService {
       conversation.messages.push(prepared.requestMessage);
       this.recordLastMessageByParticipant(conversation, prepared.requestMessage);
       const pendingTargets = prepared.batch.items.filter((item) => item.status === "pending_approval");
-      if (pendingTargets.length === 0) {
-        continue;
+      if (pendingTargets.length > 0) {
+        const participants = this.chatParticipants(conversation);
+        const approval = this.newAppToolApproval(
+          conversation,
+          participant,
+          APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
+          "participants.request",
+          {
+            ...prepared.request,
+            requests: prepared.request.requests.filter((request) => {
+              const target = this.participantForMentionHandle(participants, request.target);
+              return target ? pendingTargets.some((item) => item.targetParticipantId === target.id) : false;
+            }),
+            requestMessageId: prepared.requestMessage.id,
+            batchId: prepared.batch.id
+          },
+          this.participantRequestSummary(participant.handle, pendingTargets.map((item) => item.targetHandle)),
+          "pending"
+        );
+        this.upsertAppToolApproval(conversation, approval);
       }
-      const participants = this.chatParticipants(conversation);
-      const approval = this.newAppToolApproval(
-        conversation,
-        participant,
-        APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
-        "participants.request",
-        {
-          ...prepared.request,
-          requests: prepared.request.requests.filter((request) => {
-            const target = this.participantForMentionHandle(participants, request.target);
-            return target ? pendingTargets.some((item) => item.targetParticipantId === target.id) : false;
-          }),
-          requestMessageId: prepared.requestMessage.id,
-          batchId: prepared.batch.id
-        },
-        this.participantRequestSummary(participant.handle, pendingTargets.map((item) => item.targetHandle)),
-        "pending"
-      );
-      this.upsertAppToolApproval(conversation, approval);
+      if (prepared.batch.items.some((item) => item.status === "running")) {
+        this.startParticipantRequestRunnerAfterQueuedSave(conversation.id, prepared.requestMessage.id, prepared.batch.depth, "inferred");
+      }
       void this.debugLogs.write("chat.participant-request.inferred-created", {
         conversationId: conversation.id,
         messageId: sourceMessage.id,
         requestMessageId: prepared.requestMessage.id,
         requesterParticipantId: participant.id,
         requesterHandle: participant.handle,
-        targets: pendingTargets.map((item) => item.targetHandle)
+        targets: prepared.batch.items.map((item) => item.targetHandle),
+        approvalRequired: pendingTargets.length > 0
       });
     }
   }
@@ -6732,14 +6880,18 @@ export class ChatService {
     requester: ChatParticipant,
     normalized: { requests: ChatParticipantRequestInput[]; timeoutMs: number; resumeRequester: boolean },
     actor: ChatAppMcpActor,
-    source: "mcp" | "inferred",
-    options: { ignoreApprovalPolicies?: boolean } = {}
+    source: "mcp" | "inferred"
   ): PreparedParticipantRequest {
     const depth = (actor.participantRequestDepth ?? 0) + 1;
     const limitError = this.participantRequestLimitError(conversation, requester, actor, depth);
     if (limitError) {
       throw new Error(limitError);
     }
+    const permission = normalizeChatAgentPermissions(requester.permissions).requestParticipants;
+    if (permission === "deny") {
+      throw new Error(`Participant requests are disabled for @${requester.handle}.`);
+    }
+    const requestStatus: ChatParticipantRequestStatus = permission === "allow" ? "running" : "pending_approval";
     const participants = this.chatParticipants(conversation);
     const targets = new Map<string, ChatParticipant>();
     const requests: ChatParticipantRequestInput[] = [];
@@ -6770,9 +6922,7 @@ export class ChatService {
         targetHandle: target.handle,
         prompt: request?.prompt ?? "",
         reason: request?.reason,
-        status: !options.ignoreApprovalPolicies && this.matchingAppToolApprovalPolicy(conversation, requester, APP_CHAT_REQUEST_PARTICIPANTS_TOOL, "participants.request", target.id)
-          ? "running"
-          : "pending_approval",
+        status: requestStatus,
         createdAt: now,
         updatedAt: now
       };
@@ -7010,6 +7160,29 @@ export class ChatService {
       });
     this.participantRequestRunners.set(requestMessageId, runner);
     return runner;
+  }
+
+  private startParticipantRequestRunnerAfterQueuedSave(
+    conversationId: string,
+    requestMessageId: string,
+    depth: number,
+    source: ChatParticipantRequestBatch["source"]
+  ): void {
+    void Promise.resolve()
+      .then(async () => {
+        await this.waitForQueuedSave(conversationId);
+        const runner = this.startParticipantRequestRunner(conversationId, requestMessageId, randomUUID(), depth);
+        await runner;
+        await this.autoResumeParticipantRequest(conversationId, requestMessageId);
+      })
+      .catch((error) => {
+        void this.debugLogs.write("chat.participant-request.background-run.error", {
+          conversationId,
+          requestMessageId,
+          source,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
   }
 
   private async runParticipantRequest(
@@ -8524,6 +8697,92 @@ export class ChatService {
     );
   }
 
+  private accordStartMessageContent(facilitator: ChatParticipant, targets: ChatParticipant[], subject: string): string {
+    const targetNames = targets.map((target) => target.handle).join(", ");
+    return [
+      `@${facilitator.handle} /accord`,
+      "",
+      "Subject:",
+      subject,
+      "",
+      `Selected accord participants: ${targetNames}.`,
+      "Run the accord skill for exactly those selected participants and this subject. Use app_chat_request_participants for those participants only. The app has enabled request-participants permission for you in this chat; the user can revoke it from your participant controls."
+    ].join("\n");
+  }
+
+  private async resolveAccordSkillMention(
+    conversation: Conversation,
+    facilitator: ChatParticipant,
+    content: string
+  ): Promise<ChatSkillMention> {
+    if (!this.userSkills) {
+      throw new Error("Accord skill selection is unavailable.");
+    }
+    const searchContent = `@${facilitator.handle} /accord`;
+    const searchContext = this.userSkillRunContext(conversation, searchContent);
+    const result = await this.userSkills.search({
+      conversationId: conversation.id,
+      repoPath: conversation.repoPath,
+      query: "accord",
+      content: searchContent,
+      limit: 20
+    }, searchContext);
+    const accordSkill = result.skills.find((skill) =>
+      skill.frontmatterName === "accord" &&
+      skill.capabilityState === "invocable" &&
+      skill.variants.some((variant) => variant.providerKind === facilitator.kind && variant.capabilityState === "invocable")
+    );
+    if (!accordSkill) {
+      throw new Error(`The /accord skill is not runnable by @${facilitator.handle}.`);
+    }
+    const validation = await this.userSkills.validateMentionForParticipant(
+      accordSkill,
+      facilitator.kind,
+      this.userSkillRunContext(conversation, content),
+      facilitator.id
+    );
+    if (!validation.ok) {
+      throw new Error(validation.message);
+    }
+    return validation.mention;
+  }
+
+  private allowParticipantRequestsForManualAccordIfSelected(
+    conversation: Conversation,
+    skillMentions: ChatSkillMention[],
+    targets: ChatParticipant[]
+  ): ChatParticipant[] {
+    if (targets.length !== 1 || !skillMentions.some((mention) => mention.frontmatterName === "accord")) {
+      return targets;
+    }
+    const facilitator = targets[0];
+    const updatedFacilitator = this.setParticipantRequestPermission(conversation, facilitator.id, "allow") ?? facilitator;
+    void this.debugLogs.write("chat.accord.permission-enabled", {
+      conversationId: conversation.id,
+      facilitatorId: facilitator.id,
+      facilitatorHandle: facilitator.handle,
+      source: "manual"
+    });
+    return [updatedFacilitator];
+  }
+
+  private appToolApprovalPolicyMatches(
+    policy: ChatAppToolApprovalPolicy,
+    participant: ChatParticipant,
+    toolName: string,
+    capability: ChatAppToolCapability,
+    targetParticipantId?: string,
+    targetToolName?: string
+  ): boolean {
+    return policy.participantId === participant.id &&
+      policy.roleConfigId === participant.roleConfigId &&
+      policy.toolName === toolName &&
+      policy.capability === capability &&
+      (targetParticipantId ? policy.targetParticipantId === targetParticipantId : !policy.targetParticipantId) &&
+      (targetToolName ? policy.targetToolName === targetToolName : !policy.targetToolName) &&
+      policy.scope === "chat";
+  }
+
   private appToolApprovalReferencesParticipant(
     conversation: Conversation,
     approval: ChatAppToolApproval,
@@ -8627,25 +8886,21 @@ export class ChatService {
     targetToolName?: string
   ): ChatAppToolApprovalPolicy | undefined {
     return this.chatAppToolApprovalPolicies(conversation).find((policy) =>
-      policy.participantId === participant.id &&
-      policy.roleConfigId === participant.roleConfigId &&
-      policy.toolName === toolName &&
-      policy.capability === capability &&
-      (targetParticipantId ? policy.targetParticipantId === targetParticipantId : !policy.targetParticipantId) &&
-      (targetToolName ? policy.targetToolName === targetToolName : !policy.targetToolName) &&
-      policy.scope === "chat"
+      this.appToolApprovalPolicyMatches(policy, participant, toolName, capability, targetParticipantId, targetToolName)
     );
   }
 
   private upsertAppToolApprovalPolicy(conversation: Conversation, policy: ChatAppToolApprovalPolicy): void {
     const policies = this.chatAppToolApprovalPolicies(conversation);
     const existing = policies.find((item) =>
-      item.participantId === policy.participantId &&
-      item.roleConfigId === policy.roleConfigId &&
-      item.toolName === policy.toolName &&
-      item.capability === policy.capability &&
-      item.targetParticipantId === policy.targetParticipantId &&
-      item.targetToolName === policy.targetToolName &&
+      this.appToolApprovalPolicyMatches(
+        item,
+        { id: policy.participantId, roleConfigId: policy.roleConfigId } as ChatParticipant,
+        policy.toolName,
+        policy.capability,
+        policy.targetParticipantId,
+        policy.targetToolName
+      ) &&
       item.scope === policy.scope
     );
     conversation.metadata = {
@@ -10096,6 +10351,41 @@ export class ChatService {
     return Array.isArray(value) ? value.filter((item): item is ChatParticipant => this.isChatParticipant(item)) : [];
   }
 
+  private setParticipantRequestPermission(
+    conversation: Conversation,
+    participantId: string,
+    permission: ChatAgentPermissions["requestParticipants"]
+  ): ChatParticipant | undefined {
+    const participants = this.chatParticipants(conversation);
+    let updated: ChatParticipant | undefined;
+    const nextParticipants = participants.map((participant) => {
+      if (participant.id !== participantId) {
+        return participant;
+      }
+      const permissions = normalizeChatAgentPermissions(participant.permissions);
+      const requestParticipants = normalizeChatParticipantRequestPermission(permission);
+      if (permissions.requestParticipants === requestParticipants) {
+        updated = participant;
+        return participant;
+      }
+      updated = {
+        ...participant,
+        permissions: {
+          ...permissions,
+          requestParticipants
+        }
+      };
+      return updated;
+    });
+    if (updated) {
+      conversation.metadata = {
+        ...conversation.metadata,
+        participants: nextParticipants
+      };
+    }
+    return updated;
+  }
+
   private syncParticipantFromSavedConfig(
     participant: ChatParticipant,
     config: Pick<ChatParticipantConfig, "id" | "kind" | "avatarId" | "behaviorRuleIds">,
@@ -10138,6 +10428,39 @@ export class ChatService {
     return Array.isArray(value)
       ? value.filter((item): item is ChatAppToolApprovalPolicy => this.isChatAppToolApprovalPolicy(item))
       : [];
+  }
+
+  private clearLegacyAccordState(conversation: Conversation): boolean {
+    const metadata = conversation.metadata;
+    const nextMetadata: Conversation["metadata"] = { ...metadata };
+    let changed = false;
+    if ("accordLaunch" in nextMetadata) {
+      delete nextMetadata.accordLaunch;
+      changed = true;
+    }
+    if ("accordRun" in nextMetadata) {
+      delete nextMetadata.accordRun;
+      changed = true;
+    }
+    if (Array.isArray(metadata.appToolApprovalPolicies)) {
+      const nextPolicies = metadata.appToolApprovalPolicies.filter((policy) => {
+        if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
+          return false;
+        }
+        const candidate = policy as Partial<ChatAppToolApprovalPolicy> & { accordLaunchId?: unknown; expiresAt?: unknown };
+        return candidate.capability !== "participants.request" &&
+          candidate.accordLaunchId === undefined &&
+          candidate.expiresAt === undefined;
+      });
+      if (nextPolicies.length !== metadata.appToolApprovalPolicies.length) {
+        nextMetadata.appToolApprovalPolicies = nextPolicies;
+        changed = true;
+      }
+    }
+    if (changed) {
+      conversation.metadata = nextMetadata;
+    }
+    return changed;
   }
 
   private chatSessions(conversation: Conversation): ChatParticipantSession[] {
@@ -10381,11 +10704,6 @@ export class ChatService {
         typeof policy.targetParticipantId !== "string" &&
         typeof policy.targetToolName !== "string"
       ) || (
-        policy.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL &&
-        policy.capability === "participants.request" &&
-        typeof policy.targetParticipantId === "string" &&
-        typeof policy.targetToolName !== "string"
-      ) || (
         policy.toolName === APP_TOOL_PERMISSION_TOOL &&
         policy.capability === "permissions.request" &&
         typeof policy.targetParticipantId !== "string" &&
@@ -10403,7 +10721,11 @@ export class ChatService {
       throw new Error("Chat conversation was not found.");
     }
     const removedTombstonesApplied = this.applyRemovedChatMessageTombstones(conversation);
-    if (this.recoverStaleChatRun(conversation) || removedTombstonesApplied) {
+    const legacyAccordStateRemoved = this.clearLegacyAccordState(conversation);
+    if (this.recoverStaleChatRun(conversation) || removedTombstonesApplied || legacyAccordStateRemoved) {
+      if (legacyAccordStateRemoved) {
+        conversation.updatedAt = new Date().toISOString();
+      }
       await this.saveConversation(conversation);
     }
     return conversation;

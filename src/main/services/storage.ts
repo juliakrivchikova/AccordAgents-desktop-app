@@ -30,6 +30,28 @@ function sqlString(value: string | undefined | null): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+function clearLegacyAccordState(metadata: Conversation["metadata"]): Conversation["metadata"] {
+  const policies = Array.isArray(metadata.appToolApprovalPolicies)
+    ? metadata.appToolApprovalPolicies.filter((policy) =>
+        Boolean(
+          policy &&
+          typeof policy === "object" &&
+          !Array.isArray(policy) &&
+          (policy as { capability?: unknown }).capability !== "participants.request" &&
+          (policy as { accordLaunchId?: unknown }).accordLaunchId === undefined &&
+          (policy as { expiresAt?: unknown }).expiresAt === undefined
+        )
+      )
+    : undefined;
+  const next = { ...metadata };
+  delete next.accordLaunch;
+  delete next.accordRun;
+  if (policies) {
+    next.appToolApprovalPolicies = policies;
+  }
+  return next;
+}
+
 export class StorageService {
   private readonly dbPath: string;
   private initialized = false;
@@ -133,6 +155,7 @@ export class StorageService {
       return undefined;
     }
     const conversation = JSON.parse(payloadJson) as Conversation;
+    conversation.metadata = clearLegacyAccordState(conversation.metadata);
     sanitizeConversationWarnings(conversation);
     return conversation;
   }
@@ -146,6 +169,7 @@ export class StorageService {
       return undefined;
     }
     const conversation = JSON.parse(bodyJson) as Conversation;
+    conversation.metadata = clearLegacyAccordState(conversation.metadata);
     sanitizeConversationWarnings(conversation);
     const messagePage = await this.listConversationMessages({
       conversationId: id,
@@ -321,7 +345,7 @@ export class StorageService {
       if (hasPendingParticipantMessage(conversation) && !warnings.includes(INTERRUPTED_RUN_WARNING)) {
         warnings.push(INTERRUPTED_RUN_WARNING);
       }
-      conversation.metadata = clearChatRunMetadata({ ...conversation.metadata, warnings });
+      conversation.metadata = clearLegacyAccordState(clearChatRunMetadata({ ...conversation.metadata, warnings }));
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
     }

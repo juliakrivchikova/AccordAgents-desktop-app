@@ -1,4 +1,4 @@
-import type { ChatAgentMode, ChatAgentPermissions, ChatProviderKind, ChatShellPermissionRule } from "./types";
+import type { ChatAgentMode, ChatAgentPermissions, ChatParticipantRequestPermission, ChatProviderKind, ChatShellPermissionRule } from "./types";
 
 export const DEFAULT_CHAT_AGENT_MODE: ChatAgentMode = "default";
 export const CHAT_SHELL_RULE_PATTERN_MAX_LENGTH = 160;
@@ -8,6 +8,7 @@ export const DEFAULT_CHAT_AGENT_PERMISSIONS: ChatAgentPermissions = {
   repoRead: true,
   workspaceWrite: false,
   webAccess: false,
+  requestParticipants: "ask",
   shell: {
     enabled: false,
     rules: []
@@ -26,6 +27,7 @@ export function cloneChatAgentPermissions(permissions: ChatAgentPermissions): Ch
     repoRead: permissions.repoRead,
     workspaceWrite: permissions.workspaceWrite,
     webAccess: permissions.webAccess,
+    requestParticipants: normalizeChatParticipantRequestPermission(permissions.requestParticipants),
     shell: {
       enabled: permissions.shell.enabled,
       rules: normalizeChatShellPermissionRules(permissions.shell.rules)
@@ -50,6 +52,7 @@ export function normalizeChatAgentPermissions(value: unknown): ChatAgentPermissi
     repoRead: typeof record.repoRead === "boolean" ? record.repoRead : DEFAULT_CHAT_AGENT_PERMISSIONS.repoRead,
     workspaceWrite: typeof record.workspaceWrite === "boolean" ? record.workspaceWrite : DEFAULT_CHAT_AGENT_PERMISSIONS.workspaceWrite,
     webAccess: typeof record.webAccess === "boolean" ? record.webAccess : DEFAULT_CHAT_AGENT_PERMISSIONS.webAccess,
+    requestParticipants: normalizeChatParticipantRequestPermission(record.requestParticipants),
     shell: {
       enabled: typeof shell.enabled === "boolean" ? shell.enabled : DEFAULT_CHAT_AGENT_PERMISSIONS.shell.enabled,
       rules: normalizeChatShellPermissionRules(shell.rules)
@@ -103,6 +106,12 @@ export function effectiveChatAgentPermissionsForProvider(
 
 export function chatAgentPermissionsEqual(left: ChatAgentPermissions | undefined, right: ChatAgentPermissions | undefined): boolean {
   return JSON.stringify(normalizeChatAgentPermissions(left)) === JSON.stringify(normalizeChatAgentPermissions(right));
+}
+
+export function normalizeChatParticipantRequestPermission(value: unknown): ChatParticipantRequestPermission {
+  return value === "allow" || value === "deny" || value === "ask"
+    ? value
+    : DEFAULT_CHAT_AGENT_PERMISSIONS.requestParticipants;
 }
 
 export function isChatShellPermissionPatternSafe(pattern: string): boolean {

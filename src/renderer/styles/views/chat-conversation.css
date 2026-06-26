@@ -426,6 +426,21 @@
   accent-color: var(--app-accent);
 }
 
+.chat-rt-request-permission {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(9rem, 12rem);
+  gap: 6px;
+  align-items: center;
+  min-width: min(100%, 22rem);
+}
+
+.chat-rt-request-permission > span {
+  min-width: 0;
+  color: var(--app-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .chat-rt-status {
   display: inline-flex;
   align-items: center;
@@ -1529,6 +1544,18 @@
 .chat-app-tool-inline-check input {
   width: 15px;
   height: 15px;
+}
+
+.chat-app-tool-inline-select {
+  display: grid;
+  gap: 6px;
+  padding: 7px 9px 9px;
+}
+
+.chat-app-tool-inline-select > span {
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .chat-app-tool-inline-manual {

@@ -7,6 +7,7 @@
 @import "./views/review-layout.css" layer(components);
 @import "./views/chat-setup.css" layer(components);
 @import "./views/settings-participants.css" layer(components);
+@import "./views/chat-accord.css" layer(components);
 @import "./views/chat-conversation.css" layer(components);
 @import "./views/content-markdown.css" layer(components);
 @import "./views/visual-normalization.css" layer(components);

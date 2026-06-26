@@ -1224,7 +1224,7 @@ test("requestParticipantsFromTool does not wait on top-level run queue", async (
         participantId: requester.id,
         roleConfigId: requester.roleConfigId,
         roleConfigVersion: ROLE.version,
-        capabilities: [],
+        capabilities: ["participants.request"],
         triggerMessageId: "trigger-message",
         runId: "active-run"
       } as never, {
@@ -1242,14 +1242,10 @@ test("requestParticipantsFromTool does not wait on top-level run queue", async (
 });
 
 test("requestParticipantsFromTool reports running without approvalRequired while target is active", async () => {
-  const requester = chatParticipant();
+  const requester = chatParticipant({ requestParticipants: "allow" });
   const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
   const conversation = chatConversation([requester, target], "/repo");
   conversation.messages.push(userMessage("trigger-message", "@drew ask Taylor"));
-  conversation.metadata = {
-    ...conversation.metadata,
-    appToolApprovalPolicies: [participantRequestPolicy(requester, target)]
-  };
   const { service, storage } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
   let releaseTarget!: () => void;
@@ -1269,7 +1265,7 @@ test("requestParticipantsFromTool reports running without approvalRequired while
       participantId: requester.id,
       roleConfigId: requester.roleConfigId,
       roleConfigVersion: ROLE.version,
-      capabilities: [],
+      capabilities: ["participants.request"],
       triggerMessageId: "trigger-message",
       runId: "active-run"
     } as never, {
@@ -1496,7 +1492,7 @@ test("requestParticipantsFromTool keeps nested participant request as its own vi
     participantId: requester.id,
     roleConfigId: requester.roleConfigId,
     roleConfigVersion: ROLE.version,
-    capabilities: [],
+    capabilities: ["participants.request"],
     triggerMessageId: "thread-reply",
     triggerThreadId: "outer-thread",
     triggerParentMessageId: "outer-root",
@@ -1524,7 +1520,7 @@ test("requestParticipantsFromTool keeps nested participant request as its own vi
 });
 
 test("requestParticipantsFromTool roots running recipient replies under the request message", async () => {
-  const requester = chatParticipant();
+  const requester = chatParticipant({ requestParticipants: "allow" });
   const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
   const conversation = chatConversation([requester, target], "/repo");
   conversation.messages.push({
@@ -1535,10 +1531,6 @@ test("requestParticipantsFromTool roots running recipient replies under the requ
       chatThreadRootId: "outer-root"
     }
   });
-  conversation.metadata = {
-    ...conversation.metadata,
-    appToolApprovalPolicies: [participantRequestPolicy(requester, target)]
-  };
   const { service, storage } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
   let capturedTrigger: ChatMessage | undefined;
@@ -1566,7 +1558,7 @@ test("requestParticipantsFromTool roots running recipient replies under the requ
     participantId: requester.id,
     roleConfigId: requester.roleConfigId,
     roleConfigVersion: ROLE.version,
-    capabilities: [],
+    capabilities: ["participants.request"],
     triggerMessageId: "thread-reply",
     triggerThreadId: "outer-thread",
     triggerParentMessageId: "outer-root",
@@ -1618,6 +1610,55 @@ test("inferred participant request carrier is hidden and rooted to the source vi
   assert.equal(requestMessage.metadata?.parentMessageId, "source-message");
   assert.equal(requestMessage.metadata?.sourceMessageId, "source-message");
   assert.equal(requestMessage.metadata?.chatThreadRootId, "outer-root");
+});
+
+test("legacy accord launch metadata does not suppress inferred participant requests", () => {
+  const facilitator = chatParticipant({}, { id: "facilitator", handle: "facilitator" });
+  const requester = chatParticipant({}, { id: "requester", handle: "drew" });
+  const target = chatParticipant({ repoRead: true }, { id: "target", handle: "taylor" });
+  const conversation = chatConversation([facilitator, requester, target], "/repo");
+  conversation.metadata = {
+    ...conversation.metadata,
+    accordLaunch: {
+      id: "accord-launch",
+      facilitatorId: facilitator.id,
+      targetIds: [requester.id, target.id],
+      requiredApproverIds: [facilitator.id, requester.id, target.id],
+      runId: "accord-run",
+      expiresAt: "2099-01-01T00:00:00.000Z"
+    }
+  };
+  const { service } = testService({ conversations: [conversation] });
+
+  (service as any).appendParticipantTurnMessages(conversation, requester, [
+    participantMessage(requester, "source-message", "@taylor please verify this accord concern.")
+  ]);
+
+  const requestMessage = conversation.messages.find((message) => message.metadata?.participantRequest);
+  assert.ok(requestMessage);
+  assert.equal(requestMessage.metadata?.participantRequest?.source, "inferred");
+  assert.equal(requestMessage.metadata?.participantRequest?.requesterParticipantId, requester.id);
+});
+
+test("legacy manual accord metadata does not suppress inferred participant requests", () => {
+  const facilitator = chatParticipant({}, { id: "facilitator", handle: "facilitator" });
+  const requester = chatParticipant({}, { id: "requester", handle: "drew" });
+  const target = chatParticipant({ repoRead: true }, { id: "target", handle: "taylor" });
+  const conversation = chatConversation([facilitator, requester, target], "/repo");
+  conversation.metadata = {
+    ...conversation.metadata,
+    accordRun: { facilitatorId: facilitator.id, expiresAt: "2099-01-01T00:00:00.000Z" }
+  };
+  const { service } = testService({ conversations: [conversation] });
+
+  (service as any).appendParticipantTurnMessages(conversation, requester, [
+    participantMessage(requester, "source-message", "@taylor please verify this accord concern.")
+  ]);
+
+  const requestMessage = conversation.messages.find((message) => message.metadata?.participantRequest);
+  assert.ok(requestMessage);
+  assert.equal(requestMessage.metadata?.participantRequest?.source, "inferred");
+  assert.equal(requestMessage.metadata?.participantRequest?.requesterParticipantId, requester.id);
 });
 
 test("runParticipantRequest roots inferred recipient replies under the source visual root", async () => {

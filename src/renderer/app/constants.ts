@@ -1,9 +1,14 @@
 import type { AppSettings } from "../../shared/types";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS } from "../../shared/cliAgentRunSettings";
+import { CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS } from "../../shared/chatCompletionNotifications";
 
 export const DEFAULT_SETTINGS: AppSettings = {
   roundLimitDefault: 2,
   cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
+  chatCompletionNotifications: {
+    enabled: false,
+    thresholdMs: CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS
+  },
   providers: [],
   chatRoleConfigs: [],
   chatBehaviorRules: [],

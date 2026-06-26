@@ -95,6 +95,8 @@ export function participantPermissionChips(participant: ChatParticipantConfig): 
     permissions.workspaceWrite ? { key: "edit", label: "edit files" } : undefined,
     permissions.shell.enabled ? { key: "shell", label: permissions.shell.rules.length > 0 ? "shell rules" : "shell" } : undefined,
     permissions.webAccess ? { key: "web", label: "web access" } : undefined,
+    permissions.requestParticipants === "allow" ? { key: "request-allow", label: "request participants" } : undefined,
+    permissions.requestParticipants === "deny" ? { key: "request-deny", label: "requests denied" } : undefined,
     nativeToolCount > 0 ? { key: "native", label: "native tools" } : undefined
   ].filter((item): item is { key: string; label: string } => Boolean(item));
 }

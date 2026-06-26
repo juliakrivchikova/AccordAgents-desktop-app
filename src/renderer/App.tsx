@@ -1,6 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import {
+  Handshake,
   RefreshCw,
   Settings,
   XCircle
@@ -17,6 +18,7 @@ import { SettingsSidebar } from "./components/settings/settings-sidebar";
 import { SlackView } from "./components/review/review-view";
 import { ChatConversationView } from "./components/chat/chat-conversation-view";
 import { ChatParticipantMenu } from "./components/chat/chat-participant-menu";
+import { ChatAccordLauncherDialog } from "./components/chat/chat-accord-launcher-dialog";
 import { NewChatScreen } from "./components/chat/new-chat-screen";
 import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
 import { chatRoleLabel } from "./components/chat/chat-conversation-data";
@@ -45,6 +47,7 @@ function App(): JSX.Element {
   useAppEffects(state, conversationActions.refreshAll);
   const view = useAppViewModel(state);
   const [appVersion, setAppVersion] = React.useState("");
+  const [accordDialogOpen, setAccordDialogOpen] = React.useState(false);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -106,6 +109,14 @@ function App(): JSX.Element {
       <span className="sr-only">Show sidebar</span>
     </Button>
   ) : undefined;
+  const accordDisabledReason = !view.activeChatConversation
+    ? "Open a chat to start Accord."
+    : view.activeChatConversation.metadata.archived === true
+      ? "Archived chats cannot start Accord."
+      : view.activeChatParticipants.length < 2
+          ? "Add at least two participants to start Accord."
+          : undefined;
+  const canStartAccord = Boolean(view.activeChatConversation && !accordDisabledReason);
   const topBarActions = isNewChatScreen ? (
     <>
       <ModeToggle />
@@ -123,24 +134,38 @@ function App(): JSX.Element {
         </Button>
       )}
       {view.activeChatConversation && (
-        <ChatParticipantMenu
-          participants={view.activeChatParticipants}
-          settings={state.settings}
-          agents={state.agents}
-          draft={state.chatMessageDraft}
-          addParticipantDraft={state.chatAddParticipantDraft ?? defaultChatParticipantDraft(state.settings)}
-          isRunning={view.conversationRunning}
-          participantStatusById={view.participantStatusById}
-          onDraftChange={state.setChatMessageDraft}
-          onAddParticipantDraftChange={state.setChatAddParticipantDraft}
-          onAddParticipant={() => void chatActions.addChatParticipant()}
-          onAddSavedParticipant={(participant) => void chatActions.addSavedChatParticipant(participant)}
-          onUpdateParticipantRuntime={(participantId, patch) => void chatActions.updateChatParticipantRuntime(participantId, patch)}
-          onCompactParticipant={(participantId) => void chatActions.compactChatParticipant(participantId)}
-          onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
-          onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
-          onManageInSettings={() => openSettingsSection("participants")}
-        />
+        <>
+          <Button
+            variant="outline"
+            size="sm"
+            title={accordDisabledReason ?? "Start Accord"}
+            aria-label="Start Accord"
+            disabled={!canStartAccord}
+            data-testid="chat-accord-button"
+            onClick={() => setAccordDialogOpen(true)}
+          >
+            <Handshake aria-hidden />
+            Accord
+          </Button>
+          <ChatParticipantMenu
+            participants={view.activeChatParticipants}
+            settings={state.settings}
+            agents={state.agents}
+            draft={state.chatMessageDraft}
+            addParticipantDraft={state.chatAddParticipantDraft ?? defaultChatParticipantDraft(state.settings)}
+            isRunning={view.conversationRunning}
+            participantStatusById={view.participantStatusById}
+            onDraftChange={state.setChatMessageDraft}
+            onAddParticipantDraftChange={state.setChatAddParticipantDraft}
+            onAddParticipant={() => void chatActions.addChatParticipant()}
+            onAddSavedParticipant={(participant) => void chatActions.addSavedChatParticipant(participant)}
+            onUpdateParticipantRuntime={(participantId, patch) => void chatActions.updateChatParticipantRuntime(participantId, patch)}
+            onCompactParticipant={(participantId) => void chatActions.compactChatParticipant(participantId)}
+            onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
+            onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
+            onManageInSettings={() => openSettingsSection("participants")}
+          />
+        </>
       )}
       <ModeToggle />
       <Button variant="ghost" size="icon-sm" className="topbar-icon-button" title="Refresh" aria-label="Refresh" onClick={() => void conversationActions.refreshAll()}>
@@ -194,6 +219,16 @@ function App(): JSX.Element {
         setDismissedWarningKeysByScope={state.setDismissedWarningKeysByScope}
       />
 
+      {view.activeChatConversation && (
+        <ChatAccordLauncherDialog
+          open={accordDialogOpen}
+          participants={view.activeChatParticipants}
+          disabled={!canStartAccord}
+          onOpenChange={setAccordDialogOpen}
+          onStart={chatActions.startChatAccord}
+        />
+      )}
+
       {state.sidebarMode === "settings" ? (
         <SettingsView
           section={state.activeSettingsSection}
@@ -210,6 +245,7 @@ function App(): JSX.Element {
           deleteChatParticipantConfig={settingsActions.deleteChatParticipantConfig}
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
           setCliAgentRunTimeoutMs={settingsActions.setCliAgentRunTimeoutMs}
+          setChatCompletionNotifications={settingsActions.setChatCompletionNotifications}
           sidebarCollapsed={state.sidebarCollapsed}
           onExpandSidebar={() => state.setSidebarCollapsed(false)}
           onClose={closeSettings}

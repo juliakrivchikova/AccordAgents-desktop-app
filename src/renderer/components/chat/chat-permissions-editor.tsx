@@ -9,6 +9,7 @@ import {
 import type {
   ChatAgentMode,
   ChatAgentPermissions,
+  ChatParticipantRequestPermission,
   ChatShellPermissionAction,
   ChatShellPermissionMatch,
   ChatShellPermissionRule
@@ -17,6 +18,12 @@ import {
   CHAT_SHELL_ACTION_OPTIONS,
   CHAT_SHELL_MATCH_OPTIONS
 } from "./chat-participant-drafts";
+
+const PARTICIPANT_REQUEST_PERMISSION_OPTIONS = [
+  { value: "ask", label: "Ask each time" },
+  { value: "allow", label: "Allow without approval" },
+  { value: "deny", label: "Deny" }
+];
 
 export function ChatPermissionsEditor(props: {
   mode: ChatAgentMode;
@@ -84,6 +91,17 @@ export function ChatPermissionsEditor(props: {
           checked={permissions.webAccess}
           onChange={(webAccess) => updatePermissions({ webAccess })}
         />
+      </div>
+      <div className="chat-permission-select-row">
+        <span>Request participants</span>
+        <AppSelect
+          value={permissions.requestParticipants}
+          placeholder="Participant requests"
+          ariaLabel="Participant request permission"
+          options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
+          onValueChange={(value) => updatePermissions({ requestParticipants: value as ChatParticipantRequestPermission })}
+        />
+        <small>Controls whether this participant can ask other participants without a user approval card.</small>
       </div>
       {planMode && <div className="text-xs text-muted-foreground">Plan mode blocks shell commands and file edits while active.</div>}
       {permissions.shell.enabled && (
