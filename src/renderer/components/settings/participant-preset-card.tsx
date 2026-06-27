@@ -3,7 +3,7 @@ import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
 import { Avatar } from "../avatar/avatar";
 import { avatarForChatParticipant } from "../chat/chat-avatars";
 import { chatRoleLabel, participantProviderLabel } from "../chat/chat-conversation-data";
-import { participantModeLabel, participantPermissionChips, participantRules, providerClass } from "./participant-settings-utils";
+import { participantModeLabel, participantPermissionChips, participantRequestPermissionLabel, participantRules, providerClass } from "./participant-settings-utils";
 
 export function AvatarStack({ participants, max = 3 }: { participants: ChatParticipantConfig[]; max?: number }): JSX.Element {
   const shown = participants.slice(0, max);
@@ -68,6 +68,7 @@ export function ParticipantPresetCard(props: {
           value={props.participant.reasoningEffort ? chatReasoningEffortLabel(props.participant.reasoningEffort) : "Default"}
         />
         <ParticipantFact label="Mode" value={participantModeLabel(props.participant)} />
+        <ParticipantFact label="Requests" value={participantRequestPermissionLabel(props.participant)} />
       </dl>
 
       {(permissionChips.length > 0 || rules.length > 0) && <span className="participant-preset-divider" />}

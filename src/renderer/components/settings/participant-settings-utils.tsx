@@ -72,6 +72,18 @@ export function participantModeLabel(participant: ChatParticipantConfig): string
   }
 }
 
+export function participantRequestPermissionLabel(participant: ChatParticipantConfig): string {
+  switch (normalizeChatAgentPermissions(participant.permissions).requestParticipants) {
+    case "allow":
+      return "Allow";
+    case "deny":
+      return "Deny";
+    case "ask":
+    default:
+      return "Ask";
+  }
+}
+
 export function participantRules(settings: AppSettings, participant: ChatParticipantConfig): Array<{ id: string; label: string }> {
   const selected = new Set(participant.behaviorRuleIds ?? []);
   return settings.chatBehaviorRules

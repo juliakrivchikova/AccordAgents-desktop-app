@@ -3421,6 +3421,12 @@
   cursor: not-allowed;
 }
 
+/* The accord icon uses fixed per-stroke colors, so it ignores currentColor;
+   dim it explicitly to preserve the disabled affordance. */
+.composer-accord-button:disabled .composer-accord-icon {
+  opacity: 0.45;
+}
+
 .composer-send-button {
   background: var(--app-accent);
   color: var(--app-primary-fg);

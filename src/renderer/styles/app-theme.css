@@ -25,6 +25,9 @@
   --app-text-strong: #16191f;
   --app-muted: #868d9b;
   --app-muted-subtle: #a0a6b2;
+  --app-accord-icon-top: #a855f7;
+  --app-accord-icon-left: #e73975;
+  --app-accord-icon-right: #447bf3;
   --app-border: #e7e9ee;
   --app-border-strong: #d7dae1;
   --app-shell-border: #e7e9ee;
@@ -179,6 +182,9 @@
   --app-text-strong: #f1f3f7;
   --app-muted: #7f8794;
   --app-muted-subtle: #6b7280;
+  --app-accord-icon-top: #a855f7;
+  --app-accord-icon-left: #e73975;
+  --app-accord-icon-right: #447bf3;
   --app-border: #282d36;
   --app-border-strong: #353c47;
   --app-shell-border: #282d36;

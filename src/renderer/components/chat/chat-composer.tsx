@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useMemo, useRef } from "react";
-import { ArrowUp, ImagePlus, Loader2, Merge, RefreshCw, X } from "lucide-react";
+import { ArrowUp, ImagePlus, Loader2, RefreshCw, X } from "lucide-react";
 
 import { ResizableTextarea } from "@/renderer/components/primitives";
 import type {
@@ -300,7 +300,23 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
                 data-testid="chat-accord-button"
                 onClick={props.onOpenAccord}
               >
-                <Merge size={18} strokeWidth={2.4} aria-hidden />
+                {/* Custom merge glyph so each branch can keep its own color. */}
+                <svg
+                  className="composer-accord-icon"
+                  width={18}
+                  height={18}
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  strokeWidth={2.4}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                >
+                  <path d="m8 6 4-4 4 4" stroke="var(--app-accord-icon-top)" />
+                  <path d="M12 2v10.3" stroke="var(--app-accord-icon-top)" />
+                  <path d="M12 12.3a4 4 0 0 1-1.172 2.872L4 22" stroke="var(--app-accord-icon-left)" />
+                  <path d="m20 22-5-5" stroke="var(--app-accord-icon-right)" />
+                </svg>
               </button>
             )}
             <button

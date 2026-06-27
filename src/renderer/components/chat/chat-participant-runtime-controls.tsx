@@ -17,7 +17,6 @@ import type {
   ProviderModelCatalog
 } from "../../../shared/types";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
-import { AppSelect } from "../primitives";
 import {
   CHAT_AGENT_MODE_OPTIONS,
   chatInheritedCliSettingLabel
@@ -58,18 +57,22 @@ export function ParticipantRuntimeControls(props: {
   }
 
   const isCustomAccess = mode === "default";
+  const normalizedPermissions = normalizeChatAgentPermissions(participant.permissions);
   const effectivePermissions = effectiveChatAgentPermissionsForProvider(
     participant.kind,
     mode,
-    normalizeChatAgentPermissions(participant.permissions)
+    normalizedPermissions
   );
+  // requestParticipants is independent of agent mode, so it gets its own
+  // always-visible control below rather than living only in the Custom-access panel.
+  const requestPermission = normalizedPermissions.requestParticipants;
+  const requestPermissionLabel = PARTICIPANT_REQUEST_PERMISSION_OPTIONS
+    .find((option) => option.value === requestPermission)?.label ?? "Ask";
   const grants = [
     effectivePermissions.repoRead ? "repo read" : "",
     effectivePermissions.shell.enabled ? "shell" : "",
     effectivePermissions.workspaceWrite ? "edit" : "",
-    effectivePermissions.webAccess ? "web" : "",
-    effectivePermissions.requestParticipants === "allow" ? "request allow" : "",
-    effectivePermissions.requestParticipants === "deny" ? "request deny" : ""
+    effectivePermissions.webAccess ? "web" : ""
   ].filter(Boolean);
 
   return (
@@ -103,6 +106,18 @@ export function ParticipantRuntimeControls(props: {
           defaultLabel={cliSettingLabel}
           disabled={props.disabled}
           onChange={(model) => update({ model })}
+        />
+        <span className="chat-rt-dot" aria-hidden>·</span>
+        <GhostSelect
+          ariaLabel="Request participants permission"
+          value={requestPermission}
+          displayLabel={`Requests: ${requestPermissionLabel}`}
+          muted={requestPermission === "ask"}
+          disabled={props.disabled}
+          options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
+          onChange={(value) => update({
+            permissions: { ...normalizedPermissions, requestParticipants: value as ChatParticipantRequestPermission }
+          })}
         />
         {isCustomAccess && (
           <>
@@ -277,17 +292,6 @@ function PermissionsToggleRow(props: {
           <span>{toggle.label}</span>
         </label>
       ))}
-      <div className="chat-rt-request-permission">
-        <span>Request participants</span>
-        <AppSelect
-          value={permissions.requestParticipants}
-          placeholder="Request participants"
-          ariaLabel="Request participants permission"
-          disabled={props.disabled}
-          options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
-          onValueChange={(value) => set({ requestParticipants: value as ChatParticipantRequestPermission })}
-        />
-      </div>
     </div>
   );
 }
