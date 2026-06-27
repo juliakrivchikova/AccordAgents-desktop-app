@@ -2694,16 +2694,16 @@ export class ChatService {
           chatThreadRootId
         }));
       }
-      dispatch = {
-        ...dispatch,
-        targets: this.allowParticipantRequestsForManualAccordIfSelected(conversation, skillValidation.skillMentions, dispatch.targets)
-      };
-      if (dispatch.targets.length === 0) {
-        conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
-      }
-      conversation.updatedAt = new Date().toISOString();
       try {
         await this.withChatMutation(conversation, async () => {
+          dispatch = {
+            ...dispatch,
+            targets: this.allowParticipantRequestsForManualAccordIfSelected(conversation, skillValidation.skillMentions, dispatch.targets)
+          };
+          if (dispatch.targets.length === 0) {
+            conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
+          }
+          conversation.updatedAt = new Date().toISOString();
           await this.saveConversation(conversation);
         });
       } catch (error) {
@@ -3103,7 +3103,10 @@ export class ChatService {
     targets: ChatParticipant[],
     context?: ChatDispatchReplyContext
   ): Promise<{ skillMentions: ChatSkillMention[]; targets: ChatParticipant[]; blocks: string[] }> {
-    const skillMentions = this.chatSkillMentionsFromRaw(rawMentions);
+    let skillMentions = this.chatSkillMentionsFromRaw(rawMentions);
+    if (skillMentions.length === 0) {
+      skillMentions = await this.deriveAccordSkillMentionFromContent(conversation, content, targets, context);
+    }
     if (skillMentions.length === 0) {
       return { skillMentions: [], targets, blocks: [] };
     }
@@ -3140,6 +3143,19 @@ export class ChatService {
       }
     }
     return { skillMentions, targets: validTargets, blocks };
+  }
+
+  private async deriveAccordSkillMentionFromContent(
+    conversation: Conversation,
+    content: string,
+    targets: ChatParticipant[],
+    context?: ChatDispatchReplyContext
+  ): Promise<ChatSkillMention[]> {
+    if (targets.length !== 1 || !this.hasStandaloneAccordSkillToken(content)) {
+      return [];
+    }
+    const accordSkill = await this.findAccordSkillForParticipant(conversation, targets[0], content, context);
+    return accordSkill ? [accordSkill] : [];
   }
 
   private async skillRunBlockForParticipant(
@@ -8719,19 +8735,7 @@ export class ChatService {
       throw new Error("Accord skill selection is unavailable.");
     }
     const searchContent = `@${facilitator.handle} /accord`;
-    const searchContext = this.userSkillRunContext(conversation, searchContent);
-    const result = await this.userSkills.search({
-      conversationId: conversation.id,
-      repoPath: conversation.repoPath,
-      query: "accord",
-      content: searchContent,
-      limit: 20
-    }, searchContext);
-    const accordSkill = result.skills.find((skill) =>
-      skill.frontmatterName === "accord" &&
-      skill.capabilityState === "invocable" &&
-      skill.variants.some((variant) => variant.providerKind === facilitator.kind && variant.capabilityState === "invocable")
-    );
+    const accordSkill = await this.findAccordSkillForParticipant(conversation, facilitator, searchContent);
     if (!accordSkill) {
       throw new Error(`The /accord skill is not runnable by @${facilitator.handle}.`);
     }
@@ -8745,6 +8749,39 @@ export class ChatService {
       throw new Error(validation.message);
     }
     return validation.mention;
+  }
+
+  private async findAccordSkillForParticipant(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    content: string,
+    context?: ChatDispatchReplyContext
+  ): Promise<ChatSkillMention | undefined> {
+    if (!this.userSkills) {
+      return undefined;
+    }
+    const searchContent = `@${participant.handle} /accord`;
+    const searchContext = this.userSkillRunContext(conversation, content || searchContent, context);
+    const result = await this.userSkills.search({
+      conversationId: conversation.id,
+      repoPath: conversation.repoPath,
+      query: "accord",
+      content: searchContent,
+      limit: 20
+    }, searchContext);
+    return result.skills.find((skill) =>
+      skill.frontmatterName === "accord" &&
+      skill.capabilityState === "invocable" &&
+      skill.variants.some((variant) => variant.providerKind === participant.kind && variant.capabilityState === "invocable")
+    );
+  }
+
+  private hasStandaloneAccordSkillToken(content: string): boolean {
+    return /(^|\s)\/accord\b/i.test(this.withoutInlineCode(this.withoutFencedCode(content)));
+  }
+
+  private withoutInlineCode(content: string): string {
+    return content.replace(/`[^`\r\n]*`/g, "");
   }
 
   private allowParticipantRequestsForManualAccordIfSelected(

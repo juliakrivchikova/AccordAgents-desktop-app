@@ -36,6 +36,7 @@ import type {
   ChatRoleChangeOperation,
   ChatRoleConfig,
   ChatRoleConfigUpdate,
+  ChatSkillMention,
   Conversation,
   ParticipantConfig
 } from "../../shared/types";
@@ -2990,6 +2991,157 @@ test("a selected skill without an explicit mention targets the implicit last sen
 
   assert.deepEqual(validation.targets.map((participant: ChatParticipant) => participant.handle), ["codex"]);
   assert.deepEqual(seen, [{ kind: "codex-cli", participantId: codex.id }]);
+});
+
+test("pasted accord token derives a structured accord mention and enables facilitator requests", async () => {
+  const facilitator = chatParticipant("codex-cli");
+  const peer = chatParticipant("claude-code");
+  const conversation = chatConversation([facilitator, peer]);
+  const accordMention = skillMention("codex-cli") as ChatSkillMention;
+  const runs: Array<{ participant: ParticipantConfig; prompt: string }> = [];
+  const searches: any[] = [];
+  const validations: any[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    userSkills: {
+      async search(request: any, context: any): Promise<any> {
+        searches.push({ request, context });
+        return { target: context.target, skills: [accordMention] };
+      },
+      async validateMentionForParticipant(mention: any, providerKind: ChatProviderKind, context: any, participantId: string): Promise<any> {
+        validations.push({ mention, providerKind, context, participantId });
+        return { ok: true, mention };
+      },
+      async resolveInvocableSkillsForParticipant(): Promise<any[]> {
+        return [{ name: "accord", dir: "/tmp/accord-skill" }];
+      }
+    },
+    run: async (runParticipant, prompt) => {
+      runs.push({ participant: runParticipant, prompt });
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: "accord complete",
+        durationMs: 1
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "pasted-accord-run",
+    content: "@codex have an /accord with Drew regarding the final implementation"
+  });
+
+  await waitFor(() => runs.length === 1);
+  const userMessage = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "user" && message.content.includes("/accord")
+  ) as ChatMessage | undefined;
+  assert.equal(searches.length, 1);
+  assert.equal(searches[0].request.query, "accord");
+  assert.equal(validations.length, 2);
+  assert.equal(validations[0].participantId, facilitator.id);
+  assert.equal(userMessage?.metadata?.skillMentions?.[0]?.frontmatterName, "accord");
+  assert.equal(runs[0].participant.id, facilitator.id);
+  assert.match(runs[0].prompt, /Selected skills for this turn:/);
+  assert.equal(
+    storage.current.metadata.participants.find((participant: ChatParticipant) => participant.id === facilitator.id)
+      ?.permissions.requestParticipants,
+    "allow"
+  );
+  assert.equal(
+    storage.current.metadata.participants.find((participant: ChatParticipant) => participant.id === peer.id)
+      ?.permissions.requestParticipants,
+    "ask"
+  );
+});
+
+test("pasted accord token is a no-op when accord is not runnable by the target", async () => {
+  const facilitator = chatParticipant("codex-cli");
+  const conversation = chatConversation([facilitator]);
+  const runs: Array<{ participant: ParticipantConfig; prompt: string }> = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    userSkills: {
+      async search(): Promise<any> {
+        return { skills: [] };
+      },
+      async validateMentionForParticipant(): Promise<any> {
+        throw new Error("should not validate when no accord skill was found");
+      },
+      async resolveInvocableSkillsForParticipant(): Promise<any[]> {
+        return [];
+      }
+    },
+    run: async (runParticipant, prompt) => {
+      runs.push({ participant: runParticipant, prompt });
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: "normal reply",
+        durationMs: 1
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "pasted-accord-no-skill-run",
+    content: "@codex please consider /accord"
+  });
+
+  await waitFor(() => runs.length === 1);
+  const userMessage = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "user" && message.content.includes("/accord")
+  ) as ChatMessage | undefined;
+  assert.equal(userMessage?.metadata?.skillMentions, undefined);
+  assert.doesNotMatch(runs[0].prompt, /Selected skills:/);
+});
+
+test("pasted accord detection skips false-positive tokens and multi-target prose", async () => {
+  const codex = chatParticipant("codex-cli");
+  const drew = chatParticipant("claude-code");
+  const conversation = chatConversation([codex, drew]);
+  const { service } = testService({
+    conversation,
+    userSkills: {
+      async search(): Promise<any> {
+        throw new Error("accord search should not run for non-matching prose");
+      },
+      async validateMentionForParticipant(): Promise<any> {
+        throw new Error("accord validation should not run for non-matching prose");
+      }
+    }
+  });
+  const contents = [
+    "@codex discuss /accordion",
+    "@codex discuss and/or alternatives",
+    "@codex inspect src/accord",
+    "@codex ```\n/accord\n```",
+    "@codex `/accord`"
+  ];
+
+  for (const content of contents) {
+    const validation = await (service as any).validateChatSkillMentionsForTargets(
+      conversation,
+      content,
+      undefined,
+      [codex]
+    );
+    assert.deepEqual(validation.skillMentions, []);
+    assert.deepEqual(validation.targets.map((participant: ChatParticipant) => participant.id), [codex.id]);
+  }
+
+  const multiTarget = await (service as any).validateChatSkillMentionsForTargets(
+    conversation,
+    "@codex @drew /accord",
+    undefined,
+    [codex, drew]
+  );
+  assert.deepEqual(multiTarget.skillMentions, []);
+  assert.deepEqual(multiTarget.targets.map((participant: ChatParticipant) => participant.id), [codex.id, drew.id]);
 });
 
 test("app_chat_send_message rejects empty content and invisible parent ids", async () => {
