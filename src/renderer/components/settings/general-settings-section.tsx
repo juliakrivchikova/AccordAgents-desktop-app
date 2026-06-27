@@ -10,6 +10,10 @@ import type {
   ProviderSettings,
   RepoFileOpenAction
 } from "../../../shared/types";
+import {
+  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MAX,
+  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MIN
+} from "../../../shared/chatParticipantRequests";
 import { CLI_AGENT_RUN_TIMEOUT_MAX_MS, CLI_AGENT_RUN_TIMEOUT_MIN_MS, cliAgentRunTimeoutHours } from "../../../shared/cliAgentRunSettings";
 import {
   CHAT_COMPLETION_NOTIFICATION_MAX_THRESHOLD_MS,
@@ -27,10 +31,12 @@ export function GeneralSettingsSection(props: {
   agents: AgentHealth[];
   repoFileOpenAction?: RepoFileOpenAction;
   cliAgentRunTimeoutMs: number;
+  chatParticipantRequestMaxDepth: number;
   chatCompletionNotifications: ChatCompletionNotificationSettings;
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
+  setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
   setChatCompletionNotifications: (update: ChatCompletionNotificationSettingsUpdate) => Promise<void>;
 }): JSX.Element {
   const detectedCount = props.providers.filter(
@@ -92,6 +98,19 @@ export function GeneralSettingsSection(props: {
               <div className="gen-row-desc">Automatically stop an agent run after this many hours.</div>
             </div>
             <CliAgentRunTimeoutControl timeoutMs={props.cliAgentRunTimeoutMs} onChange={props.setCliAgentRunTimeoutMs} />
+          </div>
+          <div className="gen-card-divider" />
+          <div className="gen-row">
+            <div className="gen-row-text">
+              <div className="gen-row-title">Participant request depth</div>
+              <div className="gen-row-desc">
+                Maximum chained request levels. Use 1 to prevent requested participants from asking others.
+              </div>
+            </div>
+            <ParticipantRequestDepthControl
+              maxDepth={props.chatParticipantRequestMaxDepth}
+              onChange={props.setChatParticipantRequestMaxDepth}
+            />
           </div>
           <div className="gen-card-divider" />
           <div className="gen-row gen-row-notifications">
@@ -308,6 +327,53 @@ function CliAgentRunTimeoutControl(props: {
           className={`gen-timeout-save ${canSave ? "is-dirty" : ""}`}
           disabled={!canSave}
           onClick={() => void props.onChange(timeoutMs)}
+        >
+          Save
+        </button>
+      </div>
+      {validation && <div className="gen-timeout-error">{validation}</div>}
+    </div>
+  );
+}
+
+function ParticipantRequestDepthControl(props: {
+  maxDepth: number;
+  onChange: (maxDepth: number) => Promise<void>;
+}): JSX.Element {
+  const [depth, setDepth] = useState(String(props.maxDepth));
+  const trimmed = depth.trim();
+  const parsed = Number(trimmed);
+  const validation = trimmed === ""
+    ? undefined
+    : !Number.isFinite(parsed) || !Number.isInteger(parsed)
+      ? "Use a whole number."
+      : parsed < CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MIN || parsed > CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MAX
+        ? `Use ${CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MIN} to ${CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MAX} levels.`
+        : undefined;
+  const canSave = trimmed !== "" && !validation && parsed !== props.maxDepth;
+
+  useEffect(() => {
+    setDepth(String(props.maxDepth));
+  }, [props.maxDepth]);
+
+  return (
+    <div className="gen-row-control">
+      <div className="gen-timeout">
+        <div className="gen-timeout-field">
+          <input
+            className="gen-timeout-input"
+            inputMode="numeric"
+            value={depth}
+            aria-label="Participant request max depth"
+            onChange={(event) => setDepth(event.target.value)}
+          />
+          <span className="gen-timeout-unit">Levels</span>
+        </div>
+        <button
+          type="button"
+          className={`gen-timeout-save ${canSave ? "is-dirty" : ""}`}
+          disabled={!canSave}
+          onClick={() => void props.onChange(parsed)}
         >
           Save
         </button>

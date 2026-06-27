@@ -20,6 +20,7 @@ export interface ProviderSettings {
 export interface AppSettings {
   roundLimitDefault: number;
   cliAgentRunTimeoutMs: number;
+  chatParticipantRequestMaxDepth: number;
   chatCompletionNotifications: ChatCompletionNotificationSettings;
   providers: ProviderSettings[];
   chatRoleConfigs: ChatRoleConfig[];
@@ -1247,6 +1248,7 @@ export interface AppBridge {
   openLocalFile(request: OpenLocalFileRequest): Promise<OpenLocalFileResult>;
   setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<AppSettings>;
   setCliAgentRunTimeoutMs(timeoutMs: number): Promise<AppSettings>;
+  setChatParticipantRequestMaxDepth(maxDepth: number): Promise<AppSettings>;
   setChatCompletionNotifications(update: ChatCompletionNotificationSettingsUpdate): Promise<AppSettings>;
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;

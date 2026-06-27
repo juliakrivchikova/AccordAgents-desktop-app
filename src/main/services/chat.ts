@@ -79,6 +79,7 @@ import type {
 } from "../../shared/types";
 import { isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
 import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
+import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT } from "../../shared/chatParticipantRequests";
 import { normalizeChatReactionEmoji } from "../../shared/chatReactions";
 import {
   CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS,
@@ -218,7 +219,6 @@ const CHAT_ROLE_INSTRUCTIONS_MAX_CHARS = 40_000;
 const CHAT_COMPACT_INSTRUCTIONS_MAX_CHARS = 20_000;
 const CHAT_ROSTER_CHANGE_MAX_OPERATIONS = 12;
 const CHAT_PARTICIPANT_REQUEST_MAX_ITEMS = 4;
-const CHAT_PARTICIPANT_REQUEST_MAX_DEPTH = 2;
 const CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN = 4;
 const CHAT_PARTICIPANT_REQUEST_RATE_WINDOW_MS = 60_000;
 const CHAT_PARTICIPANT_REQUEST_RATE_LIMIT = 8;
@@ -1355,7 +1355,7 @@ export class ChatService {
 
     let prepared: PreparedParticipantRequest;
     try {
-      prepared = this.prepareParticipantRequest(conversation, requester, this.normalizeParticipantRequest(rawRequest), actor, "mcp");
+      prepared = await this.prepareParticipantRequest(conversation, requester, this.normalizeParticipantRequest(rawRequest), actor, "mcp");
     } catch (error) {
       return this.participantRequestFailedToolResult(error instanceof Error ? error.message : String(error));
     }
@@ -2975,7 +2975,7 @@ export class ChatService {
           warnings
         });
         await this.refreshStoredChatState(conversation);
-        this.appendParticipantTurnMessages(conversation, requester, messages);
+        await this.appendParticipantTurnMessages(conversation, requester, messages);
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
         await this.ensureHistoryFiles(conversation);
@@ -3008,7 +3008,7 @@ export class ChatService {
         warnings
       });
       await this.refreshStoredChatState(conversation);
-      this.appendParticipantTurnMessages(conversation, requester, messages);
+      await this.appendParticipantTurnMessages(conversation, requester, messages);
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
       await this.ensureHistoryFiles(conversation);
@@ -3255,7 +3255,7 @@ export class ChatService {
     });
     const appendCompletedTurn = async (participant: ChatParticipant, messages: ChatMessage[]): Promise<void> => {
       await this.withChatMutation(conversation, async () => {
-        this.appendParticipantTurnMessages(conversation, participant, messages);
+        await this.appendParticipantTurnMessages(conversation, participant, messages);
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
       });
@@ -3875,11 +3875,11 @@ export class ChatService {
     });
   }
 
-  private appendParticipantTurnMessages(
+  private async appendParticipantTurnMessages(
     conversation: Conversation,
     participant: ChatParticipant,
     messages: ChatMessage[]
-  ): void {
+  ): Promise<void> {
     const accepted: ChatMessage[] = [];
     for (const message of messages) {
       if (this.upsertCompletedMessage(conversation, message)) {
@@ -3889,7 +3889,7 @@ export class ChatService {
     // Only infer participant requests from messages we actually appended/replaced.
     // A declined late message (e.g. a user-stopped run finishing) must not spawn
     // implicit request approvals from content the user never sees.
-    this.createImplicitParticipantRequestApproval(conversation, participant, accepted);
+    await this.createImplicitParticipantRequestApproval(conversation, participant, accepted);
   }
 
   private buildPrompt(
@@ -6327,11 +6327,11 @@ export class ChatService {
     };
   }
 
-  private createImplicitParticipantRequestApproval(
+  private async createImplicitParticipantRequestApproval(
     conversation: Conversation,
     participant: ChatParticipant,
     messages: ChatMessage[]
-  ): void {
+  ): Promise<void> {
     for (const sourceMessage of messages) {
       if (
         sourceMessage.role !== "participant" ||
@@ -6360,7 +6360,7 @@ export class ChatService {
 
       let prepared: PreparedParticipantRequest;
       try {
-        prepared = this.prepareParticipantRequest(
+        prepared = await this.prepareParticipantRequest(
           conversation,
           participant,
           {
@@ -6891,15 +6891,16 @@ export class ChatService {
     };
   }
 
-  private prepareParticipantRequest(
+  private async prepareParticipantRequest(
     conversation: Conversation,
     requester: ChatParticipant,
     normalized: { requests: ChatParticipantRequestInput[]; timeoutMs: number; resumeRequester: boolean },
     actor: ChatAppMcpActor,
     source: "mcp" | "inferred"
-  ): PreparedParticipantRequest {
+  ): Promise<PreparedParticipantRequest> {
     const depth = (actor.participantRequestDepth ?? 0) + 1;
-    const limitError = this.participantRequestLimitError(conversation, requester, actor, depth);
+    const maxDepth = await this.chatParticipantRequestMaxDepth();
+    const limitError = this.participantRequestLimitError(conversation, requester, actor, depth, maxDepth);
     if (limitError) {
       throw new Error(limitError);
     }
@@ -6994,10 +6995,11 @@ export class ChatService {
     conversation: Conversation,
     requester: ChatParticipant,
     actor: ChatAppMcpActor,
-    depth: number
+    depth: number,
+    maxDepth: number
   ): string | undefined {
-    if (depth > CHAT_PARTICIPANT_REQUEST_MAX_DEPTH) {
-      return `max depth (${CHAT_PARTICIPANT_REQUEST_MAX_DEPTH}) reached`;
+    if (depth > maxDepth) {
+      return `max depth (${maxDepth}) reached`;
     }
     const sameTurnMcpBatches = actor.triggerMessageId
       ? this.participantRequestBatches(conversation).filter((batch) =>
@@ -7018,6 +7020,10 @@ export class ChatService {
       return `participant request rate limit (${CHAT_PARTICIPANT_REQUEST_RATE_LIMIT}/minute) reached`;
     }
     return undefined;
+  }
+
+  private async chatParticipantRequestMaxDepth(): Promise<number> {
+    return this.settings.getChatParticipantRequestMaxDepth?.() ?? CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT;
   }
 
   private participantRequestSummary(requesterHandle: string, targetHandles: string[]): string {
@@ -7245,7 +7251,7 @@ export class ChatService {
           participantRequestBatchId: batch.id
         });
         await this.refreshStoredChatState(conversation);
-        this.appendParticipantTurnMessages(conversation, target, messages);
+        await this.appendParticipantTurnMessages(conversation, target, messages);
         const reply = messages[0];
         const waitingOnPermissionApproval = this.hasPendingPermissionApprovalForParticipantTurn(
           conversation,
@@ -7466,7 +7472,7 @@ export class ChatService {
         participantRequestBatchId: participantRequestBatch?.id
       });
       await this.refreshStoredChatState(conversation);
-      this.appendParticipantTurnMessages(conversation, requester, messages);
+      await this.appendParticipantTurnMessages(conversation, requester, messages);
       const participantRequestResumeMessageId = participantRequestMessage && participantRequestBatch
         ? this.applyPermissionResumeToParticipantRequest(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, messages)
         : undefined;
@@ -7670,7 +7676,7 @@ export class ChatService {
         participantRequestBatchId: batch.id
       });
       await this.refreshStoredChatState(conversation);
-      this.appendParticipantTurnMessages(conversation, requester, messages);
+      await this.appendParticipantTurnMessages(conversation, requester, messages);
       this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
         ...current,
         status: "completed",

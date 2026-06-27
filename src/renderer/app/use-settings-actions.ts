@@ -14,6 +14,7 @@ export interface SettingsActions {
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean; model?: string }) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
+  setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
   setChatCompletionNotifications: (update: ChatCompletionNotificationSettingsUpdate) => Promise<void>;
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => Promise<void>;
   archiveChatRoleConfig: (id: string) => Promise<void>;
@@ -36,6 +37,10 @@ export function useSettingsActions(state: AppState): SettingsActions {
 
   async function setCliAgentRunTimeoutMs(timeoutMs: number): Promise<void> {
     await updateSettings(() => window.consensus.setCliAgentRunTimeoutMs(timeoutMs));
+  }
+
+  async function setChatParticipantRequestMaxDepth(maxDepth: number): Promise<void> {
+    await updateSettings(() => window.consensus.setChatParticipantRequestMaxDepth(maxDepth));
   }
 
   async function setChatCompletionNotifications(update: ChatCompletionNotificationSettingsUpdate): Promise<void> {
@@ -118,6 +123,7 @@ export function useSettingsActions(state: AppState): SettingsActions {
     updateProvider,
     setRepoFileOpenPreference,
     setCliAgentRunTimeoutMs,
+    setChatParticipantRequestMaxDepth,
     setChatCompletionNotifications,
     saveChatRoleConfig,
     archiveChatRoleConfig,

@@ -174,6 +174,9 @@ function registerIpc(): void {
     cliAgentRunner.setRunTimeoutMs(next.cliAgentRunTimeoutMs);
     return next;
   });
+  ipcMain.handle("settings:set-chat-participant-request-max-depth", (_event, maxDepth: number) => {
+    return settingsService.setChatParticipantRequestMaxDepth(maxDepth);
+  });
   ipcMain.handle("settings:set-chat-completion-notifications", (_event, update: ChatCompletionNotificationSettingsUpdate) => {
     return settingsService.setChatCompletionNotificationSettings(update);
   });

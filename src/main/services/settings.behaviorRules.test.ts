@@ -14,6 +14,11 @@ import {
   CLI_AGENT_RUN_TIMEOUT_MIN_MS
 } from "../../shared/cliAgentRunSettings";
 import { CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS } from "../../shared/chatCompletionNotifications";
+import {
+  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MAX,
+  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MIN
+} from "../../shared/chatParticipantRequests";
 
 const CODEX_AGENT: AgentHealth = {
   kind: "codex-cli",
@@ -41,6 +46,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     settingsVersion: 1,
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
+    chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
     chatCompletionNotifications: { enabled: false, thresholdMs: CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS },
     providers: [],
     chatRoleConfigs: [],
@@ -60,6 +66,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
   service.getPublicSettings = async () => ({
     roundLimitDefault: stored.roundLimitDefault,
     cliAgentRunTimeoutMs: service.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
+    chatParticipantRequestMaxDepth: service.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
     chatCompletionNotifications: stored.chatCompletionNotifications,
     providers: stored.providers,
     chatRoleConfigs: stored.chatRoleConfigs,
@@ -126,6 +133,7 @@ test("saveChatBehaviorRuleConfig rejects oversized behavior rules", async () => 
     settingsVersion: 1,
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
+    chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
     chatCompletionNotifications: { enabled: false, thresholdMs: CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS },
     providers: [],
     chatRoleConfigs: [],
@@ -139,6 +147,7 @@ test("saveChatBehaviorRuleConfig rejects oversized behavior rules", async () => 
   service.getPublicSettings = async () => ({
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
+    chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
     chatCompletionNotifications: { enabled: false, thresholdMs: CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS },
     providers: [],
     chatRoleConfigs: [],
@@ -180,6 +189,25 @@ test("CLI agent run timeout defaults to 24 hours and persists bounded values", a
   await service.setCliAgentRunTimeoutMs(5_000);
 
   assert.equal(stored().cliAgentRunTimeoutMs, CLI_AGENT_RUN_TIMEOUT_MIN_MS);
+});
+
+test("participant request max depth defaults to 2 and persists bounded values", async () => {
+  const { service, stored } = settingsServiceWithStoredSettings({
+    chatParticipantRequestMaxDepth: undefined
+  } as Partial<AppSettings>);
+
+  assert.equal(await service.getChatParticipantRequestMaxDepth(), CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT);
+
+  const updated = await service.setChatParticipantRequestMaxDepth(3);
+
+  assert.equal(stored().chatParticipantRequestMaxDepth, 3);
+  assert.equal(updated.chatParticipantRequestMaxDepth, 3);
+
+  await service.setChatParticipantRequestMaxDepth(99);
+  assert.equal(stored().chatParticipantRequestMaxDepth, CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MAX);
+
+  await service.setChatParticipantRequestMaxDepth(0);
+  assert.equal(stored().chatParticipantRequestMaxDepth, CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MIN);
 });
 
 test("ensureGenericChatParticipantSeeds seeds installed CLI providers once and adds later installs", async () => {

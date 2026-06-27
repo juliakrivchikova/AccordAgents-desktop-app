@@ -1584,7 +1584,7 @@ test("requestParticipantsFromTool roots running recipient replies under the requ
   assert.equal(targetReply?.metadata?.chatThreadRootId, requestMessage.id);
 });
 
-test("inferred participant request carrier is hidden and rooted to the source visual root", () => {
+test("inferred participant request carrier is hidden and rooted to the source visual root", async () => {
   const requester = chatParticipant();
   const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
   const conversation = chatConversation([requester, target], "/repo");
@@ -1598,7 +1598,7 @@ test("inferred participant request carrier is hidden and rooted to the source vi
   };
   const { service } = testService({ conversations: [conversation] });
 
-  (service as any).appendParticipantTurnMessages(conversation, requester, [source]);
+  await (service as any).appendParticipantTurnMessages(conversation, requester, [source]);
 
   const requestMessage = conversation.messages.find((message) => message.metadata?.participantRequest);
   const batch = requestMessage?.metadata?.participantRequest;
@@ -1612,7 +1612,7 @@ test("inferred participant request carrier is hidden and rooted to the source vi
   assert.equal(requestMessage.metadata?.chatThreadRootId, "outer-root");
 });
 
-test("legacy accord launch metadata does not suppress inferred participant requests", () => {
+test("legacy accord launch metadata does not suppress inferred participant requests", async () => {
   const facilitator = chatParticipant({}, { id: "facilitator", handle: "facilitator" });
   const requester = chatParticipant({}, { id: "requester", handle: "drew" });
   const target = chatParticipant({ repoRead: true }, { id: "target", handle: "taylor" });
@@ -1630,7 +1630,7 @@ test("legacy accord launch metadata does not suppress inferred participant reque
   };
   const { service } = testService({ conversations: [conversation] });
 
-  (service as any).appendParticipantTurnMessages(conversation, requester, [
+  await (service as any).appendParticipantTurnMessages(conversation, requester, [
     participantMessage(requester, "source-message", "@taylor please verify this accord concern.")
   ]);
 
@@ -1640,7 +1640,7 @@ test("legacy accord launch metadata does not suppress inferred participant reque
   assert.equal(requestMessage.metadata?.participantRequest?.requesterParticipantId, requester.id);
 });
 
-test("legacy manual accord metadata does not suppress inferred participant requests", () => {
+test("legacy manual accord metadata does not suppress inferred participant requests", async () => {
   const facilitator = chatParticipant({}, { id: "facilitator", handle: "facilitator" });
   const requester = chatParticipant({}, { id: "requester", handle: "drew" });
   const target = chatParticipant({ repoRead: true }, { id: "target", handle: "taylor" });
@@ -1651,7 +1651,7 @@ test("legacy manual accord metadata does not suppress inferred participant reque
   };
   const { service } = testService({ conversations: [conversation] });
 
-  (service as any).appendParticipantTurnMessages(conversation, requester, [
+  await (service as any).appendParticipantTurnMessages(conversation, requester, [
     participantMessage(requester, "source-message", "@taylor please verify this accord concern.")
   ]);
 

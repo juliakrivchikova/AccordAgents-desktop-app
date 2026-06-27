@@ -21,6 +21,7 @@ import {
   normalizeChatAgentPermissions
 } from "../../shared/agentPermissions";
 import { CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS } from "../../shared/chatBehaviorRules";
+import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT } from "../../shared/chatParticipantRequests";
 import type {
   AgentHealth,
   AppSettings,
@@ -1332,7 +1333,7 @@ test("same participant queued bubble is finalized when startup throws before tur
   assert.equal(runCount, 1);
 });
 
-test("participant prose mentioning blocked permissions does not create approval cards", () => {
+test("participant prose mentioning blocked permissions does not create approval cards", async () => {
   const participant = chatParticipant("claude-code", {
     repoRead: false,
     workspaceWrite: false,
@@ -1380,7 +1381,7 @@ test("participant prose mentioning blocked permissions does not create approval 
     }
   ];
 
-  (service as any).appendParticipantTurnMessages(conversation, participant, replies);
+  await (service as any).appendParticipantTurnMessages(conversation, participant, replies);
 
   const approvals = ((conversation.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).filter(
     (item) => item.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL
@@ -3294,7 +3295,7 @@ test("recoverStaleChatRun leaves a pending message whose run is still live", () 
   assert.equal(pending.metadata?.staleRunRecovery, undefined);
 });
 
-test("a swept placeholder is marked, and a late result repairs it preserving reactions", () => {
+test("a swept placeholder is marked, and a late result repairs it preserving reactions", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
   const runId = "dead-run";
@@ -3319,7 +3320,7 @@ test("a swept placeholder is marked, and a late result repairs it preserving rea
     content: "Here is the real answer.",
     metadata: { runId }
   });
-  (service as any).appendParticipantTurnMessages(conversation, participant, [completed]);
+  await (service as any).appendParticipantTurnMessages(conversation, participant, [completed]);
 
   const repaired = conversation.messages.find((message: any) => message.id === "pending-dead")!;
   assert.equal(repaired.status, "done");
@@ -3328,7 +3329,7 @@ test("a swept placeholder is marked, and a late result repairs it preserving rea
   assert.equal(repaired.metadata?.reactions?.["✅"]?.[0]?.actorLabel, "User");
 });
 
-test("a late result does not resurrect a non-recovery error (user-stopped) message", () => {
+test("a late result does not resurrect a non-recovery error (user-stopped) message", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
   conversation.messages.push(pendingParticipantMessage(participant, "stopped", "stopped-run", {
@@ -3338,7 +3339,7 @@ test("a late result does not resurrect a non-recovery error (user-stopped) messa
   }));
   const { service } = testService({ conversation });
 
-  (service as any).appendParticipantTurnMessages(conversation, participant, [
+  await (service as any).appendParticipantTurnMessages(conversation, participant, [
     pendingParticipantMessage(participant, "stopped", "stopped-run", {
       status: "done",
       content: "Late answer that should be ignored.",
@@ -3375,7 +3376,7 @@ test("recoverStaleChatRun keeps run metadata when a pending bubble is live only 
   assert.equal(conversation.messages.find((message: any) => message.id === "pending-registry")!.status, "pending");
 });
 
-test("a declined late result does not spawn an implicit participant request", () => {
+test("a declined late result does not spawn an implicit participant request", async () => {
   const participant = chatParticipant("codex-cli");
   const other = chatParticipant("claude-code"); // handle "drew"
   const conversation = chatConversation([participant, other]);
@@ -3387,7 +3388,7 @@ test("a declined late result does not spawn an implicit participant request", ()
   const { service } = testService({ conversation });
 
   // The stopped run finishes late with content that @-mentions another participant.
-  (service as any).appendParticipantTurnMessages(conversation, participant, [
+  await (service as any).appendParticipantTurnMessages(conversation, participant, [
     pendingParticipantMessage(participant, "stopped", "stopped-run", {
       status: "done",
       content: "@drew please take over.",
@@ -3803,6 +3804,45 @@ test("participant request permission deny blocks requests even with stale capabi
   assert.equal(storage.current.messages.some((message: ChatMessage) => message.metadata?.participantRequest), false);
 });
 
+test("participant request max depth is configurable", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "allow" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  const actor = {
+    ...participantRequestActor(requester),
+    participantRequestDepth: 2
+  };
+  const normalizedRequest = {
+    requests: [{ target: target.handle, prompt: "Please review." }],
+    timeoutMs: 1000,
+    resumeRequester: true
+  };
+  const defaultService = testService({ conversation }).service as any;
+
+  await assert.rejects(
+    () => defaultService.prepareParticipantRequest(conversation, requester, normalizedRequest, actor, "mcp"),
+    /max depth \(2\) reached/
+  );
+
+  const { service } = testService({
+    conversation,
+    settings: {
+      chatRoleConfigs: [ROLE],
+      chatParticipantRequestMaxDepth: 3
+    }
+  });
+  const prepared = await (service as any).prepareParticipantRequest(
+    conversation,
+    requester,
+    normalizedRequest,
+    actor,
+    "mcp"
+  );
+
+  assert.equal(prepared.batch.depth, 3);
+  assert.equal(prepared.batch.status, "running");
+});
+
 test("agent modes do not promote participant request permission", () => {
   const ask = normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestParticipants: "ask" });
   const deny = normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestParticipants: "deny" });
@@ -3945,6 +3985,7 @@ function testService(options: {
     chatRoleConfigs: ChatRoleConfig[];
     chatBehaviorRules?: ChatBehaviorRuleConfig[];
     chatParticipantConfigs?: ChatParticipantConfig[];
+    chatParticipantRequestMaxDepth?: number;
   };
 } = {}): { service: ChatService; storage: any; settingsState: {
   chatRoleConfigs: ChatRoleConfig[];
@@ -3971,6 +4012,8 @@ function testService(options: {
   const publicSettings = (): AppSettings => ({
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: 24 * 60 * 60_000,
+    chatParticipantRequestMaxDepth: options.settings?.chatParticipantRequestMaxDepth
+      ?? CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
     chatCompletionNotifications: { enabled: false, thresholdMs: 5 * 60_000 },
     providers: [
       { kind: "codex-cli", label: "Codex CLI", enabled: true },
@@ -3990,6 +4033,9 @@ function testService(options: {
     },
     async ensureGenericChatParticipantSeeds(): Promise<AppSettings> {
       return publicSettings();
+    },
+    async getChatParticipantRequestMaxDepth(): Promise<number> {
+      return publicSettings().chatParticipantRequestMaxDepth;
     },
     async saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings> {
       const existing = update.id ? settingsState.chatRoleConfigs.find((role) => role.id === update.id) : undefined;

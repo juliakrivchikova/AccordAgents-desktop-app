@@ -49,6 +49,8 @@ const bridge: AppBridge = {
   openLocalFile: (request: OpenLocalFileRequest) => ipcRenderer.invoke("app:open-local-file", request),
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => ipcRenderer.invoke("settings:set-repo-file-open-preference", action),
   setCliAgentRunTimeoutMs: (timeoutMs: number) => ipcRenderer.invoke("settings:set-cli-agent-run-timeout", timeoutMs),
+  setChatParticipantRequestMaxDepth: (maxDepth: number) =>
+    ipcRenderer.invoke("settings:set-chat-participant-request-max-depth", maxDepth),
   setChatCompletionNotifications: (update: ChatCompletionNotificationSettingsUpdate) =>
     ipcRenderer.invoke("settings:set-chat-completion-notifications", update),
   getSettings: () => ipcRenderer.invoke("settings:get"),

@@ -28,6 +28,7 @@ import type {
 import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { normalizeChatAppToolCapabilities } from "../../shared/appTools";
 import { normalizeChatCompletionNotificationSettings } from "../../shared/chatCompletionNotifications";
+import { normalizeChatParticipantRequestMaxDepth } from "../../shared/chatParticipantRequests";
 import { normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
 import {
   CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS,
@@ -50,6 +51,7 @@ interface StoredSettings {
   settingsVersion?: number;
   roundLimitDefault: number;
   cliAgentRunTimeoutMs?: number;
+  chatParticipantRequestMaxDepth?: number;
   chatCompletionNotifications?: ChatCompletionNotificationSettings;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
@@ -1580,6 +1582,7 @@ export class SettingsService {
     return {
       roundLimitDefault: stored.roundLimitDefault,
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
+      chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
       chatCompletionNotifications: normalizeChatCompletionNotificationSettings(stored.chatCompletionNotifications),
       lastRepoPath: stored.lastRepoPath,
       repoFileOpenAction: stored.repoFileOpenAction,
@@ -2166,6 +2169,18 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  async getChatParticipantRequestMaxDepth(): Promise<number> {
+    const stored = await this.readStored();
+    return this.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth);
+  }
+
+  async setChatParticipantRequestMaxDepth(maxDepth: number): Promise<AppSettings> {
+    const stored = await this.readStored();
+    stored.chatParticipantRequestMaxDepth = this.normalizeChatParticipantRequestMaxDepth(maxDepth);
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
   async getChatCompletionNotificationSettings(): Promise<ChatCompletionNotificationSettings> {
     const stored = await this.readStored();
     return normalizeChatCompletionNotificationSettings(stored.chatCompletionNotifications);
@@ -2215,6 +2230,7 @@ export class SettingsService {
       settingsVersion: 1,
       roundLimitDefault: this.defaultRoundLimit(settings),
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(settings.cliAgentRunTimeoutMs),
+      chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(settings.chatParticipantRequestMaxDepth),
       chatCompletionNotifications: normalizeChatCompletionNotificationSettings(settings.chatCompletionNotifications),
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
       repoFileOpenAction: this.normalizeRepoFileOpenAction(settings.repoFileOpenAction),
@@ -2488,5 +2504,9 @@ export class SettingsService {
 
   private normalizeCliAgentRunTimeoutMs(value: unknown): number {
     return normalizeCliAgentRunTimeoutMs(value);
+  }
+
+  private normalizeChatParticipantRequestMaxDepth(value: unknown): number {
+    return normalizeChatParticipantRequestMaxDepth(value);
   }
 }

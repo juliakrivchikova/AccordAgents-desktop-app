@@ -230,6 +230,7 @@ function App(): JSX.Element {
           deleteChatParticipantConfig={settingsActions.deleteChatParticipantConfig}
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
           setCliAgentRunTimeoutMs={settingsActions.setCliAgentRunTimeoutMs}
+          setChatParticipantRequestMaxDepth={settingsActions.setChatParticipantRequestMaxDepth}
           setChatCompletionNotifications={settingsActions.setChatCompletionNotifications}
           sidebarCollapsed={state.sidebarCollapsed}
           onExpandSidebar={() => state.setSidebarCollapsed(false)}
