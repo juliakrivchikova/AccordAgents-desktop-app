@@ -1,7 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import {
-  Handshake,
   RefreshCw,
   Settings,
   XCircle
@@ -134,38 +133,24 @@ function App(): JSX.Element {
         </Button>
       )}
       {view.activeChatConversation && (
-        <>
-          <Button
-            variant="outline"
-            size="sm"
-            title={accordDisabledReason ?? "Start Accord"}
-            aria-label="Start Accord"
-            disabled={!canStartAccord}
-            data-testid="chat-accord-button"
-            onClick={() => setAccordDialogOpen(true)}
-          >
-            <Handshake aria-hidden />
-            Accord
-          </Button>
-          <ChatParticipantMenu
-            participants={view.activeChatParticipants}
-            settings={state.settings}
-            agents={state.agents}
-            draft={state.chatMessageDraft}
-            addParticipantDraft={state.chatAddParticipantDraft ?? defaultChatParticipantDraft(state.settings)}
-            isRunning={view.conversationRunning}
-            participantStatusById={view.participantStatusById}
-            onDraftChange={state.setChatMessageDraft}
-            onAddParticipantDraftChange={state.setChatAddParticipantDraft}
-            onAddParticipant={() => void chatActions.addChatParticipant()}
-            onAddSavedParticipant={(participant) => void chatActions.addSavedChatParticipant(participant)}
-            onUpdateParticipantRuntime={(participantId, patch) => void chatActions.updateChatParticipantRuntime(participantId, patch)}
-            onCompactParticipant={(participantId) => void chatActions.compactChatParticipant(participantId)}
-            onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
-            onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
-            onManageInSettings={() => openSettingsSection("participants")}
-          />
-        </>
+        <ChatParticipantMenu
+          participants={view.activeChatParticipants}
+          settings={state.settings}
+          agents={state.agents}
+          draft={state.chatMessageDraft}
+          addParticipantDraft={state.chatAddParticipantDraft ?? defaultChatParticipantDraft(state.settings)}
+          isRunning={view.conversationRunning}
+          participantStatusById={view.participantStatusById}
+          onDraftChange={state.setChatMessageDraft}
+          onAddParticipantDraftChange={state.setChatAddParticipantDraft}
+          onAddParticipant={() => void chatActions.addChatParticipant()}
+          onAddSavedParticipant={(participant) => void chatActions.addSavedChatParticipant(participant)}
+          onUpdateParticipantRuntime={(participantId, patch) => void chatActions.updateChatParticipantRuntime(participantId, patch)}
+          onCompactParticipant={(participantId) => void chatActions.compactChatParticipant(participantId)}
+          onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
+          onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
+          onManageInSettings={() => openSettingsSection("participants")}
+        />
       )}
       <ModeToggle />
       <Button variant="ghost" size="icon-sm" className="topbar-icon-button" title="Refresh" aria-label="Refresh" onClick={() => void conversationActions.refreshAll()}>
@@ -301,6 +286,8 @@ function App(): JSX.Element {
                   onLoadMessagePageForMessage={conversationActions.loadConversationMessagePageForMessage}
                   messageFocusRequest={state.chatMessageFocusRequest}
                   onSend={(repoFileMentions, imageAttachments, skillMentions) => chatActions.sendChatMessage({ repoFileMentions, imageAttachments, skillMentions })}
+                  accordDisabledReason={accordDisabledReason}
+                  onOpenAccord={() => setAccordDialogOpen(true)}
                   onSendThread={(rootMessage, content, repoFileMentions, imageAttachments, skillMentions) => chatActions.sendChatMessage({
                     content,
                     skillMentions,

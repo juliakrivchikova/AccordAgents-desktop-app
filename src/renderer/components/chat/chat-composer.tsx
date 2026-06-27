@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useMemo, useRef } from "react";
-import { ArrowUp, ImagePlus, Loader2, RefreshCw, X } from "lucide-react";
+import { ArrowUp, ImagePlus, Loader2, Merge, RefreshCw, X } from "lucide-react";
 
 import { ResizableTextarea } from "@/renderer/components/primitives";
 import type {
@@ -40,6 +40,8 @@ export interface ChatComposerProps {
   participantRoleLabel: (participant: ChatParticipant) => string;
   onDraftChange: (value: string) => void;
   onSend: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => boolean | void | Promise<boolean | void>;
+  accordDisabledReason?: string;
+  onOpenAccord?: () => void;
 }
 
 export function ChatComposer(props: ChatComposerProps): JSX.Element {
@@ -288,6 +290,19 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
             )}
           </div>
           <div className="chat-composer-actions">
+            {props.onOpenAccord && (
+              <button
+                type="button"
+                className="composer-accord-button"
+                title={props.accordDisabledReason ?? "Start Accord"}
+                aria-label="Start Accord"
+                disabled={Boolean(props.accordDisabledReason)}
+                data-testid="chat-accord-button"
+                onClick={props.onOpenAccord}
+              >
+                <Merge size={18} strokeWidth={2.4} aria-hidden />
+              </button>
+            )}
             <button
               type="button"
               className="composer-send-button"

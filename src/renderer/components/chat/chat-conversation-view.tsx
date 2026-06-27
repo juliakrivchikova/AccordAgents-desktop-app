@@ -263,6 +263,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               draft={props.draft}
               onDraftChange={props.onDraftChange}
               onSend={sendDraft}
+              accordDisabledReason={props.accordDisabledReason}
+              onOpenAccord={props.onOpenAccord}
               isRunning={props.isRunning}
               activeRunCount={activeRunIdsForChat.length}
               onStopAllRuns={props.onStopRun ? () => {
