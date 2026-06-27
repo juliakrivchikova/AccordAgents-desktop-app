@@ -85,7 +85,7 @@ test("claudeToolConfig maps default + workspaceWrite=false to default and disall
   assert.equal(config.tools.includes("Edit"), false);
   assert.ok(config.disallowedTools.includes("Write"));
   assert.ok(config.disallowedTools.includes("Edit"));
-  assert.ok(config.disallowedTools.includes("MultiEdit"));
+  assert.equal(config.disallowedTools.includes("MultiEdit"), false);
   assert.ok(config.disallowedTools.includes("NotebookEdit"));
 });
 
@@ -283,9 +283,10 @@ test("claude default chat still hard-denies off-toggle capabilities via disallow
   const config = runner.claudeToolConfig("chat", "/repo", [], options);
   const disallowed = new Set(config.disallowedTools as string[]);
 
-  for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit", "WebSearch", "WebFetch", "Bash"]) {
+  for (const tool of ["Edit", "Write", "NotebookEdit", "WebSearch", "WebFetch", "Bash"]) {
     assert.equal(disallowed.has(tool), true, `expected ${tool} to be hard-denied`);
   }
+  assert.equal(disallowed.has("MultiEdit"), false);
 });
 
 test("claude non-chat keeps strict app MCP config and explicit tools", () => {

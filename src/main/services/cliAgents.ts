@@ -26,7 +26,7 @@ import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agen
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS, normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
 import { cliFailureNoticeText } from "../../shared/warnings";
-import { CommandError, commandEnvironment, commandExists, ensureLoginShellEnvPrimed, runCommand } from "./command";
+import { CommandError, commandEnvironment, commandExists, ensureLoginShellEnvPrimed, runCommand, type CommandEnvironmentOptions } from "./command";
 import type { ParticipantRunResult } from "./providers";
 
 const MAX_CLI_ERROR_CHARS = 500;
@@ -41,6 +41,15 @@ const MODEL_CATALOG_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_TIMEOUT_MS = 8_000;
 const CODEX_APP_SERVER_DISABLED_ENV = "ACCORD_AGENTS_CODEX_APP_SERVER";
 const CODEX_APP_SERVER_MCP_TOKEN_ENV = "ACCORD_AGENTS_MCP_TOKEN";
+const CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "ANTHROPIC_BASE_URL"
+];
+const CLAUDE_CODE_COMMAND_ENV_OPTIONS: CommandEnvironmentOptions = {
+  dropProcessEnvKeysAbsentFromLoginShell: CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS
+};
 const CODEX_AUTO_APPROVALS_REVIEWER = "guardian_subagent";
 const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 const APP_TOOL_PERMISSION_TOOL = "app_tool_permission";
@@ -614,7 +623,7 @@ export class CliAgentRunner {
     await ensureLoginShellEnvPrimed();
     return new Promise<string>((resolve, reject) => {
       const child = spawn("expect", ["-c", this.claudeModelProbeExpectScript()], {
-        env: commandEnvironment(),
+        env: commandEnvironment(undefined, CLAUDE_CODE_COMMAND_ENV_OPTIONS),
         stdio: ["pipe", "pipe", "pipe"]
       });
       child.stdout.setEncoding("utf8");
@@ -1947,6 +1956,7 @@ export class CliAgentRunner {
           input: prompt,
           timeoutMs: options.timeoutMs ?? this.runTimeoutMs,
           env: this.appMcpEnv(options),
+          envOptions: CLAUDE_CODE_COMMAND_ENV_OPTIONS,
           signal
         }
       );
@@ -2141,7 +2151,7 @@ export class CliAgentRunner {
 
     const child = spawn("claude", args, {
       cwd: repoPath,
-      env: commandEnvironment(this.appMcpEnv(options)),
+      env: commandEnvironment(this.appMcpEnv(options), CLAUDE_CODE_COMMAND_ENV_OPTIONS),
       stdio: ["pipe", "pipe", "pipe"]
     });
     child.stdout.setEncoding("utf8");
@@ -2817,7 +2827,10 @@ export class CliAgentRunner {
     const providerNativeAllowedTools = permissions.providerNative?.["claude-code"]?.allowedTools ?? [];
     const readContextAvailable = Boolean(repoPath) || extraReadableDirs.length > 0;
     const readTools = ["Read", "Grep", "Glob", "LS"];
-    const editTools = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+    // Claude Code 2.1 validates --disallowedTools strictly and rejects MultiEdit as
+    // unknown. Current builds expose ordinary file mutation through Edit/Write and
+    // notebook mutation through NotebookEdit.
+    const editTools = ["Edit", "Write", "NotebookEdit"];
     const webTools = ["WebSearch", "WebFetch"];
 
     if (readContextAvailable) {

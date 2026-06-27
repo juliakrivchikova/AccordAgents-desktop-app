@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CheckCircle2, Copy, FileText, ListChecks, RefreshCw, Reply, Smile, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Copy, FileText, ListChecks, RefreshCw, Reply, Smile, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -335,7 +335,8 @@ export function ChatMessageItem(props: {
             </div>
           )}
           {participantRequests.map((request) => (
-            <div className="chat-approval-note" key={request.id}>
+            <div className={`chat-approval-note ${participantRequestNoteClass(request)}`} key={request.id}>
+              {isNegativeParticipantRequestStatus(request.status) && <AlertTriangle size={14} aria-hidden />}
               <span>{participantRequestStatusLabel(request)}</span>
               {request.source === "inferred" && <StatusBadge tone="neutral">inferred request</StatusBadge>}
             </div>
@@ -401,4 +402,12 @@ export function ChatMessageItem(props: {
       )}
     </>
   );
+}
+
+function participantRequestNoteClass(request: ChatParticipantRequestBatch): string {
+  return `is-${request.status.replace(/_/g, "-")}`;
+}
+
+function isNegativeParticipantRequestStatus(status: ChatParticipantRequestBatch["status"]): boolean {
+  return status === "denied" || status === "failed";
 }

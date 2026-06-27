@@ -47,6 +47,25 @@ test("parseLoginShellEnvOutput requires sentinels", () => {
   );
 });
 
+test("commandEnvironment can drop GUI-only keys absent from login shell", (t) => {
+  const key = "ACCORD_AGENTS_TEST_GUI_ONLY_KEY";
+  const original = process.env[key];
+  process.env[key] = "stale-gui-value";
+  t.after(() => {
+    if (original === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = original;
+    }
+  });
+
+  const dropped = commandEnvironment({}, { dropProcessEnvKeysAbsentFromLoginShell: [key] });
+  assert.equal(dropped[key], undefined);
+
+  const explicit = commandEnvironment({ [key]: "explicit-value" }, { dropProcessEnvKeysAbsentFromLoginShell: [key] });
+  assert.equal(explicit[key], "explicit-value");
+});
+
 test("commandEnvironment discovers nvm bins when versions root contains non-directories", async (t) => {
   if (process.platform !== "darwin") {
     t.skip("macOS user PATH expansion is only enabled on darwin");

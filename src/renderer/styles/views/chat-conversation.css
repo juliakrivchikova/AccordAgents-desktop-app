@@ -2058,15 +2058,17 @@
   transition: background 120ms ease, border-color 120ms ease;
 }
 
-.chat-approval-option:hover,
-.chat-approval-option.selected {
+.chat-approval-option:hover {
   border-color: transparent;
   background: var(--app-surface-hover);
   color: var(--app-text-strong);
 }
 
 .chat-approval-option.selected {
-  background: var(--app-surface-subtle);
+  border-color: color-mix(in srgb, var(--app-accent) 44%, var(--app-border));
+  background: color-mix(in srgb, var(--app-accent) 10%, var(--app-surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-accent) 32%, transparent);
+  color: var(--app-text-strong);
 }
 
 .chat-approval-option-num {
@@ -2080,7 +2082,8 @@
 }
 
 .chat-approval-option.selected .chat-approval-option-num {
-  color: var(--app-muted);
+  color: var(--app-accent);
+  font-weight: 800;
 }
 
 .chat-approval-option-label {
@@ -2092,7 +2095,7 @@
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  color: var(--app-muted-subtle);
+  color: var(--app-accent);
 }
 
 .chat-approval-footer {
@@ -2772,6 +2775,23 @@
   color: var(--app-success);
   font-size: 12px;
   font-weight: 700;
+}
+
+.chat-approval-note.is-denied,
+.chat-approval-note.is-failed {
+  width: fit-content;
+  max-width: 100%;
+  padding: 5px 9px;
+  border: 1px solid color-mix(in srgb, var(--app-danger) 34%, var(--app-border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-danger) 9%, var(--app-surface));
+  color: var(--app-danger);
+}
+
+.chat-approval-note.is-pending-approval,
+.chat-approval-note.is-running,
+.chat-approval-note.is-resuming-requester {
+  color: var(--app-muted);
 }
 
 .message-stop-button {
@@ -3581,6 +3601,11 @@
   box-shadow: var(--shadow-lg);
 }
 
+.mention-menu.skill-mention-menu.opens-below {
+  top: calc(100% + 8px);
+  bottom: auto;
+}
+
 .mention-menu button {
   display: grid;
   grid-template-columns: 36px minmax(120px, max-content) minmax(0, 1fr) auto;
@@ -3617,9 +3642,13 @@
   white-space: nowrap;
 }
 
-.mention-menu button.selected,
 .mention-menu button:hover {
   background: var(--app-surface-hover);
+}
+
+.mention-menu button.selected {
+  background: color-mix(in srgb, var(--app-accent) 10%, var(--app-surface));
+  box-shadow: inset 3px 0 0 var(--app-accent);
 }
 
 .mention-menu strong,
