@@ -72,7 +72,7 @@ make clean
 ## Releases
 
 Signed macOS arm64 builds are published to a **separate** public release
-repository (`juliakrivchikova/accordagents-releases`); the source repository
+repository (`juliakrivchikova/AccordAgents-Releases`); the source repository
 never hosts release artifacts. The app auto-updates via
 `update.electronjs.org`. See `SIGN.md` for the signing, notarization, and release
 process.

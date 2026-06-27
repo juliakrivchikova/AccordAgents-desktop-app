@@ -2,7 +2,7 @@ import { updateElectronApp, UpdateSourceType } from "update-electron-app";
 import { app } from "electron";
 import { DebugLogService } from "./debugLogs";
 
-const UPDATE_REPO = "juliakrivchikova/accordagents-releases";
+const UPDATE_REPO = "juliakrivchikova/AccordAgents-Releases";
 
 export function bootstrapAppUpdater(debugLogs: DebugLogService): void {
   if (!app.isPackaged || process.platform !== "darwin") {

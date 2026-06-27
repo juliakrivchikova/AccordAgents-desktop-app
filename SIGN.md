@@ -131,7 +131,7 @@ Release artifacts are published to the public release repository configured in
 `package.json` as `config.releaseRepo`:
 
 ```text
-juliakrivchikova/accordagents-releases
+juliakrivchikova/AccordAgents-Releases
 ```
 
 The release repository must be public before `update.electronjs.org` can
@@ -140,7 +140,7 @@ separate; release artifacts are never published to the source repository.
 
 Run releases from the source repo's release branch, normally `main`, with a
 clean worktree. The active GitHub CLI account must have write access to
-`juliakrivchikova/accordagents-releases`:
+`juliakrivchikova/AccordAgents-Releases`:
 
 ```bash
 gh auth switch --user <your-github-username>

@@ -82,6 +82,6 @@
   },
   "config": {
     "forge": "./forge.config.ts",
-    "releaseRepo": "juliakrivchikova/accordagents-releases"
+    "releaseRepo": "juliakrivchikova/AccordAgents-Releases"
   }
 }
