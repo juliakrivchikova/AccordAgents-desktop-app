@@ -6,16 +6,33 @@ import type {
   ChatAgentPermissions,
   ChatAppToolApprovalScope,
   ChatPermissionChangeRequest,
-  ChatPermissionRequestToolResult
+  ChatPermissionRequestToolResult,
+  ConversationKind,
+  GitDiffMode,
+  ParticipantConfig
 } from "../../shared/types";
 import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
 import type { ChatAppToolApprovalDecisionEvent, ChatService } from "./chat";
+import { CommandError, runCommand } from "./command";
+import {
+  CODEX_APP_SERVER_MCP_TOKEN_ENV,
+  buildCodexExecInvocation,
+  createCodexLineHandler,
+  emitCodexLiveOutput,
+  extractCodexSessionId,
+  extractCodexText
+} from "./codexExec";
+import type { CodexExecOptions, CodexExecInvocation } from "./codexExec";
 
 const DEFAULT_APPLY_LIMIT = 200;
+const DEFAULT_REMOTE_RUN_TIMEOUT_MS = 24 * 60 * 60_000;
+const DEFAULT_DETACHED_MAX_RUNTIME_MS = 24 * 60 * 60_000;
 
 export type RemoteRunSpoolRecordKind =
   | "lifecycle"
   | "output_text"
+  | "provider_output"
+  | "provider_result"
   | "permission_pending"
   | "permission_decision"
   | "terminal_state";
@@ -25,6 +42,7 @@ interface RemoteRunRecordBase {
   conversationId: string;
   runId: string;
   seq: number;
+  workerSeq?: number;
   createdAt: string;
 }
 
@@ -38,6 +56,27 @@ export interface RemoteRunOutputTextRecord extends RemoteRunRecordBase {
   kind: "output_text";
   participantId: string;
   content: string;
+  sourceMessageId?: string;
+  threadId?: string;
+  chatThreadRootId?: string;
+}
+
+export interface RemoteRunProviderOutputRecord extends RemoteRunRecordBase {
+  kind: "provider_output";
+  participantId: string;
+  stream: "stdout" | "stderr";
+  content: string;
+}
+
+export interface RemoteRunProviderResultRecord extends RemoteRunRecordBase {
+  kind: "provider_result";
+  participantId: string;
+  ok: boolean;
+  content: string;
+  exitCode?: number | null;
+  error?: string;
+  sessionId?: string;
+  durationMs?: number;
   sourceMessageId?: string;
   threadId?: string;
   chatThreadRootId?: string;
@@ -71,6 +110,8 @@ export interface RemoteRunTerminalStateRecord extends RemoteRunRecordBase {
 export type RemoteRunReplayRecord =
   | RemoteRunLifecycleRecord
   | RemoteRunOutputTextRecord
+  | RemoteRunProviderOutputRecord
+  | RemoteRunProviderResultRecord
   | RemoteRunPermissionPendingRecord
   | RemoteRunPermissionDecisionRecord
   | RemoteRunTerminalStateRecord;
@@ -78,9 +119,17 @@ export type RemoteRunReplayRecord =
 type RemoteRunRecordInput =
   | Omit<RemoteRunLifecycleRecord, "id" | "seq" | "createdAt">
   | Omit<RemoteRunOutputTextRecord, "id" | "seq" | "createdAt">
+  | Omit<RemoteRunProviderOutputRecord, "id" | "seq" | "createdAt">
+  | Omit<RemoteRunProviderResultRecord, "id" | "seq" | "createdAt">
   | Omit<RemoteRunPermissionPendingRecord, "id" | "seq" | "createdAt" | "requestId"> & { requestId?: string }
   | Omit<RemoteRunPermissionDecisionRecord, "id" | "seq" | "createdAt">
   | Omit<RemoteRunTerminalStateRecord, "id" | "seq" | "createdAt">;
+
+type RemoteRunRecordInputWithOverrides = RemoteRunRecordInput & {
+  id?: string;
+  workerSeq?: number;
+  createdAt?: string;
+};
 
 export interface RemoteRunApplyRecordResult {
   applied: boolean;
@@ -93,11 +142,217 @@ export interface RemoteRunApplyRecordResult {
 export interface RemoteRunServiceOptions {
   spoolRoot?: string;
   applyLimit?: number;
+  codexExecutor?: RemoteCodexExecutor;
+  detachedWorkerTransport?: RemoteDetachedWorkerTransport;
 }
 
 export interface RemoteRunStartRequest {
   conversationId: string;
   runId?: string;
+}
+
+export interface RemoteRunWorkerTarget {
+  host: string;
+  user?: string;
+  port?: number;
+  identityFile?: string;
+  sshPath?: string;
+  codexPath?: string;
+  remoteCwd?: string;
+  workerRoot?: string;
+}
+
+export interface RemoteRunRealStartRequest extends RemoteRunStartRequest {
+  participant: ParticipantConfig;
+  prompt: string;
+  worker: RemoteRunWorkerTarget;
+  kind?: ConversationKind;
+  repoPath?: string;
+  diffMode?: GitDiffMode;
+  options?: CodexExecOptions;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  sourceMessageId?: string;
+  threadId?: string;
+  chatThreadRootId?: string;
+}
+
+export interface RemoteRunDetachedStartRequest extends RemoteRunRealStartRequest {
+  maxRuntimeMs?: number;
+  contextSnapshot?: unknown;
+}
+
+export interface RemoteRunDetachedPollRequest {
+  conversationId?: string;
+  runId: string;
+  worker: RemoteRunWorkerTarget;
+  afterWorkerSeq?: number;
+}
+
+export interface RemoteRunDetachedCancelRequest {
+  conversationId?: string;
+  runId: string;
+  worker: RemoteRunWorkerTarget;
+  reason?: string;
+}
+
+export interface RemoteRunDetachedReapRequest {
+  worker: RemoteRunWorkerTarget;
+}
+
+export interface RemoteCodexExecutorRequest {
+  worker: RemoteRunWorkerTarget;
+  invocation: CodexExecInvocation;
+  remoteFinalPath: string;
+  timeoutMs: number;
+  signal?: AbortSignal;
+}
+
+export interface RemoteCodexExecutorCallbacks {
+  onStdout(chunk: string): void;
+  onStderr(chunk: string): void;
+}
+
+export interface RemoteCodexExecutionResult {
+  stdout: string;
+  stderr: string;
+  finalMessage: string;
+  exitCode: number | null;
+  timedOut: boolean;
+}
+
+export type RemoteCodexExecutor = (
+  request: RemoteCodexExecutorRequest,
+  callbacks: RemoteCodexExecutorCallbacks
+) => Promise<RemoteCodexExecutionResult>;
+
+export type RemoteDetachedRunStatus = "running" | "completed" | "failed" | "cancelled" | "unknown";
+
+export interface RemoteDetachedRunState {
+  runId: string;
+  conversationId?: string;
+  participantId?: string;
+  status: RemoteDetachedRunStatus;
+  workerCursorSeq?: number;
+  pid?: number;
+  pgid?: number;
+  relayPort?: number;
+  startedAt?: string;
+  lastHeartbeat?: string;
+  completedAt?: string;
+  exitCode?: number | null;
+  signal?: string;
+  timedOut?: boolean;
+  error?: string;
+}
+
+interface RemoteWorkerEventBase {
+  kind: RemoteRunSpoolRecordKind;
+  workerSeq: number;
+  createdAt?: string;
+}
+
+export interface RemoteWorkerLifecycleEvent extends RemoteWorkerEventBase {
+  kind: "lifecycle";
+  state: RemoteRunLifecycleRecord["state"] | "detached_started";
+  message?: string;
+}
+
+export interface RemoteWorkerProviderOutputEvent extends RemoteWorkerEventBase {
+  kind: "provider_output";
+  stream: RemoteRunProviderOutputRecord["stream"];
+  content: string;
+}
+
+export interface RemoteWorkerProviderResultEvent extends RemoteWorkerEventBase {
+  kind: "provider_result";
+  ok: boolean;
+  content: string;
+  exitCode?: number | null;
+  error?: string;
+  sessionId?: string;
+  durationMs?: number;
+  sourceMessageId?: string;
+  threadId?: string;
+  chatThreadRootId?: string;
+}
+
+export interface RemoteWorkerPermissionPendingEvent extends RemoteWorkerEventBase {
+  kind: "permission_pending";
+  roleConfigVersion?: number;
+  triggerMessageId?: string;
+  requestId?: string;
+  request: ChatPermissionChangeRequest;
+  runPermissions?: ChatAgentPermissions;
+}
+
+export interface RemoteWorkerTerminalStateEvent extends RemoteWorkerEventBase {
+  kind: "terminal_state";
+  status: RemoteRunTerminalStateRecord["status"];
+  reason?: string;
+}
+
+export type RemoteWorkerEvent =
+  | RemoteWorkerLifecycleEvent
+  | RemoteWorkerProviderOutputEvent
+  | RemoteWorkerProviderResultEvent
+  | RemoteWorkerPermissionPendingEvent
+  | RemoteWorkerTerminalStateEvent;
+
+export interface RemoteDetachedWorkerLaunchRequest {
+  conversationId: string;
+  runId: string;
+  participant: ParticipantConfig;
+  worker: RemoteRunWorkerTarget;
+  invocation: CodexExecInvocation;
+  remoteRunDir: string;
+  remoteFinalPath: string;
+  timeoutMs: number;
+  maxRuntimeMs: number;
+  sourceMessageId?: string;
+  threadId?: string;
+  chatThreadRootId?: string;
+  contextSnapshot?: unknown;
+  signal?: AbortSignal;
+}
+
+export interface RemoteDetachedWorkerPollRequest {
+  runId: string;
+  worker: RemoteRunWorkerTarget;
+  afterWorkerSeq: number;
+  signal?: AbortSignal;
+}
+
+export interface RemoteDetachedWorkerCancelRequest {
+  runId: string;
+  worker: RemoteRunWorkerTarget;
+  reason?: string;
+  signal?: AbortSignal;
+}
+
+export interface RemoteDetachedWorkerDecisionRequest {
+  runId: string;
+  worker: RemoteRunWorkerTarget;
+  decision: RemoteRunPermissionDecisionRecord;
+  signal?: AbortSignal;
+}
+
+export interface RemoteDetachedWorkerReapRequest {
+  worker: RemoteRunWorkerTarget;
+  signal?: AbortSignal;
+}
+
+export interface RemoteDetachedWorkerSnapshot {
+  state: RemoteDetachedRunState;
+  events: RemoteWorkerEvent[];
+}
+
+export interface RemoteDetachedWorkerTransport {
+  launch(request: RemoteDetachedWorkerLaunchRequest): Promise<RemoteDetachedWorkerSnapshot>;
+  poll(request: RemoteDetachedWorkerPollRequest): Promise<RemoteDetachedWorkerSnapshot>;
+  cancel(request: RemoteDetachedWorkerCancelRequest): Promise<RemoteDetachedWorkerSnapshot>;
+  writePermissionDecision?(request: RemoteDetachedWorkerDecisionRequest): Promise<void>;
+  reapExpiredRuns?(request: RemoteDetachedWorkerReapRequest): Promise<RemoteDetachedWorkerSnapshot[]>;
 }
 
 export interface RemoteRunPermissionRequest {
@@ -123,10 +378,14 @@ export interface RemoteRunOutputTextRequest {
 export class RemoteRunService {
   private readonly spoolRoot: string;
   private readonly applyLimit: number;
+  private readonly codexExecutor: RemoteCodexExecutor;
+  private readonly detachedWorkerTransport: RemoteDetachedWorkerTransport;
   private readonly connectedRuns = new Map<string, boolean>();
   private readonly appliedSeqByRun = new Map<string, number>();
   private readonly seqByRun = new Map<string, number>();
   private readonly appendChainByRun = new Map<string, Promise<unknown>>();
+  private readonly detachedWorkerByRun = new Map<string, RemoteRunWorkerTarget>();
+  private readonly detachedContextByRun = new Map<string, { conversationId: string; participantId: string }>();
 
   constructor(
     private readonly chat: Pick<ChatService, "applyRemoteRunReplayRecord" | "onAppToolApprovalDecision" | "getRemoteRunCursorSeq">,
@@ -134,6 +393,8 @@ export class RemoteRunService {
   ) {
     this.spoolRoot = options.spoolRoot ?? path.join(app.getPath("userData"), "remote-runs");
     this.applyLimit = Math.max(1, Math.floor(options.applyLimit ?? DEFAULT_APPLY_LIMIT));
+    this.codexExecutor = options.codexExecutor ?? defaultRemoteCodexExecutor;
+    this.detachedWorkerTransport = options.detachedWorkerTransport ?? new SshDetachedWorkerTransport();
     this.chat.onAppToolApprovalDecision((event) => this.appendPermissionDecision(event));
   }
 
@@ -146,6 +407,204 @@ export class RemoteRunService {
       state: "started"
     });
     return runId;
+  }
+
+  async startRealRun(request: RemoteRunRealStartRequest): Promise<RemoteRunProviderResultRecord> {
+    const runId = request.runId?.trim() || randomUUID();
+    const startedAt = Date.now();
+    const remoteFinalPath = `/tmp/accordagents-${this.safeRunId(runId)}-last-message.txt`;
+    this.connectedRuns.set(runId, true);
+    await this.appendSpoolRecord({
+      kind: "lifecycle",
+      conversationId: request.conversationId,
+      runId,
+      state: "started"
+    });
+
+    const invocation = buildCodexExecInvocation({
+      participant: request.participant,
+      prompt: request.prompt,
+      outputPath: remoteFinalPath,
+      repoPath: request.repoPath,
+      diffMode: request.diffMode,
+      kind: request.kind ?? "chat",
+      options: { ...request.options, persistSession: true }
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let sessionId = request.options?.sessionId;
+    const pendingOutputWrites: Promise<unknown>[] = [];
+    const lineHandler = createCodexLineHandler((line) =>
+      emitCodexLiveOutput(line, undefined, undefined, (nextSessionId) => {
+        sessionId = nextSessionId;
+      })
+    );
+    const appendOutput = (stream: RemoteRunProviderOutputRecord["stream"], chunk: string): void => {
+      if (!chunk) {
+        return;
+      }
+      if (stream === "stdout") {
+        stdout += chunk;
+        lineHandler(chunk);
+      } else {
+        stderr += chunk;
+      }
+      pendingOutputWrites.push(this.appendProviderOutput({
+        conversationId: request.conversationId,
+        runId,
+        participantId: request.participant.id,
+        stream,
+        content: chunk
+      }));
+    };
+
+    try {
+      const execution = await this.codexExecutor({
+        worker: request.worker,
+        invocation,
+        remoteFinalPath,
+        timeoutMs: Math.max(1, Math.floor(request.timeoutMs ?? DEFAULT_REMOTE_RUN_TIMEOUT_MS)),
+        signal: request.signal
+      }, {
+        onStdout: (chunk) => appendOutput("stdout", chunk),
+        onStderr: (chunk) => appendOutput("stderr", chunk)
+      });
+      stdout ||= execution.stdout;
+      stderr ||= execution.stderr;
+      sessionId = extractCodexSessionId(stdout) ?? sessionId;
+      await Promise.all(pendingOutputWrites);
+      const error = this.remoteExecutionError(execution);
+      return await this.appendProviderResult({
+        conversationId: request.conversationId,
+        runId,
+        participantId: request.participant.id,
+        ok: !error,
+        content: execution.finalMessage.trim() || extractCodexText(stdout) || stderr.trim() || error || "",
+        exitCode: execution.exitCode,
+        error,
+        sessionId,
+        durationMs: Date.now() - startedAt,
+        sourceMessageId: request.sourceMessageId,
+        threadId: request.threadId,
+        chatThreadRootId: request.chatThreadRootId
+      });
+    } catch (error) {
+      await Promise.all(pendingOutputWrites);
+      const message = error instanceof Error ? error.message : String(error);
+      return await this.appendProviderResult({
+        conversationId: request.conversationId,
+        runId,
+        participantId: request.participant.id,
+        ok: false,
+        content: message,
+        error: message,
+        sessionId,
+        durationMs: Date.now() - startedAt,
+        sourceMessageId: request.sourceMessageId,
+        threadId: request.threadId,
+        chatThreadRootId: request.chatThreadRootId
+      });
+    }
+  }
+
+  async startDetachedRun(request: RemoteRunDetachedStartRequest): Promise<RemoteDetachedRunState> {
+    const runId = request.runId?.trim() || randomUUID();
+    const maxRuntimeMs = Math.max(1, Math.floor(request.maxRuntimeMs ?? DEFAULT_DETACHED_MAX_RUNTIME_MS));
+    const remoteRunDir = this.remoteWorkerRunDir(request.worker, runId);
+    const remoteFinalPath = `${remoteRunDir}/final.txt`;
+    this.connectedRuns.set(runId, true);
+    this.detachedWorkerByRun.set(runId, request.worker);
+    this.detachedContextByRun.set(runId, {
+      conversationId: request.conversationId,
+      participantId: request.participant.id
+    });
+    await this.appendSpoolRecord({
+      kind: "lifecycle",
+      conversationId: request.conversationId,
+      runId,
+      state: "started"
+    });
+
+    const invocation = buildCodexExecInvocation({
+      participant: request.participant,
+      prompt: request.prompt,
+      outputPath: remoteFinalPath,
+      repoPath: request.repoPath,
+      diffMode: request.diffMode,
+      kind: request.kind ?? "chat",
+      options: { ...request.options, persistSession: true }
+    });
+
+    const snapshot = await this.detachedWorkerTransport.launch({
+      conversationId: request.conversationId,
+      runId,
+      participant: request.participant,
+      worker: request.worker,
+      invocation,
+      remoteRunDir,
+      remoteFinalPath,
+      timeoutMs: Math.max(1, Math.floor(request.timeoutMs ?? DEFAULT_REMOTE_RUN_TIMEOUT_MS)),
+      maxRuntimeMs,
+      sourceMessageId: request.sourceMessageId,
+      threadId: request.threadId,
+      chatThreadRootId: request.chatThreadRootId,
+      contextSnapshot: request.contextSnapshot,
+      signal: request.signal
+    });
+    await this.projectWorkerSnapshot(request.conversationId, runId, request.participant.id, snapshot);
+    await this.projectSnapshotTerminalFallback(request.conversationId, runId, request.participant.id, snapshot);
+    return snapshot.state;
+  }
+
+  async pollDetachedRun(request: RemoteRunDetachedPollRequest): Promise<RemoteDetachedRunState> {
+    this.connectedRuns.set(request.runId, true);
+    this.detachedWorkerByRun.set(request.runId, request.worker);
+    const knownContext = this.detachedContextByRun.get(request.runId);
+    const conversationId = request.conversationId ?? knownContext?.conversationId ?? await this.conversationIdForRun(request.runId);
+    const afterWorkerSeq = request.afterWorkerSeq ?? await this.lastProjectedWorkerSeq(request.runId);
+    const snapshot = await this.detachedWorkerTransport.poll({
+      runId: request.runId,
+      worker: request.worker,
+      afterWorkerSeq
+    });
+    const participantId = knownContext?.participantId ?? snapshot.state.participantId ?? await this.participantIdForRun(request.runId).catch(() => undefined);
+    await this.projectWorkerSnapshot(conversationId ?? snapshot.state.conversationId, request.runId, participantId, snapshot);
+    await this.projectSnapshotTerminalFallback(conversationId ?? snapshot.state.conversationId, request.runId, participantId, snapshot);
+    return snapshot.state;
+  }
+
+  async cancelDetachedRun(request: RemoteRunDetachedCancelRequest): Promise<RemoteDetachedRunState> {
+    this.detachedWorkerByRun.set(request.runId, request.worker);
+    const knownContext = this.detachedContextByRun.get(request.runId);
+    const conversationId = request.conversationId ?? knownContext?.conversationId ?? await this.conversationIdForRun(request.runId);
+    const snapshot = await this.detachedWorkerTransport.cancel({
+      runId: request.runId,
+      worker: request.worker,
+      reason: request.reason
+    });
+    const participantId = knownContext?.participantId ?? snapshot.state.participantId ?? await this.participantIdForRun(request.runId).catch(() => undefined);
+    await this.projectWorkerSnapshot(conversationId ?? snapshot.state.conversationId, request.runId, participantId, snapshot);
+    await this.projectSnapshotTerminalFallback(conversationId ?? snapshot.state.conversationId, request.runId, participantId, snapshot);
+    return snapshot.state;
+  }
+
+  async reapExpiredRuns(request: RemoteRunDetachedReapRequest): Promise<RemoteDetachedRunState[]> {
+    if (!this.detachedWorkerTransport.reapExpiredRuns) {
+      return [];
+    }
+    const snapshots = await this.detachedWorkerTransport.reapExpiredRuns({ worker: request.worker });
+    const states: RemoteDetachedRunState[] = [];
+    for (const snapshot of snapshots) {
+      const runId = snapshot.state.runId;
+      this.connectedRuns.set(runId, true);
+      const conversationId = snapshot.state.conversationId ?? await this.conversationIdForRun(runId);
+      const participantId = snapshot.state.participantId ?? await this.participantIdForRun(runId);
+      await this.projectWorkerSnapshot(conversationId, runId, participantId, snapshot);
+      await this.projectSnapshotTerminalFallback(conversationId, runId, participantId, snapshot);
+      states.push(snapshot.state);
+    }
+    return states;
   }
 
   async setConnected(runId: string, connected: boolean): Promise<RemoteRunApplyRecordResult[]> {
@@ -164,6 +623,28 @@ export class RemoteRunService {
       ...request
     });
     return appended.record as RemoteRunOutputTextRecord;
+  }
+
+  async appendProviderOutput(
+    request: Omit<RemoteRunProviderOutputRecord, "id" | "seq" | "createdAt" | "kind">
+  ): Promise<RemoteRunProviderOutputRecord> {
+    const appended = await this.appendSpoolRecord({
+      kind: "provider_output",
+      ...request
+    });
+    return appended.record as RemoteRunProviderOutputRecord;
+  }
+
+  async appendProviderResult(
+    request: Omit<RemoteRunProviderResultRecord, "id" | "seq" | "createdAt" | "kind">
+  ): Promise<RemoteRunProviderResultRecord> {
+    const appended = await this.appendSpoolRecord({
+      kind: "provider_result",
+      ...request
+    });
+    const status: RemoteRunTerminalStateRecord["status"] = request.ok ? "completed" : "failed";
+    await this.markTerminal(request.conversationId, request.runId, status, request.error);
+    return appended.record as RemoteRunProviderResultRecord;
   }
 
   async requestPermission(request: RemoteRunPermissionRequest): Promise<RemoteRunPermissionPendingRecord> {
@@ -274,15 +755,192 @@ export class RemoteRunService {
       .at(-1);
   }
 
+  private async projectWorkerSnapshot(
+    conversationId: string | undefined,
+    runId: string,
+    participantId: string | undefined,
+    snapshot: RemoteDetachedWorkerSnapshot
+  ): Promise<void> {
+    const resolvedConversationId = conversationId ?? snapshot.state.conversationId ?? await this.conversationIdForRun(runId);
+    const resolvedParticipantId = participantId ?? snapshot.state.participantId ?? await this.participantIdForRun(runId);
+    const events = [...snapshot.events].sort((a, b) => a.workerSeq - b.workerSeq);
+    let previousWorkerSeq = 0;
+    for (const event of events) {
+      if (!Number.isFinite(event.workerSeq) || event.workerSeq <= 0) {
+        throw new Error(`Remote worker event for run ${runId} has an invalid workerSeq.`);
+      }
+      if (event.workerSeq <= previousWorkerSeq) {
+        throw new Error(`Remote worker events for run ${runId} are not strictly monotonic.`);
+      }
+      previousWorkerSeq = event.workerSeq;
+      await this.projectWorkerEvent(resolvedConversationId, runId, resolvedParticipantId, event);
+    }
+  }
+
+  private async projectWorkerEvent(
+    conversationId: string,
+    runId: string,
+    participantId: string,
+    event: RemoteWorkerEvent
+  ): Promise<void> {
+    const existing = await this.readRecords(runId);
+    if (existing.some((record) => record.workerSeq === event.workerSeq || record.id === this.workerRecordId(runId, event))) {
+      return;
+    }
+    const input = this.workerEventToRecordInput(conversationId, runId, participantId, event);
+    if (!input) {
+      return;
+    }
+    await this.appendSpoolRecord({
+      ...input,
+      id: this.workerRecordId(runId, event),
+      workerSeq: event.workerSeq,
+      createdAt: event.createdAt
+    });
+  }
+
+  private async projectSnapshotTerminalFallback(
+    conversationId: string | undefined,
+    runId: string,
+    participantId: string | undefined,
+    snapshot: RemoteDetachedWorkerSnapshot
+  ): Promise<void> {
+    if (!this.isTerminalStatus(snapshot.state.status)) {
+      return;
+    }
+    if (snapshot.events.some((event) => event.kind === "terminal_state")) {
+      return;
+    }
+    const existing = await this.readRecords(runId);
+    if (existing.some((record) => record.kind === "terminal_state")) {
+      return;
+    }
+    const resolvedConversationId = conversationId ?? snapshot.state.conversationId ?? await this.conversationIdForRun(runId);
+    const resolvedParticipantId = participantId ?? snapshot.state.participantId ?? await this.participantIdForRun(runId).catch(() => undefined);
+    if (resolvedParticipantId) {
+      this.detachedContextByRun.set(runId, {
+        conversationId: resolvedConversationId,
+        participantId: resolvedParticipantId
+      });
+    }
+    await this.markTerminal(
+      resolvedConversationId,
+      runId,
+      snapshot.state.status,
+      snapshot.state.error ?? (snapshot.state.status === "cancelled" ? "cancelled" : undefined)
+    );
+  }
+
+  private workerEventToRecordInput(
+    conversationId: string,
+    runId: string,
+    participantId: string,
+    event: RemoteWorkerEvent
+  ): RemoteRunRecordInput | undefined {
+    if (event.kind === "lifecycle") {
+      const state = event.state === "detached_started" ? "started" : event.state;
+      return {
+        kind: "lifecycle",
+        conversationId,
+        runId,
+        state,
+        message: event.message
+      };
+    }
+    if (event.kind === "provider_output") {
+      return {
+        kind: "provider_output",
+        conversationId,
+        runId,
+        participantId,
+        stream: event.stream,
+        content: event.content
+      };
+    }
+    if (event.kind === "provider_result") {
+      return {
+        kind: "provider_result",
+        conversationId,
+        runId,
+        participantId,
+        ok: event.ok,
+        content: event.content,
+        exitCode: event.exitCode,
+        error: event.error,
+        sessionId: event.sessionId,
+        durationMs: event.durationMs,
+        sourceMessageId: event.sourceMessageId,
+        threadId: event.threadId,
+        chatThreadRootId: event.chatThreadRootId
+      };
+    }
+    if (event.kind === "permission_pending") {
+      return {
+        kind: "permission_pending",
+        conversationId,
+        runId,
+        participantId,
+        roleConfigVersion: event.roleConfigVersion,
+        triggerMessageId: event.triggerMessageId,
+        requestId: event.requestId ?? this.workerRecordId(runId, event),
+        request: event.request,
+        runPermissions: event.runPermissions
+      };
+    }
+    if (event.kind === "terminal_state") {
+      return {
+        kind: "terminal_state",
+        conversationId,
+        runId,
+        status: event.status,
+        reason: event.reason
+      };
+    }
+    return undefined;
+  }
+
+  private workerRecordId(runId: string, event: RemoteWorkerEvent): string {
+    if (event.kind === "provider_result") {
+      return `${runId}:final`;
+    }
+    return `${runId}:worker:${event.workerSeq}`;
+  }
+
+  private async lastProjectedWorkerSeq(runId: string): Promise<number> {
+    const records = await this.readRecords(runId);
+    return records.reduce((max, record) => Math.max(max, record.workerSeq ?? 0), 0);
+  }
+
+  private async conversationIdForRun(runId: string): Promise<string> {
+    const records = await this.readRecords(runId);
+    const conversationId = records[0]?.conversationId;
+    if (!conversationId) {
+      throw new Error(`Remote run ${runId} has no local projection yet.`);
+    }
+    return conversationId;
+  }
+
+  private async participantIdForRun(runId: string): Promise<string> {
+    const records = await this.readRecords(runId);
+    for (const record of records) {
+      if ("participantId" in record && typeof record.participantId === "string") {
+        return record.participantId;
+      }
+    }
+    throw new Error(`Remote run ${runId} has no projected participant yet.`);
+  }
+
   private async appendSpoolRecord(
-    input: RemoteRunRecordInput
+    input: RemoteRunRecordInputWithOverrides
   ): Promise<{ record: RemoteRunReplayRecord; applyResults: RemoteRunApplyRecordResult[] }> {
     return this.withRunAppend(input.runId, async () => {
       const seq = await this.nextSeq(input.runId);
+      const { id, createdAt, workerSeq, ...payload } = input;
       const record = {
-        id: input.kind === "permission_pending" ? input.requestId ?? randomUUID() : randomUUID(),
-        createdAt: new Date().toISOString(),
-        ...input,
+        id: id ?? (payload.kind === "permission_pending" ? payload.requestId ?? randomUUID() : randomUUID()),
+        createdAt: createdAt ?? new Date().toISOString(),
+        ...payload,
+        ...(workerSeq !== undefined ? { workerSeq } : {}),
         seq
       } as RemoteRunReplayRecord;
       if (record.kind === "permission_pending" && !record.requestId) {
@@ -367,7 +1025,7 @@ export class RemoteRunService {
     if (hasDecision) {
       return;
     }
-    await this.appendSpoolRecord({
+    const appended = await this.appendSpoolRecord({
       kind: "permission_decision",
       conversationId: event.conversationId,
       runId,
@@ -377,6 +1035,14 @@ export class RemoteRunService {
       approvalUpdatedAt: event.approval.updatedAt,
       error: event.approval.error
     });
+    const worker = this.detachedWorkerByRun.get(runId);
+    if (worker && this.detachedWorkerTransport.writePermissionDecision) {
+      await this.detachedWorkerTransport.writePermissionDecision({
+        runId,
+        worker,
+        decision: appended.record as RemoteRunPermissionDecisionRecord
+      }).catch(() => undefined);
+    }
   }
 
   private spoolPath(runId: string): string {
@@ -385,6 +1051,11 @@ export class RemoteRunService {
 
   private safeRunId(runId: string): string {
     return runId.replace(/[^A-Za-z0-9._-]/g, "_") || "run";
+  }
+
+  private remoteWorkerRunDir(worker: RemoteRunWorkerTarget, runId: string): string {
+    const root = worker.workerRoot?.trim() || "~/.accordagents/remote-runs";
+    return `${root.replace(/\/+$/g, "")}/${this.safeRunId(runId)}`;
   }
 
   private normalizeRecord(value: unknown): RemoteRunReplayRecord | undefined {
@@ -405,6 +1076,20 @@ export class RemoteRunService {
     if (record.kind === "output_text") {
       return typeof record.participantId === "string" && typeof record.content === "string"
         ? record as RemoteRunOutputTextRecord
+        : undefined;
+    }
+    if (record.kind === "provider_output") {
+      return typeof record.participantId === "string" &&
+        (record.stream === "stdout" || record.stream === "stderr") &&
+        typeof record.content === "string"
+        ? record as RemoteRunProviderOutputRecord
+        : undefined;
+    }
+    if (record.kind === "provider_result") {
+      return typeof record.participantId === "string" &&
+        typeof record.ok === "boolean" &&
+        typeof record.content === "string"
+        ? record as RemoteRunProviderResultRecord
         : undefined;
     }
     if (record.kind === "permission_pending") {
@@ -428,9 +1113,15 @@ export class RemoteRunService {
   private isRecordKind(kind: unknown): kind is RemoteRunSpoolRecordKind {
     return kind === "lifecycle" ||
       kind === "output_text" ||
+      kind === "provider_output" ||
+      kind === "provider_result" ||
       kind === "permission_pending" ||
       kind === "permission_decision" ||
       kind === "terminal_state";
+  }
+
+  private isTerminalStatus(status: RemoteDetachedRunStatus): status is RemoteRunTerminalStateRecord["status"] {
+    return status === "completed" || status === "cancelled" || status === "failed";
   }
 
   private isPermissionChangeRequest(value: unknown): value is ChatPermissionChangeRequest {
@@ -440,6 +1131,1202 @@ export class RemoteRunService {
     const record = value as Partial<ChatPermissionChangeRequest>;
     return record.kind === "portable" || record.kind === "shellRules" || record.kind === "providerNative";
   }
+
+  private remoteExecutionError(execution: RemoteCodexExecutionResult): string | undefined {
+    if (execution.timedOut) {
+      return "Remote Codex run timed out.";
+    }
+    if (execution.exitCode !== 0) {
+      const diagnostic = execution.stderr.trim() || execution.stdout.trim();
+      return diagnostic
+        ? `Remote Codex exited with code ${execution.exitCode}: ${diagnostic}`
+        : `Remote Codex exited with code ${execution.exitCode}.`;
+    }
+    return undefined;
+  }
+}
+
+class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
+  async launch(request: RemoteDetachedWorkerLaunchRequest): Promise<RemoteDetachedWorkerSnapshot> {
+    const sshPath = request.worker.sshPath?.trim() || "ssh";
+    const target = remoteSshTarget(request.worker);
+    const sshBaseArgs = remoteSshBaseArgs(request.worker, target);
+    const resolvedRunDir = await resolveRemoteRunDir(sshPath, sshBaseArgs, request.remoteRunDir, request.signal);
+    const resolvedFinalPath = `${resolvedRunDir}/final.txt`;
+    const invocationArgs = replaceArgValue(request.invocation.args, request.remoteFinalPath, resolvedFinalPath);
+    const config = {
+      runId: request.runId,
+      conversationId: request.conversationId,
+      participantId: request.participant.id,
+      args: invocationArgs,
+      input: request.invocation.input,
+      env: request.invocation.env ?? {},
+      codexPath: request.worker.codexPath?.trim() || "codex",
+      remoteCwd: request.worker.remoteCwd?.trim(),
+      finalPath: resolvedFinalPath,
+      maxRuntimeMs: request.maxRuntimeMs,
+      sourceMessageId: request.sourceMessageId,
+      threadId: request.threadId,
+      chatThreadRootId: request.chatThreadRootId
+    };
+    await runCommand(sshPath, [...sshBaseArgs, `mkdir -p ${shellQuote(resolvedRunDir)}`], {
+      timeoutMs: 30_000,
+      signal: request.signal
+    });
+    await writeRemoteFile(sshPath, sshBaseArgs, `${resolvedRunDir}/prompt.txt`, request.invocation.input, request.signal);
+    await writeRemoteFile(sshPath, sshBaseArgs, `${resolvedRunDir}/invocation.json`, JSON.stringify(config), request.signal);
+    await writeRemoteFile(sshPath, sshBaseArgs, `${resolvedRunDir}/context-snapshot.json`, JSON.stringify(request.contextSnapshot ?? null), request.signal);
+    await writeRemoteFile(sshPath, sshBaseArgs, `${resolvedRunDir}/worker.js`, detachedWorkerScript(), request.signal);
+    const start = [
+      `cd ${shellQuote(resolvedRunDir)} || exit 125`,
+      "rm -f exit.json",
+      "touch events.jsonl decisions.jsonl stdout.log stderr.log",
+      `setsid node worker.js >/dev/null 2>&1 </dev/null & echo $! > wrapper.pid`
+    ].join("; ");
+    await runCommand(sshPath, [...sshBaseArgs, start], {
+      timeoutMs: 30_000,
+      signal: request.signal
+    });
+    return await this.waitForLaunchAck(request.worker, request.runId, request.signal);
+  }
+
+  async poll(request: RemoteDetachedWorkerPollRequest): Promise<RemoteDetachedWorkerSnapshot> {
+    const sshPath = request.worker.sshPath?.trim() || "ssh";
+    const target = remoteSshTarget(request.worker);
+    const sshBaseArgs = remoteSshBaseArgs(request.worker, target);
+    const runDir = await resolveRemoteRunDir(
+      sshPath,
+      sshBaseArgs,
+      remoteWorkerRunDirForTarget(request.worker, request.runId),
+      request.signal
+    );
+    const [state, events, exit] = await Promise.all([
+      readRemoteJson<RemoteDetachedRunState>(sshPath, sshBaseArgs, `${runDir}/state.json`, request.signal),
+      readRemoteWorkerEvents(sshPath, sshBaseArgs, `${runDir}/events.jsonl`, request.afterWorkerSeq, request.signal),
+      readRemoteJson<RemoteDetachedRunState>(sshPath, sshBaseArgs, `${runDir}/exit.json`, request.signal)
+    ]);
+    if (state?.status === "running" && state.pgid && !exit) {
+      const pgidAlive = await remotePidAlive(sshPath, sshBaseArgs, Math.floor(state.pgid), true, request.signal);
+      const wrapperPid = await readRemotePid(sshPath, sshBaseArgs, `${runDir}/wrapper.pid`, request.signal);
+      const wrapperAlive = wrapperPid
+        ? await remotePidAlive(sshPath, sshBaseArgs, wrapperPid, false, request.signal)
+        : false;
+      if (!pgidAlive && !wrapperAlive) {
+        return {
+          state: {
+            ...state,
+            status: "failed",
+            completedAt: new Date().toISOString(),
+            error: "Remote worker process exited without writing exit.json."
+          },
+          events
+        };
+      }
+    }
+    return {
+      state: exit
+        ? { ...state, ...exit, runId: request.runId }
+        : state ?? {
+        runId: request.runId,
+        status: "unknown"
+      },
+      events
+    };
+  }
+
+  async cancel(request: RemoteDetachedWorkerCancelRequest): Promise<RemoteDetachedWorkerSnapshot> {
+    const sshPath = request.worker.sshPath?.trim() || "ssh";
+    const target = remoteSshTarget(request.worker);
+    const sshBaseArgs = remoteSshBaseArgs(request.worker, target);
+    const runDir = await resolveRemoteRunDir(
+      sshPath,
+      sshBaseArgs,
+      remoteWorkerRunDirForTarget(request.worker, request.runId),
+      request.signal
+    );
+    const wrapperPid = await readRemotePid(sshPath, sshBaseArgs, `${runDir}/wrapper.pid`, request.signal);
+    if (wrapperPid) {
+      const kill = [
+        `kill -TERM ${wrapperPid} 2>/dev/null || true`,
+        "sleep 2",
+        `kill -0 ${wrapperPid} 2>/dev/null && kill -KILL ${wrapperPid} 2>/dev/null || true`
+      ].join("; ");
+      await runCommand(sshPath, [...sshBaseArgs, kill], {
+        timeoutMs: 10_000,
+        signal: request.signal
+      }).catch(() => undefined);
+    }
+    const snapshot = await this.poll({
+      runId: request.runId,
+      worker: request.worker,
+      afterWorkerSeq: 0,
+      signal: request.signal
+    });
+    const hasTerminal = snapshot.events.some((event) => event.kind === "terminal_state");
+    if (hasTerminal || !wrapperPid) {
+      return snapshot;
+    }
+    const wrapperAlive = await remotePidAlive(sshPath, sshBaseArgs, wrapperPid, false, request.signal);
+    if (wrapperAlive) {
+      return snapshot;
+    }
+    const completedAt = new Date().toISOString();
+    return {
+      state: {
+        ...(snapshot.state ?? { runId: request.runId }),
+        runId: request.runId,
+        status: "cancelled",
+        completedAt,
+        error: request.reason ?? "cancelled"
+      },
+      events: snapshot.events
+    };
+  }
+
+  async writePermissionDecision(request: RemoteDetachedWorkerDecisionRequest): Promise<void> {
+    const sshPath = request.worker.sshPath?.trim() || "ssh";
+    const target = remoteSshTarget(request.worker);
+    const sshBaseArgs = remoteSshBaseArgs(request.worker, target);
+    const runDir = await resolveRemoteRunDir(
+      sshPath,
+      sshBaseArgs,
+      remoteWorkerRunDirForTarget(request.worker, request.runId),
+      request.signal
+    );
+    await runCommand(sshPath, [
+      ...sshBaseArgs,
+      `mkdir -p ${shellQuote(runDir)}; cat >> ${shellQuote(`${runDir}/decisions.jsonl`)}`
+    ], {
+      input: `${JSON.stringify(request.decision)}\n`,
+      timeoutMs: 30_000,
+      signal: request.signal
+    });
+  }
+
+  async reapExpiredRuns(request: RemoteDetachedWorkerReapRequest): Promise<RemoteDetachedWorkerSnapshot[]> {
+    const sshPath = request.worker.sshPath?.trim() || "ssh";
+    const target = remoteSshTarget(request.worker);
+    const sshBaseArgs = remoteSshBaseArgs(request.worker, target);
+    const root = await resolveRemoteRunDir(
+      sshPath,
+      sshBaseArgs,
+      remoteWorkerRootForTarget(request.worker),
+      request.signal
+    );
+    const runDirs = await listRemoteRunDirs(sshPath, sshBaseArgs, root, request.signal);
+    const snapshots: RemoteDetachedWorkerSnapshot[] = [];
+    for (const runDir of runDirs) {
+      const state = await readRemoteJson<RemoteDetachedRunState>(sshPath, sshBaseArgs, `${runDir}/state.json`, request.signal);
+      if (!state?.runId) {
+        continue;
+      }
+      const snapshot = await this.poll({
+        runId: state.runId,
+        worker: request.worker,
+        afterWorkerSeq: 0,
+        signal: request.signal
+      });
+      if (snapshot.state.status !== "running" && snapshot.state.status !== "unknown") {
+        snapshots.push(snapshot);
+      }
+    }
+    return snapshots;
+  }
+
+  private async waitForLaunchAck(
+    worker: RemoteRunWorkerTarget,
+    runId: string,
+    signal: AbortSignal | undefined
+  ): Promise<RemoteDetachedWorkerSnapshot> {
+    const deadline = Date.now() + 10_000;
+    let latest: RemoteDetachedWorkerSnapshot | undefined;
+    while (Date.now() < deadline) {
+      latest = await this.poll({ runId, worker, afterWorkerSeq: 0, signal });
+      const hasDetachedStart = latest.events.some((event) =>
+        event.kind === "lifecycle" && event.state === "detached_started"
+      );
+      if (
+        latest.state.status === "running" &&
+        Number.isFinite(latest.state.pid) &&
+        Number.isFinite(latest.state.pgid) &&
+        hasDetachedStart
+      ) {
+        return latest;
+      }
+      await sleep(200);
+    }
+    const status = latest?.state.status ?? "unknown";
+    throw new Error(`Remote detached worker did not acknowledge launch; last status was ${status}.`);
+  }
+}
+
+async function defaultRemoteCodexExecutor(
+  request: RemoteCodexExecutorRequest,
+  callbacks: RemoteCodexExecutorCallbacks
+): Promise<RemoteCodexExecutionResult> {
+  const sshPath = request.worker.sshPath?.trim() || "ssh";
+  const target = remoteSshTarget(request.worker);
+  const sshBaseArgs = remoteSshBaseArgs(request.worker, target);
+  const token = request.invocation.env?.[CODEX_APP_SERVER_MCP_TOKEN_ENV];
+  const tokenPath = token ? `/tmp/accordagents-${randomUUID()}-mcp-token` : undefined;
+  if (token && tokenPath) {
+    await runCommand(sshPath, [...sshBaseArgs, `umask 077; cat > ${shellQuote(tokenPath)}`], {
+      input: token,
+      timeoutMs: 30_000,
+      signal: request.signal
+    });
+  }
+
+  try {
+    const result = await runRemoteCodexCommand(sshPath, sshBaseArgs, request, callbacks, tokenPath);
+    const finalMessage = await readRemoteFinalMessage(sshPath, sshBaseArgs, request.remoteFinalPath, request.signal);
+    return { ...result, finalMessage };
+  } finally {
+    await cleanupRemoteFiles(sshPath, sshBaseArgs, [request.remoteFinalPath, tokenPath], request.signal);
+  }
+}
+
+function remoteSshTarget(worker: RemoteRunWorkerTarget): string {
+  return worker.user?.trim()
+    ? `${worker.user.trim()}@${worker.host}`
+    : worker.host;
+}
+
+function replaceArgValue(args: string[], from: string, to: string): string[] {
+  return args.map((arg) => arg === from ? to : arg);
+}
+
+async function resolveRemoteRunDir(
+  sshPath: string,
+  sshBaseArgs: string[],
+  remotePath: string,
+  signal: AbortSignal | undefined
+): Promise<string> {
+  const trimmed = remotePath.trim();
+  if (!trimmed) {
+    throw new Error("Remote worker path is empty.");
+  }
+  if (trimmed.startsWith("/")) {
+    return trimmed.replace(/\/+$/g, "") || "/";
+  }
+  const homeRelative = trimmed === "~"
+    ? ""
+    : trimmed.startsWith("~/")
+      ? trimmed.slice(2)
+      : trimmed;
+  const command = homeRelative
+    ? `printf '%s' "$HOME"/${shellQuote(homeRelative)}`
+    : `printf '%s' "$HOME"`;
+  const result = await runCommand(sshPath, [...sshBaseArgs, command], {
+    timeoutMs: 30_000,
+    signal
+  });
+  const resolved = result.stdout.trim();
+  if (!resolved.startsWith("/")) {
+    throw new Error(`Remote worker path did not resolve to an absolute path: ${remotePath}`);
+  }
+  return resolved.replace(/\/+$/g, "") || "/";
+}
+
+async function readRemotePid(
+  sshPath: string,
+  sshBaseArgs: string[],
+  remotePath: string,
+  signal: AbortSignal | undefined
+): Promise<number | undefined> {
+  try {
+    const result = await runCommand(sshPath, [...sshBaseArgs, `cat ${shellQuote(remotePath)}`], {
+      timeoutMs: 30_000,
+      signal
+    });
+    const pid = Number.parseInt(result.stdout.trim(), 10);
+    return Number.isFinite(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function remotePidAlive(
+  sshPath: string,
+  sshBaseArgs: string[],
+  pid: number,
+  processGroup: boolean,
+  signal: AbortSignal | undefined
+): Promise<boolean> {
+  const target = processGroup ? `-${Math.floor(pid)}` : `${Math.floor(pid)}`;
+  try {
+    await runCommand(sshPath, [...sshBaseArgs, `kill -0 ${target}`], {
+      timeoutMs: 10_000,
+      signal
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function listRemoteRunDirs(
+  sshPath: string,
+  sshBaseArgs: string[],
+  root: string,
+  signal: AbortSignal | undefined
+): Promise<string[]> {
+  try {
+    const result = await runCommand(sshPath, [
+      ...sshBaseArgs,
+      `for dir in ${shellQuote(root)}/*; do [ -f "$dir/state.json" ] && printf '%s\\n' "$dir"; done`
+    ], {
+      timeoutMs: 30_000,
+      signal
+    });
+    return result.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("/"));
+  } catch {
+    return [];
+  }
+}
+
+async function writeRemoteFile(
+  sshPath: string,
+  sshBaseArgs: string[],
+  remotePath: string,
+  body: string,
+  signal: AbortSignal | undefined
+): Promise<void> {
+  await runCommand(sshPath, [
+    ...sshBaseArgs,
+    `umask 077; mkdir -p ${shellQuote(path.posix.dirname(remotePath))}; cat > ${shellQuote(remotePath)}`
+  ], {
+    input: body,
+    timeoutMs: 30_000,
+    signal
+  });
+}
+
+async function readRemoteJson<T>(
+  sshPath: string,
+  sshBaseArgs: string[],
+  remotePath: string,
+  signal: AbortSignal | undefined
+): Promise<T | undefined> {
+  try {
+    const result = await runCommand(sshPath, [...sshBaseArgs, `cat ${shellQuote(remotePath)}`], {
+      timeoutMs: 30_000,
+      signal
+    });
+    return JSON.parse(result.stdout) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readRemoteWorkerEvents(
+  sshPath: string,
+  sshBaseArgs: string[],
+  remotePath: string,
+  afterWorkerSeq: number,
+  signal: AbortSignal | undefined
+): Promise<RemoteWorkerEvent[]> {
+  let body = "";
+  try {
+    const result = await runCommand(sshPath, [...sshBaseArgs, `cat ${shellQuote(remotePath)}`], {
+      timeoutMs: 30_000,
+      signal
+    });
+    body = result.stdout;
+  } catch {
+    return [];
+  }
+  const events: RemoteWorkerEvent[] = [];
+  for (const line of body.split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const event = normalizeRemoteWorkerEvent(JSON.parse(line));
+      if (event && event.workerSeq > afterWorkerSeq) {
+        events.push(event);
+      }
+    } catch {
+      // Ignore corrupt or partially written lines; a later poll will see the next complete line.
+    }
+  }
+  return events.sort((a, b) => a.workerSeq - b.workerSeq);
+}
+
+function normalizeRemoteWorkerEvent(value: unknown): RemoteWorkerEvent | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const event = value as Partial<RemoteWorkerEvent>;
+  if (typeof event.workerSeq !== "number" || !Number.isFinite(event.workerSeq) || event.workerSeq <= 0) {
+    return undefined;
+  }
+  if (event.kind === "lifecycle") {
+    return typeof event.state === "string" ? event as RemoteWorkerLifecycleEvent : undefined;
+  }
+  if (event.kind === "provider_output") {
+    return (event.stream === "stdout" || event.stream === "stderr") && typeof event.content === "string"
+      ? event as RemoteWorkerProviderOutputEvent
+      : undefined;
+  }
+  if (event.kind === "provider_result") {
+    return typeof event.ok === "boolean" && typeof event.content === "string"
+      ? event as RemoteWorkerProviderResultEvent
+      : undefined;
+  }
+  if (event.kind === "permission_pending") {
+    return event.request ? event as RemoteWorkerPermissionPendingEvent : undefined;
+  }
+  if (event.kind === "terminal_state") {
+    return event.status === "completed" || event.status === "cancelled" || event.status === "failed"
+      ? event as RemoteWorkerTerminalStateEvent
+      : undefined;
+  }
+  return undefined;
+}
+
+function remoteWorkerRootForTarget(worker: RemoteRunWorkerTarget): string {
+  const root = worker.workerRoot?.trim() || "~/.accordagents/remote-runs";
+  return root.replace(/\/+$/g, "") || "~/.accordagents/remote-runs";
+}
+
+function remoteWorkerRunDirForTarget(worker: RemoteRunWorkerTarget, runId: string): string {
+  const root = remoteWorkerRootForTarget(worker);
+  return `${root.replace(/\/+$/g, "")}/${runId.replace(/[^A-Za-z0-9._-]/g, "_") || "run"}`;
+}
+
+function remoteSshBaseArgs(worker: RemoteRunWorkerTarget, target: string): string[] {
+  const args = [
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=accept-new"
+  ];
+  if (worker.identityFile?.trim()) {
+    args.push("-i", worker.identityFile.trim());
+  }
+  if (typeof worker.port === "number" && Number.isFinite(worker.port) && worker.port > 0) {
+    args.push("-p", String(Math.floor(worker.port)));
+  }
+  args.push(target);
+  return args;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runRemoteCodexCommand(
+  sshPath: string,
+  sshBaseArgs: string[],
+  request: RemoteCodexExecutorRequest,
+  callbacks: RemoteCodexExecutorCallbacks,
+  tokenPath: string | undefined
+): Promise<Omit<RemoteCodexExecutionResult, "finalMessage">> {
+  const remoteCommand = remoteCodexCommand(request, tokenPath);
+  try {
+    const result = await runCommand(sshPath, [...sshBaseArgs, remoteCommand], {
+      input: request.invocation.input,
+      timeoutMs: request.timeoutMs,
+      signal: request.signal,
+      onStdout: callbacks.onStdout,
+      onStderr: callbacks.onStderr
+    });
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode,
+      timedOut: result.timedOut
+    };
+  } catch (error) {
+    if (error instanceof CommandError) {
+      return {
+        stdout: error.result.stdout,
+        stderr: error.result.stderr,
+        exitCode: error.result.exitCode,
+        timedOut: error.result.timedOut
+      };
+    }
+    throw error;
+  }
+}
+
+function remoteCodexCommand(request: RemoteCodexExecutorRequest, tokenPath: string | undefined): string {
+  const codexPath = request.worker.codexPath?.trim() || "codex";
+  const cd = request.worker.remoteCwd?.trim()
+    ? `cd ${shellQuote(request.worker.remoteCwd.trim())} || exit 125; `
+    : "";
+  const tokenEnv = tokenPath
+    ? `${CODEX_APP_SERVER_MCP_TOKEN_ENV}="$(cat ${shellQuote(tokenPath)})" `
+    : "";
+  const codexArgs = request.invocation.args.map((arg) => shellQuote(arg)).join(" ");
+  return [
+    `rm -f ${shellQuote(request.remoteFinalPath)}`,
+    `${cd}${tokenEnv}${shellQuote(codexPath)} ${codexArgs}`
+  ].join("; ");
+}
+
+async function readRemoteFinalMessage(
+  sshPath: string,
+  sshBaseArgs: string[],
+  remoteFinalPath: string,
+  signal: AbortSignal | undefined
+): Promise<string> {
+  try {
+    const result = await runCommand(sshPath, [...sshBaseArgs, `cat ${shellQuote(remoteFinalPath)}`], {
+      timeoutMs: 30_000,
+      signal
+    });
+    return result.stdout;
+  } catch {
+    return "";
+  }
+}
+
+async function cleanupRemoteFiles(
+  sshPath: string,
+  sshBaseArgs: string[],
+  filePaths: Array<string | undefined>,
+  signal: AbortSignal | undefined
+): Promise<void> {
+  const existing = filePaths.filter((filePath): filePath is string => Boolean(filePath));
+  if (existing.length === 0) {
+    return;
+  }
+  const command = `rm -f ${existing.map((filePath) => shellQuote(filePath)).join(" ")}`;
+  await runCommand(sshPath, [...sshBaseArgs, command], {
+    timeoutMs: 30_000,
+    signal,
+    primeLoginShellEnv: false
+  }).catch(() => undefined);
+}
+
+function detachedWorkerScript(): string {
+  return String.raw`const fs = require("node:fs");
+const cp = require("node:child_process");
+const crypto = require("node:crypto");
+const http = require("node:http");
+
+const runDir = process.cwd();
+const config = JSON.parse(fs.readFileSync("invocation.json", "utf8"));
+let workerSeq = 0;
+let stdout = "";
+let stderr = "";
+let timedOut = false;
+let cancelled = false;
+let activeChild;
+let sessionId;
+let terminalWritten = false;
+let resumeInFlight = false;
+const pendingPermissionRequests = new Map();
+const consumedDecisionIds = new Set();
+
+function now() {
+  return new Date().toISOString();
+}
+
+function writeJsonAtomic(file, value) {
+  const tmp = file + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(value));
+  fs.renameSync(tmp, file);
+}
+
+let state = {
+  runId: config.runId,
+  conversationId: config.conversationId,
+  participantId: config.participantId,
+  status: "running",
+  startedAt: now(),
+  lastHeartbeat: now()
+};
+
+function appendEvent(event) {
+  const next = {
+    ...event,
+    workerSeq: ++workerSeq,
+    createdAt: now()
+  };
+  fs.appendFileSync("events.jsonl", JSON.stringify(next) + "\n");
+  return next;
+}
+
+function toolTextResult(result) {
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(result, null, 2)
+    }]
+  };
+}
+
+function rpcResult(id, result) {
+  return { jsonrpc: "2.0", id, result };
+}
+
+function rpcError(id, code, message) {
+  return { jsonrpc: "2.0", id, error: { code, message } };
+}
+
+function readJsonBody(request) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      body += chunk;
+      if (Buffer.byteLength(body) > 1024 * 1024) {
+        reject(new Error("MCP request body is too large."));
+        request.destroy();
+      }
+    });
+    request.on("error", reject);
+    request.on("end", () => {
+      try {
+        resolve(body.trim() ? JSON.parse(body) : {});
+      } catch {
+        reject(new Error("Invalid JSON body."));
+      }
+    });
+  });
+}
+
+function contextSnapshot() {
+  try {
+    return JSON.parse(fs.readFileSync("context-snapshot.json", "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function findSessionId(value) {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  if (typeof value.thread_id === "string" && value.thread_id.trim()) {
+    return value.thread_id.trim();
+  }
+  if (typeof value.session_id === "string" && value.session_id.trim()) {
+    return value.session_id.trim();
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findSessionId(item);
+      if (found) {
+        return found;
+      }
+    }
+    return undefined;
+  }
+  for (const item of Object.values(value)) {
+    const found = findSessionId(item);
+    if (found) {
+      return found;
+    }
+  }
+  return undefined;
+}
+
+function rememberSessionIdFromChunk(chunk) {
+  for (const line of String(chunk || "").split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const found = findSessionId(JSON.parse(line));
+      if (found) {
+        sessionId = found;
+      }
+    } catch {
+      // Ignore non-JSON output.
+    }
+  }
+}
+
+function readDecisionRecords() {
+  let body = "";
+  try {
+    body = fs.readFileSync("decisions.jsonl", "utf8");
+  } catch {
+    return [];
+  }
+  const records = [];
+  for (const line of body.split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const record = JSON.parse(line);
+      if (record && typeof record.requestId === "string") {
+        records.push(record);
+      }
+    } catch {
+      // Ignore partial decision writes; a later poll will see the complete line.
+    }
+  }
+  return records;
+}
+
+function hasOutstandingPermission() {
+  for (const pending of pendingPermissionRequests.values()) {
+    if (!pending.resumed) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function decisionKey(decision) {
+  return String(decision.id || decision.requestId || "") + ":" + String(decision.approvalUpdatedAt || decision.createdAt || "");
+}
+
+function permissionResumePrompt(requestId, request, decision) {
+  return [
+    "The user has responded to a permission request from this remote run.",
+    "Request id: " + requestId,
+    "Decision: " + String(decision.status || "unknown"),
+    decision.error ? "Decision error: " + String(decision.error) : "",
+    "Requested permission change:",
+    JSON.stringify(request, null, 2),
+    "Continue the original task from this decision. If denied, explain the limitation and continue without that capability where possible."
+  ].filter(Boolean).join("\n");
+}
+
+function insertBeforeResumeSession(args, ...items) {
+  const promptIndex = Math.max(args.length - 2, 2);
+  args.splice(promptIndex, 0, ...items);
+}
+
+function configValueFromArgs(prefix) {
+  for (let index = 0; index < (config.args || []).length - 1; index += 1) {
+    if (config.args[index] === "-c" && typeof config.args[index + 1] === "string" && config.args[index + 1].startsWith(prefix)) {
+      return config.args[index + 1];
+    }
+  }
+  return undefined;
+}
+
+function copyConfigArgsForResume(args) {
+  const copied = [];
+  for (let index = 0; index < (args || []).length - 1; index += 1) {
+    if (args[index] !== "-c") {
+      continue;
+    }
+    const value = args[index + 1];
+    if (
+      typeof value === "string" &&
+      !value.startsWith("sandbox_mode=") &&
+      (
+        value.startsWith("model_reasoning_effort=") ||
+        value.startsWith("approval_policy=") ||
+        value.startsWith("approvals_reviewer=") ||
+        value.startsWith("developer_instructions=") ||
+        value.startsWith("mcp_servers.")
+      )
+    ) {
+      copied.push("-c", value);
+    }
+  }
+  return copied;
+}
+
+function requestedPortablePermission(request, permission) {
+  return Boolean(
+    request &&
+    request.kind === "portable" &&
+    Array.isArray(request.permissions) &&
+    request.permissions.includes(permission)
+  );
+}
+
+function originalWorkspaceWrite() {
+  return (config.args || []).includes("workspace-write") ||
+    Boolean(configValueFromArgs("sandbox_mode=")?.includes("workspace-write"));
+}
+
+function originalWebAccess() {
+  return (config.args || []).includes("--search");
+}
+
+function resumeArgsForDecision(request, decision) {
+  const approved = decision.status === "approved";
+  const workspaceWrite = originalWorkspaceWrite() || (approved && requestedPortablePermission(request, "workspaceWrite"));
+  const webAccess = originalWebAccess() || (approved && requestedPortablePermission(request, "webAccess"));
+  const args = [
+    "exec",
+    "resume",
+    "--skip-git-repo-check",
+    "--json",
+    "--output-last-message",
+    config.finalPath,
+    sessionId,
+    "-"
+  ];
+  if (webAccess) {
+    args.unshift("--search");
+  }
+  insertBeforeResumeSession(args, "-c", "sandbox_mode=\"" + (workspaceWrite ? "workspace-write" : "read-only") + "\"");
+  insertBeforeResumeSession(args, ...copyConfigArgsForResume(config.args || []));
+  return args;
+}
+
+function maybeResumeFromDecision() {
+  if (terminalWritten || activeChild || resumeInFlight || cancelled || timedOut || !hasOutstandingPermission()) {
+    return;
+  }
+  if (!sessionId) {
+    finishRun(null, undefined, false, "Remote Codex requested permission before emitting a resumable session id.");
+    return;
+  }
+  const decisions = readDecisionRecords();
+  for (const [requestId, pending] of pendingPermissionRequests.entries()) {
+    if (pending.resumed) {
+      continue;
+    }
+    const decision = decisions.find((item) => item.requestId === requestId && !consumedDecisionIds.has(decisionKey(item)));
+    if (!decision) {
+      continue;
+    }
+    pending.resumed = true;
+    consumedDecisionIds.add(decisionKey(decision));
+    appendEvent({ kind: "lifecycle", state: "connected", message: "Permission decision received; resuming remote Codex." });
+    resumeInFlight = true;
+    startCodex(permissionResumePrompt(requestId, pending.request, decision), resumeArgsForDecision(pending.request, decision), true);
+    resumeInFlight = false;
+    return;
+  }
+}
+
+async function handleRpcRequest(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return rpcError(null, -32600, "Invalid JSON-RPC request.");
+  }
+  const id = raw.id;
+  const method = typeof raw.method === "string" ? raw.method : "";
+  const notify = id === undefined;
+  if (method === "initialize") {
+    return notify ? undefined : rpcResult(id, {
+      protocolVersion: "2025-06-18",
+      capabilities: { tools: { listChanged: false } },
+      serverInfo: { name: "accordagents-worker-relay", version: "0.1.0" }
+    });
+  }
+  if (method === "notifications/initialized") {
+    return undefined;
+  }
+  if (method === "tools/list") {
+    return notify ? undefined : rpcResult(id, {
+      tools: [
+        {
+          name: "app_permissions_request_change",
+          title: "Request Permission Change",
+          description: "Queue a permission request for desktop approval when the desktop reconnects.",
+          inputSchema: { type: "object", additionalProperties: true }
+        },
+        {
+          name: "app_chat_get_context",
+          title: "Get Chat Context Snapshot",
+          description: "Read the run-start chat context snapshot stored on the worker.",
+          inputSchema: { type: "object", additionalProperties: false, properties: {} }
+        },
+        {
+          name: "app_chat_get_participants",
+          title: "Get Chat Participants Snapshot",
+          description: "Read participant data from the run-start context snapshot.",
+          inputSchema: { type: "object", additionalProperties: false, properties: {} }
+        }
+      ]
+    });
+  }
+  if (method !== "tools/call") {
+    return notify ? undefined : rpcError(id, -32601, "Unsupported MCP method: " + (method || "unknown") + ".");
+  }
+  const params = raw.params && typeof raw.params === "object" ? raw.params : {};
+  const name = params.name;
+  const args = params.arguments || {};
+  if (name === "app_permissions_request_change") {
+    const requestId = crypto.randomUUID();
+    const event = appendEvent({
+      kind: "permission_pending",
+      requestId,
+      triggerMessageId: config.sourceMessageId,
+      request: args
+    });
+    pendingPermissionRequests.set(requestId, {
+      request: args,
+      createdAt: event.createdAt,
+      resumed: false
+    });
+    return notify ? undefined : rpcResult(id, toolTextResult({
+      ok: true,
+      status: "pending_user_approval",
+      requestId,
+      approvalId: requestId,
+      request: args,
+      updatedAt: event.createdAt
+    }));
+  }
+  if (name === "app_chat_get_context") {
+    return notify ? undefined : rpcResult(id, toolTextResult({
+      ok: true,
+      snapshot: contextSnapshot()
+    }));
+  }
+  if (name === "app_chat_get_participants") {
+    const snapshot = contextSnapshot();
+    return notify ? undefined : rpcResult(id, toolTextResult({
+      ok: true,
+      participants: snapshot && typeof snapshot === "object" ? snapshot.participants || [] : []
+    }));
+  }
+  return notify ? undefined : rpcError(id, -32603, "Unknown worker relay tool: " + String(name || "") + ".");
+}
+
+function startRelay(next) {
+  const token = config.env && config.env.ACCORD_AGENTS_MCP_TOKEN;
+  if (!token) {
+    next();
+    return;
+  }
+  const server = http.createServer(async (request, response) => {
+    if (request.method !== "POST" || (request.url || "").split("?")[0] !== "/mcp") {
+      response.writeHead(404, { "content-type": "text/plain" });
+      response.end("Not found");
+      return;
+    }
+    if (request.headers.authorization !== "Bearer " + token) {
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: "Unauthorized" }));
+      return;
+    }
+    try {
+      const payload = await readJsonBody(request);
+      const requests = Array.isArray(payload) ? payload : [payload];
+      const results = [];
+      for (const item of requests) {
+        const result = await handleRpcRequest(item);
+        if (result) {
+          results.push(result);
+        }
+      }
+      if (results.length === 0) {
+        response.writeHead(202);
+        response.end();
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      response.end(JSON.stringify(Array.isArray(payload) ? results : results[0]));
+    } catch (error) {
+      response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      response.end(JSON.stringify(rpcError(null, -32700, error instanceof Error ? error.message : String(error))));
+    }
+  });
+  server.listen(0, "127.0.0.1", () => {
+    const address = server.address();
+    const port = address && typeof address === "object" ? address.port : undefined;
+    if (port) {
+      config.args = (config.args || []).map((arg) =>
+        typeof arg === "string" && arg.startsWith("mcp_servers.accord_agents.url=")
+          ? "mcp_servers.accord_agents.url=\"http://127.0.0.1:" + port + "/mcp\""
+          : arg
+      );
+      writeState({ relayPort: port });
+    }
+    next();
+  });
+}
+
+function writeState(patch) {
+  state = {
+    ...state,
+    ...patch,
+    lastHeartbeat: now(),
+    workerCursorSeq: workerSeq
+  };
+  writeJsonAtomic("state.json", state);
+}
+
+function killGroup(signal) {
+  if (!state.pgid) {
+    return;
+  }
+  try {
+    process.kill(-state.pgid, signal);
+  } catch {
+    // The child may already be gone.
+  }
+}
+
+function extractedStdoutText() {
+  const messages = [];
+  const deltas = [];
+  const plain = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const event = JSON.parse(line);
+      if (typeof event.message === "string") {
+        messages.push(event.message);
+      } else if (typeof event.text === "string") {
+        messages.push(event.text);
+      } else if (event.type === "item.completed" && typeof event.item?.text === "string") {
+        messages.push(event.item.text);
+      } else if (typeof event.delta === "string") {
+        deltas.push(event.delta);
+      }
+    } catch {
+      plain.push(line.trim());
+    }
+  }
+  return messages.at(-1) || deltas.join("").trim() || plain.join("\n").trim() || stdout.trim();
+}
+
+appendEvent({ kind: "lifecycle", state: "detached_started", message: "Remote run detached." });
+writeState({});
+
+const heartbeat = setInterval(() => writeState({}), 5000);
+heartbeat.unref();
+
+const decisionWatcher = setInterval(() => maybeResumeFromDecision(), 1000);
+decisionWatcher.unref();
+
+const timeout = setTimeout(() => {
+  timedOut = true;
+  writeState({ timedOut: true });
+  if (activeChild) {
+    killGroup("SIGTERM");
+    setTimeout(() => killGroup("SIGKILL"), 2000).unref();
+    return;
+  }
+  finishRun(null, undefined, false, "Remote Codex run timed out.");
+}, Math.max(1, Number(config.maxRuntimeMs || 86400000)));
+timeout.unref();
+
+process.on("SIGTERM", () => {
+  cancelled = true;
+  writeState({ status: "cancelled", signal: "SIGTERM" });
+  if (activeChild) {
+    killGroup("SIGTERM");
+    setTimeout(() => killGroup("SIGKILL"), 2000).unref();
+    return;
+  }
+  finishRun(null, "SIGTERM", false, "Remote Codex run was cancelled.");
+});
+
+startRelay(() => startCodex(config.input || "", config.args || [], false));
+
+function finishRun(exitCode, signal, forcedOk, forcedError) {
+  if (terminalWritten) {
+    return;
+  }
+  terminalWritten = true;
+  clearInterval(heartbeat);
+  clearTimeout(timeout);
+  clearInterval(decisionWatcher);
+  let finalMessage = "";
+  try {
+    finalMessage = fs.readFileSync(config.finalPath, "utf8").trim();
+  } catch {
+    finalMessage = "";
+  }
+  const ok = forcedError ? false : forcedOk ?? (exitCode === 0 && !signal && !timedOut && !cancelled);
+  const error = ok
+    ? undefined
+    : forcedError
+      ? forcedError
+      : timedOut
+      ? "Remote Codex run timed out."
+      : cancelled
+        ? "Remote Codex run was cancelled."
+        : stderr.trim() || (signal ? "Remote Codex exited from signal " + signal + "." : "Remote Codex exited with code " + exitCode + ".");
+  appendEvent({
+    kind: "provider_result",
+    ok,
+    content: finalMessage || extractedStdoutText() || stderr.trim() || error || "",
+    exitCode,
+    error,
+    sessionId,
+    sourceMessageId: config.sourceMessageId,
+    threadId: config.threadId,
+    chatThreadRootId: config.chatThreadRootId
+  });
+  const status = ok ? "completed" : cancelled ? "cancelled" : "failed";
+  appendEvent({ kind: "terminal_state", status, reason: error });
+  const completedAt = now();
+  const exit = { runId: config.runId, status, exitCode, signal, timedOut, error, completedAt };
+  writeJsonAtomic("exit.json", exit);
+  writeState({ status, pid: undefined, pgid: undefined, exitCode, signal, timedOut, error, completedAt });
+  process.exit(0);
+}
+
+function startCodex(input, args, resuming) {
+let child;
+try {
+child = cp.spawn(config.codexPath || "codex", args || [], {
+  cwd: config.remoteCwd || undefined,
+  env: { ...process.env, ...(config.env || {}) },
+  detached: true,
+  stdio: ["pipe", "pipe", "pipe"]
+});
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  finishRun(null, undefined, false, message);
+  return;
+}
+
+activeChild = child;
+writeState({ status: "running", pid: child.pid, pgid: child.pid, relayPort: state.relayPort });
+child.stdin.end(input || "");
+
+child.stdout.setEncoding("utf8");
+child.stderr.setEncoding("utf8");
+child.stdout.on("data", (chunk) => {
+  stdout += chunk;
+  rememberSessionIdFromChunk(chunk);
+  fs.appendFileSync("stdout.log", chunk);
+  appendEvent({ kind: "provider_output", stream: "stdout", content: chunk });
+});
+child.stderr.on("data", (chunk) => {
+  stderr += chunk;
+  fs.appendFileSync("stderr.log", chunk);
+  appendEvent({ kind: "provider_output", stream: "stderr", content: chunk });
+});
+
+child.on("close", (exitCode, signal) => {
+  if (activeChild === child) {
+    activeChild = undefined;
+  }
+  writeState({ pid: undefined, pgid: undefined });
+  if (!cancelled && !timedOut && hasOutstandingPermission()) {
+    appendEvent({
+      kind: "lifecycle",
+      state: "disconnected",
+      message: resuming
+        ? "Remote Codex is waiting for another permission decision."
+        : "Remote Codex is waiting for a permission decision."
+    });
+    maybeResumeFromDecision();
+    return;
+  }
+  finishRun(exitCode, signal);
+});
+
+child.on("error", (error) => {
+  if (activeChild === child) {
+    activeChild = undefined;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  finishRun(null, undefined, false, message);
+});
+}
+`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 export class RemoteAppMcpRelay {

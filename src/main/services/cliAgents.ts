@@ -27,6 +27,13 @@ import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS, normalizeCliAgentRunTimeoutMs } from 
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
 import { cliFailureNoticeText } from "../../shared/warnings";
 import { CommandError, commandEnvironment, commandExists, ensureLoginShellEnvPrimed, runCommand } from "./command";
+import {
+  buildCodexExecInvocation,
+  createCodexLineHandler,
+  emitCodexLiveOutput as emitCodexExecLiveOutput,
+  extractCodexSessionId as extractCodexExecSessionId,
+  extractCodexText as extractCodexExecText
+} from "./codexExec";
 import type { ParticipantRunResult } from "./providers";
 
 const MAX_CLI_ERROR_CHARS = 500;
@@ -1679,112 +1686,34 @@ export class CliAgentRunner {
     try {
       outputDir = await mkdtemp(path.join(tmpdir(), "accordagents-codex-"));
       const outputPath = path.join(outputDir, "last-message.txt");
-      const resuming = Boolean(options.sessionId);
-      const extraReadableDirs = this.normalizedExtraReadableDirs(options.extraReadableDirs);
-      const mode = this.agentModeForRun(kind, options);
-      const permissions = this.permissionsForRun("codex-cli", mode, options);
-      const args = resuming
-        ? [
-            "exec",
-            "resume",
-            "--json",
-            "--output-last-message",
-            outputPath,
-            options.sessionId as string,
-            "-"
-          ]
-        : [
-            "exec",
-            "--sandbox",
-            permissions.workspaceWrite ? "workspace-write" : "read-only",
-            "--json",
-            "--output-last-message",
-            outputPath,
-            "-"
-          ];
-      if (participant.model && !resuming) {
-        args.splice(args.length - 1, 0, "--model", participant.model);
-      }
-      const reasoningEffort = this.codexReasoningEffort(participant.reasoningEffort);
-      if (reasoningEffort) {
-        this.insertCodexOptionBeforePrompt(args, resuming, "-c", `model_reasoning_effort=${this.tomlString(reasoningEffort)}`);
-      }
-      if (!resuming) {
-        for (const dir of extraReadableDirs) {
-          args.splice(args.length - 1, 0, "--add-dir", dir);
-        }
-      }
-      if (repoPath && !resuming) {
-        args.splice(1, 0, "--cd", repoPath);
-        if (kind === "chat") {
-          args.splice(1, 0, "--skip-git-repo-check");
-        }
-      } else if (!repoPath && !resuming) {
-        // Session persistence is only useful when a repository is selected. For free-form runs,
-        // keep Codex ephemeral so unrelated conversations do not bleed together.
-        args.splice(1, 0, "--skip-git-repo-check", "--ephemeral", "--ignore-rules");
-      } else if (!repoPath && resuming) {
-        args.splice(2, 0, "--skip-git-repo-check");
-      } else if (kind === "chat" && resuming) {
-        args.splice(2, 0, "--skip-git-repo-check");
-      }
-      if (resuming) {
-        // `codex exec resume` has no --sandbox flag (unlike the fresh `exec` path), so
-        // re-assert the sandbox via a config override. Without this a resumed session
-        // would keep the sandbox it was first created with, ignoring later workspace
-        // write / agent-mode changes.
-        this.insertCodexOptionBeforePrompt(
-          args,
-          resuming,
-          "-c",
-          `sandbox_mode=${this.tomlString(permissions.workspaceWrite ? "workspace-write" : "read-only")}`
-        );
-      }
-      if (mode === "auto") {
-        this.insertCodexOptionBeforePrompt(
-          args,
-          resuming,
-          "-c",
-          `approval_policy=${this.tomlString("on-request")}`,
-          "-c",
-          `approvals_reviewer=${this.tomlString(CODEX_AUTO_APPROVALS_REVIEWER)}`
-        );
-      }
-      if (options.role) {
-        this.insertCodexOptionBeforePrompt(args, resuming, "-c", `developer_instructions=${this.tomlString(options.role.instructions)}`);
-      }
-      if (options.appMcp) {
-        this.insertCodexOptionBeforePrompt(
-          args,
-          resuming,
-          "-c",
-          `mcp_servers.accord_agents.url=${this.tomlString(options.appMcp.url)}`,
-          "-c",
-          `mcp_servers.accord_agents.bearer_token_env_var=${this.tomlString("ACCORD_AGENTS_MCP_TOKEN")}`
-        );
-      }
-      if (permissions.webAccess) {
-        args.unshift("--search");
-      }
+      const invocation = buildCodexExecInvocation({
+        participant,
+        prompt,
+        outputPath,
+        repoPath,
+        diffMode,
+        kind,
+        options
+      });
       const codexDeltaAccumulator = { value: "" };
-      const stdoutLines = this.createLineHandler((line) =>
-        this.emitCodexLiveOutput(line, options.onOutput, codexDeltaAccumulator, options.onSessionId)
+      const stdoutLines = createCodexLineHandler((line) =>
+        emitCodexExecLiveOutput(line, options.onOutput, codexDeltaAccumulator, options.onSessionId)
       );
-      const result = await runCommand("codex", args, {
+      const result = await runCommand("codex", invocation.args, {
         cwd: repoPath,
-        input: this.codexPrompt(prompt, repoPath, diffMode, kind, options),
+        input: invocation.input,
         timeoutMs: options.timeoutMs ?? this.runTimeoutMs,
-        env: this.appMcpEnv(options),
+        env: invocation.env,
         signal,
         onStdout: options.onOutput || options.onSessionId ? stdoutLines : undefined
       });
       const lastMessage = await this.readOptionalFile(outputPath);
-      const sessionId = this.extractCodexSessionId(result.stdout) ?? options.sessionId;
+      const sessionId = extractCodexExecSessionId(result.stdout) ?? options.sessionId;
       this.reportSessionId(options.onSessionId, sessionId);
       return this.withAppMcpClientStatus({
         participant,
         ok: true,
-        content: lastMessage.trim() || this.extractCodexText(result.stdout),
+        content: lastMessage.trim() || extractCodexExecText(result.stdout),
         durationMs: Date.now() - startedAt,
         sessionId,
         roleRuntime: options.role ? "codex-developer-instructions" : undefined,

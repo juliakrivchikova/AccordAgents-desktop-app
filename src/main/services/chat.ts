@@ -103,6 +103,7 @@ import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
 import { CliAgentRunner } from "./cliAgents";
 import type { CliAgentOutputEvent, CliAgentRoleOptions } from "./cliAgents";
 import type { RemoteRunApplyRecordResult, RemoteRunReplayRecord } from "./remoteRuns";
+import { emitCodexLiveOutput } from "./codexExec";
 import {
   APP_CHAT_EXPORT_ATTACHMENT_TOOL,
   APP_CHAT_GET_CONTEXT_TOOL,
@@ -405,6 +406,10 @@ interface RemoteRunReplayState {
   appliedRecordIds: string[];
   permissionRequestIdsByRecordId?: Record<string, string>;
   terminalState?: string;
+  providerOutputMessageId?: string;
+  providerOutputText?: string;
+  providerOutputLineBuffer?: string;
+  providerSessionId?: string;
   updatedAt?: string;
 }
 
@@ -1317,6 +1322,7 @@ export class ChatService {
       }
 
       let permissionResult: ChatPermissionRequestToolResult | undefined;
+      let statePatch: Partial<RemoteRunReplayState> = {};
       if (record.kind === "output_text") {
         const participant = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
         if (!participant) {
@@ -1342,6 +1348,18 @@ export class ChatService {
         );
         conversation.messages.push(message);
         this.recordLastMessageByParticipant(conversation, message);
+      } else if (record.kind === "provider_output") {
+        statePatch = this.applyRemoteProviderOutputRecord(conversation, record, state);
+      } else if (record.kind === "provider_result") {
+        const participant = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
+        if (!participant) {
+          throw new Error("Remote run provider result references a participant that is no longer in this chat.");
+        }
+        this.applyRemoteProviderResultRecord(conversation, record, participant, state);
+        statePatch = {
+          providerOutputLineBuffer: undefined,
+          providerOutputText: undefined
+        };
       } else if (record.kind === "permission_pending") {
         const requester = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
         if (!requester) {
@@ -1373,6 +1391,7 @@ export class ChatService {
       }
       this.setRemoteRunReplayState(conversation, record.runId, {
         ...nextState,
+        ...statePatch,
         cursorSeq: Math.max(nextState.cursorSeq, record.seq),
         appliedRecordIds: this.remoteRunAppliedRecordIds([...nextState.appliedRecordIds, record.id]),
         permissionRequestIdsByRecordId,
@@ -1399,6 +1418,156 @@ export class ChatService {
       return 0;
     }
     return this.remoteRunReplayState(conversation, runId).cursorSeq;
+  }
+
+  private applyRemoteProviderOutputRecord(
+    conversation: Conversation,
+    record: Extract<RemoteRunReplayRecord, { kind: "provider_output" }>,
+    state: RemoteRunReplayState
+  ): Partial<RemoteRunReplayState> {
+    if (record.stream !== "stdout") {
+      return {};
+    }
+    const participant = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
+    if (!participant) {
+      throw new Error("Remote run provider output references a participant that is no longer in this chat.");
+    }
+    const combined = `${state.providerOutputLineBuffer ?? ""}${record.content}`;
+    const complete = combined.endsWith("\n") || combined.endsWith("\r");
+    const parts = combined.split(/\r?\n/);
+    const lines = complete ? parts : parts.slice(0, -1);
+    const lineBuffer = complete ? "" : parts.at(-1) ?? "";
+    let cumulative = state.providerOutputText ?? "";
+    let sessionId = state.providerSessionId;
+    let changed = false;
+    const accumulator = { value: cumulative };
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) {
+        continue;
+      }
+      emitCodexLiveOutput(line, (event) => {
+        if (event.kind !== "text") {
+          return;
+        }
+        const next = event.cumulative ?? `${cumulative}${event.text}`;
+        if (next !== cumulative) {
+          cumulative = next;
+          changed = true;
+        }
+      }, accumulator, (nextSessionId) => {
+        sessionId = nextSessionId;
+      });
+    }
+    if (changed && cumulative.trim()) {
+      this.upsertRemoteProviderProgressMessage(conversation, record, participant, cumulative, state.providerOutputMessageId);
+    }
+    return {
+      providerOutputMessageId: state.providerOutputMessageId ?? this.remoteProviderProgressMessageId(conversation, record.runId, record.participantId),
+      providerOutputText: cumulative,
+      providerOutputLineBuffer: lineBuffer,
+      providerSessionId: sessionId
+    };
+  }
+
+  private upsertRemoteProviderProgressMessage(
+    conversation: Conversation,
+    record: Extract<RemoteRunReplayRecord, { kind: "provider_output" }>,
+    participant: ChatParticipant,
+    content: string,
+    messageId: string | undefined
+  ): void {
+    const existingId = messageId ?? this.remoteProviderProgressMessageId(conversation, record.runId, record.participantId);
+    const existing = existingId
+      ? conversation.messages.find((message) => message.id === existingId && message.role === "participant")
+      : undefined;
+    if (existing) {
+      existing.content = content;
+      existing.status = "pending";
+      existing.metadata = {
+        ...existing.metadata,
+        runId: record.runId,
+        appMessageSource: "remote-run-provider-output"
+      };
+      this.recordLastMessageByParticipant(conversation, existing);
+      return;
+    }
+    const message = this.message(
+      "participant",
+      content,
+      {
+        id: participant.id,
+        kind: participant.kind,
+        label: `@${participant.handle}`,
+        model: participant.model,
+        reasoningEffort: participant.reasoningEffort
+      },
+      {
+        runId: record.runId,
+        appMessageSource: "remote-run-provider-output"
+      },
+      "pending"
+    );
+    conversation.messages.push(message);
+    this.recordLastMessageByParticipant(conversation, message);
+  }
+
+  private applyRemoteProviderResultRecord(
+    conversation: Conversation,
+    record: Extract<RemoteRunReplayRecord, { kind: "provider_result" }>,
+    participant: ChatParticipant,
+    state: RemoteRunReplayState
+  ): void {
+    const existingId = state.providerOutputMessageId ?? this.remoteProviderProgressMessageId(conversation, record.runId, record.participantId);
+    const existing = existingId
+      ? conversation.messages.find((message) => message.id === existingId && message.role === "participant")
+      : undefined;
+    const content = record.content.trim() || (record.ok ? existing?.content ?? "" : `@${participant.handle} remote run failed.`);
+    const metadata: ChatMessageMetadata = {
+      ...(existing?.metadata ?? {}),
+      runId: record.runId,
+      sourceMessageId: record.sourceMessageId,
+      threadId: record.threadId,
+      chatThreadRootId: record.chatThreadRootId,
+      workedMs: record.durationMs,
+      appMessageSource: "remote-run-provider"
+    };
+    if (existing) {
+      existing.content = content;
+      existing.status = record.ok ? "done" : "error";
+      existing.metadata = metadata;
+      this.recordLastMessageByParticipant(conversation, existing);
+      return;
+    }
+    const message = this.message(
+      "participant",
+      content,
+      {
+        id: participant.id,
+        kind: participant.kind,
+        label: `@${participant.handle}`,
+        model: participant.model,
+        reasoningEffort: participant.reasoningEffort
+      },
+      metadata,
+      record.ok ? "done" : "error"
+    );
+    conversation.messages.push(message);
+    this.recordLastMessageByParticipant(conversation, message);
+  }
+
+  private remoteProviderProgressMessageId(
+    conversation: Conversation,
+    runId: string,
+    participantId: string
+  ): string | undefined {
+    return conversation.messages.find((message) =>
+      message.role === "participant" &&
+      message.participantId === participantId &&
+      message.metadata?.runId === runId &&
+      (message.metadata?.appMessageSource === "remote-run-provider-output" ||
+        message.metadata?.appMessageSource === "remote-run-provider")
+    )?.id;
   }
 
   async requestToolPermissionFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
@@ -5311,6 +5480,10 @@ export class ChatService {
           ...(currentState.permissionRequestIdsByRecordId ?? {})
         },
         terminalState: currentState.terminalState ?? storedState.terminalState,
+        providerOutputMessageId: currentState.providerOutputMessageId ?? storedState.providerOutputMessageId,
+        providerOutputText: currentState.providerOutputText ?? storedState.providerOutputText,
+        providerOutputLineBuffer: currentState.providerOutputLineBuffer ?? storedState.providerOutputLineBuffer,
+        providerSessionId: currentState.providerSessionId ?? storedState.providerSessionId,
         updatedAt: currentState.updatedAt && storedState.updatedAt
           ? currentState.updatedAt >= storedState.updatedAt
             ? currentState.updatedAt
@@ -5336,11 +5509,19 @@ export class ChatService {
         : 0;
       const terminalState = typeof record.terminalState === "string" ? record.terminalState : undefined;
       const updatedAt = typeof record.updatedAt === "string" ? record.updatedAt : undefined;
+      const providerOutputMessageId = typeof record.providerOutputMessageId === "string" ? record.providerOutputMessageId : undefined;
+      const providerOutputText = typeof record.providerOutputText === "string" ? record.providerOutputText : undefined;
+      const providerOutputLineBuffer = typeof record.providerOutputLineBuffer === "string" ? record.providerOutputLineBuffer : undefined;
+      const providerSessionId = typeof record.providerSessionId === "string" ? record.providerSessionId : undefined;
       states[runId] = {
         cursorSeq,
         appliedRecordIds: this.remoteRunAppliedRecordIds(record.appliedRecordIds),
         permissionRequestIdsByRecordId: this.remoteRunStringMap(record.permissionRequestIdsByRecordId),
         terminalState,
+        providerOutputMessageId,
+        providerOutputText,
+        providerOutputLineBuffer,
+        providerSessionId,
         updatedAt
       };
     }
