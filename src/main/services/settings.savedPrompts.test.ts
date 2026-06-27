@@ -6,7 +6,6 @@ import {
   CHAT_SAVED_PROMPT_BODY_MAX_CHARS,
   CHAT_SAVED_PROMPT_LABEL_MAX_CHARS
 } from "../../shared/chatSavedPrompts";
-import { CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS } from "../../shared/chatCompletionNotifications";
 import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT } from "../../shared/chatParticipantRequests";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS } from "../../shared/cliAgentRunSettings";
 
@@ -29,7 +28,6 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     roundLimitDefault: number;
     cliAgentRunTimeoutMs: number;
     chatParticipantRequestMaxDepth: number;
-    chatCompletionNotifications: AppSettings["chatCompletionNotifications"];
     providers: AppSettings["providers"];
     chatRoleConfigs: AppSettings["chatRoleConfigs"];
     chatBehaviorRules: AppSettings["chatBehaviorRules"];
@@ -41,7 +39,6 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
-    chatCompletionNotifications: { enabled: false, thresholdMs: CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS },
     providers: [],
     chatRoleConfigs: [],
     chatBehaviorRules: [],

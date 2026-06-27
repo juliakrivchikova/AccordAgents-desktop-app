@@ -13,7 +13,6 @@ import {
   CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
   CLI_AGENT_RUN_TIMEOUT_MIN_MS
 } from "../../shared/cliAgentRunSettings";
-import { CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS } from "../../shared/chatCompletionNotifications";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MAX,
@@ -47,7 +46,6 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
-    chatCompletionNotifications: { enabled: false, thresholdMs: CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS },
     providers: [],
     chatRoleConfigs: [],
     chatBehaviorRules: [],
@@ -67,7 +65,6 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     roundLimitDefault: stored.roundLimitDefault,
     cliAgentRunTimeoutMs: service.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
     chatParticipantRequestMaxDepth: service.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
-    chatCompletionNotifications: stored.chatCompletionNotifications,
     providers: stored.providers,
     chatRoleConfigs: stored.chatRoleConfigs,
     chatBehaviorRules: stored.chatBehaviorRules,
@@ -134,7 +131,6 @@ test("saveChatBehaviorRuleConfig rejects oversized behavior rules", async () => 
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
-    chatCompletionNotifications: { enabled: false, thresholdMs: CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS },
     providers: [],
     chatRoleConfigs: [],
     chatBehaviorRules: [],
@@ -148,7 +144,6 @@ test("saveChatBehaviorRuleConfig rejects oversized behavior rules", async () => 
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
-    chatCompletionNotifications: { enabled: false, thresholdMs: CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS },
     providers: [],
     chatRoleConfigs: [],
     chatBehaviorRules: [],

@@ -2,7 +2,6 @@ import type {
   AgentHealth,
   AppSettings,
   ChatBehaviorRuleConfigUpdate,
-  ChatCompletionNotificationSettingsUpdate,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
   ChatSavedPromptConfigUpdate,
@@ -37,7 +36,6 @@ export function SettingsView(props: {
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
-  setChatCompletionNotifications: (update: ChatCompletionNotificationSettingsUpdate) => Promise<void>;
   sidebarCollapsed: boolean;
   onExpandSidebar: () => void;
   onClose: () => void;
@@ -122,12 +120,10 @@ export function SettingsView(props: {
             repoFileOpenAction={props.settings.repoFileOpenAction}
             cliAgentRunTimeoutMs={props.settings.cliAgentRunTimeoutMs}
             chatParticipantRequestMaxDepth={props.settings.chatParticipantRequestMaxDepth}
-            chatCompletionNotifications={props.settings.chatCompletionNotifications}
             updateProvider={props.updateProvider}
             setRepoFileOpenPreference={props.setRepoFileOpenPreference}
             setCliAgentRunTimeoutMs={props.setCliAgentRunTimeoutMs}
             setChatParticipantRequestMaxDepth={props.setChatParticipantRequestMaxDepth}
-            setChatCompletionNotifications={props.setChatCompletionNotifications}
           />
         )}
       </div>

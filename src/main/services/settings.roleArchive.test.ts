@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SettingsService } from "./settings";
 import type { AppSettings, ChatParticipantConfig, ChatRoleConfig } from "../../shared/types";
-import { CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS } from "../../shared/chatCompletionNotifications";
 import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT } from "../../shared/chatParticipantRequests";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS } from "../../shared/cliAgentRunSettings";
 
@@ -39,7 +38,6 @@ function settingsServiceWith(
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
-    chatCompletionNotifications: { enabled: false, thresholdMs: CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS },
     providers: [],
     chatRoleConfigs: initial.chatRoleConfigs ?? [],
     chatBehaviorRules: [],
@@ -57,7 +55,6 @@ function settingsServiceWith(
     roundLimitDefault: stored.roundLimitDefault,
     cliAgentRunTimeoutMs: stored.cliAgentRunTimeoutMs,
     chatParticipantRequestMaxDepth: stored.chatParticipantRequestMaxDepth,
-    chatCompletionNotifications: stored.chatCompletionNotifications,
     providers: stored.providers,
     chatRoleConfigs: stored.chatRoleConfigs,
     chatBehaviorRules: stored.chatBehaviorRules,

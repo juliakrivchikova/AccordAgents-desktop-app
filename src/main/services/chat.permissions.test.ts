@@ -4014,7 +4014,6 @@ function testService(options: {
     cliAgentRunTimeoutMs: 24 * 60 * 60_000,
     chatParticipantRequestMaxDepth: options.settings?.chatParticipantRequestMaxDepth
       ?? CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
-    chatCompletionNotifications: { enabled: false, thresholdMs: 5 * 60_000 },
     providers: [
       { kind: "codex-cli", label: "Codex CLI", enabled: true },
       { kind: "claude-code", label: "Claude Code", enabled: true }

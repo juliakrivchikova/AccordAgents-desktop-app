@@ -12,8 +12,6 @@ import type {
   ChatAgentMode,
   ChatAgentPermissions,
   ChatAppToolCapability,
-  ChatCompletionNotificationSettings,
-  ChatCompletionNotificationSettingsUpdate,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
   ChatParticipantSeedState,
@@ -27,7 +25,6 @@ import type {
 } from "../../shared/types";
 import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { normalizeChatAppToolCapabilities } from "../../shared/appTools";
-import { normalizeChatCompletionNotificationSettings } from "../../shared/chatCompletionNotifications";
 import { normalizeChatParticipantRequestMaxDepth } from "../../shared/chatParticipantRequests";
 import { normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
 import {
@@ -52,7 +49,6 @@ interface StoredSettings {
   roundLimitDefault: number;
   cliAgentRunTimeoutMs?: number;
   chatParticipantRequestMaxDepth?: number;
-  chatCompletionNotifications?: ChatCompletionNotificationSettings;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
   providers: StoredProviderSettings[];
@@ -1583,7 +1579,6 @@ export class SettingsService {
       roundLimitDefault: stored.roundLimitDefault,
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
-      chatCompletionNotifications: normalizeChatCompletionNotificationSettings(stored.chatCompletionNotifications),
       lastRepoPath: stored.lastRepoPath,
       repoFileOpenAction: stored.repoFileOpenAction,
       chatRoleConfigs: stored.chatRoleConfigs ?? DEFAULT_CHAT_ROLES,
@@ -2181,18 +2176,6 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
-  async getChatCompletionNotificationSettings(): Promise<ChatCompletionNotificationSettings> {
-    const stored = await this.readStored();
-    return normalizeChatCompletionNotificationSettings(stored.chatCompletionNotifications);
-  }
-
-  async setChatCompletionNotificationSettings(update: ChatCompletionNotificationSettingsUpdate): Promise<AppSettings> {
-    const stored = await this.readStored();
-    stored.chatCompletionNotifications = normalizeChatCompletionNotificationSettings(update);
-    await this.writeStored(stored);
-    return this.getPublicSettings();
-  }
-
   private async readStored(): Promise<StoredSettings> {
     try {
       const raw = await readFile(this.settingsPath, "utf8");
@@ -2231,7 +2214,6 @@ export class SettingsService {
       roundLimitDefault: this.defaultRoundLimit(settings),
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(settings.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(settings.chatParticipantRequestMaxDepth),
-      chatCompletionNotifications: normalizeChatCompletionNotificationSettings(settings.chatCompletionNotifications),
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
       repoFileOpenAction: this.normalizeRepoFileOpenAction(settings.repoFileOpenAction),
       providers,

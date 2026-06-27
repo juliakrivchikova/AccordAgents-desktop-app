@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS } from "../../shared/chatCompletionNotifications";
 import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT } from "../../shared/chatParticipantRequests";
 import { ChatService } from "./chat";
 import type { AppSettings, ChatParticipant, ChatRoleConfig } from "../../shared/types";
@@ -26,7 +25,6 @@ function chatServiceWithRoles(roles: ChatRoleConfig[]) {
         roundLimitDefault: 1,
         cliAgentRunTimeoutMs: 1,
         chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
-        chatCompletionNotifications: { enabled: false, thresholdMs: CHAT_COMPLETION_NOTIFICATION_DEFAULT_THRESHOLD_MS },
         providers: [],
         chatRoleConfigs: roles,
         chatBehaviorRules: [],

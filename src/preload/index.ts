@@ -4,7 +4,6 @@ import type {
   AddChatParticipantRequest,
   ChatBehaviorRuleConfigUpdate,
   ChatSavedPromptConfigUpdate,
-  ChatCompletionNotificationSettingsUpdate,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
@@ -51,8 +50,6 @@ const bridge: AppBridge = {
   setCliAgentRunTimeoutMs: (timeoutMs: number) => ipcRenderer.invoke("settings:set-cli-agent-run-timeout", timeoutMs),
   setChatParticipantRequestMaxDepth: (maxDepth: number) =>
     ipcRenderer.invoke("settings:set-chat-participant-request-max-depth", maxDepth),
-  setChatCompletionNotifications: (update: ChatCompletionNotificationSettingsUpdate) =>
-    ipcRenderer.invoke("settings:set-chat-completion-notifications", update),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateProviderSettings: (update: ProviderSettingsUpdate) => ipcRenderer.invoke("settings:update-provider", update),
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => ipcRenderer.invoke("settings:save-chat-role", update),

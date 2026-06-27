@@ -1,6 +1,5 @@
 import type {
   ChatBehaviorRuleConfigUpdate,
-  ChatCompletionNotificationSettingsUpdate,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
   ChatSavedPromptConfigUpdate,
@@ -15,7 +14,6 @@ export interface SettingsActions {
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
-  setChatCompletionNotifications: (update: ChatCompletionNotificationSettingsUpdate) => Promise<void>;
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => Promise<void>;
   archiveChatRoleConfig: (id: string) => Promise<void>;
   saveChatBehaviorRuleConfig: (update: ChatBehaviorRuleConfigUpdate) => Promise<void>;
@@ -41,10 +39,6 @@ export function useSettingsActions(state: AppState): SettingsActions {
 
   async function setChatParticipantRequestMaxDepth(maxDepth: number): Promise<void> {
     await updateSettings(() => window.consensus.setChatParticipantRequestMaxDepth(maxDepth));
-  }
-
-  async function setChatCompletionNotifications(update: ChatCompletionNotificationSettingsUpdate): Promise<void> {
-    await updateSettings(() => window.consensus.setChatCompletionNotifications(update));
   }
 
   async function saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<void> {
@@ -124,7 +118,6 @@ export function useSettingsActions(state: AppState): SettingsActions {
     setRepoFileOpenPreference,
     setCliAgentRunTimeoutMs,
     setChatParticipantRequestMaxDepth,
-    setChatCompletionNotifications,
     saveChatRoleConfig,
     archiveChatRoleConfig,
     saveChatBehaviorRuleConfig,

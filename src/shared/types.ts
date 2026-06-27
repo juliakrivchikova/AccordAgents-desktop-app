@@ -21,7 +21,6 @@ export interface AppSettings {
   roundLimitDefault: number;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
-  chatCompletionNotifications: ChatCompletionNotificationSettings;
   providers: ProviderSettings[];
   chatRoleConfigs: ChatRoleConfig[];
   chatBehaviorRules: ChatBehaviorRuleConfig[];
@@ -30,18 +29,6 @@ export interface AppSettings {
   chatParticipantSeedState?: ChatParticipantSeedState;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
-}
-
-export interface ChatCompletionNotificationSettings {
-  enabled: boolean;
-  thresholdMs: number;
-  webhookUrl?: string;
-}
-
-export interface ChatCompletionNotificationSettingsUpdate {
-  enabled: boolean;
-  thresholdMs: number;
-  webhookUrl?: string;
 }
 
 export interface ChatRoleConfig {
@@ -1249,7 +1236,6 @@ export interface AppBridge {
   setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<AppSettings>;
   setCliAgentRunTimeoutMs(timeoutMs: number): Promise<AppSettings>;
   setChatParticipantRequestMaxDepth(maxDepth: number): Promise<AppSettings>;
-  setChatCompletionNotifications(update: ChatCompletionNotificationSettingsUpdate): Promise<AppSettings>;
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;
