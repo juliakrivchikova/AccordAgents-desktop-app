@@ -1257,6 +1257,47 @@ test("ending local launcher keeps remote run active until terminal state", async
   assert.equal((storage.current.metadata.remoteRunHandles as any)["remote-run"].status, "completed");
 });
 
+test("remote provider_result without durationMs gets workedMs from handle timings", async () => {
+  const participant = chatParticipant("codex-cli");
+  const startedAt = "2026-06-27T22:00:00.000Z";
+  const completedAt = "2026-06-27T22:01:00.000Z";
+  const conversation = chatConversation([participant], {
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        worker: { host: "worker.example" },
+        status: "completed",
+        startedAt,
+        completedAt,
+        updatedAt: completedAt
+      }
+    }
+  });
+  (conversation.metadata.remoteRunHandles as any)["remote-run"].conversationId = conversation.id;
+  const { service, storage } = testService({ conversation });
+
+  await service.applyRemoteRunReplayRecord({
+    kind: "provider_result",
+    id: "remote-run:final",
+    seq: 1,
+    runId: "remote-run",
+    conversationId: conversation.id,
+    participantId: participant.id,
+    ok: true,
+    content: "Remote answer."
+  } as any);
+
+  const msg = storage.current.messages.find(
+    (item: Conversation["messages"][number]) =>
+      item.role === "participant" && item.metadata?.runId === "remote-run"
+  );
+  assert.ok(msg, "expected a finalized remote participant message");
+  assert.equal(msg?.status, "done");
+  assert.equal(msg?.metadata?.workedMs, 60_000);
+});
+
 test("cancelRun marks remote run failed when remote cancel delivery fails", async () => {
   const participant = chatParticipant("codex-cli");
   const now = "2026-06-27T22:00:00.000Z";

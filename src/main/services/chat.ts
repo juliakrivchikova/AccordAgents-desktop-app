@@ -1374,6 +1374,20 @@ export class ChatService {
         };
       }
 
+      // Projection timing: log when each remote phase record lands on the
+      // desktop. Joined with the worker spool (events.jsonl, which timestamps
+      // every phase on the box), this shows end-to-end where a remote run
+      // spends time -- launch, provider output, permission waits, reconnect
+      // gaps, terminal -- so slow/"stuck" remote runs are diagnosable.
+      void this.debugLogs.write("remote-run.replay.timing", {
+        conversationId: record.conversationId,
+        runId: record.runId,
+        kind: record.kind,
+        seq: record.seq,
+        workerSeq: record.workerSeq,
+        projectedAtMs: Date.now()
+      });
+
       let permissionResult: ChatPermissionRequestToolResult | undefined;
       let statePatch: Partial<RemoteRunReplayState> = {};
       if (record.kind === "output_text") {
@@ -1832,7 +1846,11 @@ export class ChatService {
       sourceMessageId: record.sourceMessageId,
       threadId: record.threadId,
       chatThreadRootId: record.chatThreadRootId,
-      workedMs: record.durationMs,
+      // The remote worker's provider_result does not carry a durationMs, so the
+      // desktop never timed the run (it ran on the box). Fall back to the run
+      // handle's startedAt -> completedAt so the "Worked for ..." chip renders
+      // for remote runs like it does for local ones.
+      workedMs: this.remoteRunWorkedMs(conversation, record.runId, record.durationMs),
       appMessageSource: "remote-run-provider"
     };
     if (existing) {
@@ -1857,6 +1875,25 @@ export class ChatService {
     );
     conversation.messages.push(message);
     this.recordLastMessageByParticipant(conversation, message);
+  }
+
+  private remoteRunWorkedMs(
+    conversation: Conversation,
+    runId: string,
+    recordDurationMs: number | undefined
+  ): number | undefined {
+    if (typeof recordDurationMs === "number" && Number.isFinite(recordDurationMs) && recordDurationMs >= 0) {
+      return recordDurationMs;
+    }
+    const handle = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles)[runId];
+    const startedAtMs = handle?.startedAt ? Date.parse(handle.startedAt) : NaN;
+    if (!Number.isFinite(startedAtMs)) {
+      return undefined;
+    }
+    const completedAtMs = handle?.completedAt ? Date.parse(handle.completedAt) : NaN;
+    const endedAtMs = Number.isFinite(completedAtMs) ? completedAtMs : Date.now();
+    const workedMs = endedAtMs - startedAtMs;
+    return workedMs >= 0 ? workedMs : undefined;
   }
 
   private remoteProviderProgressMessageId(
