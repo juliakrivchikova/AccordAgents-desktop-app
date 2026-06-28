@@ -108,8 +108,8 @@ export function chatActivityEventsForSegment(activityEvents: ChatAgentActivityEv
       continue;
     }
     events.push({
-        ...event,
-        afterContentLength: Math.max(0, Math.min(rawOffset - segment.startOffset, contentLength))
+      ...event,
+      afterContentLength: Math.max(0, Math.min(rawOffset - segment.startOffset, contentLength))
     });
   }
   return events.sort((left, right) => {
@@ -124,7 +124,10 @@ export function chatInlineTranscriptParts(
   segment?: ChatTranscriptSegment
 ): ChatInlineTranscriptPart[] {
   const normalized = content.replace(/\r\n/g, "\n");
-  const events = segment ? chatActivityEventsForSegment(activityEvents, segment) : [...activityEvents].sort((left, right) => {
+  const events = (segment ? chatActivityEventsForSegment(activityEvents, segment) : [...activityEvents]).map((event) => ({
+    ...event,
+    afterContentLength: snapActivityOffset(normalized, activityEventOffset(event, normalized.length))
+  })).sort((left, right) => {
     const offsetDelta = activityEventOffset(left, normalized.length) - activityEventOffset(right, normalized.length);
     return offsetDelta || left.sequence - right.sequence;
   });
@@ -162,4 +165,65 @@ function normalizeComparableText(value: string): string {
 
 function activityEventOffset(event: ChatAgentActivityEvent, contentLength: number): number {
   return Math.max(0, Math.min(event.afterContentLength ?? 0, contentLength));
+}
+
+function snapActivityOffset(content: string, offset: number): number {
+  const normalizedOffset = Math.max(0, Math.min(offset, content.length));
+  if (normalizedOffset >= content.length || chatTextEndsAtSentenceOrParagraphBoundary(content.slice(0, normalizedOffset))) {
+    return normalizedOffset;
+  }
+  for (let index = normalizedOffset; index < content.length; index += 1) {
+    if (content[index] === "\n" && content[index + 1] === "\n") {
+      return index;
+    }
+    const sentenceEnd = sentenceBoundaryEndAt(content, index);
+    if (sentenceEnd !== undefined) {
+      return sentenceEnd;
+    }
+  }
+  return content.length;
+}
+
+export function chatTextEndsAtSentenceOrParagraphBoundary(text: string): boolean {
+  const normalized = text.replace(/\r\n/g, "\n").replace(/[ \t\f\v]+$/g, "");
+  if (!normalized) {
+    return false;
+  }
+  if (/[\r\n]$/.test(normalized)) {
+    return true;
+  }
+  for (let index = 0; index < normalized.length; index += 1) {
+    if (sentenceBoundaryEndAt(normalized, index) === normalized.length) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function sentenceBoundaryEndAt(content: string, punctuationIndex: number): number | undefined {
+  if (!/[.!?:]/.test(content[punctuationIndex] ?? "")) {
+    return undefined;
+  }
+  let end = consumeClosingBoundaryChars(content, punctuationIndex + 1);
+  if (content[end] === " " && content[end + 1] === "(") {
+    const parentheticalEnd = content.indexOf(")", end + 2);
+    if (parentheticalEnd > end + 2) {
+      const afterParenthetical = consumeClosingBoundaryChars(content, parentheticalEnd + 1);
+      if (afterParenthetical >= content.length || /\s/.test(content[afterParenthetical])) {
+        return afterParenthetical;
+      }
+    }
+  }
+  if (end >= content.length || /\s/.test(content[end])) {
+    return end;
+  }
+  return undefined;
+}
+
+function consumeClosingBoundaryChars(content: string, start: number): number {
+  let cursor = start;
+  while (/["')\]}”’]/.test(content[cursor] ?? "")) {
+    cursor += 1;
+  }
+  return cursor;
 }

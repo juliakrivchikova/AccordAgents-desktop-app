@@ -211,6 +211,80 @@ test("processing transcript activity events are interleaved before and inside th
   ]);
 });
 
+test("inline transcript snaps activity rows to the next sentence boundary", () => {
+  const firstSentence = "Current EUR/RUB is about 1 EUR = 89.88 RUB.";
+  const content = `${firstSentence} Next sentence.`;
+  const event = {
+    id: "search",
+    sequence: 1,
+    kind: "web" as const,
+    label: "Using web search",
+    createdAt: NOW,
+    afterContentLength: "Current EUR/RUB is".length
+  };
+  const parts = chatInlineTranscriptParts(content, [event]);
+
+  assert.deepEqual(parts.map((part) => part.kind === "activity" ? `${part.event.id}:${part.event.afterContentLength}` : part.text), [
+    firstSentence,
+    `search:${firstSentence.length}`,
+    " Next sentence."
+  ]);
+});
+
+test("inline transcript anchors activity rows at segment end when no boundary follows", () => {
+  const content = "Streaming without terminal boundary";
+  const event = {
+    id: "tool",
+    sequence: 1,
+    kind: "tool" as const,
+    label: "Using tool",
+    createdAt: NOW,
+    afterContentLength: "Streaming".length
+  };
+  const parts = chatInlineTranscriptParts(content, [event]);
+
+  assert.deepEqual(parts.map((part) => part.kind === "activity" ? `${part.event.id}:${part.event.afterContentLength}` : part.text), [
+    content,
+    `tool:${content.length}`
+  ]);
+});
+
+test("inline transcript preserves sequence for multiple activities in one sentence", () => {
+  const content = "Current EUR/RUB is about 1 EUR = 89.88 RUB.";
+  const events = [
+    { id: "search", sequence: 1, kind: "web" as const, label: "Using web search", createdAt: NOW, afterContentLength: "Current EUR/RUB is".length },
+    { id: "read", sequence: 2, kind: "tool" as const, label: "Reading result", createdAt: NOW, afterContentLength: "Current EUR/RUB is about".length }
+  ];
+  const parts = chatInlineTranscriptParts(content, events);
+
+  assert.deepEqual(parts.map((part) => part.kind === "activity" ? `${part.event.id}:${part.event.afterContentLength}` : part.text), [
+    content,
+    `search:${content.length}`,
+    `read:${content.length}`
+  ]);
+});
+
+test("inline transcript treats parenthetical citations as sentence boundaries", () => {
+  const firstParagraph = "Current EUR/RUB is about 1 EUR = 89.88 RUB. (exchange-rates.org)";
+  const secondParagraph = "For comparison, the Bank of Russia official rate is 87.4027 RUB per EUR. (cbr.ru)";
+  const content = `${firstParagraph}\n\n${secondParagraph}`;
+  const event = {
+    id: "search",
+    sequence: 1,
+    kind: "web" as const,
+    label: "Using web search",
+    createdAt: NOW,
+    afterContentLength: "Current EUR/RUB is".length
+  };
+  const parts = chatInlineTranscriptParts(content, [event]);
+
+  assert.deepEqual(parts.map((part) => part.kind === "activity" ? `${part.event.id}:${part.event.afterContentLength}` : part.text), [
+    firstParagraph,
+    `search:${firstParagraph.length}`,
+    `\n\n${secondParagraph}`
+  ]);
+});
+
 test("processing transcript expansion exposes activity-only hidden material", () => {
   const final = "Final answer.";
   const view = chatProcessingTranscriptView(final, final);
@@ -266,13 +340,15 @@ test("processing transcript view surfaces truncation and rebases retained offset
   assert.deepEqual(chatActivityEventsForSegment(events, view.finalSegment!).map((event) => `${event.id}:${event.afterContentLength}`), ["kept:8"]);
 });
 
-test("agent progress sink keeps tool event below the following text delta", () => {
+test("agent progress sink preserves the exact activity stream offset", () => {
   const service = testService().service as any;
-  const intro = "I will use the role tool now.";
+  const intro = "Current EUR/RUB is";
+  const full = "Current EUR/RUB is about 1 EUR = 89.88 RUB.";
   const sink = service.createAgentProgressSink("run-1", () => undefined, chatParticipant("codex-cli"), "message-1");
 
-  sink.emit({ kind: "tool", text: "Using app_roles_describe_options" });
   sink.emit({ kind: "text", text: intro, cumulative: intro });
+  sink.emit({ kind: "tool", text: "Using app_roles_describe_options" });
+  sink.emit({ kind: "text", text: " about 1 EUR = 89.88 RUB.", cumulative: full });
 
   assert.equal(sink.activityEvents()[0].afterContentLength, intro.length);
 });

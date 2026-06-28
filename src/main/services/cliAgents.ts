@@ -26,6 +26,7 @@ import type {
 import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS, normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
+import { chatTextEndsAtSentenceOrParagraphBoundary } from "../../shared/processingTranscript";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
 import { cliFailureNoticeText } from "../../shared/warnings";
 import { CommandError, commandEnvironment, commandExists, ensureLoginShellEnvPrimed, runCommand, type CommandEnvironmentOptions } from "./command";
@@ -1622,7 +1623,7 @@ export class CliAgentRunner {
       if (delta) {
         pending.messages.push(delta);
         if (pending.nextAgentMessageStartsBlock) {
-          pending.streamedText = `${pending.streamedText.trimEnd()}\n\n`;
+          pending.streamedText = this.textWithAgentMessageBoundary(pending.streamedText, delta);
           pending.nextAgentMessageStartsBlock = false;
         }
         pending.streamedText += delta;
@@ -1677,8 +1678,29 @@ export class CliAgentRunner {
   }
 
   private codexAppServerFinalContent(turn: CodexAppServerPendingTurn): string {
-    const lastCompleted = [...turn.completedAgentMessages].reverse().find((message) => message.trim());
-    return (turn.finalMessage ?? lastCompleted ?? turn.messages.join("")).trim();
+    const fallback = turn.streamedText || turn.messages.join("");
+    return (fallback || turn.finalMessage || "").trim();
+  }
+
+  private textWithAgentMessageBoundary(previous: string, next: string): string {
+    const trimmedPrevious = previous.trimEnd();
+    if (!trimmedPrevious) {
+      return previous;
+    }
+    return `${trimmedPrevious}${this.agentMessageBoundarySeparator(trimmedPrevious, next)}`;
+  }
+
+  private agentMessageBoundarySeparator(previous: string, next: string): string {
+    if (!previous.trim() || !next) {
+      return "";
+    }
+    if (chatTextEndsAtSentenceOrParagraphBoundary(previous)) {
+      return "\n\n";
+    }
+    if (/^\s|^[,.;:!?)]/.test(next)) {
+      return "";
+    }
+    return " ";
   }
 
   private logCodexAppServerNotificationSummary(
@@ -2369,7 +2391,7 @@ export class CliAgentRunner {
     const streamDelta = this.extractClaudeStreamEventTextDelta(event);
     if (streamDelta) {
       if (pending.nextTextBlockStartsBlock) {
-        pending.streamedText = `${pending.streamedText.trimEnd()}\n\n`;
+        pending.streamedText = this.textWithAgentMessageBoundary(pending.streamedText, streamDelta);
         pending.nextTextBlockStartsBlock = false;
       }
       pending.streamedText += streamDelta;
@@ -2386,7 +2408,7 @@ export class CliAgentRunner {
     if (!current) {
       return;
     }
-    const content = this.extractClaudeWarmResultText(event) ?? current.messages.at(-1) ?? "";
+    const content = this.extractClaudeWarmResultText(event) ?? (current.streamedText || current.messages.join(""));
     const sessionId = this.findSessionId(event) ?? current.sessionId ?? fallbackSessionId;
     this.reportSessionId(current.onSessionId, sessionId);
     const contextUsage = buildAgentContextUsage({

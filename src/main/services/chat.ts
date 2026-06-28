@@ -11450,7 +11450,6 @@ export class ChatService {
     let activityEvents: ChatAgentActivityEvent[] = [];
     let omittedActivityEventCount = 0;
     let activitySequence = 0;
-    let pendingActivityEventIds = new Set<string>();
     let suppressed = false;
     let lastFlush = 0;
     let pendingTimer: NodeJS.Timeout | undefined;
@@ -11499,20 +11498,11 @@ export class ChatService {
         return;
       }
       if (event.kind === "text") {
-        const previousLength = cumulative.length;
         const next = event.cumulative ?? cumulative + event.text;
         if (next === cumulative) {
           return;
         }
         cumulative = next;
-        if (pendingActivityEventIds.size > 0 && cumulative.length > previousLength) {
-          activityEvents = activityEvents.map((activityEvent) =>
-            pendingActivityEventIds.has(activityEvent.id) && (activityEvent.afterContentLength ?? 0) <= previousLength
-              ? { ...activityEvent, afterContentLength: cumulative.length }
-              : activityEvent
-          );
-          pendingActivityEventIds = new Set();
-        }
         if (!suppressed && suppressIf && suppressIf(cumulative)) {
           suppressed = true;
         }
@@ -11540,14 +11530,11 @@ export class ChatService {
         status: event.activityStatus ?? "started",
         afterContentLength: cumulative.length > 0 ? cumulative.length : undefined
       };
-      pendingActivityEventIds.add(nextEvent.id);
       activityEvents = [...activityEvents, nextEvent];
       if (activityEvents.length > CHAT_ACTIVITY_EVENT_MAX_COUNT) {
         const dropped = activityEvents.length - CHAT_ACTIVITY_EVENT_MAX_COUNT;
         omittedActivityEventCount += dropped;
         activityEvents = activityEvents.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT);
-        const retainedIds = new Set(activityEvents.map((event) => event.id));
-        pendingActivityEventIds = new Set([...pendingActivityEventIds].filter((id) => retainedIds.has(id)));
       }
       dirty = true;
       scheduleFlush();
@@ -11563,7 +11550,6 @@ export class ChatService {
       activityEvents = [];
       omittedActivityEventCount = 0;
       activitySequence = 0;
-      pendingActivityEventIds = new Set();
       // Emit a snapshot so the renderer clears any prior partial content on retry.
       dirty = true;
       flush();
