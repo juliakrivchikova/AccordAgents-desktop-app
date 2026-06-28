@@ -17,6 +17,7 @@ import type {
   ChatAppToolCapability,
   ChatChoiceOption,
   ChatAccordResolutionMetadata,
+  ChatAgentActivityEvent,
   ChatImageAttachment,
   ChatImageInput,
   ChatImageMimeType,
@@ -41,6 +42,7 @@ import type {
   ChatPermissionGrant,
   ChatPendingChoice,
   ChatPendingMention,
+  ChatProcessingTranscript,
   ChatProviderKind,
   ChatRoleChangeRequest,
   ChatRoleChangeOperation,
@@ -258,6 +260,8 @@ const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
 const CHAT_SEND_MESSAGE_MAX_CONTENT_LENGTH = 200_000;
 const CHAT_SEND_MESSAGE_MAX_PER_RUN = 12;
 const CHAT_REMOVED_MESSAGE_ID_MAX = 100;
+const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 100_000;
+const CHAT_ACTIVITY_EVENT_MAX_COUNT = 80;
 const CHAT_IMAGE_MAX_ATTACHMENTS = 5;
 const CHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 const CHAT_IMAGE_MAX_DIMENSION = 8192;
@@ -3726,6 +3730,14 @@ export class ChatService {
         if (Number.isFinite(workedMs) && workedMs >= 0) {
           pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
         }
+        const activityEvents = progressSink.activityEvents();
+        if (activityEvents.length > 0) {
+          pendingMessage.metadata = { ...pendingMessage.metadata, activityEvents };
+        }
+        const processingTranscript = progressSink.processingTranscript(now);
+        if (processingTranscript) {
+          pendingMessage.metadata = { ...pendingMessage.metadata, processingTranscript };
+        }
       }
       if (!signal?.aborted && result.ok) {
         this.logMissingSelectedSkillStatus(triggerMessage, participant, pendingMessage, runId);
@@ -4992,7 +5004,9 @@ export class ChatService {
       !storedMetadata?.pendingMentions &&
       !storedMetadata?.pendingChoice &&
       !storedMetadata?.participantRequest &&
-      !storedMetadata?.queuedBehind
+      !storedMetadata?.queuedBehind &&
+      !storedMetadata?.activityEvents &&
+      !storedMetadata?.processingTranscript
     ) {
       return undefined;
     }
@@ -5026,6 +5040,12 @@ export class ChatService {
       merged.queuedBehind = storedMetadata.queuedBehind;
     } else {
       delete merged.queuedBehind;
+    }
+    if (storedMetadata?.activityEvents?.length && !currentMetadata?.activityEvents?.length) {
+      merged.activityEvents = storedMetadata.activityEvents;
+    }
+    if (storedMetadata?.processingTranscript && !currentMetadata?.processingTranscript) {
+      merged.processingTranscript = storedMetadata.processingTranscript;
     }
     return Object.keys(merged).length > 0 ? merged : undefined;
   }
@@ -11410,12 +11430,16 @@ export class ChatService {
     emit: (event: CliAgentOutputEvent) => void;
     beginAttempt: () => void;
     finish: () => void;
+    activityEvents: () => ChatAgentActivityEvent[];
+    processingTranscript: (capturedAt: string) => ChatProcessingTranscript | undefined;
   } {
     if (!progress) {
       return {
         emit: () => undefined,
         beginAttempt: () => undefined,
-        finish: () => undefined
+        finish: () => undefined,
+        activityEvents: () => [],
+        processingTranscript: () => undefined
       };
     }
     const participantLabel = `@${participant.handle}`;
@@ -11423,6 +11447,10 @@ export class ChatService {
     let finished = false;
     let cumulative = "";
     let activity: string | undefined;
+    let activityEvents: ChatAgentActivityEvent[] = [];
+    let omittedActivityEventCount = 0;
+    let activitySequence = 0;
+    let pendingActivityEventIds = new Set<string>();
     let suppressed = false;
     let lastFlush = 0;
     let pendingTimer: NodeJS.Timeout | undefined;
@@ -11447,6 +11475,7 @@ export class ChatService {
           state: "running",
           messageId,
           activity,
+          activityEvents,
           partialContent
         }
       });
@@ -11470,11 +11499,20 @@ export class ChatService {
         return;
       }
       if (event.kind === "text") {
+        const previousLength = cumulative.length;
         const next = event.cumulative ?? cumulative + event.text;
         if (next === cumulative) {
           return;
         }
         cumulative = next;
+        if (pendingActivityEventIds.size > 0 && cumulative.length > previousLength) {
+          activityEvents = activityEvents.map((activityEvent) =>
+            pendingActivityEventIds.has(activityEvent.id) && (activityEvent.afterContentLength ?? 0) <= previousLength
+              ? { ...activityEvent, afterContentLength: cumulative.length }
+              : activityEvent
+          );
+          pendingActivityEventIds = new Set();
+        }
         if (!suppressed && suppressIf && suppressIf(cumulative)) {
           suppressed = true;
         }
@@ -11486,10 +11524,31 @@ export class ChatService {
       if (!label) {
         return;
       }
-      if (label === activity) {
+      const normalizedLabel = label.replace(/\s+/g, " ");
+      if (normalizedLabel === activity) {
         return;
       }
-      activity = label;
+      activity = normalizedLabel;
+      activitySequence += 1;
+      const nextEvent: ChatAgentActivityEvent = {
+        id: `${runId}:activity:${activitySequence}`,
+        sequence: activitySequence,
+        kind: event.activityKind ?? "tool",
+        label: normalizedLabel,
+        detail: event.activityDetail?.trim() || undefined,
+        createdAt: new Date().toISOString(),
+        status: event.activityStatus ?? "started",
+        afterContentLength: cumulative.length > 0 ? cumulative.length : undefined
+      };
+      pendingActivityEventIds.add(nextEvent.id);
+      activityEvents = [...activityEvents, nextEvent];
+      if (activityEvents.length > CHAT_ACTIVITY_EVENT_MAX_COUNT) {
+        const dropped = activityEvents.length - CHAT_ACTIVITY_EVENT_MAX_COUNT;
+        omittedActivityEventCount += dropped;
+        activityEvents = activityEvents.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT);
+        const retainedIds = new Set(activityEvents.map((event) => event.id));
+        pendingActivityEventIds = new Set([...pendingActivityEventIds].filter((id) => retainedIds.has(id)));
+      }
       dirty = true;
       scheduleFlush();
     };
@@ -11501,6 +11560,10 @@ export class ChatService {
       cumulative = "";
       suppressed = false;
       activity = undefined;
+      activityEvents = [];
+      omittedActivityEventCount = 0;
+      activitySequence = 0;
+      pendingActivityEventIds = new Set();
       // Emit a snapshot so the renderer clears any prior partial content on retry.
       dirty = true;
       flush();
@@ -11529,7 +11592,43 @@ export class ChatService {
     return {
       emit: emitNow,
       beginAttempt,
-      finish
+      finish,
+      activityEvents: () => activityEvents,
+      processingTranscript: (capturedAt: string) => this.processingTranscriptFromContent(suppressed ? "" : cumulative, capturedAt, {
+        omittedActivityEventCount
+      })
+    };
+  }
+
+  private processingTranscriptFromContent(
+    content: string,
+    capturedAt: string,
+    options: { omittedActivityEventCount?: number } = {}
+  ): ChatProcessingTranscript | undefined {
+    const normalized = content.replace(/\r\n/g, "\n").trimEnd();
+    if (!normalized.trim()) {
+      return undefined;
+    }
+    const originalLength = normalized.length;
+    const omittedActivityEventCount = options.omittedActivityEventCount && options.omittedActivityEventCount > 0
+      ? options.omittedActivityEventCount
+      : undefined;
+    if (originalLength <= CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS) {
+      return {
+        content: normalized,
+        capturedAt,
+        originalLength,
+        ...(omittedActivityEventCount ? { omittedActivityEventCount } : {})
+      };
+    }
+    const retainedStart = originalLength - CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS;
+    return {
+      content: normalized.slice(retainedStart),
+      capturedAt,
+      originalLength,
+      retainedStart,
+      truncated: true,
+      ...(omittedActivityEventCount ? { omittedActivityEventCount } : {})
     };
   }
 

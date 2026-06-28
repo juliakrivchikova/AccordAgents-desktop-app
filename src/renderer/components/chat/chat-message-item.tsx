@@ -1,16 +1,11 @@
 import { useState } from "react";
-import { AlertTriangle, CheckCircle2, Copy, FileText, ListChecks, RefreshCw, Reply, Smile, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Copy, FileText, ListChecks, RefreshCw, Reply, Smile, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import type {
-  AgentContextUsage,
-  AgentRunProgress,
-  ChatParticipantRequestBatch,
-  ChatParticipant,
-  Conversation
-} from "../../../shared/types";
+import type { AgentContextUsage, AgentRunProgress, ChatParticipant, ChatParticipantRequestBatch, Conversation } from "../../../shared/types";
 import { CHAT_REACTION_EMOJIS } from "../../../shared/chatReactions";
+import { chatProcessingTranscriptView, chatProcessingTranscriptViewHasHidden } from "../../../shared/processingTranscript";
 import {
   chatDisplayContent,
   chatMessageImageAttachments,
@@ -24,7 +19,9 @@ import {
 import { formatChatTime } from "./chat-format";
 import { ChatChoiceCard } from "./chat-choice-card";
 import { ChatImageAttachmentStrip } from "./chat-image-attachments";
-import { StreamingMessageContent } from "./chat-streaming";
+import { ChatExpandedProcessingTranscript, StreamingMessageContent } from "./chat-streaming";
+import { ChatMessageReactionList } from "./chat-message-reactions";
+import { chatReplyPreviewAvatars } from "./chat-reply-preview";
 import { Avatar, avatarForMessage } from "../avatar/avatar";
 import { MarkdownText } from "../content/markdown-text";
 import { AgentAvatarWithDetails, type ParticipantCompactContext, type ParticipantCompactHandler } from "../content/participant-hover-card";
@@ -71,10 +68,12 @@ export function ChatMessageItem(props: {
   const { message } = props;
   const [copied, setCopied] = useState(false);
   const [reactionPickerOpen, setReactionPickerOpen] = useState(false);
+  const [processingTranscriptOpen, setProcessingTranscriptOpen] = useState(false);
   const author = authorForMessage(message, "chat");
   const isStreaming = message.status === "pending" && message.role === "participant";
   const streamedContent = props.liveProgress?.partialContent;
   const streamedActivity = props.liveProgress?.activity;
+  const streamedActivityEvents = props.liveProgress?.activityEvents ?? [];
   const participant = message.participantId
     ? props.participants?.find((item) => item.id === message.participantId)
     : message.role === "system"
@@ -92,7 +91,15 @@ export function ChatMessageItem(props: {
   const repoFileMentions = chatMessageRepoFileMentions(message);
   const imageAttachments = chatMessageImageAttachments(message);
   const allPendingIds = pending.map((mention) => mention.targetParticipantId);
-  const displayContent = chatDisplayContent(message, author);
+  const rawDisplayContent = chatDisplayContent(message, author);
+  const processingTranscript = message.metadata?.processingTranscript;
+  const activityEvents = message.metadata?.activityEvents ?? [];
+  const displayContent = rawDisplayContent;
+  const processingTranscriptView = !isStreaming && processingTranscript ? chatProcessingTranscriptView(processingTranscript.content, displayContent, {
+    retainedStart: processingTranscript.retainedStart,
+    truncated: processingTranscript.truncated,
+    omittedActivityEventCount: processingTranscript.omittedActivityEventCount
+  }) : undefined;
   const queuedBehind = isStreaming ? message.metadata?.queuedBehind : undefined;
   const workedMs = typeof message.metadata?.workedMs === "number" && Number.isFinite(message.metadata.workedMs) && message.metadata.workedMs >= 0
     ? message.metadata.workedMs
@@ -121,30 +128,7 @@ export function ChatMessageItem(props: {
     : `This message mentions ${pendingMentionList}.`;
   const avatar = avatarForMessage(message, author, participant);
   const replyCount = props.replyCount ?? 0;
-  const replyPreviewAvatars: Array<{ id: string; avatar: ReturnType<typeof avatarForMessage> }> = [];
-  const replyPreviewAvatarKeys = new Set<string>();
-  for (const reply of props.replyPreviewMessages ?? []) {
-    const replyAuthor = authorForMessage(reply, "chat");
-    const replyParticipant = reply.participantId
-      ? props.participants?.find((item) => item.id === reply.participantId)
-      : reply.role === "system"
-        ? props.participants?.find((item) => item.roleConfigId === CHAT_ASSISTANT_ROLE_ID)
-        : undefined;
-    const replyAvatarKey = reply.participantId
-      ? `participant:${reply.participantId}`
-      : `${reply.role}:${replyAuthor}`;
-    if (replyPreviewAvatarKeys.has(replyAvatarKey)) {
-      continue;
-    }
-    replyPreviewAvatarKeys.add(replyAvatarKey);
-    replyPreviewAvatars.push({
-      id: reply.id,
-      avatar: avatarForMessage(reply, replyAuthor, replyParticipant)
-    });
-    if (replyPreviewAvatars.length >= 3) {
-      break;
-    }
-  }
+  const replyPreviewAvatars = chatReplyPreviewAvatars(props.replyPreviewMessages, props.participants);
   const canCopy = Boolean(displayContent.trim());
   const canReact = message.status !== "pending";
   const compactContext: ParticipantCompactContext | undefined = props.inThread
@@ -160,6 +144,7 @@ export function ChatMessageItem(props: {
       reactors: message.metadata?.reactions?.[emoji] ?? []
     }))
     .filter((entry) => entry.reactors.length > 0);
+  const hasProcessingTranscript = Boolean(processingTranscriptView && chatProcessingTranscriptViewHasHidden(processingTranscriptView, activityEvents));
 
   async function copyMessage(): Promise<void> {
     if (!canCopy) {
@@ -223,6 +208,17 @@ export function ChatMessageItem(props: {
                 onClick={() => props.onStopRun?.(message.metadata!.runId!)}
               />
             )}
+            {hasProcessingTranscript && (
+              <IconButton
+                className={MESSAGE_ACTION_CLASS}
+                size="xs"
+                icon={processingTranscriptOpen ? ChevronUp : ChevronDown}
+                label={processingTranscriptOpen ? "Hide full stream" : "Show full stream"}
+                tooltip={processingTranscriptOpen ? "Hide full stream" : "Show full stream"}
+                pressed={processingTranscriptOpen}
+                onClick={() => setProcessingTranscriptOpen((open) => !open)}
+              />
+            )}
             <IconButton
               className={MESSAGE_ACTION_CLASS}
               size="xs"
@@ -277,7 +273,7 @@ export function ChatMessageItem(props: {
                   Queued
                 </span>
               ) : (
-                <RosterStatusIndicator status={props.participantStatusById.get(message.participantId ?? "") ?? "idle"} />
+                <RosterStatusIndicator status={isStreaming ? "running" : props.participantStatusById.get(message.participantId ?? "") ?? "idle"} />
               )
             )}
             <span className="message-when">{formatChatTime(message.createdAt)}</span>
@@ -288,9 +284,20 @@ export function ChatMessageItem(props: {
           {showWorkedRow && <WorkedRow workedMs={workedMs} />}
           <div className="message-content">
             {isStreaming ? (
-              <StreamingMessageContent content={streamedContent} activity={streamedActivity} startedAt={message.createdAt} />
+              <StreamingMessageContent
+                content={streamedContent}
+                activity={streamedActivity}
+                activityEvents={streamedActivityEvents}
+                startedAt={message.createdAt}
+              />
             ) : (
-              <MarkdownText content={displayContent} />
+              <>
+                {hasProcessingTranscript && processingTranscriptOpen && processingTranscriptView ? (
+                  <ChatExpandedProcessingTranscript view={processingTranscriptView} activityEvents={activityEvents} />
+                ) : (
+                  <MarkdownText content={displayContent} />
+                )}
+              </>
             )}
           </div>
           {queuedBehind && (
@@ -313,27 +320,7 @@ export function ChatMessageItem(props: {
           {imageAttachments.length > 0 && (
             <ChatImageAttachmentStrip conversationId={props.conversationId} attachments={imageAttachments} />
           )}
-          {reactionEntries.length > 0 && (
-            <div className="chat-message-reactions" aria-label="Message reactions">
-              {reactionEntries.map((entry) => {
-                const userReacted = entry.reactors.some((reactor) => reactor.actorKind === "user" && reactor.actorId === "user");
-                const actorLabels = entry.reactors.map((reactor) => reactor.actorLabel).join(", ");
-                return (
-                  <button
-                    type="button"
-                    className={`chat-reaction-chip ${userReacted ? "selected" : ""}`}
-                    title={actorLabels}
-                    aria-label={`${entry.emoji} reaction by ${actorLabels}`}
-                    onClick={() => toggleReaction(entry.emoji)}
-                    key={entry.emoji}
-                  >
-                    <span>{entry.emoji}</span>
-                    <strong>{entry.reactors.length}</strong>
-                  </button>
-                );
-              })}
-            </div>
-          )}
+          <ChatMessageReactionList reactions={reactionEntries} onToggleReaction={toggleReaction} />
           {participantRequests.map((request) => (
             <div className={`chat-approval-note ${participantRequestNoteClass(request)}`} key={request.id}>
               {isNegativeParticipantRequestStatus(request.status) && <AlertTriangle size={14} aria-hidden />}

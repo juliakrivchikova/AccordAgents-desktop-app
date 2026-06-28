@@ -620,7 +620,31 @@ export interface ChatMessageMetadata {
   workedMs?: number;
   queuedBehind?: { handle: string };
   appMessageSource?: string;
+  activityEvents?: ChatAgentActivityEvent[];
+  processingTranscript?: ChatProcessingTranscript;
   accordResolution?: ChatAccordResolutionMetadata;
+}
+
+export type ChatAgentActivityKind = "tool" | "command" | "file-edit" | "web" | "approval" | "status";
+
+export interface ChatAgentActivityEvent {
+  id: string;
+  sequence: number;
+  kind: ChatAgentActivityKind;
+  label: string;
+  detail?: string;
+  createdAt: string;
+  status?: "started" | "completed" | "failed";
+  afterContentLength?: number;
+}
+
+export interface ChatProcessingTranscript {
+  content: string;
+  capturedAt: string;
+  originalLength: number;
+  retainedStart?: number;
+  truncated?: boolean;
+  omittedActivityEventCount?: number;
 }
 
 export interface ChatLastMessageByParticipantEntry {
@@ -1083,6 +1107,7 @@ export interface AgentRunProgress {
   participantLabel: string;
   state: "running" | "finished";
   activity?: string;
+  activityEvents?: ChatAgentActivityEvent[];
   messageId?: string;
   partialContent?: string;
 }

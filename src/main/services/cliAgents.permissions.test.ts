@@ -8,6 +8,24 @@ function makeRunner(): CliAgentRunner {
   return new CliAgentRunner();
 }
 
+function makeCodexPendingTurn(overrides: Partial<Record<string, unknown>> = {}) {
+  const timer = setTimeout(() => undefined, 1);
+  clearTimeout(timer);
+  return {
+    startedAt: Date.now(),
+    threadId: "thread-1",
+    messages: [],
+    streamedText: "",
+    completedAgentMessages: [],
+    nextAgentMessageStartsBlock: false,
+    timer,
+    onOutput: undefined,
+    resolve: undefined,
+    reject: undefined,
+    ...overrides
+  };
+}
+
 test("parseClaudeModelPickerOutput extracts aliases and default model from picker text", () => {
   const output = [
     "\u001b[?25lSelect m\u001b[12Gdel",
@@ -31,6 +49,85 @@ test("parseClaudeModelPickerOutput extracts aliases and default model from picke
     { id: "claude-sonnet-4-6[1m]", recommended: false },
     { id: "haiku", recommended: false }
   ]);
+});
+
+test("codex app-server stream keeps token deltas joined inside one agent message", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event)
+  });
+  const participant = { id: "p1", label: "Agent" };
+
+  runner.handleCodexAppServerNotification(
+    { method: "item/started", params: { item: { type: "agentMessage" } } },
+    participant,
+    pending,
+    () => pending,
+    (error: Error) => { throw error; }
+  );
+  runner.handleCodexAppServerNotification(
+    { method: "item/agentMessage/delta", params: { delta: "hel" } },
+    participant,
+    pending,
+    () => pending,
+    (error: Error) => { throw error; }
+  );
+  runner.handleCodexAppServerNotification(
+    { method: "item/agentMessage/delta", params: { delta: "lo" } },
+    participant,
+    pending,
+    () => pending,
+    (error: Error) => { throw error; }
+  );
+
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "hello");
+});
+
+test("codex app-server stream separates consecutive agent message items but finalizes to the last one", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const resolved: unknown[] = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+
+  for (const text of ["first.", "second."]) {
+    runner.handleCodexAppServerNotification(
+      { method: "item/started", params: { item: { type: "agentMessage" } } },
+      participant,
+      pending,
+      () => pending,
+      fail
+    );
+    runner.handleCodexAppServerNotification(
+      { method: "item/agentMessage/delta", params: { delta: text } },
+      participant,
+      pending,
+      () => pending,
+      fail
+    );
+    runner.handleCodexAppServerNotification(
+      { method: "item/completed", params: { item: { type: "agentMessage", text } } },
+      participant,
+      pending,
+      () => pending,
+      fail
+    );
+  }
+  runner.handleCodexAppServerNotification(
+    { method: "turn/completed", params: { turn: { status: "completed" } } },
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "first.\n\nsecond.");
+  assert.equal((resolved[0] as { content: string }).content, "second.");
 });
 
 function chatOptions(overrides: {

@@ -41,6 +41,13 @@ import type {
   Conversation,
   ParticipantConfig
 } from "../../shared/types";
+import {
+  chatActivityEventsForSegment,
+  chatInlineTranscriptParts,
+  chatProcessingTranscriptPrefix,
+  chatProcessingTranscriptView,
+  chatProcessingTranscriptViewHasHidden
+} from "../../shared/processingTranscript";
 
 const NOW = "2026-05-17T12:00:00.000Z";
 
@@ -95,6 +102,179 @@ test("permission normalization is idempotent and dedupes structured grants", () 
     "Read"
   ]);
   assert.equal(chatAgentPermissionsEqual(normalized, raw as never), true);
+});
+
+test("processing transcript metadata preserves visible stream text", () => {
+  const service = testService().service as any;
+
+  assert.deepEqual(service.processingTranscriptFromContent("partial reply\n", NOW), {
+    content: "partial reply",
+    capturedAt: NOW,
+    originalLength: "partial reply".length
+  });
+  assert.equal(service.processingTranscriptFromContent("   ", NOW), undefined);
+});
+
+test("processing transcript metadata caps oversized streams to the latest text", () => {
+  const service = testService().service as any;
+  const content = `${"a".repeat(100_010)}tail`;
+  const transcript = service.processingTranscriptFromContent(content, NOW);
+
+  assert.equal(transcript.content.length, 100_000);
+  assert.equal(transcript.content.endsWith("tail"), true);
+  assert.equal(transcript.originalLength, content.length);
+  assert.equal(transcript.retainedStart, content.length - 100_000);
+  assert.equal(transcript.truncated, true);
+});
+
+test("processing transcript metadata records omitted activity event count", () => {
+  const service = testService().service as any;
+  const transcript = service.processingTranscriptFromContent("partial reply", NOW, { omittedActivityEventCount: 3 });
+
+  assert.equal(transcript.omittedActivityEventCount, 3);
+});
+
+test("processing transcript expansion hides when transcript only contains the final answer", () => {
+  const final = "Current EUR/RUB is about **89.8 RUB for 1 EUR**.";
+
+  assert.equal(chatProcessingTranscriptPrefix(final, final), "");
+  assert.equal(chatProcessingTranscriptPrefix(`\n${final}\n`, final), "");
+});
+
+test("processing transcript expansion returns only text before the final answer", () => {
+  const final = "Final answer.";
+
+  assert.equal(chatProcessingTranscriptPrefix(`Checking source...\n\n${final}`, final), "Checking source...");
+});
+
+test("processing transcript view keeps stored content verbatim for heuristic-looking final answers", () => {
+  const content = "I'll check the box on Friday — that's my final recommendation, ship it.\n\nThe deploy window is clear.";
+  const view = chatProcessingTranscriptView(content, content);
+
+  assert.equal(view.leadingSegments.length, 0);
+  assert.equal(view.finalSegment?.content, content);
+  assert.equal(view.renderFinalContent, true);
+});
+
+test("processing transcript view does not collapse multi-step final answers to a fragment", () => {
+  const content = "I'll create the schema first.\n\nThen I'll verify it.\n\nDone.";
+  const view = chatProcessingTranscriptView(content, content);
+
+  assert.equal(view.leadingSegments.length, 0);
+  assert.equal(view.finalSegment?.content, content);
+});
+
+test("processing transcript view does not split markdown fences with paragraph heuristics", () => {
+  const content = "I'll show the exact block:\n\n```ts\nconst value = 1;\n\nconst next = 2;\n```\n\nUse both values.";
+  const view = chatProcessingTranscriptView(content, content);
+
+  assert.equal(view.finalSegment?.content, content);
+  assert.equal(view.leadingSegments.length, 0);
+});
+
+test("processing transcript view keeps all-processing-looking content intact", () => {
+  const content = "Checking the release notes.\n\nOK";
+  const view = chatProcessingTranscriptView(content, content);
+
+  assert.equal(view.finalSegment?.content, content);
+  assert.equal(view.renderFinalContent, true);
+});
+
+test("processing transcript activity events are interleaved before and inside the final answer", () => {
+  const first = "I’ll check the available roles first so I don’t duplicate an existing medical-specialist role, then I’ll request the new role for app approval.";
+  const second = "No existing specialist role matches this, so I’m creating a custom `Gastroenterologist` role with medical-safety boundaries and practical digestive-health guidance.";
+  const final = "Requested a new `Gastroenterologist` role. It’s pending your approval in the app.";
+  const content = [first, second, final].join("\n\n");
+  const prefix = chatProcessingTranscriptPrefix(content, final);
+  const view = chatProcessingTranscriptView(content, final);
+  const events = [
+    { id: "describe", sequence: 1, kind: "tool" as const, label: "Using app_roles_describe_options", createdAt: NOW, afterContentLength: first.length },
+    { id: "request", sequence: 2, kind: "tool" as const, label: "Using app_roles_request_change", createdAt: NOW, afterContentLength: [first, second].join("\n\n").length },
+    { id: "final", sequence: 3, kind: "tool" as const, label: "Using final_check", createdAt: NOW, afterContentLength: content.length - 12 }
+  ];
+  const prefixSegment = view.leadingSegments[0];
+  const finalSegment = view.finalSegment!;
+
+  const prefixEvents = chatActivityEventsForSegment(events, prefixSegment);
+  const finalEvents = chatActivityEventsForSegment(events, finalSegment);
+  const parts = chatInlineTranscriptParts(prefix, events, prefixSegment);
+
+  assert.equal(prefix, [first, second].join("\n\n"));
+  assert.equal(view.renderFinalContent, true);
+  assert.deepEqual(prefixEvents.map((event) => event.id), ["describe", "request"]);
+  assert.deepEqual(finalEvents.map((event) => event.id), ["final"]);
+  assert.deepEqual(parts.map((part) => part.kind === "activity" ? part.event.id : part.text.trim()), [
+    first,
+    "describe",
+    second,
+    "request"
+  ]);
+});
+
+test("processing transcript expansion exposes activity-only hidden material", () => {
+  const final = "Final answer.";
+  const view = chatProcessingTranscriptView(final, final);
+  const events = [
+    { id: "tool", sequence: 1, kind: "tool" as const, label: "Using web search", createdAt: NOW }
+  ];
+
+  assert.equal(chatProcessingTranscriptPrefix(final, final), "");
+  assert.equal(chatProcessingTranscriptViewHasHidden(view, events), true);
+  assert.deepEqual(chatActivityEventsForSegment(events, view.finalSegment!).map((event) => event.id), ["tool"]);
+});
+
+test("processing transcript expansion never duplicates a non-trailing final answer", () => {
+  const final = "Final answer.";
+  const transcript = `Setup.\n\n${final}\n\nFollow-up tool output.`;
+  const view = chatProcessingTranscriptView(transcript, final);
+
+  assert.equal(view.renderFinalContent, false);
+  assert.equal(view.leadingSegments[0].content, transcript);
+  assert.equal(chatProcessingTranscriptPrefix(transcript, final), "");
+});
+
+test("processing transcript boundary activity belongs to the final segment only", () => {
+  const prefix = "I will use a tool.";
+  const final = "Final answer.";
+  const transcript = `${prefix}\n\n${final}`;
+  const view = chatProcessingTranscriptView(transcript, final);
+  const event = {
+    id: "tool",
+    sequence: 1,
+    kind: "tool" as const,
+    label: "Using final_check",
+    createdAt: NOW,
+    afterContentLength: prefix.length + 2
+  };
+
+  assert.deepEqual(chatActivityEventsForSegment([event], view.leadingSegments[0]).map((item) => item.id), []);
+  assert.deepEqual(chatActivityEventsForSegment([event], view.finalSegment!).map((item) => item.id), ["tool"]);
+});
+
+test("processing transcript view surfaces truncation and rebases retained offsets", () => {
+  const view = chatProcessingTranscriptView("retained text", "retained text", {
+    retainedStart: 50,
+    truncated: true,
+    omittedActivityEventCount: 2
+  });
+  const events = [
+    { id: "old", sequence: 1, kind: "tool" as const, label: "Old", createdAt: NOW, afterContentLength: 10 },
+    { id: "kept", sequence: 2, kind: "tool" as const, label: "Kept", createdAt: NOW, afterContentLength: 58 }
+  ];
+
+  assert.deepEqual(view.notices, ["Earlier stream output omitted.", "2 earlier activities omitted."]);
+  assert.deepEqual(chatActivityEventsForSegment(events, view.finalSegment!).map((event) => `${event.id}:${event.afterContentLength}`), ["kept:8"]);
+});
+
+test("agent progress sink keeps tool event below the following text delta", () => {
+  const service = testService().service as any;
+  const intro = "I will use the role tool now.";
+  const sink = service.createAgentProgressSink("run-1", () => undefined, chatParticipant("codex-cli"), "message-1");
+
+  sink.emit({ kind: "tool", text: "Using app_roles_describe_options" });
+  sink.emit({ kind: "text", text: intro, cumulative: intro });
+
+  assert.equal(sink.activityEvents()[0].afterContentLength, intro.length);
 });
 
 test("applyPreparedPermissionChange is the merge-additions path for shell rules and Claude native tools", () => {

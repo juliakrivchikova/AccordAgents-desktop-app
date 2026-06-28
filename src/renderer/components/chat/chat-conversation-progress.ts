@@ -1,5 +1,6 @@
 import type {
   AgentRunProgress,
+  ChatAgentActivityEvent,
   ChatAppToolApproval,
   ChatMessage,
   ReviewProgress
@@ -11,6 +12,7 @@ export interface ChatThinkingRow {
   participantId?: string;
   participantLabel: string;
   activity?: string;
+  activityEvents?: ChatAgentActivityEvent[];
   startedAt: string;
   updatedAt: string;
 }
@@ -49,6 +51,7 @@ export function chatThinkingRows(progress: ReviewProgress[]): ChatThinkingRow[] 
       participantId: agentProgress.participantId ?? current?.participantId,
       participantLabel,
       activity: agentProgress.activity?.trim() || current?.activity,
+      activityEvents: agentProgress.activityEvents ?? current?.activityEvents,
       startedAt: current?.startedAt ?? item.createdAt,
       updatedAt: item.createdAt
     });

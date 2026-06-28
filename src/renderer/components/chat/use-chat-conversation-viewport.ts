@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer, type VirtualItem, type Virtualizer } from "@tanstack/react-virtual";
 
 import type { ChatMessage, Conversation, ReviewProgress } from "../../../shared/types";
@@ -36,6 +36,8 @@ export function useChatConversationViewport(props: {
   chatVirtualItems: VirtualItem[];
   chatVirtualizer: Virtualizer<HTMLDivElement, Element>;
   focusChatMessage: (messageId: string, threadRootId?: string) => boolean;
+  isStuckToBottom: boolean;
+  scrollToChatBottom: () => void;
   timelineRef: React.RefObject<HTMLDivElement>;
   updateStickToBottom: () => void;
   viewRef: React.RefObject<HTMLDivElement>;
@@ -47,6 +49,7 @@ export function useChatConversationViewport(props: {
   const pendingFocusDeadlineRef = useRef<number>(0);
   const loadingFocusMessageIdRef = useRef<string | undefined>();
   const stickToBottomRef = useRef(true);
+  const [isStuckToBottom, setIsStuckToBottom] = useState(true);
   const forceStickToBottomRef = useRef(false);
   const previousMessageCountRef = useRef(props.topLevelMessages.length);
   const chatVirtualizer = useVirtualizer({
@@ -68,12 +71,17 @@ export function useChatConversationViewport(props: {
   });
   const chatVirtualItems = chatVirtualizer.getVirtualItems();
 
+  function setStickToBottom(next: boolean): void {
+    stickToBottomRef.current = next;
+    setIsStuckToBottom((current) => (current === next ? current : next));
+  }
+
   function updateStickToBottom(): void {
     const timeline = timelineRef.current;
     if (!timeline) {
       return;
     }
-    stickToBottomRef.current = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 96;
+    setStickToBottom(timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 96);
     if (timeline.scrollTop < 96 && props.hasOlderMessages && !props.olderMessagesLoading) {
       props.onLoadOlderMessages();
     }
@@ -98,6 +106,12 @@ export function useChatConversationViewport(props: {
     });
     window.setTimeout(scrollToChatBottom, 80);
     window.setTimeout(scrollToChatBottom, 180);
+  }
+
+  function scrollToLatest(): void {
+    forceStickToBottomRef.current = true;
+    scheduleScrollToChatBottom();
+    setStickToBottom(true);
   }
 
   function scheduleFocusRenderedMessage(messageId: string): void {
@@ -222,7 +236,7 @@ export function useChatConversationViewport(props: {
     pendingFocusThreadRootIdRef.current = undefined;
     pendingFocusDeadlineRef.current = 0;
     loadingFocusMessageIdRef.current = undefined;
-    stickToBottomRef.current = true;
+    setStickToBottom(true);
     forceStickToBottomRef.current = true;
     scheduleScrollToChatBottom();
   }, [props.conversationId]);
@@ -265,7 +279,7 @@ export function useChatConversationViewport(props: {
       return;
     }
     scheduleScrollToChatBottom();
-    stickToBottomRef.current = true;
+    setStickToBottom(true);
     if (messageCountChanged) {
       forceStickToBottomRef.current = false;
     }
@@ -274,6 +288,9 @@ export function useChatConversationViewport(props: {
     props.latestMessage?.content,
     props.latestMessage?.status,
     props.latestProgress?.message,
+    props.latestProgress?.agentProgress?.partialContent,
+    props.latestProgress?.agentProgress?.activity,
+    props.latestProgress?.agentProgress?.activityEvents?.length,
     props.thinkingSignature,
     props.draft,
     props.isRunning,
@@ -284,13 +301,15 @@ export function useChatConversationViewport(props: {
 
   useLayoutEffect(() => {
     scheduleScrollToChatBottom();
-    stickToBottomRef.current = true;
+    setStickToBottom(true);
   }, [props.conversationId]);
 
   return {
     chatVirtualItems,
     chatVirtualizer,
     focusChatMessage,
+    isStuckToBottom,
+    scrollToChatBottom: scrollToLatest,
     timelineRef,
     updateStickToBottom,
     viewRef

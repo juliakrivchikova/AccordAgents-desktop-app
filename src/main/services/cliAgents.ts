@@ -9,6 +9,8 @@ import type {
   AgentContextUsage,
   AgentContextUsageSource,
   AgentHealth,
+  ChatAgentActivityEvent,
+  ChatAgentActivityKind,
   ChatAgentMode,
   ChatAgentPermissions,
   ChatProviderKind,
@@ -87,6 +89,9 @@ export interface CliAgentOutputEvent {
   kind: CliAgentOutputKind;
   text: string;
   cumulative?: string;
+  activityKind?: ChatAgentActivityKind;
+  activityStatus?: ChatAgentActivityEvent["status"];
+  activityDetail?: string;
 }
 
 export type CliAgentOutputCallback = (event: CliAgentOutputEvent) => void;
@@ -154,6 +159,7 @@ interface ClaudeWarmPendingTurn {
   startedAt: number;
   messages: string[];
   streamedText: string;
+  nextTextBlockStartsBlock: boolean;
   sessionId?: string;
   model?: string;
   usedTokens?: number;
@@ -183,7 +189,9 @@ interface CodexAppServerPendingTurn {
   turnId?: string;
   messages: string[];
   streamedText: string;
+  completedAgentMessages: string[];
   finalMessage?: string;
+  nextAgentMessageStartsBlock: boolean;
   model?: string;
   contextUsage?: AgentContextUsage;
   timer: NodeJS.Timeout;
@@ -1299,6 +1307,8 @@ export class CliAgentRunner {
             threadId: currentThreadId,
             messages: [],
             streamedText: "",
+            completedAgentMessages: [],
+            nextAgentMessageStartsBlock: false,
             model: activeModel,
             timer,
             abort: signal ? () => signal.removeEventListener("abort", abort) : undefined,
@@ -1577,18 +1587,33 @@ export class CliAgentRunner {
     if (!method || !params) {
       return;
     }
+    this.logCodexAppServerNotificationSummary(method, params, pending);
     if (method === "item/autoApprovalReview/started") {
-      this.emitLiveOutput(pending.onOutput, "tool", "Auto-reviewing approval request\n");
+      this.emitLiveOutput(pending.onOutput, "tool", "Auto-reviewing approval request\n", undefined, {
+        activityKind: "approval",
+        activityStatus: "started"
+      });
       return;
     }
     if (method === "item/autoApprovalReview/completed") {
-      this.emitLiveOutput(pending.onOutput, "tool", "Auto-review completed\n");
+      this.emitLiveOutput(pending.onOutput, "tool", "Auto-review completed\n", undefined, {
+        activityKind: "approval",
+        activityStatus: "completed"
+      });
       return;
     }
     if (method === "item/started") {
-      const summary = this.codexAppServerToolSummary(this.asRecord(params.item));
+      const item = this.asRecord(params.item);
+      const itemType = this.stringField(item ?? {}, "type");
+      if (itemType === "agentMessage" && pending.streamedText.trim()) {
+        pending.nextAgentMessageStartsBlock = true;
+      }
+      const summary = this.codexAppServerToolSummary(item);
       if (summary) {
-        this.emitLiveOutput(pending.onOutput, "tool", `${summary}\n`);
+        this.emitLiveOutput(pending.onOutput, "tool", `${summary.label}\n`, undefined, {
+          activityKind: summary.kind,
+          activityStatus: "started"
+        });
       }
       return;
     }
@@ -1596,6 +1621,10 @@ export class CliAgentRunner {
       const delta = this.stringField(params, "delta");
       if (delta) {
         pending.messages.push(delta);
+        if (pending.nextAgentMessageStartsBlock) {
+          pending.streamedText = `${pending.streamedText.trimEnd()}\n\n`;
+          pending.nextAgentMessageStartsBlock = false;
+        }
         pending.streamedText += delta;
         this.emitLiveOutput(pending.onOutput, "text", delta, pending.streamedText);
       }
@@ -1607,6 +1636,7 @@ export class CliAgentRunner {
         const text = this.stringField(item ?? {}, "text");
         if (text) {
           pending.finalMessage = text;
+          pending.completedAgentMessages.push(text);
         }
       }
       return;
@@ -1634,7 +1664,7 @@ export class CliAgentRunner {
       current.reject(new Error(this.stringField(error ?? {}, "message") ?? `codex app-server turn ${status ?? "failed"}`));
       return;
     }
-    const content = (current.finalMessage ?? current.messages.join("")).trim();
+    const content = this.codexAppServerFinalContent(current);
     current.resolve({
       participant,
       ok: true,
@@ -1646,30 +1676,55 @@ export class CliAgentRunner {
     });
   }
 
-  private codexAppServerToolSummary(item: Record<string, unknown> | undefined): string | undefined {
+  private codexAppServerFinalContent(turn: CodexAppServerPendingTurn): string {
+    const lastCompleted = [...turn.completedAgentMessages].reverse().find((message) => message.trim());
+    return (turn.finalMessage ?? lastCompleted ?? turn.messages.join("")).trim();
+  }
+
+  private logCodexAppServerNotificationSummary(
+    method: string,
+    params: Record<string, unknown>,
+    pending: CodexAppServerPendingTurn
+  ): void {
+    const item = this.asRecord(params.item);
+    const delta = this.stringField(params, "delta");
+    const itemType = this.stringField(item ?? {}, "type");
+    const text = this.stringField(item ?? {}, "text");
+    const turn = this.asRecord(params.turn);
+    void this.debugLogs?.write("cli.codex-app-server.event-summary", {
+      method,
+      itemType,
+      itemId: this.stringField(item ?? {}, "id"),
+      turnId: this.stringField(turn ?? {}, "id") ?? pending.turnId,
+      deltaLength: delta?.length,
+      completedTextLength: text?.length
+    });
+  }
+
+  private codexAppServerToolSummary(item: Record<string, unknown> | undefined): { label: string; kind: ChatAgentActivityKind } | undefined {
     if (!item) {
       return undefined;
     }
     const type = this.stringField(item, "type");
     if (type === "commandExecution") {
-      return "Running command";
+      return { label: "Running command", kind: "command" };
     }
     if (type === "mcpToolCall") {
       const tool = this.stringField(item, "tool");
-      return tool ? this.toolActivityLabel(tool) : "Using MCP tool";
+      return { label: tool ? this.toolActivityLabel(tool) : "Using MCP tool", kind: "tool" };
     }
     if (type === "dynamicToolCall") {
       const tool = this.stringField(item, "tool");
-      return tool ? this.toolActivityLabel(tool) : "Using tool";
+      return { label: tool ? this.toolActivityLabel(tool) : "Using tool", kind: "tool" };
     }
     if (type === "webSearch") {
-      return "Using web search";
+      return { label: "Using web search", kind: "web" };
     }
     if (type === "imageView") {
-      return "Viewing image";
+      return { label: "Viewing image", kind: "tool" };
     }
     if (type === "fileChange") {
-      return "Updating files";
+      return { label: "Updating files", kind: "file-edit" };
     }
     return undefined;
   }
@@ -2245,6 +2300,7 @@ export class CliAgentRunner {
             startedAt,
             messages: [],
             streamedText: "",
+            nextTextBlockStartsBlock: false,
             sessionId: options.sessionId ?? newSessionId,
             model: participant.model,
             timer,
@@ -2302,10 +2358,20 @@ export class CliAgentRunner {
     }
     const toolSummary = this.claudeWarmToolSummary(event);
     if (toolSummary) {
-      this.emitLiveOutput(pending.onOutput, "tool", `${toolSummary}\n`);
+      this.emitLiveOutput(pending.onOutput, "tool", `${toolSummary.label}\n`, undefined, {
+        activityKind: toolSummary.kind,
+        activityStatus: "started"
+      });
+    }
+    if (this.claudeWarmTextBlockStarted(event) && pending.streamedText.trim()) {
+      pending.nextTextBlockStartsBlock = true;
     }
     const streamDelta = this.extractClaudeStreamEventTextDelta(event);
     if (streamDelta) {
+      if (pending.nextTextBlockStartsBlock) {
+        pending.streamedText = `${pending.streamedText.trimEnd()}\n\n`;
+        pending.nextTextBlockStartsBlock = false;
+      }
       pending.streamedText += streamDelta;
       this.emitLiveOutput(pending.onOutput, "text", streamDelta, pending.streamedText);
     }
@@ -2549,7 +2615,10 @@ export class CliAgentRunner {
       }
       const toolSummary = this.codexToolSummary(event);
       if (toolSummary) {
-        this.emitLiveOutput(onOutput, "tool", `${toolSummary}\n`);
+        this.emitLiveOutput(onOutput, "tool", `${toolSummary.label}\n`, undefined, {
+          activityKind: toolSummary.kind,
+          activityStatus: "started"
+        });
       }
     } catch {
       // Ignore non-JSON CLI output in the live chat panel; stderr/stdout diagnostics
@@ -2569,44 +2638,49 @@ export class CliAgentRunner {
     onOutput: CliAgentOutputCallback | undefined,
     kind: CliAgentOutputKind,
     text: string,
-    cumulative?: string
+    cumulative?: string,
+    activity?: {
+      activityKind?: ChatAgentActivityKind;
+      activityStatus?: ChatAgentActivityEvent["status"];
+      activityDetail?: string;
+    }
   ): void {
     const clean = this.cleanLiveOutputText(text);
     if (!onOutput || !clean) {
       return;
     }
     const cleanCumulative = cumulative !== undefined ? this.cleanLiveOutputText(cumulative) : undefined;
-    onOutput({ kind, text: clean, cumulative: cleanCumulative });
+    onOutput({ kind, text: clean, cumulative: cleanCumulative, ...activity });
   }
 
   private cleanLiveOutputText(text: string): string {
     return text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
   }
 
-  private codexToolSummary(event: unknown): string | undefined {
+  private codexToolSummary(event: unknown): { label: string; kind: ChatAgentActivityKind } | undefined {
     const record = this.asRecord(event);
     if (!record) {
       return undefined;
     }
     const method = this.stringField(record, "method");
     if (method === "item/autoApprovalReview/started") {
-      return "Auto-reviewing approval request";
+      return { label: "Auto-reviewing approval request", kind: "approval" };
     }
     if (method === "item/autoApprovalReview/completed") {
-      return "Auto-review completed";
+      return { label: "Auto-review completed", kind: "approval" };
     }
     const item = this.asRecord(record.item) ?? record;
     const type = `${this.stringField(record, "type") ?? ""} ${this.stringField(item, "type") ?? ""}`.toLowerCase();
     const name = this.stringField(item, "name") ?? this.stringField(item, "tool_name");
     const command = this.stringField(item, "command") ?? this.stringField(item, "cmd");
     if (command && /command|exec|shell|bash/.test(type)) {
-      return "Running command";
+      return { label: "Running command", kind: "command" };
     }
     if (name && /tool|function|call/.test(type)) {
-      return this.toolActivityLabel(name);
+      return { label: this.toolActivityLabel(name), kind: "tool" };
     }
     if (/read|grep|glob|ls/.test(type) && name) {
-      return this.toolActivityLabel(name);
+      return { label: this.toolActivityLabel(name), kind: "tool" };
     }
     return undefined;
   }
@@ -2628,7 +2702,20 @@ export class CliAgentRunner {
     return `Using ${name}`;
   }
 
-  private claudeWarmToolSummary(event: unknown): string | undefined {
+  private claudeWarmTextBlockStarted(event: unknown): boolean {
+    const record = this.asRecord(event);
+    if (!record || this.stringField(record, "type") !== "stream_event") {
+      return false;
+    }
+    const inner = this.asRecord(record.event);
+    if (!inner || this.stringField(inner, "type") !== "content_block_start") {
+      return false;
+    }
+    const block = this.asRecord(inner.content_block);
+    return this.stringField(block ?? {}, "type") === "text";
+  }
+
+  private claudeWarmToolSummary(event: unknown): { label: string; kind: ChatAgentActivityKind } | undefined {
     const record = this.asRecord(event);
     if (!record) {
       return undefined;
@@ -2645,10 +2732,24 @@ export class CliAgentRunner {
       }
       const name = this.stringField(blockRecord, "name");
       if (name) {
-        return this.toolActivityLabel(name);
+        return { label: this.toolActivityLabel(name), kind: this.claudeActivityKindForTool(name) };
       }
     }
     return undefined;
+  }
+
+  private claudeActivityKindForTool(name: string): ChatAgentActivityKind {
+    const normalized = name.toLowerCase();
+    if (normalized === "bash") {
+      return "command";
+    }
+    if (normalized === "websearch" || normalized === "webfetch") {
+      return "web";
+    }
+    if (["edit", "write", "multiedit", "notebookedit"].includes(normalized)) {
+      return "file-edit";
+    }
+    return "tool";
   }
 
   private withoutWarm(options: CliAgentRunOptions): CliAgentRunOptions {

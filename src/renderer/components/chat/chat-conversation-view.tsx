@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import { ArrowDown } from "lucide-react";
 
 import type {
   ChatAppToolApprovalRequest,
@@ -84,7 +85,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   );
   const thinkingRows = useMemo(() => chatThinkingRows(props.progress), [props.progress]);
   const liveProgressById = useMemo(() => liveMessageProgressById(props.progress), [props.progress]);
-  const thinkingSignature = thinkingRows.map((row) => `${row.key}:${row.activity ?? ""}:${row.updatedAt}`).join("|");
+  const thinkingSignature = thinkingRows.map((row) => `${row.key}:${row.activity ?? ""}:${row.activityEvents?.length ?? 0}:${row.updatedAt}`).join("|");
   const latestMessage = topLevelMessages[topLevelMessages.length - 1];
   const selectedThreadRoot = selectedThreadRootId
     ? topLevelMessages.find((message) => message.id === selectedThreadRootId)
@@ -255,6 +256,17 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               virtualItems={viewport.chatVirtualItems}
               virtualizer={viewport.chatVirtualizer}
             />
+            {!viewport.isStuckToBottom && topLevelMessages.length > 0 && (
+              <button
+                type="button"
+                className="chat-jump-to-latest"
+                aria-label="Jump to latest"
+                title="Jump to latest"
+                onClick={viewport.scrollToChatBottom}
+              >
+                <ArrowDown size={19} aria-hidden />
+              </button>
+            )}
             <ChatComposer
               participants={participants}
               savedPrompts={props.settings.chatSavedPrompts}
