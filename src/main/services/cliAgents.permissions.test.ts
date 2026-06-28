@@ -100,7 +100,7 @@ test("codex app-server stream keeps token deltas joined inside one agent message
   assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "hello");
 });
 
-test("codex app-server stream separates consecutive agent message items and finalizes complete content", () => {
+test("codex app-server stream excludes paragraph-separated preamble from final content", () => {
   const runner = makeRunner() as any;
   const outputs: Array<{ kind: string; cumulative?: string }> = [];
   const resolved: unknown[] = [];
@@ -143,7 +143,7 @@ test("codex app-server stream separates consecutive agent message items and fina
   );
 
   assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "first.\n\nsecond.");
-  assert.equal((resolved[0] as { content: string }).content, "first.\n\nsecond.");
+  assert.equal((resolved[0] as { content: string }).content, "second.");
 });
 
 test("codex app-server stream rejoins mid-sentence agent messages around tool usage", () => {
@@ -179,7 +179,7 @@ test("codex app-server stream rejoins mid-sentence agent messages around tool us
   assert.equal((resolved[0] as { content: string }).content, "Current EUR/RUB is about 1 EUR = 89.88 RUB.");
 });
 
-test("codex app-server stream keeps parenthetical citation boundaries as paragraph breaks", () => {
+test("codex app-server stream keeps parenthetical citation boundaries as paragraph breaks outside final content", () => {
   const runner = makeRunner() as any;
   const outputs: Array<{ kind: string; cumulative?: string }> = [];
   const resolved: unknown[] = [];
@@ -228,7 +228,88 @@ test("codex app-server stream keeps parenthetical citation boundaries as paragra
     "For comparison, the Bank of Russia official rate is 87.4027 RUB per EUR. (cbr.ru)"
   ].join("\n\n");
   assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, expected);
-  assert.equal((resolved[0] as { content: string }).content, expected);
+  assert.equal((resolved[0] as { content: string }).content, "For comparison, the Bank of Russia official rate is 87.4027 RUB per EUR. (cbr.ru)");
+});
+
+test("codex app-server keeps internal multi-paragraph final item complete", () => {
+  const runner = makeRunner() as any;
+  const resolved: unknown[] = [];
+  const pending = makeCodexPendingTurn({
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const final = [
+    "Current EUR/RUB is about 1 EUR = 89.88 RUB. (exchange-rates.org)",
+    "For comparison, the Bank of Russia official rate is 87.4027 RUB per EUR. (cbr.ru)"
+  ].join("\n\n");
+
+  for (const text of ["I’ll check the exchange sources first.", final]) {
+    runner.handleCodexAppServerNotification(
+      { method: "item/started", params: { item: { type: "agentMessage" } } },
+      participant,
+      pending,
+      () => pending,
+      fail
+    );
+    runner.handleCodexAppServerNotification(
+      { method: "item/agentMessage/delta", params: { delta: text } },
+      participant,
+      pending,
+      () => pending,
+      fail
+    );
+    runner.handleCodexAppServerNotification(
+      { method: "item/completed", params: { item: { type: "agentMessage", text } } },
+      participant,
+      pending,
+      () => pending,
+      fail
+    );
+  }
+  runner.handleCodexAppServerNotification(
+    { method: "turn/completed", params: { turn: { status: "completed" } } },
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  assert.equal((resolved[0] as { content: string }).content, final);
+});
+
+test("codex app-server falls back to trailing paragraph when completions are missing", () => {
+  const runner = makeRunner() as any;
+  const resolved: unknown[] = [];
+  const pending = makeCodexPendingTurn({
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+
+  runner.handleCodexAppServerNotification(
+    { method: "item/started", params: { item: { type: "agentMessage" } } },
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+  runner.handleCodexAppServerNotification(
+    { method: "item/agentMessage/delta", params: { delta: "I’ll check the sources first.\n\nFinal answer." } },
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+  runner.handleCodexAppServerNotification(
+    { method: "turn/completed", params: { turn: { status: "completed" } } },
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  assert.equal((resolved[0] as { content: string }).content, "Final answer.");
 });
 
 test("claude warm stream rejoins mid-sentence text blocks", () => {
@@ -255,6 +336,56 @@ test("claude warm stream rejoins mid-sentence text blocks", () => {
   send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "about 1 EUR = 89.88 RUB." } } });
 
   assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "Current EUR/RUB is about 1 EUR = 89.88 RUB.");
+});
+
+test("claude warm fallback excludes paragraph-separated preamble from final content", () => {
+  const runner = makeRunner() as any;
+  const resolved: unknown[] = [];
+  const pending = makeClaudeWarmPendingTurn({
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event),
+    participant,
+    {},
+    undefined,
+    pending,
+    () => pending,
+    fail
+  );
+
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "I’ll check the existing settings first." }] } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Final answer." }] } });
+  send({ type: "result" });
+
+  assert.equal((resolved[0] as { content: string }).content, "Final answer.");
+});
+
+test("claude warm fallback rejoins mid-sentence assistant text items", () => {
+  const runner = makeRunner() as any;
+  const resolved: unknown[] = [];
+  const pending = makeClaudeWarmPendingTurn({
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event),
+    participant,
+    {},
+    undefined,
+    pending,
+    () => pending,
+    fail
+  );
+
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Current EUR/RUB is" }] } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "about 1 EUR = 89.88 RUB." }] } });
+  send({ type: "result" });
+
+  assert.equal((resolved[0] as { content: string }).content, "Current EUR/RUB is about 1 EUR = 89.88 RUB.");
 });
 
 function chatOptions(overrides: {

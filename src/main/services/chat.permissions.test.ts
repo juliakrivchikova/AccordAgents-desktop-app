@@ -147,6 +147,16 @@ test("processing transcript expansion returns only text before the final answer"
   assert.equal(chatProcessingTranscriptPrefix(`Checking source...\n\n${final}`, final), "Checking source...");
 });
 
+test("processing transcript view keeps preamble hidden and final answer last", () => {
+  const preamble = "I’ll check the existing settings first.\n\nSo far: settings are persisted through SettingsService.";
+  const final = "Add a first-class `userProfile` setting.";
+  const view = chatProcessingTranscriptView(`${preamble}\n\n${final}`, final);
+
+  assert.deepEqual(view.leadingSegments.map((segment) => segment.content), [preamble]);
+  assert.equal(view.finalSegment?.content, final);
+  assert.equal(view.renderFinalContent, true);
+});
+
 test("processing transcript view keeps stored content verbatim for heuristic-looking final answers", () => {
   const content = "I'll check the box on Friday — that's my final recommendation, ship it.\n\nThe deploy window is clear.";
   const view = chatProcessingTranscriptView(content, content);
@@ -323,6 +333,10 @@ test("processing transcript boundary activity belongs to the final segment only"
 
   assert.deepEqual(chatActivityEventsForSegment([event], view.leadingSegments[0]).map((item) => item.id), []);
   assert.deepEqual(chatActivityEventsForSegment([event], view.finalSegment!).map((item) => item.id), ["tool"]);
+  assert.deepEqual(chatInlineTranscriptParts(final, [event], view.finalSegment!).map((part) => part.kind === "activity" ? part.event.id : part.text), [
+    "tool",
+    final
+  ]);
 });
 
 test("processing transcript view surfaces truncation and rebases retained offsets", () => {

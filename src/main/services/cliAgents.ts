@@ -1678,8 +1678,47 @@ export class CliAgentRunner {
   }
 
   private codexAppServerFinalContent(turn: CodexAppServerPendingTurn): string {
-    const fallback = turn.streamedText || turn.messages.join("");
-    return (fallback || turn.finalMessage || "").trim();
+    const completedMessages = this.completedAgentMessagesForFinal(turn.completedAgentMessages, turn.finalMessage);
+    if (completedMessages.length > 0) {
+      return this.finalTextFromMessageItems(completedMessages);
+    }
+    return this.trailingTextBlock(turn.streamedText || turn.messages.join(""));
+  }
+
+  private completedAgentMessagesForFinal(completedMessages: string[], finalMessage: string | undefined): string[] {
+    const messages = completedMessages.filter((message) => message.trim());
+    if (finalMessage?.trim() && messages.at(-1) !== finalMessage) {
+      messages.push(finalMessage);
+    }
+    return messages;
+  }
+
+  private finalTextFromMessageItems(messages: string[]): string {
+    let currentIndex = messages.length - 1;
+    let finalText = messages[currentIndex] ?? "";
+    while (currentIndex > 0) {
+      const previous = messages[currentIndex - 1] ?? "";
+      const separator = this.agentMessageBoundarySeparator(previous, messages[currentIndex] ?? finalText);
+      if (separator === "\n\n") {
+        break;
+      }
+      finalText = `${previous.trimEnd()}${separator}${separator ? finalText.trimStart() : finalText}`;
+      currentIndex -= 1;
+    }
+    return finalText.trim();
+  }
+
+  private trailingTextBlock(text: string): string {
+    const normalized = text.replace(/\r\n/g, "\n").trimEnd();
+    const splitIndex = normalized.lastIndexOf("\n\n");
+    if (splitIndex < 0) {
+      return normalized.trim();
+    }
+    let start = splitIndex + 2;
+    while (normalized[start] === "\n") {
+      start += 1;
+    }
+    return normalized.slice(start).trim();
   }
 
   private textWithAgentMessageBoundary(previous: string, next: string): string {
@@ -2408,7 +2447,12 @@ export class CliAgentRunner {
     if (!current) {
       return;
     }
-    const content = this.extractClaudeWarmResultText(event) ?? (current.streamedText || current.messages.join(""));
+    const resultText = this.extractClaudeWarmResultText(event);
+    const content = resultText ?? (
+      current.messages.length > 0
+        ? this.finalTextFromMessageItems(current.messages)
+        : this.trailingTextBlock(current.streamedText)
+    );
     const sessionId = this.findSessionId(event) ?? current.sessionId ?? fallbackSessionId;
     this.reportSessionId(current.onSessionId, sessionId);
     const contextUsage = buildAgentContextUsage({

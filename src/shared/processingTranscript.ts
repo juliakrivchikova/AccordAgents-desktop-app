@@ -169,6 +169,9 @@ function activityEventOffset(event: ChatAgentActivityEvent, contentLength: numbe
 
 function snapActivityOffset(content: string, offset: number): number {
   const normalizedOffset = Math.max(0, Math.min(offset, content.length));
+  if (normalizedOffset === 0) {
+    return 0;
+  }
   if (normalizedOffset >= content.length || chatTextEndsAtSentenceOrParagraphBoundary(content.slice(0, normalizedOffset))) {
     return normalizedOffset;
   }
