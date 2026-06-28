@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ChevronRight, FilePenLine, Globe, ShieldCheck, Terminal, type LucideIcon } from "lucide-react";
 
-import { LoadingDot } from "../primitives";
 import { MarkdownText } from "../content/markdown-text";
 import type { ChatAgentActivityEvent, ChatAgentActivityKind } from "../../../shared/types";
 import {
@@ -17,8 +16,7 @@ export function ChatThinkingRowItem({ row }: { row: ChatThinkingRow }): JSX.Elem
     <div className="chat-thinking-row" aria-live="polite">
       <div className="chat-thinking-primary">
         <strong>{row.participantLabel}</strong>
-        <span>Thinking</span>
-        <LoadingDot label="In progress" />
+        <span className="streaming-status-label">Thinking</span>
       </div>
       {row.activity && <div className="chat-thinking-activity">{row.activity}</div>}
     </div>
@@ -36,8 +34,7 @@ export function StreamingMessageContent(props: {
   return (
     <div className="streaming-message-content" aria-live="polite">
       <div className={`streaming-message-thinking ${hasContent ? "is-compact" : ""}`}>
-        <span>{hasContent ? "Responding" : "Thinking"}</span>
-        <LoadingDot label="In progress" />
+        <span className="streaming-status-label">{hasContent ? "Responding" : "Thinking"}</span>
         <span className="streaming-message-elapsed">{formatElapsed(elapsedSeconds)}</span>
       </div>
       {hasContent && (

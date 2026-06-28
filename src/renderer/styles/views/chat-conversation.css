@@ -2388,6 +2388,36 @@
   color: var(--app-muted);
 }
 
+.streaming-status-label {
+  display: inline-block;
+  background:
+    linear-gradient(
+      90deg,
+      var(--app-muted) 0%,
+      var(--app-muted) 30%,
+      var(--app-text-strong) 48%,
+      var(--app-muted) 66%,
+      var(--app-muted) 100%
+    );
+  background-size: 230% 100%;
+  background-position: 120% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: var(--app-muted);
+  -webkit-text-fill-color: transparent;
+  font-weight: 600;
+  animation: streaming-status-transfusion 1.8s ease-in-out infinite;
+}
+
+@keyframes streaming-status-transfusion {
+  0% {
+    background-position: 120% 0;
+  }
+  100% {
+    background-position: -120% 0;
+  }
+}
+
 .chat-thinking-activity {
   max-width: min(720px, 100%);
   overflow: hidden;
@@ -2476,6 +2506,15 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .streaming-status-label {
+    background: none;
+    color: var(--app-muted);
+    -webkit-text-fill-color: currentColor;
+    animation: none;
+  }
 }
 
 .chat-inline-transcript {
