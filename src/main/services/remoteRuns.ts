@@ -1348,7 +1348,13 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
     runId: string,
     signal: AbortSignal | undefined
   ): Promise<RemoteDetachedWorkerSnapshot> {
-    const deadline = Date.now() + 10_000;
+    // Cold-start tolerance: a fresh worker on a small box needs SSH + setsid +
+    // node + relay bind before it writes a "running" state (~14s observed even
+    // with no repo to clone). A 10s window falsely failed slow-but-healthy
+    // launches with "did not acknowledge launch" while the worker went on to
+    // run and complete successfully, orphaning the result. Give cold starts a
+    // realistic window to acknowledge.
+    const deadline = Date.now() + 60_000;
     let latest: RemoteDetachedWorkerSnapshot | undefined;
     while (Date.now() < deadline) {
       latest = await this.poll({ runId, worker, afterWorkerSeq: 0, signal });
