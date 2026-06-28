@@ -27,6 +27,7 @@ import type {
   ChatImageInput,
   ChatParticipant,
   ChatParticipantConfig,
+  CloudRunRemoteExecutionMode,
   ChatProviderKind,
   ChatSkillMention,
   GitRepoInfo,
@@ -35,9 +36,12 @@ import type {
 import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
 import {
   type AddableSavedParticipantConfig,
+  CHAT_RUN_LOCATION_OPTIONS,
   addableSavedParticipantConfigs,
   chatAgentModeLabel,
   chatInheritedCliSettingLabel,
+  chatRunLocationLabel,
+  normalizeChatRunLocation,
   selectedOrMentionedChatParticipantDrafts,
   validateChatStartupDrafts
 } from "./chat-participant-drafts";
@@ -70,6 +74,7 @@ export function NewChatScreen(props: {
   repoPath: string;
   repoInfo?: GitRepoInfo;
   selectedParticipantIds: Set<string>;
+  selectedParticipantRunLocations: Record<string, CloudRunRemoteExecutionMode>;
   settings: AppSettings;
   agents: AgentHealth[];
   busy: boolean;
@@ -80,6 +85,7 @@ export function NewChatScreen(props: {
   onRepoBlur: (path?: string) => void;
   onSelectRepo: () => void;
   onSelectedParticipantIdsChange: Dispatch<SetStateAction<Set<string>>>;
+  onSelectedParticipantRunLocationsChange: Dispatch<SetStateAction<Record<string, CloudRunRemoteExecutionMode>>>;
   onOpenParticipantsSettings: () => void;
   onStart: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => boolean | void | Promise<boolean | void>;
 }): JSX.Element {
@@ -109,9 +115,10 @@ export function NewChatScreen(props: {
     () => selectedOrMentionedChatParticipantDrafts(
       props.settings.chatParticipantConfigs,
       props.selectedParticipantIds,
-      props.prompt
+      props.prompt,
+      props.selectedParticipantRunLocations
     ),
-    [props.prompt, props.selectedParticipantIds, props.settings.chatParticipantConfigs]
+    [props.prompt, props.selectedParticipantIds, props.selectedParticipantRunLocations, props.settings.chatParticipantConfigs]
   );
   const searchSource = useMemo(
     () => ({
@@ -385,9 +392,11 @@ export function NewChatScreen(props: {
             assistantParticipant={assistantParticipant}
             savedParticipantOptions={savedParticipantOptions}
             selectedParticipantIds={props.selectedParticipantIds}
+            selectedParticipantRunLocations={props.selectedParticipantRunLocations}
             renderParticipantAvatar={props.renderParticipantAvatar}
             participantRoleLabel={props.participantRoleLabel}
             onSelectedParticipantIdsChange={props.onSelectedParticipantIdsChange}
+            onSelectedParticipantRunLocationsChange={props.onSelectedParticipantRunLocationsChange}
             onOpenParticipantsSettings={props.onOpenParticipantsSettings}
           />
           <button
@@ -514,9 +523,11 @@ function ParticipantPicker(props: {
   assistantParticipant: ChatParticipantConfig;
   savedParticipantOptions: AddableSavedParticipantConfig[];
   selectedParticipantIds: Set<string>;
+  selectedParticipantRunLocations: Record<string, CloudRunRemoteExecutionMode>;
   renderParticipantAvatar: (participant: ChatParticipant) => ReactNode;
   participantRoleLabel: (participant: Pick<ChatParticipant, "roleConfigId">) => string;
   onSelectedParticipantIdsChange: Dispatch<SetStateAction<Set<string>>>;
+  onSelectedParticipantRunLocationsChange: Dispatch<SetStateAction<Record<string, CloudRunRemoteExecutionMode>>>;
   onOpenParticipantsSettings: () => void;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
@@ -532,6 +543,7 @@ function ParticipantPicker(props: {
   const label = selectedCount > 0 ? `${selectedCount} participant${selectedCount === 1 ? "" : "s"}` : "Add participants";
 
   function toggleParticipant(id: string): void {
+    const removing = props.selectedParticipantIds.has(id);
     props.onSelectedParticipantIdsChange((current) => {
       const next = new Set(current);
       if (next.has(id)) {
@@ -541,6 +553,24 @@ function ParticipantPicker(props: {
       }
       return next;
     });
+    if (removing) {
+      props.onSelectedParticipantRunLocationsChange((current) => {
+        const { [id]: _removed, ...rest } = current;
+        return rest;
+      });
+    }
+  }
+
+  function runLocationFor(participant: ChatParticipantConfig): CloudRunRemoteExecutionMode {
+    return normalizeChatRunLocation(props.selectedParticipantRunLocations[participant.id] ?? participant.remoteExecution);
+  }
+
+  function updateRunLocation(participant: ChatParticipantConfig, remoteExecution: CloudRunRemoteExecutionMode): void {
+    props.onSelectedParticipantRunLocationsChange((current) => ({
+      ...current,
+      [participant.id]: normalizeChatRunLocation(remoteExecution)
+    }));
+    props.onSelectedParticipantIdsChange((current) => new Set(current).add(participant.id));
   }
 
   function toggleExpanded(id: string): void {
@@ -583,6 +613,7 @@ function ParticipantPicker(props: {
           {participantOptions.map(({ config: participant, invalidReason, locked }) => {
             const selected = Boolean(locked) || props.selectedParticipantIds.has(participant.id);
             const expanded = expandedParticipantIds.has(participant.id);
+            const runLocation = runLocationFor(participant);
             const detailValues = participantDetailValues(participant);
             const displayName = chatParticipantDisplayName(participant);
             return (
@@ -629,6 +660,20 @@ function ParticipantPicker(props: {
                     {detailValues.map((value, index) => (
                       <span key={`${index}-${value}`} className="new-chat-participant-detail">{value}</span>
                     ))}
+                    {participant.kind === "codex-cli" && !locked && (
+                      <label className="new-chat-run-location" title={`Run ${chatRunLocationLabel(runLocation).toLowerCase()}`}>
+                        <span>Run</span>
+                        <select
+                          aria-label={`Run location for @${participant.handle}`}
+                          value={runLocation}
+                          onChange={(event) => updateRunLocation(participant, event.currentTarget.value as CloudRunRemoteExecutionMode)}
+                        >
+                          {CHAT_RUN_LOCATION_OPTIONS.map((option) => (
+                            <option value={option.value} key={option.value}>{option.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
                   </div>
                 )}
               </div>
@@ -671,6 +716,7 @@ function newChatAssistantParticipant(settings: AppSettings, agents: AgentHealth[
         rules: []
       }
     },
+    remoteExecution: "local",
     updatedAt: ""
   };
 }

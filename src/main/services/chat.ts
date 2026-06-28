@@ -436,6 +436,10 @@ interface RemoteRunStarter {
   registerDetachedRunContext?(runId: string, worker: RemoteRunWorkerTarget, context: { conversationId: string; participantId: string }): void;
 }
 
+type RemoteRunParticipantTarget =
+  | { ok: true; settings: CloudRunsSettings; worker: RemoteRunWorkerTarget; workerSettings: CloudRunWorkerSettings }
+  | { ok: false; message: string };
+
 interface RemoteRunCoordinatorControl {
   trackRun(handle: RemoteRunHandle): void;
 }
@@ -781,6 +785,17 @@ export class ChatService {
       if (!target) {
         throw new Error("Chat participant was not found.");
       }
+      const nextRemoteExecution = this.normalizeConcreteRemoteExecutionMode(
+        Object.prototype.hasOwnProperty.call(request, "remoteExecution")
+          ? request.remoteExecution
+          : target.remoteExecution
+      );
+      if (
+        nextRemoteExecution !== this.normalizeConcreteRemoteExecutionMode(target.remoteExecution) &&
+        this.chatParticipantHasRun(conversation, target.id)
+      ) {
+        throw new Error("Run location is locked after the participant has run. Remove and re-add the participant to change it.");
+      }
       const updated: ChatParticipant = {
         ...target,
         model: typeof request.model === "string" ? request.model.trim() || undefined : target.model,
@@ -791,7 +806,7 @@ export class ChatService {
         permissions: request.permissions !== undefined
           ? normalizeChatAgentPermissions(request.permissions)
           : target.permissions,
-        remoteExecution: this.normalizeRemoteExecutionMode(request.remoteExecution ?? target.remoteExecution)
+        remoteExecution: nextRemoteExecution
       };
       conversation.metadata = {
         ...conversation.metadata,
@@ -2189,7 +2204,7 @@ export class ChatService {
         avatarId: participant.avatarId,
         agentMode: normalizeChatAgentMode(participant.agentMode),
         permissions: normalizeChatAgentPermissions(participant.permissions),
-        remoteExecution: this.normalizeRemoteExecutionMode(participant.remoteExecution),
+        remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
         updatedAt: participant.updatedAt
       })),
       participantChange: {
@@ -2422,7 +2437,7 @@ export class ChatService {
           reasoningEffort: participant.reasoningEffort,
           agentMode: normalizeChatAgentMode(participant.agentMode),
           permissions: normalizeChatAgentPermissions(participant.permissions),
-          remoteExecution: this.normalizeRemoteExecutionMode(participant.remoteExecution),
+          remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
           provider
         };
       }),
@@ -4120,11 +4135,23 @@ export class ChatService {
     let remoteDetachedStarted = false;
     try {
       progressSink.beginAttempt();
-      const remoteRunTarget = await this.remoteRunTargetForParticipant(participant, options.warnings);
+      const remoteRunTarget = await this.remoteRunTargetForParticipant(participant);
       if (remoteRunTarget) {
-        if (!this.remoteRuns) {
-          options.warnings.push(`@${participant.handle}: Cloud Runs is not available in this app session; ran locally instead.`);
-        } else {
+        if (!remoteRunTarget.ok) {
+          pendingMessage.status = "error";
+          pendingMessage.content = remoteRunTarget.message;
+          this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, remoteRunTarget.message);
+          return [pendingMessage];
+        }
+        const remoteRuns = this.remoteRuns;
+        if (!remoteRuns) {
+          const message = `@${participant.handle} requested remote execution, but Cloud Runs is not available in this app session.`;
+          pendingMessage.status = "error";
+          pendingMessage.content = message;
+          this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, message);
+          return [pendingMessage];
+        }
+        {
           const now = new Date().toISOString();
           const handle: RemoteRunHandle = {
             runId,
@@ -4139,7 +4166,7 @@ export class ChatService {
           await this.recordRemoteRunHandle(conversation, handle, pendingMessage.id);
           let detachedState: RemoteDetachedRunState;
           try {
-            detachedState = await this.remoteRuns.startDetachedRun({
+            detachedState = await remoteRuns.startDetachedRun({
               conversationId: conversation.id,
               runId,
               participant: cliParticipant,
@@ -4167,14 +4194,18 @@ export class ChatService {
               signal
             });
           } catch (error) {
+            const failureMessage = this.remoteRunLaunchFailureMessage(participant, error);
             await this.updateRemoteRunHandleState(conversation.id, runId, {
               runId,
               conversationId: conversation.id,
               participantId: participant.id,
               status: "failed",
-              error: error instanceof Error ? error.message : String(error)
+              error: failureMessage
             });
-            throw error;
+            pendingMessage.status = "error";
+            pendingMessage.content = failureMessage;
+            this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, failureMessage);
+            return [pendingMessage];
           }
           const updated = await this.updateRemoteRunHandleState(conversation.id, runId, detachedState);
           if (updated) {
@@ -5348,30 +5379,52 @@ export class ChatService {
     return value === "inherit" || value === "local" || value === "remote" ? value : undefined;
   }
 
+  private normalizeConcreteRemoteExecutionMode(value: unknown): Extract<CloudRunRemoteExecutionMode, "local" | "remote"> {
+    return this.normalizeRemoteExecutionMode(value) === "remote" ? "remote" : "local";
+  }
+
   private async remoteRunTargetForParticipant(
-    participant: ChatParticipant,
-    warnings: string[]
-  ): Promise<{ settings: CloudRunsSettings; worker: RemoteRunWorkerTarget; workerSettings: CloudRunWorkerSettings } | undefined> {
-    const mode = this.normalizeRemoteExecutionMode(participant.remoteExecution);
+    participant: ChatParticipant
+  ): Promise<RemoteRunParticipantTarget | undefined> {
+    const mode = this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution);
     if (mode !== "remote") {
       return undefined;
     }
     const settings = (await this.settings.getPublicSettings()).cloudRuns;
     if (!settings.enabled) {
-      warnings.push(`@${participant.handle}: Cloud Runs is disabled; ran locally instead.`);
-      return undefined;
+      return {
+        ok: false,
+        message: `@${participant.handle} requested remote execution, but Cloud Runs is disabled.`
+      };
     }
     if (participant.kind !== "codex-cli") {
-      warnings.push(`@${participant.handle}: Cloud Runs currently supports Codex participants only; ran locally instead.`);
-      return undefined;
+      return {
+        ok: false,
+        message: `@${participant.handle} requested remote execution, but Cloud Runs currently supports Codex participants only.`
+      };
     }
     const workerSettings = normalizeCloudRunWorkerSettings(settings.worker);
     const worker = cloudRunWorkerTargetFromSettings(workerSettings);
     if (!worker) {
-      warnings.push(`@${participant.handle}: Cloud Runs worker host is not configured; ran locally instead.`);
-      return undefined;
+      return {
+        ok: false,
+        message: `@${participant.handle} requested remote execution, but the Cloud Runs worker host is not configured.`
+      };
     }
-    return { settings, worker, workerSettings };
+    if (!this.remoteRuns) {
+      return {
+        ok: false,
+        message: `@${participant.handle} requested remote execution, but Cloud Runs is not available in this app session.`
+      };
+    }
+    return { ok: true, settings, worker, workerSettings };
+  }
+
+  private remoteRunLaunchFailureMessage(participant: ChatParticipant, error: unknown): string {
+    const detail = error instanceof Error ? error.message : String(error);
+    return detail.trim()
+      ? `@${participant.handle} remote run failed to start: ${detail}`
+      : `@${participant.handle} remote run failed to start.`;
   }
 
   private remoteRunContextSnapshot(
@@ -6206,7 +6259,7 @@ export class ChatService {
         avatarId: item.avatarId?.trim() || undefined,
         agentMode: normalizeChatAgentMode(item.agentMode),
         permissions: normalizeChatAgentPermissions(item.permissions),
-        remoteExecution: this.normalizeRemoteExecutionMode(item.remoteExecution)
+        remoteExecution: this.normalizeConcreteRemoteExecutionMode(item.remoteExecution)
       };
     });
   }
@@ -6379,7 +6432,7 @@ export class ChatService {
       model: participant.model,
       reasoningEffort: participant.reasoningEffort,
       agentMode: normalizeChatAgentMode(participant.agentMode),
-      remoteExecution: this.normalizeRemoteExecutionMode(participant.remoteExecution)
+      remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution)
     };
   }
 
@@ -6444,7 +6497,7 @@ export class ChatService {
             avatarId: typeof participantRecord.avatarId === "string" ? participantRecord.avatarId.trim() || undefined : undefined,
             agentMode: normalizeChatAgentMode(participantRecord.agentMode),
             permissions: normalizeChatAgentPermissions(participantRecord.permissions),
-            remoteExecution: this.normalizeRemoteExecutionMode(participantRecord.remoteExecution)
+            remoteExecution: this.normalizeConcreteRemoteExecutionMode(participantRecord.remoteExecution)
           }
         };
       })
@@ -6470,7 +6523,7 @@ export class ChatService {
           avatarId: participant.avatarId,
           agentMode: normalizeChatAgentMode(participant.agentMode),
           permissions: normalizeChatAgentPermissions(participant.permissions),
-          remoteExecution: this.normalizeRemoteExecutionMode(participant.remoteExecution)
+          remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution)
         }
       }))
     };
@@ -6831,7 +6884,7 @@ export class ChatService {
             avatarId: typeof participantRecord.avatarId === "string" ? participantRecord.avatarId.trim() || undefined : undefined,
             agentMode: normalizeChatAgentMode(participantRecord.agentMode),
             permissions: normalizeChatAgentPermissions(participantRecord.permissions),
-            remoteExecution: this.normalizeRemoteExecutionMode(participantRecord.remoteExecution)
+            remoteExecution: this.normalizeConcreteRemoteExecutionMode(participantRecord.remoteExecution)
           }
         };
       })
@@ -6853,7 +6906,7 @@ export class ChatService {
       reasoningEffort: normalizeChatReasoningEffort(record.reasoningEffort),
       agentMode: normalizeChatAgentMode(record.agentMode),
       permissions: normalizeChatAgentPermissions(record.permissions),
-      remoteExecution: this.normalizeRemoteExecutionMode(record.remoteExecution)
+      remoteExecution: this.normalizeConcreteRemoteExecutionMode(record.remoteExecution)
     };
   }
 
@@ -6891,7 +6944,7 @@ export class ChatService {
           avatarId: preset.avatarId,
           agentMode: overrides ? normalizeChatAgentMode(overrides.agentMode) : preset.agentMode,
           permissions: overrides ? overrides.permissions : preset.permissions,
-          remoteExecution: preset.remoteExecution
+          remoteExecution: overrides ? overrides.remoteExecution : preset.remoteExecution
         };
       }
       const role = newParticipantRoles.find((item) => item.id === operation.participant.roleConfigId);
@@ -6928,7 +6981,7 @@ export class ChatService {
         avatarId: operation.participant.avatarId,
         agentMode: operation.participant.agentMode,
         permissions: operation.participant.permissions,
-        remoteExecution: operation.participant.remoteExecution,
+        remoteExecution: this.normalizeConcreteRemoteExecutionMode(operation.participant.remoteExecution),
         updatedAt: new Date().toISOString()
       });
     }
@@ -6950,7 +7003,7 @@ export class ChatService {
               participantConfigId: savedPresetIdByOperationIndex.get(index),
               handle: operation.participant.handle.trim().replace(/^@/, ""),
               permissions: normalizeChatAgentPermissions(operation.participant.permissions),
-              remoteExecution: this.normalizeRemoteExecutionMode(operation.participant.remoteExecution)
+              remoteExecution: this.normalizeConcreteRemoteExecutionMode(operation.participant.remoteExecution)
             }
           };
         })
@@ -6974,7 +7027,7 @@ export class ChatService {
         avatarId: preset.avatarId,
         agentMode: preset.agentMode,
         permissions: preset.permissions,
-        remoteExecution: preset.remoteExecution
+        remoteExecution: this.normalizeConcreteRemoteExecutionMode(preset.remoteExecution)
       });
     }
     return this.applyPreparedRosterChange(conversation, {
@@ -6993,7 +7046,7 @@ export class ChatService {
             avatarId: participant.avatarId,
             agentMode: participant.agentMode,
             permissions: participant.permissions,
-            remoteExecution: participant.remoteExecution
+            remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution)
           }
         }))
       },
@@ -7017,7 +7070,7 @@ export class ChatService {
       avatarId: preset.avatarId,
       agentMode: preset.agentMode,
       permissions: preset.permissions,
-      remoteExecution: preset.remoteExecution
+      remoteExecution: this.normalizeConcreteRemoteExecutionMode(preset.remoteExecution)
     }));
     const saved = await this.settings.saveChatRoleParticipantConfigBatch(prepared.role.request.operations, participantUpdates);
     const remapRoleId = (roleConfigId: string): string => saved.roleIdByDraftRoleRef[roleConfigId] ?? roleConfigId;
@@ -7041,7 +7094,7 @@ export class ChatService {
             avatarId: participant.avatarId,
             agentMode: participant.agentMode,
             permissions: participant.permissions,
-            remoteExecution: participant.remoteExecution
+            remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution)
           }
         }))
       },
@@ -11114,6 +11167,19 @@ export class ChatService {
   private chatParticipants(conversation: Conversation): ChatParticipant[] {
     const value = conversation.metadata.participants;
     return Array.isArray(value) ? value.filter((item): item is ChatParticipant => this.isChatParticipant(item)) : [];
+  }
+
+  private chatParticipantHasRun(conversation: Conversation, participantId: string): boolean {
+    if (Array.isArray(conversation.metadata.participantSessions)) {
+      if (conversation.metadata.participantSessions.some((session) => session.participantId === participantId)) {
+        return true;
+      }
+    }
+    const handles = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles);
+    if (Object.values(handles).some((handle) => handle.participantId === participantId)) {
+      return true;
+    }
+    return conversation.messages.some((message) => message.role === "participant" && message.participantId === participantId);
   }
 
   private syncParticipantFromSavedConfig(

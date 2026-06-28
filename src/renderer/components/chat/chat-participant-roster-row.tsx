@@ -15,6 +15,7 @@ export function ChatParticipantRosterRow(props: {
   removeDisabledReason: string | undefined;
   isRunning: boolean;
   status: ChatParticipantRosterStatus;
+  runLocationLocked: boolean;
   renderParticipantAvatar: (participant: ChatParticipant) => React.ReactNode;
   participantRoleLabel: (participant: ChatParticipant) => string;
   participantRoleArchived: (participant: ChatParticipant) => boolean;
@@ -94,6 +95,7 @@ export function ChatParticipantRosterRow(props: {
         <ParticipantRuntimeControls
           participant={props.participant}
           disabled={props.isRunning}
+          runLocationLocked={props.runLocationLocked}
           onUpdate={props.onUpdateParticipantRuntime}
         />
       )}

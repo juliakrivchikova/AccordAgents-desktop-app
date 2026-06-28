@@ -18,7 +18,9 @@ import type {
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import {
   CHAT_AGENT_MODE_OPTIONS,
-  chatInheritedCliSettingLabel
+  CHAT_RUN_LOCATION_OPTIONS,
+  chatInheritedCliSettingLabel,
+  normalizeChatRunLocation
 } from "./chat-participant-drafts";
 
 const REASONING_DEFAULT_VALUE = "__default__";
@@ -28,6 +30,7 @@ const MODEL_MANUAL_VALUE = "__manual_model__";
 export function ParticipantRuntimeControls(props: {
   participant: ChatParticipant;
   disabled: boolean;
+  runLocationLocked: boolean;
   onUpdate: (
     participantId: string,
     patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">
@@ -35,6 +38,7 @@ export function ParticipantRuntimeControls(props: {
 }): JSX.Element {
   const participant = props.participant;
   const mode = normalizeChatAgentMode(participant.agentMode);
+  const runLocation = normalizeChatRunLocation(participant.remoteExecution);
   const reasoningValue = participant.reasoningEffort ?? REASONING_DEFAULT_VALUE;
   const cliSettingLabel = chatInheritedCliSettingLabel(participant.kind);
   const [showPermissions, setShowPermissions] = useState(false);
@@ -99,20 +103,21 @@ export function ParticipantRuntimeControls(props: {
         {participant.kind === "codex-cli" && (
           <>
             <span className="chat-rt-dot" aria-hidden>·</span>
-            <GhostSelect
-              ariaLabel="Run location"
-              value={participant.remoteExecution ?? "inherit"}
-              muted={!participant.remoteExecution || participant.remoteExecution === "inherit"}
-              disabled={props.disabled}
-              options={[
-                { value: "inherit", label: "Default" },
-                { value: "remote", label: "Remote" },
-                { value: "local", label: "Local" }
-              ]}
-              onChange={(value) => update({
-                remoteExecution: value === "inherit" ? undefined : value as ChatParticipant["remoteExecution"]
-              })}
-            />
+            {props.runLocationLocked ? (
+              <span className="chat-rt-badge" aria-label={`Run location ${runLocation}`}>
+                Run: {runLocation === "remote" ? "Remote" : "Local"}
+              </span>
+            ) : (
+              <GhostSelect
+                ariaLabel="Run location"
+                value={runLocation}
+                disabled={props.disabled}
+                options={CHAT_RUN_LOCATION_OPTIONS}
+                onChange={(value) => update({
+                  remoteExecution: normalizeChatRunLocation(value)
+                })}
+              />
+            )}
           </>
         )}
         {isCustomAccess && (

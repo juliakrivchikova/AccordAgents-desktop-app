@@ -11,6 +11,7 @@ import type {
   AgentHealth,
   AppSettings,
   ChatAgentMode,
+  CloudRunRemoteExecutionMode,
   ChatProviderKind,
   ProviderKind
 } from "../../../shared/types";
@@ -27,7 +28,9 @@ import { ChatPermissionsEditor } from "./chat-permissions-editor";
 import type { ChatParticipantDraft } from "./chat-participant-drafts";
 import {
   CHAT_AGENT_MODE_OPTIONS,
+  CHAT_RUN_LOCATION_OPTIONS,
   activeChatRoleConfigs,
+  normalizeChatRunLocation,
   updateChatParticipantDraft
 } from "./chat-participant-drafts";
 
@@ -90,6 +93,19 @@ export function ChatParticipantDraftRow(props: {
           onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { kind: value as ChatProviderKind }))}
         />
       </FormRow>
+      {props.draft.kind === "codex-cli" && (
+        <FormRow label="Run location">
+          <AppSelect
+            value={normalizeChatRunLocation(props.draft.remoteExecution)}
+            placeholder="Select run location"
+            ariaLabel="Participant run location"
+            options={CHAT_RUN_LOCATION_OPTIONS}
+            onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, {
+              remoteExecution: value as CloudRunRemoteExecutionMode
+            }))}
+          />
+        </FormRow>
+      )}
       <FormRow label="Model">
         <ChatModelPicker
           kind={props.draft.kind}

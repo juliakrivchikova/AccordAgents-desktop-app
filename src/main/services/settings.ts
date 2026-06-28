@@ -1836,7 +1836,7 @@ export class SettingsService {
         avatarId: update.avatarId?.trim() || undefined,
         agentMode: normalizeChatAgentMode(update.agentMode),
         permissions: normalizeChatAgentPermissions(update.permissions),
-        remoteExecution: this.normalizeRemoteExecutionMode(update.remoteExecution),
+        remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
         updatedAt: now
       };
       participants = participants.some((participant) => participant.id === nextParticipant.id)
@@ -2037,7 +2037,7 @@ export class SettingsService {
       avatarId: update.avatarId?.trim() || undefined,
       agentMode: normalizeChatAgentMode(update.agentMode),
       permissions: normalizeChatAgentPermissions(update.permissions),
-      remoteExecution: this.normalizeRemoteExecutionMode(update.remoteExecution),
+      remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
       updatedAt: now
     };
     stored.chatParticipantConfigs = participants.some((participant) => participant.id === nextParticipant.id)
@@ -2291,6 +2291,10 @@ export class SettingsService {
 
   private normalizeRemoteExecutionMode(value: unknown): CloudRunRemoteExecutionMode | undefined {
     return value === "inherit" || value === "local" || value === "remote" ? value : undefined;
+  }
+
+  private normalizeConcreteRemoteExecutionMode(value: unknown): Extract<CloudRunRemoteExecutionMode, "local" | "remote"> {
+    return this.normalizeRemoteExecutionMode(value) === "remote" ? "remote" : "local";
   }
 
   private normalizeBehaviorRules(rules: ChatBehaviorRuleConfig[] | undefined): ChatBehaviorRuleConfig[] {
