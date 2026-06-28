@@ -1,8 +1,8 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown, Code2, ExternalLink, FolderOpen, HelpCircle } from "lucide-react";
+import { Check, ChevronDown, Code2, ExternalLink, FolderOpen, HelpCircle, Server } from "lucide-react";
 
-import type { AgentHealth, ProviderKind, ProviderSettings, RepoFileOpenAction } from "../../../shared/types";
+import type { AgentHealth, CloudRunsSettings, CloudRunsSettingsUpdate, ProviderKind, ProviderSettings, RepoFileOpenAction } from "../../../shared/types";
 import { CLI_AGENT_RUN_TIMEOUT_MAX_MS, CLI_AGENT_RUN_TIMEOUT_MIN_MS, cliAgentRunTimeoutHours } from "../../../shared/cliAgentRunSettings";
 
 const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
@@ -15,9 +15,11 @@ export function GeneralSettingsSection(props: {
   agents: AgentHealth[];
   repoFileOpenAction?: RepoFileOpenAction;
   cliAgentRunTimeoutMs: number;
+  cloudRuns: CloudRunsSettings;
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
+  saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => Promise<void>;
 }): JSX.Element {
   const detectedCount = props.providers.filter(
     (provider) => props.agents.find((agent) => agent.kind === provider.kind)?.installed
@@ -60,6 +62,14 @@ export function GeneralSettingsSection(props: {
       </section>
 
       <section className="gen-section">
+        <div className="gen-section-head">
+          <h2 className="gen-section-title">Cloud Runs</h2>
+          <span className="gen-section-meta">{props.cloudRuns.enabled ? "Enabled" : "Disabled"}</span>
+        </div>
+        <CloudRunsControl settings={props.cloudRuns} onSave={props.saveCloudRunsSettings} />
+      </section>
+
+      <section className="gen-section">
         <h2 className="gen-section-title gen-section-title-solo">General</h2>
         <div className="gen-card">
           <div className="gen-row">
@@ -82,6 +92,135 @@ export function GeneralSettingsSection(props: {
         </div>
       </section>
     </>
+  );
+}
+
+function CloudRunsControl(props: {
+  settings: CloudRunsSettings;
+  onSave: (update: CloudRunsSettingsUpdate) => Promise<void>;
+}): JSX.Element {
+  const [draft, setDraft] = useState<CloudRunsSettings>(props.settings);
+  const [status, setStatus] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setDraft(props.settings);
+  }, [props.settings]);
+
+  const patch = (update: CloudRunsSettingsUpdate): void => {
+    setDraft((current) => ({
+      ...current,
+      ...update,
+      worker: {
+        ...current.worker,
+        ...(update.worker ?? {})
+      }
+    }));
+  };
+
+  const save = async (): Promise<void> => {
+    setBusy(true);
+    setStatus("");
+    try {
+      await props.onSave(draft);
+      setStatus("Saved.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const test = async (): Promise<void> => {
+    setBusy(true);
+    setStatus("Testing worker...");
+    try {
+      const result = await window.consensus.testCloudRunWorker(draft.worker);
+      setStatus(result.message);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="gen-card">
+      <div className="gen-row">
+        <div className="gen-row-text">
+          <div className="gen-row-title">Remote Codex worker</div>
+          <div className="gen-row-desc">Use one pre-provisioned SSH worker for Codex participants marked remote.</div>
+        </div>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={draft.enabled}
+            onChange={(event) => patch({ enabled: event.target.checked })}
+          />
+          <span />
+        </label>
+      </div>
+      <div className="gen-card-divider" />
+      <div className="gen-row gen-row-stack">
+        <div className="gen-row-text">
+          <div className="gen-row-title">SSH target</div>
+          <div className="gen-row-desc">Host is required; other fields inherit ssh defaults when empty.</div>
+        </div>
+        <div className="gen-grid-form">
+          <input className="gen-input" placeholder="Host" value={draft.worker.host ?? ""} onChange={(event) => patch({ worker: { host: event.target.value } })} />
+          <input className="gen-input" placeholder="User" value={draft.worker.user ?? ""} onChange={(event) => patch({ worker: { user: event.target.value } })} />
+          <input
+            className="gen-input"
+            placeholder="Port"
+            inputMode="numeric"
+            value={draft.worker.port ?? ""}
+            onChange={(event) => patch({ worker: { port: event.target.value ? Number(event.target.value) : undefined } })}
+          />
+          <input className="gen-input" placeholder="Identity file" value={draft.worker.identityFile ?? ""} onChange={(event) => patch({ worker: { identityFile: event.target.value } })} />
+          <input className="gen-input" placeholder="Worker root" value={draft.worker.workerRoot ?? ""} onChange={(event) => patch({ worker: { workerRoot: event.target.value } })} />
+          <input className="gen-input" placeholder="Remote repo/cwd" value={draft.worker.remoteCwd ?? ""} onChange={(event) => patch({ worker: { remoteCwd: event.target.value } })} />
+          <input className="gen-input" placeholder="Codex path" value={draft.worker.codexPath ?? ""} onChange={(event) => patch({ worker: { codexPath: event.target.value } })} />
+        </div>
+      </div>
+      <div className="gen-card-divider" />
+      <div className="gen-row gen-row-stack">
+        <div className="gen-row-text">
+          <div className="gen-row-title">Runtime</div>
+          <div className="gen-row-desc">Detached worker timeout and desktop reconnect polling.</div>
+        </div>
+        <div className="gen-grid-form gen-grid-form-compact">
+          <input
+            className="gen-input"
+            aria-label="Maximum runtime minutes"
+            inputMode="numeric"
+            value={Math.round(draft.maxRuntimeMs / 60_000)}
+            onChange={(event) => patch({ maxRuntimeMs: Math.max(1, Number(event.target.value) || 1) * 60_000 })}
+          />
+          <input
+            className="gen-input"
+            aria-label="Poll interval milliseconds"
+            inputMode="numeric"
+            value={draft.pollIntervalMs}
+            onChange={(event) => patch({ pollIntervalMs: Math.max(500, Number(event.target.value) || 500) })}
+          />
+        </div>
+      </div>
+      <div className="gen-card-divider" />
+      <div className="gen-row">
+        <div className="gen-row-text">
+          <div className="gen-row-title">{status || "Ready"}</div>
+        </div>
+        <div className="gen-actions">
+          <button type="button" className="gen-pill" disabled={busy} onClick={() => void test()}>
+            <span className="gen-pill-lead"><Server size={16} /></span>
+            <span className="gen-pill-label">Test</span>
+          </button>
+          <button type="button" className="gen-pill" disabled={busy} onClick={() => void save()}>
+            <span className="gen-pill-label">Save</span>
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

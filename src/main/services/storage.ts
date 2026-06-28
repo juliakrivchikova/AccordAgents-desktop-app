@@ -30,6 +30,42 @@ function sqlString(value: string | undefined | null): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+function nonTerminalRemoteRunIds(value: unknown): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return [];
+  }
+  return Object.entries(value as Record<string, unknown>).flatMap(([runId, raw]) => {
+    if (!runId || !raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return [];
+    }
+    const record = raw as Record<string, unknown>;
+    const status = record.status;
+    const worker = record.worker;
+    const host = worker && typeof worker === "object" && !Array.isArray(worker)
+      ? (worker as Record<string, unknown>).host
+      : undefined;
+    if (typeof host !== "string" || !host.trim()) {
+      return [];
+    }
+    return status === "completed" || status === "failed" || status === "cancelled" ? [] : [runId];
+  });
+}
+
+function withRemoteRunMetadata(metadata: Record<string, unknown>, runIds: string[]): Record<string, unknown> {
+  if (runIds.length === 0) {
+    return metadata;
+  }
+  const preferred = typeof metadata.runId === "string" && runIds.includes(metadata.runId)
+    ? metadata.runId
+    : runIds[0];
+  return {
+    ...metadata,
+    running: true,
+    runId: preferred,
+    activeRunIds: runIds
+  };
+}
+
 export class StorageService {
   private readonly dbPath: string;
   private initialized = false;
@@ -317,11 +353,27 @@ export class StorageService {
       if (!wasRunning) {
         continue;
       }
+      const remoteRunIds = nonTerminalRemoteRunIds(conversation.metadata.remoteRunHandles);
+      const remoteRunIdSet = new Set(remoteRunIds);
+      const metadataRunId = typeof conversation.metadata.runId === "string" ? conversation.metadata.runId : undefined;
+      const localActiveRunIds = activeRunIds.filter((runId): runId is string => typeof runId === "string" && !remoteRunIdSet.has(runId));
+      const onlyRemoteRunState = remoteRunIds.length > 0 &&
+        localActiveRunIds.length === 0 &&
+        (!metadataRunId || remoteRunIdSet.has(metadataRunId));
+      if (onlyRemoteRunState) {
+        conversation.metadata = withRemoteRunMetadata(conversation.metadata, remoteRunIds);
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+        continue;
+      }
       const warnings = sanitizeWarningList(conversation.metadata.warnings);
       if (hasPendingParticipantMessage(conversation) && !warnings.includes(INTERRUPTED_RUN_WARNING)) {
         warnings.push(INTERRUPTED_RUN_WARNING);
       }
-      conversation.metadata = clearChatRunMetadata({ ...conversation.metadata, warnings });
+      conversation.metadata = withRemoteRunMetadata(
+        clearChatRunMetadata({ ...conversation.metadata, warnings }),
+        remoteRunIds
+      );
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
     }

@@ -13,6 +13,7 @@ import type {
 } from "../../shared/types";
 import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
 import type { ChatAppToolApprovalDecisionEvent, ChatService } from "./chat";
+import { buildCloudRunSshTarget, validateCloudRunSshWorkerFields } from "./cloudRunWorkers";
 import { CommandError, runCommand } from "./command";
 import {
   CODEX_APP_SERVER_MCP_TOKEN_ENV,
@@ -555,6 +556,15 @@ export class RemoteRunService {
     await this.projectWorkerSnapshot(request.conversationId, runId, request.participant.id, snapshot);
     await this.projectSnapshotTerminalFallback(request.conversationId, runId, request.participant.id, snapshot);
     return snapshot.state;
+  }
+
+  registerDetachedRunContext(
+    runId: string,
+    worker: RemoteRunWorkerTarget,
+    context: { conversationId: string; participantId: string }
+  ): void {
+    this.detachedWorkerByRun.set(runId, worker);
+    this.detachedContextByRun.set(runId, context);
   }
 
   async pollDetachedRun(request: RemoteRunDetachedPollRequest): Promise<RemoteDetachedRunState> {
@@ -1387,9 +1397,7 @@ async function defaultRemoteCodexExecutor(
 }
 
 function remoteSshTarget(worker: RemoteRunWorkerTarget): string {
-  return worker.user?.trim()
-    ? `${worker.user.trim()}@${worker.host}`
-    : worker.host;
+  return buildCloudRunSshTarget(worker);
 }
 
 function replaceArgValue(args: string[], from: string, to: string): string[] {
@@ -1599,6 +1607,7 @@ function remoteWorkerRunDirForTarget(worker: RemoteRunWorkerTarget, runId: strin
 }
 
 function remoteSshBaseArgs(worker: RemoteRunWorkerTarget, target: string): string[] {
+  validateCloudRunSshWorkerFields(worker);
   const args = [
     "-o",
     "BatchMode=yes",

@@ -210,6 +210,7 @@ function App(): JSX.Element {
           deleteChatParticipantConfig={settingsActions.deleteChatParticipantConfig}
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
           setCliAgentRunTimeoutMs={settingsActions.setCliAgentRunTimeoutMs}
+          saveCloudRunsSettings={settingsActions.saveCloudRunsSettings}
           sidebarCollapsed={state.sidebarCollapsed}
           onExpandSidebar={() => state.setSidebarCollapsed(false)}
           onClose={closeSettings}

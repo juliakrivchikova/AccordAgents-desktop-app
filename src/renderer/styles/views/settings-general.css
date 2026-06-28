@@ -158,6 +158,49 @@
   align-items: flex-end;
 }
 
+.settings-view .gen-row-stack {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-view .gen-grid-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.settings-view .gen-grid-form-compact {
+  grid-template-columns: repeat(2, minmax(120px, 180px));
+}
+
+.settings-view .gen-input {
+  min-width: 0;
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  font: 500 13px var(--font-body);
+}
+
+.settings-view .gen-input:focus {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 1px;
+}
+
+.settings-view .gen-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.settings-view .gen-actions .gen-pill {
+  min-width: 92px;
+}
+
 /* ---- File-open dropdown pill ---- */
 
 .settings-view .gen-dropdown {

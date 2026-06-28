@@ -30,7 +30,7 @@ export function ParticipantRuntimeControls(props: {
   disabled: boolean;
   onUpdate: (
     participantId: string,
-    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions">
+    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">
   ) => void;
 }): JSX.Element {
   const participant = props.participant;
@@ -41,12 +41,13 @@ export function ParticipantRuntimeControls(props: {
 
   // Build the patch by key presence so an intentional reset (model: "") is forwarded
   // rather than collapsing back to the current value.
-  function update(patch: Partial<Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions">>): void {
+  function update(patch: Partial<Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">>): void {
     props.onUpdate(participant.id, {
       model: "model" in patch ? patch.model : participant.model,
       reasoningEffort: "reasoningEffort" in patch ? patch.reasoningEffort : participant.reasoningEffort,
       agentMode: "agentMode" in patch ? patch.agentMode : participant.agentMode,
-      permissions: "permissions" in patch ? patch.permissions : participant.permissions
+      permissions: "permissions" in patch ? patch.permissions : participant.permissions,
+      remoteExecution: "remoteExecution" in patch ? patch.remoteExecution : participant.remoteExecution
     });
   }
 
@@ -95,6 +96,25 @@ export function ParticipantRuntimeControls(props: {
           disabled={props.disabled}
           onChange={(model) => update({ model })}
         />
+        {participant.kind === "codex-cli" && (
+          <>
+            <span className="chat-rt-dot" aria-hidden>·</span>
+            <GhostSelect
+              ariaLabel="Run location"
+              value={participant.remoteExecution ?? "inherit"}
+              muted={!participant.remoteExecution || participant.remoteExecution === "inherit"}
+              disabled={props.disabled}
+              options={[
+                { value: "inherit", label: "Default" },
+                { value: "remote", label: "Remote" },
+                { value: "local", label: "Local" }
+              ]}
+              onChange={(value) => update({
+                remoteExecution: value === "inherit" ? undefined : value as ChatParticipant["remoteExecution"]
+              })}
+            />
+          </>
+        )}
         {isCustomAccess && (
           <>
             <span className="chat-rt-dot" aria-hidden>·</span>

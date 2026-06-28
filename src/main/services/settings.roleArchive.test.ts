@@ -36,6 +36,7 @@ function settingsServiceWith(
     settingsVersion: 1,
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
+    cloudRuns: { enabled: false, worker: {}, maxRuntimeMs: 24 * 60 * 60_000, pollIntervalMs: 2_500 },
     providers: [],
     chatRoleConfigs: initial.chatRoleConfigs ?? [],
     chatBehaviorRules: [],
@@ -52,6 +53,7 @@ function settingsServiceWith(
   service.getPublicSettings = async (): Promise<AppSettings> => ({
     roundLimitDefault: stored.roundLimitDefault,
     cliAgentRunTimeoutMs: stored.cliAgentRunTimeoutMs,
+    cloudRuns: stored.cloudRuns,
     providers: stored.providers,
     chatRoleConfigs: stored.chatRoleConfigs,
     chatBehaviorRules: stored.chatBehaviorRules,

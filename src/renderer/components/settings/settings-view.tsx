@@ -5,6 +5,7 @@ import type {
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
   ChatSavedPromptConfigUpdate,
+  CloudRunsSettingsUpdate,
   ProviderSettings,
   RepoFileOpenAction
 } from "../../../shared/types";
@@ -35,6 +36,7 @@ export function SettingsView(props: {
   deleteChatParticipantConfig: (id: string) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
+  saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => Promise<void>;
   sidebarCollapsed: boolean;
   onExpandSidebar: () => void;
   onClose: () => void;
@@ -118,9 +120,11 @@ export function SettingsView(props: {
             agents={props.agents}
             repoFileOpenAction={props.settings.repoFileOpenAction}
             cliAgentRunTimeoutMs={props.settings.cliAgentRunTimeoutMs}
+            cloudRuns={props.settings.cloudRuns}
             updateProvider={props.updateProvider}
             setRepoFileOpenPreference={props.setRepoFileOpenPreference}
             setCliAgentRunTimeoutMs={props.setCliAgentRunTimeoutMs}
+            saveCloudRunsSettings={props.saveCloudRunsSettings}
           />
         )}
       </div>

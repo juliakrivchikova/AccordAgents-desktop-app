@@ -41,7 +41,7 @@ export interface ChatActions {
   respondToChatChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => Promise<void>;
   addChatParticipant: () => Promise<void>;
   addSavedChatParticipant: (config: ChatParticipantConfig) => Promise<void>;
-  updateChatParticipantRuntime: (participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions">) => Promise<void>;
+  updateChatParticipantRuntime: (participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">) => Promise<void>;
   removeChatParticipant: (participantId: string) => Promise<void>;
   compactChatParticipant: (participantId: string, options?: ChatRunScopeOptions) => Promise<boolean>;
   respondToChatAppToolApproval: (
@@ -299,7 +299,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     await commitChatParticipant(participant);
   }
 
-  async function updateChatParticipantRuntime(participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions">): Promise<void> {
+  async function updateChatParticipantRuntime(participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">): Promise<void> {
     if (!state.conversation || state.conversation.kind !== "chat") return;
     state.setError(undefined);
     try {
@@ -309,7 +309,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         model: patch.model,
         reasoningEffort: patch.reasoningEffort,
         agentMode: patch.agentMode,
-        permissions: patch.permissions
+        permissions: patch.permissions,
+        remoteExecution: patch.remoteExecution
       });
       if (saved) state.setConversation(saved);
       await conversationActions.refreshConversations();

@@ -17,9 +17,59 @@ export interface ProviderSettings {
   model?: string;
 }
 
+export type CloudRunRemoteExecutionMode = "inherit" | "local" | "remote";
+
+export type CloudRunStatus = "running" | "completed" | "failed" | "cancelled" | "unknown";
+
+export interface CloudRunWorkerSettings {
+  host?: string;
+  user?: string;
+  port?: number;
+  identityFile?: string;
+  workerRoot?: string;
+  remoteCwd?: string;
+  codexPath?: string;
+}
+
+export interface CloudRunsSettings {
+  enabled: boolean;
+  worker: CloudRunWorkerSettings;
+  maxRuntimeMs: number;
+  pollIntervalMs: number;
+}
+
+export interface CloudRunsSettingsUpdate {
+  enabled?: boolean;
+  worker?: CloudRunWorkerSettings;
+  maxRuntimeMs?: number;
+  pollIntervalMs?: number;
+}
+
+export interface CloudRunWorkerTestResult {
+  ok: boolean;
+  message: string;
+}
+
+export interface RemoteRunHandle {
+  runId: string;
+  conversationId: string;
+  participantId: string;
+  participantHandle?: string;
+  worker: CloudRunWorkerSettings;
+  status: CloudRunStatus;
+  workerCursorSeq?: number;
+  providerOutputMessageId?: string;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  lastPolledAt?: string;
+  error?: string;
+}
+
 export interface AppSettings {
   roundLimitDefault: number;
   cliAgentRunTimeoutMs: number;
+  cloudRuns: CloudRunsSettings;
   providers: ProviderSettings[];
   chatRoleConfigs: ChatRoleConfig[];
   chatBehaviorRules: ChatBehaviorRuleConfig[];
@@ -234,6 +284,7 @@ export interface ChatParticipant {
   avatarId?: string;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
+  remoteExecution?: CloudRunRemoteExecutionMode;
 }
 
 export interface ChatParticipantSession {
@@ -301,6 +352,7 @@ export interface ChatRosterChangeParticipantInput {
   avatarId?: string;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
+  remoteExecution?: CloudRunRemoteExecutionMode;
 }
 
 export interface ChatRosterChangeAddOperation {
@@ -368,6 +420,7 @@ export interface ChatExistingParticipantOverrides {
   reasoningEffort?: ChatReasoningEffort;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
+  remoteExecution?: CloudRunRemoteExecutionMode;
 }
 
 export interface ChatParticipantAddExistingOperation {
@@ -511,6 +564,7 @@ export interface ChatRosterCurrentParticipant {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   agentMode?: ChatAgentMode;
+  remoteExecution?: CloudRunRemoteExecutionMode;
 }
 
 export interface ChatRosterAvailableOptions {
@@ -694,6 +748,7 @@ export interface ChatParticipantConfig {
   avatarId?: string;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
+  remoteExecution?: CloudRunRemoteExecutionMode;
   updatedAt: string;
 }
 
@@ -708,6 +763,7 @@ export interface ChatParticipantConfigUpdate {
   avatarId?: string;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
+  remoteExecution?: CloudRunRemoteExecutionMode;
 }
 
 export interface ChatParticipantInput {
@@ -721,6 +777,7 @@ export interface ChatParticipantInput {
   avatarId?: string;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
+  remoteExecution?: CloudRunRemoteExecutionMode;
 }
 
 export interface CreateChatConversationRequest {
@@ -742,6 +799,7 @@ export interface UpdateChatParticipantRuntimeRequest {
   reasoningEffort?: ChatReasoningEffort;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
+  remoteExecution?: CloudRunRemoteExecutionMode;
 }
 
 export interface RemoveChatParticipantRequest {
@@ -1239,6 +1297,8 @@ export interface AppBridge {
   openLocalFile(request: OpenLocalFileRequest): Promise<OpenLocalFileResult>;
   setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<AppSettings>;
   setCliAgentRunTimeoutMs(timeoutMs: number): Promise<AppSettings>;
+  saveCloudRunsSettings(update: CloudRunsSettingsUpdate): Promise<AppSettings>;
+  testCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerTestResult>;
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;

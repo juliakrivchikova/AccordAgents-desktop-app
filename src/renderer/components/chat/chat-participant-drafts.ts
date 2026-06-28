@@ -49,6 +49,7 @@ export interface ChatParticipantDraft {
   avatarId?: string;
   agentMode: ChatAgentMode;
   permissions: ChatAgentPermissions;
+  remoteExecution?: ChatParticipantConfig["remoteExecution"];
 }
 
 export interface AddableSavedParticipantConfig {
@@ -131,7 +132,8 @@ export function chatParticipantConfigToDraft(participant: ChatParticipantConfig)
     reasoningEffort: normalizeChatReasoningEffort(participant.reasoningEffort, participant.kind),
     avatarId: normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle),
     agentMode: normalizeChatAgentMode(participant.agentMode),
-    permissions: normalizeChatAgentPermissions(participant.permissions)
+    permissions: normalizeChatAgentPermissions(participant.permissions),
+    remoteExecution: participant.remoteExecution
   };
 }
 
@@ -231,14 +233,15 @@ export function normalizeChatParticipantDraftForSettings(draft: ChatParticipantD
     reasoningEffort: normalizeChatReasoningEffort(draft.reasoningEffort, kind),
     avatarId: normalizedChatAvatarId(kind, draft.avatarId, handle || roleConfigId),
     agentMode: normalizeChatAgentMode(draft.agentMode),
-    permissions: normalizeChatAgentPermissions(draft.permissions)
+    permissions: normalizeChatAgentPermissions(draft.permissions),
+    remoteExecution: draft.remoteExecution
   };
 }
 
 export function updateChatParticipantDraft(
   draft: ChatParticipantDraft,
   settings: AppSettings,
-  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "behaviorRuleIds" | "kind" | "model" | "reasoningEffort" | "avatarId" | "agentMode" | "permissions">>
+  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "behaviorRuleIds" | "kind" | "model" | "reasoningEffort" | "avatarId" | "agentMode" | "permissions" | "remoteExecution">>
 ): ChatParticipantDraft {
   let next = { ...draft, ...patch };
   const kindChanged = patch.kind !== undefined && patch.kind !== draft.kind;
@@ -280,7 +283,8 @@ export function normalizedChatDrafts(drafts: ChatParticipantDraft[]): ChatPartic
     reasoningEffort: normalizeChatReasoningEffort(draft.reasoningEffort, draft.kind),
     avatarId: normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle),
     agentMode: normalizeChatAgentMode(draft.agentMode),
-    permissions: normalizeChatAgentPermissions(draft.permissions)
+    permissions: normalizeChatAgentPermissions(draft.permissions),
+    remoteExecution: draft.remoteExecution
   }));
 }
 

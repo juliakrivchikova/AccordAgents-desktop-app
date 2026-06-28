@@ -1216,6 +1216,109 @@ test("ending one active run preserves survivor metadata", async () => {
   assert.equal(storage.current.metadata.runId, undefined);
 });
 
+test("ending local launcher keeps remote run active until terminal state", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const now = "2026-06-27T22:00:00.000Z";
+  conversation.metadata = {
+    ...conversation.metadata,
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        conversationId: conversation.id,
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        worker: { host: "worker.example" },
+        status: "running",
+        startedAt: now,
+        updatedAt: now
+      }
+    }
+  };
+
+  await (service as any).beginChatRun(conversation, "remote-run");
+  await (service as any).endChatRun(conversation, "remote-run");
+
+  assert.deepEqual(storage.current.metadata.activeRunIds, ["remote-run"]);
+  assert.equal(storage.current.metadata.running, true);
+  assert.equal(storage.current.metadata.runId, "remote-run");
+
+  await service.updateRemoteRunHandleState(conversation.id, "remote-run", {
+    runId: "remote-run",
+    conversationId: conversation.id,
+    participantId: participant.id,
+    status: "completed",
+    completedAt: "2026-06-27T22:01:00.000Z"
+  });
+
+  assert.equal(storage.current.metadata.activeRunIds, undefined);
+  assert.equal(storage.current.metadata.running, false);
+  assert.equal((storage.current.metadata.remoteRunHandles as any)["remote-run"].status, "completed");
+});
+
+test("cancelRun marks remote run failed when remote cancel delivery fails", async () => {
+  const participant = chatParticipant("codex-cli");
+  const now = "2026-06-27T22:00:00.000Z";
+  const handle = {
+    runId: "remote-run",
+    conversationId: "conversation-1",
+    participantId: participant.id,
+    participantHandle: participant.handle,
+    worker: { host: "worker.example" },
+    status: "running",
+    startedAt: now,
+    updatedAt: now
+  };
+  const conversation = chatConversation([participant], {
+    running: true,
+    runId: "remote-run",
+    activeRunIds: ["remote-run"],
+    remoteRunHandles: {
+      "remote-run": handle
+    }
+  });
+  const { service, storage } = testService({ conversation });
+  service.setRemoteRunService({
+    async startDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    async pollDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    async cancelDetachedRun(): Promise<any> {
+      throw new Error("ssh unavailable");
+    },
+    registerDetachedRunContext(): void {}
+  });
+  (service as any).registerRemoteRunHandle(handle);
+
+  assert.equal(service.cancelRun("remote-run"), true);
+
+  await waitFor(() => {
+    const stored = (storage.current.metadata.remoteRunHandles as any)["remote-run"];
+    return stored.status === "failed" &&
+      storage.current.metadata.running === false &&
+      Array.isArray(storage.current.metadata.warnings);
+  });
+  const stored = (storage.current.metadata.remoteRunHandles as any)["remote-run"];
+  assert.equal(stored.status, "failed");
+  assert.match(stored.error, /Failed to cancel remote run: ssh unavailable/);
+  assert.equal(storage.current.metadata.activeRunIds, undefined);
+  assert.equal(storage.current.metadata.warnings.some((warning: string) =>
+    warning.includes("Failed to cancel remote run")
+  ), true);
+
+  await service.updateRemoteRunHandleState(conversation.id, "remote-run", {
+    runId: "remote-run",
+    conversationId: conversation.id,
+    participantId: participant.id,
+    status: "running"
+  });
+
+  assert.equal((storage.current.metadata.remoteRunHandles as any)["remote-run"].status, "failed");
+});
+
 test("participant reservation is released if turn controller setup fails", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
@@ -3795,6 +3898,7 @@ function testService(options: {
   const publicSettings = (): AppSettings => ({
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: 24 * 60 * 60_000,
+    cloudRuns: { enabled: false, worker: {}, maxRuntimeMs: 24 * 60 * 60_000, pollIntervalMs: 2_500 },
     providers: [
       { kind: "codex-cli", label: "Codex CLI", enabled: true },
       { kind: "claude-code", label: "Claude Code", enabled: true }

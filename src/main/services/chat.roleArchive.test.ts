@@ -23,6 +23,7 @@ function chatServiceWithRoles(roles: ChatRoleConfig[]) {
       return {
         roundLimitDefault: 1,
         cliAgentRunTimeoutMs: 1,
+        cloudRuns: { enabled: false, worker: {}, maxRuntimeMs: 24 * 60 * 60_000, pollIntervalMs: 2_500 },
         providers: [],
         chatRoleConfigs: roles,
         chatBehaviorRules: [],

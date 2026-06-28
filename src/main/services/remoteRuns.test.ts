@@ -11,11 +11,14 @@ import type {
   ChatParticipant,
   ChatRoleConfig,
   Conversation,
-  ParticipantConfig
+  ParticipantConfig,
+  RemoteRunHandle
 } from "../../shared/types";
 import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
 import { ChatService } from "./chat";
+import { buildCloudRunSshTarget, validateCloudRunSshWorkerFields } from "./cloudRunWorkers";
 import { RemoteRunService } from "./remoteRuns";
+import { RemoteRunCoordinator } from "./remoteRunCoordinator";
 import type {
   RemoteCodexExecutor,
   RemoteDetachedWorkerCancelRequest,
@@ -475,6 +478,83 @@ test("detached cancel and reap project terminal state through worker events", as
   assert.equal((storage.current.metadata.remoteRunReplay as any)["expired-run"].terminalState, "failed");
 });
 
+test("remote run coordinator retries poll errors and drains later terminal state", async () => {
+  const handle = remoteRunHandle({
+    runId: "retry-run",
+    startedAt: new Date().toISOString()
+  });
+  const chat = new FakeCoordinatorChat(handle);
+  let pollCount = 0;
+  const remoteRuns = {
+    registerDetachedRunContext(): void {},
+    async pollDetachedRun(): Promise<any> {
+      pollCount += 1;
+      if (pollCount === 1) {
+        throw new Error("ssh unavailable");
+      }
+      return {
+        runId: handle.runId,
+        conversationId: handle.conversationId,
+        participantId: handle.participantId,
+        status: "completed",
+        completedAt: new Date().toISOString()
+      };
+    }
+  };
+  const coordinator = new RemoteRunCoordinator(
+    remoteRuns as never,
+    chat as never,
+    coordinatorSettings({ maxRuntimeMs: 60_000, pollIntervalMs: 1 }) as never,
+    coordinatorDebugLogs() as never
+  );
+
+  coordinator.trackRun(handle);
+
+  await waitFor(() => chat.current.status === "completed");
+  assert.equal(pollCount, 2);
+});
+
+test("remote run coordinator marks expired runs failed instead of polling forever", async () => {
+  const handle = remoteRunHandle({
+    runId: "expired-coordinator-run",
+    startedAt: new Date(Date.now() - 5_000).toISOString()
+  });
+  const chat = new FakeCoordinatorChat(handle);
+  let pollCount = 0;
+  const remoteRuns = {
+    registerDetachedRunContext(): void {},
+    async pollDetachedRun(): Promise<any> {
+      pollCount += 1;
+      return {
+        runId: handle.runId,
+        status: "running"
+      };
+    }
+  };
+  const coordinator = new RemoteRunCoordinator(
+    remoteRuns as never,
+    chat as never,
+    coordinatorSettings({ maxRuntimeMs: 1, pollIntervalMs: 1 }) as never,
+    coordinatorDebugLogs() as never
+  );
+
+  coordinator.trackRun(handle);
+
+  await waitFor(() => chat.current.status === "failed");
+  assert.equal(pollCount, 0);
+  assert.match(chat.current.error ?? "", /exceeded max runtime/);
+});
+
+test("cloud run SSH target validation rejects argv-sensitive values", () => {
+  assert.equal(buildCloudRunSshTarget({ host: "worker.example", user: "ubuntu" }), "ubuntu@worker.example");
+  assert.throws(() => buildCloudRunSshTarget({ host: "-oProxyCommand=touch /tmp/pwned" }), /Worker host/);
+  assert.throws(() => buildCloudRunSshTarget({ host: "worker.example", user: "-oProxyCommand=touch /tmp/pwned" }), /Worker user/);
+  assert.throws(() => validateCloudRunSshWorkerFields({
+    host: "worker.example",
+    identityFile: "-oProxyCommand=touch /tmp/pwned"
+  }), /Worker identity file/);
+});
+
 test("real remote codex run spools raw provider output and renders final output", async () => {
   const participant = chatParticipant({ webAccess: false });
   const conversation = chatConversation([participant]);
@@ -643,6 +723,7 @@ async function testRemoteRun(options: {
       return {
         roundLimitDefault: 1,
         cliAgentRunTimeoutMs: 24 * 60 * 60_000,
+        cloudRuns: { enabled: false, worker: {}, maxRuntimeMs: 24 * 60 * 60_000, pollIntervalMs: 2_500 },
         providers: [
           { kind: "codex-cli", label: "Codex CLI", enabled: true },
           { kind: "claude-code", label: "Claude Code", enabled: true }
@@ -811,6 +892,86 @@ class FakeDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
   }
 }
 
+class FakeCoordinatorChat {
+  current: RemoteRunHandle;
+
+  constructor(handle: RemoteRunHandle) {
+    this.current = clone(handle);
+  }
+
+  async listActiveRemoteRunHandles(): Promise<RemoteRunHandle[]> {
+    return [clone(this.current)];
+  }
+
+  async updateRemoteRunHandleState(_conversationId: string, _runId: string, state: any): Promise<RemoteRunHandle> {
+    this.current = {
+      ...this.current,
+      status: state.status,
+      workerCursorSeq: state.workerCursorSeq ?? this.current.workerCursorSeq,
+      completedAt: state.completedAt ?? this.current.completedAt,
+      error: state.error ?? this.current.error,
+      updatedAt: new Date().toISOString()
+    };
+    return clone(this.current);
+  }
+}
+
+function remoteRunHandle(patch: Partial<RemoteRunHandle> = {}): RemoteRunHandle {
+  const startedAt = patch.startedAt ?? new Date().toISOString();
+  return {
+    runId: "remote-run",
+    conversationId: "conversation-1",
+    participantId: "participant-1",
+    participantHandle: "codex",
+    worker: { host: "worker.example" },
+    status: "running",
+    startedAt,
+    updatedAt: startedAt,
+    ...patch
+  };
+}
+
+function coordinatorSettings(patch: { maxRuntimeMs: number; pollIntervalMs: number }): { getPublicSettings(): Promise<AppSettings> } {
+  return {
+    async getPublicSettings(): Promise<AppSettings> {
+      return {
+        roundLimitDefault: 1,
+        cliAgentRunTimeoutMs: 24 * 60 * 60_000,
+        cloudRuns: {
+          enabled: true,
+          worker: { host: "worker.example" },
+          maxRuntimeMs: patch.maxRuntimeMs,
+          pollIntervalMs: patch.pollIntervalMs
+        },
+        providers: [],
+        chatRoleConfigs: [],
+        chatBehaviorRules: [],
+        chatSavedPrompts: [],
+        chatParticipantConfigs: []
+      };
+    }
+  };
+}
+
+function coordinatorDebugLogs(): { write(): Promise<void> } {
+  return {
+    async write(): Promise<void> {
+      return undefined;
+    }
+  };
+}
+
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 1000): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Timed out waiting for condition.");
 }

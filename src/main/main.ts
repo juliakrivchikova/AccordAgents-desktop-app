@@ -6,6 +6,8 @@ import type {
   AgentHealth,
   ChatBehaviorRuleConfigUpdate,
   ChatSavedPromptConfigUpdate,
+  CloudRunsSettingsUpdate,
+  CloudRunWorkerSettings,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
@@ -46,11 +48,13 @@ import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
 import { AppSkillsService } from "./services/appSkills";
 import { bootstrapAppUpdater } from "./services/appUpdater";
-import { ensureLoginShellEnvPrimed, setCommandDebugLogger } from "./services/command";
+import { ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
+import { buildCloudRunSshTarget, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { DebugLogService } from "./services/debugLogs";
 import { GitService } from "./services/git";
 import { ProviderRunner } from "./services/providers";
 import { RemoteRunService } from "./services/remoteRuns";
+import { RemoteRunCoordinator } from "./services/remoteRunCoordinator";
 import { LocalFileOpenerService } from "./services/localFileOpener";
 import { SettingsService } from "./services/settings";
 import { StorageService } from "./services/storage";
@@ -88,7 +92,10 @@ const consensusService = new ConsensusService(gitService, storageService, provid
 const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
 }, userSkillsService);
-new RemoteRunService(chatService);
+const remoteRunService = new RemoteRunService(chatService);
+const remoteRunCoordinator = new RemoteRunCoordinator(remoteRunService, chatService, settingsService, debugLogService);
+chatService.setRemoteRunService(remoteRunService);
+chatService.setRemoteRunCoordinator(remoteRunCoordinator);
 appMcpService.setRosterChangeHandler((actor, request) => chatService.requestRosterChangeFromTool(actor, request));
 appMcpService.setRosterOptionsHandler((actor) => chatService.describeRosterOptionsForTool(actor));
 appMcpService.setRoleChangeHandler((actor, request) => chatService.requestRoleChangeFromTool(actor, request));
@@ -159,6 +166,42 @@ function createWindow(): void {
   }
 }
 
+async function testCloudRunWorker(worker: CloudRunWorkerSettings): Promise<{ ok: boolean; message: string }> {
+  const normalized = normalizeCloudRunWorkerSettings(worker);
+  const host = normalized.host ?? "";
+  if (!host) {
+    return { ok: false, message: "Worker host is required." };
+  }
+  let target: string;
+  try {
+    validateCloudRunSshWorkerFields(normalized as CloudRunWorkerSettings & { host: string });
+    target = buildCloudRunSshTarget(normalized as CloudRunWorkerSettings & { host: string });
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+  const args = [
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=10"
+  ];
+  if (normalized.identityFile) {
+    args.push("-i", normalized.identityFile);
+  }
+  if (typeof normalized.port === "number" && Number.isFinite(normalized.port)) {
+    args.push("-p", String(normalized.port));
+  }
+  args.push(target, "command -v codex >/dev/null && printf ok");
+  try {
+    const result = await runCommand("ssh", args, { timeoutMs: 20_000 });
+    return result.stdout.trim() === "ok"
+      ? { ok: true, message: "Worker reachable; codex found." }
+      : { ok: false, message: result.stdout.trim() || "Worker reachable, but codex check did not return ok." };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 function registerIpc(): void {
   ipcMain.handle("app:get-version", () => app.getVersion());
   ipcMain.handle("app:open-external", (_event, url: unknown) => openExternalUrl(url));
@@ -170,6 +213,11 @@ function registerIpc(): void {
     const next = await settingsService.setCliAgentRunTimeoutMs(timeoutMs);
     cliAgentRunner.setRunTimeoutMs(next.cliAgentRunTimeoutMs);
     return next;
+  });
+  ipcMain.handle("settings:save-cloud-runs", (_event, update: CloudRunsSettingsUpdate) => settingsService.saveCloudRunsSettings(update));
+  ipcMain.handle("cloud-runs:test-worker", async (_event, request?: CloudRunWorkerSettings) => {
+    const settings = await settingsService.getPublicSettings();
+    return testCloudRunWorker(request ?? settings.cloudRuns.worker);
   });
   ipcMain.handle("settings:update-provider", (_event, update: ProviderSettingsUpdate) => settingsService.updateProvider(update));
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));
@@ -654,6 +702,11 @@ void app.whenReady().then(async () => {
   bootstrapAppUpdater(debugLogService);
   await appMcpService.start();
   await storageService.init();
+  void remoteRunCoordinator.start().catch((error) => {
+    void debugLogService.write("remote-run.coordinator.start.error", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+  });
   createWindow();
   void ensureLoginShellEnvPrimed();
   await detectAgentsWithAppSkills().catch((error) => {

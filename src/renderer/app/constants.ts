@@ -4,6 +4,12 @@ import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS } from "../../shared/cliAgentRunSettin
 export const DEFAULT_SETTINGS: AppSettings = {
   roundLimitDefault: 2,
   cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
+  cloudRuns: {
+    enabled: false,
+    worker: {},
+    maxRuntimeMs: 24 * 60 * 60_000,
+    pollIntervalMs: 2_500
+  },
   providers: [],
   chatRoleConfigs: [],
   chatBehaviorRules: [],

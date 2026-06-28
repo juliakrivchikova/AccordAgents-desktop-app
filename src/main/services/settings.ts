@@ -12,6 +12,9 @@ import type {
   ChatAgentMode,
   ChatAgentPermissions,
   ChatAppToolCapability,
+  CloudRunsSettings,
+  CloudRunsSettingsUpdate,
+  CloudRunRemoteExecutionMode,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
   ChatParticipantSeedState,
@@ -38,6 +41,7 @@ import {
   normalizeChatSavedPromptTrigger
 } from "../../shared/chatSavedPrompts";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
+import { normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 
 type StoredProviderSettings = ProviderSettings & {
   encryptedApiKey?: string;
@@ -47,6 +51,7 @@ interface StoredSettings {
   settingsVersion?: number;
   roundLimitDefault: number;
   cliAgentRunTimeoutMs?: number;
+  cloudRuns?: CloudRunsSettings;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
   providers: StoredProviderSettings[];
@@ -63,6 +68,13 @@ const DEFAULT_PROVIDERS: ProviderSettings[] = [
 ];
 
 const DEFAULT_PROVIDER_KINDS = new Set<ProviderSettings["kind"]>(DEFAULT_PROVIDERS.map((provider) => provider.kind));
+
+const DEFAULT_CLOUD_RUNS_SETTINGS: CloudRunsSettings = {
+  enabled: false,
+  worker: {},
+  maxRuntimeMs: 24 * 60 * 60_000,
+  pollIntervalMs: 2_500
+};
 
 const CHAT_HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 const CHAT_ROLE_LABEL_MAX_CHARS = 80;
@@ -1576,6 +1588,7 @@ export class SettingsService {
     return {
       roundLimitDefault: stored.roundLimitDefault,
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
+      cloudRuns: this.normalizeCloudRunsSettings(stored.cloudRuns),
       lastRepoPath: stored.lastRepoPath,
       repoFileOpenAction: stored.repoFileOpenAction,
       chatRoleConfigs: stored.chatRoleConfigs ?? DEFAULT_CHAT_ROLES,
@@ -1823,6 +1836,7 @@ export class SettingsService {
         avatarId: update.avatarId?.trim() || undefined,
         agentMode: normalizeChatAgentMode(update.agentMode),
         permissions: normalizeChatAgentPermissions(update.permissions),
+        remoteExecution: this.normalizeRemoteExecutionMode(update.remoteExecution),
         updatedAt: now
       };
       participants = participants.some((participant) => participant.id === nextParticipant.id)
@@ -2023,6 +2037,7 @@ export class SettingsService {
       avatarId: update.avatarId?.trim() || undefined,
       agentMode: normalizeChatAgentMode(update.agentMode),
       permissions: normalizeChatAgentPermissions(update.permissions),
+      remoteExecution: this.normalizeRemoteExecutionMode(update.remoteExecution),
       updatedAt: now
     };
     stored.chatParticipantConfigs = participants.some((participant) => participant.id === nextParticipant.id)
@@ -2161,6 +2176,20 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  async saveCloudRunsSettings(update: CloudRunsSettingsUpdate): Promise<AppSettings> {
+    const stored = await this.readStored();
+    stored.cloudRuns = this.normalizeCloudRunsSettings({
+      ...stored.cloudRuns,
+      ...update,
+      worker: {
+        ...(stored.cloudRuns?.worker ?? {}),
+        ...(update.worker ?? {})
+      }
+    });
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
   private async readStored(): Promise<StoredSettings> {
     try {
       const raw = await readFile(this.settingsPath, "utf8");
@@ -2198,6 +2227,7 @@ export class SettingsService {
       settingsVersion: 1,
       roundLimitDefault: this.defaultRoundLimit(settings),
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(settings.cliAgentRunTimeoutMs),
+      cloudRuns: this.normalizeCloudRunsSettings(settings.cloudRuns),
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
       repoFileOpenAction: this.normalizeRepoFileOpenAction(settings.repoFileOpenAction),
       providers,
@@ -2239,6 +2269,28 @@ export class SettingsService {
 
   private normalizeRepoFileOpenAction(action: unknown): RepoFileOpenAction | undefined {
     return action === "open" || action === "reveal" || action === "intellij-idea" ? action : undefined;
+  }
+
+  private normalizeCloudRunsSettings(value: unknown): CloudRunsSettings {
+    const record = value && typeof value === "object" && !Array.isArray(value)
+      ? value as Partial<CloudRunsSettings>
+      : {};
+    const maxRuntimeMs = typeof record.maxRuntimeMs === "number" && Number.isFinite(record.maxRuntimeMs)
+      ? Math.max(60_000, Math.floor(record.maxRuntimeMs))
+      : DEFAULT_CLOUD_RUNS_SETTINGS.maxRuntimeMs;
+    const pollIntervalMs = typeof record.pollIntervalMs === "number" && Number.isFinite(record.pollIntervalMs)
+      ? Math.max(500, Math.floor(record.pollIntervalMs))
+      : DEFAULT_CLOUD_RUNS_SETTINGS.pollIntervalMs;
+    return {
+      enabled: record.enabled === true,
+      worker: normalizeCloudRunWorkerSettings(record.worker),
+      maxRuntimeMs,
+      pollIntervalMs
+    };
+  }
+
+  private normalizeRemoteExecutionMode(value: unknown): CloudRunRemoteExecutionMode | undefined {
+    return value === "inherit" || value === "local" || value === "remote" ? value : undefined;
   }
 
   private normalizeBehaviorRules(rules: ChatBehaviorRuleConfig[] | undefined): ChatBehaviorRuleConfig[] {
@@ -2321,6 +2373,7 @@ export class SettingsService {
         avatarId: participant.avatarId?.trim() || undefined,
         agentMode: normalizeChatAgentMode((participant as { agentMode?: ChatAgentMode }).agentMode),
         permissions: normalizeChatAgentPermissions((participant as { permissions?: ChatAgentPermissions }).permissions),
+        remoteExecution: this.normalizeRemoteExecutionMode((participant as { remoteExecution?: unknown }).remoteExecution),
         updatedAt: participant.updatedAt || new Date().toISOString()
       }));
   }
