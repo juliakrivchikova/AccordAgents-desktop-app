@@ -367,6 +367,52 @@ test("agent progress sink preserves the exact activity stream offset", () => {
   assert.equal(sink.activityEvents()[0].afterContentLength, intro.length);
 });
 
+test("agent progress sink preserves transcript without a visible progress callback", () => {
+  const service = testService().service as any;
+  const preamble = "I’ll inspect the existing renderer path first.";
+  const final = "Final answer stays visible when collapsed.";
+  const full = `${preamble}\n\n${final}`;
+  const sink = service.createAgentProgressSink("run-1", undefined, chatParticipant("codex-cli"), "message-1");
+
+  sink.beginAttempt();
+  sink.emit({ kind: "text", text: preamble, cumulative: preamble });
+  sink.emit({ kind: "tool", text: "Reading renderer state", activityKind: "tool" });
+  sink.emit({ kind: "text", text: `\n\n${final}`, cumulative: full });
+
+  assert.equal(sink.processingTranscript(NOW)?.content, full);
+  assert.equal(sink.activityEvents()[0].label, "Reading renderer state");
+  assert.equal(sink.activityEvents()[0].afterContentLength, preamble.length);
+});
+
+test("agent progress sink keeps in-progress formatted stream for visible runs", async () => {
+  const service = testService().service as any;
+  const progressItems: Array<{ partialContent?: string; activityEvents?: unknown[] }> = [];
+  const preamble = "I’ll inspect the existing renderer path first.";
+  const final = "Final answer stays visible when collapsed.";
+  const full = `${preamble}\n\n${final}`;
+  const sink = service.createAgentProgressSink(
+    "run-1",
+    (progress: { agentProgress?: { partialContent?: string; activityEvents?: unknown[] } }) => {
+      progressItems.push({
+        partialContent: progress.agentProgress?.partialContent,
+        activityEvents: progress.agentProgress?.activityEvents
+      });
+    },
+    chatParticipant("codex-cli"),
+    "message-1"
+  );
+
+  sink.beginAttempt();
+  sink.emit({ kind: "text", text: preamble, cumulative: preamble });
+  sink.emit({ kind: "tool", text: "Reading renderer state", activityKind: "tool" });
+  sink.emit({ kind: "text", text: `\n\n${final}`, cumulative: full });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  assert.equal(progressItems.at(-1)?.partialContent, full);
+  assert.equal(progressItems.at(-1)?.activityEvents?.length, 1);
+  assert.equal(sink.processingTranscript(NOW)?.content, full);
+});
+
 test("applyPreparedPermissionChange is the merge-additions path for shell rules and Claude native tools", () => {
   const service = testService().service as any;
   const participant = chatParticipant("claude-code", {

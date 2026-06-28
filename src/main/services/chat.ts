@@ -11433,15 +11433,6 @@ export class ChatService {
     activityEvents: () => ChatAgentActivityEvent[];
     processingTranscript: (capturedAt: string) => ChatProcessingTranscript | undefined;
   } {
-    if (!progress) {
-      return {
-        emit: () => undefined,
-        beginAttempt: () => undefined,
-        finish: () => undefined,
-        activityEvents: () => [],
-        processingTranscript: () => undefined
-      };
-    }
     const participantLabel = `@${participant.handle}`;
     const THROTTLE_MS = 100;
     let finished = false;
@@ -11465,6 +11456,9 @@ export class ChatService {
       }
       dirty = false;
       lastFlush = Date.now();
+      if (!progress) {
+        return;
+      }
       const partialContent = !suppressed && cumulative ? cumulative : undefined;
       this.emitProgress(runId, progress, "debate", `${participantLabel} is responding.`, {
         participantLabel,
@@ -11564,6 +11558,9 @@ export class ChatService {
         pendingTimer = undefined;
       }
       finished = true;
+      if (!progress) {
+        return;
+      }
       this.emitProgress(runId, progress, "debate", `${participantLabel} finished.`, {
         participantLabel,
         agentProgress: {
