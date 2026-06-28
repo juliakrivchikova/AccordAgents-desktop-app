@@ -105,6 +105,9 @@ export function ChatAccordLauncherDialog(props: {
               disabled={saving || props.disabled}
               onValueChange={setFacilitator}
             />
+            <div className="chat-accord-field-help">
+              The facilitator runs the Accord and asks selected members to reach agreement.
+            </div>
           </div>
 
           <div className="chat-accord-field">

@@ -3496,6 +3496,11 @@
   transition: background 130ms ease, transform 130ms ease, box-shadow 130ms ease, color 130ms ease;
 }
 
+.composer-accord-tooltip-trigger {
+  display: inline-flex;
+  border-radius: 50%;
+}
+
 .composer-accord-button {
   background: var(--app-surface-hover);
   color: var(--app-muted);

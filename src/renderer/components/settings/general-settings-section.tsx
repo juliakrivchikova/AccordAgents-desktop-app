@@ -14,6 +14,8 @@ import {
 } from "../../../shared/chatParticipantRequests";
 import { CLI_AGENT_RUN_TIMEOUT_MAX_MS, CLI_AGENT_RUN_TIMEOUT_MIN_MS, cliAgentRunTimeoutHours } from "../../../shared/cliAgentRunSettings";
 
+const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits how many levels of participant-to-participant requests can happen.";
+
 const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
   "codex-cli": new URL("../../assets/codex-cli.svg", import.meta.url).href,
   "claude-code": new URL("../../assets/claude-avatar.png", import.meta.url).href
@@ -93,9 +95,9 @@ export function GeneralSettingsSection(props: {
           <div className="gen-card-divider" />
           <div className="gen-row">
             <div className="gen-row-text">
-              <div className="gen-row-title">Participant request depth</div>
+              <div className="gen-row-title" title={PARTICIPANT_REQUEST_DEPTH_HELP}>Participant request depth</div>
               <div className="gen-row-desc">
-                Maximum chained request levels. Use 1 to prevent requested participants from asking others.
+                {PARTICIPANT_REQUEST_DEPTH_HELP} Use 1 to prevent requested participants from asking others.
               </div>
             </div>
             <ParticipantRequestDepthControl
@@ -345,6 +347,7 @@ function ParticipantRequestDepthControl(props: {
             inputMode="numeric"
             value={depth}
             aria-label="Participant request max depth"
+            title={PARTICIPANT_REQUEST_DEPTH_HELP}
             onChange={(event) => setDepth(event.target.value)}
           />
           <span className="gen-timeout-unit">Levels</span>

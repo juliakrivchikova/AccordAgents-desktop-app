@@ -121,7 +121,7 @@ export function ParticipantHoverCard(props: {
             size="xs"
             icon={Minimize2}
             label={`Compact ${profileHandleLabel(profile.handle)} context`}
-            tooltip="Compact context"
+            tooltip="Compact this participant's underlying session to free context."
             disabled={props.compactDisabled}
             onClick={(event) => compactParticipant(event)}
           />

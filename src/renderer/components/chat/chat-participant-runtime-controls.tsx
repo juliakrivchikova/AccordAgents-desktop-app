@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, ShieldCheck } from "lucide-react";
 
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   effectiveChatAgentPermissionsForProvider,
   normalizeChatAgentMode,
@@ -112,6 +113,7 @@ export function ParticipantRuntimeControls(props: {
           ariaLabel="Request participants permission"
           value={requestPermission}
           displayLabel={`Requests: ${requestPermissionLabel}`}
+          tooltip="Controls whether this participant can ask other chat members for help."
           muted={requestPermission === "ask"}
           disabled={props.disabled}
           options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
@@ -155,10 +157,11 @@ function GhostSelect(props: {
   disabled?: boolean;
   muted?: boolean;
   displayLabel?: string;
+  tooltip?: string;
 }): JSX.Element {
   const selected = props.options.find((option) => option.value === props.value);
   const label = props.displayLabel ?? selected?.label ?? props.options[0]?.label ?? "";
-  return (
+  const control = (
     <span className={`chat-rt-ghost${props.muted ? " is-muted" : ""}${props.disabled ? " is-disabled" : ""}`}>
       <span className="chat-rt-ghost-val">{label}</span>
       <ChevronDown size={11} aria-hidden />
@@ -174,6 +177,15 @@ function GhostSelect(props: {
         ))}
       </select>
     </span>
+  );
+  if (!props.tooltip) {
+    return control;
+  }
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{control}</TooltipTrigger>
+      <TooltipContent side="top">{props.tooltip}</TooltipContent>
+    </Tooltip>
   );
 }
 

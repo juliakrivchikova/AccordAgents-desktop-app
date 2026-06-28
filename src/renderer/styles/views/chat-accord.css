@@ -57,12 +57,14 @@
   resize: vertical;
 }
 
+.chat-accord-field-help,
 .chat-accord-grant-note,
 .chat-accord-validation {
   font-size: 0.82rem;
   line-height: 1.35;
 }
 
+.chat-accord-field-help,
 .chat-accord-grant-note {
   color: var(--app-muted);
 }
