@@ -2251,6 +2251,8 @@ function finishRun(exitCode, signal, forcedOk, forcedError) {
       : cancelled
         ? "Remote Codex run was cancelled."
         : stderr.trim() || (signal ? "Remote Codex exited from signal " + signal + "." : "Remote Codex exited with code " + exitCode + ".");
+  const startedAtMs = Date.parse(state.startedAt);
+  const workerDurationMs = Number.isFinite(startedAtMs) ? Math.max(0, Date.now() - startedAtMs) : undefined;
   appendEvent({
     kind: "provider_result",
     ok,
@@ -2258,6 +2260,10 @@ function finishRun(exitCode, signal, forcedOk, forcedError) {
     exitCode,
     error,
     sessionId,
+    // Real on-box run time, measured by the worker. Without this the desktop
+    // can only fall back to wall-clock-to-sync, which inflates the "Worked
+    // for ..." chip by however long the laptop lid was closed before reconnect.
+    durationMs: workerDurationMs,
     sourceMessageId: config.sourceMessageId,
     threadId: config.threadId,
     chatThreadRootId: config.chatThreadRootId

@@ -1887,12 +1887,15 @@ export class ChatService {
     }
     const handle = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles)[runId];
     const startedAtMs = handle?.startedAt ? Date.parse(handle.startedAt) : NaN;
-    if (!Number.isFinite(startedAtMs)) {
+    const completedAtMs = handle?.completedAt ? Date.parse(handle.completedAt) : NaN;
+    // Only derive from the handle when the box completion time is known. Never
+    // fall back to the desktop clock (Date.now()): when the run finished while
+    // the lid was closed, "now" is the reconnect/sync moment, which would
+    // inflate "Worked for ..." by the entire offline gap.
+    if (!Number.isFinite(startedAtMs) || !Number.isFinite(completedAtMs)) {
       return undefined;
     }
-    const completedAtMs = handle?.completedAt ? Date.parse(handle.completedAt) : NaN;
-    const endedAtMs = Number.isFinite(completedAtMs) ? completedAtMs : Date.now();
-    const workedMs = endedAtMs - startedAtMs;
+    const workedMs = completedAtMs - startedAtMs;
     return workedMs >= 0 ? workedMs : undefined;
   }
 
