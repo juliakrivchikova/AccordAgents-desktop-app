@@ -50,6 +50,7 @@ import { AppSkillsService } from "./services/appSkills";
 import { bootstrapAppUpdater } from "./services/appUpdater";
 import { ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
+import { CloudRunDoctorService } from "./services/cloudRunDoctor";
 import { DebugLogService } from "./services/debugLogs";
 import { GitService } from "./services/git";
 import { ProviderRunner } from "./services/providers";
@@ -94,6 +95,14 @@ const chatService = new ChatService(storageService, settingsService, cliAgentRun
 }, userSkillsService);
 const remoteRunService = new RemoteRunService(chatService, {
   syncLogger: (event, payload) => {
+    void debugLogService.write(event, payload);
+  }
+});
+const cloudRunDoctorService = new CloudRunDoctorService({
+  openExternal: (url) => {
+    void openExternalUrl(url);
+  },
+  logger: (event, payload) => {
     void debugLogService.write(event, payload);
   }
 });
@@ -222,6 +231,16 @@ function registerIpc(): void {
   ipcMain.handle("cloud-runs:test-worker", async (_event, request?: CloudRunWorkerSettings) => {
     const settings = await settingsService.getPublicSettings();
     return testCloudRunWorker(request ?? settings.cloudRuns.worker);
+  });
+  ipcMain.handle("cloud-runs:diagnose-worker", async (_event, request?: CloudRunWorkerSettings) => {
+    const settings = await settingsService.getPublicSettings();
+    return cloudRunDoctorService.diagnose(request ?? settings.cloudRuns.worker);
+  });
+  ipcMain.handle("cloud-runs:setup-worker", async (_event, request?: CloudRunWorkerSettings) => {
+    const settings = await settingsService.getPublicSettings();
+    return cloudRunDoctorService.setup(request ?? settings.cloudRuns.worker, (progress) => {
+      mainWindow?.webContents.send("cloud-runs:setup-progress", progress);
+    });
   });
   ipcMain.handle("settings:update-provider", (_event, update: ProviderSettingsUpdate) => settingsService.updateProvider(update));
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));

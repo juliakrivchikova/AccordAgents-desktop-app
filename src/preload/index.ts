@@ -6,6 +6,7 @@ import type {
   ChatSavedPromptConfigUpdate,
   CloudRunsSettingsUpdate,
   CloudRunWorkerSettings,
+  CloudRunWorkerSetupProgress,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
@@ -51,6 +52,13 @@ const bridge: AppBridge = {
   setCliAgentRunTimeoutMs: (timeoutMs: number) => ipcRenderer.invoke("settings:set-cli-agent-run-timeout", timeoutMs),
   saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => ipcRenderer.invoke("settings:save-cloud-runs", update),
   testCloudRunWorker: (request?: CloudRunWorkerSettings) => ipcRenderer.invoke("cloud-runs:test-worker", request),
+  diagnoseCloudRunWorker: (request?: CloudRunWorkerSettings) => ipcRenderer.invoke("cloud-runs:diagnose-worker", request),
+  setupCloudRunWorker: (request?: CloudRunWorkerSettings) => ipcRenderer.invoke("cloud-runs:setup-worker", request),
+  onCloudRunSetupProgress: (callback: (progress: CloudRunWorkerSetupProgress) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: CloudRunWorkerSetupProgress) => callback(progress);
+    ipcRenderer.on("cloud-runs:setup-progress", listener);
+    return () => ipcRenderer.removeListener("cloud-runs:setup-progress", listener);
+  },
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateProviderSettings: (update: ProviderSettingsUpdate) => ipcRenderer.invoke("settings:update-provider", update),
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => ipcRenderer.invoke("settings:save-chat-role", update),

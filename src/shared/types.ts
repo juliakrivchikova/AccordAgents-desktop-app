@@ -50,6 +50,45 @@ export interface CloudRunWorkerTestResult {
   message: string;
 }
 
+export type CloudRunWorkerCheckId =
+  | "connect"
+  | "sudo"
+  | "rsync"
+  | "git"
+  | "gh"
+  | "node"
+  | "build-essential"
+  | "codex"
+  | "codex-auth"
+  | "git-identity"
+  | "userns";
+
+export type CloudRunWorkerCheckStatus = "pass" | "warn" | "fail";
+
+export interface CloudRunWorkerCheck {
+  id: CloudRunWorkerCheckId;
+  label: string;
+  status: CloudRunWorkerCheckStatus;
+  detail?: string;
+  // True when "Set up worker" knows how to repair this check automatically.
+  fixable?: boolean;
+}
+
+export interface CloudRunWorkerDoctorReport {
+  ok: boolean;
+  message: string;
+  checks: CloudRunWorkerCheck[];
+}
+
+export interface CloudRunWorkerSetupProgress {
+  stage: string;
+  message: string;
+  // Present while the codex device-auth fix waits for the user to approve the
+  // sign-in in their browser.
+  authUrl?: string;
+  authCode?: string;
+}
+
 export interface RemoteRunSyncInfo {
   localPath: string;
   remotePath?: string;
@@ -1305,6 +1344,9 @@ export interface AppBridge {
   setCliAgentRunTimeoutMs(timeoutMs: number): Promise<AppSettings>;
   saveCloudRunsSettings(update: CloudRunsSettingsUpdate): Promise<AppSettings>;
   testCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerTestResult>;
+  diagnoseCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport>;
+  setupCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport>;
+  onCloudRunSetupProgress(callback: (progress: CloudRunWorkerSetupProgress) => void): () => void;
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;

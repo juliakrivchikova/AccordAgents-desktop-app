@@ -2,7 +2,16 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, Code2, ExternalLink, FolderOpen, HelpCircle, Server } from "lucide-react";
 
-import type { AgentHealth, CloudRunsSettings, CloudRunsSettingsUpdate, ProviderKind, ProviderSettings, RepoFileOpenAction } from "../../../shared/types";
+import type {
+  AgentHealth,
+  CloudRunsSettings,
+  CloudRunsSettingsUpdate,
+  CloudRunWorkerDoctorReport,
+  CloudRunWorkerSetupProgress,
+  ProviderKind,
+  ProviderSettings,
+  RepoFileOpenAction
+} from "../../../shared/types";
 import { CLI_AGENT_RUN_TIMEOUT_MAX_MS, CLI_AGENT_RUN_TIMEOUT_MIN_MS, cliAgentRunTimeoutHours } from "../../../shared/cliAgentRunSettings";
 
 const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
@@ -102,10 +111,14 @@ function CloudRunsControl(props: {
   const [draft, setDraft] = useState<CloudRunsSettings>(props.settings);
   const [status, setStatus] = useState<string>("");
   const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState<CloudRunWorkerDoctorReport | null>(null);
+  const [setupProgress, setSetupProgress] = useState<CloudRunWorkerSetupProgress | null>(null);
 
   useEffect(() => {
     setDraft(props.settings);
   }, [props.settings]);
+
+  useEffect(() => window.consensus.onCloudRunSetupProgress(setSetupProgress), []);
 
   const patch = (update: CloudRunsSettingsUpdate): void => {
     setDraft((current) => ({
@@ -131,16 +144,34 @@ function CloudRunsControl(props: {
     }
   };
 
-  const test = async (): Promise<void> => {
+  const diagnose = async (): Promise<void> => {
     setBusy(true);
-    setStatus("Testing worker...");
+    setStatus("Checking worker...");
+    setReport(null);
     try {
-      const result = await window.consensus.testCloudRunWorker(draft.worker);
+      const result = await window.consensus.diagnoseCloudRunWorker(draft.worker);
+      setReport(result);
       setStatus(result.message);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const setup = async (): Promise<void> => {
+    setBusy(true);
+    setStatus("Setting up worker...");
+    setSetupProgress(null);
+    try {
+      const result = await window.consensus.setupCloudRunWorker(draft.worker);
+      setReport(result);
+      setStatus(result.message);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+      setSetupProgress(null);
     }
   };
 
@@ -208,18 +239,49 @@ function CloudRunsControl(props: {
       <div className="gen-card-divider" />
       <div className="gen-row">
         <div className="gen-row-text">
-          <div className="gen-row-title">{status || "Ready"}</div>
+          <div className="gen-row-title">{(busy && setupProgress?.message) || status || "Ready"}</div>
+          {busy && setupProgress?.authUrl && (
+            <div className="gen-row-desc">
+              <button
+                type="button"
+                className="gen-doctor-auth-link"
+                onClick={() => void window.consensus.openExternal(setupProgress.authUrl as string)}
+              >
+                Open the sign-in page
+              </button>
+              {setupProgress.authCode ? ` and enter code ${setupProgress.authCode}` : ""}
+            </div>
+          )}
         </div>
         <div className="gen-actions">
-          <button type="button" className="gen-pill" disabled={busy} onClick={() => void test()}>
+          <button type="button" className="gen-pill" disabled={busy} onClick={() => void diagnose()}>
             <span className="gen-pill-lead"><Server size={16} /></span>
-            <span className="gen-pill-label">Test</span>
+            <span className="gen-pill-label">Check</span>
+          </button>
+          <button type="button" className="gen-pill" disabled={busy} onClick={() => void setup()}>
+            <span className="gen-pill-label">Set up</span>
           </button>
           <button type="button" className="gen-pill" disabled={busy} onClick={() => void save()}>
             <span className="gen-pill-label">Save</span>
           </button>
         </div>
       </div>
+      {report && (
+        <>
+          <div className="gen-card-divider" />
+          <ul className="gen-doctor-list" aria-label="Worker checks">
+            {report.checks.map((check) => (
+              <li key={check.id} className={`gen-doctor-item is-${check.status}`}>
+                <span className="gen-doctor-mark" aria-hidden="true">
+                  {check.status === "pass" ? "✓" : check.status === "warn" ? "!" : "✕"}
+                </span>
+                <span className="gen-doctor-label">{check.label}</span>
+                {check.detail && <span className="gen-doctor-detail">{check.detail}</span>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </div>
   );
 }
