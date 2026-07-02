@@ -42,6 +42,29 @@ export function buildCloudRunSshTarget(worker: Pick<RemoteRunWorkerTarget, "host
   return user ? `${user}@${host}` : host;
 }
 
+export function cloudRunSshOptionArgs(
+  worker: Pick<RemoteRunWorkerTarget, "host" | "user" | "identityFile" | "port">
+): string[] {
+  validateCloudRunSshWorkerFields(worker);
+  const args = [
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=accept-new"
+  ];
+  if (worker.identityFile?.trim()) {
+    args.push("-i", worker.identityFile.trim());
+  }
+  if (typeof worker.port === "number" && Number.isFinite(worker.port) && worker.port > 0) {
+    args.push("-p", String(Math.floor(worker.port)));
+  }
+  return args;
+}
+
+export function shellQuotePosix(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 export function validateCloudRunSshWorkerFields(
   worker: Pick<RemoteRunWorkerTarget, "host" | "user" | "identityFile">
 ): void {

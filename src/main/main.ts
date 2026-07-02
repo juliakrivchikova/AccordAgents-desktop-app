@@ -92,7 +92,11 @@ const consensusService = new ConsensusService(gitService, storageService, provid
 const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
 }, userSkillsService);
-const remoteRunService = new RemoteRunService(chatService);
+const remoteRunService = new RemoteRunService(chatService, {
+  syncLogger: (event, payload) => {
+    void debugLogService.write(event, payload);
+  }
+});
 const remoteRunCoordinator = new RemoteRunCoordinator(remoteRunService, chatService, settingsService, debugLogService);
 chatService.setRemoteRunService(remoteRunService);
 chatService.setRemoteRunCoordinator(remoteRunCoordinator);

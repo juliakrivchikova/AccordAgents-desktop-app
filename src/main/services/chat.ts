@@ -79,7 +79,8 @@ import type {
   ToggleChatReactionRequest,
   UpdateChatParticipantRuntimeRequest,
   RemoveChatParticipantRequest,
-  RemoteRunHandle
+  RemoteRunHandle,
+  RemoteRunSyncInfo
 } from "../../shared/types";
 import { isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
 import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
@@ -433,7 +434,7 @@ interface RemoteRunStarter {
   startDetachedRun(request: RemoteRunDetachedStartRequest): Promise<RemoteDetachedRunState>;
   pollDetachedRun(request: RemoteRunDetachedPollRequest): Promise<RemoteDetachedRunState>;
   cancelDetachedRun(request: RemoteRunDetachedCancelRequest): Promise<RemoteDetachedRunState>;
-  registerDetachedRunContext?(runId: string, worker: RemoteRunWorkerTarget, context: { conversationId: string; participantId: string }): void;
+  registerDetachedRunContext?(runId: string, worker: RemoteRunWorkerTarget, context: { conversationId: string; participantId: string; sync?: RemoteRunSyncInfo }): void;
 }
 
 type RemoteRunParticipantTarget =
@@ -1649,7 +1650,8 @@ export class ChatService {
       updatedAt: now,
       lastPolledAt: now,
       completedAt: state.completedAt ?? handle.completedAt,
-      error: state.error ?? handle.error
+      error: state.error ?? handle.error,
+      sync: state.sync ?? handle.sync
     };
   }
 
@@ -1659,9 +1661,23 @@ export class ChatService {
     if (worker) {
       this.remoteRuns?.registerDetachedRunContext?.(handle.runId, worker, {
         conversationId: handle.conversationId,
-        participantId: handle.participantId
+        participantId: handle.participantId,
+        sync: this.isRemoteRunTerminal(handle.status) ? undefined : handle.sync
       });
     }
+  }
+
+  private normalizeRemoteRunSyncInfo(value: unknown): RemoteRunSyncInfo | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+    const record = value as Partial<RemoteRunSyncInfo>;
+    const localPath = typeof record.localPath === "string" ? record.localPath.trim() : "";
+    if (!localPath) {
+      return undefined;
+    }
+    const remotePath = typeof record.remotePath === "string" ? record.remotePath.trim() : "";
+    return remotePath ? { localPath, remotePath } : { localPath };
   }
 
   private remoteRunHandleByRun(value: unknown): Record<string, RemoteRunHandle> {
@@ -1694,7 +1710,8 @@ export class ChatService {
         updatedAt: typeof record.updatedAt === "string" && record.updatedAt ? record.updatedAt : startedAt,
         completedAt: typeof record.completedAt === "string" ? record.completedAt : undefined,
         lastPolledAt: typeof record.lastPolledAt === "string" ? record.lastPolledAt : undefined,
-        error: typeof record.error === "string" ? record.error : undefined
+        error: typeof record.error === "string" ? record.error : undefined,
+        sync: this.normalizeRemoteRunSyncInfo(record.sync)
       };
     }
     return handles;
@@ -4193,6 +4210,14 @@ export class ChatService {
         }
         {
           const now = new Date().toISOString();
+          // Mirror-sync mode: no pre-provisioned remote cwd, and the run has a
+          // readable local repo — the project dir is rsynced to a per-project
+          // mirror on the worker and synced back at terminal state.
+          const remoteSyncLocalPath = !remoteRunTarget.worker.remoteCwd
+            && conversation.repoPath
+            && runPath === conversation.repoPath
+            ? conversation.repoPath
+            : undefined;
           const handle: RemoteRunHandle = {
             runId,
             conversationId: conversation.id,
@@ -4201,7 +4226,8 @@ export class ChatService {
             worker: remoteRunTarget.workerSettings,
             status: "running",
             startedAt: now,
-            updatedAt: now
+            updatedAt: now,
+            sync: remoteSyncLocalPath ? { localPath: remoteSyncLocalPath } : undefined
           };
           await this.recordRemoteRunHandle(conversation, handle, pendingMessage.id);
           let detachedState: RemoteDetachedRunState;
@@ -4214,6 +4240,7 @@ export class ChatService {
               worker: remoteRunTarget.worker,
               kind: "chat",
               repoPath: remoteRunTarget.worker.remoteCwd,
+              sync: remoteSyncLocalPath ? { localPath: remoteSyncLocalPath } : undefined,
               options: {
                 persistSession: true,
                 role,

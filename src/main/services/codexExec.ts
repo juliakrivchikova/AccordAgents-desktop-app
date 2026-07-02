@@ -32,6 +32,15 @@ export interface CodexExecAppMcpOptions {
   token: string;
 }
 
+export interface CodexExecRemoteSandboxOptions {
+  // The remote worker box is a dedicated dev environment: remote runs keep the
+  // workspace-write sandbox but open network access (gh/npm need it) and make
+  // the workspace .git writable (workspace-write mounts it read-only by
+  // default, which blocks the agent from committing).
+  networkAccess?: boolean;
+  gitWritableRoot?: string;
+}
+
 export interface CodexExecOptions {
   sessionId?: string;
   extraReadableDirs?: string[];
@@ -44,6 +53,7 @@ export interface CodexExecOptions {
   // (required for the remote offline-permission round-trip). Mirrors the
   // app-server `ephemeral: !persistSession` behavior used by local chat.
   persistSession?: boolean;
+  remoteSandbox?: CodexExecRemoteSandboxOptions;
 }
 
 export interface CodexExecInvocation {
@@ -120,6 +130,17 @@ export function buildCodexExecInvocation(request: BuildCodexExecInvocationReques
       resuming,
       "-c",
       `sandbox_mode=${tomlString(permissions.workspaceWrite ? "workspace-write" : "read-only")}`
+    );
+  }
+  if (options.remoteSandbox?.networkAccess) {
+    insertCodexOptionBeforePrompt(args, resuming, "-c", "sandbox_workspace_write.network_access=true");
+  }
+  if (options.remoteSandbox?.gitWritableRoot) {
+    insertCodexOptionBeforePrompt(
+      args,
+      resuming,
+      "-c",
+      `sandbox_workspace_write.writable_roots=[${tomlString(options.remoteSandbox.gitWritableRoot)}]`
     );
   }
   if (mode === "auto") {

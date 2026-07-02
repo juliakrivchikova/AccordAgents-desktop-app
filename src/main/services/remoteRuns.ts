@@ -9,11 +9,12 @@ import type {
   ChatPermissionRequestToolResult,
   ConversationKind,
   GitDiffMode,
-  ParticipantConfig
+  ParticipantConfig,
+  RemoteRunSyncInfo
 } from "../../shared/types";
 import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
 import type { ChatAppToolApprovalDecisionEvent, ChatService } from "./chat";
-import { buildCloudRunSshTarget, validateCloudRunSshWorkerFields } from "./cloudRunWorkers";
+import { buildCloudRunSshTarget, cloudRunSshOptionArgs } from "./cloudRunWorkers";
 import { CommandError, runCommand } from "./command";
 import {
   CODEX_APP_SERVER_MCP_TOKEN_ENV,
@@ -23,7 +24,9 @@ import {
   extractCodexSessionId,
   extractCodexText
 } from "./codexExec";
-import type { CodexExecOptions, CodexExecInvocation } from "./codexExec";
+import type { CodexExecOptions, CodexExecInvocation, CodexExecRemoteSandboxOptions } from "./codexExec";
+import { defaultRemoteMirrorSync, localProjectHasGitDir, remoteMirrorPath } from "./remoteMirrorSync";
+import type { RemoteMirrorSyncRunner } from "./remoteMirrorSync";
 
 const DEFAULT_APPLY_LIMIT = 200;
 const DEFAULT_REMOTE_RUN_TIMEOUT_MS = 24 * 60 * 60_000;
@@ -145,6 +148,9 @@ export interface RemoteRunServiceOptions {
   applyLimit?: number;
   codexExecutor?: RemoteCodexExecutor;
   detachedWorkerTransport?: RemoteDetachedWorkerTransport;
+  mirrorSync?: RemoteMirrorSyncRunner;
+  syncLogger?: (event: string, payload: Record<string, unknown>) => void;
+  remoteGitDirProbe?: (worker: RemoteRunWorkerTarget, gitDirPath: string, signal?: AbortSignal) => Promise<boolean>;
 }
 
 export interface RemoteRunStartRequest {
@@ -181,6 +187,11 @@ export interface RemoteRunRealStartRequest extends RemoteRunStartRequest {
 export interface RemoteRunDetachedStartRequest extends RemoteRunRealStartRequest {
   maxRuntimeMs?: number;
   contextSnapshot?: unknown;
+  // Mirror-sync mode: when set (and no pre-provisioned repoPath/remoteCwd is
+  // given), the local project directory is rsynced to a per-project mirror
+  // under the worker root before launch, the run executes in that mirror, and
+  // the working tree is rsynced back when the run reaches a terminal state.
+  sync?: { localPath: string };
 }
 
 export interface RemoteRunDetachedPollRequest {
@@ -245,6 +256,7 @@ export interface RemoteDetachedRunState {
   signal?: string;
   timedOut?: boolean;
   error?: string;
+  sync?: RemoteRunSyncInfo;
 }
 
 interface RemoteWorkerEventBase {
@@ -387,6 +399,13 @@ export class RemoteRunService {
   private readonly appendChainByRun = new Map<string, Promise<unknown>>();
   private readonly detachedWorkerByRun = new Map<string, RemoteRunWorkerTarget>();
   private readonly detachedContextByRun = new Map<string, { conversationId: string; participantId: string }>();
+  private readonly mirrorSync: RemoteMirrorSyncRunner;
+  private readonly syncLogger?: (event: string, payload: Record<string, unknown>) => void;
+  private readonly remoteGitDirProbe: (worker: RemoteRunWorkerTarget, gitDirPath: string, signal?: AbortSignal) => Promise<boolean>;
+  private readonly detachedSyncByRun = new Map<string, RemoteRunSyncInfo>();
+  private readonly syncDownCompletedRuns = new Set<string>();
+  private readonly mirrorOpChainByPath = new Map<string, Promise<void>>();
+  private readonly activeRunsByMirror = new Map<string, Set<string>>();
 
   constructor(
     private readonly chat: Pick<ChatService, "applyRemoteRunReplayRecord" | "onAppToolApprovalDecision" | "getRemoteRunCursorSeq">,
@@ -396,6 +415,9 @@ export class RemoteRunService {
     this.applyLimit = Math.max(1, Math.floor(options.applyLimit ?? DEFAULT_APPLY_LIMIT));
     this.codexExecutor = options.codexExecutor ?? defaultRemoteCodexExecutor;
     this.detachedWorkerTransport = options.detachedWorkerTransport ?? new SshDetachedWorkerTransport();
+    this.mirrorSync = options.mirrorSync ?? defaultRemoteMirrorSync;
+    this.syncLogger = options.syncLogger;
+    this.remoteGitDirProbe = options.remoteGitDirProbe ?? defaultRemoteGitDirProbe;
     this.chat.onAppToolApprovalDecision((event) => this.appendPermissionDecision(event));
   }
 
@@ -527,44 +549,60 @@ export class RemoteRunService {
       state: "started"
     });
 
+    const sync = await this.prepareMirrorForRun(runId, request);
+    const effectiveRepoPath = sync?.remotePath ?? request.repoPath;
+    const remoteSandbox = await this.remoteSandboxOptionsForRun(request, sync, effectiveRepoPath);
+
     const invocation = buildCodexExecInvocation({
       participant: request.participant,
       prompt: request.prompt,
       outputPath: remoteFinalPath,
-      repoPath: request.repoPath,
+      repoPath: effectiveRepoPath,
       diffMode: request.diffMode,
       kind: request.kind ?? "chat",
-      options: { ...request.options, persistSession: true }
+      options: { ...request.options, persistSession: true, remoteSandbox }
     });
 
-    const snapshot = await this.detachedWorkerTransport.launch({
-      conversationId: request.conversationId,
-      runId,
-      participant: request.participant,
-      worker: request.worker,
-      invocation,
-      remoteRunDir,
-      remoteFinalPath,
-      timeoutMs: Math.max(1, Math.floor(request.timeoutMs ?? DEFAULT_REMOTE_RUN_TIMEOUT_MS)),
-      maxRuntimeMs,
-      sourceMessageId: request.sourceMessageId,
-      threadId: request.threadId,
-      chatThreadRootId: request.chatThreadRootId,
-      contextSnapshot: request.contextSnapshot,
-      signal: request.signal
-    });
+    let snapshot: RemoteDetachedWorkerSnapshot;
+    try {
+      snapshot = await this.detachedWorkerTransport.launch({
+        conversationId: request.conversationId,
+        runId,
+        participant: request.participant,
+        worker: request.worker,
+        invocation,
+        remoteRunDir,
+        remoteFinalPath,
+        timeoutMs: Math.max(1, Math.floor(request.timeoutMs ?? DEFAULT_REMOTE_RUN_TIMEOUT_MS)),
+        maxRuntimeMs,
+        sourceMessageId: request.sourceMessageId,
+        threadId: request.threadId,
+        chatThreadRootId: request.chatThreadRootId,
+        contextSnapshot: request.contextSnapshot,
+        signal: request.signal
+      });
+    } catch (error) {
+      this.forgetRunSync(runId);
+      throw error;
+    }
     await this.projectWorkerSnapshot(request.conversationId, runId, request.participant.id, snapshot);
     await this.projectSnapshotTerminalFallback(request.conversationId, runId, request.participant.id, snapshot);
-    return snapshot.state;
+    return sync ? { ...snapshot.state, sync } : snapshot.state;
   }
 
   registerDetachedRunContext(
     runId: string,
     worker: RemoteRunWorkerTarget,
-    context: { conversationId: string; participantId: string }
+    context: { conversationId: string; participantId: string; sync?: RemoteRunSyncInfo }
   ): void {
     this.detachedWorkerByRun.set(runId, worker);
-    this.detachedContextByRun.set(runId, context);
+    this.detachedContextByRun.set(runId, {
+      conversationId: context.conversationId,
+      participantId: context.participantId
+    });
+    if (context.sync?.localPath && !this.syncDownCompletedRuns.has(runId)) {
+      this.registerRunSync(runId, context.sync);
+    }
   }
 
   async pollDetachedRun(request: RemoteRunDetachedPollRequest): Promise<RemoteDetachedRunState> {
@@ -940,9 +978,173 @@ export class RemoteRunService {
     throw new Error(`Remote run ${runId} has no projected participant yet.`);
   }
 
+  // Mirror-sync mode. Resolves the per-project mirror path under the worker
+  // root, up-syncs the local project into it (unless another live run is
+  // already working there), and returns the sync info recorded for the run.
+  private async prepareMirrorForRun(
+    runId: string,
+    request: RemoteRunDetachedStartRequest
+  ): Promise<RemoteRunSyncInfo | undefined> {
+    const localPath = request.sync?.localPath?.trim();
+    if (!localPath || request.repoPath) {
+      return undefined;
+    }
+    const sshPath = request.worker.sshPath?.trim() || "ssh";
+    const target = buildCloudRunSshTarget(request.worker);
+    const sshBaseArgs = remoteSshBaseArgs(request.worker, target);
+    const resolvedRoot = await resolveRemoteRunDir(
+      sshPath,
+      sshBaseArgs,
+      remoteWorkerRootForTarget(request.worker),
+      request.signal
+    );
+    const remotePath = remoteMirrorPath(resolvedRoot, localPath);
+    const sync: RemoteRunSyncInfo = { localPath: path.resolve(localPath), remotePath };
+    if ((this.activeRunsByMirror.get(remotePath)?.size ?? 0) > 0) {
+      // Another live run is working in this mirror; re-syncing with --delete
+      // would wipe its in-progress work. Reuse the mirror as-is, matching
+      // local-run semantics where concurrent participants share the live dir.
+      this.syncLogger?.("remote-run.sync.up.skipped-busy", { runId, remotePath });
+      this.registerRunSync(runId, sync);
+      return sync;
+    }
+    const startedAt = Date.now();
+    await this.chainMirrorOp(remotePath, () => this.mirrorSync.syncUp({
+      worker: request.worker,
+      localPath: sync.localPath,
+      remotePath,
+      signal: request.signal
+    }));
+    this.syncLogger?.("remote-run.sync.up", { runId, remotePath, durationMs: Date.now() - startedAt });
+    this.registerRunSync(runId, sync);
+    return sync;
+  }
+
+  private async remoteSandboxOptionsForRun(
+    request: RemoteRunDetachedStartRequest,
+    sync: RemoteRunSyncInfo | undefined,
+    effectiveRepoPath: string | undefined
+  ): Promise<CodexExecRemoteSandboxOptions> {
+    if (!effectiveRepoPath) {
+      return { networkAccess: true };
+    }
+    let hasGitDir = false;
+    if (sync) {
+      hasGitDir = localProjectHasGitDir(sync.localPath);
+    } else {
+      try {
+        hasGitDir = await this.remoteGitDirProbe(request.worker, `${effectiveRepoPath}/.git`, request.signal);
+      } catch {
+        hasGitDir = false;
+      }
+    }
+    return {
+      networkAccess: true,
+      gitWritableRoot: hasGitDir ? `${effectiveRepoPath}/.git` : undefined
+    };
+  }
+
+  // Rsync the mirror's working tree back into the local project directory.
+  // Runs exactly once per run, right before its terminal_state record is
+  // appended, so the reply message lands after the files do. Failures are
+  // logged but never block the terminal record.
+  private async syncDownForRun(runId: string): Promise<void> {
+    const sync = this.detachedSyncByRun.get(runId);
+    if (!sync || this.syncDownCompletedRuns.has(runId)) {
+      return;
+    }
+    this.syncDownCompletedRuns.add(runId);
+    const worker = this.detachedWorkerByRun.get(runId);
+    if (sync.remotePath) {
+      this.untrackMirrorRun(sync.remotePath, runId);
+    }
+    if (!worker) {
+      this.syncLogger?.("remote-run.sync.down.skipped-no-worker", { runId });
+      return;
+    }
+    const remotePath = sync.remotePath ?? await this.resolveMirrorPathForSync(worker, sync);
+    if (!remotePath) {
+      this.syncLogger?.("remote-run.sync.down.skipped-no-mirror", { runId });
+      return;
+    }
+    const startedAt = Date.now();
+    try {
+      await this.chainMirrorOp(remotePath, () => this.mirrorSync.syncDown({
+        worker,
+        localPath: sync.localPath,
+        remotePath
+      }));
+      this.syncLogger?.("remote-run.sync.down", { runId, remotePath, durationMs: Date.now() - startedAt });
+    } catch (error) {
+      this.syncLogger?.("remote-run.sync.down.error", {
+        runId,
+        remotePath,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  // A handle recorded before launch may know only the local path; resolve the
+  // deterministic mirror path from the worker root when down-syncing after a
+  // desktop restart.
+  private async resolveMirrorPathForSync(
+    worker: RemoteRunWorkerTarget,
+    sync: RemoteRunSyncInfo
+  ): Promise<string | undefined> {
+    try {
+      const sshPath = worker.sshPath?.trim() || "ssh";
+      const target = buildCloudRunSshTarget(worker);
+      const sshBaseArgs = remoteSshBaseArgs(worker, target);
+      const resolvedRoot = await resolveRemoteRunDir(sshPath, sshBaseArgs, remoteWorkerRootForTarget(worker), undefined);
+      return remoteMirrorPath(resolvedRoot, sync.localPath);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private registerRunSync(runId: string, sync: RemoteRunSyncInfo): void {
+    this.detachedSyncByRun.set(runId, sync);
+    if (sync.remotePath) {
+      const runs = this.activeRunsByMirror.get(sync.remotePath) ?? new Set<string>();
+      runs.add(runId);
+      this.activeRunsByMirror.set(sync.remotePath, runs);
+    }
+  }
+
+  private forgetRunSync(runId: string): void {
+    const sync = this.detachedSyncByRun.get(runId);
+    if (sync?.remotePath) {
+      this.untrackMirrorRun(sync.remotePath, runId);
+    }
+    this.detachedSyncByRun.delete(runId);
+  }
+
+  private untrackMirrorRun(remotePath: string, runId: string): void {
+    const runs = this.activeRunsByMirror.get(remotePath);
+    if (!runs) {
+      return;
+    }
+    runs.delete(runId);
+    if (runs.size === 0) {
+      this.activeRunsByMirror.delete(remotePath);
+    }
+  }
+
+  // Serialize rsync operations per mirror so an up-sync for a new run and a
+  // down-sync for a finishing run never interleave on the same directory.
+  private async chainMirrorOp<T>(mirrorPath: string, op: () => Promise<T>): Promise<T> {
+    const previous = this.mirrorOpChainByPath.get(mirrorPath) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(op);
+    this.mirrorOpChainByPath.set(mirrorPath, next.then(() => undefined, () => undefined));
+    return next;
+  }
+
   private async appendSpoolRecord(
     input: RemoteRunRecordInputWithOverrides
   ): Promise<{ record: RemoteRunReplayRecord; applyResults: RemoteRunApplyRecordResult[] }> {
+    if (input.kind === "terminal_state") {
+      await this.syncDownForRun(input.runId);
+    }
     return this.withRunAppend(input.runId, async () => {
       const seq = await this.nextSeq(input.runId);
       const { id, createdAt, workerSeq, ...payload } = input;
@@ -1613,21 +1815,25 @@ function remoteWorkerRunDirForTarget(worker: RemoteRunWorkerTarget, runId: strin
 }
 
 function remoteSshBaseArgs(worker: RemoteRunWorkerTarget, target: string): string[] {
-  validateCloudRunSshWorkerFields(worker);
-  const args = [
-    "-o",
-    "BatchMode=yes",
-    "-o",
-    "StrictHostKeyChecking=accept-new"
-  ];
-  if (worker.identityFile?.trim()) {
-    args.push("-i", worker.identityFile.trim());
-  }
-  if (typeof worker.port === "number" && Number.isFinite(worker.port) && worker.port > 0) {
-    args.push("-p", String(Math.floor(worker.port)));
-  }
-  args.push(target);
-  return args;
+  return [...cloudRunSshOptionArgs(worker), target];
+}
+
+async function defaultRemoteGitDirProbe(
+  worker: RemoteRunWorkerTarget,
+  gitDirPath: string,
+  signal?: AbortSignal
+): Promise<boolean> {
+  const sshPath = worker.sshPath?.trim() || "ssh";
+  const target = buildCloudRunSshTarget(worker);
+  const sshBaseArgs = remoteSshBaseArgs(worker, target);
+  const result = await runCommand(sshPath, [
+    ...sshBaseArgs,
+    `test -d ${shellQuote(`${gitDirPath}`)} && printf yes || printf no`
+  ], {
+    timeoutMs: 30_000,
+    signal
+  });
+  return result.stdout.trim() === "yes";
 }
 
 function sleep(ms: number): Promise<void> {

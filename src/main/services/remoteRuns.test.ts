@@ -17,6 +17,8 @@ import type {
 import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
 import { ChatService } from "./chat";
 import { buildCloudRunSshTarget, validateCloudRunSshWorkerFields } from "./cloudRunWorkers";
+import { remoteMirrorPath, remoteMirrorSlug } from "./remoteMirrorSync";
+import type { RemoteMirrorSyncRequest, RemoteMirrorSyncRunner } from "./remoteMirrorSync";
 import { RemoteRunService } from "./remoteRuns";
 import { RemoteRunCoordinator } from "./remoteRunCoordinator";
 import type {
@@ -624,6 +626,176 @@ test("real remote codex run spools raw provider output and renders final output"
   assert.equal((storage.current.metadata.remoteRunReplay as any)["real-run"].terminalState, "completed");
 });
 
+test("mirror path derivation is deterministic and collision-resistant", () => {
+  const first = remoteMirrorSlug("/Users/dev/projects/myapp");
+  const second = remoteMirrorSlug("/Users/dev/projects/myapp");
+  const sibling = remoteMirrorSlug("/Users/dev/other/myapp");
+  assert.equal(first, second);
+  assert.notEqual(first, sibling);
+  assert.match(first, /^myapp-[0-9a-f]{10}$/);
+  assert.equal(
+    remoteMirrorPath("/srv/worker", "/Users/dev/projects/myapp"),
+    `/srv/worker/mirrors/${first}`
+  );
+});
+
+test("mirror-sync detached run up-syncs before launch and runs codex in the mirror", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-src-"));
+  await mkdir(path.join(localDir, ".git"), { recursive: true });
+  await writeFile(path.join(localDir, "file.txt"), "hello", "utf8");
+  const order: string[] = [];
+  const mirrorSync = new FakeMirrorSync();
+  const originalUp = mirrorSync.syncUp.bind(mirrorSync);
+  mirrorSync.syncUp = async (request) => {
+    order.push("sync-up");
+    await originalUp(request);
+  };
+  class OrderedTransport extends FakeDetachedWorkerTransport {
+    launched: RemoteDetachedWorkerLaunchRequest | undefined;
+
+    override async launch(request: RemoteDetachedWorkerLaunchRequest): Promise<RemoteDetachedWorkerSnapshot> {
+      order.push("launch");
+      this.launched = request;
+      return super.launch(request);
+    }
+  }
+  const worker = new OrderedTransport();
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker, mirrorSync });
+
+  const expectedMirror = remoteMirrorPath("/srv/worker", localDir);
+  const state = await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "mirror-run",
+    participant: participantConfig(participant),
+    prompt: "Work in the mirror.",
+    worker: { host: "worker.example", workerRoot: "/srv/worker" },
+    sync: { localPath: localDir }
+  });
+
+  assert.deepEqual(order, ["sync-up", "launch"]);
+  assert.deepEqual(mirrorSync.calls, [{ kind: "up", localPath: localDir, remotePath: expectedMirror }]);
+  assert.deepEqual(state.sync, { localPath: localDir, remotePath: expectedMirror });
+  const args = worker.launched?.invocation.args ?? [];
+  const cdIndex = args.indexOf("--cd");
+  assert.ok(cdIndex >= 0);
+  assert.equal(args[cdIndex + 1], expectedMirror);
+  assert.ok(args.includes("sandbox_workspace_write.network_access=true"));
+  assert.ok(args.some((arg) => arg === `sandbox_workspace_write.writable_roots=["${expectedMirror}/.git"]`));
+});
+
+test("mirror-sync down-syncs exactly once when the run reaches terminal state", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-src-"));
+  const mirrorSync = new FakeMirrorSync();
+  const worker = new FakeDetachedWorkerTransport();
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker, mirrorSync });
+  const target = { host: "worker.example", workerRoot: "/srv/worker" };
+  const expectedMirror = remoteMirrorPath("/srv/worker", localDir);
+
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "mirror-terminal-run",
+    participant: participantConfig(participant),
+    prompt: "Finish and sync back.",
+    worker: target,
+    sync: { localPath: localDir }
+  });
+  assert.equal(mirrorSync.calls.filter((call) => call.kind === "down").length, 0);
+
+  worker.push("mirror-terminal-run", {
+    kind: "provider_result",
+    workerSeq: 2,
+    ok: true,
+    content: "Mirror final."
+  });
+  worker.push("mirror-terminal-run", {
+    kind: "terminal_state",
+    workerSeq: 3,
+    status: "completed"
+  });
+  await remote.pollDetachedRun({ runId: "mirror-terminal-run", worker: target });
+  await remote.pollDetachedRun({ runId: "mirror-terminal-run", worker: target });
+
+  const downCalls = mirrorSync.calls.filter((call) => call.kind === "down");
+  assert.equal(downCalls.length, 1);
+  assert.deepEqual(downCalls[0], { kind: "down", localPath: localDir, remotePath: expectedMirror });
+});
+
+test("concurrent run on a busy mirror skips the destructive up-sync", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-src-"));
+  const mirrorSync = new FakeMirrorSync();
+  const worker = new FakeDetachedWorkerTransport();
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker, mirrorSync });
+  const target = { host: "worker.example", workerRoot: "/srv/worker" };
+
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "mirror-busy-a",
+    participant: participantConfig(participant),
+    prompt: "First run.",
+    worker: target,
+    sync: { localPath: localDir }
+  });
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "mirror-busy-b",
+    participant: participantConfig(participant),
+    prompt: "Second run, same project.",
+    worker: target,
+    sync: { localPath: localDir }
+  });
+
+  assert.equal(mirrorSync.calls.filter((call) => call.kind === "up").length, 1);
+});
+
+test("pre-provisioned remoteCwd mode never touches the mirror sync", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const mirrorSync = new FakeMirrorSync();
+  class CapturingTransport extends FakeDetachedWorkerTransport {
+    launched: RemoteDetachedWorkerLaunchRequest | undefined;
+
+    override async launch(request: RemoteDetachedWorkerLaunchRequest): Promise<RemoteDetachedWorkerSnapshot> {
+      this.launched = request;
+      return super.launch(request);
+    }
+  }
+  const worker = new CapturingTransport();
+  const { remote } = await testRemoteRun({
+    conversation,
+    detachedWorkerTransport: worker,
+    mirrorSync,
+    remoteGitDirProbe: async () => true
+  });
+
+  const state = await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "provisioned-run",
+    participant: participantConfig(participant),
+    prompt: "Run in the pre-provisioned clone.",
+    worker: { host: "worker.example" },
+    repoPath: "/home/ubuntu/work/repo"
+  });
+
+  worker.push("provisioned-run", {
+    kind: "terminal_state",
+    workerSeq: 2,
+    status: "completed"
+  });
+  await remote.pollDetachedRun({ runId: "provisioned-run", worker: { host: "worker.example" } });
+
+  assert.equal(state.sync, undefined);
+  assert.deepEqual(mirrorSync.calls, []);
+  const args = worker.launched?.invocation.args ?? [];
+  assert.ok(args.includes("sandbox_workspace_write.network_access=true"));
+  assert.ok(args.some((arg) => arg === 'sandbox_workspace_write.writable_roots=["/home/ubuntu/work/repo/.git"]'));
+});
+
 test("real remote codex run falls back to parsed stdout when final output is missing", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant]);
@@ -700,6 +872,8 @@ async function testRemoteRun(options: {
   run?: (...args: any[]) => Promise<any>;
   codexExecutor?: RemoteCodexExecutor;
   detachedWorkerTransport?: RemoteDetachedWorkerTransport;
+  mirrorSync?: RemoteMirrorSyncRunner;
+  remoteGitDirProbe?: (worker: unknown, gitDirPath: string) => Promise<boolean>;
 } = {}): Promise<{
   service: ChatService;
   remote: RemoteRunService;
@@ -756,9 +930,23 @@ async function testRemoteRun(options: {
   const remote = new RemoteRunService(service, {
     spoolRoot: root,
     codexExecutor: options.codexExecutor,
-    detachedWorkerTransport: options.detachedWorkerTransport
+    detachedWorkerTransport: options.detachedWorkerTransport,
+    mirrorSync: options.mirrorSync,
+    remoteGitDirProbe: options.remoteGitDirProbe as never
   });
   return { service, remote, storage, root, conversation };
+}
+
+class FakeMirrorSync implements RemoteMirrorSyncRunner {
+  readonly calls: Array<{ kind: "up" | "down"; localPath: string; remotePath: string }> = [];
+
+  async syncUp(request: RemoteMirrorSyncRequest): Promise<void> {
+    this.calls.push({ kind: "up", localPath: request.localPath, remotePath: request.remotePath });
+  }
+
+  async syncDown(request: RemoteMirrorSyncRequest): Promise<void> {
+    this.calls.push({ kind: "down", localPath: request.localPath, remotePath: request.remotePath });
+  }
 }
 
 function chatParticipant(

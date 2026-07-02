@@ -50,6 +50,11 @@ export interface CloudRunWorkerTestResult {
   message: string;
 }
 
+export interface RemoteRunSyncInfo {
+  localPath: string;
+  remotePath?: string;
+}
+
 export interface RemoteRunHandle {
   runId: string;
   conversationId: string;
@@ -64,6 +69,7 @@ export interface RemoteRunHandle {
   completedAt?: string;
   lastPolledAt?: string;
   error?: string;
+  sync?: RemoteRunSyncInfo;
 }
 
 export interface AppSettings {
