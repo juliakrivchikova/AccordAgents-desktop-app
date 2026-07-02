@@ -1457,7 +1457,7 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
       remoteWorkerRunDirForTarget(request.worker, request.runId),
       request.signal
     );
-    const [state, events, exit] = await Promise.all([
+    let [state, events, exit] = await Promise.all([
       readRemoteJson<RemoteDetachedRunState>(sshPath, sshBaseArgs, `${runDir}/state.json`, request.signal),
       readRemoteWorkerEvents(sshPath, sshBaseArgs, `${runDir}/events.jsonl`, request.afterWorkerSeq, request.signal),
       readRemoteJson<RemoteDetachedRunState>(sshPath, sshBaseArgs, `${runDir}/exit.json`, request.signal)
@@ -1469,16 +1469,33 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
         ? await remotePidAlive(sshPath, sshBaseArgs, wrapperPid, false, request.signal)
         : false;
       if (!pgidAlive && !wrapperAlive) {
-        return {
-          state: {
-            ...state,
-            status: "failed",
-            completedAt: new Date().toISOString(),
-            error: "Remote worker process exited without writing exit.json."
-          },
-          events
-        };
+        // The worker's last acts are: append the terminal events, write
+        // exit.json, write terminal state.json, exit. A completion racing this
+        // poll therefore looks exactly like a crash until exit.json is
+        // re-read. Without this re-read the run is misreported as failed and
+        // the provider_result carrying the final message is never projected.
+        exit = await readRemoteJson<RemoteDetachedRunState>(sshPath, sshBaseArgs, `${runDir}/exit.json`, request.signal);
+        if (!exit) {
+          return {
+            state: {
+              ...state,
+              status: "failed",
+              completedAt: new Date().toISOString(),
+              error: "Remote worker process exited without writing exit.json."
+            },
+            events
+          };
+        }
       }
+    }
+    // exit.json (and terminal state.json) are written strictly after the
+    // terminal events, but the parallel reads above can see the exit while the
+    // slightly-earlier events read missed the tail. Re-read events once so a
+    // terminal snapshot always carries its provider_result/terminal_state
+    // records instead of forcing the synthesized-terminal fallback.
+    const terminalSeen = Boolean(exit) || (state ? state.status !== "running" && state.status !== "unknown" : false);
+    if (terminalSeen && !events.some((event) => event.kind === "terminal_state")) {
+      events = await readRemoteWorkerEvents(sshPath, sshBaseArgs, `${runDir}/events.jsonl`, request.afterWorkerSeq, request.signal);
     }
     return {
       state: exit
