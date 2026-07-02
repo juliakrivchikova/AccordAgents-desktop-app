@@ -19,7 +19,7 @@ import { ChatService } from "./chat";
 import { buildCloudRunSshTarget, validateCloudRunSshWorkerFields } from "./cloudRunWorkers";
 import { remoteMirrorPath, remoteMirrorSlug } from "./remoteMirrorSync";
 import type { RemoteMirrorSyncRequest, RemoteMirrorSyncRunner } from "./remoteMirrorSync";
-import { RemoteRunService } from "./remoteRuns";
+import { forwardedDesktopEnvironment, RemoteRunService } from "./remoteRuns";
 import { RemoteRunCoordinator } from "./remoteRunCoordinator";
 import type {
   RemoteCodexExecutor,
@@ -794,6 +794,71 @@ test("pre-provisioned remoteCwd mode never touches the mirror sync", async () =>
   const args = worker.launched?.invocation.args ?? [];
   assert.ok(args.includes("sandbox_workspace_write.network_access=true"));
   assert.ok(args.some((arg) => arg === 'sandbox_workspace_write.writable_roots=["/home/ubuntu/work/repo/.git"]'));
+});
+
+test("forwardedDesktopEnvironment strips machine-specific vars and keeps the rest", () => {
+  const forwarded = forwardedDesktopEnvironment({
+    PATH: "/opt/homebrew/bin:/usr/bin",
+    HOME: "/Users/dev",
+    TMPDIR: "/var/folders/xy",
+    SHELL: "/bin/zsh",
+    LC_ALL: "en_US.UTF-8",
+    DYLD_LIBRARY_PATH: "/usr/local/lib",
+    __CF_USER_TEXT_ENCODING: "0x0:0:0",
+    ELECTRON_RUN_AS_NODE: "1",
+    npm_config_prefix: "/opt/homebrew",
+    NVM_DIR: "/Users/dev/.nvm",
+    ACCORD_AGENTS_MCP_TOKEN: "internal",
+    GH_TOKEN: "gh-secret",
+    GITHUB_TOKEN: "gh-secret-2",
+    AWS_PROFILE: "work",
+    MY_PROJECT_FLAG: "on"
+  });
+  assert.deepEqual(forwarded, {
+    GH_TOKEN: "gh-secret",
+    GITHUB_TOKEN: "gh-secret-2",
+    AWS_PROFILE: "work",
+    MY_PROJECT_FLAG: "on"
+  });
+});
+
+test("detached run forwards desktop env with app-MCP token precedence", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  class CapturingTransport extends FakeDetachedWorkerTransport {
+    launched: RemoteDetachedWorkerLaunchRequest | undefined;
+
+    override async launch(request: RemoteDetachedWorkerLaunchRequest): Promise<RemoteDetachedWorkerSnapshot> {
+      this.launched = request;
+      return super.launch(request);
+    }
+  }
+  const worker = new CapturingTransport();
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+
+  process.env.AA_TEST_FORWARDED_SECRET = "forward-me";
+  process.env.ACCORD_AGENTS_MCP_TOKEN = "must-not-forward";
+  try {
+    await remote.startDetachedRun({
+      conversationId: conversation.id,
+      runId: "env-forward-run",
+      participant: participantConfig(participant),
+      prompt: "Use the forwarded env.",
+      worker: { host: "worker.example" },
+      options: {
+        appMcp: { url: "http://127.0.0.1:9999/mcp", token: "per-run-token" }
+      }
+    });
+  } finally {
+    delete process.env.AA_TEST_FORWARDED_SECRET;
+    delete process.env.ACCORD_AGENTS_MCP_TOKEN;
+  }
+
+  const env = worker.launched?.invocation.env ?? {};
+  assert.equal(env.AA_TEST_FORWARDED_SECRET, "forward-me");
+  assert.equal(env.ACCORD_AGENTS_MCP_TOKEN, "per-run-token");
+  assert.equal(env.PATH, undefined);
+  assert.equal(env.HOME, undefined);
 });
 
 test("real remote codex run falls back to parsed stdout when final output is missing", async () => {

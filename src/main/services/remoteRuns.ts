@@ -15,7 +15,7 @@ import type {
 import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
 import type { ChatAppToolApprovalDecisionEvent, ChatService } from "./chat";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs } from "./cloudRunWorkers";
-import { CommandError, runCommand } from "./command";
+import { CommandError, commandEnvironment, runCommand } from "./command";
 import {
   CODEX_APP_SERVER_MCP_TOKEN_ENV,
   buildCodexExecInvocation,
@@ -31,6 +31,46 @@ import type { RemoteMirrorSyncRunner } from "./remoteMirrorSync";
 const DEFAULT_APPLY_LIMIT = 200;
 const DEFAULT_REMOTE_RUN_TIMEOUT_MS = 24 * 60 * 60_000;
 const DEFAULT_DETACHED_MAX_RUNTIME_MS = 24 * 60 * 60_000;
+
+// v1 env forwarding: remote runs get the same environment local runs inherit
+// (process env + login-shell env), minus machine-specific vars that would
+// break the Linux worker or leak meaningless local state. The worker merges
+// forwarded vars OVER its own env, so anything not listed here wins over the
+// box; listed vars are never forwarded, so the box's own values win.
+const REMOTE_ENV_DENYLIST_EXACT = new Set([
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "SHLVL", "PWD", "OLDPWD",
+  "TMPDIR", "TMP", "TEMP", "TERM", "TERMINFO", "TERM_PROGRAM",
+  "TERM_PROGRAM_VERSION", "TERM_SESSION_ID", "DISPLAY", "WINDOWID",
+  "SSH_AUTH_SOCK", "SSH_AGENT_PID", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY",
+  "GPG_AGENT_INFO", "LANG", "LANGUAGE", "EDITOR", "VISUAL", "PAGER",
+  "COMMAND_MODE", "SECURITYSESSIONID", "MANPATH", "INFOPATH", "CDPATH",
+  "TMUX", "TMUX_PANE", "JAVA_HOME", "ANDROID_HOME", "SDKROOT",
+  "DEVELOPER_DIR", "VIRTUAL_ENV", "GOPATH", "GOROOT", "CARGO_HOME",
+  "RUSTUP_HOME", "ORIGINAL_XDG_CURRENT_DESKTOP"
+]);
+const REMOTE_ENV_DENYLIST_PREFIXES = [
+  "LC_", "DYLD_", "XPC_", "__", "Apple_", "ELECTRON_", "CHROME_", "NODE_",
+  "npm_", "NVM_", "HOMEBREW_", "ITERM_", "VSCODE_", "XDG_", "CONDA_",
+  "ACCORD_AGENTS_"
+];
+
+export function forwardedDesktopEnvironment(base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const source = base ?? commandEnvironment();
+  const result: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined) {
+      continue;
+    }
+    if (REMOTE_ENV_DENYLIST_EXACT.has(key)) {
+      continue;
+    }
+    if (REMOTE_ENV_DENYLIST_PREFIXES.some((prefix) => key.startsWith(prefix))) {
+      continue;
+    }
+    result[key] = value;
+  }
+  return result;
+}
 
 export type RemoteRunSpoolRecordKind =
   | "lifecycle"
@@ -451,7 +491,7 @@ export class RemoteRunService {
       repoPath: request.repoPath,
       diffMode: request.diffMode,
       kind: request.kind ?? "chat",
-      options: { ...request.options, persistSession: true }
+      options: { ...request.options, persistSession: true, extraEnv: forwardedDesktopEnvironment() }
     });
 
     let stdout = "";
@@ -560,7 +600,12 @@ export class RemoteRunService {
       repoPath: effectiveRepoPath,
       diffMode: request.diffMode,
       kind: request.kind ?? "chat",
-      options: { ...request.options, persistSession: true, remoteSandbox }
+      options: {
+        ...request.options,
+        persistSession: true,
+        remoteSandbox,
+        extraEnv: forwardedDesktopEnvironment()
+      }
     });
 
     let snapshot: RemoteDetachedWorkerSnapshot;

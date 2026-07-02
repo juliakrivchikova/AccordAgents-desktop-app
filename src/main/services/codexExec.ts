@@ -54,6 +54,9 @@ export interface CodexExecOptions {
   // app-server `ephemeral: !persistSession` behavior used by local chat.
   persistSession?: boolean;
   remoteSandbox?: CodexExecRemoteSandboxOptions;
+  // Extra environment for the codex process. App-managed per-run vars (the
+  // App-MCP token) always take precedence over entries here.
+  extraEnv?: NodeJS.ProcessEnv;
 }
 
 export interface CodexExecInvocation {
@@ -173,8 +176,16 @@ export function buildCodexExecInvocation(request: BuildCodexExecInvocationReques
   return {
     args,
     input: codexPrompt(request.prompt, request.repoPath, request.diffMode, request.kind, options),
-    env: codexAppMcpEnv(options)
+    env: codexInvocationEnv(options)
   };
+}
+
+function codexInvocationEnv(options: CodexExecOptions): NodeJS.ProcessEnv | undefined {
+  const appMcpEnv = codexAppMcpEnv(options);
+  if (!options.extraEnv && !appMcpEnv) {
+    return undefined;
+  }
+  return { ...options.extraEnv, ...appMcpEnv };
 }
 
 export function codexAppMcpEnv(options: CodexExecOptions = {}): NodeJS.ProcessEnv | undefined {
