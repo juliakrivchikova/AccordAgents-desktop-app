@@ -685,7 +685,7 @@ test("mirror-sync detached run up-syncs before launch and runs codex in the mirr
   assert.ok(args.some((arg) => arg === `sandbox_workspace_write.writable_roots=["${expectedMirror}/.git"]`));
 });
 
-test("mirror-sync down-syncs exactly once when the run reaches terminal state", async () => {
+test("terminal state releases the mirror without ever writing back automatically", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant]);
   const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-src-"));
@@ -693,18 +693,15 @@ test("mirror-sync down-syncs exactly once when the run reaches terminal state", 
   const worker = new FakeDetachedWorkerTransport();
   const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker, mirrorSync });
   const target = { host: "worker.example", workerRoot: "/srv/worker" };
-  const expectedMirror = remoteMirrorPath("/srv/worker", localDir);
 
   await remote.startDetachedRun({
     conversationId: conversation.id,
     runId: "mirror-terminal-run",
     participant: participantConfig(participant),
-    prompt: "Finish and sync back.",
+    prompt: "Finish remotely.",
     worker: target,
     sync: { localPath: localDir }
   });
-  assert.equal(mirrorSync.calls.filter((call) => call.kind === "down").length, 0);
-
   worker.push("mirror-terminal-run", {
     kind: "provider_result",
     workerSeq: 2,
@@ -719,9 +716,47 @@ test("mirror-sync down-syncs exactly once when the run reaches terminal state", 
   await remote.pollDetachedRun({ runId: "mirror-terminal-run", worker: target });
   await remote.pollDetachedRun({ runId: "mirror-terminal-run", worker: target });
 
+  assert.equal(mirrorSync.calls.filter((call) => call.kind === "down").length, 0);
+
+  // The finished run no longer counts toward mirror busyness: a new run on the
+  // same project up-syncs again instead of being skipped.
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "mirror-terminal-run-2",
+    participant: participantConfig(participant),
+    prompt: "Run again.",
+    worker: target,
+    sync: { localPath: localDir }
+  });
+  assert.equal(mirrorSync.calls.filter((call) => call.kind === "up").length, 2);
+});
+
+test("pullMirrorForRun writes back only on demand and can run repeatedly", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-src-"));
+  const mirrorSync = new FakeMirrorSync();
+  const worker = new FakeDetachedWorkerTransport();
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker, mirrorSync });
+  const target = { host: "worker.example", workerRoot: "/srv/worker" };
+  const expectedMirror = remoteMirrorPath("/srv/worker", localDir);
+
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "mirror-pull-run",
+    participant: participantConfig(participant),
+    prompt: "Produce results.",
+    worker: target,
+    sync: { localPath: localDir }
+  });
+
+  await remote.pullMirrorForRun("mirror-pull-run");
+  await remote.pullMirrorForRun("mirror-pull-run");
+
   const downCalls = mirrorSync.calls.filter((call) => call.kind === "down");
-  assert.equal(downCalls.length, 1);
+  assert.equal(downCalls.length, 2);
   assert.deepEqual(downCalls[0], { kind: "down", localPath: localDir, remotePath: expectedMirror });
+  await assert.rejects(() => remote.pullMirrorForRun("unknown-run"), /no mirror-sync information/);
 });
 
 test("concurrent run on a busy mirror skips the destructive up-sync", async () => {

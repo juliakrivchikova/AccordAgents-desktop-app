@@ -4211,8 +4211,9 @@ export class ChatService {
         {
           const now = new Date().toISOString();
           // Mirror-sync mode: no pre-provisioned remote cwd, and the run has a
-          // readable local repo — the project dir is rsynced to a per-project
-          // mirror on the worker and synced back at terminal state.
+          // readable local repo — the project dir is rsynced one-way to a
+          // per-project mirror on the worker before launch. Results come back
+          // via git (the agent pushes from the box) or an explicit pull.
           const remoteSyncLocalPath = !remoteRunTarget.worker.remoteCwd
             && conversation.repoPath
             && runPath === conversation.repoPath

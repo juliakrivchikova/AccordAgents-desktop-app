@@ -12,9 +12,11 @@ export const REMOTE_MIRROR_SYNC_TIMEOUT_MS = 15 * 60_000;
 // in the local project. rsync --delete does not remove excluded paths, so a
 // worker-side node_modules survives future up-syncs.
 const UP_SYNC_EXCLUDES = ["node_modules", ".DS_Store"];
-// .git is synced UP (the agent needs history and commits from the mirror) but
-// never DOWN: the box's git state lives on the box and on the remote (PRs);
-// pulling it back could clobber concurrent local git activity.
+// Mirror sync is ONE-WAY (local → worker). syncDown exists only for the
+// explicit user-initiated "pull changes" action; it is never run
+// automatically. .git is synced UP (the agent needs history and commits from
+// the mirror) but never DOWN: the box's git state lives on the box and on the
+// remote (PRs); pulling it back could clobber concurrent local git activity.
 const DOWN_SYNC_EXCLUDES = [".git", "node_modules", ".DS_Store"];
 
 export interface RemoteMirrorSyncRequest {

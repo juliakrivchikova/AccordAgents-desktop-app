@@ -229,8 +229,10 @@ export interface RemoteRunDetachedStartRequest extends RemoteRunRealStartRequest
   contextSnapshot?: unknown;
   // Mirror-sync mode: when set (and no pre-provisioned repoPath/remoteCwd is
   // given), the local project directory is rsynced to a per-project mirror
-  // under the worker root before launch, the run executes in that mirror, and
-  // the working tree is rsynced back when the run reaches a terminal state.
+  // under the worker root before launch and the run executes in that mirror.
+  // Sync is ONE-WAY by design: the local tree is never written automatically.
+  // Results come back via git (the agent commits/pushes from the box) or via
+  // an explicit pullMirrorForRun call.
   sync?: { localPath: string };
 }
 
@@ -443,7 +445,6 @@ export class RemoteRunService {
   private readonly syncLogger?: (event: string, payload: Record<string, unknown>) => void;
   private readonly remoteGitDirProbe: (worker: RemoteRunWorkerTarget, gitDirPath: string, signal?: AbortSignal) => Promise<boolean>;
   private readonly detachedSyncByRun = new Map<string, RemoteRunSyncInfo>();
-  private readonly syncDownCompletedRuns = new Set<string>();
   private readonly mirrorOpChainByPath = new Map<string, Promise<void>>();
   private readonly activeRunsByMirror = new Map<string, Set<string>>();
 
@@ -645,7 +646,7 @@ export class RemoteRunService {
       conversationId: context.conversationId,
       participantId: context.participantId
     });
-    if (context.sync?.localPath && !this.syncDownCompletedRuns.has(runId)) {
+    if (context.sync?.localPath) {
       this.registerRunSync(runId, context.sync);
     }
   }
@@ -1089,28 +1090,22 @@ export class RemoteRunService {
     };
   }
 
-  // Rsync the mirror's working tree back into the local project directory.
-  // Runs exactly once per run, right before its terminal_state record is
-  // appended, so the reply message lands after the files do. Failures are
-  // logged but never block the terminal record.
-  private async syncDownForRun(runId: string): Promise<void> {
+  // Explicit, user-initiated write-back: rsync the mirror's working tree into
+  // the local project directory (.git and node_modules excluded). Never called
+  // automatically — the local tree is only mutated on demand, so a long remote
+  // run cannot silently overwrite concurrent local edits.
+  async pullMirrorForRun(runId: string): Promise<void> {
     const sync = this.detachedSyncByRun.get(runId);
-    if (!sync || this.syncDownCompletedRuns.has(runId)) {
-      return;
+    if (!sync) {
+      throw new Error(`Remote run ${runId} has no mirror-sync information.`);
     }
-    this.syncDownCompletedRuns.add(runId);
     const worker = this.detachedWorkerByRun.get(runId);
-    if (sync.remotePath) {
-      this.untrackMirrorRun(sync.remotePath, runId);
-    }
     if (!worker) {
-      this.syncLogger?.("remote-run.sync.down.skipped-no-worker", { runId });
-      return;
+      throw new Error(`Remote run ${runId} has no known worker.`);
     }
     const remotePath = sync.remotePath ?? await this.resolveMirrorPathForSync(worker, sync);
     if (!remotePath) {
-      this.syncLogger?.("remote-run.sync.down.skipped-no-mirror", { runId });
-      return;
+      throw new Error(`Remote run ${runId} mirror path could not be resolved.`);
     }
     const startedAt = Date.now();
     try {
@@ -1126,6 +1121,16 @@ export class RemoteRunService {
         remotePath,
         message: error instanceof Error ? error.message : String(error)
       });
+      throw error;
+    }
+  }
+
+  // Terminal runs stop counting toward mirror busyness so the next run on the
+  // same project up-syncs a fresh mirror again.
+  private releaseMirrorForRun(runId: string): void {
+    const sync = this.detachedSyncByRun.get(runId);
+    if (sync?.remotePath) {
+      this.untrackMirrorRun(sync.remotePath, runId);
     }
   }
 
@@ -1188,7 +1193,7 @@ export class RemoteRunService {
     input: RemoteRunRecordInputWithOverrides
   ): Promise<{ record: RemoteRunReplayRecord; applyResults: RemoteRunApplyRecordResult[] }> {
     if (input.kind === "terminal_state") {
-      await this.syncDownForRun(input.runId);
+      this.releaseMirrorForRun(input.runId);
     }
     return this.withRunAppend(input.runId, async () => {
       const seq = await this.nextSeq(input.runId);
