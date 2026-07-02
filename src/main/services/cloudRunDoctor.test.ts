@@ -105,7 +105,8 @@ test("setup drives codex device-auth and surfaces url + code to the user", async
           : FULLY_PROVISIONED;
       }
       if (request.command.includes("login --device-auth")) {
-        request.onStdout?.("Open https://auth.openai.com/device and enter WXYZ-1234\n");
+        request.onStdout?.("Open \u001b[94mhttps://auth.openai.com/codex/device\u001b[0m\n");
+        request.onStdout?.("Enter this one-time code\n   \u001b[94mKIAK-7ETT8\u001b[0m\n");
         return "";
       }
       return "";
@@ -117,9 +118,9 @@ test("setup drives codex device-auth and surfaces url + code to the user", async
       progress.push({ authUrl: event.authUrl, authCode: event.authCode });
     }
   });
-  assert.equal(opened, "https://auth.openai.com/device");
-  assert.equal(progress[0]?.authUrl, "https://auth.openai.com/device");
-  assert.equal(progress[0]?.authCode, "WXYZ-1234");
+  assert.equal(opened, "https://auth.openai.com/codex/device");
+  assert.equal(progress.at(-1)?.authUrl, "https://auth.openai.com/codex/device");
+  assert.equal(progress.at(-1)?.authCode, "KIAK-7ETT8");
 });
 
 test("setup without sudo skips installs and reports remaining gaps", async () => {

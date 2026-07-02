@@ -45,7 +45,10 @@ export function ChatParticipantRosterRow(props: {
             <span className="flex min-w-0 items-center gap-1.5">
               <strong className="min-w-0 truncate text-[var(--app-text-strong)]">{displayName}</strong>
               <span className="flex-[0_0_auto]">
-                <RosterStatusIndicator status={props.status} />
+                <RosterStatusIndicator
+                  status={props.status}
+                  runningRemotely={props.participant.remoteExecution === "remote"}
+                />
               </span>
             </span>
             <span className="chat-participant-role-line">

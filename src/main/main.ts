@@ -224,6 +224,25 @@ async function testCloudRunWorker(worker: CloudRunWorkerSettings): Promise<{ ok:
   }
 }
 
+async function withCloudRunWorker<T>(
+  request: CloudRunWorkerSettings | undefined,
+  action: (worker: CloudRunWorkerSettings) => Promise<T>
+): Promise<T> {
+  if (request) {
+    return action(request);
+  }
+  const settings = await settingsService.getPublicSettings();
+  if (settings.cloudRuns.mode !== "aws") {
+    return action(settings.cloudRuns.worker);
+  }
+  cloudRunAwsService.noteRunStarted();
+  try {
+    return await action(await cloudRunAwsService.ensureWorkerForRun());
+  } finally {
+    await cloudRunAwsService.noteRunEnded();
+  }
+}
+
 function registerIpc(): void {
   ipcMain.handle("app:get-version", () => app.getVersion());
   ipcMain.handle("app:open-external", (_event, url: unknown) => openExternalUrl(url));
@@ -241,18 +260,15 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:save-cloud-runs", (_event, update: CloudRunsSettingsUpdate) => settingsService.saveCloudRunsSettings(update));
   ipcMain.handle("cloud-runs:test-worker", async (_event, request?: CloudRunWorkerSettings) => {
-    const settings = await settingsService.getPublicSettings();
-    return testCloudRunWorker(request ?? settings.cloudRuns.worker);
+    return withCloudRunWorker(request, testCloudRunWorker);
   });
   ipcMain.handle("cloud-runs:diagnose-worker", async (_event, request?: CloudRunWorkerSettings) => {
-    const settings = await settingsService.getPublicSettings();
-    return cloudRunDoctorService.diagnose(request ?? settings.cloudRuns.worker);
+    return withCloudRunWorker(request, (worker) => cloudRunDoctorService.diagnose(worker));
   });
   ipcMain.handle("cloud-runs:setup-worker", async (_event, request?: CloudRunWorkerSettings) => {
-    const settings = await settingsService.getPublicSettings();
-    return cloudRunDoctorService.setup(request ?? settings.cloudRuns.worker, (progress) => {
+    return withCloudRunWorker(request, (worker) => cloudRunDoctorService.setup(worker, (progress) => {
       mainWindow?.webContents.send("cloud-runs:setup-progress", progress);
-    });
+    }));
   });
   ipcMain.handle("cloud-runs:aws-bootstrap-command", (_event, region: string) =>
     cloudRunAwsService.bootstrapCommand(String(region ?? "").trim() || "us-east-1"));

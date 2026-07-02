@@ -11,8 +11,14 @@ const ROSTER_STATUS_LABELS: Record<ChatParticipantRosterStatus, string> = {
 // Shared borderless dot + label status indicator, reused by the roster name line and
 // the message meta row. Intentionally NOT a pill (no background/border) so it reads as
 // inline status text rather than a badge.
-export function RosterStatusIndicator({ status }: { status: ChatParticipantRosterStatus }): JSX.Element {
-  const label = ROSTER_STATUS_LABELS[status];
+export function RosterStatusIndicator({
+  status,
+  runningRemotely = false
+}: {
+  status: ChatParticipantRosterStatus;
+  runningRemotely?: boolean;
+}): JSX.Element {
+  const label = status === "running" && runningRemotely ? "Running remotely" : ROSTER_STATUS_LABELS[status];
   return (
     <span className={`chat-rt-status is-${status}`} title={`Status: ${label}`}>
       <span className="chat-rt-status-dot" />

@@ -175,7 +175,10 @@ export class CloudRunDoctorService {
   ): Promise<void> {
     progress("codex-auth", "Starting Codex sign-in on the worker…");
     let buffered = "";
-    let surfaced = false;
+    let authUrl: string | undefined;
+    let authCode: string | undefined;
+    let opened = false;
+    let lastProgressKey = "";
     const codexPath = worker.codexPath?.trim() || "codex";
     try {
       await this.sshExec({
@@ -184,17 +187,22 @@ export class CloudRunDoctorService {
         timeoutMs: DEVICE_AUTH_TIMEOUT_MS,
         onStdout: (chunk) => {
           buffered += chunk;
-          if (surfaced) {
+          const visible = stripAnsi(buffered);
+          authUrl ??= visible.match(/https:\/\/\S+/)?.[0];
+          authCode ??= visible.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4,8})\b/)?.[1];
+          if (!authUrl) {
             return;
           }
-          const url = buffered.match(/https:\/\/\S+/)?.[0];
-          const code = buffered.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/)?.[1];
-          if (url) {
-            surfaced = true;
-            progress("codex-auth", code
-              ? `Approve the sign-in in your browser and enter code ${code}.`
-              : "Approve the sign-in in your browser.", { authUrl: url, authCode: code });
-            this.openExternal?.(url);
+          const progressKey = `${authUrl}:${authCode ?? ""}`;
+          if (progressKey !== lastProgressKey) {
+            lastProgressKey = progressKey;
+            progress("codex-auth", authCode
+              ? "Approve the Codex sign-in with the device code."
+              : "Approve the Codex sign-in; waiting for the device code…", { authUrl, authCode });
+          }
+          if (!opened) {
+            opened = true;
+            this.openExternal?.(authUrl);
           }
         }
       });
@@ -203,6 +211,10 @@ export class CloudRunDoctorService {
       progress("codex-auth", `Codex sign-in did not complete: ${errorMessage(error)}`);
     }
   }
+}
+
+function stripAnsi(value: string): string {
+  return value.replace(/\u001b\[[0-9;]*m/g, "");
 }
 
 function workerTarget(settings: CloudRunWorkerSettings): RemoteRunWorkerTarget | undefined {

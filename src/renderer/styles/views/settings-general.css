@@ -479,12 +479,18 @@
   flex-direction: column;
 }
 
-.settings-view .gen-aws-command {
+.settings-view .gen-aws-command-box {
+  position: relative;
   margin: 0 18px 14px;
-  padding: 12px 14px;
   border-radius: 10px;
   background: var(--app-surface);
   border: 1px solid var(--app-border);
+  overflow: hidden;
+}
+
+.settings-view .gen-aws-command {
+  margin: 0;
+  padding: 42px 14px 12px;
   font-family: var(--font-mono, monospace);
   font-size: 11.5px;
   line-height: 1.5;
@@ -492,6 +498,32 @@
   word-break: break-all;
   max-height: 220px;
   overflow: auto;
+}
+
+.settings-view .gen-aws-copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--app-border);
+  background: var(--app-panel);
+  color: var(--app-text);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.settings-view .gen-aws-copy:hover,
+.settings-view .gen-aws-copy:focus-visible {
+  border-color: var(--app-border-strong);
+  color: var(--app-text-strong);
+  outline: none;
 }
 
 .settings-view .gen-aws-paste {

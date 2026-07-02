@@ -79,6 +79,9 @@ export function ChatMessageItem(props: {
     : message.role === "system"
       ? props.participants?.find((item) => item.roleConfigId === CHAT_ASSISTANT_ROLE_ID)
       : undefined;
+  const participantStatus: ChatParticipantRosterStatus = isStreaming
+    ? "running"
+    : props.participantStatusById.get(message.participantId ?? "") ?? "idle";
   const pending = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "pending");
   const approved = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "approved");
   const choice = message.metadata?.pendingChoice;
@@ -273,7 +276,10 @@ export function ChatMessageItem(props: {
                   Queued
                 </span>
               ) : (
-                <RosterStatusIndicator status={isStreaming ? "running" : props.participantStatusById.get(message.participantId ?? "") ?? "idle"} />
+                <RosterStatusIndicator
+                  status={participantStatus}
+                  runningRemotely={participant?.remoteExecution === "remote"}
+                />
               )
             )}
             <span className="message-when">{formatChatTime(message.createdAt)}</span>
