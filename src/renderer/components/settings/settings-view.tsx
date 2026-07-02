@@ -6,7 +6,8 @@ import type {
   ChatRoleConfigUpdate,
   ChatSavedPromptConfigUpdate,
   ProviderSettings,
-  RepoFileOpenAction
+  RepoFileOpenAction,
+  UserProfileSettings
 } from "../../../shared/types";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "../primitives";
@@ -36,6 +37,7 @@ export function SettingsView(props: {
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
+  saveUserProfileSettings: (profile: UserProfileSettings) => Promise<void>;
   sidebarCollapsed: boolean;
   onExpandSidebar: () => void;
   onClose: () => void;
@@ -120,10 +122,12 @@ export function SettingsView(props: {
             repoFileOpenAction={props.settings.repoFileOpenAction}
             cliAgentRunTimeoutMs={props.settings.cliAgentRunTimeoutMs}
             chatParticipantRequestMaxDepth={props.settings.chatParticipantRequestMaxDepth}
+            userProfile={props.settings.userProfile}
             updateProvider={props.updateProvider}
             setRepoFileOpenPreference={props.setRepoFileOpenPreference}
             setCliAgentRunTimeoutMs={props.setCliAgentRunTimeoutMs}
             setChatParticipantRequestMaxDepth={props.setChatParticipantRequestMaxDepth}
+            saveUserProfileSettings={props.saveUserProfileSettings}
           />
         )}
       </div>

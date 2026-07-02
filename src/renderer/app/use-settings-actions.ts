@@ -4,7 +4,8 @@ import type {
   ChatRoleConfigUpdate,
   ChatSavedPromptConfigUpdate,
   ProviderSettings,
-  RepoFileOpenAction
+  RepoFileOpenAction,
+  UserProfileSettings
 } from "../../shared/types";
 import { errorText } from "../components/review/review-conversation-data";
 import type { AppState } from "./app-state";
@@ -14,6 +15,7 @@ export interface SettingsActions {
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
+  saveUserProfileSettings: (profile: UserProfileSettings) => Promise<void>;
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => Promise<void>;
   archiveChatRoleConfig: (id: string) => Promise<void>;
   saveChatBehaviorRuleConfig: (update: ChatBehaviorRuleConfigUpdate) => Promise<void>;
@@ -39,6 +41,10 @@ export function useSettingsActions(state: AppState): SettingsActions {
 
   async function setChatParticipantRequestMaxDepth(maxDepth: number): Promise<void> {
     await updateSettings(() => window.consensus.setChatParticipantRequestMaxDepth(maxDepth));
+  }
+
+  async function saveUserProfileSettings(profile: UserProfileSettings): Promise<void> {
+    await updateSettings(() => window.consensus.saveUserProfileSettings(profile), { rethrow: true });
   }
 
   async function saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<void> {
@@ -118,6 +124,7 @@ export function useSettingsActions(state: AppState): SettingsActions {
     setRepoFileOpenPreference,
     setCliAgentRunTimeoutMs,
     setChatParticipantRequestMaxDepth,
+    saveUserProfileSettings,
     saveChatRoleConfig,
     archiveChatRoleConfig,
     saveChatBehaviorRuleConfig,

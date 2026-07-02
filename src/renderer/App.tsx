@@ -231,6 +231,7 @@ function App(): JSX.Element {
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
           setCliAgentRunTimeoutMs={settingsActions.setCliAgentRunTimeoutMs}
           setChatParticipantRequestMaxDepth={settingsActions.setChatParticipantRequestMaxDepth}
+          saveUserProfileSettings={settingsActions.saveUserProfileSettings}
           sidebarCollapsed={state.sidebarCollapsed}
           onExpandSidebar={() => state.setSidebarCollapsed(false)}
           onClose={closeSettings}
