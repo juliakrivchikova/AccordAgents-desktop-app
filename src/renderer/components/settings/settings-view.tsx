@@ -5,6 +5,7 @@ import type {
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
   ChatSavedPromptConfigUpdate,
+  CloudRunsSettingsUpdate,
   ProviderSettings,
   RepoFileOpenAction
 } from "../../../shared/types";
@@ -36,6 +37,7 @@ export function SettingsView(props: {
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
+  saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => Promise<void>;
   sidebarCollapsed: boolean;
   onExpandSidebar: () => void;
   onClose: () => void;
@@ -124,6 +126,8 @@ export function SettingsView(props: {
             setRepoFileOpenPreference={props.setRepoFileOpenPreference}
             setCliAgentRunTimeoutMs={props.setCliAgentRunTimeoutMs}
             setChatParticipantRequestMaxDepth={props.setChatParticipantRequestMaxDepth}
+            cloudRuns={props.settings.cloudRuns}
+            saveCloudRunsSettings={props.saveCloudRunsSettings}
           />
         )}
       </div>

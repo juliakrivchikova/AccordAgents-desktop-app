@@ -4,6 +4,7 @@ import type {
   ChatImageInput,
   ChatParticipant,
   ChatParticipantConfig,
+  CloudRunRemoteExecutionMode,
   ChatSkillMention,
   RepoFileMention
 } from "../../shared/types";
@@ -40,8 +41,8 @@ export interface ChatActions {
   toggleChatReaction: (messageId: string, emoji: string) => Promise<void>;
   respondToChatChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => Promise<void>;
   addChatParticipant: () => Promise<void>;
-  addSavedChatParticipant: (config: ChatParticipantConfig) => Promise<void>;
-  updateChatParticipantRuntime: (participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions">) => Promise<void>;
+  addSavedChatParticipant: (config: ChatParticipantConfig, remoteExecution?: CloudRunRemoteExecutionMode) => Promise<void>;
+  updateChatParticipantRuntime: (participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">) => Promise<void>;
   removeChatParticipant: (participantId: string) => Promise<void>;
   compactChatParticipant: (participantId: string, options?: ChatRunScopeOptions) => Promise<boolean>;
   startChatAccord: (options: StartChatAccordOptions) => Promise<boolean>;
@@ -95,7 +96,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     const participants = selectedOrMentionedChatParticipantDrafts(
       state.settings.chatParticipantConfigs,
       state.selectedChatParticipantConfigIds,
-      initialMessage
+      initialMessage,
+      state.selectedChatParticipantRunLocations
     );
     const validation = validateChatStartupDrafts(participants, state.settings.chatRoleConfigs, state.agents, state.settings.chatBehaviorRules);
     if (validation) {
@@ -121,6 +123,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setConversation(result.conversation);
       state.setWarnings(result.warnings);
       state.setChatMessageDraft("");
+      state.setSelectedChatParticipantRunLocations({});
       const sendResult = await window.consensus.sendChatMessage({
         conversationId: result.conversation.id,
         runId,
@@ -301,12 +304,16 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
   }
 
-  async function addSavedChatParticipant(config: ChatParticipantConfig): Promise<void> {
-    const participant = normalizedChatDrafts([chatParticipantConfigToDraft(config)])[0];
+  async function addSavedChatParticipant(config: ChatParticipantConfig, remoteExecution?: CloudRunRemoteExecutionMode): Promise<void> {
+    const draft = chatParticipantConfigToDraft(config);
+    const participant = normalizedChatDrafts([{
+      ...draft,
+      remoteExecution: remoteExecution ?? draft.remoteExecution
+    }])[0];
     await commitChatParticipant(participant);
   }
 
-  async function updateChatParticipantRuntime(participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions">): Promise<void> {
+  async function updateChatParticipantRuntime(participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">): Promise<void> {
     if (!state.conversation || state.conversation.kind !== "chat") return;
     state.setError(undefined);
     try {
@@ -316,7 +323,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         model: patch.model,
         reasoningEffort: patch.reasoningEffort,
         agentMode: patch.agentMode,
-        permissions: patch.permissions
+        permissions: patch.permissions,
+        remoteExecution: patch.remoteExecution
       });
       if (saved) state.setConversation(saved);
       await conversationActions.refreshConversations();

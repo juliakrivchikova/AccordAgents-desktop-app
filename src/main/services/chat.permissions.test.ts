@@ -559,6 +559,184 @@ test("structured permission request creates exactly one approval card", async ()
   assert.equal(approvals[0].resumeContext?.triggerMessageId, "user-message");
 });
 
+test("permission request has stable requestId and idempotent replay after approval", async () => {
+  const participant = chatParticipant("claude-code", { webAccess: false });
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const],
+    runId: "remote-run-1",
+    triggerMessageId: "user-message",
+    runPermissions: defaultChatAgentPermissions()
+  };
+  const request = {
+    kind: "portable",
+    permissions: ["webAccess"],
+    reason: "Need live web lookup from the remote worker."
+  };
+
+  const first = await service.requestPermissionChangeFromTool(actor, request);
+  assert.equal(first.status, "pending_user_approval");
+  assert.equal(typeof first.requestId, "string");
+  assert.equal(first.requestId, first.approvalId);
+
+  const duplicate = await service.requestPermissionChangeFromTool(actor, request);
+  assert.equal(duplicate.status, "pending_user_approval");
+  assert.equal(duplicate.requestId, first.requestId);
+  assert.equal(
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .filter((approval) => approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL).length,
+    1
+  );
+  assert.equal(
+    storage.current.messages.filter((message: ChatMessage) => message.content.startsWith("Permission approval needed")).length,
+    1
+  );
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: first.requestId ?? "",
+    approve: true,
+    scope: "once"
+  });
+
+  const lookup = await service.requestPermissionChangeFromTool(actor, { requestId: first.requestId });
+  assert.equal(lookup.status, "approved");
+  assert.equal(lookup.requestId, first.requestId);
+  assert.equal(lookup.approvalScope, "once");
+
+  const replayAfterDecision = await service.requestPermissionChangeFromTool(actor, request);
+  assert.equal(replayAfterDecision.status, "approved");
+  assert.equal(replayAfterDecision.requestId, first.requestId);
+  assert.equal(
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .filter((approval) => approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL).length,
+    1
+  );
+});
+
+test("permission request status lookup returns denied decisions idempotently", async () => {
+  const participant = chatParticipant("claude-code", { webAccess: false });
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const],
+    runId: "remote-run-2",
+    triggerMessageId: "user-message",
+    runPermissions: defaultChatAgentPermissions()
+  };
+
+  const pending = await service.requestPermissionChangeFromTool(actor, {
+    kind: "portable",
+    permissions: ["webAccess"]
+  });
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.requestId ?? "",
+    approve: false
+  });
+
+  const lookup = await service.requestPermissionChangeFromTool(actor, { requestId: pending.requestId });
+  assert.equal(lookup.status, "denied");
+  assert.equal(lookup.requestId, pending.requestId);
+});
+
+test("permission request status lookup is scoped to the actor run", async () => {
+  const participant = chatParticipant("claude-code", { webAccess: false });
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const],
+    runId: "remote-run-a",
+    triggerMessageId: "user-message",
+    runPermissions: defaultChatAgentPermissions()
+  };
+
+  const pending = await service.requestPermissionChangeFromTool(actor, {
+    kind: "portable",
+    permissions: ["webAccess"]
+  });
+  const otherRunLookup = await service.requestPermissionChangeFromTool({
+    ...actor,
+    runId: "remote-run-b"
+  }, {
+    requestId: pending.requestId
+  });
+
+  assert.equal(otherRunLookup.ok, false);
+  assert.equal(otherRunLookup.status, "not_found");
+  assert.equal(otherRunLookup.requestId, pending.requestId);
+});
+
+test("permission request already_granted uses run-scoped permissions when present", async () => {
+  const participant = {
+    ...chatParticipant("codex-cli", { webAccess: true }),
+    agentMode: "auto" as const
+  };
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+
+  const result = await service.requestPermissionChangeFromTool({
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request"],
+    runId: "remote-run-3",
+    triggerMessageId: "user-message",
+    runPermissions: defaultChatAgentPermissions()
+  }, {
+    kind: "portable",
+    permissions: ["webAccess"]
+  });
+
+  assert.equal(result.status, "pending_user_approval");
+  assert.equal(
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .filter((approval) => approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL).length,
+    1
+  );
+});
+
+test("permission request returns already_granted when run-scoped permissions cover it", async () => {
+  const participant = chatParticipant("claude-code", { webAccess: false });
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+
+  const result = await service.requestPermissionChangeFromTool({
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request"],
+    runId: "remote-run-4",
+    triggerMessageId: "user-message",
+    runPermissions: { ...defaultChatAgentPermissions(), webAccess: true }
+  }, {
+    kind: "portable",
+    permissions: ["webAccess"]
+  });
+
+  assert.equal(result.status, "already_granted");
+  assert.equal(
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .filter((approval) => approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL).length,
+    0
+  );
+});
+
 test("tool permission request waits for user approval and returns allow once", async () => {
   const participant = chatParticipant("claude-code");
   const conversation = chatConversation([participant]);
@@ -1354,6 +1532,357 @@ test("ending one active run preserves survivor metadata", async () => {
   assert.equal(storage.current.metadata.activeRunIds, undefined);
   assert.equal(storage.current.metadata.running, false);
   assert.equal(storage.current.metadata.runId, undefined);
+});
+
+test("ending local launcher keeps remote run active until terminal state", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const now = "2026-06-27T22:00:00.000Z";
+  conversation.metadata = {
+    ...conversation.metadata,
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        conversationId: conversation.id,
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        worker: { host: "worker.example" },
+        status: "running",
+        startedAt: now,
+        updatedAt: now
+      }
+    }
+  };
+
+  await (service as any).beginChatRun(conversation, "remote-run");
+  await (service as any).endChatRun(conversation, "remote-run");
+
+  assert.deepEqual(storage.current.metadata.activeRunIds, ["remote-run"]);
+  assert.equal(storage.current.metadata.running, true);
+  assert.equal(storage.current.metadata.runId, "remote-run");
+
+  await service.updateRemoteRunHandleState(conversation.id, "remote-run", {
+    runId: "remote-run",
+    conversationId: conversation.id,
+    participantId: participant.id,
+    status: "completed",
+    completedAt: "2026-06-27T22:01:00.000Z"
+  });
+
+  assert.equal(storage.current.metadata.activeRunIds, undefined);
+  assert.equal(storage.current.metadata.running, false);
+  assert.equal((storage.current.metadata.remoteRunHandles as any)["remote-run"].status, "completed");
+});
+
+test("remote provider_result without durationMs gets workedMs from handle timings", async () => {
+  const participant = chatParticipant("codex-cli");
+  const startedAt = "2026-06-27T22:00:00.000Z";
+  const completedAt = "2026-06-27T22:01:00.000Z";
+  const conversation = chatConversation([participant], {
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        worker: { host: "worker.example" },
+        status: "completed",
+        startedAt,
+        completedAt,
+        updatedAt: completedAt
+      }
+    }
+  });
+  (conversation.metadata.remoteRunHandles as any)["remote-run"].conversationId = conversation.id;
+  const { service, storage } = testService({ conversation });
+
+  await service.applyRemoteRunReplayRecord({
+    kind: "provider_result",
+    id: "remote-run:final",
+    seq: 1,
+    runId: "remote-run",
+    conversationId: conversation.id,
+    participantId: participant.id,
+    ok: true,
+    content: "Remote answer."
+  } as any);
+
+  const msg = storage.current.messages.find(
+    (item: Conversation["messages"][number]) =>
+      item.role === "participant" && item.metadata?.runId === "remote-run"
+  );
+  assert.ok(msg, "expected a finalized remote participant message");
+  assert.equal(msg?.status, "done");
+  assert.equal(msg?.metadata?.workedMs, 60_000);
+});
+
+test("cancelRun marks remote run failed when remote cancel delivery fails", async () => {
+  const participant = chatParticipant("codex-cli");
+  const now = "2026-06-27T22:00:00.000Z";
+  const handle = {
+    runId: "remote-run",
+    conversationId: "conversation-1",
+    participantId: participant.id,
+    participantHandle: participant.handle,
+    worker: { host: "worker.example" },
+    status: "running",
+    startedAt: now,
+    updatedAt: now
+  };
+  const conversation = chatConversation([participant], {
+    running: true,
+    runId: "remote-run",
+    activeRunIds: ["remote-run"],
+    remoteRunHandles: {
+      "remote-run": handle
+    }
+  });
+  const { service, storage } = testService({ conversation });
+  service.setRemoteRunService({
+    async startDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    async pollDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    async cancelDetachedRun(): Promise<any> {
+      throw new Error("ssh unavailable");
+    },
+    registerDetachedRunContext(): void {}
+  });
+  (service as any).registerRemoteRunHandle(handle);
+
+  assert.equal(service.cancelRun("remote-run"), true);
+
+  await waitFor(() => {
+    const stored = (storage.current.metadata.remoteRunHandles as any)["remote-run"];
+    return stored.status === "failed" &&
+      storage.current.metadata.running === false &&
+      Array.isArray(storage.current.metadata.warnings);
+  });
+  const stored = (storage.current.metadata.remoteRunHandles as any)["remote-run"];
+  assert.equal(stored.status, "failed");
+  assert.match(stored.error, /Failed to cancel remote run: ssh unavailable/);
+  assert.equal(storage.current.metadata.activeRunIds, undefined);
+  assert.equal(storage.current.metadata.warnings.some((warning: string) =>
+    warning.includes("Failed to cancel remote run")
+  ), true);
+
+  await service.updateRemoteRunHandleState(conversation.id, "remote-run", {
+    runId: "remote-run",
+    conversationId: conversation.id,
+    participantId: participant.id,
+    status: "running"
+  });
+
+  assert.equal((storage.current.metadata.remoteRunHandles as any)["remote-run"].status, "failed");
+});
+
+test("chat add paths normalize legacy run location to concrete local or remote", async () => {
+  const agents: AgentHealth[] = [{ kind: "codex-cli", label: "Codex CLI", installed: true }];
+  const { service, storage } = testService({
+    agents,
+    settings: { chatRoleConfigs: [ROLE] }
+  });
+
+  const created = await service.createConversation({
+    title: "Cloud run routing",
+    participants: [
+      { handle: "legacy", roleConfigId: ROLE.id, kind: "codex-cli" },
+      { handle: "inherit", roleConfigId: ROLE.id, kind: "codex-cli", remoteExecution: "inherit" },
+      { handle: "remote", roleConfigId: ROLE.id, kind: "codex-cli", remoteExecution: "remote" }
+    ]
+  });
+
+  const createdParticipants = created.conversation.metadata.participants as ChatParticipant[];
+  assert.deepEqual(createdParticipants.map((participant) => participant.remoteExecution), ["local", "local", "remote"]);
+
+  const conversation = chatConversation([chatParticipant("codex-cli")]);
+  storage.current = conversation;
+  await service.addParticipant({
+    conversationId: conversation.id,
+    participant: { handle: "added", roleConfigId: ROLE.id, kind: "codex-cli", remoteExecution: "inherit" }
+  });
+
+  const added = (storage.current.metadata.participants as ChatParticipant[]).find((participant) => participant.handle === "added");
+  assert.equal(added?.remoteExecution, "local");
+});
+
+test("run location is editable only before a participant has durable run history", async () => {
+  const participant = { ...chatParticipant("codex-cli"), remoteExecution: "local" as const };
+  const freshConversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation: freshConversation });
+
+  await service.updateParticipantRuntime({
+    conversationId: freshConversation.id,
+    participantId: participant.id,
+    remoteExecution: "remote"
+  });
+
+  assert.equal((storage.current.metadata.participants as ChatParticipant[])[0].remoteExecution, "remote");
+
+  const usedConversation = chatConversation([{ ...participant, remoteExecution: "local" }], {
+    participantSessions: [{
+      participantId: participant.id,
+      sessionId: "",
+      roleConfigId: ROLE.id,
+      roleConfigVersion: 1,
+      roleLabel: ROLE.label,
+      roleInstructions: ROLE.instructions,
+      updatedAt: NOW
+    }]
+  });
+  storage.current = usedConversation;
+
+  await assert.rejects(
+    () => service.updateParticipantRuntime({
+      conversationId: usedConversation.id,
+      participantId: participant.id,
+      remoteExecution: "remote"
+    }),
+    /Run location is locked/
+  );
+});
+
+test("explicit remote fails closed for cheap precondition failures", async () => {
+  type TestSettings = {
+    chatRoleConfigs: ChatRoleConfig[];
+    chatBehaviorRules?: ChatBehaviorRuleConfig[];
+    chatParticipantConfigs?: ChatParticipantConfig[];
+    cloudRuns?: Partial<AppSettings["cloudRuns"]>;
+  };
+  const cases: Array<{
+    name: string;
+    participant: ChatParticipant;
+    settings?: TestSettings;
+    message: RegExp;
+  }> = [
+    {
+      name: "disabled",
+      participant: { ...chatParticipant("codex-cli"), remoteExecution: "remote" },
+      settings: { chatRoleConfigs: [ROLE], cloudRuns: { enabled: false, worker: { host: "worker.example" } } },
+      message: /Cloud Runs is disabled/
+    },
+    {
+      name: "non-codex",
+      participant: { ...chatParticipant("claude-code"), remoteExecution: "remote" },
+      settings: { chatRoleConfigs: [ROLE], cloudRuns: { enabled: true, worker: { host: "worker.example" } } },
+      message: /supports Codex participants only/
+    },
+    {
+      name: "no-host",
+      participant: { ...chatParticipant("codex-cli"), remoteExecution: "remote" },
+      settings: { chatRoleConfigs: [ROLE], cloudRuns: { enabled: true, worker: {} } },
+      message: /worker host is not configured/
+    },
+    {
+      name: "no-service",
+      participant: { ...chatParticipant("codex-cli"), remoteExecution: "remote" },
+      settings: { chatRoleConfigs: [ROLE], cloudRuns: { enabled: true, worker: { host: "worker.example" } } },
+      message: /not available in this app session/
+    }
+  ];
+
+  for (const item of cases) {
+    let localRuns = 0;
+    const conversation = chatConversation([item.participant]);
+    const { service, storage, tempRoot } = testService({
+      conversation,
+      settings: item.settings,
+      run: async () => {
+        localRuns += 1;
+        return { ok: true, content: "local", durationMs: 1 };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+
+    await service.sendMessage({ conversationId: conversation.id, content: `@${item.participant.handle} run remote`, runId: `run-${item.name}` });
+
+    await waitFor(() => (storage.current.messages as ChatMessage[]).some((message) =>
+      message.role === "participant" &&
+      message.participantId === item.participant.id &&
+      message.status === "error"
+    ));
+    const participantMessage = (storage.current.messages as ChatMessage[]).find((message) =>
+      message.role === "participant" &&
+      message.participantId === item.participant.id
+    );
+    assert.match(participantMessage?.content ?? "", item.message);
+    assert.equal(localRuns, 0);
+    assert.equal((storage.current.metadata.warnings ?? []).some((warning: string) => warning.includes("ran locally instead")), false);
+  }
+});
+
+test("explicit remote launch rejection fails the participant bubble instead of falling back local", async () => {
+  const participant = { ...chatParticipant("codex-cli"), remoteExecution: "remote" as const };
+  const conversation = chatConversation([participant]);
+  let localRuns = 0;
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [ROLE], cloudRuns: { enabled: true, worker: { host: "worker.example" } } },
+    run: async () => {
+      localRuns += 1;
+      return { ok: true, content: "local", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  service.setRemoteRunService({
+    async startDetachedRun(): Promise<any> {
+      throw new Error("ssh connect failed");
+    },
+    async pollDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    async cancelDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    registerDetachedRunContext(): void {}
+  });
+
+  await service.sendMessage({ conversationId: conversation.id, content: "@codex run remote", runId: "remote-launch-fails" });
+
+  await waitFor(() => (storage.current.messages as ChatMessage[]).some((message) =>
+    message.role === "participant" &&
+    message.participantId === participant.id &&
+    message.status === "error"
+  ));
+  const participantMessage = (storage.current.messages as ChatMessage[]).find((message) =>
+    message.role === "participant" &&
+    message.participantId === participant.id
+  );
+  assert.match(participantMessage?.content ?? "", /remote run failed to start: ssh connect failed/);
+  assert.equal(localRuns, 0);
+});
+
+test("remote fail-closed is participant-scoped in mixed dispatch", async () => {
+  const remote = { ...chatParticipant("codex-cli"), remoteExecution: "remote" as const };
+  const local = { ...chatParticipant("claude-code"), remoteExecution: "local" as const };
+  const conversation = chatConversation([remote, local]);
+  let localRuns = 0;
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [ROLE], cloudRuns: { enabled: true, worker: { host: "worker.example" } } },
+    run: async () => {
+      localRuns += 1;
+      return { ok: true, content: "local ok", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({ conversationId: conversation.id, content: "@codex @drew both answer", runId: "mixed-dispatch" });
+
+  await waitFor(() => {
+    const participantMessages = (storage.current.messages as ChatMessage[]).filter((message) => message.role === "participant");
+    return participantMessages.some((message) => message.participantId === remote.id && message.status === "error") &&
+      participantMessages.some((message) => message.participantId === local.id && message.status === "done");
+  });
+
+  assert.equal(localRuns, 1);
+  const remoteMessage = (storage.current.messages as ChatMessage[]).find((message) =>
+    message.role === "participant" &&
+    message.participantId === remote.id
+  );
+  assert.match(remoteMessage?.content ?? "", /not available in this app session/);
 });
 
 test("participant reservation is released if turn controller setup fails", async () => {
@@ -4302,6 +4831,7 @@ function testService(options: {
     chatBehaviorRules?: ChatBehaviorRuleConfig[];
     chatParticipantConfigs?: ChatParticipantConfig[];
     chatParticipantRequestMaxDepth?: number;
+    cloudRuns?: Partial<AppSettings["cloudRuns"]>;
   };
 } = {}): { service: ChatService; storage: any; settingsState: {
   chatRoleConfigs: ChatRoleConfig[];
@@ -4330,6 +4860,14 @@ function testService(options: {
     cliAgentRunTimeoutMs: 24 * 60 * 60_000,
     chatParticipantRequestMaxDepth: options.settings?.chatParticipantRequestMaxDepth
       ?? CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+    cloudRuns: {
+      enabled: options.settings?.cloudRuns?.enabled ?? false,
+      mode: options.settings?.cloudRuns?.mode ?? "ssh",
+      worker: options.settings?.cloudRuns?.worker ?? {},
+      hasAwsCredentials: options.settings?.cloudRuns?.hasAwsCredentials ?? false,
+      maxRuntimeMs: options.settings?.cloudRuns?.maxRuntimeMs ?? 24 * 60 * 60_000,
+      pollIntervalMs: options.settings?.cloudRuns?.pollIntervalMs ?? 2_500
+    },
     providers: [
       { kind: "codex-cli", label: "Codex CLI", enabled: true },
       { kind: "claude-code", label: "Claude Code", enabled: true }
@@ -4393,6 +4931,7 @@ function testService(options: {
         avatarId: update.avatarId,
         agentMode: update.agentMode,
         permissions: normalizeChatAgentPermissions(update.permissions),
+        remoteExecution: update.remoteExecution,
         updatedAt: NOW
       };
       settingsState.chatParticipantConfigs = settingsState.chatParticipantConfigs.some((participant) => participant.id === next.id)

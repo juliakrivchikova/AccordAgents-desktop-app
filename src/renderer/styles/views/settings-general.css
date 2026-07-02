@@ -158,6 +158,49 @@
   align-items: flex-end;
 }
 
+.settings-view .gen-row-stack {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-view .gen-grid-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.settings-view .gen-grid-form-compact {
+  grid-template-columns: repeat(2, minmax(120px, 180px));
+}
+
+.settings-view .gen-input {
+  min-width: 0;
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  font: 500 13px var(--font-body);
+}
+
+.settings-view .gen-input:focus {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 1px;
+}
+
+.settings-view .gen-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.settings-view .gen-actions .gen-pill {
+  min-width: 92px;
+}
+
 /* ---- File-open dropdown pill ---- */
 
 .settings-view .gen-dropdown {
@@ -348,4 +391,121 @@
   line-height: 1.35;
   color: var(--app-danger);
   text-align: right;
+}
+
+.settings-view .gen-doctor-list {
+  list-style: none;
+  margin: 0;
+  padding: 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-view .gen-doctor-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--app-text-strong);
+}
+
+.settings-view .gen-doctor-mark {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  font-weight: 700;
+  color: var(--app-muted);
+}
+
+.settings-view .gen-doctor-item.is-pass .gen-doctor-mark {
+  color: var(--app-success);
+}
+
+.settings-view .gen-doctor-item.is-warn .gen-doctor-mark {
+  color: var(--app-warning);
+}
+
+.settings-view .gen-doctor-item.is-fail .gen-doctor-mark {
+  color: var(--app-danger);
+}
+
+.settings-view .gen-doctor-label {
+  font-weight: 600;
+}
+
+.settings-view .gen-doctor-detail {
+  color: var(--app-muted);
+}
+
+.settings-view .gen-doctor-auth-link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--app-info-fg);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.settings-view .gen-segmented {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 12px;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+}
+
+.settings-view .gen-segment {
+  padding: 7px 12px;
+  border: none;
+  border-radius: 9px;
+  background: none;
+  color: var(--app-muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.settings-view .gen-segment.is-active {
+  background: var(--app-text-strong);
+  color: var(--app-primary-fg);
+}
+
+.settings-view .gen-aws {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-view .gen-aws-command {
+  margin: 0 18px 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.settings-view .gen-aws-paste {
+  min-height: 60px;
+  resize: vertical;
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+}
+
+.settings-view .gen-aws-message {
+  padding: 0 18px 12px;
+}
+
+.settings-view .gen-pill-danger {
+  color: var(--app-danger);
+  border-color: var(--app-danger-border);
 }

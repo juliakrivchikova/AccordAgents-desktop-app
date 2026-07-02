@@ -25,6 +25,7 @@ function chatServiceWithRoles(roles: ChatRoleConfig[]) {
         roundLimitDefault: 1,
         cliAgentRunTimeoutMs: 1,
         chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+        cloudRuns: { enabled: false, mode: "ssh", worker: {}, hasAwsCredentials: false, maxRuntimeMs: 24 * 60 * 60_000, pollIntervalMs: 2_500 },
         providers: [],
         chatRoleConfigs: roles,
         chatBehaviorRules: [],

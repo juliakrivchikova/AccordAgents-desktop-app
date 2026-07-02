@@ -5,15 +5,22 @@ import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type {
   ChatParticipant,
-  ChatParticipantConfig
+  ChatParticipantConfig,
+  CloudRunRemoteExecutionMode
 } from "../../../shared/types";
 import { CHAT_ASSISTANT_ROLE_ID, chatParticipantMentionHandle } from "../conversation/conversation-display";
-import type { AddableSavedParticipantConfig } from "./chat-participant-drafts";
+import {
+  CHAT_RUN_LOCATION_OPTIONS,
+  chatRunLocationLabel,
+  normalizeChatRunLocation,
+  type AddableSavedParticipantConfig
+} from "./chat-participant-drafts";
 import { ChatParticipantRosterRow } from "./chat-participant-roster-row";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 
 export interface ChatParticipantMenuViewProps {
   participants: ChatParticipant[];
+  participantHasRunById: ReadonlyMap<string, boolean>;
   draft: string;
   addValidation?: string;
   isRunning: boolean;
@@ -29,10 +36,10 @@ export interface ChatParticipantMenuViewProps {
   savedParticipantSummary: (participant: ChatParticipantConfig) => string;
   onDraftChange: (value: string) => void;
   onAddParticipant: () => void;
-  onAddSavedParticipant: (participant: ChatParticipantConfig) => void;
+  onAddSavedParticipant: (participant: ChatParticipantConfig, remoteExecution?: CloudRunRemoteExecutionMode) => void;
   onUpdateParticipantRuntime: (
     participantId: string,
-    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions">
+    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">
   ) => void;
   onCompactParticipant: (participantId: string) => void;
   onRemoveParticipant: (participantId: string) => void;
@@ -44,6 +51,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"roster" | "create">("roster");
   const [showSaved, setShowSaved] = useState(false);
+  const [savedRunLocations, setSavedRunLocations] = useState<Record<string, CloudRunRemoteExecutionMode>>({});
   const participantCountLabel = `${props.participants.length} ${props.participants.length === 1 ? "participant" : "participants"}`;
 
   function handleOpenChange(next: boolean): void {
@@ -76,6 +84,10 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
       return "The last participant cannot be removed";
     }
     return undefined;
+  }
+
+  function savedRunLocation(participant: ChatParticipantConfig): CloudRunRemoteExecutionMode {
+    return normalizeChatRunLocation(savedRunLocations[participant.id] ?? participant.remoteExecution);
   }
 
   return (
@@ -154,6 +166,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                   renderParticipantAvatar={props.renderParticipantAvatar}
                   participantRoleLabel={props.participantRoleLabel}
                   participantRoleArchived={props.participantRoleArchived}
+                  runLocationLocked={props.participantHasRunById.get(participant.id) === true}
                   onInsertMention={insertParticipantMention}
                   onJumpToLastMessage={jumpToParticipantLastMessage}
                   onUpdateParticipantRuntime={props.onUpdateParticipantRuntime}
@@ -187,11 +200,32 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                         <span>{props.savedParticipantRoleLabel(config)} · {props.savedParticipantSummary(config)}</span>
                         {invalidReason && <small>{invalidReason}</small>}
                       </span>
+                      {config.kind === "codex-cli" && (
+                        <label className="chat-saved-run-location" title={`Run ${chatRunLocationLabel(savedRunLocation(config)).toLowerCase()}`}>
+                          <span>Run</span>
+                          <select
+                            aria-label={`Run location for @${config.handle}`}
+                            value={savedRunLocation(config)}
+                            disabled={Boolean(invalidReason) || props.isRunning}
+                            onChange={(event) => {
+                              const remoteExecution = event.currentTarget.value as CloudRunRemoteExecutionMode;
+                              setSavedRunLocations((current) => ({
+                                ...current,
+                                [config.id]: normalizeChatRunLocation(remoteExecution)
+                              }));
+                            }}
+                          >
+                            {CHAT_RUN_LOCATION_OPTIONS.map((option) => (
+                              <option value={option.value} key={option.value}>{option.label}</option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
                       <Button
                         variant="outline"
                         size="sm"
                         disabled={Boolean(invalidReason) || props.isRunning}
-                        onClick={() => props.onAddSavedParticipant(config)}
+                        onClick={() => props.onAddSavedParticipant(config, savedRunLocation(config))}
                       >
                         <Plus size={16} />
                         Add

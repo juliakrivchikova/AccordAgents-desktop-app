@@ -4,6 +4,10 @@ import type {
   AddChatParticipantRequest,
   ChatBehaviorRuleConfigUpdate,
   ChatSavedPromptConfigUpdate,
+  CloudRunsSettingsUpdate,
+  CloudRunWorkerSettings,
+  CloudRunWorkerSetupProgress,
+  ConnectAwsWorkerRequest,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
@@ -50,6 +54,19 @@ const bridge: AppBridge = {
   setCliAgentRunTimeoutMs: (timeoutMs: number) => ipcRenderer.invoke("settings:set-cli-agent-run-timeout", timeoutMs),
   setChatParticipantRequestMaxDepth: (maxDepth: number) =>
     ipcRenderer.invoke("settings:set-chat-participant-request-max-depth", maxDepth),
+  saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => ipcRenderer.invoke("settings:save-cloud-runs", update),
+  testCloudRunWorker: (request?: CloudRunWorkerSettings) => ipcRenderer.invoke("cloud-runs:test-worker", request),
+  diagnoseCloudRunWorker: (request?: CloudRunWorkerSettings) => ipcRenderer.invoke("cloud-runs:diagnose-worker", request),
+  setupCloudRunWorker: (request?: CloudRunWorkerSettings) => ipcRenderer.invoke("cloud-runs:setup-worker", request),
+  onCloudRunSetupProgress: (callback: (progress: CloudRunWorkerSetupProgress) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: CloudRunWorkerSetupProgress) => callback(progress);
+    ipcRenderer.on("cloud-runs:setup-progress", listener);
+    return () => ipcRenderer.removeListener("cloud-runs:setup-progress", listener);
+  },
+  getAwsWorkerBootstrapCommand: (region: string) => ipcRenderer.invoke("cloud-runs:aws-bootstrap-command", region),
+  connectAwsWorker: (request: ConnectAwsWorkerRequest) => ipcRenderer.invoke("cloud-runs:aws-connect", request),
+  getAwsWorkerStatus: () => ipcRenderer.invoke("cloud-runs:aws-status"),
+  deleteAwsWorker: () => ipcRenderer.invoke("cloud-runs:aws-delete"),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateProviderSettings: (update: ProviderSettingsUpdate) => ipcRenderer.invoke("settings:update-provider", update),
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => ipcRenderer.invoke("settings:save-chat-role", update),

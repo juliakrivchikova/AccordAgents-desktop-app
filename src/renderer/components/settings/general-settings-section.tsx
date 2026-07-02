@@ -1,9 +1,15 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown, Code2, ExternalLink, FolderOpen, HelpCircle } from "lucide-react";
+import { Check, ChevronDown, Code2, ExternalLink, FolderOpen, HelpCircle, Server } from "lucide-react";
 
 import type {
   AgentHealth,
+  AwsWorkerStatus,
+  CloudRunsSettings,
+  CloudRunsSettingsUpdate,
+  CloudRunWorkerDoctorReport,
+  CloudRunWorkerMode,
+  CloudRunWorkerSetupProgress,
   ProviderKind,
   ProviderSettings,
   RepoFileOpenAction
@@ -27,10 +33,12 @@ export function GeneralSettingsSection(props: {
   repoFileOpenAction?: RepoFileOpenAction;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
+  cloudRuns: CloudRunsSettings;
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
+  saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => Promise<void>;
 }): JSX.Element {
   const detectedCount = props.providers.filter(
     (provider) => props.agents.find((agent) => agent.kind === provider.kind)?.installed
@@ -73,6 +81,14 @@ export function GeneralSettingsSection(props: {
       </section>
 
       <section className="gen-section">
+        <div className="gen-section-head">
+          <h2 className="gen-section-title">Cloud Runs</h2>
+          <span className="gen-section-meta">{props.cloudRuns.enabled ? "Enabled" : "Disabled"}</span>
+        </div>
+        <CloudRunsControl settings={props.cloudRuns} onSave={props.saveCloudRunsSettings} />
+      </section>
+
+      <section className="gen-section">
         <h2 className="gen-section-title gen-section-title-solo">General</h2>
         <div className="gen-card">
           <div className="gen-row">
@@ -108,6 +124,361 @@ export function GeneralSettingsSection(props: {
         </div>
       </section>
     </>
+  );
+}
+
+function CloudRunsControl(props: {
+  settings: CloudRunsSettings;
+  onSave: (update: CloudRunsSettingsUpdate) => Promise<void>;
+}): JSX.Element {
+  const [draft, setDraft] = useState<CloudRunsSettings>(props.settings);
+  const [status, setStatus] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState<CloudRunWorkerDoctorReport | null>(null);
+  const [setupProgress, setSetupProgress] = useState<CloudRunWorkerSetupProgress | null>(null);
+
+  useEffect(() => {
+    setDraft(props.settings);
+  }, [props.settings]);
+
+  useEffect(() => window.consensus.onCloudRunSetupProgress(setSetupProgress), []);
+
+  const patch = (update: CloudRunsSettingsUpdate): void => {
+    setDraft((current) => ({
+      ...current,
+      ...update,
+      worker: {
+        ...current.worker,
+        ...(update.worker ?? {})
+      }
+    }));
+  };
+
+  const save = async (): Promise<void> => {
+    setBusy(true);
+    setStatus("");
+    try {
+      await props.onSave(draft);
+      setStatus("Saved.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const diagnose = async (): Promise<void> => {
+    setBusy(true);
+    setStatus("Checking worker...");
+    setReport(null);
+    try {
+      const result = await window.consensus.diagnoseCloudRunWorker(draft.worker);
+      setReport(result);
+      setStatus(result.message);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setup = async (): Promise<void> => {
+    setBusy(true);
+    setStatus("Setting up worker...");
+    setSetupProgress(null);
+    try {
+      const result = await window.consensus.setupCloudRunWorker(draft.worker);
+      setReport(result);
+      setStatus(result.message);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+      setSetupProgress(null);
+    }
+  };
+
+  const setMode = (mode: CloudRunWorkerMode): void => {
+    patch({ mode });
+    void props.onSave({ mode });
+  };
+
+  return (
+    <div className="gen-card">
+      <div className="gen-row">
+        <div className="gen-row-text">
+          <div className="gen-row-title">Remote Codex worker</div>
+          <div className="gen-row-desc">Run Codex participants marked remote on a worker instead of this machine.</div>
+        </div>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={draft.enabled}
+            onChange={(event) => patch({ enabled: event.target.checked })}
+          />
+          <span />
+        </label>
+      </div>
+      <div className="gen-card-divider" />
+      <div className="gen-row">
+        <div className="gen-row-text">
+          <div className="gen-row-title">Worker source</div>
+          <div className="gen-row-desc">Let the app create and manage an EC2 worker, or point it at a box you own.</div>
+        </div>
+        <div className="gen-segmented" role="tablist" aria-label="Worker source">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={draft.mode === "aws"}
+            className={`gen-segment ${draft.mode === "aws" ? "is-active" : ""}`}
+            onClick={() => setMode("aws")}
+          >
+            App-managed (AWS)
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={draft.mode !== "aws"}
+            className={`gen-segment ${draft.mode !== "aws" ? "is-active" : ""}`}
+            onClick={() => setMode("ssh")}
+          >
+            My own box (SSH)
+          </button>
+        </div>
+      </div>
+      <div className="gen-card-divider" />
+      {draft.mode === "aws" ? <AwsWorkerPanel settings={draft} /> : null}
+      <div className={draft.mode === "aws" ? "gen-collapsed" : ""} hidden={draft.mode === "aws"}>
+      <div className="gen-row gen-row-stack">
+        <div className="gen-row-text">
+          <div className="gen-row-title">SSH target</div>
+          <div className="gen-row-desc">Host is required; other fields inherit ssh defaults when empty.</div>
+        </div>
+        <div className="gen-grid-form">
+          <input className="gen-input" placeholder="Host" value={draft.worker.host ?? ""} onChange={(event) => patch({ worker: { host: event.target.value } })} />
+          <input className="gen-input" placeholder="User" value={draft.worker.user ?? ""} onChange={(event) => patch({ worker: { user: event.target.value } })} />
+          <input
+            className="gen-input"
+            placeholder="Port"
+            inputMode="numeric"
+            value={draft.worker.port ?? ""}
+            onChange={(event) => patch({ worker: { port: event.target.value ? Number(event.target.value) : undefined } })}
+          />
+          <input className="gen-input" placeholder="Identity file" value={draft.worker.identityFile ?? ""} onChange={(event) => patch({ worker: { identityFile: event.target.value } })} />
+          <input className="gen-input" placeholder="Worker root" value={draft.worker.workerRoot ?? ""} onChange={(event) => patch({ worker: { workerRoot: event.target.value } })} />
+          <input className="gen-input" placeholder="Remote repo/cwd" value={draft.worker.remoteCwd ?? ""} onChange={(event) => patch({ worker: { remoteCwd: event.target.value } })} />
+          <input className="gen-input" placeholder="Codex path" value={draft.worker.codexPath ?? ""} onChange={(event) => patch({ worker: { codexPath: event.target.value } })} />
+        </div>
+      </div>
+      <div className="gen-card-divider" />
+      <div className="gen-row gen-row-stack">
+        <div className="gen-row-text">
+          <div className="gen-row-title">Runtime</div>
+          <div className="gen-row-desc">Detached worker timeout and desktop reconnect polling.</div>
+        </div>
+        <div className="gen-grid-form gen-grid-form-compact">
+          <input
+            className="gen-input"
+            aria-label="Maximum runtime minutes"
+            inputMode="numeric"
+            value={Math.round(draft.maxRuntimeMs / 60_000)}
+            onChange={(event) => patch({ maxRuntimeMs: Math.max(1, Number(event.target.value) || 1) * 60_000 })}
+          />
+          <input
+            className="gen-input"
+            aria-label="Poll interval milliseconds"
+            inputMode="numeric"
+            value={draft.pollIntervalMs}
+            onChange={(event) => patch({ pollIntervalMs: Math.max(500, Number(event.target.value) || 500) })}
+          />
+        </div>
+      </div>
+      <div className="gen-card-divider" />
+      <div className="gen-row">
+        <div className="gen-row-text">
+          <div className="gen-row-title">{(busy && setupProgress?.message) || status || "Ready"}</div>
+          {busy && setupProgress?.authUrl && (
+            <div className="gen-row-desc">
+              <button
+                type="button"
+                className="gen-doctor-auth-link"
+                onClick={() => void window.consensus.openExternal(setupProgress.authUrl as string)}
+              >
+                Open the sign-in page
+              </button>
+              {setupProgress.authCode ? ` and enter code ${setupProgress.authCode}` : ""}
+            </div>
+          )}
+        </div>
+        <div className="gen-actions">
+          <button type="button" className="gen-pill" disabled={busy} onClick={() => void diagnose()}>
+            <span className="gen-pill-lead"><Server size={16} /></span>
+            <span className="gen-pill-label">Check</span>
+          </button>
+          <button type="button" className="gen-pill" disabled={busy} onClick={() => void setup()}>
+            <span className="gen-pill-label">Set up</span>
+          </button>
+          <button type="button" className="gen-pill" disabled={busy} onClick={() => void save()}>
+            <span className="gen-pill-label">Save</span>
+          </button>
+        </div>
+      </div>
+      {report && (
+        <>
+          <div className="gen-card-divider" />
+          <ul className="gen-doctor-list" aria-label="Worker checks">
+            {report.checks.map((check) => (
+              <li key={check.id} className={`gen-doctor-item is-${check.status}`}>
+                <span className="gen-doctor-mark" aria-hidden="true">
+                  {check.status === "pass" ? "✓" : check.status === "warn" ? "!" : "✕"}
+                </span>
+                <span className="gen-doctor-label">{check.label}</span>
+                {check.detail && <span className="gen-doctor-detail">{check.detail}</span>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      </div>
+    </div>
+  );
+}
+
+function AwsWorkerPanel(props: { settings: CloudRunsSettings }): JSX.Element {
+  const [region, setRegion] = useState(props.settings.awsRegion ?? "us-east-1");
+  const [command, setCommand] = useState<string>("");
+  const [blob, setBlob] = useState<string>("");
+  const [status, setStatus] = useState<AwsWorkerStatus | null>(null);
+  const [message, setMessage] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void window.consensus.getAwsWorkerStatus().then(setStatus).catch(() => undefined);
+  }, []);
+
+  const loadCommand = async (): Promise<void> => {
+    setBusy(true);
+    try {
+      setCommand(await window.consensus.getAwsWorkerBootstrapCommand(region.trim() || "us-east-1"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const connect = async (): Promise<void> => {
+    setBusy(true);
+    setMessage("Creating worker… this can take a minute.");
+    try {
+      const next = await window.consensus.connectAwsWorker({ blob: blob.trim() });
+      setStatus(next);
+      setBlob("");
+      setMessage(next.configured ? "Worker created." : (next.message ?? "Done."));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const refresh = async (): Promise<void> => {
+    setBusy(true);
+    try {
+      setStatus(await window.consensus.getAwsWorkerStatus());
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (): Promise<void> => {
+    setBusy(true);
+    setMessage("Deleting worker…");
+    try {
+      setStatus(await window.consensus.deleteAwsWorker());
+      setMessage("Worker deleted.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (status?.configured) {
+    return (
+      <div className="gen-aws">
+        <div className="gen-row">
+          <div className="gen-row-text">
+            <div className="gen-row-title">AWS worker</div>
+            <div className="gen-row-desc">
+              {status.handle?.instanceId} · {status.state ?? "unknown"}
+              {status.publicIp ? ` · ${status.publicIp}` : ""}
+              {status.message ? ` · ${status.message}` : ""}
+            </div>
+            <div className="gen-row-desc">Starts automatically for a remote run and stops when idle.</div>
+          </div>
+          <div className="gen-actions">
+            <button type="button" className="gen-pill" disabled={busy} onClick={() => void refresh()}>
+              <span className="gen-pill-label">Refresh</span>
+            </button>
+            <button type="button" className="gen-pill gen-pill-danger" disabled={busy} onClick={() => void remove()}>
+              <span className="gen-pill-label">Delete worker</span>
+            </button>
+          </div>
+        </div>
+        {message ? <div className="gen-row-desc gen-aws-message">{message}</div> : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="gen-aws">
+      <div className="gen-row gen-row-stack">
+        <div className="gen-row-text">
+          <div className="gen-row-title">Create an AWS worker</div>
+          <div className="gen-row-desc">
+            Run the command below in a terminal that has AWS access. It creates a scoped key; paste the result here and the app
+            launches and manages the instance.
+          </div>
+        </div>
+        <div className="gen-grid-form gen-grid-form-compact">
+          <input
+            className="gen-input"
+            aria-label="AWS region"
+            placeholder="Region (us-east-1)"
+            value={region}
+            onChange={(event) => setRegion(event.target.value)}
+          />
+          <button type="button" className="gen-pill" disabled={busy} onClick={() => void loadCommand()}>
+            <span className="gen-pill-label">Show setup command</span>
+          </button>
+        </div>
+      </div>
+      {command ? (
+        <pre className="gen-aws-command" aria-label="AWS setup command">{command}</pre>
+      ) : null}
+      <div className="gen-row gen-row-stack">
+        <div className="gen-row-text">
+          <div className="gen-row-title">Paste the result</div>
+          <div className="gen-row-desc">The command prints a line starting with <code>accord-aws-v1:</code></div>
+        </div>
+        <textarea
+          className="gen-input gen-aws-paste"
+          placeholder="accord-aws-v1:…"
+          value={blob}
+          onChange={(event) => setBlob(event.target.value)}
+        />
+      </div>
+      <div className="gen-row">
+        <div className="gen-row-text">
+          <div className="gen-row-title">{message || "Not connected"}</div>
+        </div>
+        <div className="gen-actions">
+          <button type="button" className="gen-pill" disabled={busy || !blob.trim()} onClick={() => void connect()}>
+            <span className="gen-pill-lead"><Server size={16} /></span>
+            <span className="gen-pill-label">Create worker</span>
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

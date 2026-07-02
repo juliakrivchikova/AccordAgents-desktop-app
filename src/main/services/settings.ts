@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { app } from "electron";
+import { app, safeStorage } from "electron";
 import type {
   AppSettings,
   AgentHealth,
@@ -12,6 +12,11 @@ import type {
   ChatAgentMode,
   ChatAgentPermissions,
   ChatAppToolCapability,
+  AwsWorkerHandleInfo,
+  CloudRunsSettings,
+  CloudRunsSettingsUpdate,
+  CloudRunRemoteExecutionMode,
+  CloudRunWorkerMode,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
   ChatParticipantSeedState,
@@ -39,6 +44,8 @@ import {
   normalizeChatSavedPromptTrigger
 } from "../../shared/chatSavedPrompts";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
+import { normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
+import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 
 type StoredProviderSettings = ProviderSettings & {
   encryptedApiKey?: string;
@@ -49,6 +56,11 @@ interface StoredSettings {
   roundLimitDefault: number;
   cliAgentRunTimeoutMs?: number;
   chatParticipantRequestMaxDepth?: number;
+  cloudRuns?: CloudRunsSettings;
+  cloudRunsMode?: CloudRunWorkerMode;
+  encryptedAwsCredentials?: string;
+  awsWorkerHandle?: AwsWorkerHandleInfo;
+  awsWorkerRegion?: string;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
   providers: StoredProviderSettings[];
@@ -65,6 +77,15 @@ const DEFAULT_PROVIDERS: ProviderSettings[] = [
 ];
 
 const DEFAULT_PROVIDER_KINDS = new Set<ProviderSettings["kind"]>(DEFAULT_PROVIDERS.map((provider) => provider.kind));
+
+const DEFAULT_CLOUD_RUNS_SETTINGS: CloudRunsSettings = {
+  enabled: false,
+  mode: "ssh",
+  worker: {},
+  hasAwsCredentials: false,
+  maxRuntimeMs: 24 * 60 * 60_000,
+  pollIntervalMs: 2_500
+};
 
 const CHAT_HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 const CHAT_ROLE_LABEL_MAX_CHARS = 80;
@@ -1579,6 +1600,7 @@ export class SettingsService {
       roundLimitDefault: stored.roundLimitDefault,
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
+      cloudRuns: this.normalizeCloudRunsSettings(stored),
       lastRepoPath: stored.lastRepoPath,
       repoFileOpenAction: stored.repoFileOpenAction,
       chatRoleConfigs: stored.chatRoleConfigs ?? DEFAULT_CHAT_ROLES,
@@ -1826,6 +1848,7 @@ export class SettingsService {
         avatarId: update.avatarId?.trim() || undefined,
         agentMode: normalizeChatAgentMode(update.agentMode),
         permissions: normalizeChatAgentPermissions(update.permissions),
+        remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
         updatedAt: now
       };
       participants = participants.some((participant) => participant.id === nextParticipant.id)
@@ -2026,6 +2049,7 @@ export class SettingsService {
       avatarId: update.avatarId?.trim() || undefined,
       agentMode: normalizeChatAgentMode(update.agentMode),
       permissions: normalizeChatAgentPermissions(update.permissions),
+      remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
       updatedAt: now
     };
     stored.chatParticipantConfigs = participants.some((participant) => participant.id === nextParticipant.id)
@@ -2176,6 +2200,28 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  async saveCloudRunsSettings(update: CloudRunsSettingsUpdate): Promise<AppSettings> {
+    const stored = await this.readStored();
+    if (update.mode === "aws" || update.mode === "ssh") {
+      stored.cloudRunsMode = update.mode;
+    }
+    stored.cloudRuns = this.normalizeCloudRunsSettings({
+      ...stored,
+      cloudRuns: {
+        ...(stored.cloudRuns ?? DEFAULT_CLOUD_RUNS_SETTINGS),
+        enabled: update.enabled ?? stored.cloudRuns?.enabled ?? false,
+        maxRuntimeMs: update.maxRuntimeMs ?? stored.cloudRuns?.maxRuntimeMs ?? DEFAULT_CLOUD_RUNS_SETTINGS.maxRuntimeMs,
+        pollIntervalMs: update.pollIntervalMs ?? stored.cloudRuns?.pollIntervalMs ?? DEFAULT_CLOUD_RUNS_SETTINGS.pollIntervalMs,
+        worker: {
+          ...(stored.cloudRuns?.worker ?? {}),
+          ...(update.worker ?? {})
+        }
+      }
+    });
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
   private async readStored(): Promise<StoredSettings> {
     try {
       const raw = await readFile(this.settingsPath, "utf8");
@@ -2214,6 +2260,11 @@ export class SettingsService {
       roundLimitDefault: this.defaultRoundLimit(settings),
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(settings.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(settings.chatParticipantRequestMaxDepth),
+      cloudRuns: this.normalizeCloudRunsSettings(settings),
+      cloudRunsMode: settings.cloudRunsMode === "aws" ? "aws" : "ssh",
+      encryptedAwsCredentials: typeof settings.encryptedAwsCredentials === "string" ? settings.encryptedAwsCredentials : undefined,
+      awsWorkerHandle: this.normalizeAwsWorkerHandle(settings.awsWorkerHandle),
+      awsWorkerRegion: typeof settings.awsWorkerRegion === "string" ? settings.awsWorkerRegion.trim() || undefined : undefined,
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
       repoFileOpenAction: this.normalizeRepoFileOpenAction(settings.repoFileOpenAction),
       providers,
@@ -2255,6 +2306,112 @@ export class SettingsService {
 
   private normalizeRepoFileOpenAction(action: unknown): RepoFileOpenAction | undefined {
     return action === "open" || action === "reveal" || action === "intellij-idea" ? action : undefined;
+  }
+
+  private normalizeCloudRunsSettings(stored: StoredSettings): CloudRunsSettings {
+    const record = stored.cloudRuns && typeof stored.cloudRuns === "object" && !Array.isArray(stored.cloudRuns)
+      ? stored.cloudRuns as Partial<CloudRunsSettings>
+      : {};
+    const maxRuntimeMs = typeof record.maxRuntimeMs === "number" && Number.isFinite(record.maxRuntimeMs)
+      ? Math.max(60_000, Math.floor(record.maxRuntimeMs))
+      : DEFAULT_CLOUD_RUNS_SETTINGS.maxRuntimeMs;
+    const pollIntervalMs = typeof record.pollIntervalMs === "number" && Number.isFinite(record.pollIntervalMs)
+      ? Math.max(500, Math.floor(record.pollIntervalMs))
+      : DEFAULT_CLOUD_RUNS_SETTINGS.pollIntervalMs;
+    return {
+      enabled: record.enabled === true,
+      mode: stored.cloudRunsMode === "aws" ? "aws" : "ssh",
+      worker: normalizeCloudRunWorkerSettings(record.worker),
+      hasAwsCredentials: typeof stored.encryptedAwsCredentials === "string" && stored.encryptedAwsCredentials.length > 0,
+      awsHandle: stored.awsWorkerHandle,
+      awsRegion: stored.awsWorkerRegion,
+      maxRuntimeMs,
+      pollIntervalMs
+    };
+  }
+
+  // AWS-managed worker credential storage. Credentials are encrypted with
+  // Electron safeStorage (same protection as provider API keys) and never
+  // leave the main process; only hasAwsCredentials + the handle are public.
+  async saveAwsWorkerCredentials(credentials: AwsWorkerCredentials): Promise<void> {
+    const stored = await this.readStored();
+    const json = JSON.stringify(credentials);
+    stored.encryptedAwsCredentials = safeStorage.isEncryptionAvailable()
+      ? safeStorage.encryptString(json).toString("base64")
+      : Buffer.from(json, "utf8").toString("base64");
+    stored.awsWorkerRegion = credentials.region;
+    stored.cloudRunsMode = "aws";
+    await this.writeStored(stored);
+  }
+
+  async getAwsWorkerCredentials(): Promise<AwsWorkerCredentials | undefined> {
+    const stored = await this.readStored();
+    if (!stored.encryptedAwsCredentials) {
+      return undefined;
+    }
+    try {
+      const buffer = Buffer.from(stored.encryptedAwsCredentials, "base64");
+      const json = safeStorage.isEncryptionAvailable()
+        ? safeStorage.decryptString(buffer)
+        : buffer.toString("utf8");
+      const parsed = JSON.parse(json) as Partial<AwsWorkerCredentials>;
+      if (parsed.accessKeyId && parsed.secretAccessKey && parsed.region) {
+        return parsed as AwsWorkerCredentials;
+      }
+    } catch {
+      return undefined;
+    }
+    return undefined;
+  }
+
+  async saveAwsWorkerHandle(handle: AwsWorkerHandleInfo | undefined): Promise<void> {
+    const stored = await this.readStored();
+    stored.awsWorkerHandle = handle;
+    await this.writeStored(stored);
+  }
+
+  async setCloudRunsMode(mode: CloudRunWorkerMode): Promise<void> {
+    const stored = await this.readStored();
+    stored.cloudRunsMode = mode;
+    await this.writeStored(stored);
+  }
+
+  async clearAwsWorker(): Promise<void> {
+    const stored = await this.readStored();
+    stored.encryptedAwsCredentials = undefined;
+    stored.awsWorkerHandle = undefined;
+    stored.awsWorkerRegion = undefined;
+    await this.writeStored(stored);
+  }
+
+  private normalizeAwsWorkerHandle(value: unknown): AwsWorkerHandleInfo | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+    const record = value as Partial<AwsWorkerHandleInfo>;
+    const instanceId = typeof record.instanceId === "string" ? record.instanceId.trim() : "";
+    const securityGroupId = typeof record.securityGroupId === "string" ? record.securityGroupId.trim() : "";
+    const keyName = typeof record.keyName === "string" ? record.keyName.trim() : "";
+    const region = typeof record.region === "string" ? record.region.trim() : "";
+    if (!instanceId || !securityGroupId || !keyName || !region) {
+      return undefined;
+    }
+    return {
+      instanceId,
+      securityGroupId,
+      keyName,
+      region,
+      instanceType: typeof record.instanceType === "string" && record.instanceType.trim() ? record.instanceType.trim() : "t3.small",
+      createdAt: typeof record.createdAt === "string" && record.createdAt ? record.createdAt : new Date().toISOString()
+    };
+  }
+
+  private normalizeRemoteExecutionMode(value: unknown): CloudRunRemoteExecutionMode | undefined {
+    return value === "inherit" || value === "local" || value === "remote" ? value : undefined;
+  }
+
+  private normalizeConcreteRemoteExecutionMode(value: unknown): Extract<CloudRunRemoteExecutionMode, "local" | "remote"> {
+    return this.normalizeRemoteExecutionMode(value) === "remote" ? "remote" : "local";
   }
 
   private normalizeBehaviorRules(rules: ChatBehaviorRuleConfig[] | undefined): ChatBehaviorRuleConfig[] {
@@ -2337,6 +2494,7 @@ export class SettingsService {
         avatarId: participant.avatarId?.trim() || undefined,
         agentMode: normalizeChatAgentMode((participant as { agentMode?: ChatAgentMode }).agentMode),
         permissions: normalizeChatAgentPermissions((participant as { permissions?: ChatAgentPermissions }).permissions),
+        remoteExecution: this.normalizeRemoteExecutionMode((participant as { remoteExecution?: unknown }).remoteExecution),
         updatedAt: participant.updatedAt || new Date().toISOString()
       }));
   }

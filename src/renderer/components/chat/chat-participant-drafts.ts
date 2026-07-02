@@ -4,6 +4,7 @@ import type {
   ChatBehaviorRuleConfig,
   ChatAgentMode,
   ChatAgentPermissions,
+  CloudRunRemoteExecutionMode,
   ChatParticipant,
   ChatParticipantConfig,
   ChatProviderKind,
@@ -49,6 +50,7 @@ export interface ChatParticipantDraft {
   avatarId?: string;
   agentMode: ChatAgentMode;
   permissions: ChatAgentPermissions;
+  remoteExecution?: ChatParticipantConfig["remoteExecution"];
 }
 
 export interface AddableSavedParticipantConfig {
@@ -88,6 +90,19 @@ export const CHAT_AGENT_MODE_OPTIONS: Array<{ value: ChatAgentMode; label: strin
   { value: "auto", label: chatAgentModeLabel("auto") }
 ];
 
+export const CHAT_RUN_LOCATION_OPTIONS: Array<{ value: Extract<CloudRunRemoteExecutionMode, "local" | "remote">; label: string }> = [
+  { value: "local", label: "Local" },
+  { value: "remote", label: "Remote" }
+];
+
+export function normalizeChatRunLocation(value: unknown): Extract<CloudRunRemoteExecutionMode, "local" | "remote"> {
+  return value === "remote" ? "remote" : "local";
+}
+
+export function chatRunLocationLabel(value: unknown): string {
+  return normalizeChatRunLocation(value) === "remote" ? "Remote" : "Local";
+}
+
 export const CHAT_SHELL_ACTION_OPTIONS: Array<{ value: ChatShellPermissionAction; label: string }> = [
   { value: "allow", label: "Allow" },
   { value: "ask", label: "Ask" },
@@ -116,7 +131,8 @@ export function defaultChatParticipantDraft(settings: AppSettings, existingHandl
     model: provider?.model,
     avatarId: defaultChatAvatarId(kind, handle || roleConfigId),
     agentMode: "default",
-    permissions: defaultChatAgentPermissions()
+    permissions: defaultChatAgentPermissions(),
+    remoteExecution: "local"
   };
 }
 
@@ -131,18 +147,26 @@ export function chatParticipantConfigToDraft(participant: ChatParticipantConfig)
     reasoningEffort: normalizeChatReasoningEffort(participant.reasoningEffort, participant.kind),
     avatarId: normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle),
     agentMode: normalizeChatAgentMode(participant.agentMode),
-    permissions: normalizeChatAgentPermissions(participant.permissions)
+    permissions: normalizeChatAgentPermissions(participant.permissions),
+    remoteExecution: normalizeChatRunLocation(participant.remoteExecution)
   };
 }
 
-export function selectedChatParticipantDrafts(participants: ChatParticipantConfig[], selectedIds: Set<string>): ChatParticipantDraft[] {
-  return participants.filter((participant) => selectedIds.has(participant.id)).map(chatParticipantConfigToDraft);
+export function selectedChatParticipantDrafts(
+  participants: ChatParticipantConfig[],
+  selectedIds: Set<string>,
+  remoteExecutionByConfigId: Record<string, CloudRunRemoteExecutionMode> = {}
+): ChatParticipantDraft[] {
+  return participants
+    .filter((participant) => selectedIds.has(participant.id))
+    .map((participant) => chatParticipantConfigToDraftWithRunLocation(participant, remoteExecutionByConfigId));
 }
 
 export function selectedOrMentionedChatParticipantDrafts(
   participants: ChatParticipantConfig[],
   selectedIds: Set<string>,
-  content: string
+  content: string,
+  remoteExecutionByConfigId: Record<string, CloudRunRemoteExecutionMode> = {}
 ): ChatParticipantDraft[] {
   const nextSelectedIds = new Set(selectedIds);
   for (const participant of participants) {
@@ -155,7 +179,8 @@ export function selectedOrMentionedChatParticipantDrafts(
   }
   return selectedChatParticipantDrafts(
     participants.filter((participant) => !isChatAssistantParticipant(participant)),
-    nextSelectedIds
+    nextSelectedIds,
+    remoteExecutionByConfigId
   );
 }
 
@@ -186,7 +211,8 @@ export function sameParticipantDraft(draft: ChatParticipantDraft, participant: C
     (draft.reasoningEffort ?? "") === (participant.reasoningEffort ?? "") &&
     normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle) === normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle) &&
     normalizeChatAgentMode(draft.agentMode) === normalizeChatAgentMode(participant.agentMode) &&
-    chatAgentPermissionsEqual(draft.permissions, participant.permissions)
+    chatAgentPermissionsEqual(draft.permissions, participant.permissions) &&
+    normalizeChatRunLocation(draft.remoteExecution) === normalizeChatRunLocation(participant.remoteExecution)
   );
 }
 
@@ -233,14 +259,15 @@ export function normalizeChatParticipantDraftForSettings(draft: ChatParticipantD
     reasoningEffort: normalizeChatReasoningEffort(draft.reasoningEffort, kind),
     avatarId: normalizedChatAvatarId(kind, draft.avatarId, handle || roleConfigId),
     agentMode: normalizeChatAgentMode(draft.agentMode),
-    permissions: normalizeChatAgentPermissions(draft.permissions)
+    permissions: normalizeChatAgentPermissions(draft.permissions),
+    remoteExecution: normalizeChatRunLocation(draft.remoteExecution)
   };
 }
 
 export function updateChatParticipantDraft(
   draft: ChatParticipantDraft,
   settings: AppSettings,
-  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "behaviorRuleIds" | "kind" | "model" | "reasoningEffort" | "avatarId" | "agentMode" | "permissions">>
+  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "behaviorRuleIds" | "kind" | "model" | "reasoningEffort" | "avatarId" | "agentMode" | "permissions" | "remoteExecution">>
 ): ChatParticipantDraft {
   let next = { ...draft, ...patch };
   const kindChanged = patch.kind !== undefined && patch.kind !== draft.kind;
@@ -254,6 +281,12 @@ export function updateChatParticipantDraft(
     next = {
       ...next,
       reasoningEffort: normalizeChatReasoningEffort(next.reasoningEffort, next.kind)
+    };
+  }
+  if (kindChanged && next.kind !== "codex-cli") {
+    next = {
+      ...next,
+      remoteExecution: "local"
     };
   }
   if (!isChatAvatarIdForKind(next.avatarId, next.kind)) {
@@ -282,7 +315,8 @@ export function normalizedChatDrafts(drafts: ChatParticipantDraft[]): ChatPartic
     reasoningEffort: normalizeChatReasoningEffort(draft.reasoningEffort, draft.kind),
     avatarId: normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle),
     agentMode: normalizeChatAgentMode(draft.agentMode),
-    permissions: normalizeChatAgentPermissions(draft.permissions)
+    permissions: normalizeChatAgentPermissions(draft.permissions),
+    remoteExecution: normalizeChatRunLocation(draft.remoteExecution)
   }));
 }
 
@@ -329,6 +363,15 @@ export function validateChatParticipantDrafts(
     }
   }
   return undefined;
+}
+
+function chatParticipantConfigToDraftWithRunLocation(
+  participant: ChatParticipantConfig,
+  remoteExecutionByConfigId: Record<string, CloudRunRemoteExecutionMode>
+): ChatParticipantDraft {
+  const draft = chatParticipantConfigToDraft(participant);
+  const override = remoteExecutionByConfigId[participant.id];
+  return override ? { ...draft, remoteExecution: normalizeChatRunLocation(override) } : draft;
 }
 
 export function validateChatStartupDrafts(

@@ -29,6 +29,7 @@ import type {
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
   ChatParticipantInput,
+  CloudRunRemoteExecutionMode,
   ChatExistingParticipantOverrides,
   ChatParticipantChangeRequest,
   ChatParticipantChangeOperation,
@@ -40,6 +41,7 @@ import type {
   ChatParticipantSession,
   ChatPermissionChangeRequest,
   ChatPermissionGrant,
+  ChatPermissionRequestToolResult,
   ChatPendingChoice,
   ChatPendingMention,
   ChatProcessingTranscript,
@@ -58,6 +60,9 @@ import type {
   ChatToolPermissionRequest,
   CompactChatParticipantRequest,
   Conversation,
+  CloudRunsSettings,
+  CloudRunStatus,
+  CloudRunWorkerSettings,
   CreateChatConversationRequest,
   DismissConversationWarningsRequest,
   ExportChatAttachmentRequest,
@@ -77,7 +82,9 @@ import type {
   StartReviewResult,
   ToggleChatReactionRequest,
   UpdateChatParticipantRuntimeRequest,
-  RemoveChatParticipantRequest
+  RemoveChatParticipantRequest,
+  RemoteRunHandle,
+  RemoteRunSyncInfo
 } from "../../shared/types";
 import { isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
 import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
@@ -106,7 +113,18 @@ import {
 } from "../../shared/appTools";
 import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
 import { CliAgentRunner } from "./cliAgents";
+import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type { CliAgentOutputEvent, CliAgentRoleOptions } from "./cliAgents";
+import type {
+  RemoteDetachedRunState,
+  RemoteRunApplyRecordResult,
+  RemoteRunDetachedCancelRequest,
+  RemoteRunDetachedPollRequest,
+  RemoteRunDetachedStartRequest,
+  RemoteRunReplayRecord,
+  RemoteRunWorkerTarget
+} from "./remoteRuns";
+import { emitCodexLiveOutput } from "./codexExec";
 import {
   APP_CHAT_EXPORT_ATTACHMENT_TOOL,
   APP_CHAT_GET_CONTEXT_TOOL,
@@ -384,6 +402,12 @@ interface ToolPermissionDecision {
   source: "user" | "policy" | "timeout" | "abort";
 }
 
+export interface ChatAppToolApprovalDecisionEvent {
+  conversationId: string;
+  approval: ChatAppToolApproval;
+  status: Extract<ChatAppToolApproval["status"], "approved" | "denied">;
+}
+
 interface ParticipantRequestRunResult {
   batch: ChatParticipantRequestBatch;
   replies: Array<{
@@ -398,6 +422,43 @@ interface ParticipantTurnReservation {
   queued: boolean;
   wait: () => Promise<void>;
   release: () => void;
+}
+
+interface RemoteRunReplayState {
+  cursorSeq: number;
+  appliedRecordIds: string[];
+  permissionRequestIdsByRecordId?: Record<string, string>;
+  terminalState?: string;
+  providerOutputMessageId?: string;
+  providerOutputText?: string;
+  providerOutputLineBuffer?: string;
+  providerSessionId?: string;
+  updatedAt?: string;
+}
+
+type RemoteRunReplayStateByRun = Record<string, RemoteRunReplayState>;
+
+interface RemoteRunStarter {
+  startDetachedRun(request: RemoteRunDetachedStartRequest): Promise<RemoteDetachedRunState>;
+  pollDetachedRun(request: RemoteRunDetachedPollRequest): Promise<RemoteDetachedRunState>;
+  cancelDetachedRun(request: RemoteRunDetachedCancelRequest): Promise<RemoteDetachedRunState>;
+  registerDetachedRunContext?(runId: string, worker: RemoteRunWorkerTarget, context: { conversationId: string; participantId: string; sync?: RemoteRunSyncInfo }): void;
+}
+
+type RemoteRunParticipantTarget =
+  | { ok: true; settings: CloudRunsSettings; worker: RemoteRunWorkerTarget; workerSettings: CloudRunWorkerSettings }
+  | { ok: false; message: string };
+
+interface RemoteRunCoordinatorControl {
+  trackRun(handle: RemoteRunHandle): void;
+}
+
+// AWS-managed worker hook: resolves a run-ready SSH target (starting the
+// instance if needed) and tracks activity for idle auto-stop.
+interface CloudRunAwsResolver {
+  ensureWorkerForRun(): Promise<CloudRunWorkerSettings>;
+  noteRunStarted(): void;
+  noteRunEnded(): Promise<void>;
 }
 
 export class ChatService {
@@ -418,6 +479,11 @@ export class ChatService {
   private readonly chatRunMeta = new Map<string, { conversationId: string; participantId: string; participantHandle: string; pendingMessageId?: string }>();
   private readonly chatMutationQueues = new Map<string, Promise<void>>();
   private readonly appSendMessageCountsByRun = new Map<string, number>();
+  private readonly appToolApprovalDecisionListeners = new Set<(event: ChatAppToolApprovalDecisionEvent) => Promise<void> | void>();
+  private readonly remoteRunHandlesByRun = new Map<string, RemoteRunHandle>();
+  private remoteRuns?: RemoteRunStarter;
+  private remoteRunCoordinator?: RemoteRunCoordinatorControl;
+  private cloudRunAws?: CloudRunAwsResolver;
 
   constructor(
     private readonly storage: StorageService,
@@ -428,6 +494,39 @@ export class ChatService {
     private readonly onConversationSnapshot?: (conversation: Conversation) => void,
     private readonly userSkills?: UserSkillsService
   ) {}
+
+  setRemoteRunService(remoteRuns: RemoteRunStarter): void {
+    this.remoteRuns = remoteRuns;
+  }
+
+  setRemoteRunCoordinator(coordinator: RemoteRunCoordinatorControl): void {
+    this.remoteRunCoordinator = coordinator;
+  }
+
+  setCloudRunAwsService(service: CloudRunAwsResolver): void {
+    this.cloudRunAws = service;
+  }
+
+  onAppToolApprovalDecision(listener: (event: ChatAppToolApprovalDecisionEvent) => Promise<void> | void): () => void {
+    this.appToolApprovalDecisionListeners.add(listener);
+    return () => {
+      this.appToolApprovalDecisionListeners.delete(listener);
+    };
+  }
+
+  private async emitAppToolApprovalDecision(event: ChatAppToolApprovalDecisionEvent): Promise<void> {
+    for (const listener of this.appToolApprovalDecisionListeners) {
+      try {
+        await listener(event);
+      } catch (error) {
+        await this.debugLogs.write("chat.app-tool-approval-decision-listener.error", {
+          conversationId: event.conversationId,
+          approvalId: event.approval.id,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+  }
 
   async hydrateContextUsage(conversation: Conversation): Promise<Conversation> {
     if (conversation.kind !== "chat") {
@@ -635,7 +734,8 @@ export class ChatService {
               ...normalizeChatAgentPermissions(participant.permissions),
               repoRead: true
             }
-          : participant.permissions
+          : participant.permissions,
+        remoteExecution: participant.remoteExecution
       }));
   }
 
@@ -758,6 +858,17 @@ export class ChatService {
       if (!target) {
         throw new Error("Chat participant was not found.");
       }
+      const nextRemoteExecution = this.normalizeConcreteRemoteExecutionMode(
+        Object.prototype.hasOwnProperty.call(request, "remoteExecution")
+          ? request.remoteExecution
+          : target.remoteExecution
+      );
+      if (
+        nextRemoteExecution !== this.normalizeConcreteRemoteExecutionMode(target.remoteExecution) &&
+        this.chatParticipantHasRun(conversation, target.id)
+      ) {
+        throw new Error("Run location is locked after the participant has run. Remove and re-add the participant to change it.");
+      }
       const updated: ChatParticipant = {
         ...target,
         model: typeof request.model === "string" ? request.model.trim() || undefined : target.model,
@@ -767,7 +878,8 @@ export class ChatService {
         agentMode: normalizeChatAgentMode(request.agentMode ?? target.agentMode),
         permissions: request.permissions !== undefined
           ? normalizeChatAgentPermissions(request.permissions)
-          : target.permissions
+          : target.permissions,
+        remoteExecution: nextRemoteExecution
       };
       conversation.metadata = {
         ...conversation.metadata,
@@ -1183,7 +1295,7 @@ export class ChatService {
     };
   }
 
-  async requestPermissionChangeFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+  async requestPermissionChangeFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<ChatPermissionRequestToolResult> {
     await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
@@ -1194,22 +1306,60 @@ export class ChatService {
       throw new Error("The issued app-tool token does not grant permission requests.");
     }
 
-    const prepared = this.preparePermissionChange(requester, this.normalizePermissionChangeRequest(rawRequest));
-    if (normalizeChatAgentMode(requester.agentMode) === "auto" && prepared.request.kind === "shellRules") {
+    const applied = await this.applyPermissionChangeRequestFromTool(conversation, requester, actor, rawRequest);
+    if (applied.mutated) {
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+    }
+    return applied.result;
+  }
+
+  private async applyPermissionChangeRequestFromTool(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    actor: ChatAppMcpActor,
+    rawRequest: unknown,
+    options: { requestId?: string; remoteRun?: boolean } = {}
+  ): Promise<{ result: ChatPermissionRequestToolResult; mutated: boolean }> {
+    const requestId = this.permissionRequestIdFromRaw(rawRequest);
+    if (requestId) {
+      return {
+        result: this.permissionRequestStatusForTool(conversation, requester, requestId, actor),
+        mutated: false
+      };
+    }
+
+    const runPermissions = actor.runPermissions ? normalizeChatAgentPermissions(actor.runPermissions) : undefined;
+    const prepared = this.preparePermissionChange(requester, this.normalizePermissionChangeRequest(rawRequest), runPermissions);
+    if (!runPermissions && normalizeChatAgentMode(requester.agentMode) === "auto" && prepared.request.kind === "shellRules") {
       // In Auto-review the provider's native auto classifier decides each shell command,
       // so an agent shellRules request needs no User approval. Configured deny rules are
       // still applied at launch as hard stops.
       return {
-        ok: true,
-        status: "already_granted",
-        summary: "Auto-review handles shell command decisions via the provider's native auto classifier; no shell-rule grant is needed."
+        result: {
+          ok: true,
+          status: "already_granted",
+          summary: "Auto-review handles shell command decisions via the provider's native auto classifier; no shell-rule grant is needed."
+        },
+        mutated: false
       };
     }
     if (!this.preparedPermissionChangeHasAdditions(prepared)) {
       return {
-        ok: true,
-        status: "already_granted",
-        summary: prepared.summary
+        result: {
+          ok: true,
+          status: "already_granted",
+          summary: prepared.summary
+        },
+        mutated: false
+      };
+    }
+
+    const existingApproval = this.findReplayablePermissionApproval(conversation, requester, prepared.request, actor);
+    if (existingApproval) {
+      return {
+        result: this.permissionRequestStatusResult(existingApproval),
+        mutated: false
       };
     }
 
@@ -1231,9 +1381,12 @@ export class ChatService {
         : [];
       if (selectedSkills.length > 0 && await this.shellRulesAreSelectedSkillReads(prepared.request.rules, selectedSkills.map((skill) => skill.dir))) {
         return {
-          ok: true,
-          status: "already_granted",
-          summary: "Reading the selected skill files is permitted as read-only skill invocation context; no shell-rule grant is needed."
+          result: {
+            ok: true,
+            status: "already_granted",
+            summary: "Reading the selected skill files is permitted as read-only skill invocation context; no shell-rule grant is needed."
+          },
+          mutated: false
         };
       }
     }
@@ -1247,11 +1400,15 @@ export class ChatService {
       prepared.summary,
       "pending"
     );
+    if (options.requestId) {
+      approval.id = options.requestId;
+    }
     if (actor.runId && actor.triggerMessageId) {
       approval.resumeContext = {
         runId: actor.runId,
         triggerMessageId: actor.triggerMessageId,
-        participantRequestBatchId: actor.participantRequestBatchId
+        participantRequestBatchId: actor.participantRequestBatchId,
+        remoteRun: options.remoteRun || undefined
       };
     }
     this.upsertAppToolApproval(conversation, approval);
@@ -1259,14 +1416,593 @@ export class ChatService {
       threadId: "system"
     }));
     conversation.updatedAt = new Date().toISOString();
-    await this.saveConversation(conversation);
-    this.queueSnapshot(conversation);
     return {
-      ok: true,
-      status: "pending_user_approval",
-      approvalId: approval.id,
-      summary: prepared.summary
+      result: {
+        ok: true,
+        status: "pending_user_approval",
+        requestId: approval.id,
+        approvalId: approval.id,
+        summary: prepared.summary,
+        request: prepared.request,
+        updatedAt: approval.updatedAt
+      },
+      mutated: true
     };
+  }
+
+  async applyRemoteRunReplayRecord(record: RemoteRunReplayRecord): Promise<RemoteRunApplyRecordResult> {
+    const conversation = await this.storage.getConversation(record.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      throw new Error("Remote run replay conversation was not found.");
+    }
+    return this.withChatMutation(conversation, async () => {
+      const state = this.remoteRunReplayState(conversation, record.runId);
+      if (state.appliedRecordIds.includes(record.id)) {
+        return {
+          applied: false,
+          runId: record.runId,
+          seq: record.seq,
+          cursorSeq: state.cursorSeq,
+          permissionResult: this.remoteReplayDuplicatePermissionResult(conversation, record, state)
+        };
+      }
+
+      // Projection timing: log when each remote phase record lands on the
+      // desktop. Joined with the worker spool (events.jsonl, which timestamps
+      // every phase on the box), this shows end-to-end where a remote run
+      // spends time -- launch, provider output, permission waits, reconnect
+      // gaps, terminal -- so slow/"stuck" remote runs are diagnosable.
+      void this.debugLogs.write("remote-run.replay.timing", {
+        conversationId: record.conversationId,
+        runId: record.runId,
+        kind: record.kind,
+        seq: record.seq,
+        workerSeq: record.workerSeq,
+        projectedAtMs: Date.now()
+      });
+
+      let permissionResult: ChatPermissionRequestToolResult | undefined;
+      let statePatch: Partial<RemoteRunReplayState> = {};
+      if (record.kind === "output_text") {
+        const participant = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
+        if (!participant) {
+          throw new Error("Remote run output references a participant that is no longer in this chat.");
+        }
+        const message = this.message(
+          "participant",
+          record.content,
+          {
+            id: participant.id,
+            kind: participant.kind,
+            label: `@${participant.handle}`,
+            model: participant.model,
+            reasoningEffort: participant.reasoningEffort
+          },
+          {
+            runId: record.runId,
+            sourceMessageId: record.sourceMessageId,
+            threadId: record.threadId,
+            chatThreadRootId: record.chatThreadRootId,
+            appMessageSource: "remote-run-spool"
+          }
+        );
+        conversation.messages.push(message);
+        this.recordLastMessageByParticipant(conversation, message);
+      } else if (record.kind === "provider_output") {
+        statePatch = this.applyRemoteProviderOutputRecord(conversation, record, state);
+      } else if (record.kind === "provider_result") {
+        const participant = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
+        if (!participant) {
+          throw new Error("Remote run provider result references a participant that is no longer in this chat.");
+        }
+        this.applyRemoteProviderResultRecord(conversation, record, participant, state);
+        statePatch = {
+          providerOutputLineBuffer: undefined,
+          providerOutputText: undefined
+        };
+      } else if (record.kind === "permission_pending") {
+        const requester = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
+        if (!requester) {
+          throw new Error("Remote run permission request references a participant that is no longer in this chat.");
+        }
+        const applied = await this.applyPermissionChangeRequestFromTool(
+          conversation,
+          requester,
+          {
+            conversationId: record.conversationId,
+            participantId: record.participantId,
+            roleConfigId: requester.roleConfigId,
+            roleConfigVersion: record.roleConfigVersion ?? requester.roleConfigVersion ?? 0,
+            capabilities: ["permissions.request"],
+            triggerMessageId: record.triggerMessageId,
+            runId: record.runId,
+            runPermissions: record.runPermissions
+          },
+          record.request,
+          { requestId: record.requestId ?? record.id, remoteRun: true }
+        );
+        permissionResult = applied.result;
+      }
+
+      const nextState = this.remoteRunReplayState(conversation, record.runId);
+      const permissionRequestIdsByRecordId = { ...(nextState.permissionRequestIdsByRecordId ?? {}) };
+      if (record.kind === "permission_pending" && permissionResult?.requestId) {
+        permissionRequestIdsByRecordId[record.id] = permissionResult.requestId;
+      }
+      this.setRemoteRunReplayState(conversation, record.runId, {
+        ...nextState,
+        ...statePatch,
+        cursorSeq: Math.max(nextState.cursorSeq, record.seq),
+        appliedRecordIds: this.remoteRunAppliedRecordIds([...nextState.appliedRecordIds, record.id]),
+        permissionRequestIdsByRecordId,
+        terminalState: record.kind === "terminal_state" ? record.status : nextState.terminalState,
+        updatedAt: new Date().toISOString()
+      });
+      if (record.kind === "terminal_state") {
+        this.applyRemoteTerminalStateToConversation(conversation, record.runId, record.status, record.reason);
+      }
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      return {
+        applied: true,
+        runId: record.runId,
+        seq: record.seq,
+        cursorSeq: Math.max(nextState.cursorSeq, record.seq),
+        permissionResult
+      };
+    });
+  }
+
+  // Durable replay cursor for a remote run, so RemoteRunService can seed its
+  // scan position after a restart instead of rescanning from seq 0.
+  async getRemoteRunCursorSeq(conversationId: string, runId: string): Promise<number> {
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return 0;
+    }
+    return this.remoteRunReplayState(conversation, runId).cursorSeq;
+  }
+
+  async listActiveRemoteRunHandles(): Promise<RemoteRunHandle[]> {
+    const summaries = await this.storage.listConversations();
+    const handles: RemoteRunHandle[] = [];
+    for (const summary of summaries) {
+      const conversation = await this.storage.getConversation(summary.id);
+      if (!conversation || conversation.kind !== "chat") {
+        continue;
+      }
+      for (const handle of Object.values(this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles))) {
+        if (this.isRemoteRunTerminal(handle.status)) {
+          continue;
+        }
+        this.registerRemoteRunHandle(handle);
+        this.ensureRemoteRunRemembered(handle.conversationId, handle.runId);
+        handles.push(handle);
+      }
+    }
+    return handles;
+  }
+
+  async updateRemoteRunHandleState(conversationId: string, runId: string, state: RemoteDetachedRunState): Promise<RemoteRunHandle | undefined> {
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return undefined;
+    }
+    let nextHandle: RemoteRunHandle | undefined;
+    await this.withChatMutation(conversation, async () => {
+      const handles = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles);
+      const current = handles[runId];
+      if (!current) {
+        return;
+      }
+      if (this.isRemoteRunTerminal(current.status)) {
+        nextHandle = current;
+        this.clearRemoteRunActiveState(conversation, runId);
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+        return;
+      }
+      nextHandle = this.mergeRemoteRunHandleState(current, state);
+      handles[runId] = nextHandle;
+      conversation.metadata = {
+        ...conversation.metadata,
+        remoteRunHandles: handles
+      };
+      if (this.isRemoteRunTerminal(nextHandle.status)) {
+        this.clearRemoteRunActiveState(conversation, runId);
+        // Transitioned live → terminal: release the AWS idle ref-count so the
+        // instance can auto-stop once no runs remain.
+        void this.cloudRunAws?.noteRunEnded();
+      } else {
+        this.ensureRemoteRunRemembered(conversation.id, runId);
+        conversation.metadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata, undefined, runId);
+      }
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+    });
+    if (nextHandle) {
+      this.registerRemoteRunHandle(nextHandle);
+    }
+    return nextHandle;
+  }
+
+  private async markRemoteRunCancelFailed(handle: RemoteRunHandle, runId: string, error: unknown): Promise<void> {
+    const message = error instanceof Error ? error.message : String(error);
+    const reason = `Failed to cancel remote run: ${message}`;
+    await this.updateRemoteRunHandleState(handle.conversationId, runId, {
+      runId,
+      conversationId: handle.conversationId,
+      participantId: handle.participantId,
+      status: "failed",
+      completedAt: new Date().toISOString(),
+      error: reason
+    });
+    const conversation = await this.storage.getConversation(handle.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return;
+    }
+    const label = handle.participantHandle ? `@${handle.participantHandle}` : "Remote run";
+    await this.appendConversationWarnings(conversation, [`${label}: ${reason}`]);
+  }
+
+  private async recordRemoteRunHandle(
+    conversation: Conversation,
+    handle: RemoteRunHandle,
+    providerOutputMessageId: string
+  ): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      const handles = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles);
+      handles[handle.runId] = {
+        ...handle,
+        providerOutputMessageId
+      };
+      const replayState = this.remoteRunReplayState(conversation, handle.runId);
+      this.setRemoteRunReplayState(conversation, handle.runId, {
+        ...replayState,
+        providerOutputMessageId,
+        updatedAt: new Date().toISOString()
+      });
+      const message = conversation.messages.find((item) => item.id === providerOutputMessageId);
+      if (message) {
+        message.metadata = {
+          ...message.metadata,
+          runId: handle.runId,
+          appMessageSource: "remote-run-provider-output"
+        };
+        message.status = "pending";
+        this.recordLastMessageByParticipant(conversation, message);
+      }
+      conversation.metadata = {
+        ...conversation.metadata,
+        remoteRunHandles: handles
+      };
+      this.ensureRemoteRunRemembered(conversation.id, handle.runId);
+      conversation.metadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata, undefined, handle.runId);
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+    });
+    this.registerRemoteRunHandle({ ...handle, providerOutputMessageId });
+  }
+
+  private applyRemoteTerminalStateToConversation(
+    conversation: Conversation,
+    runId: string,
+    status: Exclude<CloudRunStatus, "running" | "unknown">,
+    reason?: string
+  ): void {
+    const handles = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles);
+    const current = handles[runId];
+    if (!current) {
+      this.clearRemoteRunActiveState(conversation, runId);
+      return;
+    }
+    const now = new Date().toISOString();
+    const next: RemoteRunHandle = {
+      ...current,
+      status,
+      updatedAt: now,
+      completedAt: current.completedAt ?? now,
+      error: status === "failed" ? reason ?? current.error : current.error
+    };
+    handles[runId] = next;
+    conversation.metadata = {
+      ...conversation.metadata,
+      remoteRunHandles: handles
+    };
+    this.registerRemoteRunHandle(next);
+    this.clearRemoteRunActiveState(conversation, runId);
+  }
+
+  private mergeRemoteRunHandleState(handle: RemoteRunHandle, state: RemoteDetachedRunState): RemoteRunHandle {
+    const now = new Date().toISOString();
+    return {
+      ...handle,
+      status: this.normalizeCloudRunStatus(state.status),
+      workerCursorSeq: state.workerCursorSeq ?? handle.workerCursorSeq,
+      updatedAt: now,
+      lastPolledAt: now,
+      completedAt: state.completedAt ?? handle.completedAt,
+      error: state.error ?? handle.error,
+      sync: state.sync ?? handle.sync
+    };
+  }
+
+  private registerRemoteRunHandle(handle: RemoteRunHandle): void {
+    this.remoteRunHandlesByRun.set(handle.runId, handle);
+    const worker = cloudRunWorkerTargetFromSettings(handle.worker);
+    if (worker) {
+      this.remoteRuns?.registerDetachedRunContext?.(handle.runId, worker, {
+        conversationId: handle.conversationId,
+        participantId: handle.participantId,
+        sync: this.isRemoteRunTerminal(handle.status) ? undefined : handle.sync
+      });
+    }
+  }
+
+  private normalizeRemoteRunSyncInfo(value: unknown): RemoteRunSyncInfo | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+    const record = value as Partial<RemoteRunSyncInfo>;
+    const localPath = typeof record.localPath === "string" ? record.localPath.trim() : "";
+    if (!localPath) {
+      return undefined;
+    }
+    const remotePath = typeof record.remotePath === "string" ? record.remotePath.trim() : "";
+    return remotePath ? { localPath, remotePath } : { localPath };
+  }
+
+  private remoteRunHandleByRun(value: unknown): Record<string, RemoteRunHandle> {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return {};
+    }
+    const handles: Record<string, RemoteRunHandle> = {};
+    for (const [runId, raw] of Object.entries(value as Record<string, unknown>)) {
+      if (!runId || !raw || typeof raw !== "object" || Array.isArray(raw)) {
+        continue;
+      }
+      const record = raw as Partial<RemoteRunHandle>;
+      const conversationId = typeof record.conversationId === "string" ? record.conversationId.trim() : "";
+      const participantId = typeof record.participantId === "string" ? record.participantId.trim() : "";
+      const startedAt = typeof record.startedAt === "string" && record.startedAt ? record.startedAt : new Date().toISOString();
+      const worker = normalizeCloudRunWorkerSettings(record.worker);
+      if (!conversationId || !participantId || !worker.host) {
+        continue;
+      }
+      handles[runId] = {
+        runId,
+        conversationId,
+        participantId,
+        participantHandle: typeof record.participantHandle === "string" ? record.participantHandle : undefined,
+        worker,
+        status: this.normalizeCloudRunStatus(record.status),
+        workerCursorSeq: this.normalizeOptionalInteger(record.workerCursorSeq),
+        providerOutputMessageId: typeof record.providerOutputMessageId === "string" ? record.providerOutputMessageId : undefined,
+        startedAt,
+        updatedAt: typeof record.updatedAt === "string" && record.updatedAt ? record.updatedAt : startedAt,
+        completedAt: typeof record.completedAt === "string" ? record.completedAt : undefined,
+        lastPolledAt: typeof record.lastPolledAt === "string" ? record.lastPolledAt : undefined,
+        error: typeof record.error === "string" ? record.error : undefined,
+        sync: this.normalizeRemoteRunSyncInfo(record.sync)
+      };
+    }
+    return handles;
+  }
+
+  private normalizeCloudRunStatus(value: unknown): CloudRunStatus {
+    return value === "completed" || value === "failed" || value === "cancelled" || value === "unknown"
+      ? value
+      : "running";
+  }
+
+  private normalizeOptionalInteger(value: unknown): number | undefined {
+    return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : undefined;
+  }
+
+  private isRemoteRunTerminal(status: unknown): boolean {
+    return status === "completed" || status === "failed" || status === "cancelled";
+  }
+
+  private isNonTerminalRemoteRun(metadata: Record<string, unknown>, runId: string): boolean {
+    const handle = this.remoteRunHandleByRun(metadata.remoteRunHandles)[runId];
+    return Boolean(handle && !this.isRemoteRunTerminal(handle.status));
+  }
+
+  private ensureRemoteRunRemembered(conversationId: string, runId: string): void {
+    if (this.activeConversationRunIds.get(conversationId)?.has(runId)) {
+      return;
+    }
+    this.rememberActiveChatRun(conversationId, runId);
+  }
+
+  private clearRemoteRunActiveState(conversation: Conversation, runId: string): void {
+    this.forgetAllActiveChatRunRefs(conversation.id, runId);
+    conversation.metadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata, runId);
+  }
+
+  private forgetAllActiveChatRunRefs(conversationId: string, runId: string): void {
+    while ((this.activeConversationRunRefCount(conversationId, runId) > 0) || this.activeRunIds.has(runId)) {
+      this.forgetActiveChatRun(conversationId, runId);
+    }
+  }
+
+  private applyRemoteProviderOutputRecord(
+    conversation: Conversation,
+    record: Extract<RemoteRunReplayRecord, { kind: "provider_output" }>,
+    state: RemoteRunReplayState
+  ): Partial<RemoteRunReplayState> {
+    if (record.stream !== "stdout") {
+      return {};
+    }
+    const participant = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
+    if (!participant) {
+      throw new Error("Remote run provider output references a participant that is no longer in this chat.");
+    }
+    const combined = `${state.providerOutputLineBuffer ?? ""}${record.content}`;
+    const complete = combined.endsWith("\n") || combined.endsWith("\r");
+    const parts = combined.split(/\r?\n/);
+    const lines = complete ? parts : parts.slice(0, -1);
+    const lineBuffer = complete ? "" : parts.at(-1) ?? "";
+    let cumulative = state.providerOutputText ?? "";
+    let sessionId = state.providerSessionId;
+    let changed = false;
+    const accumulator = { value: cumulative };
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) {
+        continue;
+      }
+      emitCodexLiveOutput(line, (event) => {
+        if (event.kind !== "text") {
+          return;
+        }
+        const next = event.cumulative ?? `${cumulative}${event.text}`;
+        if (next !== cumulative) {
+          cumulative = next;
+          changed = true;
+        }
+      }, accumulator, (nextSessionId) => {
+        sessionId = nextSessionId;
+      });
+    }
+    if (changed && cumulative.trim()) {
+      this.upsertRemoteProviderProgressMessage(conversation, record, participant, cumulative, state.providerOutputMessageId);
+    }
+    return {
+      providerOutputMessageId: state.providerOutputMessageId ?? this.remoteProviderProgressMessageId(conversation, record.runId, record.participantId),
+      providerOutputText: cumulative,
+      providerOutputLineBuffer: lineBuffer,
+      providerSessionId: sessionId
+    };
+  }
+
+  private upsertRemoteProviderProgressMessage(
+    conversation: Conversation,
+    record: Extract<RemoteRunReplayRecord, { kind: "provider_output" }>,
+    participant: ChatParticipant,
+    content: string,
+    messageId: string | undefined
+  ): void {
+    const existingId = messageId ?? this.remoteProviderProgressMessageId(conversation, record.runId, record.participantId);
+    const existing = existingId
+      ? conversation.messages.find((message) => message.id === existingId && message.role === "participant")
+      : undefined;
+    if (existing) {
+      existing.content = content;
+      existing.status = "pending";
+      existing.metadata = {
+        ...existing.metadata,
+        runId: record.runId,
+        appMessageSource: "remote-run-provider-output"
+      };
+      this.recordLastMessageByParticipant(conversation, existing);
+      return;
+    }
+    const message = this.message(
+      "participant",
+      content,
+      {
+        id: participant.id,
+        kind: participant.kind,
+        label: `@${participant.handle}`,
+        model: participant.model,
+        reasoningEffort: participant.reasoningEffort
+      },
+      {
+        runId: record.runId,
+        appMessageSource: "remote-run-provider-output"
+      },
+      "pending"
+    );
+    conversation.messages.push(message);
+    this.recordLastMessageByParticipant(conversation, message);
+  }
+
+  private applyRemoteProviderResultRecord(
+    conversation: Conversation,
+    record: Extract<RemoteRunReplayRecord, { kind: "provider_result" }>,
+    participant: ChatParticipant,
+    state: RemoteRunReplayState
+  ): void {
+    const existingId = state.providerOutputMessageId ?? this.remoteProviderProgressMessageId(conversation, record.runId, record.participantId);
+    const existing = existingId
+      ? conversation.messages.find((message) => message.id === existingId && message.role === "participant")
+      : undefined;
+    const content = record.content.trim() || (record.ok ? existing?.content ?? "" : `@${participant.handle} remote run failed.`);
+    const metadata: ChatMessageMetadata = {
+      ...(existing?.metadata ?? {}),
+      runId: record.runId,
+      sourceMessageId: record.sourceMessageId,
+      threadId: record.threadId,
+      chatThreadRootId: record.chatThreadRootId,
+      // The remote worker's provider_result does not carry a durationMs, so the
+      // desktop never timed the run (it ran on the box). Fall back to the run
+      // handle's startedAt -> completedAt so the "Worked for ..." chip renders
+      // for remote runs like it does for local ones.
+      workedMs: this.remoteRunWorkedMs(conversation, record.runId, record.durationMs),
+      appMessageSource: "remote-run-provider"
+    };
+    if (existing) {
+      existing.content = content;
+      existing.status = record.ok ? "done" : "error";
+      existing.metadata = metadata;
+      this.recordLastMessageByParticipant(conversation, existing);
+      return;
+    }
+    const message = this.message(
+      "participant",
+      content,
+      {
+        id: participant.id,
+        kind: participant.kind,
+        label: `@${participant.handle}`,
+        model: participant.model,
+        reasoningEffort: participant.reasoningEffort
+      },
+      metadata,
+      record.ok ? "done" : "error"
+    );
+    conversation.messages.push(message);
+    this.recordLastMessageByParticipant(conversation, message);
+  }
+
+  private remoteRunWorkedMs(
+    conversation: Conversation,
+    runId: string,
+    recordDurationMs: number | undefined
+  ): number | undefined {
+    if (typeof recordDurationMs === "number" && Number.isFinite(recordDurationMs) && recordDurationMs >= 0) {
+      return recordDurationMs;
+    }
+    const handle = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles)[runId];
+    const startedAtMs = handle?.startedAt ? Date.parse(handle.startedAt) : NaN;
+    const completedAtMs = handle?.completedAt ? Date.parse(handle.completedAt) : NaN;
+    // Only derive from the handle when the box completion time is known. Never
+    // fall back to the desktop clock (Date.now()): when the run finished while
+    // the lid was closed, "now" is the reconnect/sync moment, which would
+    // inflate "Worked for ..." by the entire offline gap.
+    if (!Number.isFinite(startedAtMs) || !Number.isFinite(completedAtMs)) {
+      return undefined;
+    }
+    const workedMs = completedAtMs - startedAtMs;
+    return workedMs >= 0 ? workedMs : undefined;
+  }
+
+  private remoteProviderProgressMessageId(
+    conversation: Conversation,
+    runId: string,
+    participantId: string
+  ): string | undefined {
+    return conversation.messages.find((message) =>
+      message.role === "participant" &&
+      message.participantId === participantId &&
+      message.metadata?.runId === runId &&
+      (message.metadata?.appMessageSource === "remote-run-provider-output" ||
+        message.metadata?.appMessageSource === "remote-run-provider")
+    )?.id;
   }
 
   async requestToolPermissionFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
@@ -1603,6 +2339,7 @@ export class ChatService {
         avatarId: participant.avatarId,
         agentMode: normalizeChatAgentMode(participant.agentMode),
         permissions: normalizeChatAgentPermissions(participant.permissions),
+        remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
         updatedAt: participant.updatedAt
       })),
       participantChange: {
@@ -1835,6 +2572,7 @@ export class ChatService {
           reasoningEffort: participant.reasoningEffort,
           agentMode: normalizeChatAgentMode(participant.agentMode),
           permissions: normalizeChatAgentPermissions(participant.permissions),
+          remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
           provider
         };
       }),
@@ -2222,13 +2960,19 @@ export class ChatService {
       if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && this.isParticipantRequestApprovalRequest(approval.request)) {
         this.applyParticipantRequestApprovalDecision(conversation, approval, "denied", request.scope);
       }
-      this.upsertAppToolApproval(conversation, {
+      const deniedApproval: ChatAppToolApproval = {
         ...approval,
         status: "denied",
         updatedAt: now
-      });
+      };
+      this.upsertAppToolApproval(conversation, deniedApproval);
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
+      await this.emitAppToolApprovalDecision({
+        conversationId: conversation.id,
+        approval: deniedApproval,
+        status: "denied"
+      });
       const deniedParticipantRequest = this.isParticipantRequestApprovalRequest(approval.request) ? approval.request : undefined;
       if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && deniedParticipantRequest?.requestMessageId) {
         const requestMessageId = deniedParticipantRequest.requestMessageId;
@@ -2514,7 +3258,14 @@ export class ChatService {
     ));
     conversation.updatedAt = now;
     await this.saveConversation(conversation);
-    if (isPermissionApproval && updatedApproval.resumeContext) {
+    if (isPermissionApproval) {
+      await this.emitAppToolApprovalDecision({
+        conversationId: conversation.id,
+        approval: updatedApproval,
+        status: "approved"
+      });
+    }
+    if (isPermissionApproval && updatedApproval.resumeContext && updatedApproval.resumeContext.remoteRun !== true) {
       void this.autoResumePermissionApproval(conversation.id, updatedApproval.id, progress).catch((error) => {
         this.emitProgress(updatedApproval.resumeContext?.runId ?? updatedApproval.id, progress, "error", error instanceof Error ? error.message : String(error));
         void this.debugLogs.write("chat.permission-approval.auto-resume.error", {
@@ -3615,8 +4366,112 @@ export class ChatService {
     const persistSessionId = (sessionId: string): void => {
       this.persistParticipantSessionId(conversation, session, sessionId);
     };
+    let remoteDetachedStarted = false;
     try {
       progressSink.beginAttempt();
+      const remoteRunTarget = await this.remoteRunTargetForParticipant(participant);
+      if (remoteRunTarget) {
+        if (!remoteRunTarget.ok) {
+          pendingMessage.status = "error";
+          pendingMessage.content = remoteRunTarget.message;
+          this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, remoteRunTarget.message);
+          return [pendingMessage];
+        }
+        const remoteRuns = this.remoteRuns;
+        if (!remoteRuns) {
+          const message = `@${participant.handle} requested remote execution, but Cloud Runs is not available in this app session.`;
+          pendingMessage.status = "error";
+          pendingMessage.content = message;
+          this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, message);
+          return [pendingMessage];
+        }
+        {
+          const now = new Date().toISOString();
+          // Mirror-sync mode: no pre-provisioned remote cwd, and the run has a
+          // readable local repo — the project dir is rsynced one-way to a
+          // per-project mirror on the worker before launch. Results come back
+          // via git (the agent pushes from the box) or an explicit pull.
+          const remoteSyncLocalPath = !remoteRunTarget.worker.remoteCwd
+            && conversation.repoPath
+            && runPath === conversation.repoPath
+            ? conversation.repoPath
+            : undefined;
+          const handle: RemoteRunHandle = {
+            runId,
+            conversationId: conversation.id,
+            participantId: participant.id,
+            participantHandle: participant.handle,
+            worker: remoteRunTarget.workerSettings,
+            status: "running",
+            startedAt: now,
+            updatedAt: now,
+            sync: remoteSyncLocalPath ? { localPath: remoteSyncLocalPath } : undefined
+          };
+          await this.recordRemoteRunHandle(conversation, handle, pendingMessage.id);
+          let detachedState: RemoteDetachedRunState;
+          try {
+            detachedState = await remoteRuns.startDetachedRun({
+              conversationId: conversation.id,
+              runId,
+              participant: cliParticipant,
+              prompt,
+              worker: remoteRunTarget.worker,
+              kind: "chat",
+              repoPath: remoteRunTarget.worker.remoteCwd,
+              sync: remoteSyncLocalPath ? { localPath: remoteSyncLocalPath } : undefined,
+              options: {
+                persistSession: true,
+                role,
+                appMcp: appMcp
+                  ? {
+                      url: appMcp.url,
+                      token: appMcp.token
+                    }
+                  : undefined,
+                agentMode,
+                permissions
+              },
+              maxRuntimeMs: remoteRunTarget.settings.maxRuntimeMs,
+              sourceMessageId: triggerMessage.id,
+              threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
+              chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
+              contextSnapshot: this.remoteRunContextSnapshot(promptConversation, participant, triggerMessage),
+              signal
+            });
+          } catch (error) {
+            const failureMessage = this.remoteRunLaunchFailureMessage(participant, error);
+            await this.updateRemoteRunHandleState(conversation.id, runId, {
+              runId,
+              conversationId: conversation.id,
+              participantId: participant.id,
+              status: "failed",
+              error: failureMessage
+            });
+            pendingMessage.status = "error";
+            pendingMessage.content = failureMessage;
+            this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, failureMessage);
+            return [pendingMessage];
+          }
+          const updated = await this.updateRemoteRunHandleState(conversation.id, runId, detachedState);
+          if (updated) {
+            this.remoteRunCoordinator?.trackRun(updated);
+          }
+          if (remoteRunTarget.settings.mode === "aws") {
+            this.cloudRunAws?.noteRunStarted();
+          }
+          remoteDetachedStarted = true;
+          this.emitProgress(runId, progress, "done", `@${participant.handle} is running remotely.`, {
+            participantLabel: `@${participant.handle}`,
+            agentProgress: {
+              participantId: participant.id,
+              participantLabel: `@${participant.handle}`,
+              state: "running",
+              messageId: pendingMessage.id
+            }
+          });
+          return [pendingMessage];
+        }
+      }
       let result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
         persistSession: true,
         sessionId: session.sessionId,
@@ -3759,7 +4614,7 @@ export class ChatService {
       this.lockParticipantRoleVersion(conversation, participant, session.roleConfigVersion);
       return [pendingMessage];
     } finally {
-      if (pendingMessage.status === "pending") {
+      if (!remoteDetachedStarted && pendingMessage.status === "pending") {
         if (signal?.aborted) {
           this.markParticipantMessageStoppedByUser(pendingMessage, participant);
         } else {
@@ -3780,7 +4635,10 @@ export class ChatService {
       // auto-resume) still needs an immediate snapshot of the finalized pending
       // message, but it must run under `withChatMutation` so concurrent background
       // dispatches' state isn't clobbered by a stale clone.
-      if (signal?.aborted && !options.existingPendingMessage) {
+      if (remoteDetachedStarted) {
+        // Remote replay owns finalization. Keep the pending bubble active until
+        // provider output/result records arrive through the durable spool.
+      } else if (signal?.aborted && !options.existingPendingMessage) {
         this.markPendingAppToolApprovalsForRunTerminal(
           conversation,
           runId,
@@ -4799,6 +5657,103 @@ export class ChatService {
     return ids;
   }
 
+  private normalizeRemoteExecutionMode(value: unknown): CloudRunRemoteExecutionMode | undefined {
+    return value === "inherit" || value === "local" || value === "remote" ? value : undefined;
+  }
+
+  private normalizeConcreteRemoteExecutionMode(value: unknown): Extract<CloudRunRemoteExecutionMode, "local" | "remote"> {
+    return this.normalizeRemoteExecutionMode(value) === "remote" ? "remote" : "local";
+  }
+
+  private async remoteRunTargetForParticipant(
+    participant: ChatParticipant
+  ): Promise<RemoteRunParticipantTarget | undefined> {
+    const mode = this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution);
+    if (mode !== "remote") {
+      return undefined;
+    }
+    const settings = (await this.settings.getPublicSettings()).cloudRuns;
+    if (!settings.enabled) {
+      return {
+        ok: false,
+        message: `@${participant.handle} requested remote execution, but Cloud Runs is disabled.`
+      };
+    }
+    if (participant.kind !== "codex-cli") {
+      return {
+        ok: false,
+        message: `@${participant.handle} requested remote execution, but Cloud Runs currently supports Codex participants only.`
+      };
+    }
+    let workerSettings: CloudRunWorkerSettings;
+    if (settings.mode === "aws") {
+      if (!this.cloudRunAws) {
+        return {
+          ok: false,
+          message: `@${participant.handle} requested remote execution, but the AWS worker is not available in this app session.`
+        };
+      }
+      try {
+        // May start a stopped instance and re-open SSH ingress; can take a
+        // couple of minutes on a cold start.
+        workerSettings = await this.cloudRunAws.ensureWorkerForRun();
+      } catch (error) {
+        return {
+          ok: false,
+          message: `@${participant.handle} requested remote execution, but the AWS worker could not be started: ${error instanceof Error ? error.message : String(error)}`
+        };
+      }
+    } else {
+      workerSettings = normalizeCloudRunWorkerSettings(settings.worker);
+    }
+    const worker = cloudRunWorkerTargetFromSettings(workerSettings);
+    if (!worker) {
+      return {
+        ok: false,
+        message: `@${participant.handle} requested remote execution, but the Cloud Runs worker host is not configured.`
+      };
+    }
+    if (!this.remoteRuns) {
+      return {
+        ok: false,
+        message: `@${participant.handle} requested remote execution, but Cloud Runs is not available in this app session.`
+      };
+    }
+    return { ok: true, settings, worker, workerSettings };
+  }
+
+  private remoteRunLaunchFailureMessage(participant: ChatParticipant, error: unknown): string {
+    const detail = error instanceof Error ? error.message : String(error);
+    return detail.trim()
+      ? `@${participant.handle} remote run failed to start: ${detail}`
+      : `@${participant.handle} remote run failed to start.`;
+  }
+
+  private remoteRunContextSnapshot(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    triggerMessage: ChatMessage
+  ): Record<string, unknown> {
+    return {
+      conversationId: conversation.id,
+      title: conversation.title,
+      repoPath: conversation.repoPath,
+      participantId: participant.id,
+      participantHandle: participant.handle,
+      triggerMessageId: triggerMessage.id,
+      participants: this.chatParticipants(conversation).map((item) => ({
+        id: item.id,
+        handle: item.handle,
+        kind: item.kind,
+        roleConfigId: item.roleConfigId,
+        model: item.model,
+        reasoningEffort: item.reasoningEffort,
+        agentMode: item.agentMode,
+        remoteExecution: item.remoteExecution
+      }))
+    };
+  }
+
   private shortHash(value: string): string {
     return createHash("sha256").update(value).digest("hex").slice(0, 16);
   }
@@ -5257,7 +6212,131 @@ export class ChatService {
     if (policies) {
       merged.appToolApprovalPolicies = policies;
     }
+    const remoteRunReplay = this.mergeRemoteRunReplayStateByRun(
+      storedMetadata.remoteRunReplay,
+      currentMetadata.remoteRunReplay
+    );
+    if (Object.keys(remoteRunReplay).length > 0) {
+      merged.remoteRunReplay = remoteRunReplay;
+    } else {
+      delete merged.remoteRunReplay;
+    }
     return merged;
+  }
+
+  private remoteRunReplayState(conversation: Conversation, runId: string): RemoteRunReplayState {
+    return this.remoteRunReplayStateByRun(conversation.metadata.remoteRunReplay)[runId] ?? {
+      cursorSeq: 0,
+      appliedRecordIds: []
+    };
+  }
+
+  private setRemoteRunReplayState(conversation: Conversation, runId: string, state: RemoteRunReplayState): void {
+    conversation.metadata = {
+      ...conversation.metadata,
+      remoteRunReplay: {
+        ...this.remoteRunReplayStateByRun(conversation.metadata.remoteRunReplay),
+        [runId]: {
+          ...state,
+          appliedRecordIds: this.remoteRunAppliedRecordIds(state.appliedRecordIds),
+          permissionRequestIdsByRecordId: this.remoteRunStringMap(state.permissionRequestIdsByRecordId)
+        }
+      }
+    };
+  }
+
+  private mergeRemoteRunReplayStateByRun(storedValue: unknown, currentValue: unknown): RemoteRunReplayStateByRun {
+    const stored = this.remoteRunReplayStateByRun(storedValue);
+    const current = this.remoteRunReplayStateByRun(currentValue);
+    const runIds = new Set([...Object.keys(stored), ...Object.keys(current)]);
+    const merged: RemoteRunReplayStateByRun = {};
+    for (const runId of runIds) {
+      const storedState = stored[runId] ?? { cursorSeq: 0, appliedRecordIds: [] };
+      const currentState = current[runId] ?? { cursorSeq: 0, appliedRecordIds: [] };
+      const appliedRecordIds = this.remoteRunAppliedRecordIds([
+        ...storedState.appliedRecordIds,
+        ...currentState.appliedRecordIds
+      ]);
+      merged[runId] = {
+        cursorSeq: Math.max(storedState.cursorSeq, currentState.cursorSeq),
+        appliedRecordIds,
+        permissionRequestIdsByRecordId: {
+          ...(storedState.permissionRequestIdsByRecordId ?? {}),
+          ...(currentState.permissionRequestIdsByRecordId ?? {})
+        },
+        terminalState: currentState.terminalState ?? storedState.terminalState,
+        providerOutputMessageId: currentState.providerOutputMessageId ?? storedState.providerOutputMessageId,
+        providerOutputText: currentState.providerOutputText ?? storedState.providerOutputText,
+        providerOutputLineBuffer: currentState.providerOutputLineBuffer ?? storedState.providerOutputLineBuffer,
+        providerSessionId: currentState.providerSessionId ?? storedState.providerSessionId,
+        updatedAt: currentState.updatedAt && storedState.updatedAt
+          ? currentState.updatedAt >= storedState.updatedAt
+            ? currentState.updatedAt
+            : storedState.updatedAt
+          : currentState.updatedAt ?? storedState.updatedAt
+      };
+    }
+    return merged;
+  }
+
+  private remoteRunReplayStateByRun(value: unknown): RemoteRunReplayStateByRun {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return {};
+    }
+    const states: RemoteRunReplayStateByRun = {};
+    for (const [runId, rawState] of Object.entries(value as Record<string, unknown>)) {
+      if (!runId || !rawState || typeof rawState !== "object" || Array.isArray(rawState)) {
+        continue;
+      }
+      const record = rawState as Record<string, unknown>;
+      const cursorSeq = typeof record.cursorSeq === "number" && Number.isFinite(record.cursorSeq)
+        ? Math.max(0, Math.floor(record.cursorSeq))
+        : 0;
+      const terminalState = typeof record.terminalState === "string" ? record.terminalState : undefined;
+      const updatedAt = typeof record.updatedAt === "string" ? record.updatedAt : undefined;
+      const providerOutputMessageId = typeof record.providerOutputMessageId === "string" ? record.providerOutputMessageId : undefined;
+      const providerOutputText = typeof record.providerOutputText === "string" ? record.providerOutputText : undefined;
+      const providerOutputLineBuffer = typeof record.providerOutputLineBuffer === "string" ? record.providerOutputLineBuffer : undefined;
+      const providerSessionId = typeof record.providerSessionId === "string" ? record.providerSessionId : undefined;
+      states[runId] = {
+        cursorSeq,
+        appliedRecordIds: this.remoteRunAppliedRecordIds(record.appliedRecordIds),
+        permissionRequestIdsByRecordId: this.remoteRunStringMap(record.permissionRequestIdsByRecordId),
+        terminalState,
+        providerOutputMessageId,
+        providerOutputText,
+        providerOutputLineBuffer,
+        providerSessionId,
+        updatedAt
+      };
+    }
+    return states;
+  }
+
+  private remoteRunAppliedRecordIds(value: unknown): string[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    const ids: string[] = [];
+    for (const item of value) {
+      if (typeof item === "string" && item && !ids.includes(item)) {
+        ids.push(item);
+      }
+    }
+    return ids.slice(-2_000);
+  }
+
+  private remoteRunStringMap(value: unknown): Record<string, string> {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return {};
+    }
+    const map: Record<string, string> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (key && typeof item === "string" && item) {
+        map[key] = item;
+      }
+    }
+    return map;
   }
 
   private mergeRemovedChatMessageIds(storedValue: unknown, currentValue: unknown): string[] {
@@ -5489,7 +6568,8 @@ export class ChatService {
         reasoningEffort: normalizeChatReasoningEffort(item.reasoningEffort, item.kind as ChatProviderKind),
         avatarId: item.avatarId?.trim() || undefined,
         agentMode: normalizeChatAgentMode(item.agentMode),
-        permissions: normalizeChatAgentPermissions(item.permissions)
+        permissions: normalizeChatAgentPermissions(item.permissions),
+        remoteExecution: this.normalizeConcreteRemoteExecutionMode(item.remoteExecution)
       };
     });
   }
@@ -5662,7 +6742,8 @@ export class ChatService {
       kind: participant.kind,
       model: participant.model,
       reasoningEffort: participant.reasoningEffort,
-      agentMode: normalizeChatAgentMode(participant.agentMode)
+      agentMode: normalizeChatAgentMode(participant.agentMode),
+      remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution)
     };
   }
 
@@ -5726,7 +6807,8 @@ export class ChatService {
             reasoningEffort: normalizeChatReasoningEffort(participantRecord.reasoningEffort, kind),
             avatarId: typeof participantRecord.avatarId === "string" ? participantRecord.avatarId.trim() || undefined : undefined,
             agentMode: normalizeChatAgentMode(participantRecord.agentMode),
-            permissions: normalizeChatAgentPermissions(participantRecord.permissions)
+            permissions: normalizeChatAgentPermissions(participantRecord.permissions),
+            remoteExecution: this.normalizeConcreteRemoteExecutionMode(participantRecord.remoteExecution)
           }
         };
       })
@@ -5751,7 +6833,8 @@ export class ChatService {
           reasoningEffort: participant.reasoningEffort,
           avatarId: participant.avatarId,
           agentMode: normalizeChatAgentMode(participant.agentMode),
-          permissions: normalizeChatAgentPermissions(participant.permissions)
+          permissions: normalizeChatAgentPermissions(participant.permissions),
+          remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution)
         }
       }))
     };
@@ -6111,7 +7194,8 @@ export class ChatService {
             reasoningEffort: normalizeChatReasoningEffort(participantRecord.reasoningEffort, kind),
             avatarId: typeof participantRecord.avatarId === "string" ? participantRecord.avatarId.trim() || undefined : undefined,
             agentMode: normalizeChatAgentMode(participantRecord.agentMode),
-            permissions: normalizeChatAgentPermissions(participantRecord.permissions)
+            permissions: normalizeChatAgentPermissions(participantRecord.permissions),
+            remoteExecution: this.normalizeConcreteRemoteExecutionMode(participantRecord.remoteExecution)
           }
         };
       })
@@ -6125,14 +7209,15 @@ export class ChatService {
       return undefined;
     }
     const record = raw as Record<string, unknown>;
-    if (!("model" in record) && !("reasoningEffort" in record) && !("agentMode" in record) && !("permissions" in record)) {
+    if (!("model" in record) && !("reasoningEffort" in record) && !("agentMode" in record) && !("permissions" in record) && !("remoteExecution" in record)) {
       return undefined;
     }
     return {
       model: typeof record.model === "string" ? record.model.trim() || undefined : undefined,
       reasoningEffort: normalizeChatReasoningEffort(record.reasoningEffort),
       agentMode: normalizeChatAgentMode(record.agentMode),
-      permissions: normalizeChatAgentPermissions(record.permissions)
+      permissions: normalizeChatAgentPermissions(record.permissions),
+      remoteExecution: this.normalizeConcreteRemoteExecutionMode(record.remoteExecution)
     };
   }
 
@@ -6169,7 +7254,8 @@ export class ChatService {
             : preset.reasoningEffort,
           avatarId: preset.avatarId,
           agentMode: overrides ? normalizeChatAgentMode(overrides.agentMode) : preset.agentMode,
-          permissions: overrides ? overrides.permissions : preset.permissions
+          permissions: overrides ? overrides.permissions : preset.permissions,
+          remoteExecution: overrides ? overrides.remoteExecution : preset.remoteExecution
         };
       }
       const role = newParticipantRoles.find((item) => item.id === operation.participant.roleConfigId);
@@ -6206,6 +7292,7 @@ export class ChatService {
         avatarId: operation.participant.avatarId,
         agentMode: operation.participant.agentMode,
         permissions: operation.participant.permissions,
+        remoteExecution: this.normalizeConcreteRemoteExecutionMode(operation.participant.remoteExecution),
         updatedAt: new Date().toISOString()
       });
     }
@@ -6226,7 +7313,8 @@ export class ChatService {
               ...operation.participant,
               participantConfigId: savedPresetIdByOperationIndex.get(index),
               handle: operation.participant.handle.trim().replace(/^@/, ""),
-              permissions: normalizeChatAgentPermissions(operation.participant.permissions)
+              permissions: normalizeChatAgentPermissions(operation.participant.permissions),
+              remoteExecution: this.normalizeConcreteRemoteExecutionMode(operation.participant.remoteExecution)
             }
           };
         })
@@ -6249,7 +7337,8 @@ export class ChatService {
         reasoningEffort: preset.reasoningEffort,
         avatarId: preset.avatarId,
         agentMode: preset.agentMode,
-        permissions: preset.permissions
+        permissions: preset.permissions,
+        remoteExecution: this.normalizeConcreteRemoteExecutionMode(preset.remoteExecution)
       });
     }
     return this.applyPreparedRosterChange(conversation, {
@@ -6267,7 +7356,8 @@ export class ChatService {
             reasoningEffort: participant.reasoningEffort,
             avatarId: participant.avatarId,
             agentMode: participant.agentMode,
-            permissions: participant.permissions
+            permissions: participant.permissions,
+            remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution)
           }
         }))
       },
@@ -6290,7 +7380,8 @@ export class ChatService {
       reasoningEffort: preset.reasoningEffort,
       avatarId: preset.avatarId,
       agentMode: preset.agentMode,
-      permissions: preset.permissions
+      permissions: preset.permissions,
+      remoteExecution: this.normalizeConcreteRemoteExecutionMode(preset.remoteExecution)
     }));
     const saved = await this.settings.saveChatRoleParticipantConfigBatch(prepared.role.request.operations, participantUpdates);
     const remapRoleId = (roleConfigId: string): string => saved.roleIdByDraftRoleRef[roleConfigId] ?? roleConfigId;
@@ -6313,7 +7404,8 @@ export class ChatService {
             reasoningEffort: participant.reasoningEffort,
             avatarId: participant.avatarId,
             agentMode: participant.agentMode,
-            permissions: participant.permissions
+            permissions: participant.permissions,
+            remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution)
           }
         }))
       },
@@ -6503,6 +7595,113 @@ export class ChatService {
       return prompt;
     }
     return [prompt, "", PARTICIPANT_REQUEST_SCRUTINY_APPENDIX].join("\n");
+  }
+
+  private permissionRequestIdFromRaw(rawRequest: unknown): string | undefined {
+    if (!rawRequest || typeof rawRequest !== "object" || Array.isArray(rawRequest)) {
+      return undefined;
+    }
+    const requestId = (rawRequest as Record<string, unknown>).requestId;
+    return typeof requestId === "string" ? requestId.trim() || undefined : undefined;
+  }
+
+  private permissionRequestStatusForTool(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    requestId: string,
+    actor: ChatAppMcpActor
+  ): ChatPermissionRequestToolResult {
+    const approval = this.chatAppToolApprovals(conversation).find((item) =>
+      item.id === requestId &&
+      item.requesterParticipantId === requester.id &&
+      item.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
+      this.isPermissionChangeRequest(item.request) &&
+      (!actor.runId || item.resumeContext?.runId === actor.runId)
+    );
+    if (!approval) {
+      return {
+        ok: false,
+        status: "not_found",
+        requestId,
+        error: "Permission request was not found for this participant run."
+      };
+    }
+    return this.permissionRequestStatusResult(approval);
+  }
+
+  private permissionRequestStatusResult(approval: ChatAppToolApproval): ChatPermissionRequestToolResult {
+    const status: ChatPermissionRequestToolResult["status"] =
+      approval.status === "pending"
+        ? "pending_user_approval"
+        : approval.status === "approved"
+          ? "approved"
+          : approval.status === "denied"
+            ? "denied"
+            : "already_granted";
+    return {
+      ok: true,
+      status,
+      requestId: approval.id,
+      approvalId: approval.id,
+      summary: approval.summary,
+      request: this.isPermissionChangeRequest(approval.request) ? approval.request : undefined,
+      approvalScope: approval.approvalScope,
+      updatedAt: approval.updatedAt,
+      ...(approval.error ? { error: approval.error } : {})
+    };
+  }
+
+  private remoteReplayDuplicatePermissionResult(
+    conversation: Conversation,
+    record: RemoteRunReplayRecord,
+    state: RemoteRunReplayState
+  ): ChatPermissionRequestToolResult | undefined {
+    if (record.kind !== "permission_pending") {
+      return undefined;
+    }
+    const requester = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
+    if (!requester) {
+      return undefined;
+    }
+    const requestId = state.permissionRequestIdsByRecordId?.[record.id] ?? record.requestId ?? record.id;
+    return this.permissionRequestStatusForTool(conversation, requester, requestId, {
+      conversationId: record.conversationId,
+      participantId: record.participantId,
+      roleConfigId: requester.roleConfigId,
+      roleConfigVersion: record.roleConfigVersion ?? requester.roleConfigVersion ?? 0,
+      capabilities: ["permissions.request"],
+      triggerMessageId: record.triggerMessageId,
+      runId: record.runId,
+      runPermissions: record.runPermissions
+    });
+  }
+
+  private findReplayablePermissionApproval(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    request: ChatPermissionChangeRequest,
+    actor: ChatAppMcpActor
+  ): ChatAppToolApproval | undefined {
+    return this.chatAppToolApprovals(conversation).find((approval) => {
+      if (
+        approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL ||
+        approval.requesterParticipantId !== requester.id ||
+        !this.isPermissionChangeRequest(approval.request)
+      ) {
+        return false;
+      }
+      if (actor.runId) {
+        if (approval.resumeContext?.runId !== actor.runId) {
+          return false;
+        }
+      } else if (approval.status !== "pending") {
+        return false;
+      }
+      return (
+        this.permissionChangeRequestCovers(approval.request, request) &&
+        this.permissionChangeRequestCovers(request, approval.request)
+      );
+    });
   }
 
   private hasPendingPermissionApproval(
@@ -6761,7 +7960,8 @@ export class ChatService {
 
   private preparePermissionChange(
     requester: ChatParticipant | undefined,
-    request: ChatAppToolApprovalRequest
+    request: ChatAppToolApprovalRequest,
+    currentPermissionsOverride?: ChatAgentPermissions
   ): PreparedPermissionChange {
     if (!requester) {
       throw new Error("The requesting participant is no longer in this chat.");
@@ -6784,11 +7984,13 @@ export class ChatService {
     // stored toggles. In Auto-review mode the provider preset already grants web/edit,
     // so an in-preset request must report already_granted instead of producing a
     // spurious auto-applied approval and an unnecessary session relaunch.
-    const current = effectiveChatAgentPermissionsForProvider(
-      requester.kind,
-      mode,
-      normalizeChatAgentPermissions(requester.permissions)
-    );
+    const current = currentPermissionsOverride
+      ? normalizeChatAgentPermissions(currentPermissionsOverride)
+      : effectiveChatAgentPermissionsForProvider(
+          requester.kind,
+          mode,
+          normalizeChatAgentPermissions(requester.permissions)
+        );
     if (normalizedRequest.kind === "portable") {
       const portablePermissions = normalizedRequest.permissions.filter((permission) => !current[permission]);
       const summaryPermissions = portablePermissions.length > 0 ? portablePermissions : normalizedRequest.permissions;
@@ -10449,6 +11651,19 @@ export class ChatService {
     return updated;
   }
 
+  private chatParticipantHasRun(conversation: Conversation, participantId: string): boolean {
+    if (Array.isArray(conversation.metadata.participantSessions)) {
+      if (conversation.metadata.participantSessions.some((session) => session.participantId === participantId)) {
+        return true;
+      }
+    }
+    const handles = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles);
+    if (Object.values(handles).some((handle) => handle.participantId === participantId)) {
+      return true;
+    }
+    return conversation.messages.some((message) => message.role === "participant" && message.participantId === participantId);
+  }
+
   private syncParticipantFromSavedConfig(
     participant: ChatParticipant,
     config: Pick<ChatParticipantConfig, "id" | "kind" | "avatarId" | "behaviorRuleIds">,
@@ -11122,13 +12337,42 @@ export class ChatService {
 
   cancelRun(runId: string): boolean {
     const controllers = this.chatRunControllers.get(runId);
-    if (!controllers || controllers.size === 0) {
-      return false;
+    let cancelled = false;
+    if (controllers && controllers.size > 0) {
+      for (const controller of controllers) {
+        controller.abort();
+      }
+      cancelled = true;
     }
-    for (const controller of controllers) {
-      controller.abort();
+    const remoteHandle = this.remoteRunHandlesByRun.get(runId);
+    const worker = remoteHandle && !this.isRemoteRunTerminal(remoteHandle.status)
+      ? cloudRunWorkerTargetFromSettings(remoteHandle.worker)
+      : undefined;
+    if (remoteHandle && worker && this.remoteRuns) {
+      cancelled = true;
+      void this.remoteRuns.cancelDetachedRun({
+        conversationId: remoteHandle.conversationId,
+        runId,
+        worker,
+        reason: "user cancelled"
+      })
+        .then((state) => this.updateRemoteRunHandleState(remoteHandle.conversationId, runId, state))
+        .catch((error) => {
+          void this.debugLogs.write("chat.remote-run.cancel.error", {
+            conversationId: remoteHandle.conversationId,
+            runId,
+            message: error instanceof Error ? error.message : String(error)
+          });
+          void this.markRemoteRunCancelFailed(remoteHandle, runId, error).catch((failure) => {
+            void this.debugLogs.write("chat.remote-run.cancel-failure-state.error", {
+              conversationId: remoteHandle.conversationId,
+              runId,
+              message: failure instanceof Error ? failure.message : String(failure)
+            });
+          });
+        });
     }
-    return true;
+    return cancelled;
   }
 
   private async withChatMutation<T>(
@@ -11246,8 +12490,16 @@ export class ChatService {
   }
 
   private async endChatRun(conversation: Conversation, runId: string): Promise<void> {
+    let keepRemoteActive = false;
     try {
       await this.withChatMutation(conversation, async () => {
+        if (this.isNonTerminalRemoteRun(conversation.metadata, runId)) {
+          keepRemoteActive = true;
+          conversation.metadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata, undefined, runId);
+          conversation.updatedAt = new Date().toISOString();
+          this.queueSnapshot(conversation);
+          return;
+        }
         if (this.activeConversationRunRefCount(conversation.id, runId) <= 1) {
           const activeRunIds = readActiveRunIds(conversation.metadata);
           const ownsStoredRunState = activeRunIds.includes(runId) || this.chatRunId(conversation) === runId;
@@ -11260,7 +12512,9 @@ export class ChatService {
         this.queueSnapshot(conversation);
       });
     } finally {
-      this.forgetActiveChatRun(conversation.id, runId);
+      if (!keepRemoteActive) {
+        this.forgetActiveChatRun(conversation.id, runId);
+      }
     }
   }
 

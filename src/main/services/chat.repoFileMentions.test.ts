@@ -1205,6 +1205,55 @@ test("clearInterruptedRuns preserves interrupted warning when startup cleanup fi
   assert.deepEqual(saved?.metadata.warnings, [INTERRUPTED_RUN_WARNING]);
 });
 
+test("clearInterruptedRuns preserves active remote run handles without warning", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant], "/repo");
+  const pending = participantMessage(participant, "pending-remote", "");
+  pending.status = "pending";
+  pending.metadata = {
+    ...pending.metadata,
+    runId: "remote-run",
+    appMessageSource: "remote-run-provider-output"
+  };
+  conversation.messages.push(pending);
+  conversation.metadata = {
+    ...conversation.metadata,
+    running: true,
+    runId: "remote-run",
+    activeRunIds: ["remote-run"],
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        conversationId: conversation.id,
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        worker: { host: "worker.example" },
+        status: "running",
+        startedAt: "2026-06-27T22:00:00.000Z",
+        updatedAt: "2026-06-27T22:00:00.000Z"
+      }
+    }
+  };
+  let saved: Conversation | undefined;
+  const storage = Object.create(StorageService.prototype) as any;
+  storage.queryJson = async (sql: string) => {
+    assert.match(sql, /select id from conversations/);
+    assert.doesNotMatch(sql, /payload_json as payloadJson/);
+    return [{ id: conversation.id }];
+  };
+  storage.queryText = async () => JSON.stringify(conversation);
+  storage.saveConversation = async (next: Conversation) => {
+    saved = cloneConversation(next);
+  };
+
+  await (storage as any).clearInterruptedRuns();
+
+  assert.equal(saved?.metadata.running, true);
+  assert.equal(saved?.metadata.runId, "remote-run");
+  assert.deepEqual(saved?.metadata.activeRunIds, ["remote-run"]);
+  assert.equal(saved?.metadata.warnings, undefined);
+});
+
 test("requestParticipantsFromTool does not wait on top-level run queue", async () => {
   const requester = chatParticipant();
   const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });

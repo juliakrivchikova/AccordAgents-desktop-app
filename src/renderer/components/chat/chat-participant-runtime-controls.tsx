@@ -20,7 +20,9 @@ import type {
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import {
   CHAT_AGENT_MODE_OPTIONS,
-  chatInheritedCliSettingLabel
+  CHAT_RUN_LOCATION_OPTIONS,
+  chatInheritedCliSettingLabel,
+  normalizeChatRunLocation
 } from "./chat-participant-drafts";
 
 const REASONING_DEFAULT_VALUE = "__default__";
@@ -35,25 +37,28 @@ const PARTICIPANT_REQUEST_PERMISSION_OPTIONS = [
 export function ParticipantRuntimeControls(props: {
   participant: ChatParticipant;
   disabled: boolean;
+  runLocationLocked: boolean;
   onUpdate: (
     participantId: string,
-    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions">
+    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">
   ) => void;
 }): JSX.Element {
   const participant = props.participant;
   const mode = normalizeChatAgentMode(participant.agentMode);
+  const runLocation = normalizeChatRunLocation(participant.remoteExecution);
   const reasoningValue = participant.reasoningEffort ?? REASONING_DEFAULT_VALUE;
   const cliSettingLabel = chatInheritedCliSettingLabel(participant.kind);
   const [showPermissions, setShowPermissions] = useState(false);
 
   // Build the patch by key presence so an intentional reset (model: "") is forwarded
   // rather than collapsing back to the current value.
-  function update(patch: Partial<Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions">>): void {
+  function update(patch: Partial<Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">>): void {
     props.onUpdate(participant.id, {
       model: "model" in patch ? patch.model : participant.model,
       reasoningEffort: "reasoningEffort" in patch ? patch.reasoningEffort : participant.reasoningEffort,
       agentMode: "agentMode" in patch ? patch.agentMode : participant.agentMode,
-      permissions: "permissions" in patch ? patch.permissions : participant.permissions
+      permissions: "permissions" in patch ? patch.permissions : participant.permissions,
+      remoteExecution: "remoteExecution" in patch ? patch.remoteExecution : participant.remoteExecution
     });
   }
 
@@ -121,6 +126,26 @@ export function ParticipantRuntimeControls(props: {
             permissions: { ...normalizedPermissions, requestParticipants: value as ChatParticipantRequestPermission }
           })}
         />
+        {participant.kind === "codex-cli" && (
+          <>
+            <span className="chat-rt-dot" aria-hidden>·</span>
+            {props.runLocationLocked ? (
+              <span className="chat-rt-badge" aria-label={`Run location ${runLocation}`}>
+                Run: {runLocation === "remote" ? "Remote" : "Local"}
+              </span>
+            ) : (
+              <GhostSelect
+                ariaLabel="Run location"
+                value={runLocation}
+                disabled={props.disabled}
+                options={CHAT_RUN_LOCATION_OPTIONS}
+                onChange={(value) => update({
+                  remoteExecution: normalizeChatRunLocation(value)
+                })}
+              />
+            )}
+          </>
+        )}
         {isCustomAccess && (
           <>
             <span className="chat-rt-dot" aria-hidden>·</span>

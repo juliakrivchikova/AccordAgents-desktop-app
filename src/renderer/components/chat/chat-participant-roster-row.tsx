@@ -15,6 +15,7 @@ export function ChatParticipantRosterRow(props: {
   removeDisabledReason: string | undefined;
   isRunning: boolean;
   status: ChatParticipantRosterStatus;
+  runLocationLocked: boolean;
   renderParticipantAvatar: (participant: ChatParticipant) => React.ReactNode;
   participantRoleLabel: (participant: ChatParticipant) => string;
   participantRoleArchived: (participant: ChatParticipant) => boolean;
@@ -22,7 +23,7 @@ export function ChatParticipantRosterRow(props: {
   onJumpToLastMessage: (participant: ChatParticipant) => void;
   onUpdateParticipantRuntime: (
     participantId: string,
-    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions">
+    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">
   ) => void;
   onCompactParticipant: (participantId: string) => void;
   onRemoveParticipant: (participantId: string) => void;
@@ -94,6 +95,7 @@ export function ChatParticipantRosterRow(props: {
         <ParticipantRuntimeControls
           participant={props.participant}
           disabled={props.isRunning}
+          runLocationLocked={props.runLocationLocked}
           onUpdate={props.onUpdateParticipantRuntime}
         />
       )}

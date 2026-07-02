@@ -25,7 +25,7 @@
     "test:chat-compact": "npm run build:main && node --test dist/main/main/services/chat.compact.test.js",
     "test:user-skills": "npm run build:main && node --test dist/main/main/services/userSkills.test.js dist/main/main/services/chat.userSkills.test.js",
     "test:avatar-contract": "node --test scripts/avatar-contract.test.mjs",
-    "test:permissions": "npm run build:main && node --test dist/main/main/services/chat.permissions.test.js dist/main/main/services/chat.roleArchive.test.js dist/main/main/services/chat.repoFileMentions.test.js dist/main/main/services/repoFile.test.js dist/main/main/services/chat.participantRequestThreads.test.js dist/main/main/services/chat.rename.test.js dist/main/main/services/git.repoFiles.test.js dist/main/main/services/cliAgents.permissions.test.js dist/main/main/services/warnings.test.js",
+    "test:permissions": "npm run build:main && node --test dist/main/main/services/chat.permissions.test.js dist/main/main/services/remoteRuns.test.js dist/main/main/services/cloudRunDoctor.test.js dist/main/main/services/awsWorkerLifecycle.test.js dist/main/main/services/chat.roleArchive.test.js dist/main/main/services/chat.repoFileMentions.test.js dist/main/main/services/repoFile.test.js dist/main/main/services/chat.participantRequestThreads.test.js dist/main/main/services/chat.rename.test.js dist/main/main/services/git.repoFiles.test.js dist/main/main/services/cliAgents.permissions.test.js dist/main/main/services/warnings.test.js",
     "lint:renderer-styles": "node scripts/check-renderer-style-guardrails.mjs",
     "lint:renderer-line-counts": "node scripts/check-renderer-line-counts.mjs",
     "lint:renderer-orphans": "node scripts/check-renderer-orphans.mjs",
@@ -41,6 +41,7 @@
     "tag-release": "node scripts/tag-release.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-ec2": "^3.1079.0",
     "@fontsource-variable/geist": "^5.2.8",
     "@fontsource-variable/hanken-grotesk": "^5.2.8",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",

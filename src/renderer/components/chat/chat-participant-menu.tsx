@@ -3,7 +3,8 @@ import type {
   AgentHealth,
   AppSettings,
   ChatParticipant,
-  ChatParticipantConfig
+  ChatParticipantConfig,
+  CloudRunRemoteExecutionMode
 } from "../../../shared/types";
 import { Avatar } from "../avatar/avatar";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
@@ -20,6 +21,7 @@ import {
   addableSavedParticipantConfigs,
   activeChatRoleConfigs,
   chatParticipantPermissionSummary,
+  chatRunLocationLabel,
   labelForProviderKind,
   normalizedChatDrafts,
   validateChatCliAgents,
@@ -32,6 +34,7 @@ export { RosterStatusIndicator } from "./chat-roster-status";
 
 export function ChatParticipantMenu(props: {
   participants: ChatParticipant[];
+  participantHasRunById: ReadonlyMap<string, boolean>;
   settings: AppSettings;
   agents: AgentHealth[];
   draft: string;
@@ -41,10 +44,10 @@ export function ChatParticipantMenu(props: {
   onDraftChange: (value: string) => void;
   onAddParticipantDraftChange: (draft: ChatParticipantDraft) => void;
   onAddParticipant: () => void;
-  onAddSavedParticipant: (participant: ChatParticipantConfig) => void;
+  onAddSavedParticipant: (participant: ChatParticipantConfig, remoteExecution?: CloudRunRemoteExecutionMode) => void;
   onUpdateParticipantRuntime: (
     participantId: string,
-    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions">
+    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">
   ) => void;
   onCompactParticipant: (participantId: string) => void;
   onRemoveParticipant: (participantId: string) => void;
@@ -64,6 +67,7 @@ export function ChatParticipantMenu(props: {
   return (
     <ChatParticipantMenuView
       participants={props.participants}
+      participantHasRunById={props.participantHasRunById}
       draft={props.draft}
       addValidation={addValidation}
       isRunning={props.isRunning}
@@ -102,6 +106,7 @@ export function ChatParticipantMenu(props: {
 function savedParticipantSummary(settings: AppSettings, participant: ChatParticipantConfig): string {
   return [
     labelForProviderKind(settings.providers, participant.kind),
+    participant.kind === "codex-cli" ? `run ${chatRunLocationLabel(participant.remoteExecution).toLowerCase()}` : "",
     participant.model,
     participant.reasoningEffort ? `reasoning ${chatReasoningEffortLabel(participant.reasoningEffort)}` : "",
     chatParticipantPermissionSummary(participant)

@@ -135,6 +135,7 @@ function App(): JSX.Element {
       {view.activeChatConversation && (
         <ChatParticipantMenu
           participants={view.activeChatParticipants}
+          participantHasRunById={view.participantHasRunById}
           settings={state.settings}
           agents={state.agents}
           draft={state.chatMessageDraft}
@@ -144,7 +145,7 @@ function App(): JSX.Element {
           onDraftChange={state.setChatMessageDraft}
           onAddParticipantDraftChange={state.setChatAddParticipantDraft}
           onAddParticipant={() => void chatActions.addChatParticipant()}
-          onAddSavedParticipant={(participant) => void chatActions.addSavedChatParticipant(participant)}
+          onAddSavedParticipant={(participant, remoteExecution) => void chatActions.addSavedChatParticipant(participant, remoteExecution)}
           onUpdateParticipantRuntime={(participantId, patch) => void chatActions.updateChatParticipantRuntime(participantId, patch)}
           onCompactParticipant={(participantId) => void chatActions.compactChatParticipant(participantId)}
           onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
@@ -231,6 +232,7 @@ function App(): JSX.Element {
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
           setCliAgentRunTimeoutMs={settingsActions.setCliAgentRunTimeoutMs}
           setChatParticipantRequestMaxDepth={settingsActions.setChatParticipantRequestMaxDepth}
+          saveCloudRunsSettings={settingsActions.saveCloudRunsSettings}
           sidebarCollapsed={state.sidebarCollapsed}
           onExpandSidebar={() => state.setSidebarCollapsed(false)}
           onClose={closeSettings}
@@ -248,6 +250,7 @@ function App(): JSX.Element {
                 repoPath={state.repoPath}
                 repoInfo={state.repoInfo}
                 selectedParticipantIds={state.selectedChatParticipantConfigIds}
+                selectedParticipantRunLocations={state.selectedChatParticipantRunLocations}
                 settings={state.settings}
                 agents={state.agents}
                 busy={state.busy}
@@ -261,6 +264,7 @@ function App(): JSX.Element {
                 onRepoBlur={(path) => void conversationActions.inspectRepo(path)}
                 onSelectRepo={() => void conversationActions.selectRepo()}
                 onSelectedParticipantIdsChange={conversationActions.updateSelectedChatParticipantConfigIds}
+                onSelectedParticipantRunLocationsChange={state.setSelectedChatParticipantRunLocations}
                 onOpenParticipantsSettings={() => openSettingsSection("participants")}
                 onStart={(repoFileMentions, imageAttachments, skillMentions) => chatActions.startChat({ repoFileMentions, imageAttachments, skillMentions })}
               />

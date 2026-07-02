@@ -59,6 +59,7 @@ export function useAppViewModel(state: AppState) {
   const activeChatConversation = state.conversation?.kind === "chat" ? state.conversation : undefined;
   const activeChatParticipants = useMemo(() => activeChatConversation ? chatParticipants(activeChatConversation) : [], [activeChatConversation]);
   const participantStatusById = useMemo(() => buildParticipantStatusMap(activeChatConversation), [activeChatConversation]);
+  const participantHasRunById = useMemo(() => buildParticipantHasRunMap(activeChatConversation), [activeChatConversation]);
 
   return {
     openingConversation,
@@ -80,8 +81,42 @@ export function useAppViewModel(state: AppState) {
     visibleProgressLog,
     activeChatConversation,
     activeChatParticipants,
-    participantStatusById
+    participantStatusById,
+    participantHasRunById
   };
+}
+
+function buildParticipantHasRunMap(activeChatConversation: Conversation | undefined): Map<string, boolean> {
+  const markers = new Map<string, boolean>();
+  if (!activeChatConversation) {
+    return markers;
+  }
+  const participantIds = new Set(chatParticipants(activeChatConversation).map((participant) => participant.id));
+  const sessions = Array.isArray(activeChatConversation.metadata.participantSessions)
+    ? activeChatConversation.metadata.participantSessions
+    : [];
+  for (const session of sessions) {
+    if (participantIds.has(session.participantId)) {
+      markers.set(session.participantId, true);
+    }
+  }
+  const handles = activeChatConversation.metadata.remoteRunHandles;
+  if (handles && typeof handles === "object" && !Array.isArray(handles)) {
+    for (const handle of Object.values(handles)) {
+      if (handle && typeof handle === "object" && !Array.isArray(handle)) {
+        const participantId = (handle as { participantId?: unknown }).participantId;
+        if (typeof participantId === "string" && participantIds.has(participantId)) {
+          markers.set(participantId, true);
+        }
+      }
+    }
+  }
+  for (const message of activeChatConversation.messages) {
+    if (message.role === "participant" && message.participantId && participantIds.has(message.participantId)) {
+      markers.set(message.participantId, true);
+    }
+  }
+  return markers;
 }
 
 function buildParticipantStatusMap(activeChatConversation: Conversation | undefined): Map<string, ChatParticipantRosterStatus> {

@@ -17,10 +17,144 @@ export interface ProviderSettings {
   model?: string;
 }
 
+export type CloudRunRemoteExecutionMode = "inherit" | "local" | "remote";
+
+export type CloudRunStatus = "running" | "completed" | "failed" | "cancelled" | "unknown";
+
+export interface CloudRunWorkerSettings {
+  host?: string;
+  user?: string;
+  port?: number;
+  identityFile?: string;
+  workerRoot?: string;
+  remoteCwd?: string;
+  codexPath?: string;
+}
+
+export type CloudRunWorkerMode = "ssh" | "aws";
+
+export interface AwsWorkerHandleInfo {
+  instanceId: string;
+  securityGroupId: string;
+  keyName: string;
+  region: string;
+  instanceType: string;
+  createdAt: string;
+}
+
+export interface CloudRunsSettings {
+  enabled: boolean;
+  mode: CloudRunWorkerMode;
+  worker: CloudRunWorkerSettings;
+  // AWS-managed worker: credentials are stored encrypted and never returned to
+  // the renderer; only hasAwsCredentials + the non-sensitive handle are exposed.
+  hasAwsCredentials: boolean;
+  awsHandle?: AwsWorkerHandleInfo;
+  awsRegion?: string;
+  maxRuntimeMs: number;
+  pollIntervalMs: number;
+}
+
+export interface CloudRunsSettingsUpdate {
+  enabled?: boolean;
+  mode?: CloudRunWorkerMode;
+  worker?: CloudRunWorkerSettings;
+  maxRuntimeMs?: number;
+  pollIntervalMs?: number;
+}
+
+export type AwsWorkerLifecycleState =
+  | "absent"
+  | "pending"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "terminated";
+
+export interface AwsWorkerStatus {
+  configured: boolean;
+  handle?: AwsWorkerHandleInfo;
+  state?: AwsWorkerLifecycleState;
+  publicIp?: string;
+  message?: string;
+}
+
+export interface ConnectAwsWorkerRequest {
+  blob: string;
+  instanceType?: string;
+}
+
+export interface CloudRunWorkerTestResult {
+  ok: boolean;
+  message: string;
+}
+
+export type CloudRunWorkerCheckId =
+  | "connect"
+  | "sudo"
+  | "rsync"
+  | "git"
+  | "gh"
+  | "node"
+  | "build-essential"
+  | "codex"
+  | "codex-auth"
+  | "git-identity"
+  | "userns";
+
+export type CloudRunWorkerCheckStatus = "pass" | "warn" | "fail";
+
+export interface CloudRunWorkerCheck {
+  id: CloudRunWorkerCheckId;
+  label: string;
+  status: CloudRunWorkerCheckStatus;
+  detail?: string;
+  // True when "Set up worker" knows how to repair this check automatically.
+  fixable?: boolean;
+}
+
+export interface CloudRunWorkerDoctorReport {
+  ok: boolean;
+  message: string;
+  checks: CloudRunWorkerCheck[];
+}
+
+export interface CloudRunWorkerSetupProgress {
+  stage: string;
+  message: string;
+  // Present while the codex device-auth fix waits for the user to approve the
+  // sign-in in their browser.
+  authUrl?: string;
+  authCode?: string;
+}
+
+export interface RemoteRunSyncInfo {
+  localPath: string;
+  remotePath?: string;
+}
+
+export interface RemoteRunHandle {
+  runId: string;
+  conversationId: string;
+  participantId: string;
+  participantHandle?: string;
+  worker: CloudRunWorkerSettings;
+  status: CloudRunStatus;
+  workerCursorSeq?: number;
+  providerOutputMessageId?: string;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  lastPolledAt?: string;
+  error?: string;
+  sync?: RemoteRunSyncInfo;
+}
+
 export interface AppSettings {
   roundLimitDefault: number;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
+  cloudRuns: CloudRunsSettings;
   providers: ProviderSettings[];
   chatRoleConfigs: ChatRoleConfig[];
   chatBehaviorRules: ChatBehaviorRuleConfig[];
@@ -238,6 +372,7 @@ export interface ChatParticipant {
   avatarId?: string;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
+  remoteExecution?: CloudRunRemoteExecutionMode;
 }
 
 export interface ChatParticipantSession {
@@ -305,6 +440,7 @@ export interface ChatRosterChangeParticipantInput {
   avatarId?: string;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
+  remoteExecution?: CloudRunRemoteExecutionMode;
 }
 
 export interface ChatRosterChangeAddOperation {
@@ -372,6 +508,7 @@ export interface ChatExistingParticipantOverrides {
   reasoningEffort?: ChatReasoningEffort;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
+  remoteExecution?: CloudRunRemoteExecutionMode;
 }
 
 export interface ChatParticipantAddExistingOperation {
@@ -515,6 +652,7 @@ export interface ChatRosterCurrentParticipant {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   agentMode?: ChatAgentMode;
+  remoteExecution?: CloudRunRemoteExecutionMode;
 }
 
 export interface ChatRosterAvailableOptions {
@@ -550,6 +688,25 @@ export type ChatAppToolApprovalStatus = "pending" | "approved" | "denied" | "aut
 
 export type ChatAppToolApprovalScope = "once" | "chat";
 
+export type ChatPermissionRequestToolStatus =
+  | "pending_user_approval"
+  | "approved"
+  | "denied"
+  | "already_granted"
+  | "not_found";
+
+export interface ChatPermissionRequestToolResult {
+  ok: boolean;
+  status: ChatPermissionRequestToolStatus;
+  requestId?: string;
+  approvalId?: string;
+  summary?: string;
+  request?: ChatPermissionChangeRequest;
+  approvalScope?: ChatAppToolApprovalScope;
+  updatedAt?: string;
+  error?: string;
+}
+
 export type ChatAppToolApprovalRequest =
   | ChatRosterChangeRequest
   | ChatRoleChangeRequest
@@ -578,6 +735,7 @@ export interface ChatAppToolApproval {
     runId: string;
     triggerMessageId: string;
     participantRequestBatchId?: string;
+    remoteRun?: boolean;
   };
   consumedAt?: string;
   error?: string;
@@ -702,6 +860,7 @@ export interface ChatParticipantConfig {
   avatarId?: string;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
+  remoteExecution?: CloudRunRemoteExecutionMode;
   updatedAt: string;
 }
 
@@ -716,6 +875,7 @@ export interface ChatParticipantConfigUpdate {
   avatarId?: string;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
+  remoteExecution?: CloudRunRemoteExecutionMode;
 }
 
 export interface ChatParticipantInput {
@@ -729,6 +889,7 @@ export interface ChatParticipantInput {
   avatarId?: string;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
+  remoteExecution?: CloudRunRemoteExecutionMode;
 }
 
 export interface CreateChatConversationRequest {
@@ -750,6 +911,7 @@ export interface UpdateChatParticipantRuntimeRequest {
   reasoningEffort?: ChatReasoningEffort;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
+  remoteExecution?: CloudRunRemoteExecutionMode;
 }
 
 export interface RemoveChatParticipantRequest {
@@ -1261,6 +1423,15 @@ export interface AppBridge {
   setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<AppSettings>;
   setCliAgentRunTimeoutMs(timeoutMs: number): Promise<AppSettings>;
   setChatParticipantRequestMaxDepth(maxDepth: number): Promise<AppSettings>;
+  saveCloudRunsSettings(update: CloudRunsSettingsUpdate): Promise<AppSettings>;
+  testCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerTestResult>;
+  diagnoseCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport>;
+  setupCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport>;
+  onCloudRunSetupProgress(callback: (progress: CloudRunWorkerSetupProgress) => void): () => void;
+  getAwsWorkerBootstrapCommand(region: string): Promise<string>;
+  connectAwsWorker(request: ConnectAwsWorkerRequest): Promise<AwsWorkerStatus>;
+  getAwsWorkerStatus(): Promise<AwsWorkerStatus>;
+  deleteAwsWorker(): Promise<AwsWorkerStatus>;
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;
