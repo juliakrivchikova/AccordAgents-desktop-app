@@ -6,7 +6,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
   cloudRuns: {
     enabled: false,
+    mode: "ssh",
     worker: {},
+    hasAwsCredentials: false,
     maxRuntimeMs: 24 * 60 * 60_000,
     pollIntervalMs: 2_500
   },

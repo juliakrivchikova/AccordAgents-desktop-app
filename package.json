@@ -41,6 +41,7 @@
     "tag-release": "node scripts/tag-release.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-ec2": "^3.1079.0",
     "@fontsource-variable/geist": "^5.2.8",
     "@fontsource-variable/hanken-grotesk": "^5.2.8",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",

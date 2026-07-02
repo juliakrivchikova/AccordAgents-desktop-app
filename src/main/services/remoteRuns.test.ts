@@ -997,7 +997,7 @@ async function testRemoteRun(options: {
       return {
         roundLimitDefault: 1,
         cliAgentRunTimeoutMs: 24 * 60 * 60_000,
-        cloudRuns: { enabled: false, worker: {}, maxRuntimeMs: 24 * 60 * 60_000, pollIntervalMs: 2_500 },
+        cloudRuns: { enabled: false, mode: "ssh", worker: {}, hasAwsCredentials: false, maxRuntimeMs: 24 * 60 * 60_000, pollIntervalMs: 2_500 },
         providers: [
           { kind: "codex-cli", label: "Codex CLI", enabled: true },
           { kind: "claude-code", label: "Claude Code", enabled: true }
@@ -1227,7 +1227,9 @@ function coordinatorSettings(patch: { maxRuntimeMs: number; pollIntervalMs: numb
         cliAgentRunTimeoutMs: 24 * 60 * 60_000,
         cloudRuns: {
           enabled: true,
+          mode: "ssh",
           worker: { host: "worker.example" },
+          hasAwsCredentials: false,
           maxRuntimeMs: patch.maxRuntimeMs,
           pollIntervalMs: patch.pollIntervalMs
         },

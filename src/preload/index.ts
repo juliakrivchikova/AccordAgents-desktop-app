@@ -7,6 +7,7 @@ import type {
   CloudRunsSettingsUpdate,
   CloudRunWorkerSettings,
   CloudRunWorkerSetupProgress,
+  ConnectAwsWorkerRequest,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
@@ -59,6 +60,10 @@ const bridge: AppBridge = {
     ipcRenderer.on("cloud-runs:setup-progress", listener);
     return () => ipcRenderer.removeListener("cloud-runs:setup-progress", listener);
   },
+  getAwsWorkerBootstrapCommand: (region: string) => ipcRenderer.invoke("cloud-runs:aws-bootstrap-command", region),
+  connectAwsWorker: (request: ConnectAwsWorkerRequest) => ipcRenderer.invoke("cloud-runs:aws-connect", request),
+  getAwsWorkerStatus: () => ipcRenderer.invoke("cloud-runs:aws-status"),
+  deleteAwsWorker: () => ipcRenderer.invoke("cloud-runs:aws-delete"),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateProviderSettings: (update: ProviderSettingsUpdate) => ipcRenderer.invoke("settings:update-provider", update),
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => ipcRenderer.invoke("settings:save-chat-role", update),

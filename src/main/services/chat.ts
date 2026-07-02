@@ -445,6 +445,14 @@ interface RemoteRunCoordinatorControl {
   trackRun(handle: RemoteRunHandle): void;
 }
 
+// AWS-managed worker hook: resolves a run-ready SSH target (starting the
+// instance if needed) and tracks activity for idle auto-stop.
+interface CloudRunAwsResolver {
+  ensureWorkerForRun(): Promise<CloudRunWorkerSettings>;
+  noteRunStarted(): void;
+  noteRunEnded(): Promise<void>;
+}
+
 export class ChatService {
   private readonly saveQueues = new Map<string, Promise<void>>();
   private readonly runQueues = new Map<string, Promise<void>>();
@@ -467,6 +475,7 @@ export class ChatService {
   private readonly remoteRunHandlesByRun = new Map<string, RemoteRunHandle>();
   private remoteRuns?: RemoteRunStarter;
   private remoteRunCoordinator?: RemoteRunCoordinatorControl;
+  private cloudRunAws?: CloudRunAwsResolver;
 
   constructor(
     private readonly storage: StorageService,
@@ -484,6 +493,10 @@ export class ChatService {
 
   setRemoteRunCoordinator(coordinator: RemoteRunCoordinatorControl): void {
     this.remoteRunCoordinator = coordinator;
+  }
+
+  setCloudRunAwsService(service: CloudRunAwsResolver): void {
+    this.cloudRunAws = service;
   }
 
   onAppToolApprovalDecision(listener: (event: ChatAppToolApprovalDecisionEvent) => Promise<void> | void): () => void {
@@ -1539,6 +1552,9 @@ export class ChatService {
       };
       if (this.isRemoteRunTerminal(nextHandle.status)) {
         this.clearRemoteRunActiveState(conversation, runId);
+        // Transitioned live → terminal: release the AWS idle ref-count so the
+        // instance can auto-stop once no runs remain.
+        void this.cloudRunAws?.noteRunEnded();
       } else {
         this.ensureRemoteRunRemembered(conversation.id, runId);
         conversation.metadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata, undefined, runId);
@@ -4279,6 +4295,9 @@ export class ChatService {
           if (updated) {
             this.remoteRunCoordinator?.trackRun(updated);
           }
+          if (remoteRunTarget.settings.mode === "aws") {
+            this.cloudRunAws?.noteRunStarted();
+          }
           remoteDetachedStarted = true;
           this.emitProgress(runId, progress, "done", `@${participant.handle} is running remotely.`, {
             participantLabel: `@${participant.handle}`,
@@ -5471,7 +5490,27 @@ export class ChatService {
         message: `@${participant.handle} requested remote execution, but Cloud Runs currently supports Codex participants only.`
       };
     }
-    const workerSettings = normalizeCloudRunWorkerSettings(settings.worker);
+    let workerSettings: CloudRunWorkerSettings;
+    if (settings.mode === "aws") {
+      if (!this.cloudRunAws) {
+        return {
+          ok: false,
+          message: `@${participant.handle} requested remote execution, but the AWS worker is not available in this app session.`
+        };
+      }
+      try {
+        // May start a stopped instance and re-open SSH ingress; can take a
+        // couple of minutes on a cold start.
+        workerSettings = await this.cloudRunAws.ensureWorkerForRun();
+      } catch (error) {
+        return {
+          ok: false,
+          message: `@${participant.handle} requested remote execution, but the AWS worker could not be started: ${error instanceof Error ? error.message : String(error)}`
+        };
+      }
+    } else {
+      workerSettings = normalizeCloudRunWorkerSettings(settings.worker);
+    }
     const worker = cloudRunWorkerTargetFromSettings(workerSettings);
     if (!worker) {
       return {

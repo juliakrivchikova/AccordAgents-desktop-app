@@ -4149,7 +4149,9 @@ function testService(options: {
     cliAgentRunTimeoutMs: 24 * 60 * 60_000,
     cloudRuns: {
       enabled: options.settings?.cloudRuns?.enabled ?? false,
+      mode: options.settings?.cloudRuns?.mode ?? "ssh",
       worker: options.settings?.cloudRuns?.worker ?? {},
+      hasAwsCredentials: options.settings?.cloudRuns?.hasAwsCredentials ?? false,
       maxRuntimeMs: options.settings?.cloudRuns?.maxRuntimeMs ?? 24 * 60 * 60_000,
       pollIntervalMs: options.settings?.cloudRuns?.pollIntervalMs ?? 2_500
     },

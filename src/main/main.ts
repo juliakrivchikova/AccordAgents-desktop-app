@@ -8,6 +8,7 @@ import type {
   ChatSavedPromptConfigUpdate,
   CloudRunsSettingsUpdate,
   CloudRunWorkerSettings,
+  ConnectAwsWorkerRequest,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
@@ -51,6 +52,7 @@ import { bootstrapAppUpdater } from "./services/appUpdater";
 import { ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { CloudRunDoctorService } from "./services/cloudRunDoctor";
+import { CloudRunAwsService } from "./services/cloudRunAws";
 import { DebugLogService } from "./services/debugLogs";
 import { GitService } from "./services/git";
 import { ProviderRunner } from "./services/providers";
@@ -106,6 +108,12 @@ const cloudRunDoctorService = new CloudRunDoctorService({
     void debugLogService.write(event, payload);
   }
 });
+const cloudRunAwsService = new CloudRunAwsService(settingsService, {
+  logger: (event, payload) => {
+    void debugLogService.write(event, payload);
+  }
+});
+chatService.setCloudRunAwsService(cloudRunAwsService);
 const remoteRunCoordinator = new RemoteRunCoordinator(remoteRunService, chatService, settingsService, debugLogService);
 chatService.setRemoteRunService(remoteRunService);
 chatService.setRemoteRunCoordinator(remoteRunCoordinator);
@@ -242,6 +250,12 @@ function registerIpc(): void {
       mainWindow?.webContents.send("cloud-runs:setup-progress", progress);
     });
   });
+  ipcMain.handle("cloud-runs:aws-bootstrap-command", (_event, region: string) =>
+    cloudRunAwsService.bootstrapCommand(String(region ?? "").trim() || "us-east-1"));
+  ipcMain.handle("cloud-runs:aws-connect", (_event, request: ConnectAwsWorkerRequest) =>
+    cloudRunAwsService.connectWorker(request.blob, request.instanceType));
+  ipcMain.handle("cloud-runs:aws-status", () => cloudRunAwsService.status());
+  ipcMain.handle("cloud-runs:aws-delete", () => cloudRunAwsService.deleteWorker());
   ipcMain.handle("settings:update-provider", (_event, update: ProviderSettingsUpdate) => settingsService.updateProvider(update));
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));
   ipcMain.handle("settings:archive-chat-role", (_event, id: string) => settingsService.archiveChatRoleConfig(id));

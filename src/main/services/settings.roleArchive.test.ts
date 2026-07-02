@@ -36,7 +36,7 @@ function settingsServiceWith(
     settingsVersion: 1,
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
-    cloudRuns: { enabled: false, worker: {}, maxRuntimeMs: 24 * 60 * 60_000, pollIntervalMs: 2_500 },
+    cloudRuns: { enabled: false, mode: "ssh" as const, worker: {}, hasAwsCredentials: false, maxRuntimeMs: 24 * 60 * 60_000, pollIntervalMs: 2_500 },
     providers: [],
     chatRoleConfigs: initial.chatRoleConfigs ?? [],
     chatBehaviorRules: [],

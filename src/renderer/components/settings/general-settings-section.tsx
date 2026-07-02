@@ -4,9 +4,11 @@ import { Check, ChevronDown, Code2, ExternalLink, FolderOpen, HelpCircle, Server
 
 import type {
   AgentHealth,
+  AwsWorkerStatus,
   CloudRunsSettings,
   CloudRunsSettingsUpdate,
   CloudRunWorkerDoctorReport,
+  CloudRunWorkerMode,
   CloudRunWorkerSetupProgress,
   ProviderKind,
   ProviderSettings,
@@ -175,12 +177,17 @@ function CloudRunsControl(props: {
     }
   };
 
+  const setMode = (mode: CloudRunWorkerMode): void => {
+    patch({ mode });
+    void props.onSave({ mode });
+  };
+
   return (
     <div className="gen-card">
       <div className="gen-row">
         <div className="gen-row-text">
           <div className="gen-row-title">Remote Codex worker</div>
-          <div className="gen-row-desc">Use one pre-provisioned SSH worker for Codex participants marked remote.</div>
+          <div className="gen-row-desc">Run Codex participants marked remote on a worker instead of this machine.</div>
         </div>
         <label className="toggle">
           <input
@@ -192,6 +199,35 @@ function CloudRunsControl(props: {
         </label>
       </div>
       <div className="gen-card-divider" />
+      <div className="gen-row">
+        <div className="gen-row-text">
+          <div className="gen-row-title">Worker source</div>
+          <div className="gen-row-desc">Let the app create and manage an EC2 worker, or point it at a box you own.</div>
+        </div>
+        <div className="gen-segmented" role="tablist" aria-label="Worker source">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={draft.mode === "aws"}
+            className={`gen-segment ${draft.mode === "aws" ? "is-active" : ""}`}
+            onClick={() => setMode("aws")}
+          >
+            App-managed (AWS)
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={draft.mode !== "aws"}
+            className={`gen-segment ${draft.mode !== "aws" ? "is-active" : ""}`}
+            onClick={() => setMode("ssh")}
+          >
+            My own box (SSH)
+          </button>
+        </div>
+      </div>
+      <div className="gen-card-divider" />
+      {draft.mode === "aws" ? <AwsWorkerPanel settings={draft} /> : null}
+      <div className={draft.mode === "aws" ? "gen-collapsed" : ""} hidden={draft.mode === "aws"}>
       <div className="gen-row gen-row-stack">
         <div className="gen-row-text">
           <div className="gen-row-title">SSH target</div>
@@ -282,6 +318,145 @@ function CloudRunsControl(props: {
           </ul>
         </>
       )}
+      </div>
+    </div>
+  );
+}
+
+function AwsWorkerPanel(props: { settings: CloudRunsSettings }): JSX.Element {
+  const [region, setRegion] = useState(props.settings.awsRegion ?? "us-east-1");
+  const [command, setCommand] = useState<string>("");
+  const [blob, setBlob] = useState<string>("");
+  const [status, setStatus] = useState<AwsWorkerStatus | null>(null);
+  const [message, setMessage] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void window.consensus.getAwsWorkerStatus().then(setStatus).catch(() => undefined);
+  }, []);
+
+  const loadCommand = async (): Promise<void> => {
+    setBusy(true);
+    try {
+      setCommand(await window.consensus.getAwsWorkerBootstrapCommand(region.trim() || "us-east-1"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const connect = async (): Promise<void> => {
+    setBusy(true);
+    setMessage("Creating worker… this can take a minute.");
+    try {
+      const next = await window.consensus.connectAwsWorker({ blob: blob.trim() });
+      setStatus(next);
+      setBlob("");
+      setMessage(next.configured ? "Worker created." : (next.message ?? "Done."));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const refresh = async (): Promise<void> => {
+    setBusy(true);
+    try {
+      setStatus(await window.consensus.getAwsWorkerStatus());
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (): Promise<void> => {
+    setBusy(true);
+    setMessage("Deleting worker…");
+    try {
+      setStatus(await window.consensus.deleteAwsWorker());
+      setMessage("Worker deleted.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (status?.configured) {
+    return (
+      <div className="gen-aws">
+        <div className="gen-row">
+          <div className="gen-row-text">
+            <div className="gen-row-title">AWS worker</div>
+            <div className="gen-row-desc">
+              {status.handle?.instanceId} · {status.state ?? "unknown"}
+              {status.publicIp ? ` · ${status.publicIp}` : ""}
+              {status.message ? ` · ${status.message}` : ""}
+            </div>
+            <div className="gen-row-desc">Starts automatically for a remote run and stops when idle.</div>
+          </div>
+          <div className="gen-actions">
+            <button type="button" className="gen-pill" disabled={busy} onClick={() => void refresh()}>
+              <span className="gen-pill-label">Refresh</span>
+            </button>
+            <button type="button" className="gen-pill gen-pill-danger" disabled={busy} onClick={() => void remove()}>
+              <span className="gen-pill-label">Delete worker</span>
+            </button>
+          </div>
+        </div>
+        {message ? <div className="gen-row-desc gen-aws-message">{message}</div> : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="gen-aws">
+      <div className="gen-row gen-row-stack">
+        <div className="gen-row-text">
+          <div className="gen-row-title">Create an AWS worker</div>
+          <div className="gen-row-desc">
+            Run the command below in a terminal that has AWS access. It creates a scoped key; paste the result here and the app
+            launches and manages the instance.
+          </div>
+        </div>
+        <div className="gen-grid-form gen-grid-form-compact">
+          <input
+            className="gen-input"
+            aria-label="AWS region"
+            placeholder="Region (us-east-1)"
+            value={region}
+            onChange={(event) => setRegion(event.target.value)}
+          />
+          <button type="button" className="gen-pill" disabled={busy} onClick={() => void loadCommand()}>
+            <span className="gen-pill-label">Show setup command</span>
+          </button>
+        </div>
+      </div>
+      {command ? (
+        <pre className="gen-aws-command" aria-label="AWS setup command">{command}</pre>
+      ) : null}
+      <div className="gen-row gen-row-stack">
+        <div className="gen-row-text">
+          <div className="gen-row-title">Paste the result</div>
+          <div className="gen-row-desc">The command prints a line starting with <code>accord-aws-v1:</code></div>
+        </div>
+        <textarea
+          className="gen-input gen-aws-paste"
+          placeholder="accord-aws-v1:…"
+          value={blob}
+          onChange={(event) => setBlob(event.target.value)}
+        />
+      </div>
+      <div className="gen-row">
+        <div className="gen-row-text">
+          <div className="gen-row-title">{message || "Not connected"}</div>
+        </div>
+        <div className="gen-actions">
+          <button type="button" className="gen-pill" disabled={busy || !blob.trim()} onClick={() => void connect()}>
+            <span className="gen-pill-lead"><Server size={16} /></span>
+            <span className="gen-pill-label">Create worker</span>
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

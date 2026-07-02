@@ -31,18 +31,57 @@ export interface CloudRunWorkerSettings {
   codexPath?: string;
 }
 
+export type CloudRunWorkerMode = "ssh" | "aws";
+
+export interface AwsWorkerHandleInfo {
+  instanceId: string;
+  securityGroupId: string;
+  keyName: string;
+  region: string;
+  instanceType: string;
+  createdAt: string;
+}
+
 export interface CloudRunsSettings {
   enabled: boolean;
+  mode: CloudRunWorkerMode;
   worker: CloudRunWorkerSettings;
+  // AWS-managed worker: credentials are stored encrypted and never returned to
+  // the renderer; only hasAwsCredentials + the non-sensitive handle are exposed.
+  hasAwsCredentials: boolean;
+  awsHandle?: AwsWorkerHandleInfo;
+  awsRegion?: string;
   maxRuntimeMs: number;
   pollIntervalMs: number;
 }
 
 export interface CloudRunsSettingsUpdate {
   enabled?: boolean;
+  mode?: CloudRunWorkerMode;
   worker?: CloudRunWorkerSettings;
   maxRuntimeMs?: number;
   pollIntervalMs?: number;
+}
+
+export type AwsWorkerLifecycleState =
+  | "absent"
+  | "pending"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "terminated";
+
+export interface AwsWorkerStatus {
+  configured: boolean;
+  handle?: AwsWorkerHandleInfo;
+  state?: AwsWorkerLifecycleState;
+  publicIp?: string;
+  message?: string;
+}
+
+export interface ConnectAwsWorkerRequest {
+  blob: string;
+  instanceType?: string;
 }
 
 export interface CloudRunWorkerTestResult {
@@ -1347,6 +1386,10 @@ export interface AppBridge {
   diagnoseCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport>;
   setupCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport>;
   onCloudRunSetupProgress(callback: (progress: CloudRunWorkerSetupProgress) => void): () => void;
+  getAwsWorkerBootstrapCommand(region: string): Promise<string>;
+  connectAwsWorker(request: ConnectAwsWorkerRequest): Promise<AwsWorkerStatus>;
+  getAwsWorkerStatus(): Promise<AwsWorkerStatus>;
+  deleteAwsWorker(): Promise<AwsWorkerStatus>;
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;
