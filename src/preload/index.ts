@@ -37,6 +37,7 @@ import type {
   ToggleChatReactionRequest,
   UpdateChatParticipantRuntimeRequest,
   RemoveChatParticipantRequest,
+  UserProfileSettings,
   UserSkillDiagnosticsRequest,
   UserSkillSearchRequest
 } from "../shared/types";
@@ -50,6 +51,7 @@ const bridge: AppBridge = {
   setCliAgentRunTimeoutMs: (timeoutMs: number) => ipcRenderer.invoke("settings:set-cli-agent-run-timeout", timeoutMs),
   setChatParticipantRequestMaxDepth: (maxDepth: number) =>
     ipcRenderer.invoke("settings:set-chat-participant-request-max-depth", maxDepth),
+  saveUserProfileSettings: (profile: UserProfileSettings) => ipcRenderer.invoke("settings:save-user-profile", profile),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateProviderSettings: (update: ProviderSettingsUpdate) => ipcRenderer.invoke("settings:update-provider", update),
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => ipcRenderer.invoke("settings:save-chat-role", update),

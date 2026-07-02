@@ -37,6 +37,7 @@ import type {
   ToggleChatReactionRequest,
   UpdateChatParticipantRuntimeRequest,
   RemoveChatParticipantRequest,
+  UserProfileSettings,
   UserSkillDiagnosticsRequest,
   UserSkillSearchRequest
 } from "../shared/types";
@@ -172,6 +173,9 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:set-chat-participant-request-max-depth", (_event, maxDepth: number) => {
     return settingsService.setChatParticipantRequestMaxDepth(maxDepth);
+  });
+  ipcMain.handle("settings:save-user-profile", (_event, profile: UserProfileSettings) => {
+    return settingsService.saveUserProfileSettings(profile);
   });
   ipcMain.handle("settings:update-provider", (_event, update: ProviderSettingsUpdate) => settingsService.updateProvider(update));
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));

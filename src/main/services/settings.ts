@@ -21,7 +21,9 @@ import type {
   ChatRoleConfigUpdate,
   ProviderSettings,
   ProviderSettingsUpdate,
-  RepoFileOpenAction
+  RepoFileOpenAction,
+  UserProfileAvatarColor,
+  UserProfileSettings
 } from "../../shared/types";
 import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { normalizeChatAppToolCapabilities } from "../../shared/appTools";
@@ -49,6 +51,7 @@ interface StoredSettings {
   roundLimitDefault: number;
   cliAgentRunTimeoutMs?: number;
   chatParticipantRequestMaxDepth?: number;
+  userProfile?: UserProfileSettings;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
   providers: StoredProviderSettings[];
@@ -69,6 +72,16 @@ const DEFAULT_PROVIDER_KINDS = new Set<ProviderSettings["kind"]>(DEFAULT_PROVIDE
 const CHAT_HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 const CHAT_ROLE_LABEL_MAX_CHARS = 80;
 const CHAT_ROLE_INSTRUCTIONS_MAX_CHARS = 40_000;
+const USER_PROFILE_USERNAME_MAX_CHARS = 80;
+const USER_PROFILE_AVATAR_COLORS: UserProfileAvatarColor[] = ["slate", "teal", "blue", "violet", "rose", "amber"];
+const DEFAULT_USER_PROFILE: UserProfileSettings = {
+  username: "User",
+  avatar: {
+    kind: "initial",
+    initial: "U",
+    color: "teal"
+  }
+};
 const GENERIC_PARTICIPANT_ROLE_ID = "generic-participant";
 const SEEDABLE_CHAT_PROVIDER_KINDS: ChatProviderKind[] = ["codex-cli", "claude-code"];
 
@@ -1579,6 +1592,7 @@ export class SettingsService {
       roundLimitDefault: stored.roundLimitDefault,
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
+      userProfile: this.normalizeUserProfile(stored.userProfile),
       lastRepoPath: stored.lastRepoPath,
       repoFileOpenAction: stored.repoFileOpenAction,
       chatRoleConfigs: stored.chatRoleConfigs ?? DEFAULT_CHAT_ROLES,
@@ -1609,6 +1623,13 @@ export class SettingsService {
       provider.model = update.model.trim();
     }
 
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
+  async saveUserProfileSettings(profile: UserProfileSettings): Promise<AppSettings> {
+    const stored = await this.readStored();
+    stored.userProfile = this.normalizeUserProfile(profile);
     await this.writeStored(stored);
     return this.getPublicSettings();
   }
@@ -2214,6 +2235,7 @@ export class SettingsService {
       roundLimitDefault: this.defaultRoundLimit(settings),
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(settings.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(settings.chatParticipantRequestMaxDepth),
+      userProfile: this.normalizeUserProfile(settings.userProfile),
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
       repoFileOpenAction: this.normalizeRepoFileOpenAction(settings.repoFileOpenAction),
       providers,
@@ -2255,6 +2277,38 @@ export class SettingsService {
 
   private normalizeRepoFileOpenAction(action: unknown): RepoFileOpenAction | undefined {
     return action === "open" || action === "reveal" || action === "intellij-idea" ? action : undefined;
+  }
+
+  private normalizeUserProfile(value: unknown): UserProfileSettings {
+    const profile = value && typeof value === "object" && !Array.isArray(value)
+      ? value as Partial<UserProfileSettings>
+      : {};
+    const username = typeof profile.username === "string"
+      ? profile.username.trim().slice(0, USER_PROFILE_USERNAME_MAX_CHARS)
+      : "";
+    const avatar = profile.avatar && typeof profile.avatar === "object" && !Array.isArray(profile.avatar)
+      ? profile.avatar as Partial<UserProfileSettings["avatar"]>
+      : {};
+    const initialSource = typeof avatar.initial === "string" && avatar.initial.trim()
+      ? avatar.initial.trim()
+      : username;
+    const initial = this.normalizeUserProfileInitial(initialSource);
+    const color = USER_PROFILE_AVATAR_COLORS.includes(avatar.color as UserProfileAvatarColor)
+      ? avatar.color as UserProfileAvatarColor
+      : DEFAULT_USER_PROFILE.avatar.color;
+    return {
+      username: username || DEFAULT_USER_PROFILE.username,
+      avatar: {
+        kind: "initial",
+        initial,
+        color
+      }
+    };
+  }
+
+  private normalizeUserProfileInitial(value: string): string {
+    const candidate = value.trim().replace(/^@/, "")[0]?.toUpperCase();
+    return candidate && /[A-Z0-9]/.test(candidate) ? candidate : DEFAULT_USER_PROFILE.avatar.initial;
   }
 
   private normalizeBehaviorRules(rules: ChatBehaviorRuleConfig[] | undefined): ChatBehaviorRuleConfig[] {

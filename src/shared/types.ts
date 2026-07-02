@@ -17,10 +17,24 @@ export interface ProviderSettings {
   model?: string;
 }
 
+export type UserProfileAvatarColor = "slate" | "teal" | "blue" | "violet" | "rose" | "amber";
+
+export interface UserProfileAvatarSettings {
+  kind: "initial";
+  initial: string;
+  color: UserProfileAvatarColor;
+}
+
+export interface UserProfileSettings {
+  username: string;
+  avatar: UserProfileAvatarSettings;
+}
+
 export interface AppSettings {
   roundLimitDefault: number;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
+  userProfile: UserProfileSettings;
   providers: ProviderSettings[];
   chatRoleConfigs: ChatRoleConfig[];
   chatBehaviorRules: ChatBehaviorRuleConfig[];
@@ -1261,6 +1275,7 @@ export interface AppBridge {
   setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<AppSettings>;
   setCliAgentRunTimeoutMs(timeoutMs: number): Promise<AppSettings>;
   setChatParticipantRequestMaxDepth(maxDepth: number): Promise<AppSettings>;
+  saveUserProfileSettings(profile: UserProfileSettings): Promise<AppSettings>;
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;

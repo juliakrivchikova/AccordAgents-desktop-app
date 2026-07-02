@@ -6,6 +6,14 @@ export const DEFAULT_SETTINGS: AppSettings = {
   roundLimitDefault: 2,
   cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
   chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+  userProfile: {
+    username: "User",
+    avatar: {
+      kind: "initial",
+      initial: "U",
+      color: "teal"
+    }
+  },
   providers: [],
   chatRoleConfigs: [],
   chatBehaviorRules: [],

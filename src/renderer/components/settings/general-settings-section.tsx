@@ -6,7 +6,9 @@ import type {
   AgentHealth,
   ProviderKind,
   ProviderSettings,
-  RepoFileOpenAction
+  RepoFileOpenAction,
+  UserProfileAvatarColor,
+  UserProfileSettings
 } from "../../../shared/types";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MAX,
@@ -15,6 +17,19 @@ import {
 import { CLI_AGENT_RUN_TIMEOUT_MAX_MS, CLI_AGENT_RUN_TIMEOUT_MIN_MS, cliAgentRunTimeoutHours } from "../../../shared/cliAgentRunSettings";
 
 const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits how many levels of participant-to-participant requests can happen.";
+const USERNAME_MAX_LENGTH = 80;
+
+const USER_PROFILE_AVATAR_COLORS: Array<{
+  color: UserProfileAvatarColor;
+  label: string;
+}> = [
+  { color: "slate", label: "Slate" },
+  { color: "teal", label: "Teal" },
+  { color: "blue", label: "Blue" },
+  { color: "violet", label: "Violet" },
+  { color: "rose", label: "Rose" },
+  { color: "amber", label: "Amber" }
+];
 
 const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
   "codex-cli": new URL("../../assets/codex-cli.svg", import.meta.url).href,
@@ -27,16 +42,23 @@ export function GeneralSettingsSection(props: {
   repoFileOpenAction?: RepoFileOpenAction;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
+  userProfile: UserProfileSettings;
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
+  saveUserProfileSettings: (profile: UserProfileSettings) => Promise<void>;
 }): JSX.Element {
   const detectedCount = props.providers.filter(
     (provider) => props.agents.find((agent) => agent.kind === provider.kind)?.installed
   ).length;
   return (
     <>
+      <section className="gen-section">
+        <h2 className="gen-section-title gen-section-title-solo">Profile</h2>
+        <ProfileSettingsControl profile={props.userProfile} onSave={props.saveUserProfileSettings} />
+      </section>
+
       <section className="gen-section">
         <div className="gen-section-head">
           <h2 className="gen-section-title">Local CLI setup</h2>
@@ -109,6 +131,100 @@ export function GeneralSettingsSection(props: {
       </section>
     </>
   );
+}
+
+function ProfileSettingsControl(props: {
+  profile: UserProfileSettings;
+  onSave: (profile: UserProfileSettings) => Promise<void>;
+}): JSX.Element {
+  const [username, setUsername] = useState(props.profile.username);
+  const [color, setColor] = useState<UserProfileAvatarColor>(props.profile.avatar.color);
+  const [saving, setSaving] = useState(false);
+  const trimmedUsername = username.trim();
+  const initial = profileInitial(trimmedUsername);
+  const validation = trimmedUsername === ""
+    ? "Username is required."
+    : trimmedUsername.length > USERNAME_MAX_LENGTH
+      ? `Use ${USERNAME_MAX_LENGTH} characters or fewer.`
+      : undefined;
+  const canSave = !saving && !validation && (
+    trimmedUsername !== props.profile.username ||
+    color !== props.profile.avatar.color ||
+    initial !== props.profile.avatar.initial
+  );
+
+  useEffect(() => {
+    setUsername(props.profile.username);
+    setColor(props.profile.avatar.color);
+  }, [props.profile]);
+
+  const save = async (): Promise<void> => {
+    if (!canSave) {
+      return;
+    }
+    setSaving(true);
+    try {
+      await props.onSave({
+        username: trimmedUsername,
+        avatar: {
+          kind: "initial",
+          initial,
+          color
+        }
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="gen-card">
+      <div className="gen-profile">
+        <div className={`gen-profile-avatar gen-profile-avatar-${color}`} aria-hidden="true">
+          {initial}
+        </div>
+        <div className="gen-profile-fields">
+          <label className="gen-profile-label" htmlFor="settings-profile-username">Username</label>
+          <input
+            id="settings-profile-username"
+            className="gen-profile-input"
+            value={username}
+            maxLength={USERNAME_MAX_LENGTH}
+            onChange={(event) => setUsername(event.target.value)}
+          />
+          {validation && <div className="gen-profile-error">{validation}</div>}
+          <div className="gen-profile-color-picker" aria-label="Avatar color">
+            {USER_PROFILE_AVATAR_COLORS.map((option) => (
+              <button
+                key={option.color}
+                type="button"
+                className={`gen-profile-color gen-profile-avatar-${option.color} ${color === option.color ? "is-selected" : ""}`}
+                aria-label={`${option.label} avatar`}
+                aria-pressed={color === option.color}
+                title={option.label}
+                onClick={() => setColor(option.color)}
+              >
+                <span>{initial}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+        <button
+          type="button"
+          className={`gen-timeout-save gen-profile-save ${canSave ? "is-dirty" : ""}`}
+          disabled={!canSave}
+          onClick={() => void save()}
+        >
+          {saving ? "Saving" : "Save"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function profileInitial(username: string): string {
+  const candidate = username.trim().replace(/^@/, "")[0]?.toUpperCase();
+  return candidate && /[A-Z0-9]/.test(candidate) ? candidate : "U";
 }
 
 const FILE_OPEN_OPTIONS: Array<{
