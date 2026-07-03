@@ -136,6 +136,7 @@ appMcpService.setChatParticipantRequestHandler((actor, request) => chatService.r
 appMcpService.setChatParticipantRequestStatusHandler((actor, request) => chatService.participantRequestStatusForTool(actor, request));
 appMcpService.setChatReactHandler((actor, request) => chatService.reactToMessageFromTool(actor, request));
 appMcpService.setChatSendMessageHandler((actor, request) => chatService.sendChatMessageFromTool(actor, request));
+appMcpService.setChatSetTitleHandler((actor, request) => chatService.setChatTitleFromTool(actor, request));
 const activeReviews = new Map<string, AbortController>();
 
 function appSkillsSourceRoot(): string {

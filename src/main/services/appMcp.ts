@@ -24,6 +24,7 @@ export const APP_CHAT_READ_ATTACHMENT_TOOL = "app_chat_read_attachment";
 export const APP_CHAT_EXPORT_ATTACHMENT_TOOL = "app_chat_export_attachment";
 export const APP_CHAT_REACT_TOOL = "app_chat_react";
 export const APP_CHAT_SEND_MESSAGE_TOOL = "app_chat_send_message";
+export const APP_CHAT_SET_TITLE_TOOL = "app_chat_set_title";
 
 export interface AppMcpActor {
   conversationId: string;
@@ -88,6 +89,7 @@ type AppChatParticipantRequestHandler = (actor: AppMcpActor, request: unknown) =
 type AppChatParticipantRequestStatusHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatReactHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatSendMessageHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+type AppChatSetTitleHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 
 interface JsonRpcRequest {
   jsonrpc?: unknown;
@@ -132,6 +134,7 @@ export class AppMcpService {
   private chatParticipantRequestStatusHandler?: AppChatParticipantRequestStatusHandler;
   private chatReactHandler?: AppChatReactHandler;
   private chatSendMessageHandler?: AppChatSendMessageHandler;
+  private chatSetTitleHandler?: AppChatSetTitleHandler;
 
   setRosterChangeHandler(handler: AppRosterChangeHandler): void {
     this.rosterChangeHandler = handler;
@@ -203,6 +206,10 @@ export class AppMcpService {
 
   setChatSendMessageHandler(handler: AppChatSendMessageHandler): void {
     this.chatSendMessageHandler = handler;
+  }
+
+  setChatSetTitleHandler(handler: AppChatSetTitleHandler): void {
+    this.chatSetTitleHandler = handler;
   }
 
   async start(): Promise<void> {
@@ -767,6 +774,29 @@ export class AppMcpService {
           idempotentHint: false,
           openWorldHint: false
         }
+      },
+      {
+        name: APP_CHAT_SET_TITLE_TOOL,
+        title: "Set Chat Title",
+        description:
+          "Set a concise title for this chat. Intended for the first eligible participant turn only; the backend validates eligibility, sanitizes the title, applies the first accepted title, and ignores later or ineligible calls.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            title: {
+              type: "string",
+              description: "Concise title based on the user's intent. Omit participant handles, slash commands, model/provider names, and generic words like Chat."
+            }
+          },
+          required: ["title"]
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false
+        }
       }
     ];
     if (hasChatAppToolCapability(actor.capabilities, "participants.request")) {
@@ -1151,7 +1181,8 @@ export class AppMcpService {
       record.name !== APP_CHAT_READ_ATTACHMENT_TOOL &&
       record.name !== APP_CHAT_EXPORT_ATTACHMENT_TOOL &&
       record.name !== APP_CHAT_REACT_TOOL &&
-      record.name !== APP_CHAT_SEND_MESSAGE_TOOL
+      record.name !== APP_CHAT_SEND_MESSAGE_TOOL &&
+      record.name !== APP_CHAT_SET_TITLE_TOOL
     ) {
       throw new Error(`Unknown app tool: ${String(record.name ?? "")}.`);
     }
@@ -1211,6 +1242,12 @@ export class AppMcpService {
         throw new Error("Chat message sending is not available.");
       }
       return this.toolTextResult(await this.chatSendMessageHandler(actor, record.arguments));
+    }
+    if (record.name === APP_CHAT_SET_TITLE_TOOL) {
+      if (!this.chatSetTitleHandler) {
+        throw new Error("Chat title setting is not available.");
+      }
+      return this.toolTextResult(await this.chatSetTitleHandler(actor, record.arguments));
     }
     if (record.name === APP_CHAT_REQUEST_PARTICIPANTS_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "participants.request")) {
