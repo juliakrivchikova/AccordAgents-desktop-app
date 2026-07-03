@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ChatService } from "./chat";
+import { normalizeAutoChatTitle, sanitizeAutoChatTitleSuggestion } from "../../shared/chatTitles";
 import type {
   AgentContextUsage,
   ChatParticipant,
@@ -21,6 +22,15 @@ const ROLE: ChatRoleConfig = {
   appToolCapabilities: [],
   updatedAt: NOW
 };
+
+test("auto chat title sanitizer strips leading participant handles and slash skills", () => {
+  assert.equal(
+    normalizeAutoChatTitle("@drew-codex-engineer /office-hours I want new feature, assign chat title"),
+    "I want new feature, assign chat title"
+  );
+  assert.equal(sanitizeAutoChatTitleSuggestion("@drew /office-hours"), undefined);
+  assert.equal(sanitizeAutoChatTitleSuggestion("Codex"), undefined);
+});
 
 test("renameConversation updates chat title, emits a snapshot, and keeps the transcript unchanged", async () => {
   const conversation = chatConversation({ title: "Old chat" });
@@ -56,6 +66,226 @@ test("renameConversation normalizes long and blank chat titles", async () => {
   });
   assert.equal(blankSaved?.title, "Chat");
   assert.equal((await storage.getConversation(conversation.id))?.title, "Chat");
+});
+
+test("renameConversation marks the title as manual and clears first-agent title eligibility", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation({
+    metadata: {
+      participants: [participant],
+      participantSessions: [],
+      autoTitleEligibility: autoTitleEligibility(participant)
+    }
+  });
+  const { service, storage } = testService([conversation]);
+
+  const saved = await service.renameConversation({
+    conversationId: conversation.id,
+    title: "Manual title"
+  });
+
+  assert.equal(saved?.title, "Manual title");
+  assert.equal((saved?.metadata.autoTitle as { source?: string; title?: string } | undefined)?.source, "manual");
+  assert.equal((saved?.metadata.autoTitle as { source?: string; title?: string } | undefined)?.title, "Manual title");
+  assert.equal(saved?.metadata.autoTitleEligibility, undefined);
+  assert.equal((await storage.getConversation(conversation.id))?.metadata.autoTitleEligibility, undefined);
+});
+
+test("setChatTitleFromTool applies the first eligible participant title", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation({
+    title: "@drew /office-hours I want new feature",
+    messages: [
+      systemMessage(),
+      userMessage("user-message-1", "@drew /office-hours I want new feature")
+    ],
+    metadata: {
+      participants: [participant],
+      participantSessions: [],
+      autoTitleEligibility: autoTitleEligibility(participant)
+    }
+  });
+  const { service, storage, snapshots, historyWrites } = testService([conversation]);
+
+  const result = await service.setChatTitleFromTool(autoTitleActor(participant), {
+    title: "@drew /office-hours First Agent Auto Title?"
+  });
+
+  assert.deepEqual(result, {
+    ok: true,
+    status: "applied",
+    title: "First Agent Auto Title",
+    conversationId: conversation.id
+  });
+  const saved = await storage.getConversation(conversation.id);
+  assert.equal(saved?.title, "First Agent Auto Title");
+  assert.equal((saved?.metadata.autoTitle as { source?: string; participantId?: string; runId?: string } | undefined)?.source, "first-agent");
+  assert.equal((saved?.metadata.autoTitle as { source?: string; participantId?: string; runId?: string } | undefined)?.participantId, participant.id);
+  assert.equal((saved?.metadata.autoTitle as { source?: string; participantId?: string; runId?: string } | undefined)?.runId, "run-1");
+  assert.equal(saved?.metadata.autoTitleEligibility, undefined);
+  assert.equal(snapshots.at(-1)?.title, "First Agent Auto Title");
+  assert.deepEqual(historyWrites, ["First Agent Auto Title"]);
+});
+
+test("setChatTitleFromTool ignores duplicate, invalid, and wrong-run title calls", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation({
+    messages: [
+      systemMessage(),
+      userMessage("user-message-1", "@drew implement auto title")
+    ],
+    metadata: {
+      participants: [participant],
+      participantSessions: [],
+      autoTitleEligibility: autoTitleEligibility(participant)
+    }
+  });
+  const { service, storage } = testService([conversation]);
+
+  const invalid = await service.setChatTitleFromTool(autoTitleActor(participant), { title: "@drew /office-hours" });
+  assert.equal(invalid.reason, "invalid_title");
+  assert.equal((await storage.getConversation(conversation.id))?.metadata.autoTitleEligibility !== undefined, true);
+
+  const wrongRun = await service.setChatTitleFromTool({ ...autoTitleActor(participant), runId: "other-run" }, { title: "Auto Title Feature" });
+  assert.equal(wrongRun.reason, "not_eligible");
+
+  await service.setChatTitleFromTool(autoTitleActor(participant), { title: "Auto Title Feature" });
+  const duplicate = await service.setChatTitleFromTool(autoTitleActor(participant), { title: "Second Auto Title" });
+  assert.equal(duplicate.reason, "already_titled");
+  assert.equal((await storage.getConversation(conversation.id))?.title, "Auto Title Feature");
+});
+
+test("sendMessage persists first-turn title eligibility and passes matching target run ids", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation({
+    messages: [systemMessage()],
+    metadata: {
+      participants: [participant],
+      participantSessions: []
+    }
+  });
+  const { service, storage } = testService([conversation]);
+  let captured: { triggerMessageId?: string; targetRunId?: string } | undefined;
+  (service as unknown as {
+    runParticipantBatch(
+      conversation: Conversation,
+      targets: ChatParticipant[],
+      triggerMessage: Conversation["messages"][number],
+      runId: string,
+      signal: AbortSignal | undefined,
+      progress: unknown,
+      warnings: string[],
+      options: { targetRunIds?: ReadonlyMap<string, string> }
+    ): Promise<void>;
+  }).runParticipantBatch = async (_conversation, targets, triggerMessage, _runId, _signal, _progress, _warnings, options) => {
+    captured = {
+      triggerMessageId: triggerMessage.id,
+      targetRunId: options.targetRunIds?.get(targets[0]?.id ?? "")
+    };
+  };
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "outer-run",
+    content: "@drew /office-hours Please name this chat"
+  });
+
+  const saved = await storage.getConversation(conversation.id);
+  const eligibility = saved?.metadata.autoTitleEligibility as {
+    triggerMessageId?: string;
+    targetParticipantIds?: string[];
+    targetRunIds?: Record<string, string>;
+  } | undefined;
+  assert.ok(eligibility);
+  assert.equal(eligibility.triggerMessageId, captured?.triggerMessageId);
+  assert.deepEqual(eligibility.targetParticipantIds, [participant.id]);
+  assert.equal(eligibility.targetRunIds?.[participant.id], captured?.targetRunId);
+  assert.notEqual(eligibility.targetRunIds?.[participant.id], "outer-run");
+});
+
+test("stored first-agent title survives a later stale run mutation", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation({
+    title: "Initial fallback title",
+    messages: [
+      systemMessage(),
+      userMessage("user-message-1", "@drew please name this chat")
+    ],
+    metadata: {
+      participants: [participant],
+      participantSessions: [],
+      autoTitleEligibility: autoTitleEligibility(participant)
+    }
+  });
+  const staleRunConversation = cloneConversation(conversation);
+  const { service, storage } = testService([conversation]);
+
+  await service.setChatTitleFromTool(autoTitleActor(participant), { title: "Agent Chosen Title" });
+
+  await (service as unknown as {
+    withChatMutation(conversation: Conversation, fn: () => Promise<void>): Promise<void>;
+    saveConversation(conversation: Conversation): Promise<void>;
+  }).withChatMutation(staleRunConversation, async () => {
+    staleRunConversation.messages.push({
+      id: "participant-message-1",
+      role: "participant",
+      participantId: participant.id,
+      participantLabel: "@drew",
+      content: "Done.",
+      createdAt: NOW,
+      status: "done"
+    });
+    staleRunConversation.updatedAt = "2026-05-19T12:01:00.000Z";
+    await (service as unknown as {
+      saveConversation(conversation: Conversation): Promise<void>;
+    }).saveConversation(staleRunConversation);
+  });
+
+  const saved = await storage.getConversation(conversation.id);
+  assert.equal(saved?.title, "Agent Chosen Title");
+  assert.equal(saved?.metadata.autoTitleEligibility, undefined);
+  assert.equal((saved?.metadata.autoTitle as { source?: string } | undefined)?.source, "first-agent");
+  assert.equal(saved?.messages.some((message) => message.id === "participant-message-1"), true);
+});
+
+test("terminal title cleanup keeps eligibility while another target run is registered", async () => {
+  const skippedParticipant = chatParticipant();
+  const liveParticipant = chatParticipant({ id: "participant-2", handle: "taylor" });
+  const conversation = chatConversation({
+    metadata: {
+      participants: [skippedParticipant, liveParticipant],
+      participantSessions: [],
+      autoTitleEligibility: {
+        triggerMessageId: "user-message-1",
+        targetParticipantIds: [skippedParticipant.id, liveParticipant.id],
+        targetRunIds: {
+          [skippedParticipant.id]: "run-skipped",
+          [liveParticipant.id]: "run-live"
+        },
+        createdAt: NOW
+      }
+    }
+  });
+  const { service } = testService([conversation]);
+  const internals = service as unknown as {
+    registerTargetRun(runId: string, controller: AbortController, meta: { conversationId: string; participantId: string; participantHandle: string }): void;
+    unregisterTargetRun(runId: string, controller?: AbortController): void;
+    metadataAfterAutoTitleRunTerminal(conversationId: string, metadata: Record<string, unknown>, terminalRunId: string): Record<string, unknown>;
+  };
+  const controller = new AbortController();
+
+  internals.registerTargetRun("run-live", controller, {
+    conversationId: conversation.id,
+    participantId: liveParticipant.id,
+    participantHandle: liveParticipant.handle
+  });
+
+  const preserved = internals.metadataAfterAutoTitleRunTerminal(conversation.id, conversation.metadata, "run-skipped");
+  assert.ok(preserved.autoTitleEligibility);
+
+  internals.unregisterTargetRun("run-live", controller);
+  const cleared = internals.metadataAfterAutoTitleRunTerminal(conversation.id, preserved, "run-live");
+  assert.equal(cleared.autoTitleEligibility, undefined);
 });
 
 test("renameConversation rejects non-chat conversations", async () => {
@@ -591,6 +821,60 @@ function chatParticipant(patch: Partial<ChatParticipant> = {}): ChatParticipant 
     roleConfigId: ROLE.id,
     kind: "codex-cli",
     ...patch
+  };
+}
+
+function autoTitleEligibility(participant: ChatParticipant): Record<string, unknown> {
+  return {
+    triggerMessageId: "user-message-1",
+    targetParticipantIds: [participant.id],
+    targetRunIds: {
+      [participant.id]: "run-1"
+    },
+    createdAt: NOW
+  };
+}
+
+function autoTitleActor(participant: ChatParticipant): {
+  conversationId: string;
+  participantId: string;
+  roleConfigId: string;
+  roleConfigVersion: number;
+  capabilities: [];
+  triggerMessageId: string;
+  runId: string;
+} {
+  return {
+    conversationId: "conversation-1",
+    participantId: participant.id,
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    capabilities: [],
+    triggerMessageId: "user-message-1",
+    runId: "run-1"
+  };
+}
+
+function systemMessage(): Conversation["messages"][number] {
+  return {
+    id: "system-message-1",
+    role: "system",
+    content: "Chat started.",
+    createdAt: NOW,
+    status: "done"
+  };
+}
+
+function userMessage(id: string, content: string): Conversation["messages"][number] {
+  return {
+    id,
+    role: "user",
+    content,
+    createdAt: NOW,
+    status: "done",
+    metadata: {
+      threadId: id
+    }
   };
 }
 

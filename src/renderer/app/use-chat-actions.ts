@@ -31,6 +31,7 @@ import {
 import type { AppState } from "./app-state";
 import type { ConversationActions } from "./use-conversation-actions";
 import { upsertConversationSummary } from "./conversation-summaries";
+import { normalizeAutoChatTitle, normalizeManualChatTitle } from "../../shared/chatTitles";
 
 export interface ChatActions {
   startChat: (options?: StartChatOptions) => Promise<boolean>;
@@ -468,10 +469,10 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
 
 function initialChatTitle(initialMessage: string, imageAttachments: ChatImageInput[]): string {
   if (initialMessage) {
-    return initialMessage.slice(0, 80);
+    return normalizeAutoChatTitle(initialMessage);
   }
   const filename = imageAttachments[0]?.filename?.trim();
-  return filename ? `Image: ${filename}`.slice(0, 80) : "Image chat";
+  return normalizeManualChatTitle(filename ? `Image: ${filename}` : "Image chat");
 }
 
 function hasMultipleMentionedParticipants(content: string, conversation: Parameters<typeof chatAppToolApprovals>[0]): boolean {
