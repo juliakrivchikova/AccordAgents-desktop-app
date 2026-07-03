@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -464,6 +464,79 @@ test("detached poll recovers permission events skipped by an older cursor", asyn
   const approvals = storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[];
   assert.equal(approvals.length, 1);
   assert.equal(approvals[0].id, "recovered-github-write-request");
+});
+
+test("detached poll replays preexisting skipped permission records below the cursor", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const worker = new FakeDetachedWorkerTransport();
+  const { remote, storage, root } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+  const runId = "preexisting-skipped-permission-run";
+  const recordId = `${runId}:worker:2`;
+
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId,
+    participant: participantConfig(participant),
+    prompt: "Need GitHub write.",
+    worker: { host: "worker.example" }
+  });
+  worker.push(runId, {
+    kind: "permission_pending",
+    workerSeq: 2,
+    requestId: "preexisting-github-write-request",
+    triggerMessageId: "user-message",
+    request: {
+      kind: "githubApp",
+      repository_full_name: "juliakrivchikova/AccordAgents-desktop-app",
+      permissions: ["contents:write"]
+    },
+    runPermissions: defaultChatAgentPermissions()
+  });
+  worker.push(runId, {
+    kind: "lifecycle",
+    workerSeq: 3,
+    state: "disconnected",
+    message: "Remote Codex is waiting for a permission decision."
+  });
+  await appendFile(path.join(root, `${runId}.jsonl`), `${JSON.stringify({
+    id: recordId,
+    conversationId: conversation.id,
+    runId,
+    seq: 2,
+    createdAt: NOW,
+    kind: "permission_pending",
+    participantId: participant.id,
+    requestId: "preexisting-github-write-request",
+    triggerMessageId: "user-message",
+    request: {
+      kind: "githubApp",
+      repository_full_name: "juliakrivchikova/AccordAgents-desktop-app",
+      permissions: ["contents:write"]
+    },
+    runPermissions: defaultChatAgentPermissions(),
+    workerSeq: 2
+  })}\n`, "utf8");
+  storage.current.metadata.remoteRunReplay = {
+    ...(storage.current.metadata.remoteRunReplay as Record<string, unknown> | undefined),
+    [runId]: {
+      cursorSeq: 3,
+      appliedRecordIds: [`${runId}:worker:1`, `${runId}:worker:3`],
+      permissionRequestIdsByRecordId: {},
+      updatedAt: NOW
+    }
+  };
+
+  await remote.pollDetachedRun({
+    runId,
+    worker: { host: "worker.example" },
+    afterWorkerSeq: 3
+  });
+
+  const approvals = storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[];
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].id, "preexisting-github-write-request");
+  assert.equal((storage.current.metadata.remoteRunReplay as any)[runId].permissionRequestIdsByRecordId[recordId], "preexisting-github-write-request");
 });
 
 test("detached permission approval writes the decision back to the worker", async () => {

@@ -5,6 +5,7 @@
 import { mkdir, chmod, readFile } from "node:fs/promises";
 import path from "node:path";
 import { app } from "electron";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
 import {
   EC2Client,
   DescribeImagesCommand,
@@ -37,6 +38,10 @@ import { runCommand } from "./command";
 export function createAwsEc2Client(credentials: AwsWorkerCredentials): Ec2Client {
   const client = new EC2Client({
     region: credentials.region,
+    requestHandler: new NodeHttpHandler({
+      connectionTimeout: 5_000,
+      requestTimeout: 15_000
+    }),
     credentials: {
       accessKeyId: credentials.accessKeyId,
       secretAccessKey: credentials.secretAccessKey

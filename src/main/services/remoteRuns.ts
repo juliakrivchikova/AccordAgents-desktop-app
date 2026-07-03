@@ -899,7 +899,11 @@ export class RemoteRunService {
     event: RemoteWorkerEvent
   ): Promise<void> {
     const existing = await this.readRecords(runId);
-    if (existing.some((record) => record.workerSeq === event.workerSeq || record.id === this.workerRecordId(runId, event))) {
+    const existingRecord = existing.find((record) => record.workerSeq === event.workerSeq || record.id === this.workerRecordId(runId, event));
+    if (existingRecord) {
+      if (existingRecord.kind === "permission_pending" && this.connectedRuns.get(runId) === true) {
+        await this.chat.applyRemoteRunReplayRecord(existingRecord);
+      }
       return;
     }
     const input = this.workerEventToRecordInput(conversationId, runId, participantId, event);
