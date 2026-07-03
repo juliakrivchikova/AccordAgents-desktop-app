@@ -5156,9 +5156,9 @@ export class ChatService {
       "App MCP tools: use the connected `accord_agents` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
       "Read-only chat MCP tools: `app_chat_get_context`, `app_chat_get_participants`, `app_chat_read_messages`, `app_chat_list_attachments`, and `app_chat_read_attachment`. Prefer them over history files for roster, thread, messages, and screenshots.",
       "Reaction MCP tool: `app_chat_react` adds or toggles an emoji reaction on a specific message. To react, call it with the message `id` from `app_chat_read_messages` and an allowed emoji.",
-      "Send-message MCP tool: `app_chat_send_message` posts your message immediately (visible/reactable before your turn ends) and returns its `messageId`. Use it only for mid-turn visibility, e.g. a canonical resolution. Do not use it for an ordinary reply — your normal turn response already reaches everyone at turn end.",
+      "Send-message MCP tool: `app_chat_send_message` posts immediately and returns its `messageId`. Use only for mid-turn visibility, e.g. a canonical resolution; normal replies use your turn response.",
       "If a message lists attached images, call `app_chat_read_attachment` with the attachment ID before reasoning about visual details.",
-      "Participant request MCP tools: when `app_chat_request_participants` is available, use it to ask current chat participants for input; `app_chat_get_participant_request_status` recovers their replies. Request JSON is `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
+      "Participant request MCP tools: use `app_chat_request_participants` to ask participants; `app_chat_get_participant_request_status` recovers replies. JSON: `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
       "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
       "If `app_chat_request_participants` returns replies before timeout, use them in this turn. If it returns `pending_approval` or `running`, stop after a brief status note; the app will auto-resume you after replies or errors arrive.",
       ...permissionPolicyLines
@@ -5522,8 +5522,8 @@ export class ChatService {
       return "";
     }
     return canRequestPermissions
-      ? "If you need repository file contents, call `app_permissions_request_change` for `repoRead` before refusing."
-      : "If you need repository file contents, explain that `repoRead` is needed before refusing.";
+      ? "For repo files call `app_permissions_request_change` for `repoRead` before refusal."
+      : "For repo files, explain that `repoRead` is needed before refusing.";
   }
 
   private warmAgentContextKey(

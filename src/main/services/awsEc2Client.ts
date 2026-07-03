@@ -2,8 +2,6 @@
 // from awsWorkerLifecycle.ts so the lifecycle state machine stays SDK-free and
 // unit-testable; this module is the thin adapter over @aws-sdk/client-ec2 and
 // the local key/IP tooling.
-import { mkdir, chmod, readFile } from "node:fs/promises";
-import path from "node:path";
 import { app } from "electron";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import {
@@ -11,8 +9,10 @@ import {
   DescribeImagesCommand,
   ImportKeyPairCommand,
   DescribeKeyPairsCommand,
+  DeleteKeyPairCommand,
   CreateSecurityGroupCommand,
   DescribeSecurityGroupsCommand,
+  DeleteSecurityGroupCommand,
   AuthorizeSecurityGroupIngressCommand,
   RevokeSecurityGroupIngressCommand,
   RunInstancesCommand,
@@ -26,6 +26,12 @@ import {
   AWS_WORKER_TAG_VALUE,
   buildWorkerInstanceSpec
 } from "./awsWorkerProvisioning";
+import {
+  awsWorkerKeyDir,
+  awsWorkerPrivateKeyPath,
+  deleteAwsWorkerKeyMaterial,
+  generateOrLoadAwsWorkerKeyMaterial
+} from "./awsWorkerKeyMaterial";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 import type {
   AwsWorkerInstanceInfo,
@@ -33,7 +39,6 @@ import type {
   AwsWorkerKeyMaterial,
   Ec2Client
 } from "./awsWorkerLifecycle";
-import { runCommand } from "./command";
 
 export function createAwsEc2Client(credentials: AwsWorkerCredentials): Ec2Client {
   const client = new EC2Client({
@@ -71,19 +76,37 @@ class SdkEc2Client implements Ec2Client {
     return imageId;
   }
 
-  async ensureKeyPair(name: string, publicKeyMaterial: string): Promise<void> {
+  async keyPairExists(name: string): Promise<boolean> {
     try {
-      const existing = await this.client.send(new DescribeKeyPairsCommand({ KeyNames: [name] }));
-      if ((existing.KeyPairs ?? []).length > 0) {
-        return;
+      const result = await this.client.send(new DescribeKeyPairsCommand({ KeyNames: [name] }));
+      return (result.KeyPairs ?? []).length > 0;
+    } catch (error) {
+      if (isAwsError(error, "InvalidKeyPair.NotFound")) {
+        return false;
       }
-    } catch {
-      // Not found throws; fall through to import.
+      throw error;
     }
+  }
+
+  async importKeyPair(name: string, publicKeyMaterial: string): Promise<void> {
     await this.client.send(new ImportKeyPairCommand({
       KeyName: name,
-      PublicKeyMaterial: Buffer.from(publicKeyMaterial, "utf8")
+      PublicKeyMaterial: Buffer.from(publicKeyMaterial, "utf8"),
+      TagSpecifications: [{
+        ResourceType: "key-pair",
+        Tags: workerTags(name)
+      }]
     }));
+  }
+
+  async deleteKeyPair(name: string): Promise<void> {
+    try {
+      await this.client.send(new DeleteKeyPairCommand({ KeyName: name }));
+    } catch (error) {
+      if (!isAwsError(error, "InvalidKeyPair.NotFound")) {
+        throw error;
+      }
+    }
   }
 
   async ensureSecurityGroup(name: string, description: string): Promise<string> {
@@ -99,13 +122,23 @@ class SdkEc2Client implements Ec2Client {
       Description: description,
       TagSpecifications: [{
         ResourceType: "security-group",
-        Tags: [{ Key: AWS_WORKER_TAG_KEY, Value: AWS_WORKER_TAG_VALUE }]
+        Tags: workerTags(name)
       }]
     }));
     if (!created.GroupId) {
       throw new Error("Failed to create the worker security group.");
     }
     return created.GroupId;
+  }
+
+  async deleteSecurityGroup(securityGroupId: string): Promise<void> {
+    try {
+      await this.client.send(new DeleteSecurityGroupCommand({ GroupId: securityGroupId }));
+    } catch (error) {
+      if (!isAwsError(error, "InvalidGroup.NotFound")) {
+        throw error;
+      }
+    }
   }
 
   async authorizeSshIngress(securityGroupId: string, cidr: string): Promise<void> {
@@ -148,7 +181,7 @@ class SdkEc2Client implements Ec2Client {
         ResourceType: "instance",
         Tags: [
           { Key: spec.tagKey, Value: spec.tagValue },
-          { Key: "Name", Value: "accordagents-worker" }
+          { Key: "Name", Value: spec.keyName }
         ]
       }]
     }));
@@ -204,6 +237,17 @@ function isDuplicatePermission(error: unknown): boolean {
   return name === "InvalidPermission.Duplicate";
 }
 
+function isAwsError(error: unknown, name: string): boolean {
+  return (error as { name?: string })?.name === name;
+}
+
+function workerTags(name: string): Array<{ Key: string; Value: string }> {
+  return [
+    { Key: AWS_WORKER_TAG_KEY, Value: AWS_WORKER_TAG_VALUE },
+    { Key: "Name", Value: name }
+  ];
+}
+
 function mapInstanceState(name: string | undefined): AwsWorkerInstanceState {
   switch (name) {
     case "pending":
@@ -225,20 +269,19 @@ function mapInstanceState(name: string | undefined): AwsWorkerInstanceState {
 // App-generated SSH keypair, so the user never manages a key file. Generated
 // with ssh-keygen (already required for remote runs) into userData; the public
 // half is imported to EC2, the private half stays local and drives SSH.
-export async function generateAwsWorkerKeyMaterial(): Promise<AwsWorkerKeyMaterial> {
-  const dir = path.join(app.getPath("userData"), "cloud-runs-keys");
-  await mkdir(dir, { recursive: true });
-  const keyName = "accordagents-worker";
-  const privateKeyPath = path.join(dir, `${keyName}.pem`);
-  // -q quiet, -N "" no passphrase, -f target; overwrite any stale key so a
-  // re-create always matches what we import to EC2.
-  await runCommand("bash", [
-    "-lc",
-    `rm -f ${shellQuote(privateKeyPath)} ${shellQuote(`${privateKeyPath}.pub`)}; ssh-keygen -t ed25519 -N '' -q -f ${shellQuote(privateKeyPath)} -C accordagents-worker`
-  ], { timeoutMs: 30_000 });
-  await chmod(privateKeyPath, 0o600);
-  const publicKeyOpenSsh = (await readFile(`${privateKeyPath}.pub`, "utf8")).trim();
-  return { keyName, publicKeyOpenSsh, privateKeyPath };
+export async function generateAwsWorkerKeyMaterial(options: { rotate?: boolean } = {}): Promise<AwsWorkerKeyMaterial> {
+  return generateOrLoadAwsWorkerKeyMaterial({
+    keyDir: awsWorkerKeyDir(app.getPath("userData")),
+    rotate: options.rotate
+  });
+}
+
+export async function deleteGeneratedAwsWorkerKeyMaterial(keyName: string): Promise<void> {
+  await deleteAwsWorkerKeyMaterial(awsWorkerKeyDir(app.getPath("userData")), keyName);
+}
+
+export function resolveAwsWorkerPrivateKeyPath(keyName: string): string {
+  return awsWorkerPrivateKeyPath(awsWorkerKeyDir(app.getPath("userData")), keyName);
 }
 
 export async function resolveCurrentPublicIp(): Promise<string> {
@@ -255,8 +298,4 @@ export async function resolveCurrentPublicIp(): Promise<string> {
     }
   }
   throw new Error("Could not determine this machine's public IP address.");
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }

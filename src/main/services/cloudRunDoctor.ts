@@ -76,7 +76,7 @@ export class CloudRunDoctorService {
     try {
       output = await this.sshExec({ worker, command: probeScript(worker), timeoutMs: PROBE_TIMEOUT_MS });
     } catch (error) {
-      return failedReport("connect", `SSH connection failed: ${errorMessage(error)}`);
+      return failedReport("connect", sshConnectionFailureDetail(errorMessage(error)));
     }
     const checks = parseProbeOutput(output);
     const failing = checks.filter((check) => check.status === "fail");
@@ -335,4 +335,18 @@ async function defaultLocalGitIdentity(): Promise<{ name?: string; email?: strin
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function sshConnectionFailureDetail(message: string): string {
+  if (isLikelyAwsKeyMismatch(message)) {
+    return `SSH connection failed: ${message} This looks like the local AWS worker private key is missing or does not match the EC2 key pair. Delete and recreate the AWS worker; EC2 key pairs are only applied when an instance is launched.`;
+  }
+  return `SSH connection failed: ${message}`;
+}
+
+function isLikelyAwsKeyMismatch(message: string): boolean {
+  const lower = message.toLowerCase();
+  return lower.includes("permission denied (publickey)")
+    || lower.includes("identity file") && lower.includes("not accessible")
+    || lower.includes(".pem") && lower.includes("no such file");
 }

@@ -439,8 +439,9 @@ function AwsWorkerPanel(props: { settings: CloudRunsSettings }): JSX.Element {
     setBusy(true);
     setMessage("Deleting worker…");
     try {
-      setStatus(await window.consensus.deleteAwsWorker());
-      setMessage("Worker deleted.");
+      const next = await window.consensus.deleteAwsWorker();
+      setStatus(next);
+      setMessage(next.message ?? "Worker deleted.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -458,6 +459,7 @@ function AwsWorkerPanel(props: { settings: CloudRunsSettings }): JSX.Element {
             <div className="gen-row-title">AWS worker</div>
             <div className="gen-row-desc">
               {status.handle?.instanceId} · {status.state ?? "unknown"}
+              {status.handle?.keyName ? ` · ${status.handle.keyName}` : ""}
               {status.publicIp ? ` · ${status.publicIp}` : ""}
               {status.message ? ` · ${status.message}` : ""}
             </div>

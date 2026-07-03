@@ -35,6 +35,10 @@ test("scoped policy limits state changes to tagged instances in-region", () => {
   const policy = buildScopedWorkerPolicy("eu-west-1") as {
     Statement: Array<{ Sid: string; Action: string[]; Condition: Record<string, Record<string, string>> }>;
   };
+  const create = policy.Statement.find((statement) => statement.Sid === "CreateInfra");
+  assert.ok(create);
+  assert.ok(create.Action.includes("ec2:DeleteKeyPair"));
+  assert.ok(create.Action.includes("ec2:DeleteSecurityGroup"));
   const manage = policy.Statement.find((statement) => statement.Sid === "ManageTaggedInstances");
   assert.ok(manage);
   assert.deepEqual(manage.Action.sort(), ["ec2:StartInstances", "ec2:StopInstances", "ec2:TerminateInstances"]);
@@ -71,6 +75,15 @@ test("ipToCidr validates and appends /32", () => {
 class FakeEc2Client implements Ec2Client {
   state: AwsWorkerInstanceInfo;
   readonly ingressCidrs = new Set<string>();
+  readonly keyPairs = new Set<string>();
+  readonly importedKeyPairs: string[] = [];
+  readonly deletedKeyPairs: string[] = [];
+  readonly securityGroupNames: string[] = [];
+  readonly deletedSecurityGroups: string[] = [];
+  readonly revokedSecurityGroups: string[] = [];
+  readonly authorizedSecurityGroups: string[] = [];
+  lastRunSpec: Parameters<Ec2Client["runInstance"]>[0] | undefined;
+  terminateError: Error | undefined;
   revokedCount = 0;
   startCount = 0;
   stopCount = 0;
@@ -82,18 +95,35 @@ class FakeEc2Client implements Ec2Client {
   async resolveUbuntuImageId(): Promise<string> {
     return "ami-ubuntu";
   }
-  async ensureKeyPair(): Promise<void> {}
-  async ensureSecurityGroup(): Promise<string> {
+  async keyPairExists(name: string): Promise<boolean> {
+    return this.keyPairs.has(name);
+  }
+  async importKeyPair(name: string): Promise<void> {
+    this.importedKeyPairs.push(name);
+    this.keyPairs.add(name);
+  }
+  async deleteKeyPair(name: string): Promise<void> {
+    this.deletedKeyPairs.push(name);
+    this.keyPairs.delete(name);
+  }
+  async ensureSecurityGroup(name: string): Promise<string> {
+    this.securityGroupNames.push(name);
     return "sg-123";
   }
-  async authorizeSshIngress(_sg: string, cidr: string): Promise<void> {
+  async deleteSecurityGroup(securityGroupId: string): Promise<void> {
+    this.deletedSecurityGroups.push(securityGroupId);
+  }
+  async authorizeSshIngress(sg: string, cidr: string): Promise<void> {
+    this.authorizedSecurityGroups.push(sg);
     this.ingressCidrs.add(cidr);
   }
-  async revokeAllSshIngress(): Promise<void> {
+  async revokeAllSshIngress(securityGroupId: string): Promise<void> {
+    this.revokedSecurityGroups.push(securityGroupId);
     this.revokedCount += 1;
     this.ingressCidrs.clear();
   }
-  async runInstance(): Promise<string> {
+  async runInstance(spec: Parameters<Ec2Client["runInstance"]>[0]): Promise<string> {
+    this.lastRunSpec = spec;
     return "i-123";
   }
   async describeInstance(): Promise<AwsWorkerInstanceInfo | undefined> {
@@ -108,6 +138,9 @@ class FakeEc2Client implements Ec2Client {
     this.state = { ...this.state, state: "stopped", publicIp: undefined };
   }
   async terminateInstance(): Promise<void> {
+    if (this.terminateError) {
+      throw this.terminateError;
+    }
     this.state = { ...this.state, state: "terminated", publicIp: undefined };
   }
 }
@@ -141,7 +174,46 @@ test("createWorker provisions key, security group, ingress and instance", async 
   const handle = await lifecycleWith(client).createWorker(CREDS);
   assert.equal(handle.instanceId, "i-123");
   assert.equal(handle.securityGroupId, "sg-123");
+  assert.deepEqual(client.importedKeyPairs, ["aa-key"]);
+  assert.deepEqual(client.securityGroupNames, ["aa-key-sg"]);
+  assert.equal(client.lastRunSpec?.keyName, "aa-key");
   assert.ok(client.ingressCidrs.has("203.0.113.9/32"));
+});
+
+test("createWorker reuses an existing local/AWS key without re-importing it", async () => {
+  const client = new FakeEc2Client();
+  client.keyPairs.add("aa-key");
+  await lifecycleWith(client, {
+    generateKeyMaterial: async () => ({ keyName: "aa-key", publicKeyOpenSsh: "ssh-ed25519 AAAA", privateKeyPath: "/tmp/aa-key", reused: true })
+  }).createWorker(CREDS);
+  assert.deepEqual(client.importedKeyPairs, []);
+});
+
+test("createWorker rotates fresh key material when AWS reports a duplicate key pair", async () => {
+  const client = new FakeEc2Client();
+  const deletedLocalKeys: string[] = [];
+  const keys = [
+    { keyName: "accordagents-worker-dup", publicKeyOpenSsh: "ssh-ed25519 AAAA", privateKeyPath: "/tmp/dup", reused: false },
+    { keyName: "accordagents-worker-new", publicKeyOpenSsh: "ssh-ed25519 BBBB", privateKeyPath: "/tmp/new", reused: false }
+  ];
+  client.importKeyPair = async (name: string): Promise<void> => {
+    client.importedKeyPairs.push(name);
+    if (name === "accordagents-worker-dup") {
+      const error = new Error("duplicate") as Error & { name: string };
+      error.name = "InvalidKeyPair.Duplicate";
+      throw error;
+    }
+    client.keyPairs.add(name);
+  };
+  const handle = await lifecycleWith(client, {
+    generateKeyMaterial: async (options?: { rotate?: boolean }) => keys[options?.rotate ? 1 : 0],
+    deleteKeyMaterial: async (keyName: string) => {
+      deletedLocalKeys.push(keyName);
+    }
+  }).createWorker(CREDS);
+  assert.equal(handle.keyName, "accordagents-worker-new");
+  assert.deepEqual(client.importedKeyPairs, ["accordagents-worker-dup", "accordagents-worker-new"]);
+  assert.deepEqual(deletedLocalKeys, ["accordagents-worker-dup"]);
 });
 
 test("ensureRunning starts a stopped instance and rebuilds ingress to the current IP", async () => {
@@ -150,6 +222,7 @@ test("ensureRunning starts a stopped instance and rebuilds ingress to the curren
   assert.equal(client.startCount, 1);
   assert.equal(ip, "2.2.2.2");
   assert.equal(client.revokedCount, 1);
+  assert.deepEqual(client.revokedSecurityGroups, ["sg-123"]);
   assert.deepEqual([...client.ingressCidrs], ["203.0.113.9/32"]);
 });
 
@@ -192,10 +265,40 @@ test("idle auto-stop fires only after the last run ends and is cancelled by a ne
   void timers;
 });
 
-test("deleteWorker terminates the instance", async () => {
+test("deleteWorker terminates the instance and cleans up key material and security group", async () => {
   const client = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
-  await lifecycleWith(client).deleteWorker(CREDS, HANDLE);
+  const deletedLocalKeys: string[] = [];
+  await lifecycleWith(client, {
+    deleteKeyMaterial: async (keyName: string) => {
+      deletedLocalKeys.push(keyName);
+    }
+  }).deleteWorker(CREDS, HANDLE);
   assert.equal(client.state.state, "terminated");
+  assert.deepEqual(client.deletedKeyPairs, ["aa-key"]);
+  assert.deepEqual(deletedLocalKeys, ["aa-key"]);
+  assert.deepEqual(client.deletedSecurityGroups, ["sg-123"]);
+});
+
+test("deleteWorker reports terminate failure but still attempts cleanup", async () => {
+  const client = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
+  client.terminateError = new Error("AccessDenied");
+  const result = await lifecycleWith(client).deleteWorker(CREDS, HANDLE);
+  assert.equal(result.terminateFailed, "AccessDenied");
+  assert.equal(client.state.state, "running");
+  assert.deepEqual(client.deletedKeyPairs, ["aa-key"]);
+  assert.deepEqual(client.deletedSecurityGroups, ["sg-123"]);
+});
+
+test("deleteWorker waits up to three minutes before first security group cleanup", async () => {
+  const client = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
+  let observedTimeout = 0;
+  await lifecycleWith(client, {
+    waitForState: async (_poll: () => Promise<AwsWorkerInstanceInfo | undefined>, _predicate: (info: AwsWorkerInstanceInfo | undefined) => boolean, timeoutMs: number) => {
+      observedTimeout = timeoutMs;
+      return { instanceId: "i-123", state: "terminated" };
+    }
+  }).deleteWorker(CREDS, HANDLE);
+  assert.equal(observedTimeout, 3 * 60_000);
 });
 
 test("stopWorker stops a running instance without terminating it", async () => {

@@ -2,8 +2,6 @@
 // the lifecycle, and turning "run a remote participant" into a reachable SSH
 // worker target. The chat run path calls ensureWorkerForRun(); the coordinator
 // calls noteRunStarted/noteRunEnded for idle auto-stop.
-import path from "node:path";
-import { app } from "electron";
 import type {
   AwsWorkerHandleInfo,
   AwsWorkerStatus,
@@ -15,8 +13,14 @@ import {
 } from "./awsWorkerProvisioning";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 import { AwsWorkerLifecycle } from "./awsWorkerLifecycle";
-import type { AwsWorkerHandle, Ec2Client } from "./awsWorkerLifecycle";
-import { createAwsEc2Client, generateAwsWorkerKeyMaterial, resolveCurrentPublicIp } from "./awsEc2Client";
+import type { AwsWorkerDeleteResult, AwsWorkerHandle, Ec2Client } from "./awsWorkerLifecycle";
+import {
+  createAwsEc2Client,
+  deleteGeneratedAwsWorkerKeyMaterial,
+  generateAwsWorkerKeyMaterial,
+  resolveAwsWorkerPrivateKeyPath,
+  resolveCurrentPublicIp
+} from "./awsEc2Client";
 import type { SettingsService } from "./settings";
 
 const WORKER_SSH_USER = "ubuntu";
@@ -25,6 +29,8 @@ const WORKER_ROOT = "~/.accordagents/remote-runs";
 export interface CloudRunAwsServiceOptions {
   createEc2Client?: (credentials: AwsWorkerCredentials) => Ec2Client;
   generateKeyMaterial?: typeof generateAwsWorkerKeyMaterial;
+  deleteKeyMaterial?: typeof deleteGeneratedAwsWorkerKeyMaterial;
+  privateKeyPathForKeyName?: (keyName: string) => string;
   currentPublicIp?: () => Promise<string>;
   logger?: (event: string, payload: Record<string, unknown>) => void;
   randomSuffix?: () => string;
@@ -33,18 +39,23 @@ export interface CloudRunAwsServiceOptions {
 export class CloudRunAwsService {
   private readonly lifecycle: AwsWorkerLifecycle;
   private readonly randomSuffix: () => string;
+  private readonly privateKeyPathForKeyName: (keyName: string) => string;
+  private readonly logger?: (event: string, payload: Record<string, unknown>) => void;
 
   constructor(
     private readonly settings: SettingsService,
     options: CloudRunAwsServiceOptions = {}
   ) {
+    this.logger = options.logger;
     this.lifecycle = new AwsWorkerLifecycle({
       createEc2Client: options.createEc2Client ?? createAwsEc2Client,
       generateKeyMaterial: options.generateKeyMaterial ?? generateAwsWorkerKeyMaterial,
+      deleteKeyMaterial: async (keyName) => (options.deleteKeyMaterial ?? deleteGeneratedAwsWorkerKeyMaterial)(keyName),
       currentPublicIp: options.currentPublicIp ?? resolveCurrentPublicIp,
       logger: options.logger
     });
     this.randomSuffix = options.randomSuffix ?? (() => Math.random().toString(36).slice(2, 10));
+    this.privateKeyPathForKeyName = options.privateKeyPathForKeyName ?? resolveAwsWorkerPrivateKeyPath;
   }
 
   // The user runs this in their own terminal (AWS auth) to mint the scoped key.
@@ -54,7 +65,7 @@ export class CloudRunAwsService {
 
   async connectWorker(blob: string, instanceType?: string): Promise<AwsWorkerStatus> {
     const credentials = parseWorkerBlob(blob);
-    await this.settings.saveAwsWorkerCredentials(credentials);
+    await this.assertCanCreateWorker();
     const handle = await this.lifecycle.createWorker(credentials, instanceType);
     const info: AwsWorkerHandleInfo = {
       instanceId: handle.instanceId,
@@ -64,6 +75,7 @@ export class CloudRunAwsService {
       instanceType: instanceType?.trim() || "t3.small",
       createdAt: new Date().toISOString()
     };
+    await this.settings.saveAwsWorkerCredentials(credentials);
     await this.settings.saveAwsWorkerHandle(info);
     await this.settings.setCloudRunsMode("aws");
     return this.status();
@@ -97,12 +109,24 @@ export class CloudRunAwsService {
     const credentials = await this.settings.getAwsWorkerCredentials();
     const settings = await this.settings.getPublicSettings();
     const handle = settings.cloudRuns.awsHandle;
-    if (credentials && handle) {
-      await this.lifecycle.deleteWorker(credentials, this.toHandle(handle));
+    let deleteResult: AwsWorkerDeleteResult | undefined;
+    let deleteError: string | undefined;
+    try {
+      if (credentials && handle) {
+        deleteResult = await this.lifecycle.deleteWorker(credentials, this.toHandle(handle));
+      }
+    } catch (error) {
+      deleteError = error instanceof Error ? error.message : String(error);
+      this.log("cloud-runs.aws.delete.error", {
+        message: deleteError
+      });
     }
     await this.settings.clearAwsWorker();
     await this.settings.setCloudRunsMode("ssh");
-    return { configured: false };
+    return {
+      configured: false,
+      message: this.deleteWarningMessage(handle, deleteResult, deleteError)
+    };
   }
 
   async stopWorker(): Promise<AwsWorkerStatus> {
@@ -158,9 +182,45 @@ export class CloudRunAwsService {
     };
   }
 
-  private privateKeyPath(_info: AwsWorkerHandleInfo): string {
-    // The key is app-generated at a fixed per-app location by
-    // generateAwsWorkerKeyMaterial; mirror that path here.
-    return path.join(app.getPath("userData"), "cloud-runs-keys", "accordagents-worker.pem");
+  private privateKeyPath(info: AwsWorkerHandleInfo): string {
+    return this.privateKeyPathForKeyName(info.keyName);
+  }
+
+  private async assertCanCreateWorker(): Promise<void> {
+    const credentials = await this.settings.getAwsWorkerCredentials();
+    const settings = await this.settings.getPublicSettings();
+    const handle = settings.cloudRuns.awsHandle;
+    if (!handle) {
+      return;
+    }
+    if (!credentials) {
+      throw new Error("An AWS worker is already configured but its credentials are missing. Delete the existing worker before connecting a new one.");
+    }
+    let existing: Awaited<ReturnType<AwsWorkerLifecycle["describe"]>>;
+    try {
+      existing = await this.lifecycle.describe(credentials, this.toHandle(handle));
+    } catch (error) {
+      throw new Error(`Could not verify the existing AWS worker before reconnecting: ${error instanceof Error ? error.message : String(error)}. Delete the existing worker first.`);
+    }
+    if (existing && existing.state !== "terminated" && existing.state !== "absent") {
+      throw new Error("An AWS worker is already configured. Delete the existing worker before connecting a new one.");
+    }
+    await this.lifecycle.deleteWorker(credentials, this.toHandle(handle));
+  }
+
+  private log(event: string, payload: Record<string, unknown>): void {
+    this.logger?.(event, payload);
+  }
+
+  private deleteWarningMessage(
+    handle: AwsWorkerHandleInfo | undefined,
+    result: AwsWorkerDeleteResult | undefined,
+    deleteError: string | undefined
+  ): string | undefined {
+    const reason = result?.terminateFailed ?? deleteError;
+    if (!handle || !reason) {
+      return undefined;
+    }
+    return `Settings cleared, but AWS instance ${handle.instanceId} may still exist. Check the EC2 console. (${reason})`;
   }
 }

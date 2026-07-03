@@ -51,7 +51,9 @@ export function buildScopedWorkerPolicy(region: string): unknown {
           "ec2:RunInstances",
           "ec2:ImportKeyPair",
           "ec2:CreateKeyPair",
+          "ec2:DeleteKeyPair",
           "ec2:CreateSecurityGroup",
+          "ec2:DeleteSecurityGroup",
           "ec2:AuthorizeSecurityGroupIngress",
           "ec2:RevokeSecurityGroupIngress",
           "ec2:CreateTags"

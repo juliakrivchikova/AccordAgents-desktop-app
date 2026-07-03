@@ -29,8 +29,11 @@ export interface AwsWorkerInstanceInfo {
 
 export interface Ec2Client {
   resolveUbuntuImageId(namePattern: string, owner: string): Promise<string>;
-  ensureKeyPair(name: string, publicKeyMaterial: string): Promise<void>;
+  keyPairExists(name: string): Promise<boolean>;
+  importKeyPair(name: string, publicKeyMaterial: string): Promise<void>;
+  deleteKeyPair(name: string): Promise<void>;
   ensureSecurityGroup(name: string, description: string): Promise<string>;
+  deleteSecurityGroup(securityGroupId: string): Promise<void>;
   authorizeSshIngress(securityGroupId: string, cidr: string): Promise<void>;
   revokeAllSshIngress(securityGroupId: string): Promise<void>;
   runInstance(spec: ReturnType<typeof buildWorkerInstanceSpec>): Promise<string>;
@@ -44,11 +47,13 @@ export interface AwsWorkerKeyMaterial {
   keyName: string;
   publicKeyOpenSsh: string;
   privateKeyPath: string;
+  reused?: boolean;
 }
 
 export interface AwsWorkerLifecycleOptions {
   createEc2Client: (credentials: AwsWorkerCredentials) => Ec2Client;
-  generateKeyMaterial: () => Promise<AwsWorkerKeyMaterial>;
+  generateKeyMaterial: (options?: { rotate?: boolean }) => Promise<AwsWorkerKeyMaterial>;
+  deleteKeyMaterial?: (keyName: string, privateKeyPath: string) => Promise<void>;
   currentPublicIp: () => Promise<string>;
   waitForState?: (
     poll: () => Promise<AwsWorkerInstanceInfo | undefined>,
@@ -68,13 +73,18 @@ export interface AwsWorkerHandle {
   region: string;
 }
 
+export interface AwsWorkerDeleteResult {
+  terminateFailed?: string;
+  cleanupFailures: Array<{ event: string; message: string }>;
+}
+
 const RUNNING_WAIT_TIMEOUT_MS = 3 * 60_000;
+const TERMINATED_WAIT_TIMEOUT_MS = 3 * 60_000;
 const DEFAULT_IDLE_STOP_MS = 20 * 60_000;
-const SECURITY_GROUP_NAME = "accordagents-worker-sg";
 
 export class AwsWorkerLifecycle {
   private readonly options: Required<Pick<AwsWorkerLifecycleOptions,
-    "createEc2Client" | "generateKeyMaterial" | "currentPublicIp" | "waitForState" | "idleStopMs" | "now">>
+    "createEc2Client" | "generateKeyMaterial" | "deleteKeyMaterial" | "currentPublicIp" | "waitForState" | "idleStopMs" | "now">>
     & Pick<AwsWorkerLifecycleOptions, "logger">;
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
   private activeRuns = 0;
@@ -83,6 +93,7 @@ export class AwsWorkerLifecycle {
     this.options = {
       createEc2Client: options.createEc2Client,
       generateKeyMaterial: options.generateKeyMaterial,
+      deleteKeyMaterial: options.deleteKeyMaterial ?? (async () => undefined),
       currentPublicIp: options.currentPublicIp,
       waitForState: options.waitForState ?? defaultWaitForState,
       idleStopMs: options.idleStopMs ?? DEFAULT_IDLE_STOP_MS,
@@ -96,13 +107,13 @@ export class AwsWorkerLifecycle {
   // instance. Returns the handle the app persists.
   async createWorker(credentials: AwsWorkerCredentials, instanceType?: string): Promise<AwsWorkerHandle> {
     const client = this.options.createEc2Client(credentials);
-    const key = await this.options.generateKeyMaterial();
-    const [imageId, securityGroupId, publicIp] = await Promise.all([
+    const [imageId, publicIp] = await Promise.all([
       client.resolveUbuntuImageId(UBUNTU_2404_NAME_PATTERN, UBUNTU_2404_OWNER),
-      client.ensureSecurityGroup(SECURITY_GROUP_NAME, "AccordAgents Cloud Runs worker"),
       this.options.currentPublicIp()
     ]);
-    await client.ensureKeyPair(key.keyName, key.publicKeyOpenSsh);
+    const key = await this.ensureImportedKeyPair(client);
+    const securityGroupName = securityGroupNameForKey(key.keyName);
+    const securityGroupId = await client.ensureSecurityGroup(securityGroupName, "AccordAgents Cloud Runs worker");
     await client.authorizeSshIngress(securityGroupId, ipToCidr(publicIp));
     const spec = buildWorkerInstanceSpec({ imageId, keyName: key.keyName, securityGroupId, instanceType });
     const instanceId = await client.runInstance(spec);
@@ -190,11 +201,42 @@ export class AwsWorkerLifecycle {
     }
   }
 
-  async deleteWorker(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle): Promise<void> {
+  async deleteWorker(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle): Promise<AwsWorkerDeleteResult> {
     this.clearIdleTimer();
+    this.activeRuns = 0;
     const client = this.options.createEc2Client(credentials);
-    await client.terminateInstance(handle.instanceId);
-    this.log("aws-worker.terminated", { instanceId: handle.instanceId });
+    const result: AwsWorkerDeleteResult = { cleanupFailures: [] };
+    const terminateFailed = await this.bestEffort("aws-worker.terminate", { instanceId: handle.instanceId }, async () => {
+      await client.terminateInstance(handle.instanceId);
+      this.log("aws-worker.terminated", { instanceId: handle.instanceId });
+    });
+    if (terminateFailed) {
+      result.terminateFailed = terminateFailed;
+    } else {
+      const waitFailed = await this.bestEffort("aws-worker.wait-terminated", { instanceId: handle.instanceId }, async () => {
+        await this.options.waitForState(
+          () => client.describeInstance(handle.instanceId),
+          (current) => !current || current.state === "terminated" || current.state === "absent",
+          TERMINATED_WAIT_TIMEOUT_MS
+        );
+      });
+      if (waitFailed) {
+        result.cleanupFailures.push({ event: "wait-terminated", message: waitFailed });
+      }
+    }
+    const keyFailed = await this.bestEffort("aws-worker.delete-key-pair", { keyName: handle.keyName }, () => client.deleteKeyPair(handle.keyName));
+    if (keyFailed) {
+      result.cleanupFailures.push({ event: "delete-key-pair", message: keyFailed });
+    }
+    const localKeyFailed = await this.bestEffort("aws-worker.delete-local-key", { keyName: handle.keyName }, () => this.options.deleteKeyMaterial(handle.keyName, handle.privateKeyPath));
+    if (localKeyFailed) {
+      result.cleanupFailures.push({ event: "delete-local-key", message: localKeyFailed });
+    }
+    const securityGroupFailed = await this.bestEffort("aws-worker.delete-security-group", { securityGroupId: handle.securityGroupId }, () => client.deleteSecurityGroup(handle.securityGroupId));
+    if (securityGroupFailed) {
+      result.cleanupFailures.push({ event: "delete-security-group", message: securityGroupFailed });
+    }
+    return result;
   }
 
   async stopWorker(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle): Promise<void> {
@@ -212,6 +254,30 @@ export class AwsWorkerLifecycle {
     return this.options.createEc2Client(credentials).describeInstance(handle.instanceId);
   }
 
+  private async ensureImportedKeyPair(client: Ec2Client): Promise<AwsWorkerKeyMaterial> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const key = await this.options.generateKeyMaterial({ rotate: attempt > 0 });
+      if (key.reused && await client.keyPairExists(key.keyName)) {
+        return key;
+      }
+      try {
+        await client.importKeyPair(key.keyName, key.publicKeyOpenSsh);
+        return key;
+      } catch (error) {
+        if (key.reused && isDuplicateKeyPair(error)) {
+          return key;
+        }
+        if (!key.reused && attempt === 0 && isDuplicateKeyPair(error)) {
+          this.log("aws-worker.key-pair-duplicate", { keyName: key.keyName });
+          await this.bestEffort("aws-worker.delete-local-key", { keyName: key.keyName }, () => this.options.deleteKeyMaterial(key.keyName, key.privateKeyPath));
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error("Could not import a unique AWS worker key pair.");
+  }
+
   private clearIdleTimer(): void {
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);
@@ -222,6 +288,28 @@ export class AwsWorkerLifecycle {
   private log(event: string, payload: Record<string, unknown>): void {
     this.options.logger?.(event, { tag: `${AWS_WORKER_TAG_KEY}=${AWS_WORKER_TAG_VALUE}`, ...payload });
   }
+
+  private async bestEffort(event: string, payload: Record<string, unknown>, action: () => Promise<void>): Promise<string | undefined> {
+    try {
+      await action();
+      return undefined;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`${event}.error`, {
+        ...payload,
+        message
+      });
+      return message;
+    }
+  }
+}
+
+function securityGroupNameForKey(keyName: string): string {
+  return `${keyName}-sg`;
+}
+
+function isDuplicateKeyPair(error: unknown): boolean {
+  return (error as { name?: string })?.name === "InvalidKeyPair.Duplicate";
 }
 
 async function defaultWaitForState(
