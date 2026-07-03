@@ -1,7 +1,7 @@
 {
   "name": "accordagents",
   "productName": "AccordAgents",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "private": true,
   "description": "Desktop app for multi-participant AI chat that debates a question or code diff and converges on a consensus answer.",
   "license": "Apache-2.0",
