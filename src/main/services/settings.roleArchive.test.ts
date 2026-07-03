@@ -40,7 +40,15 @@ function settingsServiceWith(
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
     chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
-    cloudRuns: { enabled: false, mode: "ssh" as const, worker: {}, hasAwsCredentials: false, maxRuntimeMs: 24 * 60 * 60_000, pollIntervalMs: 2_500 },
+    cloudRuns: {
+      enabled: false,
+      mode: "ssh" as const,
+      worker: {},
+      hasAwsCredentials: false,
+      awsRootVolumeSizeGb: 32,
+      maxRuntimeMs: 24 * 60 * 60_000,
+      pollIntervalMs: 2_500
+    },
     providers: [],
     chatRoleConfigs: initial.chatRoleConfigs ?? [],
     chatBehaviorRules: [],

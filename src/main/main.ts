@@ -137,6 +137,7 @@ appMcpService.setChatParticipantRequestHandler((actor, request) => chatService.r
 appMcpService.setChatParticipantRequestStatusHandler((actor, request) => chatService.participantRequestStatusForTool(actor, request));
 appMcpService.setChatReactHandler((actor, request) => chatService.reactToMessageFromTool(actor, request));
 appMcpService.setChatSendMessageHandler((actor, request) => chatService.sendChatMessageFromTool(actor, request));
+appMcpService.setChatSetTitleHandler((actor, request) => chatService.setChatTitleFromTool(actor, request));
 const activeReviews = new Map<string, AbortController>();
 
 function appSkillsSourceRoot(): string {
@@ -277,7 +278,7 @@ function registerIpc(): void {
   ipcMain.handle("cloud-runs:aws-bootstrap-command", (_event, region: string) =>
     cloudRunAwsService.bootstrapCommand(String(region ?? "").trim() || "us-east-1"));
   ipcMain.handle("cloud-runs:aws-connect", (_event, request: ConnectAwsWorkerRequest) =>
-    cloudRunAwsService.connectWorker(request.blob, request.instanceType));
+    cloudRunAwsService.connectWorker(request.blob, request.instanceType, request.rootVolumeSizeGb));
   ipcMain.handle("cloud-runs:aws-status", () => cloudRunAwsService.status());
   ipcMain.handle("cloud-runs:aws-stop", () => cloudRunAwsService.stopWorker());
   ipcMain.handle("cloud-runs:aws-delete", () => cloudRunAwsService.deleteWorker());

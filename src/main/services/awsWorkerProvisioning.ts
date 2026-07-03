@@ -2,6 +2,7 @@
 // command the user runs with their own AWS auth, the paste-blob it produces,
 // and the instance-launch spec. No AWS SDK and no side effects live here so
 // this is fully unit-testable; awsWorkerLifecycle.ts drives the real EC2 calls.
+import { normalizeAwsRootVolumeSizeGb } from "../../shared/cloudRuns";
 
 export const AWS_WORKER_TAG_KEY = "accordagents-worker";
 export const AWS_WORKER_TAG_VALUE = "1";
@@ -51,7 +52,9 @@ export function buildScopedWorkerPolicy(region: string): unknown {
           "ec2:RunInstances",
           "ec2:ImportKeyPair",
           "ec2:CreateKeyPair",
+          "ec2:DeleteKeyPair",
           "ec2:CreateSecurityGroup",
+          "ec2:DeleteSecurityGroup",
           "ec2:AuthorizeSecurityGroupIngress",
           "ec2:RevokeSecurityGroupIngress",
           "ec2:CreateTags"
@@ -165,28 +168,34 @@ export function buildWorkerCloudInit(): string {
 
 export interface WorkerInstanceSpec {
   imageId: string;
+  rootDeviceName: string;
   instanceType: string;
   keyName: string;
   securityGroupId: string;
   userData: string;
   tagKey: string;
   tagValue: string;
+  rootVolumeSizeGb: number;
 }
 
 export function buildWorkerInstanceSpec(options: {
   imageId: string;
+  rootDeviceName: string;
   keyName: string;
   securityGroupId: string;
   instanceType?: string;
+  rootVolumeSizeGb?: number;
 }): WorkerInstanceSpec {
   return {
     imageId: options.imageId,
+    rootDeviceName: options.rootDeviceName,
     instanceType: options.instanceType?.trim() || DEFAULT_AWS_WORKER_INSTANCE_TYPE,
     keyName: options.keyName,
     securityGroupId: options.securityGroupId,
     userData: Buffer.from(buildWorkerCloudInit(), "utf8").toString("base64"),
     tagKey: AWS_WORKER_TAG_KEY,
-    tagValue: AWS_WORKER_TAG_VALUE
+    tagValue: AWS_WORKER_TAG_VALUE,
+    rootVolumeSizeGb: normalizeAwsRootVolumeSizeGb(options.rootVolumeSizeGb)
   };
 }
 

@@ -53,14 +53,35 @@ test("diagnose fails on required gaps and warns on optional gaps", async () => {
   assert.equal(byId.get("git-identity"), "warn");
 });
 
-test("diagnose surfaces a clean connection error", async () => {
+test("diagnose classifies public-key failures as likely AWS key mismatches", async () => {
   const { service } = doctorWith(async () => {
     throw new Error("Permission denied (publickey).");
   });
   const report = await service.diagnose(WORKER);
   assert.equal(report.ok, false);
   assert.match(report.message, /SSH connection failed/);
+  assert.match(report.message, /private key is missing or does not match/);
+  assert.match(report.message, /Delete and recreate the AWS worker/);
   assert.equal(report.checks[0].id, "connect");
+});
+
+test("diagnose classifies missing identity files as likely AWS key mismatches", async () => {
+  const { service } = doctorWith(async () => {
+    throw new Error("Warning: Identity file /tmp/key.pem not accessible: No such file or directory.");
+  });
+  const report = await service.diagnose(WORKER);
+  assert.equal(report.ok, false);
+  assert.match(report.message, /private key is missing or does not match/);
+});
+
+test("diagnose keeps generic connection errors generic", async () => {
+  const { service } = doctorWith(async () => {
+    throw new Error("Connection timed out.");
+  });
+  const report = await service.diagnose(WORKER);
+  assert.equal(report.ok, false);
+  assert.match(report.message, /SSH connection failed: Connection timed out/);
+  assert.doesNotMatch(report.message, /Delete and recreate/);
 });
 
 test("setup installs only the missing pieces and re-diagnoses", async () => {

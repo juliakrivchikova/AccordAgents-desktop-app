@@ -139,6 +139,7 @@ import {
   APP_CHAT_LIST_ATTACHMENTS_TOOL,
   APP_CHAT_REACT_TOOL,
   APP_CHAT_SEND_MESSAGE_TOOL,
+  APP_CHAT_SET_TITLE_TOOL,
   APP_CHAT_READ_ATTACHMENT_TOOL,
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_CHAT_READ_MESSAGES_TOOL,
@@ -163,6 +164,7 @@ import {
   readActiveRunIds
 } from "../../shared/chatRunState";
 import { INTERRUPTED_RUN_WARNING, sanitizeWarningList, sanitizeWarningText } from "../../shared/warnings";
+import { normalizeAutoChatTitle, normalizeManualChatTitle, sanitizeAutoChatTitleSuggestion } from "../../shared/chatTitles";
 
 type ProgressCallback = (progress: ReviewProgress) => void;
 
@@ -189,6 +191,7 @@ interface ChatPromptSectionSizes {
   skills: number;
   mentions: number;
   attachments: number;
+  autoTitle: number;
   behaviorRules: number;
   currentRequest: number;
   total: number;
@@ -275,6 +278,7 @@ const CHAT_CONTEXT_MCP_TOOL_NAMES = [
   APP_CHAT_EXPORT_ATTACHMENT_TOOL,
   APP_CHAT_REACT_TOOL,
   APP_CHAT_SEND_MESSAGE_TOOL,
+  APP_CHAT_SET_TITLE_TOOL,
   APP_TOOL_PERMISSION_TOOL
 ];
 const CHAT_APP_MCP_TOOL_NAMES = [
@@ -355,6 +359,22 @@ interface ChatAppMcpActor {
   historyMarkdownPath?: string;
   historyJsonPath?: string;
   runPermissions?: ChatAgentPermissions;
+}
+
+interface ChatAutoTitleMetadata {
+  source: "first-agent" | "manual";
+  title: string;
+  appliedAt: string;
+  participantId?: string;
+  runId?: string;
+  triggerMessageId?: string;
+}
+
+interface ChatAutoTitleEligibilityMetadata {
+  triggerMessageId: string;
+  targetParticipantIds: string[];
+  targetRunIds: Record<string, string>;
+  createdAt: string;
 }
 
 interface ChatChoiceDraft {
@@ -664,7 +684,7 @@ export class ChatService {
       const participants = await this.ensureAdministratorParticipant(requestedParticipants);
       conversation = {
         id: randomUUID(),
-        title: this.normalizeChatTitle(requestedTitle),
+        title: normalizeAutoChatTitle(requestedTitle),
         kind: "chat",
         createdAt: now,
         updatedAt: now,
@@ -772,11 +792,15 @@ export class ChatService {
         throw new Error("Chat name cannot be edited while participants are running.");
       }
       const title = this.normalizeChatTitle(request.title);
-      if (title === conversation.title) {
+      const existingAutoTitle = this.chatAutoTitleMetadata(conversation);
+      const hadAutoTitleEligibility = Boolean(this.chatAutoTitleEligibility(conversation));
+      if (title === conversation.title && existingAutoTitle?.source === "manual" && !hadAutoTitleEligibility) {
         return conversation;
       }
+      const now = new Date().toISOString();
       conversation.title = title;
-      conversation.updatedAt = new Date().toISOString();
+      conversation.metadata = this.metadataWithManualChatTitle(conversation.metadata, title, now);
+      conversation.updatedAt = now;
       await this.saveConversation(conversation);
       await this.ensureHistoryFiles(conversation);
       return conversation;
@@ -2838,6 +2862,70 @@ export class ChatService {
     };
   }
 
+  async setChatTitleFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+    const request = this.normalizeChatTitleToolRequest(rawRequest);
+    const title = sanitizeAutoChatTitleSuggestion(request.title);
+    if (!title) {
+      return {
+        ok: false,
+        status: "ignored",
+        reason: "invalid_title"
+      };
+    }
+    const conversation = await this.requireChat(actor.conversationId);
+    let applied = false;
+    let result: Record<string, unknown> = {
+      ok: false,
+      status: "ignored",
+      reason: "not_eligible"
+    };
+    await this.withChatMutation(conversation, async () => {
+      if (this.chatAutoTitleMetadata(conversation)) {
+        result = {
+          ok: false,
+          status: "ignored",
+          reason: "already_titled",
+          title: conversation.title
+        };
+        return;
+      }
+      const eligibility = this.chatAutoTitleEligibility(conversation);
+      if (!this.actorMatchesAutoTitleEligibility(actor, eligibility)) {
+        result = {
+          ok: false,
+          status: "ignored",
+          reason: "not_eligible",
+          title: conversation.title
+        };
+        return;
+      }
+      const now = new Date().toISOString();
+      conversation.title = title;
+      conversation.metadata = this.metadataWithFirstAgentChatTitle(conversation.metadata, {
+        source: "first-agent",
+        title,
+        participantId: actor.participantId,
+        runId: actor.runId,
+        triggerMessageId: actor.triggerMessageId,
+        appliedAt: now
+      });
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+      applied = true;
+      result = {
+        ok: true,
+        status: "applied",
+        title,
+        conversationId: conversation.id
+      };
+    });
+    if (applied) {
+      await this.ensureHistoryFiles(conversation);
+    }
+    return result;
+  }
+
   async readChatAttachment(request: ReadChatAttachmentRequest): Promise<{ attachment: ChatImageAttachment; dataBase64: string }> {
     await this.waitForQueuedSave(request.conversationId);
     const conversation = await this.requireChat(request.conversationId);
@@ -3448,6 +3536,8 @@ export class ChatService {
         await this.rollbackPreparedImageAttachments(conversation.id, preparedImages, "MessageValidationFailed", error);
         throw error;
       }
+      const initialAutoTitleCandidate = this.shouldCreateInitialAutoTitleEligibility(conversation, request, dispatch.targets);
+      let autoTitleTargetRunIds: Map<string, string> | undefined;
       const threadId = replyContext.threadId ?? randomUUID();
       const userMessage = this.message("user", content, undefined, {
         threadId,
@@ -3483,6 +3573,13 @@ export class ChatService {
             ...dispatch,
             targets: this.allowParticipantRequestsForManualAccordIfSelected(conversation, skillValidation.skillMentions, dispatch.targets)
           };
+          if (initialAutoTitleCandidate && dispatch.targets.length > 0) {
+            autoTitleTargetRunIds = new Map(dispatch.targets.map((target) => [target.id, randomUUID()]));
+            conversation.metadata = {
+              ...conversation.metadata,
+              autoTitleEligibility: this.initialAutoTitleEligibility(userMessage, dispatch.targets, autoTitleTargetRunIds)
+            };
+          }
           if (dispatch.targets.length === 0) {
             conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
           }
@@ -3493,7 +3590,7 @@ export class ChatService {
         await this.rollbackPreparedImageAttachments(conversation.id, preparedImages, "ConversationSaveFailed", error);
         throw error;
       }
-      return { conversation, dispatch, userMessage };
+      return { conversation, dispatch, userMessage, autoTitleTargetRunIds };
     });
 
     if (ingest.dispatch.targets.length === 0) {
@@ -3513,7 +3610,8 @@ export class ChatService {
       runId,
       signal,
       progress,
-      dispatchWarnings
+      dispatchWarnings,
+      ingest.autoTitleTargetRunIds ? { targetRunIds: ingest.autoTitleTargetRunIds } : {}
     );
     // Fire-and-track: ingest is already persisted, so return to the renderer now and let the
     // participant batch run in the background. Completion and per-participant failures surface
@@ -4074,6 +4172,7 @@ export class ChatService {
             this.queueSnapshot(conversation);
           });
           this.unregisterTargetRun(targetRunId, targetController);
+          await this.clearAutoTitleEligibilityForTerminalRun(conversation, targetRunId);
           signal?.removeEventListener("abort", onParentAbort);
           completed += 1;
           this.emitProgress(runId, progress, "debate", `@${participant.handle} skipped.`, {
@@ -4860,6 +4959,7 @@ export class ChatService {
       this.isAdministratorSession(session)
     );
     const attachmentsBlock = this.imageAttachmentsPromptSection(triggerMessage);
+    const autoTitleBlock = this.initialAutoTitlePromptSection(conversation, participant, triggerMessage);
     // When role instructions are included this turn they already carry the rules
     // verbatim (the `## Participant Behavior Rules` section), so skip the per-turn
     // reinforcement to avoid a duplicated, divergent copy in the same prompt.
@@ -4879,6 +4979,7 @@ export class ChatService {
       skillsBlock,
       mentionsBlock,
       attachmentsBlock,
+      autoTitleBlock,
       behaviorRulesBlock,
       currentRequestBlock
     ].filter(Boolean);
@@ -4895,6 +4996,7 @@ export class ChatService {
         skills: skillsBlock.length,
         mentions: mentionsBlock.length,
         attachments: attachmentsBlock.length,
+        autoTitle: autoTitleBlock.length,
         behaviorRules: behaviorRulesBlock.length,
         currentRequest: currentRequestBlock.length,
         total: prompt.length
@@ -4983,6 +5085,23 @@ export class ChatService {
       "",
       "Reply only \"Noted\" if:",
       "- the message is addressed to another participant, even if my handle appears inside the requested action."
+    ].join("\n");
+  }
+
+  private initialAutoTitlePromptSection(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    triggerMessage: ChatMessage
+  ): string {
+    const eligibility = this.chatAutoTitleEligibility(conversation);
+    if (!eligibility || eligibility.triggerMessageId !== triggerMessage.id || !eligibility.targetParticipantIds.includes(participant.id)) {
+      return "";
+    }
+    return [
+      "Chat title assignment:",
+      "- Before answering, call `app_chat_set_title` once with a concise title based on User's intent.",
+      "- Use 3-8 words. Omit participant handles, slash commands, model/provider names, and generic words like Chat.",
+      "- Continue with the user's request after the tool call. Do not mention the title call unless it blocks the request."
     ].join("\n");
   }
 
@@ -5205,9 +5324,9 @@ export class ChatService {
       "App MCP tools: use the connected `accord_agents` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
       "Read-only chat MCP tools: `app_chat_get_context`, `app_chat_get_participants`, `app_chat_read_messages`, `app_chat_list_attachments`, and `app_chat_read_attachment`. Prefer them over history files for roster, thread, messages, and screenshots.",
       "Reaction MCP tool: `app_chat_react` adds or toggles an emoji reaction on a specific message. To react, call it with the message `id` from `app_chat_read_messages` and an allowed emoji.",
-      "Send-message MCP tool: `app_chat_send_message` posts your message immediately (visible/reactable before your turn ends) and returns its `messageId`. Use it only for mid-turn visibility, e.g. a canonical resolution. Do not use it for an ordinary reply — your normal turn response already reaches everyone at turn end.",
+      "Send-message MCP tool: `app_chat_send_message` posts immediately and returns its `messageId`. Use only for mid-turn visibility, e.g. a canonical resolution; normal replies use your turn response.",
       "If a message lists attached images, call `app_chat_read_attachment` with the attachment ID before reasoning about visual details.",
-      "Participant request MCP tools: when `app_chat_request_participants` is available, use it to ask current chat participants for input; `app_chat_get_participant_request_status` recovers their replies. Request JSON is `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
+      "Participant request MCP tools: use `app_chat_request_participants` to ask participants; `app_chat_get_participant_request_status` recovers replies. JSON: `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
       "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
       "If `app_chat_request_participants` returns replies before timeout, use them in this turn. If it returns `pending_approval` or `running`, stop after a brief status note; the app will auto-resume you after replies or errors arrive.",
       ...permissionPolicyLines
@@ -5571,8 +5690,8 @@ export class ChatService {
       return "";
     }
     return canRequestPermissions
-      ? "If you need repository file contents, call `app_permissions_request_change` for `repoRead` before refusing."
-      : "If you need repository file contents, explain that `repoRead` is needed before refusing.";
+      ? "For repo files call `app_permissions_request_change` for `repoRead` before refusal."
+      : "For repo files, explain that `repoRead` is needed before refusing.";
   }
 
   private warmAgentContextKey(
@@ -5954,10 +6073,27 @@ export class ChatService {
     // Always merge: the (updatedAt, length) short-circuit was unsound under concurrent
     // sends, where two batches can land at the same length+timestamp with different
     // message ids. The merge is O(n) and id-keyed, so a no-op when storage matches.
+    const title = this.mergeStoredChatTitle(stored, conversation);
     conversation.messages = this.mergeStoredChatMessages(stored.messages, conversation.messages);
     conversation.metadata = this.mergeStoredChatMetadata(stored.metadata, conversation.metadata);
+    conversation.title = title;
     this.applyRemovedChatMessageTombstones(conversation);
     conversation.updatedAt = stored.updatedAt > conversation.updatedAt ? stored.updatedAt : conversation.updatedAt;
+  }
+
+  private mergeStoredChatTitle(stored: Conversation, current: Conversation): string {
+    const storedTitle = this.chatAutoTitleMetadata(stored);
+    const currentTitle = this.chatAutoTitleMetadata(current);
+    if (!storedTitle && !currentTitle) {
+      return current.title;
+    }
+    if (storedTitle && !currentTitle) {
+      return stored.title;
+    }
+    if (!storedTitle && currentTitle) {
+      return current.title;
+    }
+    return (storedTitle?.appliedAt ?? "") > (currentTitle?.appliedAt ?? "") ? stored.title : current.title;
   }
 
   private mergeStoredChatMessages(storedMessages: ChatMessage[], currentMessages: ChatMessage[]): ChatMessage[] {
@@ -6202,6 +6338,9 @@ export class ChatService {
       ...storedMetadata,
       ...currentMetadata
     };
+    if (merged.autoTitle) {
+      delete merged.autoTitleEligibility;
+    }
     const participants = this.mergeMetadataItemsByKey(
       storedMetadata.participants,
       currentMetadata.participants,
@@ -12022,7 +12161,191 @@ export class ChatService {
   }
 
   private normalizeChatTitle(value: string): string {
-    return value.trim().slice(0, 80) || "Chat";
+    return normalizeManualChatTitle(value);
+  }
+
+  private normalizeChatTitleToolRequest(value: unknown): { title: string } {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("Chat title request must be an object.");
+    }
+    const title = (value as { title?: unknown }).title;
+    if (typeof title !== "string") {
+      throw new Error("Chat title request requires a string title.");
+    }
+    return { title };
+  }
+
+  private shouldCreateInitialAutoTitleEligibility(
+    conversation: Conversation,
+    request: SendChatMessageRequest,
+    targets: ChatParticipant[]
+  ): boolean {
+    if (targets.length === 0) {
+      return false;
+    }
+    if (conversation.metadata.autoTitle || conversation.metadata.autoTitleEligibility) {
+      return false;
+    }
+    if (request.threadId?.trim() || request.parentMessageId?.trim() || request.chatThreadRootId?.trim()) {
+      return false;
+    }
+    return !conversation.messages.some((message) => message.role === "user" || message.role === "participant");
+  }
+
+  private initialAutoTitleEligibility(
+    triggerMessage: ChatMessage,
+    targets: ChatParticipant[],
+    targetRunIds: ReadonlyMap<string, string>
+  ): ChatAutoTitleEligibilityMetadata {
+    const targetParticipantIds = targets.map((target) => target.id);
+    const runIds: Record<string, string> = {};
+    for (const participantId of targetParticipantIds) {
+      const runId = targetRunIds.get(participantId);
+      if (runId) {
+        runIds[participantId] = runId;
+      }
+    }
+    return {
+      triggerMessageId: triggerMessage.id,
+      targetParticipantIds,
+      targetRunIds: runIds,
+      createdAt: new Date().toISOString()
+    };
+  }
+
+  private chatAutoTitleMetadata(conversation: Conversation): ChatAutoTitleMetadata | undefined {
+    const value = conversation.metadata.autoTitle;
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+    const record = value as Partial<ChatAutoTitleMetadata>;
+    if (
+      (record.source !== "first-agent" && record.source !== "manual") ||
+      typeof record.title !== "string" ||
+      typeof record.appliedAt !== "string"
+    ) {
+      return undefined;
+    }
+    return {
+      source: record.source,
+      title: record.title,
+      appliedAt: record.appliedAt,
+      participantId: typeof record.participantId === "string" ? record.participantId : undefined,
+      runId: typeof record.runId === "string" ? record.runId : undefined,
+      triggerMessageId: typeof record.triggerMessageId === "string" ? record.triggerMessageId : undefined
+    };
+  }
+
+  private chatAutoTitleEligibility(conversation: Conversation): ChatAutoTitleEligibilityMetadata | undefined {
+    const value = conversation.metadata.autoTitleEligibility;
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+    const record = value as Partial<ChatAutoTitleEligibilityMetadata>;
+    if (
+      typeof record.triggerMessageId !== "string" ||
+      !Array.isArray(record.targetParticipantIds) ||
+      !record.targetParticipantIds.every((id): id is string => typeof id === "string" && id.length > 0) ||
+      !record.targetRunIds ||
+      typeof record.targetRunIds !== "object" ||
+      Array.isArray(record.targetRunIds) ||
+      typeof record.createdAt !== "string"
+    ) {
+      return undefined;
+    }
+    const targetRunIds: Record<string, string> = {};
+    for (const [participantId, runId] of Object.entries(record.targetRunIds)) {
+      if (typeof runId === "string" && runId.length > 0) {
+        targetRunIds[participantId] = runId;
+      }
+    }
+    return {
+      triggerMessageId: record.triggerMessageId,
+      targetParticipantIds: record.targetParticipantIds,
+      targetRunIds,
+      createdAt: record.createdAt
+    };
+  }
+
+  private actorMatchesAutoTitleEligibility(
+    actor: ChatAppMcpActor,
+    eligibility: ChatAutoTitleEligibilityMetadata | undefined
+  ): boolean {
+    if (!eligibility || actor.continuation) {
+      return false;
+    }
+    if (!actor.triggerMessageId || actor.triggerMessageId !== eligibility.triggerMessageId) {
+      return false;
+    }
+    if (!eligibility.targetParticipantIds.includes(actor.participantId)) {
+      return false;
+    }
+    const expectedRunId = eligibility.targetRunIds[actor.participantId];
+    return Boolean(expectedRunId && actor.runId && actor.runId === expectedRunId);
+  }
+
+  private metadataWithManualChatTitle(
+    metadata: Record<string, unknown>,
+    title: string,
+    appliedAt: string
+  ): Record<string, unknown> {
+    return this.metadataWithoutAutoTitleEligibility({
+      ...metadata,
+      autoTitle: {
+        source: "manual",
+        title,
+        appliedAt
+      } satisfies ChatAutoTitleMetadata
+    });
+  }
+
+  private metadataWithFirstAgentChatTitle(
+    metadata: Record<string, unknown>,
+    autoTitle: ChatAutoTitleMetadata
+  ): Record<string, unknown> {
+    return this.metadataWithoutAutoTitleEligibility({
+      ...metadata,
+      autoTitle
+    });
+  }
+
+  private metadataWithoutAutoTitleEligibility(metadata: Record<string, unknown>): Record<string, unknown> {
+    const { autoTitleEligibility: _autoTitleEligibility, ...rest } = metadata;
+    return rest;
+  }
+
+  private metadataAfterAutoTitleRunTerminal(
+    conversationId: string,
+    metadata: Record<string, unknown>,
+    terminalRunId: string
+  ): Record<string, unknown> {
+    const eligibility = this.chatAutoTitleEligibility({ metadata } as Conversation);
+    if (!eligibility || !Object.values(eligibility.targetRunIds).includes(terminalRunId)) {
+      return metadata;
+    }
+    const hasOtherLiveEligibleRun = Object.values(eligibility.targetRunIds)
+      .some((runId) => runId !== terminalRunId && this.isAutoTitleEligibleRunLive(conversationId, runId));
+    return hasOtherLiveEligibleRun ? metadata : this.metadataWithoutAutoTitleEligibility(metadata);
+  }
+
+  private isAutoTitleEligibleRunLive(conversationId: string, runId: string): boolean {
+    if (this.activeConversationRunIds.get(conversationId)?.has(runId)) {
+      return true;
+    }
+    return this.chatRunMeta.get(runId)?.conversationId === conversationId;
+  }
+
+  private async clearAutoTitleEligibilityForTerminalRun(conversation: Conversation, terminalRunId: string): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      const nextMetadata = this.metadataAfterAutoTitleRunTerminal(conversation.id, conversation.metadata, terminalRunId);
+      if (nextMetadata === conversation.metadata) {
+        return;
+      }
+      conversation.metadata = nextMetadata;
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+    });
   }
 
   private formatHandleList(handles: string[]): string {
@@ -12492,6 +12815,7 @@ export class ChatService {
     }
     if (shouldClear) {
       conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
+      conversation.metadata = this.metadataWithoutAutoTitleEligibility(conversation.metadata);
     }
     conversation.updatedAt = new Date().toISOString();
     return true;
@@ -12943,6 +13267,7 @@ export class ChatService {
             conversation.metadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata, runId);
           }
         }
+        conversation.metadata = this.metadataAfterAutoTitleRunTerminal(conversation.id, conversation.metadata, runId);
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
       });

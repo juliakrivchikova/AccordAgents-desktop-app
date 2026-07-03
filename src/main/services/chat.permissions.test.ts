@@ -7,6 +7,7 @@ import {
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
   APP_CHAT_REACT_TOOL,
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
+  APP_CHAT_SET_TITLE_TOOL,
   APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
   APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
   APP_ROLES_REQUEST_CHANGE_TOOL,
@@ -4558,6 +4559,7 @@ test("app MCP advertises app_chat_react to chat participants", () => {
   }) as Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> }; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean } }>;
   const reactionTool = tools.find((tool) => tool.name === APP_CHAT_REACT_TOOL);
   const exportTool = tools.find((tool) => tool.name === APP_CHAT_EXPORT_ATTACHMENT_TOOL);
+  const titleTool = tools.find((tool) => tool.name === APP_CHAT_SET_TITLE_TOOL);
 
   assert.ok(reactionTool);
   assert.ok(reactionTool.inputSchema?.properties?.messageId);
@@ -4567,6 +4569,9 @@ test("app MCP advertises app_chat_react to chat participants", () => {
   assert.equal(exportTool.annotations?.destructiveHint, true);
   assert.ok(exportTool.inputSchema?.properties?.attachmentId);
   assert.ok(exportTool.inputSchema?.properties?.targetPath);
+  assert.ok(titleTool);
+  assert.equal(titleTool.annotations?.readOnlyHint, false);
+  assert.ok(titleTool.inputSchema?.properties?.title);
   assert.ok(tools.find((tool) => tool.name === APP_TOOL_PERMISSION_TOOL));
 });
 
@@ -4576,6 +4581,7 @@ test("appMcpToolNames exposes participant request only with participants.request
   const requestTools = (service as any).appMcpToolNames(["participants.request"]);
 
   assert.equal(defaultTools.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL), false);
+  assert.ok(defaultTools.includes(APP_CHAT_SET_TITLE_TOOL));
   assert.ok(defaultTools.includes(APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL));
   assert.ok(requestTools.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL));
   assert.ok(requestTools.includes(APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL));
@@ -5166,6 +5172,7 @@ function testService(options: {
       mode: options.settings?.cloudRuns?.mode ?? "ssh",
       worker: options.settings?.cloudRuns?.worker ?? {},
       hasAwsCredentials: options.settings?.cloudRuns?.hasAwsCredentials ?? false,
+      awsRootVolumeSizeGb: options.settings?.cloudRuns?.awsRootVolumeSizeGb ?? 32,
       maxRuntimeMs: options.settings?.cloudRuns?.maxRuntimeMs ?? 24 * 60 * 60_000,
       pollIntervalMs: options.settings?.cloudRuns?.pollIntervalMs ?? 2_500
     },
