@@ -7,6 +7,7 @@ import {
   CHAT_SAVED_PROMPT_LABEL_MAX_CHARS
 } from "../../shared/chatSavedPrompts";
 import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT } from "../../shared/chatParticipantRequests";
+import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS } from "../../shared/cliAgentRunSettings";
 
 function savedPrompt(overrides: Partial<ChatSavedPromptConfig> = {}): ChatSavedPromptConfig {
@@ -28,6 +29,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     roundLimitDefault: number;
     cliAgentRunTimeoutMs: number;
     chatParticipantRequestMaxDepth: number;
+    chatPromptContext: AppSettings["chatPromptContext"];
     providers: AppSettings["providers"];
     chatRoleConfigs: AppSettings["chatRoleConfigs"];
     chatBehaviorRules: AppSettings["chatBehaviorRules"];
@@ -39,6 +41,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+    chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
     providers: [],
     chatRoleConfigs: [],
     chatBehaviorRules: [],

@@ -159,7 +159,7 @@ test("buildPromptParts section sizes stay under baseline caps across envelope br
     includeRoleInstructions,
     agentMode: "default",
     permissions
-  }) as { prompt: string; sections: { staticEnvelope: number; dynamicHeader: number; trigger: number; mentions: number; currentRequest: number; total: number } };
+  }) as { prompt: string; sections: { staticEnvelope: number; dynamicHeader: number; promptContext: number; trigger: number; mentions: number; currentRequest: number; total: number } };
 
   const slimRepoRead = build(conversationWithRepo, permGranted, false);
   const slimNoRepoRead = build(conversationWithRepo, permBlocked, false);
@@ -175,6 +175,7 @@ test("buildPromptParts section sizes stay under baseline caps across envelope br
   ] as const) {
     assert.equal(parts.sections.staticEnvelope, 0, `${label}: staticEnvelope should be empty on slim`);
     assert.ok(parts.sections.dynamicHeader < 1000, `${label}: dynamicHeader too large: ${parts.sections.dynamicHeader}`);
+    assert.equal(parts.sections.promptContext, 0, `${label}: promptContext should be empty without automatic context`);
     assert.ok(parts.sections.trigger < 350, `${label}: trigger too large: ${parts.sections.trigger}`);
     assert.equal(parts.sections.mentions, 0, `${label}: mentions should be empty when no #file tokens`);
     assert.ok(parts.sections.currentRequest < 130, `${label}: currentRequest too large: ${parts.sections.currentRequest}`);
@@ -189,7 +190,8 @@ test("buildPromptParts section sizes stay under baseline caps across envelope br
     // Bumped from 7450 when app_chat_send_message was added to the static chat MCP tool
     // instructions, then again when its guidance was expanded to prevent misuse (use only
     // for mid-turn visibility). Intentional growth; keep tightening any further bloat.
-    assert.ok(parts.sections.staticEnvelope < 7750, `${label}: staticEnvelope too large: ${parts.sections.staticEnvelope}`);
+    assert.ok(parts.sections.staticEnvelope < 7925, `${label}: staticEnvelope too large: ${parts.sections.staticEnvelope}`);
+    assert.equal(parts.sections.promptContext, 0, `${label}: promptContext should be empty without automatic context`);
     assert.ok(parts.sections.trigger < 350, `${label}: trigger too large: ${parts.sections.trigger}`);
     assert.ok(parts.sections.currentRequest < 130, `${label}: currentRequest too large: ${parts.sections.currentRequest}`);
   }
@@ -198,8 +200,8 @@ test("buildPromptParts section sizes stay under baseline caps across envelope br
   assert.ok(slimRepoRead.sections.total < 1100, `slim repo+repoRead total too large: ${slimRepoRead.sections.total}`);
   assert.ok(slimNoRepoRead.sections.total < 1500, `slim repo+no-repoRead total too large: ${slimNoRepoRead.sections.total}`);
   assert.ok(slimNoRepo.sections.total < 1500, `slim no-repo total too large: ${slimNoRepo.sections.total}`);
-  assert.ok(fullRepoRead.sections.total < 7850, `full repo+repoRead total too large: ${fullRepoRead.sections.total}`);
-  assert.ok(fullNoRepoRead.sections.total < 8000, `full repo+no-repoRead total too large: ${fullNoRepoRead.sections.total}`);
+  assert.ok(fullRepoRead.sections.total < 8050, `full repo+repoRead total too large: ${fullRepoRead.sections.total}`);
+  assert.ok(fullNoRepoRead.sections.total < 8200, `full repo+no-repoRead total too large: ${fullNoRepoRead.sections.total}`);
   assert.ok(slimRepoRead.sections.total * 4 < fullRepoRead.sections.total, "slim envelope should be at least 4x smaller than full");
 
   // Repo-read state appears once: on the Repository line (and the escalation line when blocked).
