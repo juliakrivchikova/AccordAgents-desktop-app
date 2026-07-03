@@ -10,6 +10,9 @@ import type {
   CloudRunWorkerDoctorReport,
   CloudRunWorkerMode,
   CloudRunWorkerSetupProgress,
+  ChatPromptContextMode,
+  ChatPromptContextScopeSettings,
+  ChatPromptContextSettings,
   ProviderKind,
   ProviderSettings,
   RepoFileOpenAction
@@ -19,6 +22,10 @@ import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MIN
 } from "../../../shared/chatParticipantRequests";
 import { CLI_AGENT_RUN_TIMEOUT_MAX_MS, CLI_AGENT_RUN_TIMEOUT_MIN_MS, cliAgentRunTimeoutHours } from "../../../shared/cliAgentRunSettings";
+import {
+  CHAT_PROMPT_CONTEXT_LIMIT_MAX,
+  normalizeChatPromptContextSettings
+} from "../../../shared/chatPromptContext";
 import {
   AWS_WORKER_ROOT_VOLUME_SIZE_GB_MAX,
   AWS_WORKER_ROOT_VOLUME_SIZE_GB_MIN,
@@ -38,11 +45,13 @@ export function GeneralSettingsSection(props: {
   repoFileOpenAction?: RepoFileOpenAction;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
+  chatPromptContext: ChatPromptContextSettings;
   cloudRuns: CloudRunsSettings;
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
+  setChatPromptContext: (settings: ChatPromptContextSettings) => Promise<void>;
   saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => Promise<void>;
 }): JSX.Element {
   const detectedCount = props.providers.filter(
@@ -104,6 +113,16 @@ export function GeneralSettingsSection(props: {
               <div className="gen-row-desc">Automatically stop an agent run after this many hours.</div>
             </div>
             <CliAgentRunTimeoutControl timeoutMs={props.cliAgentRunTimeoutMs} onChange={props.setCliAgentRunTimeoutMs} />
+          </div>
+          <div className="gen-card-divider" />
+          <div className="gen-row">
+            <div className="gen-row-text">
+              <div className="gen-row-title">Prompt context</div>
+              <div className="gen-row-desc">
+                Automatically include unseen chat messages in participant prompts. Set a scope to 0 or Off to keep today's behavior.
+              </div>
+            </div>
+            <PromptContextControl settings={props.chatPromptContext} onChange={props.setChatPromptContext} />
           </div>
           <div className="gen-card-divider" />
           <div className="gen-row">
@@ -782,6 +801,126 @@ function CliAgentRunTimeoutControl(props: {
       {validation && <div className="gen-timeout-error">{validation}</div>}
     </div>
   );
+}
+
+function PromptContextControl(props: {
+  settings: ChatPromptContextSettings;
+  onChange: (settings: ChatPromptContextSettings) => Promise<void>;
+}): JSX.Element {
+  const [threadMode, setThreadMode] = useState<ChatPromptContextMode>(props.settings.thread.mode);
+  const [threadLimit, setThreadLimit] = useState(String(props.settings.thread.limit ?? 0));
+  const [timelineMode, setTimelineMode] = useState<ChatPromptContextMode>(props.settings.timeline.mode);
+  const [timelineLimit, setTimelineLimit] = useState(String(props.settings.timeline.limit ?? 3));
+
+  useEffect(() => {
+    setThreadMode(props.settings.thread.mode);
+    setThreadLimit(String(props.settings.thread.limit ?? 0));
+    setTimelineMode(props.settings.timeline.mode);
+    setTimelineLimit(String(props.settings.timeline.limit ?? 3));
+  }, [props.settings]);
+
+  const threadValidation = promptContextLimitValidation(threadMode, threadLimit);
+  const timelineValidation = promptContextLimitValidation(timelineMode, timelineLimit);
+  const draft = normalizeChatPromptContextSettings({
+    thread: promptContextScopeDraft(threadMode, threadLimit),
+    timeline: promptContextScopeDraft(timelineMode, timelineLimit)
+  });
+  const canSave = !threadValidation && !timelineValidation && JSON.stringify(draft) !== JSON.stringify(props.settings);
+
+  return (
+    <div className="gen-row-control prompt-context-control">
+      <PromptContextScopeControl
+        label="Thread"
+        mode={threadMode}
+        limit={threadLimit}
+        validation={threadValidation}
+        onModeChange={setThreadMode}
+        onLimitChange={setThreadLimit}
+      />
+      <PromptContextScopeControl
+        label="Timeline"
+        mode={timelineMode}
+        limit={timelineLimit}
+        validation={timelineValidation}
+        onModeChange={setTimelineMode}
+        onLimitChange={setTimelineLimit}
+      />
+      <button
+        type="button"
+        className={`gen-timeout-save ${canSave ? "is-dirty" : ""}`}
+        disabled={!canSave}
+        onClick={() => void props.onChange(draft)}
+      >
+        Save
+      </button>
+    </div>
+  );
+}
+
+function PromptContextScopeControl(props: {
+  label: string;
+  mode: ChatPromptContextMode;
+  limit: string;
+  validation?: string;
+  onModeChange: (mode: ChatPromptContextMode) => void;
+  onLimitChange: (limit: string) => void;
+}): JSX.Element {
+  const latest = props.mode === "latest_unseen";
+  return (
+    <div className="gen-timeout prompt-context-scope">
+      <label className="prompt-context-select-wrap">
+        <span className="sr-only">{props.label} prompt context mode</span>
+        <select
+          className="prompt-context-select"
+          value={props.mode}
+          onChange={(event) => props.onModeChange(event.target.value as ChatPromptContextMode)}
+          aria-label={`${props.label} prompt context mode`}
+        >
+          <option value="off">{props.label}: Off</option>
+          <option value="all_unseen">{props.label}: All unseen</option>
+          <option value="latest_unseen">{props.label}: Latest unseen</option>
+        </select>
+        <ChevronDown aria-hidden="true" size={14} />
+      </label>
+      <div className="gen-timeout-field">
+        <input
+          className="gen-timeout-input"
+          inputMode="numeric"
+          value={latest ? props.limit : "0"}
+          disabled={!latest}
+          aria-label={`${props.label} prompt context limit`}
+          onChange={(event) => props.onLimitChange(event.target.value)}
+        />
+        <span className="gen-timeout-unit">Msgs</span>
+      </div>
+      {props.validation && <div className="gen-timeout-error">{props.validation}</div>}
+    </div>
+  );
+}
+
+function promptContextScopeDraft(mode: ChatPromptContextMode, limit: string): ChatPromptContextScopeSettings {
+  if (mode === "off") {
+    return { mode: "off" };
+  }
+  if (mode === "all_unseen") {
+    return { mode: "all_unseen" };
+  }
+  return { mode: "latest_unseen", limit: Number(limit.trim()) };
+}
+
+function promptContextLimitValidation(mode: ChatPromptContextMode, limit: string): string | undefined {
+  if (mode !== "latest_unseen") {
+    return undefined;
+  }
+  const trimmed = limit.trim();
+  const parsed = Number(trimmed);
+  if (trimmed === "" || !Number.isFinite(parsed) || !Number.isInteger(parsed)) {
+    return "Use a whole number.";
+  }
+  if (parsed < 0 || parsed > CHAT_PROMPT_CONTEXT_LIMIT_MAX) {
+    return `Use 0 to ${CHAT_PROMPT_CONTEXT_LIMIT_MAX} messages.`;
+  }
+  return undefined;
 }
 
 function ParticipantRequestDepthControl(props: {

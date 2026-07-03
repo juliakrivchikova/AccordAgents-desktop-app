@@ -159,7 +159,7 @@ test("buildPromptParts section sizes stay under baseline caps across envelope br
     includeRoleInstructions,
     agentMode: "default",
     permissions
-  }) as { prompt: string; sections: { staticEnvelope: number; dynamicHeader: number; trigger: number; mentions: number; currentRequest: number; total: number } };
+  }) as { prompt: string; sections: { staticEnvelope: number; dynamicHeader: number; promptContext: number; trigger: number; mentions: number; currentRequest: number; total: number } };
 
   const slimRepoRead = build(conversationWithRepo, permGranted, false);
   const slimNoRepoRead = build(conversationWithRepo, permBlocked, false);
@@ -175,6 +175,7 @@ test("buildPromptParts section sizes stay under baseline caps across envelope br
   ] as const) {
     assert.equal(parts.sections.staticEnvelope, 0, `${label}: staticEnvelope should be empty on slim`);
     assert.ok(parts.sections.dynamicHeader < 1000, `${label}: dynamicHeader too large: ${parts.sections.dynamicHeader}`);
+    assert.equal(parts.sections.promptContext, 0, `${label}: promptContext should be empty without automatic context`);
     assert.ok(parts.sections.trigger < 350, `${label}: trigger too large: ${parts.sections.trigger}`);
     assert.equal(parts.sections.mentions, 0, `${label}: mentions should be empty when no #file tokens`);
     assert.ok(parts.sections.currentRequest < 130, `${label}: currentRequest too large: ${parts.sections.currentRequest}`);
@@ -190,6 +191,7 @@ test("buildPromptParts section sizes stay under baseline caps across envelope br
     // was expanded, then when app_chat_set_title joined the always-on app MCP surface.
     // Intentional growth; keep tightening any further bloat.
     assert.ok(parts.sections.staticEnvelope < 7950, `${label}: staticEnvelope too large: ${parts.sections.staticEnvelope}`);
+    assert.equal(parts.sections.promptContext, 0, `${label}: promptContext should be empty without automatic context`);
     assert.ok(parts.sections.trigger < 350, `${label}: trigger too large: ${parts.sections.trigger}`);
     assert.ok(parts.sections.currentRequest < 130, `${label}: currentRequest too large: ${parts.sections.currentRequest}`);
   }

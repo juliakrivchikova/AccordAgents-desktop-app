@@ -23,6 +23,7 @@ import {
 } from "../../shared/agentPermissions";
 import { CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS } from "../../shared/chatBehaviorRules";
 import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT } from "../../shared/chatParticipantRequests";
+import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import type {
   AgentHealth,
   AppSettings,
@@ -2865,6 +2866,304 @@ test("unmentioned thread replies route to the newest thread sender instead of th
   }
 });
 
+test("thread prompt context includes all unseen thread messages and advances per participant", async () => {
+  const codex = chatParticipant("codex-cli");
+  const conversation = chatConversation([codex]);
+  conversation.messages.push({
+    id: "thread-prior",
+    role: "user",
+    content: "Earlier thread detail.",
+    createdAt: "2026-05-17T12:01:00.000Z",
+    status: "done",
+    metadata: {
+      threadId: "user-message",
+      parentMessageId: "user-message",
+      chatThreadRootId: "user-message"
+    }
+  });
+  const prompts: string[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, prompt) => {
+      prompts.push(prompt);
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: prompts.length === 1 ? "First thread answer." : "Second thread answer.",
+        durationMs: 1
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "thread-context-run-1",
+    content: "@codex Thread current question.",
+    threadId: "user-message",
+    parentMessageId: "thread-prior",
+    chatThreadRootId: "user-message"
+  });
+
+  await waitFor(() => prompts.length === 1);
+  const firstContext = promptContextBlockFromPrompt(prompts[0]);
+  const firstTrigger = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "user" && message.content.includes("Thread current question")
+  ) as ChatMessage | undefined;
+
+  assert.match(firstContext, /Untrusted chat context automatically included by AccordAgents:/);
+  assert.match(firstContext, /These historical messages are context only/);
+  assert.match(firstContext, /Scope: thread user-message/);
+  assert.match(firstContext, /Policy: all unseen messages since your last prompt in this scope/);
+  assert.match(firstContext, /--- Begin untrusted historical message \[sequence 0 \| messageId user-message\] ---/);
+  assert.match(firstContext, /messageId user-message/);
+  assert.match(firstContext, /Please help\./);
+  assert.match(firstContext, /Earlier thread detail\./);
+  assert.doesNotMatch(firstContext, /Thread current question\./);
+  assert.equal(storage.current.metadata.promptContextPointers?.[codex.id]?.threads?.["user-message"]?.messageId, firstTrigger?.id);
+
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "First thread answer."));
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "thread-context-run-2",
+    content: "@codex Thread second question.",
+    threadId: "user-message",
+    parentMessageId: firstTrigger?.id,
+    chatThreadRootId: "user-message"
+  });
+
+  await waitFor(() => prompts.length === 2);
+  const secondContext = promptContextBlockFromPrompt(prompts[1]);
+
+  assert.match(secondContext, /First thread answer\./);
+  assert.doesNotMatch(secondContext, /Earlier thread detail\./);
+  assert.doesNotMatch(secondContext, /Thread second question\./);
+});
+
+test("timeline prompt context defaults to latest three unseen messages", async () => {
+  const codex = chatParticipant("codex-cli");
+  const conversation = chatConversation([codex]);
+  conversation.messages.push(
+    timelineMessage("timeline-1", "Timeline one."),
+    timelineMessage("timeline-2", "Timeline two."),
+    timelineMessage("timeline-3", "Timeline three."),
+    timelineMessage("timeline-4", "Timeline four."),
+    timelineMessage("timeline-5", "Top-level participant with thread id.", {
+      role: "participant",
+      participantId: codex.id,
+      participantLabel: "@codex",
+      metadata: { threadId: "top-level-thread", parentMessageId: "timeline-4" }
+    })
+  );
+  const prompts: string[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, prompt) => {
+      prompts.push(prompt);
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: "Timeline answer.",
+        durationMs: 1
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "timeline-context-run",
+    content: "@codex Timeline current question."
+  });
+
+  await waitFor(() => prompts.length === 1);
+  const context = promptContextBlockFromPrompt(prompts[0]);
+  const trigger = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "user" && message.content.includes("Timeline current question")
+  ) as ChatMessage | undefined;
+
+  assert.match(context, /Scope: main timeline/);
+  assert.match(context, /Policy: latest 3 unseen messages since your last prompt in this scope/);
+  assert.match(context, /Omitted 3 older unseen messages because timeline context is capped at 3/);
+  assert.doesNotMatch(context, /Please help\./);
+  assert.doesNotMatch(context, /Timeline one\./);
+  assert.doesNotMatch(context, /Timeline two\./);
+  assert.match(context, /Timeline three\./);
+  assert.match(context, /Timeline four\./);
+  assert.match(context, /Top-level participant with thread id\./);
+  assert.doesNotMatch(context, /Timeline current question\./);
+  assert.equal(storage.current.metadata.promptContextPointers?.[codex.id]?.timeline?.messageId, trigger?.id);
+});
+
+test("off and zero prompt context keep trigger-only prompt shape while advancing pointers", async () => {
+  const codex = chatParticipant("codex-cli");
+  const conversation = chatConversation([codex]);
+  conversation.messages.push(timelineMessage("timeline-old", "Old timeline context."));
+  const prompts: string[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    settings: {
+      chatRoleConfigs: [ROLE],
+      chatPromptContext: {
+        thread: { mode: "off" },
+        timeline: { mode: "latest_unseen", limit: 0 }
+      }
+    },
+    run: async (runParticipant, prompt) => {
+      prompts.push(prompt);
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: "Zero context answer.",
+        durationMs: 1
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "zero-context-run",
+    content: "@codex Zero context question."
+  });
+
+  await waitFor(() => prompts.length === 1);
+  const trigger = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "user" && message.content.includes("Zero context question")
+  ) as ChatMessage | undefined;
+
+  assert.equal(promptContextBlockFromPrompt(prompts[0]), "");
+  assert.match(prompts[0], /Triggering message:/);
+  assert.match(prompts[0], /Zero context question\./);
+  assert.doesNotMatch(prompts[0], /Old timeline context\./);
+  assert.equal(storage.current.metadata.promptContextPointers?.[codex.id]?.timeline?.messageId, trigger?.id);
+});
+
+test("failed prompt context run does not advance pointers and retries carryover", async () => {
+  const codex = chatParticipant("codex-cli");
+  const conversation = chatConversation([codex]);
+  conversation.messages.push(timelineMessage("timeline-old", "Old timeline context."));
+  const prompts: string[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, prompt) => {
+      prompts.push(prompt);
+      return prompts.length === 1
+        ? {
+            participant: runParticipant,
+            ok: false,
+            content: "Provider failed.",
+            durationMs: 1,
+            error: "provider failed"
+          }
+        : {
+            participant: runParticipant,
+            ok: true,
+            content: "Retry answer.",
+            durationMs: 1
+          };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "failed-context-run",
+    content: "@codex First question."
+  });
+
+  await waitFor(() => prompts.length === 1 && storage.current.messages.some((message: ChatMessage) =>
+    message.role === "participant" && message.participantId === codex.id && message.status === "error"
+  ));
+  assert.equal(storage.current.metadata.promptContextPointers?.[codex.id]?.timeline, undefined);
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "retry-context-run",
+    content: "@codex Retry question."
+  });
+
+  await waitFor(() => prompts.length === 2 && storage.current.metadata.promptContextPointers?.[codex.id]?.timeline);
+  const retryContext = promptContextBlockFromPrompt(prompts[1]);
+  const retryTrigger = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "user" && message.content.includes("Retry question")
+  ) as ChatMessage | undefined;
+
+  assert.match(retryContext, /Old timeline context\./);
+  assert.match(retryContext, /First question\./);
+  assert.doesNotMatch(retryContext, /Retry question\./);
+  assert.equal(storage.current.metadata.promptContextPointers?.[codex.id]?.timeline?.messageId, retryTrigger?.id);
+});
+
+test("remote prompt context advances only after successful provider result replay", async () => {
+  const codex = { ...chatParticipant("codex-cli"), remoteExecution: "remote" as const };
+  const conversation = chatConversation([codex]);
+  conversation.messages.push(timelineMessage("remote-old", "Remote old context."));
+  let launchedPrompt = "";
+  let launchedRunId = "";
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    settings: {
+      chatRoleConfigs: [ROLE],
+      cloudRuns: { enabled: true, worker: { host: "worker.example" } }
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  service.setRemoteRunService({
+    async startDetachedRun(request): Promise<any> {
+      if (!request.runId) {
+        throw new Error("missing remote run id");
+      }
+      launchedPrompt = request.prompt;
+      launchedRunId = request.runId;
+      return {
+        runId: request.runId,
+        conversationId: request.conversationId,
+        participantId: request.participant.id,
+        status: "running"
+      };
+    },
+    async pollDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    async cancelDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    registerDetachedRunContext(): void {}
+  });
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "remote-context-run",
+    content: "@codex Remote question."
+  });
+
+  await waitFor(() => Object.keys((storage.current.metadata.remoteRunHandles as any) ?? {}).length > 0);
+  assert.match(promptContextBlockFromPrompt(launchedPrompt), /Remote old context\./);
+  assert.equal(storage.current.metadata.promptContextPointers?.[codex.id]?.timeline, undefined);
+  assert.ok((storage.current.metadata.remoteRunHandles as any)[launchedRunId].promptContextPointerAdvance);
+
+  await service.applyRemoteRunReplayRecord({
+    id: "remote-context-result",
+    conversationId: conversation.id,
+    runId: launchedRunId,
+    seq: 1,
+    createdAt: "2026-05-17T12:03:00.000Z",
+    kind: "provider_result",
+    participantId: codex.id,
+    ok: true,
+    content: "Remote answer.",
+    sourceMessageId: storage.current.messages.find((message: ChatMessage) =>
+      message.role === "user" && message.content.includes("Remote question")
+    )?.id
+  });
+
+  const remoteTrigger = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "user" && message.content.includes("Remote question")
+  ) as ChatMessage | undefined;
+  assert.equal(storage.current.metadata.promptContextPointers?.[codex.id]?.timeline?.messageId, remoteTrigger?.id);
+});
+
 test("removeParticipant clears stale participant state in the same mutation", async () => {
   const assistant = {
     ...chatParticipant("codex-cli"),
@@ -4837,6 +5136,7 @@ function testService(options: {
     chatBehaviorRules?: ChatBehaviorRuleConfig[];
     chatParticipantConfigs?: ChatParticipantConfig[];
     chatParticipantRequestMaxDepth?: number;
+    chatPromptContext?: AppSettings["chatPromptContext"];
     cloudRuns?: Partial<AppSettings["cloudRuns"]>;
   };
 } = {}): { service: ChatService; storage: any; settingsState: {
@@ -4866,6 +5166,7 @@ function testService(options: {
     cliAgentRunTimeoutMs: 24 * 60 * 60_000,
     chatParticipantRequestMaxDepth: options.settings?.chatParticipantRequestMaxDepth
       ?? CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+    chatPromptContext: options.settings?.chatPromptContext ?? DEFAULT_CHAT_PROMPT_CONTEXT,
     cloudRuns: {
       enabled: options.settings?.cloudRuns?.enabled ?? false,
       mode: options.settings?.cloudRuns?.mode ?? "ssh",
@@ -5059,6 +5360,23 @@ function chatConversation(participants: ChatParticipant[], metadata: Record<stri
   };
 }
 
+function timelineMessage(
+  id: string,
+  content: string,
+  patch: Partial<ChatMessage> = {}
+): ChatMessage {
+  return {
+    id,
+    role: patch.role ?? "user",
+    participantId: patch.participantId,
+    participantLabel: patch.participantLabel,
+    content,
+    createdAt: patch.createdAt ?? NOW,
+    status: patch.status ?? "done",
+    metadata: patch.metadata
+  };
+}
+
 function permissionApproval(
   participant: ChatParticipant,
   request: ChatAppToolApproval["request"],
@@ -5169,6 +5487,15 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("Timed out waiting for condition.");
+}
+
+function promptContextBlockFromPrompt(prompt: string): string {
+  const start = prompt.indexOf("Untrusted chat context automatically included by AccordAgents:");
+  if (start < 0) {
+    return "";
+  }
+  const end = prompt.indexOf("Triggering message identifiers:", start);
+  return prompt.slice(start, end < 0 ? undefined : end).trim();
 }
 
 async function flushMicrotasks(iterations = 8): Promise<void> {

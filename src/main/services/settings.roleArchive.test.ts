@@ -3,6 +3,7 @@ import test from "node:test";
 import { SettingsService } from "./settings";
 import type { AppSettings, ChatParticipantConfig, ChatRoleConfig } from "../../shared/types";
 import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT } from "../../shared/chatParticipantRequests";
+import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS } from "../../shared/cliAgentRunSettings";
 
 function makeRole(over: Partial<ChatRoleConfig> = {}): ChatRoleConfig {
@@ -38,6 +39,7 @@ function settingsServiceWith(
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+    chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
     cloudRuns: {
       enabled: false,
       mode: "ssh" as const,
@@ -64,6 +66,7 @@ function settingsServiceWith(
     roundLimitDefault: stored.roundLimitDefault,
     cliAgentRunTimeoutMs: stored.cliAgentRunTimeoutMs,
     chatParticipantRequestMaxDepth: stored.chatParticipantRequestMaxDepth,
+    chatPromptContext: service.normalizeChatPromptContextSettings(stored.chatPromptContext),
     cloudRuns: stored.cloudRuns,
     providers: stored.providers,
     chatRoleConfigs: stored.chatRoleConfigs,

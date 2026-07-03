@@ -3,6 +3,7 @@ import type {
   AppBridge,
   AddChatParticipantRequest,
   ChatBehaviorRuleConfigUpdate,
+  ChatPromptContextSettings,
   ChatSavedPromptConfigUpdate,
   CloudRunsSettingsUpdate,
   CloudRunWorkerSettings,
@@ -54,6 +55,8 @@ const bridge: AppBridge = {
   setCliAgentRunTimeoutMs: (timeoutMs: number) => ipcRenderer.invoke("settings:set-cli-agent-run-timeout", timeoutMs),
   setChatParticipantRequestMaxDepth: (maxDepth: number) =>
     ipcRenderer.invoke("settings:set-chat-participant-request-max-depth", maxDepth),
+  setChatPromptContext: (settings: ChatPromptContextSettings) =>
+    ipcRenderer.invoke("settings:set-chat-prompt-context", settings),
   saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => ipcRenderer.invoke("settings:save-cloud-runs", update),
   testCloudRunWorker: (request?: CloudRunWorkerSettings) => ipcRenderer.invoke("cloud-runs:test-worker", request),
   diagnoseCloudRunWorker: (request?: CloudRunWorkerSettings) => ipcRenderer.invoke("cloud-runs:diagnose-worker", request),

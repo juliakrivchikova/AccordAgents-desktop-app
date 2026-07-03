@@ -5,6 +5,7 @@ import type {
   AddChatParticipantRequest,
   AgentHealth,
   ChatBehaviorRuleConfigUpdate,
+  ChatPromptContextSettings,
   ChatSavedPromptConfigUpdate,
   CloudRunsSettingsUpdate,
   CloudRunWorkerSettings,
@@ -258,6 +259,9 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:set-chat-participant-request-max-depth", (_event, maxDepth: number) => {
     return settingsService.setChatParticipantRequestMaxDepth(maxDepth);
+  });
+  ipcMain.handle("settings:set-chat-prompt-context", (_event, settings: ChatPromptContextSettings) => {
+    return settingsService.setChatPromptContext(settings);
   });
   ipcMain.handle("settings:save-cloud-runs", (_event, update: CloudRunsSettingsUpdate) => settingsService.saveCloudRunsSettings(update));
   ipcMain.handle("cloud-runs:test-worker", async (_event, request?: CloudRunWorkerSettings) => {

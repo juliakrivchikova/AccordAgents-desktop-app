@@ -152,12 +152,26 @@ export interface RemoteRunHandle {
   lastPolledAt?: string;
   error?: string;
   sync?: RemoteRunSyncInfo;
+  promptContextPointerAdvance?: ChatPromptContextPointerAdvance;
+}
+
+export type ChatPromptContextMode = "off" | "all_unseen" | "latest_unseen";
+
+export interface ChatPromptContextScopeSettings {
+  mode: ChatPromptContextMode;
+  limit?: number;
+}
+
+export interface ChatPromptContextSettings {
+  thread: ChatPromptContextScopeSettings;
+  timeline: ChatPromptContextScopeSettings;
 }
 
 export interface AppSettings {
   roundLimitDefault: number;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
+  chatPromptContext: ChatPromptContextSettings;
   cloudRuns: CloudRunsSettings;
   providers: ProviderSettings[];
   chatRoleConfigs: ChatRoleConfig[];
@@ -829,6 +843,28 @@ export interface ChatLastMessageByParticipantEntry {
 
 export type ChatLastMessageByParticipant = Record<string, ChatLastMessageByParticipantEntry>;
 
+export interface ChatPromptContextPointerEntry {
+  messageId: string;
+  sequence: number;
+  createdAt?: string;
+}
+
+export type ChatPromptContextPointerScope =
+  | { type: "timeline" }
+  | { type: "thread"; threadRootId: string };
+
+export interface ChatPromptContextPointerAdvance {
+  scope: ChatPromptContextPointerScope;
+  entry: ChatPromptContextPointerEntry;
+}
+
+export interface ChatPromptContextParticipantPointers {
+  timeline?: ChatPromptContextPointerEntry;
+  threads?: Record<string, ChatPromptContextPointerEntry>;
+}
+
+export type ChatPromptContextPointers = Record<string, ChatPromptContextParticipantPointers>;
+
 // Lightweight, optional metadata a facilitator can attach to a canonical /accord
 // resolution message for verification/debugging. This is NOT an app-state decision
 // engine — approval authority remains the `✅` reactor set on the canonical message.
@@ -1352,6 +1388,7 @@ export interface ConversationSummary {
 
 export type ConversationMetadata = Record<string, unknown> & {
   lastMessageByParticipant?: ChatLastMessageByParticipant;
+  promptContextPointers?: ChatPromptContextPointers;
 };
 
 export interface Conversation extends ConversationSummary {
@@ -1435,6 +1472,7 @@ export interface AppBridge {
   setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<AppSettings>;
   setCliAgentRunTimeoutMs(timeoutMs: number): Promise<AppSettings>;
   setChatParticipantRequestMaxDepth(maxDepth: number): Promise<AppSettings>;
+  setChatPromptContext(settings: ChatPromptContextSettings): Promise<AppSettings>;
   saveCloudRunsSettings(update: CloudRunsSettingsUpdate): Promise<AppSettings>;
   testCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerTestResult>;
   diagnoseCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport>;

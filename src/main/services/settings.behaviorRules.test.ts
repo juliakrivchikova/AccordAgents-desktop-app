@@ -18,6 +18,10 @@ import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MAX,
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MIN
 } from "../../shared/chatParticipantRequests";
+import {
+  CHAT_PROMPT_CONTEXT_LIMIT_MAX,
+  DEFAULT_CHAT_PROMPT_CONTEXT
+} from "../../shared/chatPromptContext";
 
 const CODEX_AGENT: AgentHealth = {
   kind: "codex-cli",
@@ -46,6 +50,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+    chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
     providers: [],
     chatRoleConfigs: [],
     chatBehaviorRules: [],
@@ -65,6 +70,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     roundLimitDefault: stored.roundLimitDefault,
     cliAgentRunTimeoutMs: service.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
     chatParticipantRequestMaxDepth: service.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
+    chatPromptContext: service.normalizeChatPromptContextSettings(stored.chatPromptContext),
     providers: stored.providers,
     chatRoleConfigs: stored.chatRoleConfigs,
     chatBehaviorRules: stored.chatBehaviorRules,
@@ -203,6 +209,22 @@ test("participant request max depth defaults to 2 and persists bounded values", 
 
   await service.setChatParticipantRequestMaxDepth(0);
   assert.equal(stored().chatParticipantRequestMaxDepth, CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MIN);
+});
+
+test("chat prompt context normalizes zero latest-unseen limits to off", async () => {
+  const { service, stored } = settingsServiceWithStoredSettings();
+
+  const updated = await service.setChatPromptContext({
+    thread: { mode: "latest_unseen", limit: 0 },
+    timeline: { mode: "latest_unseen", limit: 99 }
+  });
+
+  assert.deepEqual(stored().chatPromptContext.thread, { mode: "off" });
+  assert.deepEqual(updated.chatPromptContext.thread, { mode: "off" });
+  assert.deepEqual(stored().chatPromptContext.timeline, {
+    mode: "latest_unseen",
+    limit: CHAT_PROMPT_CONTEXT_LIMIT_MAX
+  });
 });
 
 test("ensureGenericChatParticipantSeeds seeds installed CLI providers once and adds later installs", async () => {

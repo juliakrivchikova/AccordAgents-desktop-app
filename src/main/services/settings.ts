@@ -20,6 +20,7 @@ import type {
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
   ChatParticipantSeedState,
+  ChatPromptContextSettings,
   ChatProviderKind,
   ChatRoleChangeOperation,
   ChatRoleConfig,
@@ -31,6 +32,7 @@ import type {
 import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { normalizeChatAppToolCapabilities } from "../../shared/appTools";
 import { normalizeChatParticipantRequestMaxDepth } from "../../shared/chatParticipantRequests";
+import { normalizeChatPromptContextSettings } from "../../shared/chatPromptContext";
 import { normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
 import {
   AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT,
@@ -61,6 +63,7 @@ interface StoredSettings {
   roundLimitDefault: number;
   cliAgentRunTimeoutMs?: number;
   chatParticipantRequestMaxDepth?: number;
+  chatPromptContext?: ChatPromptContextSettings;
   cloudRuns?: CloudRunsSettings;
   cloudRunsMode?: CloudRunWorkerMode;
   encryptedAwsCredentials?: string;
@@ -1606,6 +1609,7 @@ export class SettingsService {
       roundLimitDefault: stored.roundLimitDefault,
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
+      chatPromptContext: this.normalizeChatPromptContextSettings(stored.chatPromptContext),
       cloudRuns: this.normalizeCloudRunsSettings(stored),
       lastRepoPath: stored.lastRepoPath,
       repoFileOpenAction: stored.repoFileOpenAction,
@@ -2206,6 +2210,13 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  async setChatPromptContext(settings: ChatPromptContextSettings): Promise<AppSettings> {
+    const stored = await this.readStored();
+    stored.chatPromptContext = this.normalizeChatPromptContextSettings(settings);
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
   async saveCloudRunsSettings(update: CloudRunsSettingsUpdate): Promise<AppSettings> {
     const stored = await this.readStored();
     if (update.mode === "aws" || update.mode === "ssh") {
@@ -2269,6 +2280,7 @@ export class SettingsService {
       roundLimitDefault: this.defaultRoundLimit(settings),
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(settings.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(settings.chatParticipantRequestMaxDepth),
+      chatPromptContext: this.normalizeChatPromptContextSettings(settings.chatPromptContext),
       cloudRuns: this.normalizeCloudRunsSettings(settings),
       cloudRunsMode: settings.cloudRunsMode === "aws" ? "aws" : "ssh",
       encryptedAwsCredentials: typeof settings.encryptedAwsCredentials === "string" ? settings.encryptedAwsCredentials : undefined,
@@ -2660,5 +2672,9 @@ export class SettingsService {
 
   private normalizeChatParticipantRequestMaxDepth(value: unknown): number {
     return normalizeChatParticipantRequestMaxDepth(value);
+  }
+
+  private normalizeChatPromptContextSettings(value: unknown): ChatPromptContextSettings {
+    return normalizeChatPromptContextSettings(value);
   }
 }

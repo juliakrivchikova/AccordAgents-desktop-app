@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT } from "../../shared/chatParticipantRequests";
+import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import type {
   AppSettings,
   ChatAppToolApproval,
@@ -1176,6 +1177,7 @@ async function testRemoteRun(options: {
         roundLimitDefault: 1,
         cliAgentRunTimeoutMs: 24 * 60 * 60_000,
         chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+        chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
         cloudRuns: {
           enabled: false,
           mode: "ssh",
@@ -1413,6 +1415,7 @@ function coordinatorSettings(patch: { maxRuntimeMs: number; pollIntervalMs: numb
         roundLimitDefault: 1,
         cliAgentRunTimeoutMs: 24 * 60 * 60_000,
         chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+        chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
         cloudRuns: {
           enabled: true,
           mode: "ssh",

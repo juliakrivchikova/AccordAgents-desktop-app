@@ -3,6 +3,7 @@ import type {
   AppSettings,
   ChatBehaviorRuleConfigUpdate,
   ChatParticipantConfigUpdate,
+  ChatPromptContextSettings,
   ChatRoleConfigUpdate,
   ChatSavedPromptConfigUpdate,
   CloudRunsSettingsUpdate,
@@ -37,6 +38,7 @@ export function SettingsView(props: {
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
+  setChatPromptContext: (settings: ChatPromptContextSettings) => Promise<void>;
   saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => Promise<void>;
   sidebarCollapsed: boolean;
   onExpandSidebar: () => void;
@@ -122,10 +124,12 @@ export function SettingsView(props: {
             repoFileOpenAction={props.settings.repoFileOpenAction}
             cliAgentRunTimeoutMs={props.settings.cliAgentRunTimeoutMs}
             chatParticipantRequestMaxDepth={props.settings.chatParticipantRequestMaxDepth}
+            chatPromptContext={props.settings.chatPromptContext}
             updateProvider={props.updateProvider}
             setRepoFileOpenPreference={props.setRepoFileOpenPreference}
             setCliAgentRunTimeoutMs={props.setCliAgentRunTimeoutMs}
             setChatParticipantRequestMaxDepth={props.setChatParticipantRequestMaxDepth}
+            setChatPromptContext={props.setChatPromptContext}
             cloudRuns={props.settings.cloudRuns}
             saveCloudRunsSettings={props.saveCloudRunsSettings}
           />
