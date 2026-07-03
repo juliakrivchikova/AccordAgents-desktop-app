@@ -19,6 +19,11 @@ import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MIN
 } from "../../../shared/chatParticipantRequests";
 import { CLI_AGENT_RUN_TIMEOUT_MAX_MS, CLI_AGENT_RUN_TIMEOUT_MIN_MS, cliAgentRunTimeoutHours } from "../../../shared/cliAgentRunSettings";
+import {
+  AWS_WORKER_ROOT_VOLUME_SIZE_GB_MAX,
+  AWS_WORKER_ROOT_VOLUME_SIZE_GB_MIN,
+  normalizeAwsRootVolumeSizeGb
+} from "../../../shared/cloudRuns";
 
 const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits how many levels of participant-to-participant requests can happen.";
 
@@ -266,6 +271,28 @@ function CloudRunsControl(props: {
       </div>
       <div className="gen-card-divider" />
       {draft.mode === "aws" ? <AwsWorkerPanel settings={draft} /> : null}
+      {draft.mode === "aws" ? (
+        <>
+          <div className="gen-card-divider" />
+          <div className="gen-row gen-row-stack">
+            <div className="gen-row-text">
+              <div className="gen-row-title">AWS worker disk</div>
+              <div className="gen-row-desc">Root disk size for newly created app-managed AWS workers.</div>
+            </div>
+            <div className="gen-grid-form gen-grid-form-compact">
+              <input
+                className="gen-input"
+                aria-label="AWS worker disk size GB"
+                inputMode="numeric"
+                min={AWS_WORKER_ROOT_VOLUME_SIZE_GB_MIN}
+                max={AWS_WORKER_ROOT_VOLUME_SIZE_GB_MAX}
+                value={draft.awsRootVolumeSizeGb}
+                onChange={(event) => patch({ awsRootVolumeSizeGb: normalizeAwsRootVolumeSizeGb(event.target.value) })}
+              />
+            </div>
+          </div>
+        </>
+      ) : null}
       <div className={draft.mode === "aws" ? "gen-collapsed" : ""} hidden={draft.mode === "aws"}>
         <div className="gen-row gen-row-stack">
           <div className="gen-row-text">
@@ -392,7 +419,10 @@ function AwsWorkerPanel(props: { settings: CloudRunsSettings }): JSX.Element {
     setBusy(true);
     setMessage("Creating worker… this can take a minute.");
     try {
-      const next = await window.consensus.connectAwsWorker({ blob: blob.trim() });
+      const next = await window.consensus.connectAwsWorker({
+        blob: blob.trim(),
+        rootVolumeSizeGb: props.settings.awsRootVolumeSizeGb
+      });
       setStatus(next);
       setBlob("");
       setMessage(next.configured ? "Worker created." : (next.message ?? "Done."));
@@ -460,10 +490,11 @@ function AwsWorkerPanel(props: { settings: CloudRunsSettings }): JSX.Element {
             <div className="gen-row-desc">
               {status.handle?.instanceId} · {status.state ?? "unknown"}
               {status.handle?.keyName ? ` · ${status.handle.keyName}` : ""}
+              {status.handle?.rootVolumeSizeGb ? ` · ${status.handle.rootVolumeSizeGb} GB disk` : ""}
               {status.publicIp ? ` · ${status.publicIp}` : ""}
               {status.message ? ` · ${status.message}` : ""}
             </div>
-            <div className="gen-row-desc">Starts automatically for a remote run and stops when idle.</div>
+            <div className="gen-row-desc">Starts automatically for a remote run and stops when idle. Disk size changes apply to newly created workers.</div>
           </div>
           <div className="gen-actions">
             <button type="button" className="gen-pill" disabled={busy} onClick={() => void refresh()}>

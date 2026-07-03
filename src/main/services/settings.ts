@@ -33,6 +33,11 @@ import { normalizeChatAppToolCapabilities } from "../../shared/appTools";
 import { normalizeChatParticipantRequestMaxDepth } from "../../shared/chatParticipantRequests";
 import { normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
 import {
+  AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT,
+  normalizeAwsRootVolumeSizeGb,
+  normalizeOptionalAwsRootVolumeSizeGb
+} from "../../shared/cloudRuns";
+import {
   CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS,
   CHAT_BEHAVIOR_RULE_LABEL_MAX_CHARS
 } from "../../shared/chatBehaviorRules";
@@ -83,6 +88,7 @@ const DEFAULT_CLOUD_RUNS_SETTINGS: CloudRunsSettings = {
   mode: "ssh",
   worker: {},
   hasAwsCredentials: false,
+  awsRootVolumeSizeGb: AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT,
   maxRuntimeMs: 24 * 60 * 60_000,
   pollIntervalMs: 2_500
 };
@@ -2210,6 +2216,9 @@ export class SettingsService {
       cloudRuns: {
         ...(stored.cloudRuns ?? DEFAULT_CLOUD_RUNS_SETTINGS),
         enabled: update.enabled ?? stored.cloudRuns?.enabled ?? false,
+        awsRootVolumeSizeGb: update.awsRootVolumeSizeGb
+          ?? stored.cloudRuns?.awsRootVolumeSizeGb
+          ?? DEFAULT_CLOUD_RUNS_SETTINGS.awsRootVolumeSizeGb,
         maxRuntimeMs: update.maxRuntimeMs ?? stored.cloudRuns?.maxRuntimeMs ?? DEFAULT_CLOUD_RUNS_SETTINGS.maxRuntimeMs,
         pollIntervalMs: update.pollIntervalMs ?? stored.cloudRuns?.pollIntervalMs ?? DEFAULT_CLOUD_RUNS_SETTINGS.pollIntervalMs,
         worker: {
@@ -2325,6 +2334,7 @@ export class SettingsService {
       hasAwsCredentials: typeof stored.encryptedAwsCredentials === "string" && stored.encryptedAwsCredentials.length > 0,
       awsHandle: stored.awsWorkerHandle,
       awsRegion: stored.awsWorkerRegion,
+      awsRootVolumeSizeGb: normalizeAwsRootVolumeSizeGb(record.awsRootVolumeSizeGb),
       maxRuntimeMs,
       pollIntervalMs
     };
@@ -2396,12 +2406,14 @@ export class SettingsService {
     if (!instanceId || !securityGroupId || !keyName || !region) {
       return undefined;
     }
+    const rootVolumeSizeGb = normalizeOptionalAwsRootVolumeSizeGb(record.rootVolumeSizeGb);
     return {
       instanceId,
       securityGroupId,
       keyName,
       region,
       instanceType: typeof record.instanceType === "string" && record.instanceType.trim() ? record.instanceType.trim() : "t3.small",
+      ...(rootVolumeSizeGb ? { rootVolumeSizeGb } : {}),
       createdAt: typeof record.createdAt === "string" && record.createdAt ? record.createdAt : new Date().toISOString()
     };
   }

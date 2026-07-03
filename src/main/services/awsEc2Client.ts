@@ -34,6 +34,7 @@ import {
 } from "./awsWorkerKeyMaterial";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 import type {
+  AwsWorkerImageInfo,
   AwsWorkerInstanceInfo,
   AwsWorkerInstanceState,
   AwsWorkerKeyMaterial,
@@ -58,7 +59,7 @@ export function createAwsEc2Client(credentials: AwsWorkerCredentials): Ec2Client
 class SdkEc2Client implements Ec2Client {
   constructor(private readonly client: EC2Client) {}
 
-  async resolveUbuntuImageId(namePattern: string, owner: string): Promise<string> {
+  async resolveUbuntuImage(namePattern: string, owner: string): Promise<AwsWorkerImageInfo> {
     const result = await this.client.send(new DescribeImagesCommand({
       Owners: [owner],
       Filters: [
@@ -69,11 +70,16 @@ class SdkEc2Client implements Ec2Client {
     }));
     const images = (result.Images ?? []).filter((image) => image.ImageId && image.CreationDate);
     images.sort((a, b) => (b.CreationDate ?? "").localeCompare(a.CreationDate ?? ""));
-    const imageId = images[0]?.ImageId;
+    const image = images[0];
+    const imageId = image?.ImageId;
     if (!imageId) {
       throw new Error("Could not find an Ubuntu 24.04 AMI in this region.");
     }
-    return imageId;
+    const rootDeviceName = image.RootDeviceName?.trim();
+    if (!rootDeviceName) {
+      throw new Error("Could not determine the Ubuntu AMI root device in this region.");
+    }
+    return { imageId, rootDeviceName };
   }
 
   async keyPairExists(name: string): Promise<boolean> {
@@ -177,6 +183,14 @@ class SdkEc2Client implements Ec2Client {
       MinCount: 1,
       MaxCount: 1,
       UserData: spec.userData,
+      BlockDeviceMappings: [{
+        DeviceName: spec.rootDeviceName,
+        Ebs: {
+          DeleteOnTermination: true,
+          VolumeSize: spec.rootVolumeSizeGb,
+          VolumeType: "gp3"
+        }
+      }],
       TagSpecifications: [{
         ResourceType: "instance",
         Tags: [

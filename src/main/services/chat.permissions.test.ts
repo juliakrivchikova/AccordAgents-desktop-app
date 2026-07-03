@@ -4865,6 +4865,7 @@ function testService(options: {
       mode: options.settings?.cloudRuns?.mode ?? "ssh",
       worker: options.settings?.cloudRuns?.worker ?? {},
       hasAwsCredentials: options.settings?.cloudRuns?.hasAwsCredentials ?? false,
+      awsRootVolumeSizeGb: options.settings?.cloudRuns?.awsRootVolumeSizeGb ?? 32,
       maxRuntimeMs: options.settings?.cloudRuns?.maxRuntimeMs ?? 24 * 60 * 60_000,
       pollIntervalMs: options.settings?.cloudRuns?.pollIntervalMs ?? 2_500
     },

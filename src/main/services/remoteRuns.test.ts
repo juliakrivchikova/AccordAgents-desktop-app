@@ -18,7 +18,8 @@ import type {
 import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
 import { ChatService } from "./chat";
 import { buildCloudRunSshTarget, validateCloudRunSshWorkerFields } from "./cloudRunWorkers";
-import { remoteMirrorPath, remoteMirrorSlug } from "./remoteMirrorSync";
+import { CommandError } from "./command";
+import { normalizeMirrorSyncError, remoteMirrorPath, remoteMirrorSlug } from "./remoteMirrorSync";
 import type { RemoteMirrorSyncRequest, RemoteMirrorSyncRunner } from "./remoteMirrorSync";
 import { forwardedDesktopEnvironment, RemoteRunService } from "./remoteRuns";
 import { RemoteRunCoordinator } from "./remoteRunCoordinator";
@@ -798,6 +799,24 @@ test("mirror path derivation is deterministic and collision-resistant", () => {
   );
 });
 
+test("mirror sync normalizes worker disk space failures to an actionable message", () => {
+  const error = normalizeMirrorSyncError(
+    new CommandError("rsync exited with code 11", {
+      command: "rsync",
+      args: ["-az", "/local/", "worker:/srv/mirrors/myapp/"],
+      stdout: "",
+      stderr: "rsync: write failed: No space left on device (28)",
+      exitCode: 11,
+      timedOut: false
+    }),
+    "/srv/mirrors/myapp"
+  );
+
+  assert.match(error.message, /Remote worker disk is too small to sync this project/);
+  assert.match(error.message, /\/srv\/mirrors\/myapp/);
+  assert.match(error.message, /larger disk in Settings > Cloud Runs/);
+});
+
 test("mirror-sync detached run up-syncs before launch and runs codex in the mirror", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant]);
@@ -1157,7 +1176,15 @@ async function testRemoteRun(options: {
         roundLimitDefault: 1,
         cliAgentRunTimeoutMs: 24 * 60 * 60_000,
         chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
-        cloudRuns: { enabled: false, mode: "ssh", worker: {}, hasAwsCredentials: false, maxRuntimeMs: 24 * 60 * 60_000, pollIntervalMs: 2_500 },
+        cloudRuns: {
+          enabled: false,
+          mode: "ssh",
+          worker: {},
+          hasAwsCredentials: false,
+          awsRootVolumeSizeGb: 32,
+          maxRuntimeMs: 24 * 60 * 60_000,
+          pollIntervalMs: 2_500
+        },
         providers: [
           { kind: "codex-cli", label: "Codex CLI", enabled: true },
           { kind: "claude-code", label: "Claude Code", enabled: true }
@@ -1391,6 +1418,7 @@ function coordinatorSettings(patch: { maxRuntimeMs: number; pollIntervalMs: numb
           mode: "ssh",
           worker: { host: "worker.example" },
           hasAwsCredentials: false,
+          awsRootVolumeSizeGb: 32,
           maxRuntimeMs: patch.maxRuntimeMs,
           pollIntervalMs: patch.pollIntervalMs
         },

@@ -12,6 +12,7 @@ import {
   parseWorkerBlob
 } from "./awsWorkerProvisioning";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
+import { normalizeAwsRootVolumeSizeGb } from "../../shared/cloudRuns";
 import { AwsWorkerLifecycle } from "./awsWorkerLifecycle";
 import type { AwsWorkerDeleteResult, AwsWorkerHandle, Ec2Client } from "./awsWorkerLifecycle";
 import {
@@ -63,19 +64,28 @@ export class CloudRunAwsService {
     return buildBootstrapCommand(region, this.randomSuffix());
   }
 
-  async connectWorker(blob: string, instanceType?: string): Promise<AwsWorkerStatus> {
+  async connectWorker(blob: string, instanceType?: string, rootVolumeSizeGb?: number): Promise<AwsWorkerStatus> {
     const credentials = parseWorkerBlob(blob);
     await this.assertCanCreateWorker();
-    const handle = await this.lifecycle.createWorker(credentials, instanceType);
+    const settings = await this.settings.getPublicSettings();
+    const normalizedRootVolumeSizeGb = normalizeAwsRootVolumeSizeGb(
+      rootVolumeSizeGb ?? settings.cloudRuns.awsRootVolumeSizeGb
+    );
+    const handle = await this.lifecycle.createWorker(credentials, {
+      instanceType,
+      rootVolumeSizeGb: normalizedRootVolumeSizeGb
+    });
     const info: AwsWorkerHandleInfo = {
       instanceId: handle.instanceId,
       securityGroupId: handle.securityGroupId,
       keyName: handle.keyName,
       region: handle.region,
       instanceType: instanceType?.trim() || "t3.small",
+      rootVolumeSizeGb: normalizedRootVolumeSizeGb,
       createdAt: new Date().toISOString()
     };
     await this.settings.saveAwsWorkerCredentials(credentials);
+    await this.settings.saveCloudRunsSettings({ awsRootVolumeSizeGb: normalizedRootVolumeSizeGb });
     await this.settings.saveAwsWorkerHandle(info);
     await this.settings.setCloudRunsMode("aws");
     return this.status();

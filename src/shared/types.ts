@@ -39,6 +39,7 @@ export interface AwsWorkerHandleInfo {
   keyName: string;
   region: string;
   instanceType: string;
+  rootVolumeSizeGb?: number;
   createdAt: string;
 }
 
@@ -51,6 +52,7 @@ export interface CloudRunsSettings {
   hasAwsCredentials: boolean;
   awsHandle?: AwsWorkerHandleInfo;
   awsRegion?: string;
+  awsRootVolumeSizeGb: number;
   maxRuntimeMs: number;
   pollIntervalMs: number;
 }
@@ -59,6 +61,7 @@ export interface CloudRunsSettingsUpdate {
   enabled?: boolean;
   mode?: CloudRunWorkerMode;
   worker?: CloudRunWorkerSettings;
+  awsRootVolumeSizeGb?: number;
   maxRuntimeMs?: number;
   pollIntervalMs?: number;
 }
@@ -82,6 +85,7 @@ export interface AwsWorkerStatus {
 export interface ConnectAwsWorkerRequest {
   blob: string;
   instanceType?: string;
+  rootVolumeSizeGb?: number;
 }
 
 export interface CloudRunWorkerTestResult {

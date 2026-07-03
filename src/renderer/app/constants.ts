@@ -1,6 +1,7 @@
 import type { AppSettings } from "../../shared/types";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS } from "../../shared/cliAgentRunSettings";
 import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT } from "../../shared/chatParticipantRequests";
+import { AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT } from "../../shared/cloudRuns";
 
 export const DEFAULT_SETTINGS: AppSettings = {
   roundLimitDefault: 2,
@@ -11,6 +12,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     mode: "ssh",
     worker: {},
     hasAwsCredentials: false,
+    awsRootVolumeSizeGb: AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT,
     maxRuntimeMs: 24 * 60 * 60_000,
     pollIntervalMs: 2_500
   },

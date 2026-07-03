@@ -60,8 +60,19 @@ test("cloud-init and instance spec carry the toolchain and tag", () => {
   const init = buildWorkerCloudInit();
   assert.match(init, /@openai\/codex/);
   assert.match(init, /apparmor_restrict_unprivileged_userns=0/);
-  const spec = buildWorkerInstanceSpec({ imageId: "ami-1", keyName: "k", securityGroupId: "sg-1" });
+  const spec = buildWorkerInstanceSpec({ imageId: "ami-1", rootDeviceName: "/dev/sda1", keyName: "k", securityGroupId: "sg-1" });
   assert.equal(spec.instanceType, "t3.small");
+  assert.equal(spec.rootVolumeSizeGb, 32);
+  assert.equal(
+    buildWorkerInstanceSpec({
+      imageId: "ami-1",
+      rootDeviceName: "/dev/sda1",
+      keyName: "k",
+      securityGroupId: "sg-1",
+      rootVolumeSizeGb: 64
+    }).rootVolumeSizeGb,
+    64
+  );
   assert.equal(spec.tagKey, AWS_WORKER_TAG_KEY);
   assert.equal(Buffer.from(spec.userData, "base64").toString("utf8"), init);
 });
@@ -92,8 +103,8 @@ class FakeEc2Client implements Ec2Client {
     this.state = { instanceId: "i-123", state: "running", publicIp: "1.1.1.1", ...initial };
   }
 
-  async resolveUbuntuImageId(): Promise<string> {
-    return "ami-ubuntu";
+  async resolveUbuntuImage(): Promise<{ imageId: string; rootDeviceName: string }> {
+    return { imageId: "ami-ubuntu", rootDeviceName: "/dev/sda1" };
   }
   async keyPairExists(name: string): Promise<boolean> {
     return this.keyPairs.has(name);
@@ -171,13 +182,15 @@ const HANDLE: AwsWorkerHandle = {
 
 test("createWorker provisions key, security group, ingress and instance", async () => {
   const client = new FakeEc2Client();
-  const handle = await lifecycleWith(client).createWorker(CREDS);
+  const handle = await lifecycleWith(client).createWorker(CREDS, { rootVolumeSizeGb: 64 });
   assert.equal(handle.instanceId, "i-123");
   assert.equal(handle.securityGroupId, "sg-123");
   assert.deepEqual(client.importedKeyPairs, ["aa-key"]);
   assert.deepEqual(client.securityGroupNames, ["aa-key-sg"]);
   assert.equal(client.lastRunSpec?.keyName, "aa-key");
   assert.ok(client.ingressCidrs.has("203.0.113.9/32"));
+  assert.equal(client.lastRunSpec?.rootDeviceName, "/dev/sda1");
+  assert.equal(client.lastRunSpec?.rootVolumeSizeGb, 64);
 });
 
 test("createWorker reuses an existing local/AWS key without re-importing it", async () => {

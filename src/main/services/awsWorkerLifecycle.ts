@@ -27,8 +27,13 @@ export interface AwsWorkerInstanceInfo {
   publicIp?: string;
 }
 
+export interface AwsWorkerImageInfo {
+  imageId: string;
+  rootDeviceName: string;
+}
+
 export interface Ec2Client {
-  resolveUbuntuImageId(namePattern: string, owner: string): Promise<string>;
+  resolveUbuntuImage(namePattern: string, owner: string): Promise<AwsWorkerImageInfo>;
   keyPairExists(name: string): Promise<boolean>;
   importKeyPair(name: string, publicKeyMaterial: string): Promise<void>;
   deleteKeyPair(name: string): Promise<void>;
@@ -105,17 +110,27 @@ export class AwsWorkerLifecycle {
   // First-time provisioning: resolve the Ubuntu AMI, upload an app-generated
   // key, open SSH to the caller's current IP only, and launch a tagged
   // instance. Returns the handle the app persists.
-  async createWorker(credentials: AwsWorkerCredentials, instanceType?: string): Promise<AwsWorkerHandle> {
+  async createWorker(
+    credentials: AwsWorkerCredentials,
+    options: { instanceType?: string; rootVolumeSizeGb?: number } = {}
+  ): Promise<AwsWorkerHandle> {
     const client = this.options.createEc2Client(credentials);
-    const [imageId, publicIp] = await Promise.all([
-      client.resolveUbuntuImageId(UBUNTU_2404_NAME_PATTERN, UBUNTU_2404_OWNER),
+    const [image, publicIp] = await Promise.all([
+      client.resolveUbuntuImage(UBUNTU_2404_NAME_PATTERN, UBUNTU_2404_OWNER),
       this.options.currentPublicIp()
     ]);
     const key = await this.ensureImportedKeyPair(client);
     const securityGroupName = securityGroupNameForKey(key.keyName);
     const securityGroupId = await client.ensureSecurityGroup(securityGroupName, "AccordAgents Cloud Runs worker");
     await client.authorizeSshIngress(securityGroupId, ipToCidr(publicIp));
-    const spec = buildWorkerInstanceSpec({ imageId, keyName: key.keyName, securityGroupId, instanceType });
+    const spec = buildWorkerInstanceSpec({
+      imageId: image.imageId,
+      rootDeviceName: image.rootDeviceName,
+      keyName: key.keyName,
+      securityGroupId,
+      instanceType: options.instanceType,
+      rootVolumeSizeGb: options.rootVolumeSizeGb
+    });
     const instanceId = await client.runInstance(spec);
     this.log("aws-worker.created", { instanceId, securityGroupId });
     return {

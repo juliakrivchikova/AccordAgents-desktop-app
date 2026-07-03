@@ -22,6 +22,7 @@ class FakeSettings {
   credentials: AwsWorkerCredentials | undefined;
   handle: AwsWorkerHandleInfo | undefined;
   mode: "ssh" | "aws" = "ssh";
+  awsRootVolumeSizeGb = 32;
 
   async getAwsWorkerCredentials(): Promise<AwsWorkerCredentials | undefined> {
     return this.credentials;
@@ -35,6 +36,7 @@ class FakeSettings {
         worker: {},
         hasAwsCredentials: Boolean(this.credentials),
         awsHandle: this.handle,
+        awsRootVolumeSizeGb: this.awsRootVolumeSizeGb,
         maxRuntimeMs: 24 * 60 * 60_000,
         pollIntervalMs: 2_500
       }
@@ -47,6 +49,11 @@ class FakeSettings {
 
   async saveAwsWorkerHandle(handle: AwsWorkerHandleInfo | undefined): Promise<void> {
     this.handle = handle;
+  }
+
+  async saveCloudRunsSettings(update: { awsRootVolumeSizeGb?: number }): Promise<AppSettings> {
+    this.awsRootVolumeSizeGb = update.awsRootVolumeSizeGb ?? this.awsRootVolumeSizeGb;
+    return this.getPublicSettings();
   }
 
   async clearAwsWorker(): Promise<void> {
@@ -73,8 +80,8 @@ class FakeEc2Client implements Ec2Client {
 
   constructor(public state: AwsWorkerInstanceInfo | undefined = { instanceId: "i-new", state: "running", publicIp: "198.51.100.5" }) {}
 
-  async resolveUbuntuImageId(): Promise<string> {
-    return "ami-ubuntu";
+  async resolveUbuntuImage(): Promise<{ imageId: string; rootDeviceName: string }> {
+    return { imageId: "ami-ubuntu", rootDeviceName: "/dev/sda1" };
   }
 
   async keyPairExists(): Promise<boolean> {
