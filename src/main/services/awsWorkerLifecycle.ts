@@ -197,6 +197,17 @@ export class AwsWorkerLifecycle {
     this.log("aws-worker.terminated", { instanceId: handle.instanceId });
   }
 
+  async stopWorker(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle): Promise<void> {
+    this.clearIdleTimer();
+    this.activeRuns = 0;
+    const client = this.options.createEc2Client(credentials);
+    const info = await client.describeInstance(handle.instanceId);
+    if (info?.state === "running" || info?.state === "pending") {
+      await client.stopInstance(handle.instanceId);
+      this.log("aws-worker.stopped", { instanceId: handle.instanceId });
+    }
+  }
+
   async describe(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle): Promise<AwsWorkerInstanceInfo | undefined> {
     return this.options.createEc2Client(credentials).describeInstance(handle.instanceId);
   }

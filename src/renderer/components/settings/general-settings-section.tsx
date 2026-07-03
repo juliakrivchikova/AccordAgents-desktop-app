@@ -412,6 +412,20 @@ function AwsWorkerPanel(props: { settings: CloudRunsSettings }): JSX.Element {
     }
   };
 
+  const stop = async (): Promise<void> => {
+    setBusy(true);
+    setMessage("Stopping worker...");
+    try {
+      const next = await window.consensus.stopAwsWorker();
+      setStatus(next);
+      setMessage(next.state === "stopped" ? "Worker stopped." : `Worker ${next.state ?? "stop requested"}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const copyCommand = async (): Promise<void> => {
     if (!command) {
       return;
@@ -434,6 +448,8 @@ function AwsWorkerPanel(props: { settings: CloudRunsSettings }): JSX.Element {
     }
   };
 
+  const canStop = status?.state === "running" || status?.state === "pending";
+
   if (status?.configured) {
     return (
       <div className="gen-aws">
@@ -450,6 +466,9 @@ function AwsWorkerPanel(props: { settings: CloudRunsSettings }): JSX.Element {
           <div className="gen-actions">
             <button type="button" className="gen-pill" disabled={busy} onClick={() => void refresh()}>
               <span className="gen-pill-label">Refresh</span>
+            </button>
+            <button type="button" className="gen-pill" disabled={busy || !canStop} onClick={() => void stop()}>
+              <span className="gen-pill-label">Stop worker</span>
             </button>
             <button type="button" className="gen-pill gen-pill-danger" disabled={busy} onClick={() => void remove()}>
               <span className="gen-pill-label">Delete worker</span>

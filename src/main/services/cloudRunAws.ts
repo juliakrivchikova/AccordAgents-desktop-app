@@ -105,6 +105,17 @@ export class CloudRunAwsService {
     return { configured: false };
   }
 
+  async stopWorker(): Promise<AwsWorkerStatus> {
+    const credentials = await this.settings.getAwsWorkerCredentials();
+    const settings = await this.settings.getPublicSettings();
+    const handle = settings.cloudRuns.awsHandle;
+    if (!credentials || !handle) {
+      return { configured: false };
+    }
+    await this.lifecycle.stopWorker(credentials, this.toHandle(handle));
+    return this.status();
+  }
+
   // Called by the chat run path in AWS mode: guarantees the instance is running,
   // refreshes ingress to the current IP, and returns a ready SSH worker target
   // (no remoteCwd, so the mirror transport takes over).

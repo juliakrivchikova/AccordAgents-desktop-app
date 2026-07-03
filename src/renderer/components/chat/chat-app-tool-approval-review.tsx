@@ -320,6 +320,9 @@ export function approvalQuestion(
   if (permissionRequest?.kind === "providerNative") {
     return `Do you want to allow ${requester} to use ${permissionRequest.allowedTools.length === 1 ? "this provider-native tool" : "these provider-native tools"}?`;
   }
+  if (permissionRequest?.kind === "githubApp") {
+    return `Do you want to allow ${requester} GitHub App access to ${permissionRequest.repository_full_name}?`;
+  }
   if (toolPermissionRequest) {
     return `Do you want to allow ${requester} to use ${toolPermissionRequest.toolName}?`;
   }

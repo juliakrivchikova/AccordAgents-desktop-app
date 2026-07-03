@@ -245,6 +245,10 @@ const CHAT_PARTICIPANT_REQUEST_RATE_LIMIT = 8;
 const CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS = 120_000;
 const CHAT_PARTICIPANT_REQUEST_WAIT_MAX_MS = 300_000;
 const CHAT_TOOL_PERMISSION_WAIT_MS = 30 * 60_000;
+const CHAT_GITHUB_APP_REPOSITORY_MAX_LENGTH = 200;
+const CHAT_GITHUB_APP_PERMISSION_MAX_LENGTH = 80;
+const CHAT_GITHUB_APP_REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const CHAT_GITHUB_APP_PERMISSION_PATTERN = /^[A-Za-z0-9_:-]+$/;
 const PARTICIPANT_REQUEST_SCRUTINY_APPENDIX =
   "Review for blockers, incorrect assumptions, missing edge cases, or simpler alternatives. If none, reply with only `No objections.` Do not restate the proposal.";
 const CHAT_CONTEXT_MCP_TOOL_NAMES = [
@@ -376,6 +380,7 @@ interface PreparedPermissionChange {
   portablePermissions: ChatPermissionGrant[];
   shellRules: ChatShellPermissionRule[];
   providerNativeAllowedTools: string[];
+  githubAppRequest: boolean;
   summary: string;
 }
 
@@ -5137,11 +5142,11 @@ export class ChatService {
         : agentMode === "auto"
         ? [
             "Permission MCP tool: `app_permissions_request_change` is available when this participant needs approval for blocked capabilities.",
-            "In Auto-review mode, repo read, workspace write, web, and shell commands all run under the provider's native auto review. Do not call `app_permissions_request_change` for these, and do not request shellRules; shell decisions are handled by native auto. Portable repo/web/edit requests return already_granted if called anyway. Only genuinely out-of-preset capabilities need a request, for example `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants. After a permission MCP call, inspect the status: pending_user_approval means it is awaiting User approval; already_granted means the capability is available."
+            "In Auto-review mode, repo read, workspace write, web, and shell commands all run under the provider's native auto review. Do not call `app_permissions_request_change` for these, and do not request shellRules; shell decisions are handled by native auto. Portable repo/web/edit requests return already_granted if called anyway. Only genuinely out-of-preset capabilities need a request, for example `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants or `{ \"kind\": \"githubApp\", \"repository_full_name\": \"owner/repo\", \"permissions\": [\"contents:write\", \"pull_requests:write\"], \"reason\": \"Need to push a branch and open a PR.\" }` for GitHub App repository permissions. After a permission MCP call, inspect the status: pending_user_approval means it is awaiting User approval; already_granted means the capability is available."
           ]
         : [
             "Permission MCP tool: `app_permissions_request_change` is available when this participant needs approval for blocked capabilities.",
-            "Required permission workflow: if the current task needs a blocked capability, call `app_permissions_request_change` before answering that the work cannot be done. Use `{ \"kind\": \"portable\", \"permissions\": [\"repoRead\"], \"reason\": \"Need to inspect the referenced repository files.\" }` for repository reads, `{ \"kind\": \"portable\", \"permissions\": [\"webAccess\"], \"reason\": \"Need live web lookup to answer User's trademark question.\" }` for web access, `{ \"kind\": \"portable\", \"permissions\": [\"workspaceWrite\"], \"reason\": \"Need to edit files for the requested change.\" }` for file edits, `{ \"kind\": \"shellRules\", \"rules\": [{ \"action\": \"allow\", \"match\": \"prefix\", \"pattern\": \"git diff\" }], \"reason\": \"Need to inspect diffs.\" }` for shell rules, or `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants.",
+            "Required permission workflow: if the current task needs a blocked capability, call `app_permissions_request_change` before answering that the work cannot be done. Use `{ \"kind\": \"portable\", \"permissions\": [\"repoRead\"], \"reason\": \"Need to inspect the referenced repository files.\" }` for repository reads, `{ \"kind\": \"portable\", \"permissions\": [\"webAccess\"], \"reason\": \"Need live web lookup to answer User's trademark question.\" }` for web access, `{ \"kind\": \"portable\", \"permissions\": [\"workspaceWrite\"], \"reason\": \"Need to edit files for the requested change.\" }` for file edits, `{ \"kind\": \"shellRules\", \"rules\": [{ \"action\": \"allow\", \"match\": \"prefix\", \"pattern\": \"git diff\" }], \"reason\": \"Need to inspect diffs.\" }` for shell rules, `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants, or `{ \"kind\": \"githubApp\", \"repository_full_name\": \"owner/repo\", \"permissions\": [\"contents:write\", \"pull_requests:write\"], \"reason\": \"Need to push a branch and open a PR.\" }` for GitHub App repository permissions.",
             "After a permission MCP call, inspect the returned status. If the result is pending_user_approval, say only that the permission request is awaiting User approval; do not claim the permission was granted until the tool result or a later app message confirms approval."
           ]
       : [
@@ -7733,6 +7738,9 @@ export class ChatService {
     if (record.kind === "providerNative") {
       return this.normalizeProviderNativePermissionChangeRequest(record);
     }
+    if (record.kind === "githubApp") {
+      return this.normalizeGitHubAppPermissionChangeRequest(record);
+    }
     if (record.kind === "portable" || Array.isArray(record.permissions)) {
       return this.normalizePortablePermissionChangeRequest(record);
     }
@@ -7827,6 +7835,53 @@ export class ChatService {
       reason: this.normalizePermissionChangeReason(record.reason),
       provider: "claude-code",
       allowedTools
+    };
+  }
+
+  private normalizeGitHubAppPermissionChangeRequest(record: Record<string, unknown>): ChatPermissionChangeRequest {
+    const repositoryFullName = typeof record.repository_full_name === "string"
+      ? record.repository_full_name.trim()
+      : typeof record.repositoryFullName === "string"
+        ? record.repositoryFullName.trim()
+        : "";
+    if (
+      !repositoryFullName ||
+      repositoryFullName.length > CHAT_GITHUB_APP_REPOSITORY_MAX_LENGTH ||
+      !CHAT_GITHUB_APP_REPOSITORY_PATTERN.test(repositoryFullName)
+    ) {
+      throw new Error("GitHub App permission request needs a repository_full_name like owner/repo.");
+    }
+    if (!Array.isArray(record.permissions) || record.permissions.length === 0) {
+      throw new Error("GitHub App permission request needs at least one permission token.");
+    }
+    const permissions: string[] = [];
+    const seen = new Set<string>();
+    for (const item of record.permissions) {
+      if (typeof item !== "string") {
+        throw new Error("GitHub App permission tokens must be strings.");
+      }
+      const token = item.trim();
+      if (
+        !token ||
+        token.length > CHAT_GITHUB_APP_PERMISSION_MAX_LENGTH ||
+        !CHAT_GITHUB_APP_PERMISSION_PATTERN.test(token)
+      ) {
+        throw new Error("GitHub App permission tokens must be non-empty permission:access strings.");
+      }
+      if (seen.has(token)) {
+        continue;
+      }
+      seen.add(token);
+      permissions.push(token);
+    }
+    if (permissions.length === 0) {
+      throw new Error("GitHub App permission request needs at least one unique permission token.");
+    }
+    return {
+      kind: "githubApp",
+      reason: this.normalizePermissionChangeReason(record.reason),
+      repository_full_name: repositoryFullName,
+      permissions
     };
   }
 
@@ -7980,6 +8035,9 @@ export class ChatService {
     if (mode === "plan" && normalizedRequest.kind === "providerNative") {
       throw new Error("Plan mode blocks provider-native tool grants for this participant. Switch the participant to default or auto mode before granting provider-native access.");
     }
+    if (mode === "plan" && normalizedRequest.kind === "githubApp") {
+      throw new Error("Plan mode blocks GitHub App permission grants for this participant. Switch the participant to default or auto mode before granting GitHub write access.");
+    }
     // Resolve "already granted" against the effective launch profile, not the raw
     // stored toggles. In Auto-review mode the provider preset already grants web/edit,
     // so an in-preset request must report already_granted instead of producing a
@@ -7999,6 +8057,7 @@ export class ChatService {
         portablePermissions,
         shellRules: [],
         providerNativeAllowedTools: [],
+        githubAppRequest: false,
         summary: `Grant @${requester.handle} ${this.formatPermissionGrantList(summaryPermissions)}`
       };
     }
@@ -8018,7 +8077,18 @@ export class ChatService {
         portablePermissions: [],
         shellRules,
         providerNativeAllowedTools: [],
+        githubAppRequest: false,
         summary: `Grant @${requester.handle} ${this.formatShellPermissionRuleList(summaryRules)}`
+      };
+    }
+    if (normalizedRequest.kind === "githubApp") {
+      return {
+        request: normalizedRequest,
+        portablePermissions: [],
+        shellRules: [],
+        providerNativeAllowedTools: [],
+        githubAppRequest: true,
+        summary: `Grant @${requester.handle} ${this.formatGitHubAppPermissionList(normalizedRequest.repository_full_name, normalizedRequest.permissions)}`
       };
     }
     if (normalizedRequest.provider !== requester.kind) {
@@ -8037,6 +8107,7 @@ export class ChatService {
       portablePermissions: [],
       shellRules: [],
       providerNativeAllowedTools,
+      githubAppRequest: false,
       summary: `Grant @${requester.handle} ${this.formatProviderNativeAllowedToolList(summaryAllowedTools)}`
     };
   }
@@ -9537,7 +9608,8 @@ export class ChatService {
     return (
       prepared.portablePermissions.length > 0 ||
       prepared.shellRules.length > 0 ||
-      prepared.providerNativeAllowedTools.length > 0
+      prepared.providerNativeAllowedTools.length > 0 ||
+      prepared.githubAppRequest
     );
   }
 
@@ -9558,6 +9630,11 @@ export class ChatService {
         }
         const existingRules = new Set(normalizedExisting.rules.map((rule) => this.shellPermissionRuleKey(rule)));
         return normalizedRequested.rules.every((rule) => existingRules.has(this.shellPermissionRuleKey(rule)));
+      }
+      if (normalizedRequested.kind === "githubApp") {
+        return normalizedExisting.kind === "githubApp" &&
+          normalizedExisting.repository_full_name === normalizedRequested.repository_full_name &&
+          normalizedRequested.permissions.every((token) => normalizedExisting.permissions.includes(token));
       }
       return normalizedExisting.kind === "providerNative" &&
         normalizedExisting.provider === normalizedRequested.provider &&
@@ -9588,6 +9665,9 @@ export class ChatService {
           rules: this.mergeShellPermissionRules(permissions.shell.rules, normalizedRequest.rules)
         }
       };
+    }
+    if (normalizedRequest.kind === "githubApp") {
+      return permissions;
     }
     const allowedTools = this.mergeProviderNativeAllowedTools(
       permissions.providerNative?.["claude-code"]?.allowedTools ?? [],
@@ -9857,6 +9937,9 @@ export class ChatService {
     if (request.kind === "shellRules") {
       return this.formatShellPermissionRuleList(request.rules);
     }
+    if (request.kind === "githubApp") {
+      return this.formatGitHubAppPermissionList(request.repository_full_name, request.permissions);
+    }
     return this.formatProviderNativeAllowedToolList(request.allowedTools);
   }
 
@@ -9877,6 +9960,11 @@ export class ChatService {
 
   private formatProviderNativeAllowedToolList(allowedTools: string[]): string {
     const labels = allowedTools.map((token) => `Claude native tool ${JSON.stringify(token)}`);
+    return this.formatHandleList(labels);
+  }
+
+  private formatGitHubAppPermissionList(repositoryFullName: string, permissions: string[]): string {
+    const labels = permissions.map((permission) => `GitHub App ${JSON.stringify(permission)} on ${repositoryFullName}`);
     return this.formatHandleList(labels);
   }
 
@@ -11936,6 +12024,20 @@ export class ChatService {
         Array.isArray(record.allowedTools) &&
         record.allowedTools.length > 0 &&
         record.allowedTools.every((token) => typeof token === "string");
+    }
+    if (record.kind === "githubApp") {
+      const repositoryFullName = record.repository_full_name;
+      const permissions = record.permissions;
+      return typeof repositoryFullName === "string" &&
+        CHAT_GITHUB_APP_REPOSITORY_PATTERN.test(repositoryFullName.trim()) &&
+        Array.isArray(permissions) &&
+        permissions.length > 0 &&
+        permissions.every((token) =>
+          typeof token === "string" &&
+          token.trim().length > 0 &&
+          token.trim().length <= CHAT_GITHUB_APP_PERMISSION_MAX_LENGTH &&
+          CHAT_GITHUB_APP_PERMISSION_PATTERN.test(token.trim())
+        );
     }
     const permissions = record.permissions;
     return (record.kind === "portable" || record.kind === undefined) &&

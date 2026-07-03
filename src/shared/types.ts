@@ -552,10 +552,18 @@ export interface ChatProviderNativePermissionChangeRequest {
   allowedTools: string[];
 }
 
+export interface ChatGitHubAppPermissionChangeRequest {
+  kind: "githubApp";
+  reason?: string;
+  repository_full_name: string;
+  permissions: string[];
+}
+
 export type ChatPermissionChangeRequest =
   | ChatPortablePermissionChangeRequest
   | ChatShellRulesPermissionChangeRequest
-  | ChatProviderNativePermissionChangeRequest;
+  | ChatProviderNativePermissionChangeRequest
+  | ChatGitHubAppPermissionChangeRequest;
 
 export interface ChatToolPermissionRequest {
   kind: "toolPermission";
@@ -1431,6 +1439,7 @@ export interface AppBridge {
   getAwsWorkerBootstrapCommand(region: string): Promise<string>;
   connectAwsWorker(request: ConnectAwsWorkerRequest): Promise<AwsWorkerStatus>;
   getAwsWorkerStatus(): Promise<AwsWorkerStatus>;
+  stopAwsWorker(): Promise<AwsWorkerStatus>;
   deleteAwsWorker(): Promise<AwsWorkerStatus>;
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;

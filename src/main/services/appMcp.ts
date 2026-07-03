@@ -829,7 +829,7 @@ export class AppMcpService {
         name: APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
         title: "Request Chat Permission Change",
         description:
-          "Request a permission change for this chat participant, or pass a prior requestId to recover its status idempotently. Use portable for repoRead/workspaceWrite/webAccess, shellRules for command-specific shell rules, or providerNative for Claude Code allowedTools tokens. Provider-native grants are rejected unless the requester is a Claude Code participant. The app validates the request and may return already_granted (the capability is already available for this run) or pending_user_approval for User approval.",
+          "Request a permission change for this chat participant, or pass a prior requestId to recover its status idempotently. Use portable for repoRead/workspaceWrite/webAccess, shellRules for command-specific shell rules, providerNative for Claude Code allowedTools tokens, or githubApp for GitHub App repository permissions. Provider-native grants are rejected unless the requester is a Claude Code participant. The app validates the request and may return already_granted (the capability is already available for this run) or pending_user_approval for User approval.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -840,7 +840,7 @@ export class AppMcpService {
             },
             kind: {
               type: "string",
-              enum: ["portable", "shellRules", "providerNative"],
+              enum: ["portable", "shellRules", "providerNative", "githubApp"],
               description: "Permission request kind."
             },
             reason: {
@@ -850,12 +850,10 @@ export class AppMcpService {
             permissions: {
               type: "array",
               minItems: 1,
-              maxItems: 3,
               items: {
-                type: "string",
-                enum: ["repoRead", "workspaceWrite", "webAccess"]
+                type: "string"
               },
-              description: "Portable permission grants to request when kind is portable."
+              description: "Portable grants repoRead/workspaceWrite/webAccess when kind is portable, or GitHub App permission tokens such as contents:write when kind is githubApp."
             },
             rules: {
               type: "array",
@@ -893,6 +891,10 @@ export class AppMcpService {
                 type: "string"
               },
               description: "Literal Claude Code allowedTools tokens to request when kind is providerNative."
+            },
+            repository_full_name: {
+              type: "string",
+              description: "GitHub repository full name, owner/repo, when kind is githubApp."
             }
           }
         },

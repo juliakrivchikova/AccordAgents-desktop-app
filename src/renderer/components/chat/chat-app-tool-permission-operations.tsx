@@ -27,6 +27,22 @@ export function ChatAppToolPermissionOperation({ request }: { request: ChatPermi
       </div>
     );
   }
+  if (request.kind === "githubApp") {
+    return (
+      <div className="chat-app-tool-roster-list">
+        <div className="chat-app-tool-roster-item">
+          <strong>Repository</strong>
+          <span><code>{request.repository_full_name}</code></span>
+        </div>
+        {request.permissions.map((permission) => (
+          <div className="chat-app-tool-roster-item" key={permission}>
+            <strong>GitHub App</strong>
+            <span><code>{permission}</code></span>
+          </div>
+        ))}
+      </div>
+    );
+  }
   return (
     <div className="chat-app-tool-roster-list">
       {request.permissions.map((permission) => (
@@ -67,4 +83,3 @@ export function ChatAppToolParticipantRequestOperation({ request, requesterHandl
     </div>
   );
 }
-

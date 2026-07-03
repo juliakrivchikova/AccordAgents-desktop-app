@@ -191,6 +191,17 @@ export function chatPermissionChangeRequest(approval: ChatAppToolApproval): Chat
       ? { kind: "providerNative", reason, provider: "claude-code", allowedTools }
       : undefined;
   }
+  if (request.kind === "githubApp" && Array.isArray(request.permissions)) {
+    const repositoryFullName = typeof request.repository_full_name === "string" ? request.repository_full_name.trim() : "";
+    const permissions = request.permissions
+      .map((token) => (typeof token === "string" ? token.trim() : ""))
+      .filter((token) => token.length > 0);
+    return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repositoryFullName) &&
+      permissions.length === request.permissions.length &&
+      permissions.length > 0
+      ? { kind: "githubApp", reason, repository_full_name: repositoryFullName, permissions }
+      : undefined;
+  }
   return undefined;
 }
 

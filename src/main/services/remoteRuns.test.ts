@@ -381,6 +381,91 @@ test("detached reconnect preserves workerSeq ordering and skips duplicate worker
   assert.equal((storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).length, 1);
 });
 
+test("detached reconnect projects GitHub App permission requests", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const worker = new FakeDetachedWorkerTransport();
+  const { remote, storage } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "github-permission-run",
+    participant: participantConfig(participant),
+    prompt: "Need GitHub write.",
+    worker: { host: "worker.example" }
+  });
+  worker.push("github-permission-run", {
+    kind: "permission_pending",
+    workerSeq: 2,
+    requestId: "github-write-request",
+    triggerMessageId: "user-message",
+    request: {
+      kind: "githubApp",
+      repository_full_name: "juliakrivchikova/AccordAgents-desktop-app",
+      permissions: ["contents:write", "pull_requests:write"],
+      reason: "Need to push a branch and open a PR."
+    },
+    runPermissions: defaultChatAgentPermissions()
+  });
+
+  await remote.pollDetachedRun({ runId: "github-permission-run", worker: { host: "worker.example" } });
+
+  const approvals = storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[];
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].id, "github-write-request");
+  const request = approvals[0].request as any;
+  assert.equal(request.kind, "githubApp");
+  assert.equal(request.repository_full_name, "juliakrivchikova/AccordAgents-desktop-app");
+  assert.deepEqual(request.permissions, ["contents:write", "pull_requests:write"]);
+  assert.match(approvals[0].summary, /GitHub App/);
+  assert.ok(storage.current.messages.some((message: Conversation["messages"][number]) =>
+    message.role === "system" && message.content.includes("Permission approval needed")
+  ));
+});
+
+test("detached poll recovers permission events skipped by an older cursor", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const worker = new FakeDetachedWorkerTransport();
+  const { remote, storage } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "skipped-permission-run",
+    participant: participantConfig(participant),
+    prompt: "Need GitHub write.",
+    worker: { host: "worker.example" }
+  });
+  worker.push("skipped-permission-run", {
+    kind: "permission_pending",
+    workerSeq: 2,
+    requestId: "recovered-github-write-request",
+    triggerMessageId: "user-message",
+    request: {
+      kind: "githubApp",
+      repository_full_name: "juliakrivchikova/AccordAgents-desktop-app",
+      permissions: ["contents:write"]
+    },
+    runPermissions: defaultChatAgentPermissions()
+  });
+  worker.push("skipped-permission-run", {
+    kind: "lifecycle",
+    workerSeq: 3,
+    state: "disconnected",
+    message: "Remote Codex is waiting for a permission decision."
+  });
+
+  await remote.pollDetachedRun({
+    runId: "skipped-permission-run",
+    worker: { host: "worker.example" },
+    afterWorkerSeq: 3
+  });
+
+  const approvals = storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[];
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].id, "recovered-github-write-request");
+});
+
 test("detached permission approval writes the decision back to the worker", async () => {
   const participant = chatParticipant({ webAccess: false });
   const conversation = chatConversation([participant]);

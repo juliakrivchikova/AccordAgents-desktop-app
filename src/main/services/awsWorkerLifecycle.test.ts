@@ -197,3 +197,17 @@ test("deleteWorker terminates the instance", async () => {
   await lifecycleWith(client).deleteWorker(CREDS, HANDLE);
   assert.equal(client.state.state, "terminated");
 });
+
+test("stopWorker stops a running instance without terminating it", async () => {
+  const client = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
+  await lifecycleWith(client).stopWorker(CREDS, HANDLE);
+  assert.equal(client.stopCount, 1);
+  assert.equal(client.state.state, "stopped");
+});
+
+test("stopWorker is a no-op for an already stopped instance", async () => {
+  const client = new FakeEc2Client({ state: "stopped", publicIp: undefined });
+  await lifecycleWith(client).stopWorker(CREDS, HANDLE);
+  assert.equal(client.stopCount, 0);
+  assert.equal(client.state.state, "stopped");
+});

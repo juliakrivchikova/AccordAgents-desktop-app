@@ -657,11 +657,18 @@ export class RemoteRunService {
     const knownContext = this.detachedContextByRun.get(request.runId);
     const conversationId = request.conversationId ?? knownContext?.conversationId ?? await this.conversationIdForRun(request.runId);
     const afterWorkerSeq = request.afterWorkerSeq ?? await this.lastProjectedWorkerSeq(request.runId);
-    const snapshot = await this.detachedWorkerTransport.poll({
+    let snapshot = await this.detachedWorkerTransport.poll({
       runId: request.runId,
       worker: request.worker,
       afterWorkerSeq
     });
+    if (this.shouldRecoverMissingPermissionEvents(snapshot, afterWorkerSeq)) {
+      snapshot = await this.detachedWorkerTransport.poll({
+        runId: request.runId,
+        worker: request.worker,
+        afterWorkerSeq: 0
+      });
+    }
     const participantId = knownContext?.participantId ?? snapshot.state.participantId ?? await this.participantIdForRun(request.runId).catch(() => undefined);
     await this.projectWorkerSnapshot(conversationId ?? snapshot.state.conversationId, request.runId, participantId, snapshot);
     await this.projectSnapshotTerminalFallback(conversationId ?? snapshot.state.conversationId, request.runId, participantId, snapshot);
@@ -869,6 +876,20 @@ export class RemoteRunService {
       previousWorkerSeq = event.workerSeq;
       await this.projectWorkerEvent(resolvedConversationId, runId, resolvedParticipantId, event);
     }
+  }
+
+  private shouldRecoverMissingPermissionEvents(
+    snapshot: RemoteDetachedWorkerSnapshot,
+    afterWorkerSeq: number
+  ): boolean {
+    return (
+      afterWorkerSeq > 0 &&
+      snapshot.events.length === 0 &&
+      snapshot.state.status === "running" &&
+      !Number.isFinite(snapshot.state.pid) &&
+      !Number.isFinite(snapshot.state.pgid) &&
+      (snapshot.state.workerCursorSeq ?? 0) >= afterWorkerSeq
+    );
   }
 
   private async projectWorkerEvent(
@@ -1390,7 +1411,17 @@ export class RemoteRunService {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       return false;
     }
-    const record = value as Partial<ChatPermissionChangeRequest>;
+    const record = value as Record<string, unknown>;
+    if (record.kind === "githubApp") {
+      return typeof record.repository_full_name === "string" &&
+        /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(record.repository_full_name.trim()) &&
+        Array.isArray(record.permissions) &&
+        record.permissions.length > 0 &&
+        record.permissions.every((permission) =>
+          typeof permission === "string" &&
+          /^[A-Za-z0-9_:-]+$/.test(permission.trim())
+        );
+    }
     return record.kind === "portable" || record.kind === "shellRules" || record.kind === "providerNative";
   }
 
@@ -2309,7 +2340,7 @@ async function handleRpcRequest(raw) {
         {
           name: "app_permissions_request_change",
           title: "Request Permission Change",
-          description: "Queue a permission request for desktop approval when the desktop reconnects.",
+          description: "Queue a permission request for desktop approval when the desktop reconnects. Supports portable, shellRules, providerNative, and githubApp request kinds.",
           inputSchema: { type: "object", additionalProperties: true }
         },
         {
