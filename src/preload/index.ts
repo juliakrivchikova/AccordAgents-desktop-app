@@ -9,6 +9,7 @@ import type {
   CloudRunWorkerSettings,
   CloudRunWorkerSetupProgress,
   ConnectAwsWorkerRequest,
+  DeleteAgentEnvironmentVariableRequest,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
@@ -37,6 +38,7 @@ import type {
   RetryImplementationPlanSynthesisRequest,
   ReviewProgress,
   ReviewRequest,
+  SaveAgentEnvironmentVariableRequest,
   SendChatMessageRequest,
   StartChatAccordRequest,
   ToggleChatReactionRequest,
@@ -71,6 +73,11 @@ const bridge: AppBridge = {
   getAwsWorkerStatus: () => ipcRenderer.invoke("cloud-runs:aws-status"),
   stopAwsWorker: () => ipcRenderer.invoke("cloud-runs:aws-stop"),
   deleteAwsWorker: () => ipcRenderer.invoke("cloud-runs:aws-delete"),
+  getAgentEnvironment: () => ipcRenderer.invoke("settings:get-agent-environment"),
+  saveAgentEnvironmentVariable: (request: SaveAgentEnvironmentVariableRequest) =>
+    ipcRenderer.invoke("settings:save-agent-environment-variable", request),
+  deleteAgentEnvironmentVariable: (request: DeleteAgentEnvironmentVariableRequest) =>
+    ipcRenderer.invoke("settings:delete-agent-environment-variable", request),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateProviderSettings: (update: ProviderSettingsUpdate) => ipcRenderer.invoke("settings:update-provider", update),
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => ipcRenderer.invoke("settings:save-chat-role", update),

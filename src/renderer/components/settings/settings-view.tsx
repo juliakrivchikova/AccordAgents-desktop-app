@@ -1,4 +1,5 @@
 import type {
+  AgentEnvironmentSnapshot,
   AgentHealth,
   AppSettings,
   ChatBehaviorRuleConfigUpdate,
@@ -7,8 +8,10 @@ import type {
   ChatRoleConfigUpdate,
   ChatSavedPromptConfigUpdate,
   CloudRunsSettingsUpdate,
+  DeleteAgentEnvironmentVariableRequest,
   ProviderSettings,
-  RepoFileOpenAction
+  RepoFileOpenAction,
+  SaveAgentEnvironmentVariableRequest
 } from "../../../shared/types";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "../primitives";
@@ -18,9 +21,10 @@ import { RolesSettingsSection } from "./roles-settings-section";
 import { GeneralSettingsSection } from "./general-settings-section";
 import { BehaviorRuleSettingsSection } from "./behavior-rules-settings-section";
 import { SavedPromptsSettingsSection } from "./saved-prompts-settings-section";
+import { EnvironmentSettingsSection } from "./environment-settings-section";
 import { X } from "lucide-react";
 
-export type SettingsSection = "general" | "roles" | "behavior-rules" | "saved-prompts" | "participants";
+export type SettingsSection = "general" | "environment" | "roles" | "behavior-rules" | "saved-prompts" | "participants";
 
 export function SettingsView(props: {
   section: SettingsSection;
@@ -40,17 +44,22 @@ export function SettingsView(props: {
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
   setChatPromptContext: (settings: ChatPromptContextSettings) => Promise<void>;
   saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => Promise<void>;
+  getAgentEnvironment: () => Promise<AgentEnvironmentSnapshot>;
+  saveAgentEnvironmentVariable: (request: SaveAgentEnvironmentVariableRequest) => Promise<AgentEnvironmentSnapshot>;
+  deleteAgentEnvironmentVariable: (request: DeleteAgentEnvironmentVariableRequest) => Promise<AgentEnvironmentSnapshot>;
   sidebarCollapsed: boolean;
   onExpandSidebar: () => void;
   onClose: () => void;
 }): JSX.Element {
   const title = props.section === "general"
     ? "General"
-    : props.section === "roles"
-      ? "Roles"
-      : props.section === "behavior-rules"
-        ? "Rules"
-        : props.section === "saved-prompts" ? "Prompts" : "Participants";
+    : props.section === "environment"
+      ? "Environment"
+      : props.section === "roles"
+        ? "Roles"
+        : props.section === "behavior-rules"
+          ? "Rules"
+          : props.section === "saved-prompts" ? "Prompts" : "Participants";
   const sectionClass = props.section === "participants"
     ? "settings-view-participants"
     : props.section === "roles"
@@ -115,6 +124,13 @@ export function SettingsView(props: {
             settings={props.settings}
             onSave={props.saveChatSavedPromptConfig}
             onDelete={props.deleteChatSavedPromptConfig}
+          />
+        )}
+        {props.section === "environment" && (
+          <EnvironmentSettingsSection
+            getAgentEnvironment={props.getAgentEnvironment}
+            saveAgentEnvironmentVariable={props.saveAgentEnvironmentVariable}
+            deleteAgentEnvironmentVariable={props.deleteAgentEnvironmentVariable}
           />
         )}
         {props.section === "general" && (

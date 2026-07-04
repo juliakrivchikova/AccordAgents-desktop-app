@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import type {
   AddChatParticipantRequest,
+  DeleteAgentEnvironmentVariableRequest,
   AgentHealth,
   ChatBehaviorRuleConfigUpdate,
   ChatPromptContextSettings,
@@ -37,6 +38,7 @@ import type {
   RetryImplementationPlanSynthesisRequest,
   ReviewRequest,
   SendChatMessageRequest,
+  SaveAgentEnvironmentVariableRequest,
   StartChatAccordRequest,
   ToggleChatReactionRequest,
   UpdateChatParticipantRuntimeRequest,
@@ -50,6 +52,7 @@ import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
 import { AppSkillsService } from "./services/appSkills";
+import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { bootstrapAppUpdater } from "./services/appUpdater";
 import { ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
@@ -69,6 +72,7 @@ let mainWindow: BrowserWindow | undefined;
 
 const gitService = new GitService();
 const settingsService = new SettingsService();
+const agentEnvironmentService = new AgentEnvironmentService(settingsService);
 const storageService = new StorageService();
 const localFileOpenerService = new LocalFileOpenerService(storageService, settingsService);
 const providerRunner = new ProviderRunner();
@@ -282,6 +286,17 @@ function registerIpc(): void {
   ipcMain.handle("cloud-runs:aws-status", () => cloudRunAwsService.status());
   ipcMain.handle("cloud-runs:aws-stop", () => cloudRunAwsService.stopWorker());
   ipcMain.handle("cloud-runs:aws-delete", () => cloudRunAwsService.deleteWorker());
+  ipcMain.handle("settings:get-agent-environment", () => agentEnvironmentService.snapshot());
+  ipcMain.handle("settings:save-agent-environment-variable", async (_event, request: SaveAgentEnvironmentVariableRequest) => {
+    await settingsService.saveAgentEnvironmentVariable(request);
+    await cliAgentRunner.shutdownWarmAgents();
+    return agentEnvironmentService.snapshot();
+  });
+  ipcMain.handle("settings:delete-agent-environment-variable", async (_event, request: DeleteAgentEnvironmentVariableRequest) => {
+    await settingsService.deleteAgentEnvironmentVariable(request.key);
+    await cliAgentRunner.shutdownWarmAgents();
+    return agentEnvironmentService.snapshot();
+  });
   ipcMain.handle("settings:update-provider", (_event, update: ProviderSettingsUpdate) => settingsService.updateProvider(update));
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));
   ipcMain.handle("settings:archive-chat-role", (_event, id: string) => settingsService.archiveChatRoleConfig(id));

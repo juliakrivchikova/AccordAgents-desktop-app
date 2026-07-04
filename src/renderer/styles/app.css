@@ -13,6 +13,7 @@
 @import "./views/visual-normalization.css" layer(components);
 @import "./views/token-overrides.css" layer(components);
 @import "./views/settings-general.css" layer(components);
+@import "./views/settings-environment.css" layer(components);
 @import "./views/settings-rules.css" layer(components);
 @import "./views/settings-prompts.css" layer(components);
 @import "./views/settings-roles.css" layer(components);

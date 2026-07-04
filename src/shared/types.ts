@@ -66,6 +66,46 @@ export interface CloudRunsSettingsUpdate {
   pollIntervalMs?: number;
 }
 
+export type AgentEnvironmentKeySource = "forwarded" | "manual";
+
+export type AgentEnvironmentValueProtection = "os-encrypted" | "local-obfuscated";
+
+export interface ManualAgentEnvironmentVariable {
+  key: string;
+  enabled: boolean;
+  updatedAt: string;
+  protection: AgentEnvironmentValueProtection;
+  overridesDetected: boolean;
+  hasValue: boolean;
+}
+
+export interface AgentEnvironmentKey {
+  key: string;
+  source: AgentEnvironmentKeySource;
+  manual: boolean;
+  overridesDetected: boolean;
+}
+
+export interface AgentEnvironmentSnapshot {
+  refreshedAt: string;
+  keys: AgentEnvironmentKey[];
+  manualVariables: ManualAgentEnvironmentVariable[];
+  forwardedCount: number;
+  manualEnabledCount: number;
+  localInheritanceDisclosure: string;
+  valueProtection: AgentEnvironmentValueProtection;
+}
+
+export interface SaveAgentEnvironmentVariableRequest {
+  key: string;
+  value?: string;
+  enabled?: boolean;
+}
+
+export interface DeleteAgentEnvironmentVariableRequest {
+  key: string;
+}
+
 export type AwsWorkerLifecycleState =
   | "absent"
   | "pending"
@@ -1505,6 +1545,9 @@ export interface AppBridge {
   getAwsWorkerStatus(): Promise<AwsWorkerStatus>;
   stopAwsWorker(): Promise<AwsWorkerStatus>;
   deleteAwsWorker(): Promise<AwsWorkerStatus>;
+  getAgentEnvironment(): Promise<AgentEnvironmentSnapshot>;
+  saveAgentEnvironmentVariable(request: SaveAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot>;
+  deleteAgentEnvironmentVariable(request: DeleteAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot>;
   getSettings(): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;

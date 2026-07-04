@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { CliAgentRunner, parseClaudeModelPickerOutput } from "./cliAgents";
 import { CommandError } from "./command";
+import { CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 
 function makeRunner(): CliAgentRunner {
@@ -41,6 +42,72 @@ function makeClaudeWarmPendingTurn(overrides: Partial<Record<string, unknown>> =
     ...overrides
   };
 }
+
+test("agentRunEnv filters blocked manual keys and preserves app MCP token precedence", () => {
+  const runner = makeRunner() as unknown as {
+    agentRunEnv(options: Record<string, unknown>): NodeJS.ProcessEnv | undefined;
+  };
+
+  const env = runner.agentRunEnv({
+    agentEnv: {
+      AA_MANUAL_AGENT_ENV_TEST: "manual",
+      PATH: "/manual/bin",
+      ACCORD_AGENTS_INTERNAL: "blocked",
+      [CODEX_APP_SERVER_MCP_TOKEN_ENV]: "manual-token"
+    },
+    appMcp: {
+      token: "per-run-token"
+    }
+  });
+
+  assert.equal(env?.AA_MANUAL_AGENT_ENV_TEST, "manual");
+  assert.equal(env?.PATH, undefined);
+  assert.equal(env?.ACCORD_AGENTS_INTERNAL, undefined);
+  assert.equal(env?.[CODEX_APP_SERVER_MCP_TOKEN_ENV], "per-run-token");
+});
+
+test("warmAgentKey changes when the manual agent environment version changes", () => {
+  const runner = makeRunner() as unknown as {
+    warmAgentKey(
+      participant: Record<string, unknown>,
+      repoPath: string | undefined,
+      kind: string,
+      options: Record<string, unknown>
+    ): string;
+  };
+  const participant = {
+    id: "participant-1",
+    kind: "codex",
+    model: "gpt-5",
+    reasoningEffort: "medium"
+  };
+  const baseOptions = {
+    extraReadableDirs: ["/tmp/workspace"],
+    warm: {
+      conversationId: "conversation-1",
+      participantId: "participant-1",
+      contextKey: "prompt-context-v1"
+    }
+  };
+
+  const firstKey = runner.warmAgentKey(participant, "/tmp/repo", "chat", {
+    ...baseOptions,
+    agentEnvKey: "agent-env-v1"
+  });
+  const secondKey = runner.warmAgentKey(participant, "/tmp/repo", "chat", {
+    ...baseOptions,
+    agentEnvKey: "agent-env-v2"
+  });
+  const repeatedFirstKey = runner.warmAgentKey(participant, "/tmp/repo", "chat", {
+    ...baseOptions,
+    agentEnvKey: "agent-env-v1"
+  });
+
+  assert.notEqual(firstKey, secondKey);
+  assert.equal(firstKey, repeatedFirstKey);
+  assert.equal(JSON.parse(firstKey).agentEnvKey, "agent-env-v1");
+  assert.equal(JSON.parse(secondKey).agentEnvKey, "agent-env-v2");
+});
 
 test("parseClaudeModelPickerOutput extracts aliases and default model from picker text", () => {
   const output = [

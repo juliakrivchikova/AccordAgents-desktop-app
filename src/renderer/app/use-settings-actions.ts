@@ -1,12 +1,15 @@
 import type {
+  AgentEnvironmentSnapshot,
   ChatBehaviorRuleConfigUpdate,
   ChatParticipantConfigUpdate,
   ChatPromptContextSettings,
   ChatRoleConfigUpdate,
   ChatSavedPromptConfigUpdate,
   CloudRunsSettingsUpdate,
+  DeleteAgentEnvironmentVariableRequest,
   ProviderSettings,
-  RepoFileOpenAction
+  RepoFileOpenAction,
+  SaveAgentEnvironmentVariableRequest
 } from "../../shared/types";
 import { errorText } from "../components/review/review-conversation-data";
 import type { AppState } from "./app-state";
@@ -18,6 +21,9 @@ export interface SettingsActions {
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
   setChatPromptContext: (settings: ChatPromptContextSettings) => Promise<void>;
   saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => Promise<void>;
+  getAgentEnvironment: () => Promise<AgentEnvironmentSnapshot>;
+  saveAgentEnvironmentVariable: (request: SaveAgentEnvironmentVariableRequest) => Promise<AgentEnvironmentSnapshot>;
+  deleteAgentEnvironmentVariable: (request: DeleteAgentEnvironmentVariableRequest) => Promise<AgentEnvironmentSnapshot>;
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => Promise<void>;
   archiveChatRoleConfig: (id: string) => Promise<void>;
   saveChatBehaviorRuleConfig: (update: ChatBehaviorRuleConfigUpdate) => Promise<void>;
@@ -51,6 +57,18 @@ export function useSettingsActions(state: AppState): SettingsActions {
 
   async function saveCloudRunsSettings(update: CloudRunsSettingsUpdate): Promise<void> {
     await updateSettings(() => window.consensus.saveCloudRunsSettings(update));
+  }
+
+  async function getAgentEnvironment(): Promise<AgentEnvironmentSnapshot> {
+    return loadSettingResult(() => window.consensus.getAgentEnvironment());
+  }
+
+  async function saveAgentEnvironmentVariable(request: SaveAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot> {
+    return loadSettingResult(() => window.consensus.saveAgentEnvironmentVariable(request));
+  }
+
+  async function deleteAgentEnvironmentVariable(request: DeleteAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot> {
+    return loadSettingResult(() => window.consensus.deleteAgentEnvironmentVariable(request));
   }
 
   async function saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<void> {
@@ -125,6 +143,17 @@ export function useSettingsActions(state: AppState): SettingsActions {
     }
   }
 
+  async function loadSettingResult<T>(load: () => Promise<T>): Promise<T> {
+    state.setError(undefined);
+    try {
+      return await load();
+    } catch (caught) {
+      const message = errorText(caught);
+      state.setError(message);
+      throw new Error(message);
+    }
+  }
+
   return {
     updateProvider,
     setRepoFileOpenPreference,
@@ -132,6 +161,9 @@ export function useSettingsActions(state: AppState): SettingsActions {
     setChatParticipantRequestMaxDepth,
     setChatPromptContext,
     saveCloudRunsSettings,
+    getAgentEnvironment,
+    saveAgentEnvironmentVariable,
+    deleteAgentEnvironmentVariable,
     saveChatRoleConfig,
     archiveChatRoleConfig,
     saveChatBehaviorRuleConfig,

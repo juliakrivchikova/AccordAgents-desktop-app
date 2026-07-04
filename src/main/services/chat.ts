@@ -541,6 +541,14 @@ export class ChatService {
     private readonly userSkills?: UserSkillsService
   ) {}
 
+  private async manualAgentEnvironmentForRun(): Promise<{ env: NodeJS.ProcessEnv; version: string }> {
+    const settings = this.settings as Partial<Pick<SettingsService, "getManualAgentEnvironment">>;
+    if (typeof settings.getManualAgentEnvironment !== "function") {
+      return { env: {}, version: "" };
+    }
+    return settings.getManualAgentEnvironment();
+  }
+
   setRemoteRunService(remoteRuns: RemoteRunStarter): void {
     this.remoteRuns = remoteRuns;
   }
@@ -1030,6 +1038,7 @@ export class ChatService {
       session.participantPermissions = permissions;
       const runPath = this.runPathForParticipant(conversation, participant, workspacePath, agentMode, permissions);
       const cliParticipant = this.cliParticipantForSession(participant, session);
+      const agentEnvironment = await this.manualAgentEnvironmentForRun();
       const appMcpToolInventoryKey = this.appMcpToolInventoryKey(this.appMcpToolNames([
         ...normalizeChatAppToolCapabilities(session.roleAppToolCapabilities),
         "permissions.request"
@@ -1040,6 +1049,8 @@ export class ChatService {
         extraReadableDirs: [workspacePath],
         agentMode,
         permissions,
+        agentEnv: agentEnvironment.env,
+        agentEnvKey: agentEnvironment.version,
         ...(compactInstructions ? { compactInstructions } : {}),
         onSessionId: (sessionId) => {
           this.persistParticipantSessionId(conversation, session, sessionId);
@@ -4682,6 +4693,7 @@ export class ChatService {
           participant.id
         )
       : [];
+    const agentEnvironment = await this.manualAgentEnvironmentForRun();
     const persistSessionId = (sessionId: string): void => {
       this.persistParticipantSessionId(conversation, session, sessionId);
     };
@@ -4755,7 +4767,8 @@ export class ChatService {
                     }
                   : undefined,
                 agentMode,
-                permissions
+                permissions,
+                extraEnv: agentEnvironment.env
               },
               maxRuntimeMs: remoteRunTarget.settings.maxRuntimeMs,
               sourceMessageId: triggerMessage.id,
@@ -4827,6 +4840,8 @@ export class ChatService {
               clientStatus: (clientGenerationId: string) => this.appMcp?.clientStatus?.(clientGenerationId)
             }
           : undefined,
+        agentEnv: agentEnvironment.env,
+        agentEnvKey: agentEnvironment.version,
         agentMode,
         permissions,
         onOutput: progressSink.emit,
@@ -4881,6 +4896,8 @@ export class ChatService {
                 clientStatus: (clientGenerationId: string) => this.appMcp?.clientStatus?.(clientGenerationId)
               }
             : undefined,
+          agentEnv: agentEnvironment.env,
+          agentEnvKey: agentEnvironment.version,
           agentMode,
           permissions,
           onOutput: progressSink.emit,
