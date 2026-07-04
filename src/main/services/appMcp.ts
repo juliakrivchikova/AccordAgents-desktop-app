@@ -43,6 +43,7 @@ export interface AppMcpActor {
   runId?: string;
   participantRequestDepth?: number;
   participantRequestBatchId?: string;
+  chainRootId?: string;
   historyMarkdownPath?: string;
   historyJsonPath?: string;
   runPermissions?: ChatAgentPermissions;
@@ -290,6 +291,7 @@ export class AppMcpService {
       runId: grant.runId,
       participantRequestDepth: grant.participantRequestDepth,
       participantRequestBatchId: grant.participantRequestBatchId,
+      chainRootId: grant.chainRootId,
       historyMarkdownPath: grant.historyMarkdownPath,
       historyJsonPath: grant.historyJsonPath,
       runPermissions: grant.runPermissions ? normalizeChatAgentPermissions(grant.runPermissions) : undefined
@@ -804,7 +806,7 @@ export class AppMcpService {
         name: APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
         title: "Request Chat Participants",
         description:
-          "Ask one or more current chat participants to respond to a concrete prompt. The app validates policy, may request User approval, runs approved participants, and can return replies if they finish before timeout.",
+          "Ask one or more current chat participants to respond to a concrete prompt. The app validates policy, may request User approval, runs approved participants, and either auto-resumes the requester or returns inline replies when requested.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -841,7 +843,7 @@ export class AppMcpService {
             },
             resumeRequester: {
               type: "boolean",
-              description: "Whether the app should return control to the requester if replies arrive after this tool call returns. Defaults to true."
+              description: "Whether the app should return control in a fresh requester turn. Defaults to true and also applies when replies finish before timeout. Set false to receive completed replies inline."
             }
           },
           required: ["requests"]

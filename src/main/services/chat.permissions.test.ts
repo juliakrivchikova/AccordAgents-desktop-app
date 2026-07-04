@@ -22,7 +22,10 @@ import {
   normalizeChatAgentPermissions
 } from "../../shared/agentPermissions";
 import { CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS } from "../../shared/chatBehaviorRules";
-import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT } from "../../shared/chatParticipantRequests";
+import {
+  CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES,
+  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT
+} from "../../shared/chatParticipantRequests";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import type {
   AgentHealth,
@@ -1216,7 +1219,9 @@ test("permission resume attaches resumed participant-request reply to the origin
         source: "mcp" as const,
         resumeRequester: false,
         status: "running" as const,
-        depth: 1,
+        depth: 2,
+        requesterDepth: 1,
+        chainRootId: "chain-root",
         createdAt: NOW,
         updatedAt: NOW,
         triggerMessageId: "user-message",
@@ -1286,6 +1291,99 @@ test("permission resume attaches resumed participant-request reply to the origin
   assert.equal(progressEvents[0]?.phase, "initial");
   assert.equal(progressEvents.some((event) => event.agentProgress?.state === "running"), true);
   assert.equal(progressEvents.at(-1)?.phase, "done");
+});
+
+test("permission resume preserves target depth instead of requester depth", async () => {
+  const requester = chatParticipant("codex-cli");
+  const target = chatParticipant("claude-code");
+  const trigger: ChatMessage = {
+    id: "request-message",
+    role: "system",
+    content: "@target continue after permission.",
+    createdAt: NOW,
+    status: "done",
+    metadata: {
+      threadId: "thread-1",
+      participantRequest: {
+        id: "batch-1",
+        requesterParticipantId: requester.id,
+        requesterHandle: requester.handle,
+        source: "mcp",
+        resumeRequester: true,
+        status: "running",
+        depth: 2,
+        requesterDepth: 1,
+        chainRootId: "chain-root",
+        createdAt: NOW,
+        updatedAt: NOW,
+        triggerMessageId: "user-message",
+        items: [{
+          targetParticipantId: target.id,
+          targetHandle: target.handle,
+          prompt: "Continue after permission.",
+          status: "running",
+          createdAt: NOW,
+          updatedAt: NOW
+        }]
+      }
+    }
+  };
+  const approval = permissionApproval(target, {
+    kind: "portable",
+    permissions: ["webAccess"]
+  }, {
+    approvalScope: "once",
+    status: "approved",
+    resumeContext: {
+      runId: "blocked-run",
+      triggerMessageId: trigger.id,
+      participantRequestBatchId: "batch-1"
+    }
+  });
+  const conversation = chatConversation([requester, target], { pendingAppToolApprovals: [approval] });
+  conversation.messages.push(trigger);
+  const { service, storage, tempRoot } = testService({ conversation });
+  const serviceAny = service as any;
+  const capturedRuns: Array<{ participantId: string; options: any }> = [];
+  serviceAny.ensureHistoryFiles = async () => tempRoot;
+  serviceAny.runParticipantTurnSerialized = async (
+    _conversation: Conversation,
+    participant: ChatParticipant,
+    _trigger: ChatMessage,
+    _runId: string,
+    _signal: AbortSignal | undefined,
+    _progress: unknown,
+    options: any
+  ) => {
+    capturedRuns.push({ participantId: participant.id, options });
+    return [{
+      id: "target-reply",
+      role: "participant",
+      participantId: participant.id,
+      participantLabel: `@${participant.handle}`,
+      content: "Target resumed at preserved depth.",
+      createdAt: NOW,
+      status: "done",
+      metadata: {
+        threadId: "thread-1",
+        parentMessageId: trigger.id,
+        sourceMessageId: trigger.id
+      }
+    }];
+  };
+
+  await serviceAny.autoResumePermissionApproval(conversation.id, approval.id);
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.id === "target-reply"));
+
+  const targetRun = capturedRuns.find((run) => run.participantId === target.id);
+  assert.equal(targetRun?.options.participantRequestDepth, 2);
+  assert.equal(targetRun?.options.participantRequestBatchId, "batch-1");
+  assert.equal(targetRun?.options.chainRootId, "chain-root");
+  await waitFor(() => capturedRuns.some((run) => run.participantId === requester.id));
+  const requesterRun = capturedRuns.find((run) => run.participantId === requester.id);
+  assert.equal(requesterRun?.options.participantRequestDepth, 1);
+  assert.equal(requesterRun?.options.participantRequestBatchId, "batch-1");
+  assert.equal(requesterRun?.options.chainRootId, "chain-root");
 });
 
 test("permission resume clears running and emits terminal error when resumed participant fails", async () => {
@@ -5101,7 +5199,8 @@ test("participant request permission allow runs without approval", async () => {
 
   const result = await service.requestParticipantsFromTool(participantRequestActor(requester), {
     requests: [{ target: target.handle, prompt: "Please review." }],
-    timeoutMs: 5000
+    timeoutMs: 5000,
+    resumeRequester: false
   });
 
   assert.equal(result.ok, true);
@@ -5109,6 +5208,42 @@ test("participant request permission allow runs without approval", async () => {
   assert.equal(runs.length, 1);
   assert.equal(runs[0].id, target.id);
   assert.equal(storage.current.metadata.pendingAppToolApprovals, undefined);
+});
+
+test("participant request with fast replies auto-resumes requester instead of completing inline", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "allow" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  const runs: string[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (participant) => {
+      runs.push(participant.id);
+      return {
+        participant,
+        ok: true,
+        content: participant.id === target.id ? "Reviewed." : "Continued.",
+        durationMs: 1
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  const result = await service.requestParticipantsFromTool(participantRequestActor(requester), {
+    requests: [{ target: target.handle, prompt: "Please review." }],
+    timeoutMs: 5000,
+    resumeRequester: true
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "running");
+  assert.equal((result.batch as any).items[0].reply, undefined);
+  await waitFor(() => runs.includes(requester.id));
+  const requestMessage = storage.current.messages.find((message: ChatMessage) => message.metadata?.participantRequest);
+  const batch = requestMessage?.metadata?.participantRequest;
+  assert.deepEqual(runs, [target.id, requester.id]);
+  assert.equal(batch?.completedInToolCall, false);
+  assert.equal(batch?.autoResumeMessageId !== undefined, true);
 });
 
 test("participant request permission deny blocks requests even with stale capability", async () => {
@@ -5163,6 +5298,135 @@ test("participant request max depth is configurable", async () => {
 
   assert.equal(prepared.batch.depth, 3);
   assert.equal(prepared.batch.status, "running");
+});
+
+test("participant request depth stays flat for requester sibling rounds but blocks true nesting", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "allow" });
+  const target = chatParticipant("claude-code", { requestParticipants: "allow" });
+  const conversation = chatConversation([requester, target]);
+  const normalizedRequest = {
+    requests: [{ target: target.handle, prompt: "Please review." }],
+    timeoutMs: 1000,
+    resumeRequester: true
+  };
+  const { service } = testService({
+    conversation,
+    settings: {
+      chatRoleConfigs: [ROLE],
+      chatParticipantRequestMaxDepth: 1
+    }
+  });
+  const serviceAny = service as any;
+
+  const first = await serviceAny.prepareParticipantRequest(
+    conversation,
+    requester,
+    normalizedRequest,
+    {
+      ...participantRequestActor(requester),
+      participantRequestDepth: 0,
+      chainRootId: "chain-root"
+    },
+    "mcp"
+  );
+  conversation.messages.push(first.requestMessage);
+
+  assert.equal(first.batch.depth, 1);
+  assert.equal(first.batch.requesterDepth, 0);
+  assert.equal(first.batch.chainRootId, "chain-root");
+
+  const sibling = await serviceAny.prepareParticipantRequest(
+    conversation,
+    requester,
+    normalizedRequest,
+    {
+      ...participantRequestActor(requester),
+      triggerMessageId: "resume-message",
+      triggerThreadId: "resume-message",
+      participantRequestDepth: first.batch.requesterDepth,
+      chainRootId: first.batch.chainRootId
+    },
+    "mcp"
+  );
+
+  assert.equal(sibling.batch.depth, 1);
+  assert.equal(sibling.batch.requesterDepth, 0);
+  assert.equal(sibling.batch.chainRootId, first.batch.chainRootId);
+
+  await assert.rejects(
+    () => serviceAny.prepareParticipantRequest(
+      conversation,
+      target,
+      {
+        requests: [{ target: requester.handle, prompt: "Please review." }],
+        timeoutMs: 1000,
+        resumeRequester: true
+      },
+      {
+        ...participantRequestActor(target),
+        triggerMessageId: "target-message",
+        triggerThreadId: "target-message",
+        participantRequestDepth: first.batch.depth,
+        chainRootId: first.batch.chainRootId
+      },
+      "mcp"
+    ),
+    /max depth \(1\) reached/
+  );
+});
+
+test("participant request chain guard limits one logical request chain", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "allow" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  const chainRootId = "chain-root";
+  for (let index = 0; index < CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES; index += 1) {
+    conversation.messages.push({
+      id: `request-${index}`,
+      role: "participant",
+      participantId: requester.id,
+      participantLabel: `@${requester.handle}`,
+      content: "Request",
+      createdAt: NOW,
+      status: "done",
+      metadata: {
+        participantRequest: {
+          id: `batch-${index}`,
+          requesterParticipantId: requester.id,
+          requesterHandle: requester.handle,
+          source: "mcp",
+          resumeRequester: true,
+          status: "completed",
+          depth: 1,
+          requesterDepth: 0,
+          chainRootId,
+          createdAt: NOW,
+          updatedAt: NOW,
+          items: []
+        }
+      }
+    });
+  }
+  const { service } = testService({ conversation });
+
+  await assert.rejects(
+    () => (service as any).prepareParticipantRequest(
+      conversation,
+      requester,
+      {
+        requests: [{ target: target.handle, prompt: "Please review." }],
+        timeoutMs: 1000,
+        resumeRequester: true
+      },
+      {
+        ...participantRequestActor(requester),
+        triggerMessageId: "new-request",
+        chainRootId
+      },
+      "mcp"
+    ),
+    /participant request chain limit \(24\) reached/
+  );
 });
 
 test("agent modes do not promote participant request permission", () => {

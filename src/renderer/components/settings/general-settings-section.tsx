@@ -31,7 +31,7 @@ import {
   normalizeAwsRootVolumeSizeGb
 } from "../../../shared/cloudRuns";
 
-const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits how many levels of participant-to-participant requests can happen.";
+const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits transitive participant-to-participant nesting, not repeated rounds by the same requester.";
 
 const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
   "codex-cli": new URL("../../assets/codex-cli.svg", import.meta.url).href,

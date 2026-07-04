@@ -637,6 +637,8 @@ export interface ChatParticipantRequestBatch {
   resumeRequester: boolean;
   status: ChatParticipantRequestStatus;
   depth: number;
+  requesterDepth?: number;
+  chainRootId?: string;
   createdAt: string;
   updatedAt: string;
   triggerMessageId?: string;

@@ -95,7 +95,10 @@ import type {
 } from "../../shared/types";
 import { isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
 import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
-import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT } from "../../shared/chatParticipantRequests";
+import {
+  CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES,
+  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT
+} from "../../shared/chatParticipantRequests";
 import { normalizeChatReactionEmoji } from "../../shared/chatReactions";
 import {
   CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS,
@@ -332,6 +335,7 @@ interface ChatAppMcpGateway {
     runId?: string;
     participantRequestDepth?: number;
     participantRequestBatchId?: string;
+    chainRootId?: string;
     historyMarkdownPath?: string;
     historyJsonPath?: string;
     runPermissions?: ChatAgentPermissions;
@@ -357,6 +361,7 @@ interface ChatAppMcpActor {
   runId?: string;
   participantRequestDepth?: number;
   participantRequestBatchId?: string;
+  chainRootId?: string;
   historyMarkdownPath?: string;
   historyJsonPath?: string;
   runPermissions?: ChatAgentPermissions;
@@ -2359,6 +2364,29 @@ export class ChatService {
     const approvalRequired = latestBatch?.items.some((item) => item.status === "pending_approval") ?? false;
     let status = latestBatch?.status ?? result.result.batch.status;
     if (!hasUnfinishedItems) {
+      if (latestBatch?.resumeRequester) {
+        this.updateParticipantRequestBatch(latest, prepared.requestMessage.id, (batch) => ({
+          ...batch,
+          completedInToolCall: false,
+          status: "resuming_requester",
+          updatedAt: new Date().toISOString()
+        }));
+        status = "running";
+        await this.saveConversation(latest);
+        void this.autoResumeParticipantRequest(conversation.id, prepared.requestMessage.id).catch((error) => {
+          void this.debugLogs.write("chat.participant-request.auto-resume.error", {
+            conversationId: conversation.id,
+            requestMessageId: prepared.requestMessage.id,
+            message: error instanceof Error ? error.message : String(error)
+          });
+        });
+        return this.participantRequestToolResult(
+          latest,
+          prepared.requestMessage.id,
+          { status, approvalRequired: false },
+          { includeReplies: false }
+        );
+      }
       const completedBatch = this.updateParticipantRequestBatch(latest, prepared.requestMessage.id, (batch) => ({
         ...batch,
         completedInToolCall: true,
@@ -2366,6 +2394,11 @@ export class ChatService {
         updatedAt: new Date().toISOString()
       }));
       status = completedBatch?.status ?? "completed";
+      void this.debugLogs.write("chat.participant-request.completed-in-tool-call", {
+        conversationId: conversation.id,
+        requestMessageId: prepared.requestMessage.id,
+        batchId: completedBatch?.id ?? latestBatch?.id
+      });
     }
     await this.saveConversation(latest);
     return this.participantRequestToolResult(latest, prepared.requestMessage.id, { status, approvalRequired });
@@ -4468,6 +4501,7 @@ export class ChatService {
       promptContextScope?: ChatPromptContextScope;
       participantRequestDepth?: number;
       participantRequestBatchId?: string;
+      chainRootId?: string;
       queuedBehindHandle?: string;
       existingPendingMessage?: ChatMessage;
     }
@@ -4614,6 +4648,7 @@ export class ChatService {
       runPermissions: effectiveChatAgentPermissionsForProvider(participant.kind, agentMode, permissions),
       participantRequestDepth: options.participantRequestDepth ?? 0,
       participantRequestBatchId: options.participantRequestBatchId,
+      chainRootId: options.chainRootId,
       historyMarkdownPath: path.join(workspacePath, "history.md"),
       historyJsonPath: path.join(workspacePath, "history.json")
     };
@@ -5493,7 +5528,7 @@ export class ChatService {
       "If a message lists attached images, call `app_chat_read_attachment` with the attachment ID before reasoning about visual details.",
       "Participant request MCP tools: use `app_chat_request_participants` to ask participants; `app_chat_get_participant_request_status` recovers replies. JSON: `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
       "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
-      "If `app_chat_request_participants` returns replies before timeout, use them in this turn. If it returns `pending_approval` or `running`, stop after a brief status note; the app will auto-resume you after replies or errors arrive.",
+      "With the default `resumeRequester: true`, participant replies return through a fresh auto-resumed requester turn even if targets finish before timeout; stop when the tool returns `pending_approval` or `running`. Use `resumeRequester: false` only when you explicitly need completed target replies inline in the same turn.",
       ...permissionPolicyLines
     ];
     if (!hasChatAppToolCapability(session.roleAppToolCapabilities, "participants.manage")) {
@@ -8591,9 +8626,12 @@ export class ChatService {
     actor: ChatAppMcpActor,
     source: "mcp" | "inferred"
   ): Promise<PreparedParticipantRequest> {
-    const depth = (actor.participantRequestDepth ?? 0) + 1;
+    const batchId = randomUUID();
+    const requesterDepth = actor.participantRequestDepth ?? 0;
+    const depth = requesterDepth + 1;
+    const chainRootId = actor.chainRootId ?? actor.triggerMessageId ?? batchId;
     const maxDepth = await this.chatParticipantRequestMaxDepth();
-    const limitError = this.participantRequestLimitError(conversation, requester, actor, depth, maxDepth);
+    const limitError = this.participantRequestLimitError(conversation, requester, actor, depth, maxDepth, chainRootId);
     if (limitError) {
       throw new Error(limitError);
     }
@@ -8624,7 +8662,6 @@ export class ChatService {
     }
 
     const now = new Date().toISOString();
-    const batchId = randomUUID();
     const items: ChatParticipantRequestItem[] = Array.from(targets.values()).map((target) => {
       const request = requests.find((item) => item.target.toLowerCase() === target.handle.toLowerCase());
       return {
@@ -8645,6 +8682,8 @@ export class ChatService {
       resumeRequester: source === "inferred" ? true : normalized.resumeRequester,
       status: this.rollupParticipantRequestStatus(items),
       depth,
+      requesterDepth,
+      chainRootId,
       createdAt: now,
       updatedAt: now,
       triggerMessageId: actor.triggerMessageId,
@@ -8689,10 +8728,17 @@ export class ChatService {
     requester: ChatParticipant,
     actor: ChatAppMcpActor,
     depth: number,
-    maxDepth: number
+    maxDepth: number,
+    chainRootId: string
   ): string | undefined {
     if (depth > maxDepth) {
       return `max depth (${maxDepth}) reached`;
+    }
+    const chainBatches = this.participantRequestBatches(conversation).filter((batch) =>
+      this.participantRequestBatchChainRootId(batch) === chainRootId
+    );
+    if (chainBatches.length >= CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES) {
+      return `participant request chain limit (${CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES}) reached`;
     }
     const sameTurnMcpBatches = actor.triggerMessageId
       ? this.participantRequestBatches(conversation).filter((batch) =>
@@ -8717,6 +8763,20 @@ export class ChatService {
 
   private async chatParticipantRequestMaxDepth(): Promise<number> {
     return this.settings.getChatParticipantRequestMaxDepth?.() ?? CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT;
+  }
+
+  private participantRequestBatchRequesterDepth(batch: ChatParticipantRequestBatch): number {
+    return batch.requesterDepth ?? Math.max(0, batch.depth - 1);
+  }
+
+  private participantRequestResumeDepth(batch: ChatParticipantRequestBatch, resumedParticipantId: string): number {
+    return resumedParticipantId === batch.requesterParticipantId
+      ? this.participantRequestBatchRequesterDepth(batch)
+      : batch.depth;
+  }
+
+  private participantRequestBatchChainRootId(batch: ChatParticipantRequestBatch): string {
+    return batch.chainRootId ?? batch.id;
   }
 
   private participantRequestSummary(requesterHandle: string, targetHandles: string[]): string {
@@ -8941,7 +9001,8 @@ export class ChatService {
         const messages = await this.runParticipantTurnSerialized(conversation, target, targetTriggerMessage, runId, undefined, undefined, {
           warnings,
           participantRequestDepth: depth,
-          participantRequestBatchId: batch.id
+          participantRequestBatchId: batch.id,
+          chainRootId: batch.chainRootId
         });
         await this.refreshStoredChatState(conversation);
         await this.appendParticipantTurnMessages(conversation, target, messages);
@@ -9161,8 +9222,11 @@ export class ChatService {
     try {
       const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, progress, {
         warnings: [],
-        participantRequestDepth: participantRequestBatch?.depth,
-        participantRequestBatchId: participantRequestBatch?.id
+        participantRequestDepth: participantRequestBatch
+          ? this.participantRequestResumeDepth(participantRequestBatch, requester.id)
+          : undefined,
+        participantRequestBatchId: participantRequestBatch?.id,
+        chainRootId: participantRequestBatch?.chainRootId
       });
       await this.refreshStoredChatState(conversation);
       await this.appendParticipantTurnMessages(conversation, requester, messages);
@@ -9273,6 +9337,7 @@ export class ChatService {
 
   private async autoResumeParticipantRequest(conversationId: string, requestMessageId: string, progress?: ProgressCallback): Promise<void> {
     if (this.participantRequestAutoResumes.has(requestMessageId)) {
+      void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "already-auto-resuming");
       return;
     }
     this.participantRequestAutoResumes.add(requestMessageId);
@@ -9282,17 +9347,33 @@ export class ChatService {
         const conversation = await this.requireChat(conversationId);
         const requestMessage = conversation.messages.find((message) => message.id === requestMessageId);
         const batch = requestMessage?.metadata?.participantRequest;
-        if (!requestMessage || !batch || !batch.resumeRequester || batch.completedInToolCall || batch.autoResumeMessageId) {
+        if (!requestMessage || !batch) {
+          void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "missing-request-message-or-batch");
+          return;
+        }
+        if (!batch.resumeRequester) {
+          void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "resume-requester-false", batch);
+          return;
+        }
+        if (batch.completedInToolCall) {
+          void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "completed-in-tool-call", batch);
+          return;
+        }
+        if (batch.autoResumeMessageId) {
+          void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "already-auto-resumed", batch);
           return;
         }
         if (this.participantRequestHasUnfinishedItems(batch)) {
+          void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "unfinished-items", batch);
           return;
         }
         if (batch.items.length > 0 && batch.items.every((item) => item.status === "denied")) {
+          void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "all-items-denied", batch);
           return;
         }
         const requester = this.chatParticipants(conversation).find((participant) => participant.id === batch.requesterParticipantId);
         if (!requester) {
+          void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "requester-missing", batch);
           return;
         }
         const now = new Date().toISOString();
@@ -9352,6 +9433,20 @@ export class ChatService {
     }
   }
 
+  private async logParticipantRequestAutoResumeSkipped(
+    conversationId: string,
+    requestMessageId: string,
+    reason: string,
+    batch?: ChatParticipantRequestBatch
+  ): Promise<void> {
+    await this.debugLogs.write("chat.participant-request.auto-resume.skipped", {
+      conversationId,
+      requestMessageId,
+      batchId: batch?.id,
+      reason
+    });
+  }
+
   private async runParticipantRequestAutoResumeFlow(
     conversation: Conversation,
     requestMessageId: string,
@@ -9365,8 +9460,9 @@ export class ChatService {
       const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, progress, {
         continuation: true,
         warnings: [],
-        participantRequestDepth: batch.depth,
-        participantRequestBatchId: batch.id
+        participantRequestDepth: this.participantRequestBatchRequesterDepth(batch),
+        participantRequestBatchId: batch.id,
+        chainRootId: batch.chainRootId
       });
       await this.refreshStoredChatState(conversation);
       await this.appendParticipantTurnMessages(conversation, requester, messages);
@@ -9403,6 +9499,7 @@ export class ChatService {
       promptContextScope?: ChatPromptContextScope;
       participantRequestDepth?: number;
       participantRequestBatchId?: string;
+      chainRootId?: string;
       queuedBehindHandle?: string;
       existingPendingMessage?: ChatMessage;
       turnReservation?: ParticipantTurnReservation;
@@ -9853,7 +9950,8 @@ export class ChatService {
   private participantRequestToolResult(
     conversation: Conversation,
     requestMessageId: string,
-    extra: Record<string, unknown>
+    extra: Record<string, unknown>,
+    options: { includeReplies?: boolean } = {}
   ): Record<string, unknown> {
     const message = conversation.messages.find((item) => item.id === requestMessageId);
     const batch = message?.metadata?.participantRequest;
@@ -9864,7 +9962,7 @@ export class ChatService {
       ok: true,
       requestId: batch.id,
       requestMessageId,
-      batch: this.participantRequestBatchForTool(conversation, batch),
+      batch: this.participantRequestBatchForTool(conversation, batch, options),
       ...extra
     };
   }
@@ -9877,7 +9975,12 @@ export class ChatService {
     };
   }
 
-  private participantRequestBatchForTool(conversation: Conversation, batch: ChatParticipantRequestBatch): Record<string, unknown> {
+  private participantRequestBatchForTool(
+    conversation: Conversation,
+    batch: ChatParticipantRequestBatch,
+    options: { includeReplies?: boolean } = {}
+  ): Record<string, unknown> {
+    const includeReplies = options.includeReplies ?? true;
     return {
       id: batch.id,
       status: batch.status,
@@ -9891,8 +9994,8 @@ export class ChatService {
           prompt: item.prompt,
           reason: item.reason,
           status: item.status,
-          replyMessageId: item.replyMessageId,
-          reply: reply?.content,
+          replyMessageId: includeReplies ? item.replyMessageId : undefined,
+          reply: includeReplies ? reply?.content : undefined,
           error: item.error
         };
       })
