@@ -12,6 +12,7 @@ type ThreadSummaryMap = Map<string, { replies: Conversation["messages"]; latestR
 // retry effect so an unreachable target (compacted/deleted message, or a thread reply whose
 // root never loads) stops re-running on every timeline change for the rest of the session.
 const PENDING_FOCUS_DEADLINE_MS = 5000;
+const USER_SCROLL_INTENT_MS = 900;
 
 export function useChatConversationViewport(props: {
   conversationId: string;
@@ -37,6 +38,7 @@ export function useChatConversationViewport(props: {
   chatVirtualizer: Virtualizer<HTMLDivElement, Element>;
   focusChatMessage: (messageId: string, threadRootId?: string) => boolean;
   isStuckToBottom: boolean;
+  markUserScrollIntent: () => void;
   scrollToChatBottom: () => void;
   timelineRef: React.RefObject<HTMLDivElement>;
   updateStickToBottom: () => void;
@@ -50,8 +52,8 @@ export function useChatConversationViewport(props: {
   const loadingFocusMessageIdRef = useRef<string | undefined>();
   const stickToBottomRef = useRef(true);
   const [isStuckToBottom, setIsStuckToBottom] = useState(true);
-  const forceStickToBottomRef = useRef(false);
-  const previousMessageCountRef = useRef(props.topLevelMessages.length);
+  const scrollScheduleIdRef = useRef(0);
+  const userScrollIntentUntilRef = useRef(0);
   const chatVirtualizer = useVirtualizer({
     count: props.chatTimelineRows.length,
     getScrollElement: () => timelineRef.current,
@@ -76,12 +78,35 @@ export function useChatConversationViewport(props: {
     setIsStuckToBottom((current) => (current === next ? current : next));
   }
 
+  function hasRecentUserScrollIntent(): boolean {
+    return Date.now() <= userScrollIntentUntilRef.current;
+  }
+
+  function clearUserScrollIntent(): void {
+    userScrollIntentUntilRef.current = 0;
+  }
+
+  function markUserScrollIntent(): void {
+    userScrollIntentUntilRef.current = Date.now() + USER_SCROLL_INTENT_MS;
+  }
+
+  function detachFromBottom(): void {
+    setStickToBottom(false);
+    scrollScheduleIdRef.current += 1;
+  }
+
   function updateStickToBottom(): void {
     const timeline = timelineRef.current;
     if (!timeline) {
       return;
     }
-    setStickToBottom(timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 96);
+    const nextStickToBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 96;
+    if (nextStickToBottom) {
+      setStickToBottom(true);
+      clearUserScrollIntent();
+    } else if (hasRecentUserScrollIntent() || !stickToBottomRef.current) {
+      detachFromBottom();
+    }
     if (timeline.scrollTop < 96 && props.hasOlderMessages && !props.olderMessagesLoading) {
       props.onLoadOlderMessages();
     }
@@ -91,6 +116,7 @@ export function useChatConversationViewport(props: {
     if (props.chatTimelineRows.length === 0) {
       return;
     }
+    clearUserScrollIntent();
     chatVirtualizer.scrollToIndex(props.chatTimelineRows.length - 1, { align: "end" });
     const timeline = timelineRef.current;
     if (timeline) {
@@ -99,19 +125,27 @@ export function useChatConversationViewport(props: {
   }
 
   function scheduleScrollToChatBottom(): void {
-    scrollToChatBottom();
+    const scheduleId = scrollScheduleIdRef.current + 1;
+    scrollScheduleIdRef.current = scheduleId;
+    const scrollIfCurrent = (): void => {
+      if (scrollScheduleIdRef.current === scheduleId && !hasRecentUserScrollIntent()) {
+        scrollToChatBottom();
+      }
+    };
+
+    scrollIfCurrent();
     window.requestAnimationFrame(() => {
-      scrollToChatBottom();
-      window.requestAnimationFrame(scrollToChatBottom);
+      scrollIfCurrent();
+      window.requestAnimationFrame(scrollIfCurrent);
     });
-    window.setTimeout(scrollToChatBottom, 80);
-    window.setTimeout(scrollToChatBottom, 180);
+    window.setTimeout(scrollIfCurrent, 80);
+    window.setTimeout(scrollIfCurrent, 180);
   }
 
   function scrollToLatest(): void {
-    forceStickToBottomRef.current = true;
-    scheduleScrollToChatBottom();
+    clearUserScrollIntent();
     setStickToBottom(true);
+    scheduleScrollToChatBottom();
   }
 
   function scheduleFocusRenderedMessage(messageId: string): void {
@@ -133,8 +167,10 @@ export function useChatConversationViewport(props: {
   function scheduleScrollToRowAndFocus(messageId: string, rowIndex: number): void {
     const attempt = (): boolean => {
       if (focusRenderedMessage(viewRef.current, messageId)) {
+        detachFromBottom();
         return true;
       }
+      detachFromBottom();
       chatVirtualizer.scrollToIndex(rowIndex, { align: "center" });
       return false;
     };
@@ -154,6 +190,7 @@ export function useChatConversationViewport(props: {
 
   function focusLoadedChatMessage(messageId: string, threadRootId?: string): boolean {
     if (focusRenderedMessage(viewRef.current, messageId)) {
+      detachFromBottom();
       return true;
     }
 
@@ -205,6 +242,7 @@ export function useChatConversationViewport(props: {
         // Restart the clock now that paging is done, giving the focus/thread-open retry a
         // full window regardless of how long the load itself took.
         pendingFocusDeadlineRef.current = Date.now() + PENDING_FOCUS_DEADLINE_MS;
+        detachFromBottom();
         scheduleFocusRenderedMessage(messageId);
         return;
       }
@@ -236,9 +274,8 @@ export function useChatConversationViewport(props: {
     pendingFocusThreadRootIdRef.current = undefined;
     pendingFocusDeadlineRef.current = 0;
     loadingFocusMessageIdRef.current = undefined;
+    clearUserScrollIntent();
     setStickToBottom(true);
-    forceStickToBottomRef.current = true;
-    scheduleScrollToChatBottom();
   }, [props.conversationId]);
 
   useEffect(() => {
@@ -272,17 +309,11 @@ export function useChatConversationViewport(props: {
 
   useLayoutEffect(() => {
     const timeline = timelineRef.current;
-    const messageCountChanged = previousMessageCountRef.current !== props.topLevelMessages.length;
-    previousMessageCountRef.current = props.topLevelMessages.length;
-    const shouldFollowBottom = stickToBottomRef.current || forceStickToBottomRef.current || messageCountChanged;
-    if (!timeline || !shouldFollowBottom) {
+    if (!timeline || !stickToBottomRef.current) {
       return;
     }
     scheduleScrollToChatBottom();
     setStickToBottom(true);
-    if (messageCountChanged) {
-      forceStickToBottomRef.current = false;
-    }
   }, [
     props.topLevelMessages.length,
     props.latestMessage?.content,
@@ -300,8 +331,8 @@ export function useChatConversationViewport(props: {
   ]);
 
   useLayoutEffect(() => {
-    scheduleScrollToChatBottom();
     setStickToBottom(true);
+    scheduleScrollToChatBottom();
   }, [props.conversationId]);
 
   return {
@@ -309,6 +340,7 @@ export function useChatConversationViewport(props: {
     chatVirtualizer,
     focusChatMessage,
     isStuckToBottom,
+    markUserScrollIntent,
     scrollToChatBottom: scrollToLatest,
     timelineRef,
     updateStickToBottom,

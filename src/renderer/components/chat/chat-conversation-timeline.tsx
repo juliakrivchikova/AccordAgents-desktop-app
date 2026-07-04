@@ -49,6 +49,7 @@ export function ChatConversationTimeline(props: {
   ) => Promise<void>;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void | Promise<void>;
   onScroll: () => void;
+  onScrollIntent: () => void;
   onStopRun?: (runId: string) => void;
   onToggleReaction: (messageId: string, emoji: string) => void;
   participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
@@ -69,7 +70,19 @@ export function ChatConversationTimeline(props: {
     <div
       className={`chat-timeline virtual-timeline ${props.pendingApprovalRows.length > 0 ? "has-approvals" : ""}`}
       ref={props.timelineRef}
+      onKeyDown={(event) => {
+        if (isScrollKey(event.key)) {
+          props.onScrollIntent();
+        }
+      }}
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) {
+          props.onScrollIntent();
+        }
+      }}
       onScroll={props.onScroll}
+      onTouchMove={props.onScrollIntent}
+      onWheel={props.onScrollIntent}
     >
       <div className="virtual-timeline-inner" style={{ height: `${props.virtualizer.getTotalSize()}px` }}>
         {props.virtualItems.map((virtualItem) => {
@@ -146,4 +159,14 @@ export function ChatConversationTimeline(props: {
       </div>
     </div>
   );
+}
+
+function isScrollKey(key: string): boolean {
+  return key === "ArrowDown" ||
+    key === "ArrowUp" ||
+    key === "End" ||
+    key === "Home" ||
+    key === "PageDown" ||
+    key === "PageUp" ||
+    key === " ";
 }
