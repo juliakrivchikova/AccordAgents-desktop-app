@@ -2608,6 +2608,12 @@ export class CliAgentRunner {
         this.emitLiveOutput(onOutput, "text", delta, deltaAccumulator.value);
         return;
       }
+      const completedMessage = this.extractCodexAssistantMessage(event);
+      if (completedMessage && deltaAccumulator && !deltaAccumulator.value.trim()) {
+        deltaAccumulator.value = completedMessage;
+        this.emitLiveOutput(onOutput, "text", completedMessage, deltaAccumulator.value);
+        return;
+      }
       const toolSummary = this.codexToolSummary(event);
       if (toolSummary) {
         this.emitLiveOutput(onOutput, "tool", `${toolSummary.label}\n`, undefined, {
@@ -3631,7 +3637,7 @@ export class CliAgentRunner {
   private textFromAssistantMessageItem(item: Record<string, unknown>): string | undefined {
     const itemType = this.stringField(item, "type");
     const role = this.stringField(item, "role");
-    if (itemType !== "message" && itemType !== "assistant_message" && role !== "assistant") {
+    if (itemType !== "message" && itemType !== "assistant_message" && itemType !== "agent_message" && role !== "assistant") {
       return undefined;
     }
     if (role && role !== "assistant") {

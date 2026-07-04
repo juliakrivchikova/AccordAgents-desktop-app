@@ -1821,6 +1821,61 @@ test("remote provider text reuses the pending bubble and marks processing starte
   assert.equal(typeof messages[0].metadata?.remoteRunStatus?.processingStartedAt, "string");
 });
 
+test("remote provider completed agent message reuses the pending bubble", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], {
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        conversationId: "conversation-1",
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        providerOutputMessageId: "pending-remote",
+        worker: { host: "worker.example" },
+        status: "running",
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push({
+    id: "pending-remote",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "",
+    createdAt: NOW,
+    status: "pending",
+    metadata: { runId: "remote-run", appMessageSource: "remote-run-provider-output" }
+  });
+  const { service, storage } = testService({ conversation });
+
+  await service.applyRemoteRunReplayRecord({
+    id: "remote-run:provider-output:1",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 1,
+    createdAt: NOW,
+    kind: "provider_output",
+    participantId: participant.id,
+    stream: "stdout",
+    content: `${JSON.stringify({
+      type: "item.completed",
+      item: { id: "item_0", type: "agent_message", text: "Remote complete text." }
+    })}\n`
+  } as any);
+
+  const messages = storage.current.messages.filter((item: ChatMessage) =>
+    item.role === "participant" && item.participantId === participant.id
+  );
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].id, "pending-remote");
+  assert.equal(messages[0].content, "Remote complete text.");
+  assert.equal(messages[0].status, "pending");
+  assert.equal(messages[0].metadata?.remoteRunStatus?.phase, "processing-request");
+  assert.equal(typeof messages[0].metadata?.remoteRunStatus?.processingStartedAt, "string");
+});
+
 test("remote provider text keeps processing start stable across chunks", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant], {

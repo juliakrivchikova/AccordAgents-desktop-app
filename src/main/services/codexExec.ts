@@ -231,6 +231,12 @@ export function emitCodexLiveOutput(
       emitLiveOutput(onOutput, "text", delta, deltaAccumulator.value);
       return;
     }
+    const completedMessage = extractCodexAssistantMessage(event);
+    if (completedMessage && deltaAccumulator && !deltaAccumulator.value.trim()) {
+      deltaAccumulator.value = completedMessage;
+      emitLiveOutput(onOutput, "text", completedMessage, deltaAccumulator.value);
+      return;
+    }
     const toolSummary = codexToolSummary(event);
     if (toolSummary) {
       emitLiveOutput(onOutput, "tool", `${toolSummary}\n`);
@@ -485,7 +491,7 @@ function extractCodexAssistantStreamingDelta(event: unknown): string | undefined
 function textFromAssistantMessageItem(item: Record<string, unknown>): string | undefined {
   const itemType = stringField(item, "type");
   const role = stringField(item, "role");
-  if (itemType !== "message" && itemType !== "assistant_message" && role !== "assistant") {
+  if (itemType !== "message" && itemType !== "assistant_message" && itemType !== "agent_message" && role !== "assistant") {
     return undefined;
   }
   if (role && role !== "assistant") {
