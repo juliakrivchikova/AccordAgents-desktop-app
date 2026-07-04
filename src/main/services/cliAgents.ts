@@ -25,6 +25,7 @@ import type {
 } from "../../shared/types";
 import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
+import { filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS, normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
 import { chatTextEndsAtSentenceOrParagraphBoundary } from "../../shared/processingTranscript";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
@@ -74,6 +75,8 @@ export interface CliAgentRunOptions {
   resumeFallbackPrompt?: string;
   role?: CliAgentRoleOptions;
   appMcp?: CliAgentAppMcpOptions;
+  agentEnv?: NodeJS.ProcessEnv;
+  agentEnvKey?: string;
   warm?: CliAgentWarmOptions;
   onOutput?: CliAgentOutputCallback;
   onSessionId?: CliAgentSessionIdCallback;
@@ -954,7 +957,7 @@ export class CliAgentRunner {
   ): WarmAgentEntry {
     const child = spawn("codex", ["app-server", "--listen", "stdio://"], {
       cwd: repoPath,
-      env: commandEnvironment(this.appMcpEnv(options)),
+      env: commandEnvironment(this.agentRunEnv(options)),
       stdio: ["pipe", "pipe", "pipe"]
     });
     child.stdout.setEncoding("utf8");
@@ -1818,7 +1821,10 @@ export class CliAgentRunner {
         repoPath,
         diffMode,
         kind,
-        options
+        options: {
+          ...options,
+          extraEnv: this.agentRunEnv(options)
+        }
       });
       const codexDeltaAccumulator = { value: "" };
       const stdoutLines = createCodexLineHandler((line) =>
@@ -1863,6 +1869,8 @@ export class CliAgentRunner {
             agentMode: options.agentMode,
             permissions: options.permissions,
             appMcp: options.appMcp,
+            agentEnv: options.agentEnv,
+            agentEnvKey: options.agentEnvKey,
             onSessionId: options.onSessionId
           }
         );
@@ -1883,6 +1891,8 @@ export class CliAgentRunner {
           agentMode: options.agentMode,
           permissions: options.permissions,
           appMcp: options.appMcp,
+          agentEnv: options.agentEnv,
+          agentEnvKey: options.agentEnvKey,
           onSessionId: options.onSessionId
         });
         return { ...restarted, sessionRestarted: true };
@@ -2000,7 +2010,7 @@ export class CliAgentRunner {
           cwd: repoPath,
           input: prompt,
           timeoutMs: options.timeoutMs ?? this.runTimeoutMs,
-          env: this.appMcpEnv(options),
+          env: this.agentRunEnv(options),
           envOptions: CLAUDE_CODE_COMMAND_ENV_OPTIONS,
           signal
         }
@@ -2196,7 +2206,7 @@ export class CliAgentRunner {
 
     const child = spawn("claude", args, {
       cwd: repoPath,
-      env: commandEnvironment(this.appMcpEnv(options), CLAUDE_CODE_COMMAND_ENV_OPTIONS),
+      env: commandEnvironment(this.agentRunEnv(options), CLAUDE_CODE_COMMAND_ENV_OPTIONS),
       stdio: ["pipe", "pipe", "pipe"]
     });
     child.stdout.setEncoding("utf8");
@@ -2513,6 +2523,7 @@ export class CliAgentRunner {
       repoPath: repoPath ?? "",
       kind,
       extraReadableDirs: this.normalizedExtraReadableDirs(options.extraReadableDirs),
+      agentEnvKey: options.agentEnvKey ?? "",
       contextKey: options.warm?.contextKey ?? ""
     });
   }
@@ -2758,6 +2769,18 @@ export class CliAgentRunner {
     }
     return {
       [CODEX_APP_SERVER_MCP_TOKEN_ENV]: options.appMcp.token
+    };
+  }
+
+  private agentRunEnv(options: CliAgentRunOptions): NodeJS.ProcessEnv | undefined {
+    const manualEnv = filterAllowedAgentEnvironment(options.agentEnv);
+    const appMcpEnv = this.appMcpEnv(options);
+    if (Object.keys(manualEnv).length === 0 && !appMcpEnv) {
+      return undefined;
+    }
+    return {
+      ...manualEnv,
+      ...(appMcpEnv ?? {})
     };
   }
 

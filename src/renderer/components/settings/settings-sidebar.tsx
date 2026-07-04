@@ -1,4 +1,4 @@
-import { ArrowLeft, Circle, FileText, ListChecks, Settings, SlidersHorizontal, Users } from "lucide-react";
+import { ArrowLeft, Circle, FileText, KeyRound, ListChecks, Settings, SlidersHorizontal, Users } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { SidebarPanelIcon } from "../shell/sidebar-panel-icon";
@@ -8,6 +8,7 @@ const ACCORDAGENTS_MARK_URL = new URL("../../assets/accordagents-mark.png", impo
 
 const SETTINGS_NAV: Array<{ section: SettingsSection; label: string; icon: typeof Settings }> = [
   { section: "general", label: "General", icon: SlidersHorizontal },
+  { section: "environment", label: "Environment", icon: KeyRound },
   { section: "roles", label: "Roles", icon: Circle },
   { section: "behavior-rules", label: "Rules", icon: ListChecks },
   { section: "saved-prompts", label: "Prompts", icon: FileText },

@@ -234,6 +234,9 @@ function App(): JSX.Element {
           setChatParticipantRequestMaxDepth={settingsActions.setChatParticipantRequestMaxDepth}
           setChatPromptContext={settingsActions.setChatPromptContext}
           saveCloudRunsSettings={settingsActions.saveCloudRunsSettings}
+          getAgentEnvironment={settingsActions.getAgentEnvironment}
+          saveAgentEnvironmentVariable={settingsActions.saveAgentEnvironmentVariable}
+          deleteAgentEnvironmentVariable={settingsActions.deleteAgentEnvironmentVariable}
           sidebarCollapsed={state.sidebarCollapsed}
           onExpandSidebar={() => state.setSidebarCollapsed(false)}
           onClose={closeSettings}

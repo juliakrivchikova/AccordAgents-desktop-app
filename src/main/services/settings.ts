@@ -1,10 +1,11 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { app, safeStorage } from "electron";
 import type {
   AppSettings,
   AgentHealth,
+  AgentEnvironmentValueProtection,
   ChatBehaviorRuleConfig,
   ChatBehaviorRuleConfigUpdate,
   ChatSavedPromptConfig,
@@ -25,10 +26,17 @@ import type {
   ChatRoleChangeOperation,
   ChatRoleConfig,
   ChatRoleConfigUpdate,
+  ManualAgentEnvironmentVariable,
   ProviderSettings,
   ProviderSettingsUpdate,
-  RepoFileOpenAction
+  RepoFileOpenAction,
+  SaveAgentEnvironmentVariableRequest
 } from "../../shared/types";
+import {
+  assertAgentEnvironmentKeyAllowed,
+  filterAllowedAgentEnvironment,
+  normalizeAgentEnvironmentKey
+} from "../../shared/agentEnvironment";
 import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { normalizeChatAppToolCapabilities } from "../../shared/appTools";
 import { normalizeChatParticipantRequestMaxDepth } from "../../shared/chatParticipantRequests";
@@ -58,6 +66,18 @@ type StoredProviderSettings = ProviderSettings & {
   encryptedApiKey?: string;
 };
 
+interface StoredAgentEnvironmentVariable {
+  key: string;
+  encryptedValue: string;
+  enabled?: boolean;
+  updatedAt: string;
+  protection?: AgentEnvironmentValueProtection;
+}
+
+interface StoredAgentEnvironmentSettings {
+  variables?: StoredAgentEnvironmentVariable[];
+}
+
 interface StoredSettings {
   settingsVersion?: number;
   roundLimitDefault: number;
@@ -69,6 +89,7 @@ interface StoredSettings {
   encryptedAwsCredentials?: string;
   awsWorkerHandle?: AwsWorkerHandleInfo;
   awsWorkerRegion?: string;
+  agentEnvironment?: StoredAgentEnvironmentSettings;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
   providers: StoredProviderSettings[];
@@ -2242,6 +2263,87 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  async listManualAgentEnvironmentVariables(detectedKeys: Set<string> = new Set()): Promise<ManualAgentEnvironmentVariable[]> {
+    const stored = await this.readStored();
+    return (stored.agentEnvironment?.variables ?? []).map((variable) => ({
+      key: variable.key,
+      enabled: variable.enabled !== false,
+      updatedAt: variable.updatedAt,
+      protection: variable.protection ?? "local-obfuscated",
+      overridesDetected: detectedKeys.has(variable.key),
+      hasValue: true
+    }));
+  }
+
+  async getManualAgentEnvironment(): Promise<{ env: NodeJS.ProcessEnv; version: string }> {
+    const stored = await this.readStored();
+    const env: NodeJS.ProcessEnv = {};
+    for (const variable of stored.agentEnvironment?.variables ?? []) {
+      if (variable.enabled === false) {
+        continue;
+      }
+      if (normalizeAgentEnvironmentKey(variable.key) !== variable.key) {
+        continue;
+      }
+      try {
+        assertAgentEnvironmentKeyAllowed(variable.key);
+      } catch {
+        continue;
+      }
+      const value = this.decodeAgentEnvironmentValue(variable);
+      if (value === undefined) {
+        continue;
+      }
+      env[variable.key] = value;
+    }
+    const filtered = filterAllowedAgentEnvironment(env);
+    return { env: filtered, version: this.agentEnvironmentVersion(filtered) };
+  }
+
+  async saveAgentEnvironmentVariable(update: SaveAgentEnvironmentVariableRequest): Promise<ManualAgentEnvironmentVariable[]> {
+    const key = assertAgentEnvironmentKeyAllowed(update.key);
+    const stored = await this.readStored();
+    const variables = stored.agentEnvironment?.variables ?? [];
+    const now = new Date().toISOString();
+    const existingIndex = variables.findIndex((variable) => variable.key === key);
+    const existing = existingIndex >= 0 ? variables[existingIndex] : undefined;
+    const encoded = typeof update.value === "string"
+      ? this.encodeAgentEnvironmentValue(update.value)
+      : existing
+        ? {
+            encryptedValue: existing.encryptedValue,
+            protection: existing.protection ?? "local-obfuscated" as AgentEnvironmentValueProtection
+          }
+        : this.encodeAgentEnvironmentValue("");
+    const nextVariable: StoredAgentEnvironmentVariable = {
+      key,
+      encryptedValue: encoded.encryptedValue,
+      enabled: update.enabled === false ? false : true,
+      updatedAt: now,
+      protection: encoded.protection
+    };
+    if (existingIndex >= 0) {
+      variables[existingIndex] = nextVariable;
+    } else {
+      variables.push(nextVariable);
+    }
+    stored.agentEnvironment = {
+      variables: this.normalizeAgentEnvironmentVariables(variables)
+    };
+    await this.writeStored(stored);
+    return this.listManualAgentEnvironmentVariables();
+  }
+
+  async deleteAgentEnvironmentVariable(key: string): Promise<ManualAgentEnvironmentVariable[]> {
+    const normalized = assertAgentEnvironmentKeyAllowed(key);
+    const stored = await this.readStored();
+    stored.agentEnvironment = {
+      variables: (stored.agentEnvironment?.variables ?? []).filter((variable) => variable.key !== normalized)
+    };
+    await this.writeStored(stored);
+    return this.listManualAgentEnvironmentVariables();
+  }
+
   private async readStored(): Promise<StoredSettings> {
     try {
       const raw = await readFile(this.settingsPath, "utf8");
@@ -2286,6 +2388,9 @@ export class SettingsService {
       encryptedAwsCredentials: typeof settings.encryptedAwsCredentials === "string" ? settings.encryptedAwsCredentials : undefined,
       awsWorkerHandle: this.normalizeAwsWorkerHandle(settings.awsWorkerHandle),
       awsWorkerRegion: typeof settings.awsWorkerRegion === "string" ? settings.awsWorkerRegion.trim() || undefined : undefined,
+      agentEnvironment: {
+        variables: this.normalizeAgentEnvironmentVariables(settings.agentEnvironment?.variables)
+      },
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
       repoFileOpenAction: this.normalizeRepoFileOpenAction(settings.repoFileOpenAction),
       providers,
@@ -2327,6 +2432,85 @@ export class SettingsService {
 
   private normalizeRepoFileOpenAction(action: unknown): RepoFileOpenAction | undefined {
     return action === "open" || action === "reveal" || action === "intellij-idea" ? action : undefined;
+  }
+
+  private normalizeAgentEnvironmentVariables(value: unknown): StoredAgentEnvironmentVariable[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    const seen = new Set<string>();
+    const variables: StoredAgentEnvironmentVariable[] = [];
+    for (const item of value) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        continue;
+      }
+      const record = item as Partial<StoredAgentEnvironmentVariable>;
+      const key = normalizeAgentEnvironmentKey(record.key);
+      if (!key || seen.has(key)) {
+        continue;
+      }
+      try {
+        assertAgentEnvironmentKeyAllowed(key);
+      } catch {
+        continue;
+      }
+      const encryptedValue = typeof record.encryptedValue === "string" ? record.encryptedValue : "";
+      const updatedAt = typeof record.updatedAt === "string" && record.updatedAt
+        ? record.updatedAt
+        : new Date().toISOString();
+      variables.push({
+        key,
+        encryptedValue,
+        enabled: record.enabled === false ? false : true,
+        updatedAt,
+        protection: record.protection === "os-encrypted" ? "os-encrypted" : "local-obfuscated"
+      });
+      seen.add(key);
+    }
+    return variables.sort((left, right) => left.key.localeCompare(right.key));
+  }
+
+  private encodeAgentEnvironmentValue(value: string): { encryptedValue: string; protection: AgentEnvironmentValueProtection } {
+    if (this.safeStorageEncryptionAvailable()) {
+      return {
+        encryptedValue: safeStorage.encryptString(value).toString("base64"),
+        protection: "os-encrypted"
+      };
+    }
+    return {
+      encryptedValue: Buffer.from(value, "utf8").toString("base64"),
+      protection: "local-obfuscated"
+    };
+  }
+
+  private decodeAgentEnvironmentValue(variable: StoredAgentEnvironmentVariable): string | undefined {
+    try {
+      const buffer = Buffer.from(variable.encryptedValue, "base64");
+      if (variable.protection === "os-encrypted") {
+        if (!this.safeStorageEncryptionAvailable()) {
+          return undefined;
+        }
+        return safeStorage.decryptString(buffer);
+      }
+      return buffer.toString("utf8");
+    } catch {
+      return undefined;
+    }
+  }
+
+  private agentEnvironmentVersion(env: NodeJS.ProcessEnv): string {
+    const hash = createHash("sha256");
+    for (const [key, value] of Object.entries(env).sort(([left], [right]) => left.localeCompare(right))) {
+      hash.update(key);
+      hash.update("\0");
+      hash.update(value ?? "");
+      hash.update("\0");
+    }
+    return hash.digest("hex").slice(0, 16);
+  }
+
+  private safeStorageEncryptionAvailable(): boolean {
+    return Boolean(safeStorage?.isEncryptionAvailable?.());
   }
 
   private normalizeCloudRunsSettings(stored: StoredSettings): CloudRunsSettings {

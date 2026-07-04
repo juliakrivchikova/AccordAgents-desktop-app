@@ -1060,6 +1060,12 @@ test("detached run forwards desktop env with app-MCP token precedence", async ()
       prompt: "Use the forwarded env.",
       worker: { host: "worker.example" },
       options: {
+        extraEnv: {
+          AA_TEST_FORWARDED_SECRET: "manual-override",
+          AA_TEST_MANUAL_SECRET: "manual-secret",
+          PATH: "/manual/bin",
+          ACCORD_AGENTS_INTERNAL: "must-not-forward"
+        },
         appMcp: { url: "http://127.0.0.1:9999/mcp", token: "per-run-token" }
       }
     });
@@ -1069,8 +1075,10 @@ test("detached run forwards desktop env with app-MCP token precedence", async ()
   }
 
   const env = worker.launched?.invocation.env ?? {};
-  assert.equal(env.AA_TEST_FORWARDED_SECRET, "forward-me");
+  assert.equal(env.AA_TEST_FORWARDED_SECRET, "manual-override");
+  assert.equal(env.AA_TEST_MANUAL_SECRET, "manual-secret");
   assert.equal(env.ACCORD_AGENTS_MCP_TOKEN, "per-run-token");
+  assert.equal(env.ACCORD_AGENTS_INTERNAL, undefined);
   assert.equal(env.PATH, undefined);
   assert.equal(env.HOME, undefined);
 });

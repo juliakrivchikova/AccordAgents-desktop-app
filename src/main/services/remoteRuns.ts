@@ -12,6 +12,7 @@ import type {
   ParticipantConfig,
   RemoteRunSyncInfo
 } from "../../shared/types";
+import { filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
 import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
 import type { ChatAppToolApprovalDecisionEvent, ChatService } from "./chat";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs } from "./cloudRunWorkers";
@@ -492,7 +493,14 @@ export class RemoteRunService {
       repoPath: request.repoPath,
       diffMode: request.diffMode,
       kind: request.kind ?? "chat",
-      options: { ...request.options, persistSession: true, extraEnv: forwardedDesktopEnvironment() }
+      options: {
+        ...request.options,
+        persistSession: true,
+        extraEnv: {
+          ...forwardedDesktopEnvironment(),
+          ...filterAllowedAgentEnvironment(request.options?.extraEnv)
+        }
+      }
     });
 
     let stdout = "";
@@ -605,7 +613,10 @@ export class RemoteRunService {
         ...request.options,
         persistSession: true,
         remoteSandbox,
-        extraEnv: forwardedDesktopEnvironment()
+        extraEnv: {
+          ...forwardedDesktopEnvironment(),
+          ...filterAllowedAgentEnvironment(request.options?.extraEnv)
+        }
       }
     });
 
