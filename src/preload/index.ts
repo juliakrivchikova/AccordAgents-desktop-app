@@ -57,6 +57,8 @@ const bridge: AppBridge = {
   setCliAgentRunTimeoutMs: (timeoutMs: number) => ipcRenderer.invoke("settings:set-cli-agent-run-timeout", timeoutMs),
   setChatParticipantRequestMaxDepth: (maxDepth: number) =>
     ipcRenderer.invoke("settings:set-chat-participant-request-max-depth", maxDepth),
+  setChatParticipantRequestPromptMaxChars: (maxChars: number) =>
+    ipcRenderer.invoke("settings:set-chat-participant-request-prompt-max-chars", maxChars),
   setChatPromptContext: (settings: ChatPromptContextSettings) =>
     ipcRenderer.invoke("settings:set-chat-prompt-context", settings),
   saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => ipcRenderer.invoke("settings:save-cloud-runs", update),

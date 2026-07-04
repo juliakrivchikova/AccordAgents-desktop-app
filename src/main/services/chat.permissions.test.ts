@@ -24,7 +24,8 @@ import {
 import { CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS } from "../../shared/chatBehaviorRules";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES,
-  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT
+  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+  CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT
 } from "../../shared/chatParticipantRequests";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import type {
@@ -5265,6 +5266,53 @@ test("participant request permission allow runs without approval", async () => {
   assert.equal(storage.current.metadata.pendingAppToolApprovals, undefined);
 });
 
+test("participant request stores prompt exactly up to configured max", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "ask" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  const longPrompt = `Please review.\n${"x".repeat(2_500)}`;
+  const { service, storage } = testService({
+    conversation,
+    settings: {
+      chatRoleConfigs: [ROLE],
+      chatParticipantRequestPromptMaxChars: 3_000
+    }
+  });
+
+  const result = await service.requestParticipantsFromTool(participantRequestActor(requester), {
+    requests: [{ target: target.handle, prompt: longPrompt }],
+    timeoutMs: 1000
+  });
+
+  assert.equal(result.ok, true);
+  const requestMessage = storage.current.messages.find((message: ChatMessage) => message.metadata?.participantRequest);
+  assert.equal(requestMessage?.metadata?.participantRequest?.items[0]?.prompt, longPrompt);
+  assert.match(requestMessage?.content ?? "", /Please review\./);
+  assert.equal(requestMessage?.content.includes("x".repeat(2_500)), true);
+});
+
+test("participant request rejects prompts over configured max instead of truncating", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "ask" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  const { service, storage } = testService({
+    conversation,
+    settings: {
+      chatRoleConfigs: [ROLE],
+      chatParticipantRequestPromptMaxChars: 1_000
+    }
+  });
+
+  const result = await service.requestParticipantsFromTool(participantRequestActor(requester), {
+    requests: [{ target: target.handle, prompt: "x".repeat(1_001) }],
+    timeoutMs: 1000
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(String(result.error), /exceeds 1000 characters; it is rejected, not truncated/);
+  assert.equal(storage.current.messages.some((message: ChatMessage) => message.metadata?.participantRequest), false);
+});
+
 test("participant request with fast replies auto-resumes requester instead of completing inline", async () => {
   const requester = chatParticipant("codex-cli", { requestParticipants: "allow" });
   const target = chatParticipant("claude-code");
@@ -5627,6 +5675,7 @@ function testService(options: {
     chatBehaviorRules?: ChatBehaviorRuleConfig[];
     chatParticipantConfigs?: ChatParticipantConfig[];
     chatParticipantRequestMaxDepth?: number;
+    chatParticipantRequestPromptMaxChars?: number;
     chatPromptContext?: AppSettings["chatPromptContext"];
     cloudRuns?: Partial<AppSettings["cloudRuns"]>;
   };
@@ -5657,6 +5706,8 @@ function testService(options: {
     cliAgentRunTimeoutMs: 24 * 60 * 60_000,
     chatParticipantRequestMaxDepth: options.settings?.chatParticipantRequestMaxDepth
       ?? CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+    chatParticipantRequestPromptMaxChars: options.settings?.chatParticipantRequestPromptMaxChars
+      ?? CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
     chatPromptContext: options.settings?.chatPromptContext ?? DEFAULT_CHAT_PROMPT_CONTEXT,
     cloudRuns: {
       enabled: options.settings?.cloudRuns?.enabled ?? false,
@@ -5688,6 +5739,9 @@ function testService(options: {
     },
     async getChatParticipantRequestMaxDepth(): Promise<number> {
       return publicSettings().chatParticipantRequestMaxDepth;
+    },
+    async getChatParticipantRequestPromptMaxChars(): Promise<number> {
+      return publicSettings().chatParticipantRequestPromptMaxChars;
     },
     async saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings> {
       const existing = update.id ? settingsState.chatRoleConfigs.find((role) => role.id === update.id) : undefined;

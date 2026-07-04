@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT } from "../../shared/chatParticipantRequests";
+import {
+  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+  CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT
+} from "../../shared/chatParticipantRequests";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { ChatService } from "./chat";
 import type { AppSettings, ChatParticipant, ChatRoleConfig } from "../../shared/types";
@@ -26,6 +29,7 @@ function chatServiceWithRoles(roles: ChatRoleConfig[]) {
         roundLimitDefault: 1,
         cliAgentRunTimeoutMs: 1,
         chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+        chatParticipantRequestPromptMaxChars: CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
         chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
         cloudRuns: {
           enabled: false,

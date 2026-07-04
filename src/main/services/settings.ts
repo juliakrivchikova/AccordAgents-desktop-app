@@ -39,7 +39,10 @@ import {
 } from "../../shared/agentEnvironment";
 import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { normalizeChatAppToolCapabilities } from "../../shared/appTools";
-import { normalizeChatParticipantRequestMaxDepth } from "../../shared/chatParticipantRequests";
+import {
+  normalizeChatParticipantRequestMaxDepth,
+  normalizeChatParticipantRequestPromptMaxChars
+} from "../../shared/chatParticipantRequests";
 import { normalizeChatPromptContextSettings } from "../../shared/chatPromptContext";
 import { normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
 import {
@@ -83,6 +86,7 @@ interface StoredSettings {
   roundLimitDefault: number;
   cliAgentRunTimeoutMs?: number;
   chatParticipantRequestMaxDepth?: number;
+  chatParticipantRequestPromptMaxChars?: number;
   chatPromptContext?: ChatPromptContextSettings;
   cloudRuns?: CloudRunsSettings;
   cloudRunsMode?: CloudRunWorkerMode;
@@ -1630,6 +1634,7 @@ export class SettingsService {
       roundLimitDefault: stored.roundLimitDefault,
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
+      chatParticipantRequestPromptMaxChars: this.normalizeChatParticipantRequestPromptMaxChars(stored.chatParticipantRequestPromptMaxChars),
       chatPromptContext: this.normalizeChatPromptContextSettings(stored.chatPromptContext),
       cloudRuns: this.normalizeCloudRunsSettings(stored),
       lastRepoPath: stored.lastRepoPath,
@@ -2231,6 +2236,18 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  async getChatParticipantRequestPromptMaxChars(): Promise<number> {
+    const stored = await this.readStored();
+    return this.normalizeChatParticipantRequestPromptMaxChars(stored.chatParticipantRequestPromptMaxChars);
+  }
+
+  async setChatParticipantRequestPromptMaxChars(maxChars: number): Promise<AppSettings> {
+    const stored = await this.readStored();
+    stored.chatParticipantRequestPromptMaxChars = this.normalizeChatParticipantRequestPromptMaxChars(maxChars);
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
   async setChatPromptContext(settings: ChatPromptContextSettings): Promise<AppSettings> {
     const stored = await this.readStored();
     stored.chatPromptContext = this.normalizeChatPromptContextSettings(settings);
@@ -2382,6 +2399,7 @@ export class SettingsService {
       roundLimitDefault: this.defaultRoundLimit(settings),
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(settings.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(settings.chatParticipantRequestMaxDepth),
+      chatParticipantRequestPromptMaxChars: this.normalizeChatParticipantRequestPromptMaxChars(settings.chatParticipantRequestPromptMaxChars),
       chatPromptContext: this.normalizeChatPromptContextSettings(settings.chatPromptContext),
       cloudRuns: this.normalizeCloudRunsSettings(settings),
       cloudRunsMode: settings.cloudRunsMode === "aws" ? "aws" : "ssh",
@@ -2856,6 +2874,10 @@ export class SettingsService {
 
   private normalizeChatParticipantRequestMaxDepth(value: unknown): number {
     return normalizeChatParticipantRequestMaxDepth(value);
+  }
+
+  private normalizeChatParticipantRequestPromptMaxChars(value: unknown): number {
+    return normalizeChatParticipantRequestPromptMaxChars(value);
   }
 
   private normalizeChatPromptContextSettings(value: unknown): ChatPromptContextSettings {

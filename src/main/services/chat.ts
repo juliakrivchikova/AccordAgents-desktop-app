@@ -97,7 +97,8 @@ import { isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibi
 import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES,
-  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT
+  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+  CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT
 } from "../../shared/chatParticipantRequests";
 import { normalizeChatReactionEmoji } from "../../shared/chatReactions";
 import {
@@ -8622,7 +8623,7 @@ export class ChatService {
       }
       requests.push({
         target,
-        prompt: prompt.slice(0, 2000),
+        prompt,
         reason: typeof candidate.reason === "string" ? candidate.reason.trim().slice(0, 500) || undefined : undefined
       });
     }
@@ -8653,6 +8654,12 @@ export class ChatService {
     const limitError = this.participantRequestLimitError(conversation, requester, actor, depth, maxDepth, chainRootId);
     if (limitError) {
       throw new Error(limitError);
+    }
+    const promptMaxChars = await this.chatParticipantRequestPromptMaxChars();
+    for (const request of normalized.requests) {
+      if (request.prompt.length > promptMaxChars) {
+        throw new Error(`Participant request prompt for @${request.target} exceeds ${promptMaxChars} characters; it is rejected, not truncated.`);
+      }
     }
     const permission = normalizeChatAgentPermissions(requester.permissions).requestParticipants;
     if (permission === "deny") {
@@ -8782,6 +8789,10 @@ export class ChatService {
 
   private async chatParticipantRequestMaxDepth(): Promise<number> {
     return this.settings.getChatParticipantRequestMaxDepth?.() ?? CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT;
+  }
+
+  private async chatParticipantRequestPromptMaxChars(): Promise<number> {
+    return this.settings.getChatParticipantRequestPromptMaxChars?.() ?? CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT;
   }
 
   private participantRequestBatchRequesterDepth(batch: ChatParticipantRequestBatch): number {

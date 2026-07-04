@@ -264,6 +264,9 @@ function registerIpc(): void {
   ipcMain.handle("settings:set-chat-participant-request-max-depth", (_event, maxDepth: number) => {
     return settingsService.setChatParticipantRequestMaxDepth(maxDepth);
   });
+  ipcMain.handle("settings:set-chat-participant-request-prompt-max-chars", (_event, maxChars: number) => {
+    return settingsService.setChatParticipantRequestPromptMaxChars(maxChars);
+  });
   ipcMain.handle("settings:set-chat-prompt-context", (_event, settings: ChatPromptContextSettings) => {
     return settingsService.setChatPromptContext(settings);
   });

@@ -16,7 +16,10 @@ import {
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MAX,
-  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MIN
+  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MIN,
+  CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
+  CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_MAX,
+  CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_MIN
 } from "../../shared/chatParticipantRequests";
 import {
   CHAT_PROMPT_CONTEXT_LIMIT_MAX,
@@ -50,6 +53,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+    chatParticipantRequestPromptMaxChars: CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
     chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
     providers: [],
     chatRoleConfigs: [],
@@ -70,6 +74,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     roundLimitDefault: stored.roundLimitDefault,
     cliAgentRunTimeoutMs: service.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
     chatParticipantRequestMaxDepth: service.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
+    chatParticipantRequestPromptMaxChars: service.normalizeChatParticipantRequestPromptMaxChars(stored.chatParticipantRequestPromptMaxChars),
     chatPromptContext: service.normalizeChatPromptContextSettings(stored.chatPromptContext),
     providers: stored.providers,
     chatRoleConfigs: stored.chatRoleConfigs,
@@ -137,6 +142,7 @@ test("saveChatBehaviorRuleConfig rejects oversized behavior rules", async () => 
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+    chatParticipantRequestPromptMaxChars: CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
     providers: [],
     chatRoleConfigs: [],
     chatBehaviorRules: [],
@@ -150,6 +156,7 @@ test("saveChatBehaviorRuleConfig rejects oversized behavior rules", async () => 
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+    chatParticipantRequestPromptMaxChars: CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
     providers: [],
     chatRoleConfigs: [],
     chatBehaviorRules: [],
@@ -209,6 +216,25 @@ test("participant request max depth defaults to 2 and persists bounded values", 
 
   await service.setChatParticipantRequestMaxDepth(0);
   assert.equal(stored().chatParticipantRequestMaxDepth, CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MIN);
+});
+
+test("participant request prompt max chars defaults to 50000 and persists bounded values", async () => {
+  const { service, stored } = settingsServiceWithStoredSettings({
+    chatParticipantRequestPromptMaxChars: undefined
+  } as Partial<AppSettings>);
+
+  assert.equal(await service.getChatParticipantRequestPromptMaxChars(), CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT);
+
+  const updated = await service.setChatParticipantRequestPromptMaxChars(75_000);
+
+  assert.equal(stored().chatParticipantRequestPromptMaxChars, 75_000);
+  assert.equal(updated.chatParticipantRequestPromptMaxChars, 75_000);
+
+  await service.setChatParticipantRequestPromptMaxChars(999_999);
+  assert.equal(stored().chatParticipantRequestPromptMaxChars, CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_MAX);
+
+  await service.setChatParticipantRequestPromptMaxChars(10);
+  assert.equal(stored().chatParticipantRequestPromptMaxChars, CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_MIN);
 });
 
 test("chat prompt context normalizes zero latest-unseen limits to off", async () => {

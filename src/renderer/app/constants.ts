@@ -1,6 +1,9 @@
 import type { AppSettings } from "../../shared/types";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS } from "../../shared/cliAgentRunSettings";
-import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT } from "../../shared/chatParticipantRequests";
+import {
+  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+  CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT
+} from "../../shared/chatParticipantRequests";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT } from "../../shared/cloudRuns";
 
@@ -8,6 +11,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   roundLimitDefault: 2,
   cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
   chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+  chatParticipantRequestPromptMaxChars: CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
   chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
   cloudRuns: {
     enabled: false,

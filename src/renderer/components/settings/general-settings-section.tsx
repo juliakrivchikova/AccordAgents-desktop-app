@@ -19,7 +19,9 @@ import type {
 } from "../../../shared/types";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MAX,
-  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MIN
+  CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MIN,
+  CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_MAX,
+  CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_MIN
 } from "../../../shared/chatParticipantRequests";
 import { CLI_AGENT_RUN_TIMEOUT_MAX_MS, CLI_AGENT_RUN_TIMEOUT_MIN_MS, cliAgentRunTimeoutHours } from "../../../shared/cliAgentRunSettings";
 import {
@@ -32,6 +34,7 @@ import {
 } from "../../../shared/cloudRuns";
 
 const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits transitive participant-to-participant nesting, not repeated rounds by the same requester.";
+const PARTICIPANT_REQUEST_PROMPT_MAX_HELP = "Maximum characters accepted for each participant request prompt. Longer prompts are rejected, not truncated.";
 
 const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
   "codex-cli": new URL("../../assets/codex-cli.svg", import.meta.url).href,
@@ -49,12 +52,14 @@ export function GeneralSettingsSection(props: {
   repoFileOpenAction?: RepoFileOpenAction;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
+  chatParticipantRequestPromptMaxChars: number;
   chatPromptContext: ChatPromptContextSettings;
   cloudRuns: CloudRunsSettings;
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
+  setChatParticipantRequestPromptMaxChars: (maxChars: number) => Promise<void>;
   setChatPromptContext: (settings: ChatPromptContextSettings) => Promise<void>;
   saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => Promise<void>;
 }): JSX.Element {
@@ -139,6 +144,19 @@ export function GeneralSettingsSection(props: {
             <ParticipantRequestDepthControl
               maxDepth={props.chatParticipantRequestMaxDepth}
               onChange={props.setChatParticipantRequestMaxDepth}
+            />
+          </div>
+          <div className="gen-card-divider" />
+          <div className="gen-row">
+            <div className="gen-row-text">
+              <div className="gen-row-title" title={PARTICIPANT_REQUEST_PROMPT_MAX_HELP}>Participant request prompt limit</div>
+              <div className="gen-row-desc">
+                {PARTICIPANT_REQUEST_PROMPT_MAX_HELP}
+              </div>
+            </div>
+            <ParticipantRequestPromptMaxControl
+              maxChars={props.chatParticipantRequestPromptMaxChars}
+              onChange={props.setChatParticipantRequestPromptMaxChars}
             />
           </div>
         </div>
@@ -992,6 +1010,54 @@ function ParticipantRequestDepthControl(props: {
             onChange={(event) => setDepth(event.target.value)}
           />
           <span className="gen-timeout-unit">Levels</span>
+        </div>
+        <button
+          type="button"
+          className={`gen-timeout-save ${canSave ? "is-dirty" : ""}`}
+          disabled={!canSave}
+          onClick={() => void props.onChange(parsed)}
+        >
+          Save
+        </button>
+      </div>
+      {validation && <div className="gen-timeout-error">{validation}</div>}
+    </div>
+  );
+}
+
+function ParticipantRequestPromptMaxControl(props: {
+  maxChars: number;
+  onChange: (maxChars: number) => Promise<void>;
+}): JSX.Element {
+  const [maxChars, setMaxChars] = useState(String(props.maxChars));
+  const trimmed = maxChars.trim();
+  const parsed = Number(trimmed);
+  const validation = trimmed === ""
+    ? undefined
+    : !Number.isFinite(parsed) || !Number.isInteger(parsed)
+      ? "Use a whole number."
+      : parsed < CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_MIN || parsed > CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_MAX
+        ? `Use ${CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_MIN.toLocaleString()} to ${CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_MAX.toLocaleString()} characters.`
+        : undefined;
+  const canSave = trimmed !== "" && !validation && parsed !== props.maxChars;
+
+  useEffect(() => {
+    setMaxChars(String(props.maxChars));
+  }, [props.maxChars]);
+
+  return (
+    <div className="gen-row-control">
+      <div className="gen-timeout">
+        <div className="gen-timeout-field">
+          <input
+            className="gen-timeout-input"
+            inputMode="numeric"
+            value={maxChars}
+            aria-label="Participant request prompt max characters"
+            title={PARTICIPANT_REQUEST_PROMPT_MAX_HELP}
+            onChange={(event) => setMaxChars(event.target.value)}
+          />
+          <span className="gen-timeout-unit">Chars</span>
         </div>
         <button
           type="button"

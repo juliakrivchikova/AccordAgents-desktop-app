@@ -211,6 +211,7 @@ export interface AppSettings {
   roundLimitDefault: number;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
+  chatParticipantRequestPromptMaxChars: number;
   chatPromptContext: ChatPromptContextSettings;
   cloudRuns: CloudRunsSettings;
   providers: ProviderSettings[];
@@ -1540,6 +1541,7 @@ export interface AppBridge {
   setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<AppSettings>;
   setCliAgentRunTimeoutMs(timeoutMs: number): Promise<AppSettings>;
   setChatParticipantRequestMaxDepth(maxDepth: number): Promise<AppSettings>;
+  setChatParticipantRequestPromptMaxChars(maxChars: number): Promise<AppSettings>;
   setChatPromptContext(settings: ChatPromptContextSettings): Promise<AppSettings>;
   saveCloudRunsSettings(update: CloudRunsSettingsUpdate): Promise<AppSettings>;
   testCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerTestResult>;
