@@ -294,32 +294,12 @@ function CloudRunsControl(props: {
         </div>
       </div>
       <div className="gen-card-divider" />
-      {draft.mode === "aws" ? <AwsWorkerPanel settings={draft} /> : null}
       {draft.mode === "aws" ? (
-        <>
-          <div className="gen-card-divider" />
-          <div className="gen-row gen-row-stack">
-            <div className="gen-row-text">
-              <div className="gen-row-title">AWS worker disk</div>
-              <div className="gen-row-desc">Root disk size for newly created app-managed AWS workers.</div>
-            </div>
-            <div className="gen-grid-form gen-grid-form-compact">
-              <label className="gen-select-wrap">
-                <select
-                  className="gen-input"
-                  aria-label="AWS worker disk size"
-                  value={draft.awsRootVolumeSizeGb}
-                  onChange={(event) => patch({ awsRootVolumeSizeGb: normalizeAwsRootVolumeSizeGb(event.target.value) })}
-                >
-                  {diskOptions.map((sizeGb) => (
-                    <option key={sizeGb} value={sizeGb}>{sizeGb} GB</option>
-                  ))}
-                </select>
-                <ChevronDown size={16} aria-hidden />
-              </label>
-            </div>
-          </div>
-        </>
+        <AwsWorkerPanel
+          settings={draft}
+          diskOptions={diskOptions}
+          onDiskSizeChange={(value) => patch({ awsRootVolumeSizeGb: value })}
+        />
       ) : null}
       <div className={draft.mode === "aws" ? "gen-collapsed" : ""} hidden={draft.mode === "aws"}>
         <div className="gen-row gen-row-stack">
@@ -417,7 +397,41 @@ function CloudRunsControl(props: {
   );
 }
 
-function AwsWorkerPanel(props: { settings: CloudRunsSettings }): JSX.Element {
+function AwsWorkerDiskRow(props: {
+  value: number;
+  options: number[];
+  onChange: (value: number) => void;
+}): JSX.Element {
+  return (
+    <div className="gen-row gen-row-stack">
+      <div className="gen-row-text">
+        <div className="gen-row-title">AWS worker disk</div>
+        <div className="gen-row-desc">Root disk size for newly created app-managed AWS workers.</div>
+      </div>
+      <div className="gen-grid-form gen-grid-form-compact">
+        <label className="gen-select-wrap">
+          <select
+            className="gen-input"
+            aria-label="AWS worker disk size"
+            value={props.value}
+            onChange={(event) => props.onChange(normalizeAwsRootVolumeSizeGb(event.target.value))}
+          >
+            {props.options.map((sizeGb) => (
+              <option key={sizeGb} value={sizeGb}>{sizeGb} GB</option>
+            ))}
+          </select>
+          <ChevronDown size={16} aria-hidden />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function AwsWorkerPanel(props: {
+  settings: CloudRunsSettings;
+  diskOptions: number[];
+  onDiskSizeChange: (value: number) => void;
+}): JSX.Element {
   const [region, setRegion] = useState(props.settings.awsRegion ?? "us-east-1");
   const [command, setCommand] = useState<string>("");
   const [blob, setBlob] = useState<string>("");
@@ -537,6 +551,12 @@ function AwsWorkerPanel(props: { settings: CloudRunsSettings }): JSX.Element {
           </div>
         </div>
         {message ? <div className="gen-row-desc gen-aws-message">{message}</div> : null}
+        <div className="gen-card-divider" />
+        <AwsWorkerDiskRow
+          value={props.settings.awsRootVolumeSizeGb}
+          options={props.diskOptions}
+          onChange={props.onDiskSizeChange}
+        />
       </div>
     );
   }
@@ -578,6 +598,13 @@ function AwsWorkerPanel(props: { settings: CloudRunsSettings }): JSX.Element {
           <pre className="gen-aws-command" aria-label="AWS setup command">{command}</pre>
         </div>
       ) : null}
+      <div className="gen-card-divider" />
+      <AwsWorkerDiskRow
+        value={props.settings.awsRootVolumeSizeGb}
+        options={props.diskOptions}
+        onChange={props.onDiskSizeChange}
+      />
+      <div className="gen-card-divider" />
       <div className="gen-row gen-row-stack">
         <div className="gen-row-text">
           <div className="gen-row-title">Paste the result</div>
