@@ -62,7 +62,7 @@ test("cloud-init and instance spec carry the toolchain and tag", () => {
   assert.match(init, /apparmor_restrict_unprivileged_userns=0/);
   const spec = buildWorkerInstanceSpec({ imageId: "ami-1", rootDeviceName: "/dev/sda1", keyName: "k", securityGroupId: "sg-1" });
   assert.equal(spec.instanceType, "t3.small");
-  assert.equal(spec.rootVolumeSizeGb, 32);
+  assert.equal(spec.rootVolumeSizeGb, 8);
   assert.equal(
     buildWorkerInstanceSpec({
       imageId: "ami-1",

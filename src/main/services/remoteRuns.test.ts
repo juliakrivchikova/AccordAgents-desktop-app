@@ -1183,7 +1183,7 @@ async function testRemoteRun(options: {
           mode: "ssh",
           worker: {},
           hasAwsCredentials: false,
-          awsRootVolumeSizeGb: 32,
+          awsRootVolumeSizeGb: 8,
           maxRuntimeMs: 24 * 60 * 60_000,
           pollIntervalMs: 2_500
         },
@@ -1421,7 +1421,7 @@ function coordinatorSettings(patch: { maxRuntimeMs: number; pollIntervalMs: numb
           mode: "ssh",
           worker: { host: "worker.example" },
           hasAwsCredentials: false,
-          awsRootVolumeSizeGb: 32,
+          awsRootVolumeSizeGb: 8,
           maxRuntimeMs: patch.maxRuntimeMs,
           pollIntervalMs: patch.pollIntervalMs
         },

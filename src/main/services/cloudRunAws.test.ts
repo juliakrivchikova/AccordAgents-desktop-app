@@ -22,7 +22,7 @@ class FakeSettings {
   credentials: AwsWorkerCredentials | undefined;
   handle: AwsWorkerHandleInfo | undefined;
   mode: "ssh" | "aws" = "ssh";
-  awsRootVolumeSizeGb = 32;
+  awsRootVolumeSizeGb = 8;
 
   async getAwsWorkerCredentials(): Promise<AwsWorkerCredentials | undefined> {
     return this.credentials;

@@ -27,8 +27,7 @@ import {
   normalizeChatPromptContextSettings
 } from "../../../shared/chatPromptContext";
 import {
-  AWS_WORKER_ROOT_VOLUME_SIZE_GB_MAX,
-  AWS_WORKER_ROOT_VOLUME_SIZE_GB_MIN,
+  AWS_WORKER_ROOT_VOLUME_SIZE_GB_OPTIONS,
   normalizeAwsRootVolumeSizeGb
 } from "../../../shared/cloudRuns";
 
@@ -38,6 +37,11 @@ const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
   "codex-cli": new URL("../../assets/codex-cli.svg", import.meta.url).href,
   "claude-code": new URL("../../assets/claude-avatar.png", import.meta.url).href
 };
+
+function awsWorkerDiskOptions(value: number): number[] {
+  const options: number[] = [...AWS_WORKER_ROOT_VOLUME_SIZE_GB_OPTIONS];
+  return options.includes(value) ? options : [...options, value].sort((left, right) => left - right);
+}
 
 export function GeneralSettingsSection(props: {
   providers: ProviderSettings[];
@@ -205,6 +209,7 @@ function CloudRunsControl(props: {
       setBusy(false);
     }
   };
+  const diskOptions = awsWorkerDiskOptions(draft.awsRootVolumeSizeGb);
 
   const diagnose = async (): Promise<void> => {
     setBusy(true);
@@ -299,15 +304,19 @@ function CloudRunsControl(props: {
               <div className="gen-row-desc">Root disk size for newly created app-managed AWS workers.</div>
             </div>
             <div className="gen-grid-form gen-grid-form-compact">
-              <input
-                className="gen-input"
-                aria-label="AWS worker disk size GB"
-                inputMode="numeric"
-                min={AWS_WORKER_ROOT_VOLUME_SIZE_GB_MIN}
-                max={AWS_WORKER_ROOT_VOLUME_SIZE_GB_MAX}
-                value={draft.awsRootVolumeSizeGb}
-                onChange={(event) => patch({ awsRootVolumeSizeGb: normalizeAwsRootVolumeSizeGb(event.target.value) })}
-              />
+              <label className="gen-select-wrap">
+                <select
+                  className="gen-input"
+                  aria-label="AWS worker disk size"
+                  value={draft.awsRootVolumeSizeGb}
+                  onChange={(event) => patch({ awsRootVolumeSizeGb: normalizeAwsRootVolumeSizeGb(event.target.value) })}
+                >
+                  {diskOptions.map((sizeGb) => (
+                    <option key={sizeGb} value={sizeGb}>{sizeGb} GB</option>
+                  ))}
+                </select>
+                <ChevronDown size={16} aria-hidden />
+              </label>
             </div>
           </div>
         </>

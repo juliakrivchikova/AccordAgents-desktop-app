@@ -190,6 +190,27 @@
   outline-offset: 1px;
 }
 
+.settings-view .gen-select-wrap {
+  position: relative;
+  display: block;
+  min-width: 0;
+  width: 100%;
+}
+
+.settings-view .gen-select-wrap .gen-input {
+  appearance: none;
+  padding-right: 34px;
+}
+
+.settings-view .gen-select-wrap svg {
+  position: absolute;
+  right: 11px;
+  top: 50%;
+  pointer-events: none;
+  color: var(--app-muted);
+  transform: translateY(-50%);
+}
+
 .settings-view .gen-actions {
   display: flex;
   flex-wrap: wrap;

@@ -1,6 +1,7 @@
-export const AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT = 32;
+export const AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT = 8;
 export const AWS_WORKER_ROOT_VOLUME_SIZE_GB_MIN = 8;
 export const AWS_WORKER_ROOT_VOLUME_SIZE_GB_MAX = 1024;
+export const AWS_WORKER_ROOT_VOLUME_SIZE_GB_OPTIONS = [8, 16, 32, 64, 128, 256] as const;
 
 export function normalizeAwsRootVolumeSizeGb(value: unknown): number {
   const numeric = numericValue(value);
