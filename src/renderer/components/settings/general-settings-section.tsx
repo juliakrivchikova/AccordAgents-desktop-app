@@ -123,7 +123,7 @@ export function GeneralSettingsSection(props: {
             <div className="gen-row-text">
               <div className="gen-row-title">Prompt context</div>
               <div className="gen-row-desc">
-                Automatically include unseen chat messages in participant prompts. Set a scope to 0 or Off to keep today's behavior.
+                Automatically include unseen chat messages when an agent starts. Set Thread and Timeline to Off or 0 to send only the message that started the run.
               </div>
             </div>
             <PromptContextControl settings={props.chatPromptContext} onChange={props.setChatPromptContext} />
