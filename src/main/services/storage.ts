@@ -11,7 +11,7 @@ import type {
   ConversationOpenResult,
   ConversationSummary
 } from "../../shared/types";
-import { clearChatRunMetadata } from "../../shared/chatRunState";
+import { clearChatRunMetadata, clearParticipantCompactions, readParticipantCompactions } from "../../shared/chatRunState";
 import { normalizeInferredParticipantRequestThreads as normalizeInferredParticipantRequestThreadMetadata } from "../../shared/chatParticipantRequestThreads";
 import { INTERRUPTED_RUN_WARNING, sanitizeConversationWarnings, sanitizeWarningList } from "../../shared/warnings";
 
@@ -359,7 +359,7 @@ export class StorageService {
 
   private async clearInterruptedRuns(): Promise<void> {
     const ids = await this.queryConversationIds(
-      "payload_json like '%\"running\":true%' or payload_json like '%\"activeRunIds\":[%'"
+      "payload_json like '%\"running\":true%' or payload_json like '%\"activeRunIds\":[%' or payload_json like '%\"participantCompactionsByParticipantId\":%'"
     );
     for (const id of ids) {
       const payloadJson = await this.readConversationPayloadById(id);
@@ -374,7 +374,8 @@ export class StorageService {
       }
       const activeRunIds = Array.isArray(conversation.metadata.activeRunIds) ? conversation.metadata.activeRunIds : [];
       const wasRunning = conversation.metadata.running === true || activeRunIds.length > 0;
-      if (!wasRunning) {
+      const hasParticipantCompactions = Object.keys(readParticipantCompactions(conversation.metadata)).length > 0;
+      if (!wasRunning && !hasParticipantCompactions) {
         continue;
       }
       const remoteRunIds = nonTerminalRemoteRunIds(conversation.metadata.remoteRunHandles);
@@ -385,7 +386,7 @@ export class StorageService {
         localActiveRunIds.length === 0 &&
         (!metadataRunId || remoteRunIdSet.has(metadataRunId));
       if (onlyRemoteRunState) {
-        conversation.metadata = withRemoteRunMetadata(conversation.metadata, remoteRunIds);
+        conversation.metadata = withRemoteRunMetadata(clearParticipantCompactions(conversation.metadata), remoteRunIds);
         conversation.updatedAt = new Date().toISOString();
         await this.saveConversation(conversation);
         continue;
@@ -395,7 +396,7 @@ export class StorageService {
         warnings.push(INTERRUPTED_RUN_WARNING);
       }
       conversation.metadata = withRemoteRunMetadata(
-        clearLegacyAccordState(clearChatRunMetadata({ ...conversation.metadata, warnings })),
+        clearParticipantCompactions(clearLegacyAccordState(clearChatRunMetadata({ ...conversation.metadata, warnings }))),
         remoteRunIds
       );
       conversation.updatedAt = new Date().toISOString();

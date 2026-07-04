@@ -481,6 +481,14 @@
   animation: chat-rt-pulse 1.4s ease-in-out infinite;
 }
 
+.chat-rt-status.is-compacting {
+  --st: var(--app-accent);
+}
+
+.chat-rt-status.is-compacting .chat-rt-status-dot {
+  animation: chat-rt-pulse 1.4s ease-in-out infinite;
+}
+
 .chat-rt-status.is-pending {
   --st: var(--app-warning);
 }

@@ -3,8 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import type { ChatParticipant, ChatParticipantSession, ChatRoleConfig, Conversation, ParticipantConfig } from "../../shared/types";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { readParticipantCompactions } from "../../shared/chatRunState";
 import { ChatService } from "./chat";
 
 const NOW = "2026-01-01T00:00:00.000Z";
@@ -140,6 +142,149 @@ test("compactParticipant refreshes stored context usage from the session after c
 
     assert.equal(storage.current.metadata.agentContextUsageByParticipant?.[participant.id]?.usedTokens, 120);
     assert.equal(storage.current.metadata.agentContextUsageByParticipant?.[participant.id]?.percentage, 12);
+    assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("compactParticipant preserves sibling active runs while compacting an idle participant", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-sibling-run-"));
+  try {
+    const running = chatParticipant({ id: "codex-running", handle: "running" });
+    const idle = chatParticipant({ id: "codex-idle", handle: "idle" });
+    const conversation = chatConversation([running, idle], [chatSession(running, "session-running"), chatSession(idle, "session-idle")]);
+    conversation.metadata = {
+      ...conversation.metadata,
+      running: true,
+      runId: "other-run",
+      activeRunIds: ["other-run"]
+    };
+    let sawCompactState = false;
+    const { service, storage } = testService({
+      conversation,
+      compactSession: async (runParticipant) => {
+        const activeRunIds = storage.current.metadata.activeRunIds;
+        assert.equal(runParticipant.id, idle.id);
+        assert.deepEqual(activeRunIds, ["other-run", "compact-idle"]);
+        assert.deepEqual(readParticipantCompactions(storage.current.metadata), {
+          [idle.id]: {
+            runId: "compact-idle",
+            startedAt: readParticipantCompactions(storage.current.metadata)[idle.id]!.startedAt
+          }
+        });
+        sawCompactState = true;
+        return {
+          participant: runParticipant,
+          ok: true,
+          sessionId: "session-idle"
+        };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    (service as any).rememberActiveChatRun(conversation.id, "other-run");
+
+    await service.compactParticipant({
+      conversationId: conversation.id,
+      participantId: idle.id,
+      runId: "compact-idle"
+    });
+
+    assert.equal(sawCompactState, true);
+    assert.equal(storage.current.metadata.running, true);
+    assert.equal(storage.current.metadata.runId, "other-run");
+    assert.deepEqual(storage.current.metadata.activeRunIds, ["other-run"]);
+    assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("compactParticipant waits for an existing same-participant turn reservation", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-same-participant-wait-"));
+  try {
+    const participant = chatParticipant();
+    const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+    let compactCalls = 0;
+    const { service } = testService({
+      conversation,
+      compactSession: async (runParticipant) => {
+        compactCalls += 1;
+        return {
+          participant: runParticipant,
+          ok: true,
+          sessionId: "session-1"
+        };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    const reservation = (service as any).reserveParticipantTurn(conversation.id, participant.id);
+
+    const compact = service.compactParticipant({
+      conversationId: conversation.id,
+      participantId: participant.id,
+      runId: "compact-waits"
+    });
+    await delay(25);
+    assert.equal(compactCalls, 0);
+
+    reservation.release();
+    await compact;
+    assert.equal(compactCalls, 1);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("compactParticipant serializes double compact requests for the same participant", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-double-"));
+  try {
+    const participant = chatParticipant();
+    const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+    let activeCompactions = 0;
+    let maxActiveCompactions = 0;
+    let calls = 0;
+    let releaseFirst!: () => void;
+    const firstCanFinish = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const { service } = testService({
+      conversation,
+      compactSession: async (runParticipant) => {
+        activeCompactions += 1;
+        maxActiveCompactions = Math.max(maxActiveCompactions, activeCompactions);
+        calls += 1;
+        if (calls === 1) {
+          await firstCanFinish;
+        }
+        activeCompactions -= 1;
+        return {
+          participant: runParticipant,
+          ok: true,
+          sessionId: "session-1"
+        };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+
+    const first = service.compactParticipant({
+      conversationId: conversation.id,
+      participantId: participant.id,
+      runId: "compact-1"
+    });
+    await waitFor(() => calls === 1);
+    const second = service.compactParticipant({
+      conversationId: conversation.id,
+      participantId: participant.id,
+      runId: "compact-2"
+    });
+    await delay(25);
+    assert.equal(calls, 1);
+    releaseFirst();
+
+    await Promise.all([first, second]);
+    assert.equal(calls, 2);
+    assert.equal(maxActiveCompactions, 1);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -190,8 +335,40 @@ test("compactParticipant clears running state when compact fails", async () => {
     assert.equal(storage.current.metadata.running, false);
     assert.equal(storage.current.metadata.runId, undefined);
     assert.equal(storage.current.metadata.activeRunIds, undefined);
+    assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
     assert.equal(storage.current.metadata.agentContextUsageByParticipant?.[participant.id]?.usedTokens, 120);
     assert.equal(storage.current.metadata.agentContextUsageByParticipant?.[participant.id]?.percentage, 12);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("compactParticipant clears running and compaction state when compact throws", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-throw-"));
+  try {
+    const participant = chatParticipant();
+    const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+    const { service, storage } = testService({
+      conversation,
+      compactSession: async () => {
+        throw new Error("compact transport failed");
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+
+    await assert.rejects(
+      service.compactParticipant({
+        conversationId: conversation.id,
+        participantId: participant.id,
+        runId: "compact-throw"
+      }),
+      /compact transport failed/
+    );
+
+    assert.equal(storage.current.metadata.running, false);
+    assert.equal(storage.current.metadata.runId, undefined);
+    assert.equal(storage.current.metadata.activeRunIds, undefined);
+    assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -262,6 +439,7 @@ test("compactParticipant records a clear note when the participant has no active
   assert.equal(compactCalls, 0);
   assert.equal(result.warnings.length, 0);
   assert.equal(storage.current.messages.at(-1)?.content, "@admin does not have an active session to compact yet.");
+  assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
 });
 
 function testService(options: {
@@ -349,4 +527,15 @@ function chatConversation(participants: ChatParticipant[], sessions: ChatPartici
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 1000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await predicate()) {
+      return;
+    }
+    await delay(10);
+  }
+  assert.fail("Timed out waiting for condition.");
 }

@@ -2,6 +2,7 @@ import { useState } from "react";
 import type React from "react";
 import { AtSign, ChevronDown, Minimize2, Trash2 } from "lucide-react";
 
+import { canCompactParticipant } from "../../../shared/chatParticipantStatus";
 import type {
   ChatParticipant
 } from "../../../shared/types";
@@ -32,6 +33,7 @@ export function ChatParticipantRosterRow(props: {
   const roleLabel = props.participantRoleLabel(props.participant);
   const roleArchived = props.participantRoleArchived(props.participant);
   const [expanded, setExpanded] = useState(false);
+  const compactDisabled = !canCompactParticipant(props.status);
   return (
     <div className="chat-participant-row grid gap-2 rounded-md px-2 py-1.5">
       <div className="chat-participant-row-main">
@@ -80,8 +82,8 @@ export function ChatParticipantRosterRow(props: {
           size="xs"
           icon={Minimize2}
           label={`Compact ${displayName} context`}
-          tooltip="Compact this participant's underlying session to free context."
-          disabled={props.isRunning}
+          tooltip={compactDisabled ? "This participant is busy." : "Compact this participant's underlying session to free context."}
+          disabled={compactDisabled}
           onClick={() => props.onCompactParticipant(props.participant.id)}
         />
         <IconButton

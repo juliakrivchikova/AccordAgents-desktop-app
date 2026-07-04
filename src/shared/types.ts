@@ -1448,8 +1448,14 @@ export interface ConversationSummary {
   archived?: boolean;
 }
 
+export interface ChatParticipantCompactionState {
+  runId: string;
+  startedAt: string;
+}
+
 export type ConversationMetadata = Record<string, unknown> & {
   lastMessageByParticipant?: ChatLastMessageByParticipant;
+  participantCompactionsByParticipantId?: Record<string, ChatParticipantCompactionState>;
   promptContextPointers?: ChatPromptContextPointers;
 };
 

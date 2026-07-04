@@ -1,9 +1,12 @@
-export type ChatParticipantRosterStatus = "idle" | "running" | "pending" | "stopped" | "error";
+import type { ChatParticipantRosterStatus } from "../../../shared/chatParticipantStatus";
+
+export type { ChatParticipantRosterStatus };
 
 const ROSTER_STATUS_LABELS: Record<ChatParticipantRosterStatus, string> = {
   idle: "Idle",
   running: "Running",
   pending: "Pending",
+  compacting: "Compacting",
   stopped: "Stopped",
   error: "Error"
 };

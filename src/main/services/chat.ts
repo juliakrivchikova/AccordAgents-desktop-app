@@ -165,7 +165,9 @@ import { sanitizeChatSkillMention, UserSkillsService } from "./userSkills";
 import type { UserSkillRunContext } from "./userSkills";
 import {
   clearChatRunMetadata,
-  readActiveRunIds
+  readActiveRunIds,
+  withParticipantCompactionStarted,
+  withParticipantCompactionsForRunRemoved
 } from "../../shared/chatRunState";
 import { INTERRUPTED_RUN_WARNING, sanitizeWarningList, sanitizeWarningText } from "../../shared/warnings";
 import { normalizeAutoChatTitle, normalizeManualChatTitle, sanitizeAutoChatTitleSuggestion } from "../../shared/chatTitles";
@@ -1014,7 +1016,7 @@ export class ChatService {
         });
         return { conversation, participant, session: sessionState.session, runStarted: false };
       }
-      await this.beginChatRun(conversation, runId);
+      await this.beginChatParticipantCompactionRun(conversation, runId, participant.id);
       await this.waitForQueuedSave(conversation.id);
       return { conversation, participant, session: sessionState.session, runStarted: true };
     });
@@ -13580,10 +13582,30 @@ export class ChatService {
     }
   }
 
+  private async beginChatParticipantCompactionRun(conversation: Conversation, runId: string, participantId: string): Promise<void> {
+    this.rememberActiveChatRun(conversation.id, runId);
+    try {
+      await this.withChatMutation(conversation, async () => {
+        const now = new Date().toISOString();
+        const liveMetadata = this.metadataWithLiveRunState(conversation.id, {
+          ...conversation.metadata,
+          runId
+        }, undefined, runId);
+        conversation.metadata = withParticipantCompactionStarted(liveMetadata, participantId, runId, now);
+        conversation.updatedAt = now;
+        this.queueSnapshot(conversation);
+      });
+    } catch (error) {
+      this.forgetActiveChatRun(conversation.id, runId);
+      throw error;
+    }
+  }
+
   private async endChatRun(conversation: Conversation, runId: string): Promise<void> {
     let keepRemoteActive = false;
     try {
       await this.withChatMutation(conversation, async () => {
+        conversation.metadata = withParticipantCompactionsForRunRemoved(conversation.metadata, runId);
         if (this.isNonTerminalRemoteRun(conversation.metadata, runId)) {
           keepRemoteActive = true;
           conversation.metadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata, undefined, runId);

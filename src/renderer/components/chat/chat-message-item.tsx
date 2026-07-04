@@ -3,6 +3,7 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Copy, FileText, Li
 
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { canCompactParticipant } from "../../../shared/chatParticipantStatus";
 import type { AgentContextUsage, AgentRunProgress, ChatParticipant, ChatParticipantRequestBatch, Conversation } from "../../../shared/types";
 import { CHAT_REACTION_EMOJIS } from "../../../shared/chatReactions";
 import { chatProcessingTranscriptView, chatProcessingTranscriptViewHasHidden } from "../../../shared/processingTranscript";
@@ -201,7 +202,7 @@ export function ChatMessageItem(props: {
             contextUsage={props.contextUsage}
             sessionId={props.sessionId}
             handle={participant?.handle}
-            compactDisabled={props.busy}
+            compactDisabled={!canCompactParticipant(participantStatus)}
             compactContext={compactContext}
             onCompactParticipant={props.onCompactParticipant}
           />

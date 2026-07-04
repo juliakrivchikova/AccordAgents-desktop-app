@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { Conversation, ConversationSummary } from "../../shared/types";
+import { readParticipantCompactions } from "../../shared/chatRunState";
 import { chatAppToolApprovals, chatParticipants } from "../components/chat/chat-conversation-data";
 import type { ChatParticipantRosterStatus } from "../components/chat/chat-participant-menu";
 import {
@@ -129,7 +130,8 @@ function buildParticipantStatusMap(activeChatConversation: Conversation | undefi
     error: 1,
     stopped: 2,
     pending: 3,
-    running: 4
+    compacting: 4,
+    running: 5
   };
   const setStatus = (participantId: string, status: Exclude<ChatParticipantRosterStatus, "idle">): void => {
     const current = statuses.get(participantId);
@@ -140,6 +142,12 @@ function buildParticipantStatusMap(activeChatConversation: Conversation | undefi
   };
 
   const liveRunIds = activeRunIdsForConversation(activeChatConversation);
+  const compacting = readParticipantCompactions(activeChatConversation.metadata);
+  for (const [participantId, state] of Object.entries(compacting)) {
+    if (liveRunIds.has(state.runId)) {
+      setStatus(participantId, "compacting");
+    }
+  }
   const latestTerminalParticipantIds = new Set<string>();
   for (let index = activeChatConversation.messages.length - 1; index >= 0; index -= 1) {
     const message = activeChatConversation.messages[index];

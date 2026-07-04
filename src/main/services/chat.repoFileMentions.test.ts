@@ -1176,6 +1176,38 @@ test("clearInterruptedRuns clears stale run metadata without warning when no pen
   assert.deepEqual(saved?.metadata.warnings, []);
 });
 
+test("clearInterruptedRuns clears stale participant compaction metadata", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant], "/repo");
+  conversation.metadata = {
+    ...conversation.metadata,
+    participantCompactionsByParticipantId: {
+      [participant.id]: {
+        runId: "stale-compact-run",
+        startedAt: "2026-01-01T00:00:00.000Z"
+      }
+    }
+  };
+  let saved: Conversation | undefined;
+  const storage = Object.create(StorageService.prototype) as any;
+  storage.queryJson = async (sql: string) => {
+    assert.match(sql, /select id from conversations/);
+    assert.doesNotMatch(sql, /payload_json as payloadJson/);
+    return [{ id: conversation.id }];
+  };
+  storage.queryText = async () => JSON.stringify(conversation);
+  storage.saveConversation = async (next: Conversation) => {
+    saved = cloneConversation(next);
+  };
+
+  await (storage as any).clearInterruptedRuns();
+
+  assert.equal(saved?.metadata.running, false);
+  assert.equal(saved?.metadata.runId, undefined);
+  assert.equal(saved?.metadata.activeRunIds, undefined);
+  assert.equal(saved?.metadata.participantCompactionsByParticipantId, undefined);
+});
+
 test("clearInterruptedRuns preserves interrupted warning when startup cleanup finds a pending turn", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant], "/repo");

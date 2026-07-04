@@ -1,3 +1,7 @@
+import type { ChatParticipantCompactionState } from "./types";
+
+const PARTICIPANT_COMPACTIONS_KEY = "participantCompactionsByParticipantId";
+
 export function clearChatRunMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
   const next: Record<string, unknown> = { ...metadata, running: false };
   delete next.runId;
@@ -44,4 +48,106 @@ export function conversationIsRunning(metadata: Record<string, unknown>): boolea
     return true;
   }
   return metadata.running === true;
+}
+
+export function readParticipantCompactions(metadata: Record<string, unknown>): Record<string, ChatParticipantCompactionState> {
+  const raw = metadata[PARTICIPANT_COMPACTIONS_KEY];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {};
+  }
+  const out: Record<string, ChatParticipantCompactionState> = {};
+  for (const [participantId, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!participantId.trim() || !value || typeof value !== "object" || Array.isArray(value)) {
+      continue;
+    }
+    const record = value as Record<string, unknown>;
+    const runId = typeof record.runId === "string" ? record.runId.trim() : "";
+    const startedAt = typeof record.startedAt === "string" ? record.startedAt.trim() : "";
+    if (runId && startedAt) {
+      out[participantId] = { runId, startedAt };
+    }
+  }
+  return out;
+}
+
+export function withParticipantCompactionStarted(
+  metadata: Record<string, unknown>,
+  participantId: string,
+  runId: string,
+  startedAt: string
+): Record<string, unknown> {
+  const id = participantId.trim();
+  const compactRunId = runId.trim();
+  const compactStartedAt = startedAt.trim();
+  if (!id || !compactRunId || !compactStartedAt) {
+    return metadata;
+  }
+  return {
+    ...metadata,
+    [PARTICIPANT_COMPACTIONS_KEY]: {
+      ...readParticipantCompactions(metadata),
+      [id]: {
+        runId: compactRunId,
+        startedAt: compactStartedAt
+      }
+    }
+  };
+}
+
+export function withParticipantCompactionFinished(
+  metadata: Record<string, unknown>,
+  participantId: string,
+  runId?: string
+): Record<string, unknown> {
+  const id = participantId.trim();
+  if (!id) {
+    return metadata;
+  }
+  const compacting = readParticipantCompactions(metadata);
+  const current = compacting[id];
+  if (!current || (runId && current.runId !== runId)) {
+    return metadata;
+  }
+  delete compacting[id];
+  const next: Record<string, unknown> = { ...metadata };
+  if (Object.keys(compacting).length > 0) {
+    next[PARTICIPANT_COMPACTIONS_KEY] = compacting;
+  } else {
+    delete next[PARTICIPANT_COMPACTIONS_KEY];
+  }
+  return next;
+}
+
+export function withParticipantCompactionsForRunRemoved(metadata: Record<string, unknown>, runId: string): Record<string, unknown> {
+  const compactRunId = runId.trim();
+  if (!compactRunId) {
+    return metadata;
+  }
+  const compacting = readParticipantCompactions(metadata);
+  let changed = false;
+  for (const [participantId, state] of Object.entries(compacting)) {
+    if (state.runId === compactRunId) {
+      delete compacting[participantId];
+      changed = true;
+    }
+  }
+  if (!changed) {
+    return metadata;
+  }
+  const next: Record<string, unknown> = { ...metadata };
+  if (Object.keys(compacting).length > 0) {
+    next[PARTICIPANT_COMPACTIONS_KEY] = compacting;
+  } else {
+    delete next[PARTICIPANT_COMPACTIONS_KEY];
+  }
+  return next;
+}
+
+export function clearParticipantCompactions(metadata: Record<string, unknown>): Record<string, unknown> {
+  if (!(PARTICIPANT_COMPACTIONS_KEY in metadata)) {
+    return metadata;
+  }
+  const next: Record<string, unknown> = { ...metadata };
+  delete next[PARTICIPANT_COMPACTIONS_KEY];
+  return next;
 }
