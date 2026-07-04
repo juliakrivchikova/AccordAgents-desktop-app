@@ -130,7 +130,11 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   });
 
   async function sendDraft(repoFileMentions: RepoFileMention[] = [], imageAttachments: ChatImageInput[] = [], skillMentions: ChatSkillMention[] = []): Promise<boolean> {
-    return props.onSend(repoFileMentions, imageAttachments, skillMentions);
+    const sent = await props.onSend(repoFileMentions, imageAttachments, skillMentions);
+    if (sent) {
+      viewport.scrollToChatBottom();
+    }
+    return sent;
   }
 
   async function sendThreadDraft(
@@ -240,6 +244,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               onRespondToAppToolApproval={handleAppToolApproval}
               onRespondToChoice={handleChoiceResponse}
               onScroll={viewport.updateStickToBottom}
+              onScrollIntent={viewport.markUserScrollIntent}
               onStopRun={props.onStopRun}
               onToggleReaction={props.onToggleReaction}
               participantStatusById={props.participantStatusById}
