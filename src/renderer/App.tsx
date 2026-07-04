@@ -184,7 +184,7 @@ function App(): JSX.Element {
             unreadIds={state.unreadConversationIds}
             appVersion={appVersion}
             onSelect={(id) => void conversationActions.openConversation(id)}
-            onNewSession={conversationActions.newReview}
+            onNewSession={() => void conversationActions.newChatSession()}
             onNewProjectSession={(projectRepoPath) => void conversationActions.newProjectSession(projectRepoPath)}
             onArchive={(id) => void chatActions.setChatArchived(id, true)}
             onUnarchive={(id) => void chatActions.setChatArchived(id, false)}

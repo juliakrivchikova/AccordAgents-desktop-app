@@ -10,7 +10,7 @@ import {
 } from "../components/review/review-conversation-data";
 import { defaultChatParticipantDraft } from "../components/chat/chat-participant-drafts";
 import type { AppState } from "./app-state";
-import { normalizeProjectPath, upsertConversationSummary } from "./conversation-summaries";
+import { conversationTimeValue, normalizeProjectPath, upsertConversationSummary } from "./conversation-summaries";
 import { persistLastViewedAt } from "./storage";
 
 export interface ConversationActions {
@@ -24,7 +24,7 @@ export interface ConversationActions {
   inspectRepo: (path?: string, options?: { remember?: boolean }) => Promise<void>;
   rememberRepoPath: (path: string) => Promise<void>;
   cancelReview: () => Promise<void>;
-  newReview: () => void;
+  newChatSession: () => Promise<void>;
   newProjectSession: (projectRepoPath?: string) => Promise<void>;
   updateSelectedChatParticipantConfigIds: React.Dispatch<React.SetStateAction<Set<string>>>;
 }
@@ -235,8 +235,21 @@ export function useConversationActions(state: AppState): ConversationActions {
     }
   }
 
-  function newReview(): void {
+  async function newChatSession(): Promise<void> {
     if (state.busy) return;
+    const nextRepoPath = preferredNewChatRepoPath();
+    resetNewChatState();
+    await applyNewChatRepoPath(nextRepoPath);
+  }
+
+  async function newProjectSession(projectRepoPath?: string): Promise<void> {
+    if (state.busy) return;
+    const nextRepoPath = normalizeProjectPath(projectRepoPath) ?? "";
+    resetNewChatState();
+    await applyNewChatRepoPath(nextRepoPath);
+  }
+
+  function resetNewChatState(): void {
     state.setConversation(undefined);
     state.setMessagePage(undefined);
     state.setOlderMessagesLoading(false);
@@ -262,10 +275,7 @@ export function useConversationActions(state: AppState): ConversationActions {
     state.setError(undefined);
   }
 
-  async function newProjectSession(projectRepoPath?: string): Promise<void> {
-    if (state.busy) return;
-    const nextRepoPath = normalizeProjectPath(projectRepoPath) ?? "";
-    newReview();
+  async function applyNewChatRepoPath(nextRepoPath: string): Promise<void> {
     state.setRepoPath(nextRepoPath);
     state.setRepoInfo(undefined);
     if (nextRepoPath) {
@@ -273,10 +283,30 @@ export function useConversationActions(state: AppState): ConversationActions {
     }
   }
 
+  function preferredNewChatRepoPath(): string {
+    return normalizeProjectPath(state.conversation?.repoPath)
+      ?? normalizeProjectPath(state.repoPath)
+      ?? normalizeProjectPath(state.settings.lastRepoPath)
+      ?? newestSummaryRepoPath()
+      ?? "";
+  }
+
+  function newestSummaryRepoPath(): string | undefined {
+    let newest: { repoPath: string; updatedAt: string } | undefined;
+    for (const summary of state.summaries) {
+      const repoPath = normalizeProjectPath(summary.repoPath);
+      if (!repoPath) continue;
+      if (!newest || conversationTimeValue(summary.updatedAt) > conversationTimeValue(newest.updatedAt)) {
+        newest = { repoPath, updatedAt: summary.updatedAt };
+      }
+    }
+    return newest?.repoPath;
+  }
+
   return {
     refreshAll, refreshConversations, openConversation, loadOlderConversationMessages,
     loadConversationMessagePageForMessage, jumpToParticipantLastMessage, selectRepo,
-    inspectRepo, rememberRepoPath, cancelReview, newReview, newProjectSession,
+    inspectRepo, rememberRepoPath, cancelReview, newChatSession, newProjectSession,
     updateSelectedChatParticipantConfigIds: state.setSelectedChatParticipantConfigIds
   };
 
