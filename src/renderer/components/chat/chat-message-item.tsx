@@ -6,6 +6,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import type { AgentContextUsage, AgentRunProgress, ChatParticipant, ChatParticipantRequestBatch, Conversation } from "../../../shared/types";
 import { CHAT_REACTION_EMOJIS } from "../../../shared/chatReactions";
 import { chatProcessingTranscriptView, chatProcessingTranscriptViewHasHidden } from "../../../shared/processingTranscript";
+import { remoteRunStreamingContent, remoteRunStreamingStartedAt } from "../../../shared/remoteRunStreaming";
 import {
   chatDisplayContent,
   chatMessageImageAttachments,
@@ -71,7 +72,17 @@ export function ChatMessageItem(props: {
   const [processingTranscriptOpen, setProcessingTranscriptOpen] = useState(false);
   const author = authorForMessage(message, "chat");
   const isStreaming = message.status === "pending" && message.role === "participant";
-  const streamedContent = props.liveProgress?.partialContent;
+  const rawDisplayContent = chatDisplayContent(message, author);
+  const displayContent = rawDisplayContent;
+  const streamedRemoteRunStatus = props.liveProgress?.remoteRunStatus ?? message.metadata?.remoteRunStatus;
+  const streamedContent = remoteRunStreamingContent({
+    isStreaming,
+    appMessageSource: message.metadata?.appMessageSource,
+    remoteRunStatus: streamedRemoteRunStatus,
+    livePartialContent: props.liveProgress?.partialContent,
+    displayContent
+  });
+  const streamingStartedAt = remoteRunStreamingStartedAt(message.createdAt, streamedRemoteRunStatus);
   const streamedActivity = props.liveProgress?.activity;
   const streamedActivityEvents = props.liveProgress?.activityEvents ?? [];
   const participant = message.participantId
@@ -94,10 +105,8 @@ export function ChatMessageItem(props: {
   const repoFileMentions = chatMessageRepoFileMentions(message);
   const imageAttachments = chatMessageImageAttachments(message);
   const allPendingIds = pending.map((mention) => mention.targetParticipantId);
-  const rawDisplayContent = chatDisplayContent(message, author);
   const processingTranscript = message.metadata?.processingTranscript;
   const activityEvents = message.metadata?.activityEvents ?? [];
-  const displayContent = rawDisplayContent;
   const processingTranscriptView = !isStreaming && processingTranscript ? chatProcessingTranscriptView(processingTranscript.content, displayContent, {
     retainedStart: processingTranscript.retainedStart,
     truncated: processingTranscript.truncated,
@@ -294,7 +303,8 @@ export function ChatMessageItem(props: {
                 content={streamedContent}
                 activity={streamedActivity}
                 activityEvents={streamedActivityEvents}
-                startedAt={message.createdAt}
+                statusLabel={streamedRemoteRunStatus?.label}
+                startedAt={streamingStartedAt}
               />
             ) : (
               <>

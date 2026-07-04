@@ -1618,6 +1618,178 @@ test("remote provider_result without durationMs gets workedMs from handle timing
   assert.equal(msg?.metadata?.workedMs, 60_000);
 });
 
+test("remote lifecycle status updates the original pending provider bubble", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], {
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        conversationId: "conversation-1",
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        providerOutputMessageId: "pending-remote",
+        worker: { host: "worker.example" },
+        status: "running",
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push({
+    id: "pending-remote",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "",
+    createdAt: NOW,
+    status: "pending",
+    metadata: { runId: "remote-run" }
+  });
+  const { service, storage } = testService({ conversation });
+
+  await service.applyRemoteRunReplayRecord({
+    id: "remote-run:phase:syncing",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 1,
+    createdAt: NOW,
+    kind: "lifecycle",
+    state: "started",
+    remoteRunStatus: {
+      phase: "syncing-files",
+      label: "Syncing project files",
+      startedAt: NOW,
+      updatedAt: NOW
+    }
+  } as any);
+
+  const msg = storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote");
+  assert.equal(msg?.status, "pending");
+  assert.equal(msg?.metadata?.appMessageSource, "remote-run-provider-output");
+  assert.equal(msg?.metadata?.remoteRunStatus?.phase, "syncing-files");
+  assert.equal(msg?.metadata?.remoteRunStatus?.label, "Syncing project files");
+  assert.equal((storage.current.metadata.remoteRunReplay as any)["remote-run"].providerOutputMessageId, "pending-remote");
+});
+
+test("remote provider text reuses the pending bubble and marks processing started", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], {
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        conversationId: "conversation-1",
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        providerOutputMessageId: "pending-remote",
+        worker: { host: "worker.example" },
+        status: "running",
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push({
+    id: "pending-remote",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "",
+    createdAt: NOW,
+    status: "pending",
+    metadata: { runId: "remote-run", appMessageSource: "remote-run-provider-output" }
+  });
+  const { service, storage } = testService({ conversation });
+
+  await service.applyRemoteRunReplayRecord({
+    id: "remote-run:provider-output:1",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 1,
+    createdAt: NOW,
+    kind: "provider_output",
+    participantId: participant.id,
+    stream: "stdout",
+    content: `${JSON.stringify({ type: "agent_message_delta", delta: "Remote text." })}\n`
+  } as any);
+
+  const messages = storage.current.messages.filter((item: ChatMessage) =>
+    item.role === "participant" && item.participantId === participant.id
+  );
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].id, "pending-remote");
+  assert.equal(messages[0].content, "Remote text.");
+  assert.equal(messages[0].status, "pending");
+  assert.equal(messages[0].metadata?.remoteRunStatus?.phase, "processing-request");
+  assert.equal(typeof messages[0].metadata?.remoteRunStatus?.processingStartedAt, "string");
+});
+
+test("remote provider text keeps processing start stable across chunks", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], {
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        conversationId: "conversation-1",
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        providerOutputMessageId: "pending-remote",
+        worker: { host: "worker.example" },
+        status: "running",
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push({
+    id: "pending-remote",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "",
+    createdAt: NOW,
+    status: "pending",
+    metadata: { runId: "remote-run", appMessageSource: "remote-run-provider-output" }
+  });
+  const { service, storage } = testService({ conversation });
+
+  await service.applyRemoteRunReplayRecord({
+    id: "remote-run:provider-output:1",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 1,
+    createdAt: NOW,
+    kind: "provider_output",
+    participantId: participant.id,
+    stream: "stdout",
+    content: `${JSON.stringify({ type: "agent_message_delta", delta: "Remote " })}\n`
+  } as any);
+  const firstStartedAt = storage.current.messages
+    .find((item: ChatMessage) => item.id === "pending-remote")
+    ?.metadata?.remoteRunStatus?.processingStartedAt;
+  assert.equal(typeof firstStartedAt, "string");
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await service.applyRemoteRunReplayRecord({
+    id: "remote-run:provider-output:2",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 2,
+    createdAt: NOW,
+    kind: "provider_output",
+    participantId: participant.id,
+    stream: "stdout",
+    content: `${JSON.stringify({ type: "agent_message_delta", delta: "text." })}\n`
+  } as any);
+
+  const msg = storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote");
+  assert.equal(msg?.content, "Remote text.");
+  assert.equal(msg?.metadata?.remoteRunStatus?.processingStartedAt, firstStartedAt);
+  assert.equal(
+    (storage.current.metadata.remoteRunReplay as any)["remote-run"].remoteRunStatus.processingStartedAt,
+    firstStartedAt
+  );
+});
+
 test("cancelRun marks remote run failed when remote cancel delivery fails", async () => {
   const participant = chatParticipant("codex-cli");
   const now = "2026-06-27T22:00:00.000Z";

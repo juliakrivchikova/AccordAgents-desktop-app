@@ -7,6 +7,7 @@ import type {
   ChatAppToolApprovalScope,
   ChatPermissionChangeRequest,
   ChatPermissionRequestToolResult,
+  ChatRemoteRunStatus,
   ConversationKind,
   GitDiffMode,
   ParticipantConfig,
@@ -94,6 +95,7 @@ export interface RemoteRunLifecycleRecord extends RemoteRunRecordBase {
   kind: "lifecycle";
   state: "started" | "connected" | "disconnected" | "reconnecting";
   message?: string;
+  remoteRunStatus?: ChatRemoteRunStatus;
 }
 
 export interface RemoteRunOutputTextRecord extends RemoteRunRecordBase {
@@ -234,6 +236,7 @@ export interface RemoteRunDetachedStartRequest extends RemoteRunRealStartRequest
   // Results come back via git (the agent commits/pushes from the box) or via
   // an explicit pullMirrorForRun call.
   sync?: { localPath: string };
+  onPhase?: (status: ChatRemoteRunStatus) => void;
 }
 
 export interface RemoteRunDetachedPollRequest {
@@ -592,6 +595,7 @@ export class RemoteRunService {
 
     const sync = await this.prepareMirrorForRun(runId, request);
     const effectiveRepoPath = sync?.remotePath ?? request.repoPath;
+    await this.emitDetachedPhase(runId, request, "launching-session", "Preparing remote sandbox");
     const remoteSandbox = await this.remoteSandboxOptionsForRun(request, sync, effectiveRepoPath);
 
     const invocation = buildCodexExecInvocation({
@@ -611,6 +615,7 @@ export class RemoteRunService {
 
     let snapshot: RemoteDetachedWorkerSnapshot;
     try {
+      await this.emitDetachedPhase(runId, request, "launching-session", "Launching remote session");
       snapshot = await this.detachedWorkerTransport.launch({
         conversationId: request.conversationId,
         runId,
@@ -633,6 +638,7 @@ export class RemoteRunService {
     }
     await this.projectWorkerSnapshot(request.conversationId, runId, request.participant.id, snapshot);
     await this.projectSnapshotTerminalFallback(request.conversationId, runId, request.participant.id, snapshot);
+    await this.emitDetachedPhase(runId, request, "waiting-for-response", "Waiting for response");
     return sync ? { ...snapshot.state, sync } : snapshot.state;
   }
 
@@ -1076,10 +1082,12 @@ export class RemoteRunService {
       // would wipe its in-progress work. Reuse the mirror as-is, matching
       // local-run semantics where concurrent participants share the live dir.
       this.syncLogger?.("remote-run.sync.up.skipped-busy", { runId, remotePath });
+      await this.emitDetachedPhase(runId, request, "syncing-files", "Using active project mirror");
       this.registerRunSync(runId, sync);
       return sync;
     }
     const startedAt = Date.now();
+    await this.emitDetachedPhase(runId, request, "syncing-files", "Syncing project files");
     await this.chainMirrorOp(remotePath, () => this.mirrorSync.syncUp({
       worker: request.worker,
       localPath: sync.localPath,
@@ -1087,8 +1095,44 @@ export class RemoteRunService {
       signal: request.signal
     }));
     this.syncLogger?.("remote-run.sync.up", { runId, remotePath, durationMs: Date.now() - startedAt });
+    await this.emitDetachedPhase(runId, request, "syncing-files", "Project files synced");
     this.registerRunSync(runId, sync);
     return sync;
+  }
+
+  private remoteRunPhase(
+    phase: ChatRemoteRunStatus["phase"],
+    label: string,
+    detail?: string
+  ): ChatRemoteRunStatus {
+    const now = new Date().toISOString();
+    return {
+      phase,
+      label,
+      ...(detail ? { detail } : {}),
+      startedAt: now,
+      updatedAt: now,
+      ...(phase === "processing-request" ? { processingStartedAt: now } : {})
+    };
+  }
+
+  private async emitDetachedPhase(
+    runId: string,
+    request: RemoteRunDetachedStartRequest,
+    phase: ChatRemoteRunStatus["phase"],
+    label: string,
+    detail?: string
+  ): Promise<void> {
+    const status = this.remoteRunPhase(phase, label, detail);
+    request.onPhase?.(status);
+    await this.appendSpoolRecord({
+      kind: "lifecycle",
+      conversationId: request.conversationId,
+      runId,
+      state: "started",
+      message: label,
+      remoteRunStatus: status
+    });
   }
 
   private async remoteSandboxOptionsForRun(

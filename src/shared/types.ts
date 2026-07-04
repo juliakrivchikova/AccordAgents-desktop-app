@@ -806,7 +806,26 @@ export interface ChatMessageMetadata {
   appMessageSource?: string;
   activityEvents?: ChatAgentActivityEvent[];
   processingTranscript?: ChatProcessingTranscript;
+  remoteRunStatus?: ChatRemoteRunStatus;
   accordResolution?: ChatAccordResolutionMetadata;
+}
+
+export type ChatRemoteRunPhase =
+  | "preparing-worker"
+  | "syncing-files"
+  | "launching-session"
+  | "waiting-for-response"
+  | "processing-request"
+  | "waiting-for-approval"
+  | "terminal";
+
+export interface ChatRemoteRunStatus {
+  phase: ChatRemoteRunPhase;
+  label: string;
+  detail?: string;
+  startedAt: string;
+  updatedAt: string;
+  processingStartedAt?: string;
 }
 
 export type ChatAgentActivityKind = "tool" | "command" | "file-edit" | "web" | "approval" | "status";
@@ -1320,6 +1339,7 @@ export interface AgentRunProgress {
   activityEvents?: ChatAgentActivityEvent[];
   messageId?: string;
   partialContent?: string;
+  remoteRunStatus?: ChatRemoteRunStatus;
 }
 
 export interface ChatMessage {

@@ -825,6 +825,7 @@ test("mirror-sync detached run up-syncs before launch and runs codex in the mirr
   await mkdir(path.join(localDir, ".git"), { recursive: true });
   await writeFile(path.join(localDir, "file.txt"), "hello", "utf8");
   const order: string[] = [];
+  const phases: string[] = [];
   const mirrorSync = new FakeMirrorSync();
   const originalUp = mirrorSync.syncUp.bind(mirrorSync);
   mirrorSync.syncUp = async (request) => {
@@ -850,10 +851,18 @@ test("mirror-sync detached run up-syncs before launch and runs codex in the mirr
     participant: participantConfig(participant),
     prompt: "Work in the mirror.",
     worker: { host: "worker.example", workerRoot: "/srv/worker" },
-    sync: { localPath: localDir }
+    sync: { localPath: localDir },
+    onPhase: (status) => phases.push(status.label)
   });
 
   assert.deepEqual(order, ["sync-up", "launch"]);
+  assert.deepEqual(phases, [
+    "Syncing project files",
+    "Project files synced",
+    "Preparing remote sandbox",
+    "Launching remote session",
+    "Waiting for response"
+  ]);
   assert.deepEqual(mirrorSync.calls, [{ kind: "up", localPath: localDir, remotePath: expectedMirror }]);
   assert.deepEqual(state.sync, { localPath: localDir, remotePath: expectedMirror });
   const args = worker.launched?.invocation.args ?? [];

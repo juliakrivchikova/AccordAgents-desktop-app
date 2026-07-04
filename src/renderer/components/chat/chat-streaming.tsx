@@ -27,14 +27,17 @@ export function StreamingMessageContent(props: {
   content?: string;
   activity?: string;
   activityEvents?: ChatAgentActivityEvent[];
+  statusLabel?: string;
   startedAt: string;
 }): JSX.Element {
   const elapsedSeconds = useStreamingElapsedSeconds(props.startedAt);
   const hasContent = Boolean(props.content?.trim());
+  const statusLabel = props.statusLabel ?? (hasContent ? "Responding" : "Thinking");
+  const activity = props.activity && props.activity !== statusLabel ? props.activity : undefined;
   return (
     <div className="streaming-message-content" aria-live="polite">
       <div className={`streaming-message-thinking ${hasContent ? "is-compact" : ""}`}>
-        <span className="streaming-status-label">{hasContent ? "Responding" : "Thinking"}</span>
+        <span className="streaming-status-label">{statusLabel}</span>
         <span className="streaming-message-elapsed">{formatElapsed(elapsedSeconds)}</span>
       </div>
       {hasContent && (
@@ -43,7 +46,7 @@ export function StreamingMessageContent(props: {
       {!hasContent && props.activityEvents && props.activityEvents.length > 0 && (
         <ChatInlineTranscript content="" activityEvents={props.activityEvents} />
       )}
-      {!hasContent && props.activity && !props.activityEvents?.length && <div className="streaming-message-activity">{props.activity}</div>}
+      {!hasContent && activity && !props.activityEvents?.length && <div className="streaming-message-activity">{activity}</div>}
     </div>
   );
 }
