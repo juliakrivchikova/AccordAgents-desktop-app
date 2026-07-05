@@ -244,7 +244,7 @@ interface CompactChatCommand {
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 16;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 17;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const CHAT_ADMINISTRATOR_ROLE_ID = "administrator";
@@ -4621,10 +4621,7 @@ export class ChatService {
       runId,
       progress,
       participant,
-      pendingMessage.id,
-      (cumulative: string): boolean => {
-        return Boolean(this.confirmationBrevityViolation(cumulative, triggerMessage, Boolean(options.continuation)));
-      }
+      pendingMessage.id
     );
     // `permissions.request` is force-added to every run's grant (independent of the
     // role's configured capabilities). The default-mode tool-permission bridge depends
@@ -4857,69 +4854,6 @@ export class ChatService {
         }
       });
       this.applyCliRunMetadata(session, result, participant, options.warnings);
-      const confirmationViolation = result.ok
-        ? this.confirmationBrevityViolation(result.content, triggerMessage, Boolean(options.continuation))
-        : undefined;
-      if (confirmationViolation) {
-        options.warnings.push(`@${participant.handle}: rejected verbose affirmative confirmation; retried in the same chat session.`);
-        const retryUsesPromptRole = session.roleRuntime === "prompt-fallback";
-        const retryIsResumingSession = Boolean(session.sessionId);
-        const retryIncludeRoleInstructions = (retryUsesPromptRole && !retryIsResumingSession) || (retryIsResumingSession && sessionState.instructionsRefreshed);
-        const retryPromptBase = retryIncludeRoleInstructions
-          ? this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
-              includeRoleInstructions: true,
-              agentMode,
-              permissions,
-              promptContextBlock: preparedPromptContext.block
-            })
-          : this.buildRetryEnvelope(promptConversation, triggerMessage, Boolean(options.continuation), session, preparedPromptContext.block);
-        const retryPromptFallbackBase = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
-          includeRoleInstructions: true,
-          agentMode,
-          permissions,
-          promptContextBlock: preparedPromptContext.block
-        });
-        const retryPrompt = this.confirmationBrevityRetryPrompt(retryPromptBase);
-        const retryRole = retryUsesPromptRole
-          ? undefined
-          : this.cliRoleOptions(participant, session, this.confirmationBrevityRetryPrompt(retryPromptFallbackBase));
-        progressSink.beginAttempt();
-        result = await this.cliRunner.run(cliParticipant, retryPrompt, runPath, undefined, "chat", signal, {
-          persistSession: true,
-          sessionId: session.sessionId,
-          extraReadableDirs: [workspacePath],
-          resumeFallbackPrompt,
-          role: retryRole,
-          selectedSkills,
-          appMcp: appMcp
-            ? {
-                ...appMcp,
-                toolNames: appMcpToolNames,
-                clientGenerationId: appMcpClientGenerationId,
-                clientStatus: (clientGenerationId: string) => this.appMcp?.clientStatus?.(clientGenerationId)
-              }
-            : undefined,
-          agentEnv: agentEnvironment.env,
-          agentEnvKey: agentEnvironment.version,
-          agentMode,
-          permissions,
-          onOutput: progressSink.emit,
-          onSessionId: persistSessionId,
-          warm: {
-            conversationId: conversation.id,
-            participantId: participant.id,
-            contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey, this.skillRuntimeKey(triggerMessage, participant.kind)),
-            idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
-          }
-        });
-        this.applyCliRunMetadata(session, result, participant, options.warnings);
-        const retryConfirmationViolation = result.ok
-          ? this.confirmationBrevityViolation(result.content, triggerMessage, Boolean(options.continuation))
-          : undefined;
-        if (retryConfirmationViolation) {
-          options.warnings.push(`@${participant.handle}: still returned a verbose affirmative confirmation after retry.`);
-        }
-      }
       if (!signal?.aborted) {
         this.consumeOneTimePermissionApprovals(conversation, participant, appliedOneTimePermissionApprovalIds);
       }
@@ -5269,28 +5203,6 @@ export class ChatService {
     return `${normalized.slice(0, maxChars - 3).trimEnd()}...`;
   }
 
-  private buildRetryEnvelope(
-    conversation: Conversation,
-    triggerMessage: ChatMessage,
-    continuation: boolean,
-    session: ChatParticipantSession,
-    promptContextBlock = ""
-  ): string {
-    return [
-      promptContextBlock,
-      "Triggering message identifiers:",
-      this.triggeringMessageIdentifiers(triggerMessage),
-      "Triggering message:",
-      this.formatMessage(triggerMessage, false, false),
-      this.multiParticipantAddresseePromptSection(conversation, triggerMessage),
-      this.skillMentionsPromptSection(triggerMessage, undefined),
-      this.imageAttachmentsPromptSection(triggerMessage),
-      this.behaviorRuleReinforcementSection(session),
-      this.currentChatRequestLine(triggerMessage, continuation),
-      "Write your next message in this chat."
-    ].filter(Boolean).join("\n\n");
-  }
-
   private multiParticipantAddresseePromptSection(conversation: Conversation, message: ChatMessage): string {
     const mentionedParticipants = this.resolveMentionTargets(conversation, message.content).targets;
     if (mentionedParticipants.length <= 1) {
@@ -5509,7 +5421,6 @@ export class ChatService {
       ...(session.participantKind === "claude-code" ? ["- Claude Code only: do not use provider-native interactive question, user-input, or structured-question tools to ask User to choose. In AccordAgents Chat, ask choices only by emitting the `User choice:` block format described below."] : []),
       "- When User must pick one option before you can continue, include one dedicated `User choice:` block after your explanation. Format it as lines `T: short title`, `Q: question`, `O1: option label | optional description`, `O2: option label | optional description`, and optionally `R: O1`. Use at least two options. Ask at most one user choice in a message.",
       "- The UI also lets User write a custom answer instead of choosing your suggestions. After User confirms, the app will send the selected option or custom answer back to you in this chat.",
-      `- ${this.confirmationBrevityPolicy()}`,
       "- Answer in the active thread. Do not assume a mentioned participant has answered until their reply appears in the transcript.",
       "- Answer only in this chat message. Do not mention ExitPlanMode, plan files, tool availability, or recording/writing outside the chat unless User directly asks about those mechanics.",
       "- If you make a decision, arbitration, plan, or summary, include it in this reply. Do not say it is posted above or recorded elsewhere unless you cite the exact existing chat message.",
@@ -6151,31 +6062,6 @@ export class ChatService {
     return createHash("sha256").update(value).digest("hex").slice(0, 16);
   }
 
-  private confirmationBrevityPolicy(): string {
-    return "Confirmation brevity policy: when the triggering request asks whether you agree, confirm, approve, acknowledge, sign off, review for objections, or confirm/correct/add anything, reply with only a short verdict such as `Yes, agree.`, `Confirmed.`, or `No objections.` Do not restate, summarize, or re-list the proposal you are confirming. If you have a real objection, caveat, correction, or short additive observation, start with `Objection:`, `Concern:`, `Correction:`, or `Note:` and include only the new material.";
-  }
-
-  private confirmationBrevityRetryPrompt(prompt: string): string {
-    return [
-      "Your previous draft was rejected because the triggering request only asked for agreement or confirmation, and you replied with a verbose affirmative restatement.",
-      "Rewrite with only one short confirmation sentence, such as `Yes, agree.`, `Confirmed.`, or `No objections.` Do not restate, summarize, or re-list the prior proposal. If you have a real objection, caveat, correction, or short additive observation, start with `Objection:`, `Concern:`, `Correction:`, or `Note:` and include only that new material.",
-      prompt
-    ].join("\n\n");
-  }
-
-  private confirmationBrevityViolation(content: string, triggerMessage: ChatMessage, continuation: boolean): string | undefined {
-    if (continuation || !this.confirmationRequestWasAsked(triggerMessage.content)) {
-      return undefined;
-    }
-    const searchable = this.withoutFencedCode(content).trim();
-    if (!searchable || this.hasMaterialConfirmationObjection(searchable) || !this.startsWithAffirmativeConfirmation(searchable)) {
-      return undefined;
-    }
-    const wordCount = searchable.match(/\S+/g)?.length ?? 0;
-    const hasExtraStructure = /\n|```|^\s*(?:[-*]|\d+[.)])\s+/m.test(content);
-    return wordCount > 8 || hasExtraStructure ? "verbose affirmative confirmation" : undefined;
-  }
-
   private confirmationRequestWasAsked(content: string): boolean {
     const searchable = this.withoutFencedCode(content);
     return [
@@ -6192,19 +6078,6 @@ export class ChatService {
       /\bis\s+this\s+(?:right|correct|ok|okay)\b/i,
       /\b(?:sign\s*off|lgtm)\b/i
     ].some((pattern) => pattern.test(searchable));
-  }
-
-  private startsWithAffirmativeConfirmation(content: string): boolean {
-    const first = content.trim().replace(/^>\s*/, "").slice(0, 160);
-    return /^(?:yes\b|agree(?:d)?\b|confirmed?\b|confirm\b|ack(?:nowledged)?\b|lgtm\b|sounds good\b|no objections?\b|i agree\b|i confirm\b|i approve\b)/i.test(first);
-  }
-
-  private hasMaterialConfirmationObjection(content: string): boolean {
-    const withoutNoObjections = content.replace(/\bno\s+objections?\b/gi, "");
-    if (/\b(?:note|correction|addition)\s*:/i.test(withoutNoObjections)) {
-      return true;
-    }
-    return /\b(?:objection|concern|caveat|but|however|except|unless|disagree|reject|unclear|unsupported|blocker|risk|issue|problem|missing|incorrect|wrong|invalid|unsafe|not convinced|cannot confirm|can't confirm|do not agree|don't agree|i disagree)\b/i.test(withoutNoObjections);
   }
 
   private lockParticipantRoleVersion(conversation: Conversation, participant: ChatParticipant, version: number): void {
@@ -13803,8 +13676,7 @@ export class ChatService {
     runId: string,
     progress: ProgressCallback | undefined,
     participant: ChatParticipant,
-    messageId: string,
-    suppressIf?: (cumulative: string) => boolean
+    messageId: string
   ): {
     emit: (event: CliAgentOutputEvent) => void;
     beginAttempt: () => void;
@@ -13820,7 +13692,6 @@ export class ChatService {
     let activityEvents: ChatAgentActivityEvent[] = [];
     let omittedActivityEventCount = 0;
     let activitySequence = 0;
-    let suppressed = false;
     let lastFlush = 0;
     let pendingTimer: NodeJS.Timeout | undefined;
     let dirty = false;
@@ -13838,7 +13709,7 @@ export class ChatService {
       if (!progress) {
         return;
       }
-      const partialContent = !suppressed && cumulative ? cumulative : undefined;
+      const partialContent = cumulative ? cumulative : undefined;
       this.emitProgress(runId, progress, "debate", `${participantLabel} is responding.`, {
         participantLabel,
         agentProgress: {
@@ -13876,9 +13747,6 @@ export class ChatService {
           return;
         }
         cumulative = next;
-        if (!suppressed && suppressIf && suppressIf(cumulative)) {
-          suppressed = true;
-        }
         dirty = true;
         scheduleFlush();
         return;
@@ -13918,7 +13786,6 @@ export class ChatService {
         return;
       }
       cumulative = "";
-      suppressed = false;
       activity = undefined;
       activityEvents = [];
       omittedActivityEventCount = 0;
@@ -13956,7 +13823,7 @@ export class ChatService {
       beginAttempt,
       finish,
       activityEvents: () => activityEvents,
-      processingTranscript: (capturedAt: string) => this.processingTranscriptFromContent(suppressed ? "" : cumulative, capturedAt, {
+      processingTranscript: (capturedAt: string) => this.processingTranscriptFromContent(cumulative, capturedAt, {
         omittedActivityEventCount
       })
     };

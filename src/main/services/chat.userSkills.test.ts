@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import type { ChatMessage, ChatParticipant, ChatParticipantSession, ChatRoleConfig, ChatSkillMention, Conversation, ParticipantConfig } from "../../shared/types";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { ChatService } from "./chat";
 import { UserSkillsService } from "./userSkills";
 
@@ -379,7 +380,7 @@ test("skill prompt tells Codex to use inline slash invocation and direct selecte
   assert.match(promptSection, /do not call `app_permissions_request_change` just to read selected skill files/);
 });
 
-test("current request line is conditional for selected skill prompts and retry envelopes", () => {
+test("current request line is conditional for selected skill prompts", () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant]);
   const { service } = testService({
@@ -425,13 +426,15 @@ test("current request line is conditional for selected skill prompts and retry e
   assert.match(normalPrompt, /Current request: answer the triggering message above/);
   assert.doesNotMatch(normalPrompt, /Current request: execute the selected skill workflow/);
 
-  const retrySkillPrompt = (service as any).buildRetryEnvelope(skillMessage, false, session) as string;
-  assert.match(retrySkillPrompt, /Current request: execute the selected skill workflow for the triggering message/);
-
-  const retryNormalPrompt = (service as any).buildRetryEnvelope(normalMessage, false, session) as string;
-  assert.match(retryNormalPrompt, /Current request: answer the triggering message above/);
-
-  const continuationPrompt = (service as any).buildRetryEnvelope(skillMessage, true, session) as string;
+  const continuationPrompt = (service as any).buildPromptParts(
+    conversation,
+    participant,
+    session,
+    skillMessage,
+    "/tmp/accordagents-history",
+    true,
+    options
+  ).prompt as string;
   assert.match(continuationPrompt, /Current request: control has returned to you after the approved participants have replied/);
   assert.doesNotMatch(continuationPrompt, /Current request: execute the selected skill workflow/);
 });
@@ -499,12 +502,12 @@ test("chat:send returns after ingest without awaiting the participant batch", as
     });
 
     // sendMessage must resolve while the gated participant run is still in flight.
+    await waitFor(() => runStarted);
     assert.equal(runCompleted, false);
     assert.ok(result.conversation);
 
     releaseRun?.();
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.equal(runStarted, true);
+    await waitFor(() => runCompleted);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -633,11 +636,13 @@ function testService(options: {
     async getPublicSettings(): Promise<{
       chatRoleConfigs: ChatRoleConfig[];
       chatBehaviorRules: [];
+      chatPromptContext: typeof DEFAULT_CHAT_PROMPT_CONTEXT;
       providers: Array<{ kind: string; enabled: boolean }>;
     }> {
       return {
         chatRoleConfigs: [ROLE, GENERIC_ROLE],
         chatBehaviorRules: [],
+        chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
         providers: [{ kind: "codex-cli", enabled: true }]
       };
     }

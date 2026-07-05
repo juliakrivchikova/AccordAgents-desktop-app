@@ -14,7 +14,9 @@ const RAW_CLI_PATTERNS = [
 ];
 
 const OBSOLETE_WARNING_PATTERNS = [
-  /^.+?: CLI session id was not reported, so later rounds may need to rebuild context from the saved thread transcript\.$/
+  /^.+?: CLI session id was not reported, so later rounds may need to rebuild context from the saved thread transcript\.$/,
+  /^@[A-Za-z0-9._-]+: rejected verbose affirmative confirmation; retried in the same chat session\.$/,
+  /^@[A-Za-z0-9._-]+: still returned a verbose affirmative confirmation after retry\.$/
 ];
 
 export function sanitizeWarningText(warning: string, maxChars = DEFAULT_NOTICE_CHARS): string {

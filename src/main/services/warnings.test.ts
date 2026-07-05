@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sanitizeWarningText } from "../../shared/warnings";
+import { sanitizeWarningList, sanitizeWarningText } from "../../shared/warnings";
 
 test("sanitizeWarningText hides plain CLI auth diagnostics in warning notices", () => {
   const warning = [
@@ -17,3 +17,10 @@ test("sanitizeWarningText hides plain CLI auth diagnostics in warning notices", 
   assert.doesNotMatch(sanitized, /AuthRequired|Transport channel closed|1800000ms|rmcp::transport/);
 });
 
+test("sanitizeWarningList drops obsolete confirmation-brevity retry warnings", () => {
+  assert.deepEqual(sanitizeWarningList([
+    "@drew-codex-engineer: rejected verbose affirmative confirmation; retried in the same chat session.",
+    "@taylor-claude-engineer: still returned a verbose affirmative confirmation after retry.",
+    "Other warning"
+  ]), ["Other warning"]);
+});

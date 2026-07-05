@@ -2613,6 +2613,50 @@ test("internal-mechanics phrasing in a draft is delivered as-is without retry", 
   assert.equal(approvals.length, 0);
 });
 
+test("verbose affirmative confirmations are delivered without retry or warning", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const verbose = [
+    "Yes, I agree.",
+    "",
+    "- The plan is sound because it removes the retry gate.",
+    "- The remaining concise-response guidance is independent."
+  ].join("\n");
+  const runs: ParticipantConfig[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => {
+      runs.push(runParticipant);
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: runs.length === 1 ? verbose : "Confirmed.",
+        durationMs: 1
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  const result = await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "verbose-confirmation-run",
+    content: "@codex Do you agree?"
+  });
+  await waitFor(() => storage.current.messages.some(
+    (message: Conversation["messages"][number]) => message.role === "participant" && message.status === "done"
+  ));
+
+  assert.equal(runs.length, 1);
+  assert.equal(result.warnings.some((warning) => /verbose affirmative|confirmation-brevity/i.test(warning)), false);
+  const participantMessage = storage.current.messages.find(
+    (message: Conversation["messages"][number]) => message.role === "participant"
+  );
+  assert.equal(participantMessage?.content, verbose);
+  assert.equal(participantMessage?.status, "done");
+  const storedWarnings = (storage.current.metadata.warnings ?? []) as string[];
+  assert.equal(storedWarnings.some((warning) => /verbose affirmative|confirmation-brevity/i.test(warning)), false);
+});
+
 test("approved permission without resumeContext does not auto-run", async () => {
   const runs: ParticipantConfig[] = [];
   const participant = chatParticipant("claude-code");
