@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { copyFile, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { app } from "electron";
 import type {
@@ -216,6 +216,32 @@ interface PreparedImageAttachments {
   writtenPaths: string[];
 }
 
+type ChatAttachmentImportSourceRoot = "repo";
+
+interface ChatAttachmentImportSource {
+  realPath: string;
+  root: ChatAttachmentImportSourceRoot;
+  dev: number;
+  ino: number;
+}
+
+interface ChatToolImageAttachmentInput {
+  kind: "image";
+  sourcePath: string;
+  filename?: string;
+  mimeType?: ChatImageMimeType;
+}
+
+interface PreparedToolImageAttachments extends PreparedImageAttachments {
+  summaries: ChatToolImageAttachmentSummary[];
+  totalBytes: number;
+}
+
+interface ChatToolImageAttachmentSummary {
+  attachment: Omit<ChatImageAttachment, "storageKey">;
+  sourceRoot: ChatAttachmentImportSourceRoot;
+}
+
 interface ChatAttachmentRecord {
   message: ChatMessage;
   sequence: number;
@@ -311,6 +337,7 @@ const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 100_000;
 const CHAT_ACTIVITY_EVENT_MAX_COUNT = 80;
 const CHAT_IMAGE_MAX_ATTACHMENTS = 5;
 const CHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+const CHAT_SEND_MESSAGE_MAX_IMAGE_BYTES_PER_RUN = CHAT_IMAGE_MAX_ATTACHMENTS * CHAT_IMAGE_MAX_BYTES;
 const CHAT_IMAGE_MAX_DIMENSION = 8192;
 const CHAT_IMAGE_MAX_PIXELS = 25_000_000;
 const CHAT_IMAGE_MIME_TYPES: ChatImageMimeType[] = ["image/png", "image/jpeg", "image/webp"];
@@ -528,6 +555,7 @@ export class ChatService {
   private readonly chatRunMeta = new Map<string, { conversationId: string; participantId: string; participantHandle: string; pendingMessageId?: string }>();
   private readonly chatMutationQueues = new Map<string, Promise<void>>();
   private readonly appSendMessageCountsByRun = new Map<string, number>();
+  private readonly appSendMessageImageBytesByRun = new Map<string, number>();
   private readonly appToolApprovalDecisionListeners = new Set<(event: ChatAppToolApprovalDecisionEvent) => Promise<void> | void>();
   private readonly remoteRunHandlesByRun = new Map<string, RemoteRunHandle>();
   private remoteRuns?: RemoteRunStarter;
@@ -2966,91 +2994,114 @@ export class ChatService {
         );
       }
     }
+    const preparedImages = await this.prepareToolImageAttachments(conversation, actor, request.attachments);
+    if (actor.runId && preparedImages.totalBytes > 0) {
+      const currentBytes = this.appSendMessageImageBytesByRun.get(actor.runId) ?? 0;
+      if (currentBytes + preparedImages.totalBytes > CHAT_SEND_MESSAGE_MAX_IMAGE_BYTES_PER_RUN) {
+        await this.rollbackPreparedImageAttachments(conversation.id, preparedImages, "AttachmentImportDenied", "per-run image byte limit exceeded");
+        throw new Error(
+          `AttachmentImportDenied. Problem: this turn already imported too many image bytes. Cause: app_chat_send_message accepts at most ${this.formatBytes(CHAT_SEND_MESSAGE_MAX_IMAGE_BYTES_PER_RUN)} of images per run. Fix: send fewer or smaller images.`
+        );
+      }
+    }
     let created: { id: string; sequence: number; threadId?: string } | undefined;
-    await this.withChatMutation(conversation, async () => {
-      const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
-      if (!requester) {
-        throw new Error("The requesting participant is no longer in this chat.");
-      }
-      // Resolve and validate the visible scope. parent/root, when provided, must be a message
-      // visible to this turn; an invisible/wrong-conversation id is rejected.
-      const resolveVisible = (id: string | undefined, label: string): string | undefined => {
-        if (!id) {
-          return undefined;
+    try {
+      await this.withChatMutation(conversation, async () => {
+        const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+        if (!requester) {
+          throw new Error("The requesting participant is no longer in this chat.");
         }
-        const record = this.findMessageRecord(conversation, id);
-        if (!record || (typeof actor.snapshotMaxSequence === "number" && record.sequence > actor.snapshotMaxSequence)) {
-          throw new Error(
-            `ChatSendMessageDenied. Problem: ${label} is not visible to this turn. Cause: the id is wrong, belongs to another conversation, or is newer than this turn. Fix: use an id returned by app_chat_read_messages.`
-          );
-        }
-        return id;
-      };
-      const parentMessageId = resolveVisible(request.parentMessageId, "parentMessageId");
-      const chatThreadRootId = resolveVisible(request.chatThreadRootId, "chatThreadRootId");
-      // An explicit threadId must also be a visible scope: it has to match a visible message's
-      // id (a thread root) or the threadId of some visible message. Otherwise a participant could
-      // post into an arbitrary thread id string. When omitted, derive it from visible context.
-      const resolveVisibleThreadId = (threadId: string | undefined): string | undefined => {
-        if (!threadId) {
-          return undefined;
-        }
-        const visible = conversation.messages.some((message, sequence) => {
-          if (typeof actor.snapshotMaxSequence === "number" && sequence > actor.snapshotMaxSequence) {
-            return false;
+        // Resolve and validate the visible scope. parent/root, when provided, must be a message
+        // visible to this turn; an invisible/wrong-conversation id is rejected.
+        const resolveVisible = (id: string | undefined, label: string): string | undefined => {
+          if (!id) {
+            return undefined;
           }
-          return message.id === threadId || message.metadata?.threadId === threadId;
-        });
-        if (!visible) {
-          throw new Error(
-            "ChatSendMessageDenied. Problem: threadId is not a visible thread in this turn. Cause: the id is wrong, belongs to another conversation, or is newer than this turn. Fix: use a threadId/messageId returned by app_chat_read_messages, or omit it."
-          );
+          const record = this.findMessageRecord(conversation, id);
+          if (!record || (typeof actor.snapshotMaxSequence === "number" && record.sequence > actor.snapshotMaxSequence)) {
+            throw new Error(
+              `ChatSendMessageDenied. Problem: ${label} is not visible to this turn. Cause: the id is wrong, belongs to another conversation, or is newer than this turn. Fix: use an id returned by app_chat_read_messages.`
+            );
+          }
+          return id;
+        };
+        const parentMessageId = resolveVisible(request.parentMessageId, "parentMessageId");
+        const chatThreadRootId = resolveVisible(request.chatThreadRootId, "chatThreadRootId");
+        // An explicit threadId must also be a visible scope: it has to match a visible message's
+        // id (a thread root) or the threadId of some visible message. Otherwise a participant could
+        // post into an arbitrary thread id string. When omitted, derive it from visible context.
+        const resolveVisibleThreadId = (threadId: string | undefined): string | undefined => {
+          if (!threadId) {
+            return undefined;
+          }
+          const visible = conversation.messages.some((message, sequence) => {
+            if (typeof actor.snapshotMaxSequence === "number" && sequence > actor.snapshotMaxSequence) {
+              return false;
+            }
+            return message.id === threadId || message.metadata?.threadId === threadId;
+          });
+          if (!visible) {
+            throw new Error(
+              "ChatSendMessageDenied. Problem: threadId is not a visible thread in this turn. Cause: the id is wrong, belongs to another conversation, or is newer than this turn. Fix: use a threadId/messageId returned by app_chat_read_messages, or omit it."
+            );
+          }
+          return threadId;
+        };
+        const threadId = resolveVisibleThreadId(request.threadId)
+          ?? actor.triggerThreadId ?? parentMessageId ?? chatThreadRootId;
+        const message: ChatMessage = {
+          id: randomUUID(),
+          role: "participant",
+          participantId: requester.id,
+          participantLabel: `@${requester.handle}`,
+          content: request.content,
+          createdAt: new Date().toISOString(),
+          status: "done",
+          metadata: {
+            threadId,
+            parentMessageId,
+            chatThreadRootId,
+            appMessageSource: APP_CHAT_SEND_MESSAGE_TOOL,
+            accordResolution: request.accordResolution,
+            runId: actor.runId,
+            ...(preparedImages.attachments.length > 0 ? { imageAttachments: preparedImages.attachments } : {})
+          }
+        };
+        conversation.messages.push(message);
+        this.recordLastMessageByParticipant(conversation, message);
+        const sequence = conversation.messages.length - 1;
+        // P0-1: make the new message visible to this same run so publish -> self-read /
+        // self-react works. The actor object is the stored token grant reference, so this
+        // bump persists for the rest of the turn.
+        if (typeof actor.snapshotMaxSequence === "number" && sequence > actor.snapshotMaxSequence) {
+          actor.snapshotMaxSequence = sequence;
         }
-        return threadId;
-      };
-      const threadId = resolveVisibleThreadId(request.threadId)
-        ?? actor.triggerThreadId ?? parentMessageId ?? chatThreadRootId;
-      const message: ChatMessage = {
-        id: randomUUID(),
-        role: "participant",
-        participantId: requester.id,
-        participantLabel: `@${requester.handle}`,
-        content: request.content,
-        createdAt: new Date().toISOString(),
-        status: "done",
-        metadata: {
-          threadId,
-          parentMessageId,
-          chatThreadRootId,
-          appMessageSource: APP_CHAT_SEND_MESSAGE_TOOL,
-          accordResolution: request.accordResolution,
-          runId: actor.runId
-        }
-      };
-      conversation.messages.push(message);
-      this.recordLastMessageByParticipant(conversation, message);
-      const sequence = conversation.messages.length - 1;
-      // P0-1: make the new message visible to this same run so publish -> self-read /
-      // self-react works. The actor object is the stored token grant reference, so this
-      // bump persists for the rest of the turn.
-      if (typeof actor.snapshotMaxSequence === "number" && sequence > actor.snapshotMaxSequence) {
-        actor.snapshotMaxSequence = sequence;
-      }
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
-      created = { id: message.id, sequence, threadId };
-    });
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+        created = { id: message.id, sequence, threadId };
+      });
+    } catch (error) {
+      await this.rollbackPreparedImageAttachments(conversation.id, preparedImages, "ChatSendMessageFailed", error);
+      throw error;
+    }
     if (!created) {
       throw new Error("Message was not created.");
     }
     if (actor.runId) {
       this.appSendMessageCountsByRun.set(actor.runId, (this.appSendMessageCountsByRun.get(actor.runId) ?? 0) + 1);
+      if (preparedImages.totalBytes > 0) {
+        this.appSendMessageImageBytesByRun.set(
+          actor.runId,
+          (this.appSendMessageImageBytesByRun.get(actor.runId) ?? 0) + preparedImages.totalBytes
+        );
+      }
     }
     return {
       ok: true,
       messageId: created.id,
       sequence: created.sequence,
-      threadId: created.threadId
+      threadId: created.threadId,
+      ...(preparedImages.summaries.length > 0 ? { imageAttachments: preparedImages.summaries } : {})
     };
   }
 
@@ -5455,7 +5506,7 @@ export class ChatService {
       "App MCP tools: use the connected `accord_agents` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
       "Read-only chat MCP tools: `app_chat_get_context`, `app_chat_get_participants`, `app_chat_read_messages`, `app_chat_list_attachments`, and `app_chat_read_attachment`. Prefer them over history files for roster, thread, messages, and screenshots.",
       "Reaction MCP tool: `app_chat_react` adds or toggles an emoji reaction on a specific message. To react, call it with the message `id` from `app_chat_read_messages` and an allowed emoji.",
-      "Send-message MCP tool: `app_chat_send_message` posts immediately and returns its `messageId`. Use only for mid-turn visibility, e.g. a canonical resolution; normal replies use your turn response.",
+      "Send-message MCP tool: `app_chat_send_message` posts immediately and returns `messageId`; use only for mid-turn visibility, not normal replies. It can attach PNG/JPEG/WebP with `attachments: [{ \"kind\": \"image\", \"sourcePath\": \"path.png\" }]` from image paths inside the selected repository when repoRead is granted.",
       "If a message lists attached images, call `app_chat_read_attachment` with the attachment ID before reasoning about visual details.",
       "Participant request MCP tools: use `app_chat_request_participants` to ask participants; `app_chat_get_participant_request_status` recovers replies. JSON: `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
       "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
@@ -9793,6 +9844,7 @@ export class ChatService {
         cleanup: () => {
           this.chatRunMeta.delete(runId);
           this.appSendMessageCountsByRun.delete(runId);
+          this.appSendMessageImageBytesByRun.delete(runId);
         }
       };
     }
@@ -11653,6 +11705,7 @@ export class ChatService {
 
   private normalizeChatSendMessageRequest(raw: unknown): {
     content: string;
+    attachments: ChatToolImageAttachmentInput[];
     threadId?: string;
     parentMessageId?: string;
     chatThreadRootId?: string;
@@ -11665,9 +11718,13 @@ export class ChatService {
     // Preserve the exact submitted content (no trimming/normalization). The trimmed copy is
     // used only to reject empty/whitespace-only input. Over-limit content is rejected with an
     // explicit error, never silently shortened, so the canonical message keeps the exact text.
+    if (record.content !== undefined && record.content !== null && typeof record.content !== "string") {
+      throw new Error("Send-message content must be a string.");
+    }
     const content = typeof record.content === "string" ? record.content : "";
-    if (!content.trim()) {
-      throw new Error("Send-message request needs non-empty content.");
+    const attachments = this.normalizeChatSendMessageAttachments(record.attachments);
+    if (!content.trim() && attachments.length === 0) {
+      throw new Error("Send-message request needs non-empty content or at least one image attachment.");
     }
     if (content.length > CHAT_SEND_MESSAGE_MAX_CONTENT_LENGTH) {
       throw new Error(`Send-message content exceeds ${CHAT_SEND_MESSAGE_MAX_CONTENT_LENGTH} characters; it is rejected, not truncated.`);
@@ -11683,11 +11740,54 @@ export class ChatService {
     };
     return {
       content,
+      attachments,
       threadId: optionalId(record.threadId, "threadId"),
       parentMessageId: optionalId(record.parentMessageId, "parentMessageId"),
       chatThreadRootId: optionalId(record.chatThreadRootId, "chatThreadRootId"),
       accordResolution: this.normalizeAccordResolutionMetadata(record.accordResolution)
     };
+  }
+
+  private normalizeChatSendMessageAttachments(raw: unknown): ChatToolImageAttachmentInput[] {
+    if (raw === undefined || raw === null) {
+      return [];
+    }
+    if (!Array.isArray(raw)) {
+      throw new Error("Send-message attachments must be an array.");
+    }
+    if (raw.length > CHAT_IMAGE_MAX_ATTACHMENTS) {
+      throw new Error(`Too many images. Attach at most ${CHAT_IMAGE_MAX_ATTACHMENTS} images per message.`);
+    }
+    return raw.map((item, index): ChatToolImageAttachmentInput => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        throw new Error(`Send-message attachment ${index + 1} is invalid.`);
+      }
+      const record = item as Record<string, unknown>;
+      if (record.kind !== "image") {
+        throw new Error("UnsupportedAttachmentType. Problem: app_chat_send_message v1 accepts image attachments only. Cause: the attachment kind was not \"image\". Fix: pass { \"kind\": \"image\", \"sourcePath\": \"...\" }.");
+      }
+      if (typeof record.sourcePath !== "string") {
+        throw new Error("AttachmentImportDenied. Problem: image attachment sourcePath is required. Cause: the attachment did not include a file path. Fix: pass a sourcePath for an image file visible to this run.");
+      }
+      const sourcePath = record.sourcePath.trim();
+      if (!sourcePath || sourcePath.includes("\0")) {
+        throw new Error("AttachmentImportDenied. Problem: image attachment sourcePath is invalid. Cause: the path is empty or contains a NUL byte. Fix: pass a valid image file path.");
+      }
+      const filename = typeof record.filename === "string" && record.filename.trim()
+        ? record.filename.trim()
+        : undefined;
+      const mimeType = record.mimeType === undefined || record.mimeType === null
+        ? undefined
+        : (typeof record.mimeType === "string"
+            ? this.normalizeChatImageMimeType(record.mimeType)
+            : (() => { throw new Error("AttachmentImportDenied. Problem: image attachment mimeType must be a string. Cause: the supplied MIME type is invalid. Fix: omit mimeType or pass image/png, image/jpeg, or image/webp."); })());
+      return {
+        kind: "image",
+        sourcePath,
+        filename,
+        mimeType
+      };
+    });
   }
 
   private normalizeAccordResolutionMetadata(raw: unknown): ChatAccordResolutionMetadata | undefined {
@@ -12090,6 +12190,60 @@ export class ChatService {
     }
     const mimeType = this.normalizeChatImageMimeType(input.mimeType);
     const bytes = this.decodeImageInputBase64(input.dataBase64);
+    return this.persistChatImageAttachment(conversationId, {
+      bytes,
+      filename: input.filename,
+      mimeType,
+      providedMimeType: input.mimeType
+    }, index);
+  }
+
+  private async prepareToolImageAttachments(
+    conversation: Conversation,
+    actor: ChatAppMcpActor,
+    inputs: ChatToolImageAttachmentInput[]
+  ): Promise<PreparedToolImageAttachments> {
+    if (inputs.length === 0) {
+      return { attachments: [], writtenPaths: [], summaries: [], totalBytes: 0 };
+    }
+    const prepared: PreparedToolImageAttachments = { attachments: [], writtenPaths: [], summaries: [], totalBytes: 0 };
+    try {
+      for (let index = 0; index < inputs.length; index += 1) {
+        const input = inputs[index];
+        const source = await this.resolveChatAttachmentImportSource(conversation, actor, input.sourcePath);
+        const bytes = await this.readFileWithMaxBytes(source, CHAT_IMAGE_MAX_BYTES);
+        const persisted = await this.persistChatImageAttachment(conversation.id, {
+          bytes,
+          filename: input.filename ?? path.basename(source.realPath),
+          mimeType: input.mimeType,
+          providedMimeType: input.mimeType
+        }, index);
+        prepared.attachments.push(persisted.attachment);
+        prepared.writtenPaths.push(persisted.filePath);
+        prepared.totalBytes += persisted.attachment.sizeBytes;
+        prepared.summaries.push({
+          attachment: this.chatImageAttachmentForTool(persisted.attachment),
+          sourceRoot: source.root
+        });
+      }
+      return prepared;
+    } catch (error) {
+      await this.rollbackPreparedImageAttachments(conversation.id, prepared, "AttachmentImportFailed", error);
+      throw error;
+    }
+  }
+
+  private async persistChatImageAttachment(
+    conversationId: string,
+    input: {
+      bytes: Buffer;
+      filename?: string;
+      mimeType?: ChatImageMimeType;
+      providedMimeType?: string;
+    },
+    index: number
+  ): Promise<{ attachment: ChatImageAttachment; filePath: string }> {
+    const bytes = input.bytes;
     if (bytes.length === 0) {
       throw new Error("ImageDecodeFailed. Problem: image data is empty. Cause: the pasted or selected image did not produce bytes. Fix: paste or choose the image again.");
     }
@@ -12097,15 +12251,16 @@ export class ChatService {
       throw new Error(`ImageTooLarge. Problem: image ${index + 1} is ${this.formatBytes(bytes.length)}. Cause: v1 accepts images up to ${this.formatBytes(CHAT_IMAGE_MAX_BYTES)}. Fix: crop or compress the image and try again.`);
     }
     const detectedMimeType = this.detectChatImageMimeType(bytes);
-    if (!detectedMimeType || detectedMimeType !== mimeType) {
+    if (!detectedMimeType || (input.mimeType && detectedMimeType !== input.mimeType)) {
       void this.debugLogs.write("chat.attachments.validation-failed", {
         conversationId,
         reason: "mime-mismatch",
-        providedMimeType: input.mimeType,
+        providedMimeType: input.providedMimeType,
         detectedMimeType
       });
       throw new Error("UnsupportedImageType. Problem: image MIME type does not match the file bytes. Cause: the attachment is not a PNG, JPEG, or WebP image. Fix: paste or choose a PNG, JPEG, or WebP image.");
     }
+    const mimeType = detectedMimeType;
     const dimensions = this.chatImageDimensions(bytes, mimeType);
     if (!dimensions) {
       void this.debugLogs.write("chat.attachments.validation-failed", {
@@ -12155,6 +12310,187 @@ export class ChatService {
         createdAt: new Date().toISOString()
       }
     };
+  }
+
+  private async resolveChatAttachmentImportSource(
+    conversation: Conversation,
+    actor: ChatAppMcpActor,
+    sourcePath: string
+  ): Promise<ChatAttachmentImportSource> {
+    const runPermissions = actor.runPermissions
+      ? normalizeChatAgentPermissions(actor.runPermissions)
+      : undefined;
+    if (!runPermissions) {
+      throw new Error(
+        "AttachmentImportDenied. Problem: sourcePath import permission could not be verified for this participant run. Cause: the app MCP token does not include a run-scoped permission snapshot. Fix: retry in a new participant turn."
+      );
+    }
+    const allowedRoots = await this.chatAttachmentImportRoots(conversation, runPermissions);
+    if (allowedRoots.length === 0) {
+      throw new Error(
+        "AttachmentImportDenied. Problem: this participant run has no allowed image import roots. Cause: sourcePath imports require repoRead for selected-repository files. Fix: request repoRead or attach image content another way."
+      );
+    }
+
+    const candidatePath = path.isAbsolute(sourcePath)
+      ? path.resolve(sourcePath)
+      : conversation.repoPath && runPermissions.repoRead
+        ? path.resolve(conversation.repoPath, sourcePath)
+        : undefined;
+    if (!candidatePath) {
+      throw new Error(
+        "AttachmentImportDenied. Problem: relative sourcePath cannot be resolved. Cause: relative imports require repoRead and a selected repository. Fix: pass a repository-relative path in a repo-enabled chat."
+      );
+    }
+    const normalizedCandidatePath = path.resolve(candidatePath);
+    const lexicalRoot = allowedRoots.find((root) =>
+      this.isPathInside(root.rootPath, normalizedCandidatePath) ||
+      this.isPathInside(root.realPath, normalizedCandidatePath)
+    );
+    if (!lexicalRoot) {
+      void this.debugLogs.write("chat.attachments.import-denied", {
+        conversationId: conversation.id,
+        participantId: actor.participantId,
+        reason: "outside-allowed-roots"
+      });
+      throw new Error(
+        "AttachmentImportDenied. Problem: sourcePath is outside allowed roots for this run. Cause: sourcePath imports are limited to the selected repository when repoRead is granted. Fix: use an image file path inside the selected repository."
+      );
+    }
+
+    let linkInfo: Awaited<ReturnType<typeof lstat>>;
+    try {
+      linkInfo = await lstat(normalizedCandidatePath);
+    } catch (error) {
+      throw new Error(
+        `AttachmentImportDenied. Problem: sourcePath could not be inspected. Cause: ${error instanceof Error ? error.message : String(error)}. Fix: pass an existing image file path visible to this run.`
+      );
+    }
+    if (linkInfo.isSymbolicLink()) {
+      throw new Error(
+        "AttachmentImportDenied. Problem: sourcePath points to a symlink. Cause: importing through symlinks could escape allowed roots. Fix: pass the real image file path inside an allowed root."
+      );
+    }
+    if (linkInfo.isDirectory()) {
+      throw new Error(
+        "AttachmentImportDenied. Problem: sourcePath points to a directory. Cause: image attachments require a file path. Fix: pass a PNG, JPEG, or WebP file."
+      );
+    }
+    if (!linkInfo.isFile()) {
+      throw new Error(
+        "AttachmentImportDenied. Problem: sourcePath is not a regular file. Cause: app_chat_send_message can import regular image files only. Fix: pass a PNG, JPEG, or WebP file."
+      );
+    }
+    if (linkInfo.size > CHAT_IMAGE_MAX_BYTES) {
+      throw new Error(`ImageTooLarge. Problem: sourcePath is ${this.formatBytes(linkInfo.size)}. Cause: v1 accepts images up to ${this.formatBytes(CHAT_IMAGE_MAX_BYTES)}. Fix: crop or compress the image and try again.`);
+    }
+
+    let realFilePath: string;
+    try {
+      realFilePath = await realpath(normalizedCandidatePath);
+    } catch (error) {
+      throw new Error(
+        `AttachmentImportDenied. Problem: sourcePath could not be resolved. Cause: ${error instanceof Error ? error.message : String(error)}. Fix: pass an existing image file path visible to this run.`
+      );
+    }
+    const allowedRoot = allowedRoots.find((root) => this.isPathInside(root.realPath, realFilePath));
+    if (!allowedRoot) {
+      void this.debugLogs.write("chat.attachments.import-denied", {
+        conversationId: conversation.id,
+        participantId: actor.participantId,
+        reason: "outside-allowed-roots"
+      });
+      throw new Error(
+        "AttachmentImportDenied. Problem: sourcePath is outside allowed roots for this run. Cause: sourcePath imports are limited to the selected repository when repoRead is granted. Fix: use an image file path inside the selected repository."
+      );
+    }
+    const fileInfo = await stat(realFilePath);
+    if (!fileInfo.isFile()) {
+      throw new Error(
+        "AttachmentImportDenied. Problem: sourcePath is not a regular file after resolution. Cause: app_chat_send_message can import regular image files only. Fix: pass a PNG, JPEG, or WebP file."
+      );
+    }
+    if (fileInfo.size > CHAT_IMAGE_MAX_BYTES) {
+      throw new Error(`ImageTooLarge. Problem: sourcePath is ${this.formatBytes(fileInfo.size)}. Cause: v1 accepts images up to ${this.formatBytes(CHAT_IMAGE_MAX_BYTES)}. Fix: crop or compress the image and try again.`);
+    }
+    return { realPath: realFilePath, root: allowedRoot.root, dev: fileInfo.dev, ino: fileInfo.ino };
+  }
+
+  private async chatAttachmentImportRoots(
+    conversation: Conversation,
+    runPermissions: ChatAgentPermissions
+  ): Promise<Array<{ root: ChatAttachmentImportSourceRoot; rootPath: string; realPath: string }>> {
+    const roots: Array<{ root: ChatAttachmentImportSourceRoot; rootPath: string; realPath: string }> = [];
+    const addRoot = async (root: ChatAttachmentImportSourceRoot, rootPath: string | undefined): Promise<void> => {
+      if (!rootPath) {
+        return;
+      }
+      const normalizedRootPath = path.resolve(rootPath);
+      const realRoot = await realpath(rootPath).catch(() => undefined);
+      if (!realRoot || roots.some((item) => item.realPath === realRoot)) {
+        return;
+      }
+      roots.push({ root, rootPath: normalizedRootPath, realPath: realRoot });
+    };
+
+    if (runPermissions.repoRead && conversation.repoPath) {
+      await addRoot("repo", conversation.repoPath);
+    }
+    return roots;
+  }
+
+  private async readFileWithMaxBytes(source: ChatAttachmentImportSource, maxBytes: number): Promise<Buffer> {
+    const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+    let file: Awaited<ReturnType<typeof open>>;
+    try {
+      file = await open(source.realPath, fsConstants.O_RDONLY | noFollow);
+    } catch (error) {
+      throw new Error(
+        `AttachmentImportDenied. Problem: sourcePath could not be opened safely. Cause: ${error instanceof Error ? error.message : String(error)}. Fix: pass a stable regular image file inside the selected repository.`
+      );
+    }
+
+    try {
+      const fileInfo = await file.stat();
+      if (!fileInfo.isFile()) {
+        throw new Error(
+          "AttachmentImportDenied. Problem: sourcePath is not a regular file after opening. Cause: app_chat_send_message can import regular image files only. Fix: pass a PNG, JPEG, or WebP file."
+        );
+      }
+      if (fileInfo.dev !== source.dev || fileInfo.ino !== source.ino) {
+        throw new Error(
+          "AttachmentImportDenied. Problem: sourcePath changed during import. Cause: the validated file is not the same file that would be read. Fix: retry with a stable image file inside the selected repository."
+        );
+      }
+      if (fileInfo.size > maxBytes) {
+        throw new Error(`ImageTooLarge. Problem: sourcePath is ${this.formatBytes(fileInfo.size)}. Cause: v1 accepts images up to ${this.formatBytes(maxBytes)}. Fix: crop or compress the image and try again.`);
+      }
+
+      const chunks: Buffer[] = [];
+      const buffer = Buffer.allocUnsafe(64 * 1024);
+      let totalBytes = 0;
+      while (true) {
+        const { bytesRead } = await file.read(buffer, 0, buffer.length, null);
+        if (bytesRead === 0) {
+          break;
+        }
+        totalBytes += bytesRead;
+        if (totalBytes > maxBytes) {
+          throw new Error(`ImageTooLarge. Problem: sourcePath grew beyond ${this.formatBytes(maxBytes)} while reading. Cause: the image file changed during import. Fix: retry with a stable file under the image size limit.`);
+        }
+        chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+      }
+
+      const afterInfo = await file.stat();
+      if (afterInfo.dev !== source.dev || afterInfo.ino !== source.ino) {
+        throw new Error(
+          "AttachmentImportDenied. Problem: sourcePath changed during import. Cause: the validated file is not the same file that was read. Fix: retry with a stable image file inside the selected repository."
+        );
+      }
+      return Buffer.concat(chunks, totalBytes);
+    } finally {
+      await file.close().catch(() => undefined);
+    }
   }
 
   private async rollbackPreparedImageAttachments(
@@ -13408,6 +13744,7 @@ export class ChatService {
     }
     this.chatRunMeta.delete(runId);
     this.appSendMessageCountsByRun.delete(runId);
+    this.appSendMessageImageBytesByRun.delete(runId);
   }
 
   private unregisterRunController(runId: string, controller?: AbortController): boolean {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -56,6 +57,7 @@ import {
 } from "../../shared/processingTranscript";
 
 const NOW = "2026-05-17T12:00:00.000Z";
+const ONE_BY_ONE_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 
 const ROLE: ChatRoleConfig = {
   id: "engineer",
@@ -4350,6 +4352,314 @@ test("app_chat_send_message publishes a participant message and lets the author 
   });
   assert.equal(reacted.status, "added");
   assert.equal(storage.current.messages[1].metadata.reactions["✅"][0].actorLabel, "@codex");
+});
+
+test("app_chat_send_message imports image attachments and exposes them in the same run", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-send-image-"));
+  const repoPath = path.join(tempRoot, "repo");
+  const storageRoot = path.join(tempRoot, "storage");
+  await mkdir(path.join(repoPath, "assets"), { recursive: true });
+  const sourcePath = path.join(repoPath, "assets", "shot.png");
+  await writeFile(sourcePath, Buffer.from(ONE_BY_ONE_PNG_BASE64, "base64"));
+
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  conversation.repoPath = repoPath;
+  const { service, storage } = testService({ conversation });
+  (service as any).attachmentPath = (_conversationId: string, storageKey: string) => path.join(storageRoot, storageKey);
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: [],
+    snapshotMaxSequence: 0,
+    runId: "send-image-run-1",
+    runPermissions: normalizeChatAgentPermissions({
+      ...defaultChatAgentPermissions(),
+      repoRead: true
+    })
+  };
+
+  try {
+    const sent = await service.sendChatMessageFromTool(actor, {
+      content: "",
+      parentMessageId: "user-message",
+      attachments: [{
+        kind: "image",
+        sourcePath: "assets/shot.png",
+        filename: "qa-shot.png",
+        mimeType: "image/png"
+      }]
+    });
+
+    assert.equal(sent.ok, true);
+    assert.equal(sent.sequence, 1);
+    assert.equal(actor.snapshotMaxSequence, 1);
+    assert.equal((sent.imageAttachments as Array<{ sourceRoot: string }>)[0].sourceRoot, "repo");
+    const message = storage.current.messages[1];
+    const attachment = message.metadata.imageAttachments[0];
+    assert.equal(message.role, "participant");
+    assert.equal(message.content, "");
+    assert.equal(attachment.filename, "qa-shot.png");
+    assert.equal(attachment.mimeType, "image/png");
+    assert.equal(attachment.width, 1);
+    assert.equal(attachment.height, 1);
+    await stat(path.join(storageRoot, attachment.storageKey));
+
+    const listed = await service.listChatAttachmentsForTool(actor, { messageId: sent.messageId });
+    assert.deepEqual(
+      (listed.attachments as Array<{ attachment: { id: string } }>).map((item) => item.attachment.id),
+      [attachment.id]
+    );
+    const readBack = await service.readChatAttachmentForTool(actor, { attachmentId: attachment.id });
+    assert.equal(readBack.dataBase64, ONE_BY_ONE_PNG_BASE64);
+
+    const reacted = await service.reactToMessageFromTool(actor, {
+      messageId: sent.messageId as string,
+      emoji: "✅"
+    });
+    assert.equal(reacted.status, "added");
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("app_chat_send_message rejects unsafe image import sources", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-send-image-denied-"));
+  const repoPath = path.join(tempRoot, "repo");
+  const outsidePath = path.join(tempRoot, "outside.png");
+  const storageRoot = path.join(tempRoot, "storage");
+  await mkdir(path.join(repoPath, "assets"), { recursive: true });
+  await writeFile(path.join(repoPath, "assets", "not-image.txt"), "not an image", "utf8");
+  await writeFile(path.join(repoPath, "assets", "shot.png"), Buffer.from(ONE_BY_ONE_PNG_BASE64, "base64"));
+  await writeFile(outsidePath, Buffer.from(ONE_BY_ONE_PNG_BASE64, "base64"));
+  await symlink(outsidePath, path.join(repoPath, "assets", "outside-link.png"));
+
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  conversation.repoPath = repoPath;
+  const { service, storage } = testService({ conversation });
+  (service as any).attachmentPath = (_conversationId: string, storageKey: string) => path.join(storageRoot, storageKey);
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: [],
+    snapshotMaxSequence: 0,
+    runId: "send-image-denied-run",
+    runPermissions: normalizeChatAgentPermissions({
+      ...defaultChatAgentPermissions(),
+      repoRead: true
+    })
+  };
+
+  try {
+    await assert.rejects(
+      () => service.sendChatMessageFromTool(actor, {
+        content: "outside",
+        attachments: [{ kind: "image", sourcePath: outsidePath }]
+      }),
+      /outside allowed roots/
+    );
+    await assert.rejects(
+      () => service.sendChatMessageFromTool({
+        ...actor,
+        runId: "send-image-denied-temp-run",
+        runPermissions: normalizeChatAgentPermissions({
+          ...defaultChatAgentPermissions(),
+          repoRead: false,
+          workspaceWrite: true,
+          shell: { enabled: true, rules: [] }
+        })
+      }, {
+        content: "temp root",
+        attachments: [{ kind: "image", sourcePath: outsidePath }]
+      }),
+      /no allowed image import roots/
+    );
+    await assert.rejects(
+      () => service.sendChatMessageFromTool(actor, {
+        content: "symlink",
+        attachments: [{ kind: "image", sourcePath: "assets/outside-link.png" }]
+      }),
+      /symlink/
+    );
+    await assert.rejects(
+      () => service.sendChatMessageFromTool(actor, {
+        content: "directory",
+        attachments: [{ kind: "image", sourcePath: "assets" }]
+      }),
+      /directory/
+    );
+    await assert.rejects(
+      () => service.sendChatMessageFromTool(actor, {
+        content: "missing",
+        attachments: [{ kind: "image", sourcePath: "assets/missing.png" }]
+      }),
+      /could not be inspected/
+    );
+    await assert.rejects(
+      () => service.sendChatMessageFromTool(actor, {
+        content: "not image",
+        attachments: [{ kind: "image", sourcePath: "assets/not-image.txt" }]
+      }),
+      /UnsupportedImageType/
+    );
+    await assert.rejects(
+      () => service.sendChatMessageFromTool(actor, {
+        content: "mime mismatch",
+        attachments: [{ kind: "image", sourcePath: "assets/shot.png", mimeType: "image/jpeg" }]
+      }),
+      /UnsupportedImageType/
+    );
+
+    assert.equal(storage.current.messages.length, 1);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("app_chat_send_message pins imported image file identity while reading", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-send-image-identity-"));
+  const repoPath = path.join(tempRoot, "repo");
+  const sourcePath = path.join(repoPath, "shot.png");
+  const outsidePath = path.join(tempRoot, "outside.png");
+  await mkdir(repoPath, { recursive: true });
+  await writeFile(sourcePath, Buffer.from(ONE_BY_ONE_PNG_BASE64, "base64"));
+  await writeFile(outsidePath, Buffer.from(ONE_BY_ONE_PNG_BASE64, "base64"));
+
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  conversation.repoPath = repoPath;
+  const { service } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: [],
+    snapshotMaxSequence: 0,
+    runId: "send-image-identity-run",
+    runPermissions: normalizeChatAgentPermissions({
+      ...defaultChatAgentPermissions(),
+      repoRead: true
+    })
+  };
+  const serviceAny = service as any;
+
+  try {
+    const source = await serviceAny.resolveChatAttachmentImportSource(conversation, actor, "shot.png");
+    await assert.rejects(
+      () => serviceAny.readFileWithMaxBytes({ ...source, ino: source.ino + 1 }, 10 * 1024 * 1024),
+      /changed during import/
+    );
+
+    await rm(sourcePath, { force: true });
+    await symlink(outsidePath, sourcePath);
+    await assert.rejects(
+      () => serviceAny.readFileWithMaxBytes(source, 10 * 1024 * 1024),
+      /could not be opened safely|changed during import/
+    );
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("app_chat_send_message rolls back imported images on later validation failure", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-send-image-rollback-"));
+  const repoPath = path.join(tempRoot, "repo");
+  const storageRoot = path.join(tempRoot, "storage");
+  await mkdir(repoPath, { recursive: true });
+  await writeFile(path.join(repoPath, "shot.png"), Buffer.from(ONE_BY_ONE_PNG_BASE64, "base64"));
+
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  conversation.repoPath = repoPath;
+  const { service } = testService({ conversation });
+  (service as any).attachmentPath = (_conversationId: string, storageKey: string) => path.join(storageRoot, storageKey);
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: [],
+    snapshotMaxSequence: 0,
+    runId: "send-image-rollback-run",
+    runPermissions: normalizeChatAgentPermissions({
+      ...defaultChatAgentPermissions(),
+      repoRead: true
+    })
+  };
+
+  try {
+    await assert.rejects(
+      () => service.sendChatMessageFromTool(actor, {
+        content: "will fail",
+        threadId: "ghost-thread",
+        attachments: [{ kind: "image", sourcePath: "shot.png" }]
+      }),
+      /ChatSendMessageDenied/
+    );
+    const entries = await readdir(path.join(storageRoot, "attachments")).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    });
+    assert.deepEqual(entries, []);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("app_chat_send_message enforces a per-run imported image byte cap", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-send-image-cap-"));
+  const repoPath = path.join(tempRoot, "repo");
+  const storageRoot = path.join(tempRoot, "storage");
+  await mkdir(repoPath, { recursive: true });
+  await writeFile(path.join(repoPath, "shot.png"), Buffer.from(ONE_BY_ONE_PNG_BASE64, "base64"));
+
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  conversation.repoPath = repoPath;
+  const { service, storage } = testService({ conversation });
+  (service as any).attachmentPath = (_conversationId: string, storageKey: string) => path.join(storageRoot, storageKey);
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: [],
+    snapshotMaxSequence: 0,
+    runId: "send-image-cap-run",
+    runPermissions: normalizeChatAgentPermissions({
+      ...defaultChatAgentPermissions(),
+      repoRead: true
+    })
+  };
+  (service as any).appSendMessageImageBytesByRun.set(actor.runId, (5 * 10 * 1024 * 1024) - 1);
+
+  try {
+    await assert.rejects(
+      () => service.sendChatMessageFromTool(actor, {
+        content: "over cap",
+        attachments: [{ kind: "image", sourcePath: "shot.png" }]
+      }),
+      /too many image bytes/
+    );
+    assert.equal(storage.current.messages.length, 1);
+    const entries = await readdir(path.join(storageRoot, "attachments")).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    });
+    assert.deepEqual(entries, []);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test("app_chat_send_message preserves exact content and rejects (never truncates) over-limit content", async () => {

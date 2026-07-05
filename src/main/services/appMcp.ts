@@ -733,14 +733,45 @@ export class AppMcpService {
         name: APP_CHAT_SEND_MESSAGE_TOOL,
         title: "Send Chat Message",
         description:
-          "Post a participant message authored by you IMMEDIATELY, so other participants and User can see and react to it before your turn ends, and return its messageId and sequence. Use this ONLY when you need a message visible mid-turn — for example to publish something others will react to during this same turn (a canonical resolution) and you need its messageId now. Do NOT use this for an ordinary answer or reply: your normal turn response is already shared with everyone when your turn ends, so sending it with this tool just duplicates it and leaves your turn with nothing to say. The returned messageId can be passed to app_chat_react.",
+          "Post a participant message authored by you IMMEDIATELY, so other participants and User can see and react to it before your turn ends, and return its messageId and sequence. Use this ONLY when you need a message visible mid-turn — for example to publish something others will react to during this same turn (a canonical resolution) and you need its messageId now. Do NOT use this for an ordinary answer or reply: your normal turn response is already shared with everyone when your turn ends, so sending it with this tool just duplicates it and leaves your turn with nothing to say. The returned messageId can be passed to app_chat_react. Optional image attachments are imported from sourcePath files inside the selected repository when this run has repoRead; v1 accepts only PNG, JPEG, and WebP images.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
           properties: {
             content: {
               type: "string",
-              description: "Message content. Must be non-empty after trimming."
+              description: "Message content. Must be non-empty after trimming unless attachments contains at least one image."
+            },
+            attachments: {
+              type: "array",
+              minItems: 1,
+              maxItems: 5,
+              description: "Optional image attachments to import from files visible to this run. V1 accepts PNG, JPEG, and WebP only.",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  kind: {
+                    type: "string",
+                    enum: ["image"],
+                    description: "Attachment kind. V1 supports image only."
+                  },
+                  sourcePath: {
+                    type: "string",
+                    description: "Absolute or repository-relative path to an image file inside the selected repository."
+                  },
+                  filename: {
+                    type: "string",
+                    description: "Optional display filename. The app normalizes the filename and extension."
+                  },
+                  mimeType: {
+                    type: "string",
+                    enum: ["image/png", "image/jpeg", "image/webp"],
+                    description: "Optional expected MIME type. The app validates this against the image bytes."
+                  }
+                },
+                required: ["kind", "sourcePath"]
+              }
             },
             threadId: {
               type: "string",
@@ -767,8 +798,7 @@ export class AppMcpService {
                 status: { type: "string" }
               }
             }
-          },
-          required: ["content"]
+          }
         },
         annotations: {
           readOnlyHint: false,
