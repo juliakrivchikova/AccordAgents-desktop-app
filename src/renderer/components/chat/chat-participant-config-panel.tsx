@@ -13,12 +13,11 @@ import type {
   ProviderModelCatalog
 } from "../../../shared/types";
 import { Avatar } from "../avatar/avatar";
-import { AppSelect } from "../primitives";
 import { avatarForChatAvatarOption, avatarForChatParticipant, chatAvatarOptionsForKind, normalizedChatAvatarId } from "./chat-avatars";
-import { chatInheritedCliSettingLabel } from "./chat-participant-drafts";
+import { chatAgentModeLabel, chatInheritedCliSettingLabel } from "./chat-participant-drafts";
 
-const PARTICIPANT_REQUEST_PERMISSION_OPTIONS = [
-  { value: "ask", label: "Ask each time" },
+const PARTICIPANT_REQUEST_PERMISSION_OPTIONS: Array<{ value: ChatParticipantRequestPermission; label: string }> = [
+  { value: "ask", label: "Always ask approval" },
   { value: "allow", label: "Allow without approval" },
   { value: "deny", label: "Deny" }
 ];
@@ -283,55 +282,67 @@ export function ChatParticipantInlinePermissionsRow(props: {
   participant: ChatRosterChangeParticipantInput;
   onChange: (permissions: ChatAgentPermissions) => void;
 }): JSX.Element {
-  const [open, setOpen] = useState(false);
+  const mode = normalizeChatAgentMode(props.participant.agentMode);
   const permissions = normalizeChatAgentPermissions(props.participant.permissions);
-  const labels = participantPermissionSummaryLabels(props.participant);
-  const toggles: { key: string; label: string; checked: boolean; next: (value: boolean) => ChatAgentPermissions }[] = [
-    { key: "repoRead", label: "Read repo", checked: permissions.repoRead, next: (value) => ({ ...permissions, repoRead: value }) },
-    { key: "workspaceWrite", label: "Edit files", checked: permissions.workspaceWrite, next: (value) => ({ ...permissions, workspaceWrite: value }) },
-    { key: "webAccess", label: "Web access", checked: permissions.webAccess, next: (value) => ({ ...permissions, webAccess: value }) },
-    { key: "shell", label: "Run shell", checked: permissions.shell.enabled, next: (value) => ({ ...permissions, shell: { ...permissions.shell, enabled: value } }) }
+  const basePermissionsLocked = mode !== "default";
+  const lockedTitle = `${chatAgentModeLabel(mode)} manages runtime access. Switch to Custom access to edit these permissions.`;
+  const toggles: Array<{
+    key: string;
+    label: string;
+    checked: boolean;
+    next: (value: boolean) => ChatAgentPermissions;
+  }> = [
+    { key: "repoRead", label: "repo read", checked: permissions.repoRead, next: (value) => ({ ...permissions, repoRead: value }) },
+    { key: "workspaceWrite", label: "file editing", checked: permissions.workspaceWrite, next: (value) => ({ ...permissions, workspaceWrite: value }) },
+    { key: "webAccess", label: "web access", checked: permissions.webAccess, next: (value) => ({ ...permissions, webAccess: value }) },
+    { key: "shell", label: "shell access", checked: permissions.shell.enabled, next: (value) => ({ ...permissions, shell: { ...permissions.shell, enabled: value } }) }
   ];
   return (
     <ChatParticipantSpecRow label="Permissions">
-      <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger asChild>
-          <button type="button" className="chat-app-tool-inline-edit is-permissions" aria-label="Change permissions">
-            <span className="chat-app-tool-review-grants">
-              {labels.map((label) => (
-                <span className="chat-app-tool-roster-grant" key={label}>
-                  <ShieldCheck size={12} aria-hidden />
-                  {label}
-                </span>
-              ))}
-            </span>
-            <ChevronDown size={14} aria-hidden />
-          </button>
-        </PopoverTrigger>
-        <PopoverContent align="end" sideOffset={6} className="chat-app-tool-inline-menu">
-          {toggles.map((toggle) => (
-            <label className="chat-app-tool-inline-check" key={toggle.key}>
-              <input
-                type="checkbox"
-                checked={toggle.checked}
-                onChange={(event) => props.onChange(toggle.next(event.currentTarget.checked))}
-              />
-              <span>{toggle.label}</span>
-            </label>
-          ))}
-          <div className="chat-app-tool-inline-select">
-            <span>Request participants</span>
-            <AppSelect
-              value={permissions.requestParticipants}
-              placeholder="Request participants"
-              ariaLabel="Request participants permission"
-              options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
-              onValueChange={(value) => props.onChange({ ...permissions, requestParticipants: value as ChatParticipantRequestPermission })}
-            />
-          </div>
-        </PopoverContent>
-      </Popover>
+      <div className="chat-app-tool-permission-panel">
+        <div className="chat-app-tool-permission-pills" aria-label="Base permissions">
+          {toggles.map((toggle) => {
+            const className = [
+              "chat-app-tool-permission-pill",
+              !basePermissionsLocked && toggle.checked ? "is-selected" : "",
+              basePermissionsLocked ? "is-locked" : ""
+            ].filter(Boolean).join(" ");
+            return (
+              <button
+                type="button"
+                key={toggle.key}
+                className={className}
+                aria-pressed={basePermissionsLocked ? undefined : toggle.checked}
+                disabled={basePermissionsLocked}
+                title={basePermissionsLocked ? lockedTitle : undefined}
+                onClick={() => props.onChange(toggle.next(!toggle.checked))}
+              >
+                <ShieldCheck className="chat-app-tool-permission-pill-icon" size={12} aria-hidden />
+                {toggle.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </ChatParticipantSpecRow>
+  );
+}
+
+export function ChatParticipantInlineRequestParticipantsRow(props: {
+  participant: Pick<ChatRosterChangeParticipantInput, "permissions">;
+  onChange: (permissions: ChatAgentPermissions) => void;
+}): JSX.Element {
+  const permissions = normalizeChatAgentPermissions(props.participant.permissions);
+  const current = permissions.requestParticipants;
+  const value = PARTICIPANT_REQUEST_PERMISSION_OPTIONS.find((option) => option.value === current)?.label ?? "Always ask approval";
+  return (
+    <ChatParticipantInlineSelectRow
+      label="Request participants"
+      value={value}
+      current={current}
+      options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
+      onSelect={(requestParticipants) => props.onChange({ ...permissions, requestParticipants: requestParticipants as ChatParticipantRequestPermission })}
+    />
   );
 }
 

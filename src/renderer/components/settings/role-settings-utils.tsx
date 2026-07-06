@@ -1,10 +1,16 @@
-import type { ChatParticipantConfig, ChatRoleConfig } from "../../../shared/types";
+import type { ChatParticipantConfig, ChatRoleConfig, ChatRoleParticipantDefaults } from "../../../shared/types";
 
 export const CHAT_ROLE_LABEL_MAX_CHARS = 80;
 export const CHAT_ROLE_INSTRUCTIONS_MAX_CHARS = 40_000;
 
 export type RoleEditorState =
-  | { type: "new"; initialLabel?: string; initialDescription?: string; initialInstructions?: string }
+  | {
+      type: "new";
+      initialLabel?: string;
+      initialDescription?: string;
+      initialInstructions?: string;
+      initialParticipantDefaults?: ChatRoleParticipantDefaults;
+    }
   | { type: "edit"; roleId: string };
 
 export interface RoleInstructionParts {
@@ -122,5 +128,4 @@ export function slugFromRoleLabel(label: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "") || "custom-role";
 }
-
 

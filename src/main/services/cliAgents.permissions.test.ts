@@ -455,6 +455,31 @@ test("claude warm fallback rejoins mid-sentence assistant text items", () => {
   assert.equal((resolved[0] as { content: string }).content, "Current EUR/RUB is about 1 EUR = 89.88 RUB.");
 });
 
+test("claude warm rejects result events without response content", () => {
+  const runner = makeRunner() as any;
+  const resolved: unknown[] = [];
+  const rejected: Error[] = [];
+  const pending = makeClaudeWarmPendingTurn({
+    resolve: (result: unknown) => resolved.push(result),
+    reject: (error: Error) => rejected.push(error)
+  });
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const fail = (error: Error): never => { throw error; };
+
+  runner.handleClaudeWarmLine(
+    JSON.stringify({ type: "result" }),
+    participant,
+    {},
+    undefined,
+    pending,
+    () => pending,
+    fail
+  );
+
+  assert.equal(resolved.length, 0);
+  assert.equal(rejected[0]?.message, "Claude warm process completed without response content.");
+});
+
 function chatOptions(overrides: {
   agentMode: "default" | "plan" | "auto";
   workspaceWrite: boolean;

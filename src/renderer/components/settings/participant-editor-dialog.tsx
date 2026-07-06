@@ -3,13 +3,13 @@ import { Trash2, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import type { AgentHealth, AppSettings, ChatAgentMode, ChatParticipantConfig, ChatParticipantConfigUpdate, ChatProviderKind, ChatRosterChangeParticipantInput } from "../../../shared/types";
+import type { AgentHealth, AppSettings, ChatAgentMode, ChatParticipantConfigUpdate, ChatProviderKind, ChatRosterChangeParticipantInput } from "../../../shared/types";
 import { normalizeChatAgentMode } from "../../../shared/agentPermissions";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import { participantProviderLabel } from "../chat/chat-conversation-data";
-import { ChatParticipantAvatarField, ChatParticipantInlineModelRow, ChatParticipantInlinePermissionsRow, ChatParticipantInlineSelectRow, ChatParticipantSpecRow } from "../chat/chat-participant-config-panel";
+import { ChatParticipantAvatarField, ChatParticipantInlineModelRow, ChatParticipantInlinePermissionsRow, ChatParticipantInlineRequestParticipantsRow, ChatParticipantInlineSelectRow, ChatParticipantSpecRow } from "../chat/chat-participant-config-panel";
 import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
-import { CHAT_AGENT_MODE_OPTIONS, chatAgentModeLabel, chatCliProviderLabel, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
+import { CHAT_AGENT_MODE_OPTIONS, WORKFLOW_MANAGER_ROLE_ID, chatAgentModeLabel, chatCliProviderLabel, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
 import {
   ParticipantEditorHandleField,
@@ -19,6 +19,8 @@ import {
 } from "./participant-settings-utils";
 
 type ChatParticipantDraftPatch = Parameters<typeof updateChatParticipantDraft>[2];
+const AUTO_WATCH_GENERIC_DESCRIPTION = "Let this participant watch new chat messages and decide whether to act.";
+const AUTO_WATCH_MANAGER_DESCRIPTION = "Workflow Manager always watches new chat messages.";
 
 export function ParticipantEditorDialog(props: {
   editor?: ParticipantEditorState;
@@ -59,6 +61,7 @@ export function ParticipantEditorDialog(props: {
     ?? validateChatCliAgents([normalized], props.agents);
   const canSave = changed && !validation && !saving;
   const roleLabel = props.settings.chatRoleConfigs.find((role) => role.id === draft.roleConfigId)?.label ?? draft.roleConfigId;
+  const isWorkflowManager = draft.roleConfigId === WORKFLOW_MANAGER_ROLE_ID;
   // Hide archived (deleted) roles from the picker so no new references form, but keep the
   // participant's current role selectable so editing an existing binding never goes blank.
   const roleOptions = props.settings.chatRoleConfigs
@@ -113,7 +116,7 @@ export function ParticipantEditorDialog(props: {
     }
     setSaving(true);
     try {
-      await props.onSave({ id: participant?.id, ...normalized });
+      await props.onSave({ id: participant?.id, ...normalized, autoWatchEnabled: normalized.autoWatch });
       props.onClose();
     } finally {
       setSaving(false);
@@ -213,6 +216,19 @@ export function ParticipantEditorDialog(props: {
                 onChange={(permissions) => patchDraft({ permissions })}
               />
             )}
+            <ChatParticipantSpecRow label="Auto-watch">
+              <ParticipantEditorSwitch
+                label="Watch new chat activity"
+                description={isWorkflowManager ? AUTO_WATCH_MANAGER_DESCRIPTION : AUTO_WATCH_GENERIC_DESCRIPTION}
+                checked={draft.autoWatch}
+                disabled={isWorkflowManager}
+                onChange={(checked) => patchDraft({ autoWatch: checked })}
+              />
+            </ChatParticipantSpecRow>
+            <ChatParticipantInlineRequestParticipantsRow
+              participant={draftParticipant}
+              onChange={(permissions) => patchDraft({ permissions })}
+            />
           </div>
 
           {props.settings.chatBehaviorRules.length > 0 && (

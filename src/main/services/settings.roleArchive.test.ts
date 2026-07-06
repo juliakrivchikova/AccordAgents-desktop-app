@@ -6,6 +6,7 @@ import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
   CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT
 } from "../../shared/chatParticipantRequests";
+import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS } from "../../shared/cliAgentRunSettings";
 
@@ -41,6 +42,7 @@ function settingsServiceWith(
     settingsVersion: 1,
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
+    chatAutoWatchWakeLimit: CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
     chatParticipantRequestPromptMaxChars: CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
     chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
@@ -69,6 +71,7 @@ function settingsServiceWith(
   service.getPublicSettings = async (): Promise<AppSettings> => ({
     roundLimitDefault: stored.roundLimitDefault,
     cliAgentRunTimeoutMs: stored.cliAgentRunTimeoutMs,
+    chatAutoWatchWakeLimit: service.normalizeChatAutoWatchWakeLimit(stored.chatAutoWatchWakeLimit),
     chatParticipantRequestMaxDepth: stored.chatParticipantRequestMaxDepth,
     chatParticipantRequestPromptMaxChars: stored.chatParticipantRequestPromptMaxChars,
     chatPromptContext: service.normalizeChatPromptContextSettings(stored.chatPromptContext),
@@ -160,6 +163,71 @@ test("rejects editing an archived role", async () => {
     /Deleted role "Reviewer" cannot be edited/
   );
   assert.equal(writeCount(), 0);
+});
+
+test("custom role participant defaults are editable and preserved when omitted", async () => {
+  const { service, stored } = settingsServiceWith({ chatRoleConfigs: [makeRole()] });
+
+  await service.saveChatRoleConfig({
+    id: "custom-reviewer",
+    label: "Reviewer",
+    instructions: "Review things.",
+    participantDefaults: {
+      autoWatch: true,
+      requestParticipants: "allow"
+    }
+  });
+  let role = stored().chatRoleConfigs.find((item) => item.id === "custom-reviewer");
+  assert.deepEqual(role?.participantDefaults, {
+    autoWatch: true,
+    requestParticipants: "allow"
+  });
+
+  await service.saveChatRoleConfig({
+    id: "custom-reviewer",
+    label: "Reviewer",
+    instructions: "Review changed."
+  });
+  role = stored().chatRoleConfigs.find((item) => item.id === "custom-reviewer");
+  assert.deepEqual(role?.participantDefaults, {
+    autoWatch: true,
+    requestParticipants: "allow"
+  });
+
+  await service.saveChatRoleConfig({
+    id: "custom-reviewer",
+    label: "Reviewer",
+    instructions: "Review changed again.",
+    participantDefaults: undefined
+  });
+  role = stored().chatRoleConfigs.find((item) => item.id === "custom-reviewer");
+  assert.deepEqual(role?.participantDefaults, {
+    autoWatch: false,
+    requestParticipants: "ask"
+  });
+});
+
+test("Workflow Manager saved participant presets force auto-watch on", async () => {
+  const workflowManager = makeRole({
+    id: "workflow-manager",
+    label: "Workflow Manager",
+    builtIn: true,
+    participantDefaults: {
+      autoWatch: true,
+      requestParticipants: "allow"
+    }
+  });
+  const { service, stored } = settingsServiceWith({ chatRoleConfigs: [workflowManager] });
+
+  await service.saveChatParticipantConfig({
+    handle: "manager",
+    roleConfigId: workflowManager.id,
+    behaviorRuleIds: [],
+    kind: "codex-cli",
+    autoWatchEnabled: false
+  });
+
+  assert.equal(stored().chatParticipantConfigs[0]?.autoWatchEnabled, true);
 });
 
 test("rejects editing an archived role in a grouped role/participant write", async () => {

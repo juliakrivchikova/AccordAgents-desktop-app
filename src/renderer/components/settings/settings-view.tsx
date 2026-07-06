@@ -43,6 +43,7 @@ export function SettingsView(props: {
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
   setChatParticipantRequestPromptMaxChars: (maxChars: number) => Promise<void>;
+  setChatAutoWatchWakeLimit: (limit: number) => Promise<void>;
   setChatPromptContext: (settings: ChatPromptContextSettings) => Promise<void>;
   saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => Promise<void>;
   getAgentEnvironment: () => Promise<AgentEnvironmentSnapshot>;
@@ -142,12 +143,14 @@ export function SettingsView(props: {
             cliAgentRunTimeoutMs={props.settings.cliAgentRunTimeoutMs}
             chatParticipantRequestMaxDepth={props.settings.chatParticipantRequestMaxDepth}
             chatParticipantRequestPromptMaxChars={props.settings.chatParticipantRequestPromptMaxChars}
+            chatAutoWatchWakeLimit={props.settings.chatAutoWatchWakeLimit}
             chatPromptContext={props.settings.chatPromptContext}
             updateProvider={props.updateProvider}
             setRepoFileOpenPreference={props.setRepoFileOpenPreference}
             setCliAgentRunTimeoutMs={props.setCliAgentRunTimeoutMs}
             setChatParticipantRequestMaxDepth={props.setChatParticipantRequestMaxDepth}
             setChatParticipantRequestPromptMaxChars={props.setChatParticipantRequestPromptMaxChars}
+            setChatAutoWatchWakeLimit={props.setChatAutoWatchWakeLimit}
             setChatPromptContext={props.setChatPromptContext}
             cloudRuns={props.settings.cloudRuns}
             saveCloudRunsSettings={props.saveCloudRunsSettings}

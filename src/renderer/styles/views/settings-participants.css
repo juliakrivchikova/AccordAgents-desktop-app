@@ -823,6 +823,18 @@
   opacity: 0;
 }
 
+.participants-editor-toggle.is-disabled {
+  cursor: default;
+}
+
+.participants-editor-toggle.is-disabled .participants-editor-toggle-text {
+  opacity: 0.72;
+}
+
+.participants-editor-switch input:disabled {
+  cursor: default;
+}
+
 .participants-editor-switch span {
   position: absolute;
   inset: 0;
@@ -848,6 +860,20 @@
 .participants-editor-switch input:checked + span {
   border-color: var(--app-accent);
   background: var(--app-accent);
+}
+
+.participants-editor-switch input:checked:disabled + span {
+  border-color: var(--app-accent-border);
+  background: var(--app-accent-soft);
+}
+
+.participants-editor-switch input:checked:disabled + span::after {
+  background: color-mix(in srgb, var(--app-accent) 72%, var(--app-surface));
+}
+
+.participants-editor-switch input:disabled:not(:checked) + span {
+  border-color: var(--app-border);
+  background: var(--app-surface-muted);
 }
 
 .participants-editor-switch input:checked + span::after {

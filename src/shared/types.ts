@@ -212,6 +212,7 @@ export interface AppSettings {
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
   chatParticipantRequestPromptMaxChars: number;
+  chatAutoWatchWakeLimit: number;
   chatPromptContext: ChatPromptContextSettings;
   cloudRuns: CloudRunsSettings;
   providers: ProviderSettings[];
@@ -231,10 +232,16 @@ export interface ChatRoleConfig {
   version: number;
   builtIn?: boolean;
   appToolCapabilities?: ChatAppToolCapability[];
+  participantDefaults?: ChatRoleParticipantDefaults;
   updatedAt: string;
   // Soft-delete marker. Archived custom roles stay in settings so existing
   // participants keep resolving, but are hidden from the Roles list and pickers.
   archivedAt?: string;
+}
+
+export interface ChatRoleParticipantDefaults {
+  autoWatch?: boolean;
+  requestParticipants?: ChatParticipantRequestPermission;
 }
 
 export interface ChatBehaviorRuleConfig {
@@ -432,6 +439,7 @@ export interface ChatParticipant {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  autoWatch?: boolean;
 }
 
 export interface ChatParticipantSession {
@@ -500,6 +508,7 @@ export interface ChatRosterChangeParticipantInput {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  autoWatch?: boolean;
 }
 
 export interface ChatRosterChangeAddOperation {
@@ -521,6 +530,7 @@ export interface ChatRoleCreateOperation {
     label: string;
     instructions: string;
     appToolCapabilities?: ChatAppToolCapability[];
+    participantDefaults?: ChatRoleParticipantDefaults;
   };
 }
 
@@ -531,6 +541,7 @@ export interface ChatRoleEditOperation {
     label: string;
     instructions: string;
     appToolCapabilities?: ChatAppToolCapability[];
+    participantDefaults?: ChatRoleParticipantDefaults;
   };
 }
 
@@ -568,6 +579,7 @@ export interface ChatExistingParticipantOverrides {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  autoWatch?: boolean;
 }
 
 export interface ChatParticipantAddExistingOperation {
@@ -722,6 +734,7 @@ export interface ChatRosterCurrentParticipant {
   reasoningEffort?: ChatReasoningEffort;
   agentMode?: ChatAgentMode;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  autoWatch?: boolean;
 }
 
 export interface ChatRosterAvailableOptions {
@@ -851,6 +864,11 @@ export interface ChatMessageMetadata {
   processingTranscript?: ChatProcessingTranscript;
   remoteRunStatus?: ChatRemoteRunStatus;
   accordResolution?: ChatAccordResolutionMetadata;
+  autoWatchTrigger?: {
+    participantId: string;
+    reason: string;
+    messageIds: string[];
+  };
 }
 
 export type ChatRemoteRunPhase =
@@ -944,6 +962,7 @@ export interface ChatRoleConfigUpdate {
   label: string;
   instructions: string;
   appToolCapabilities?: ChatAppToolCapability[];
+  participantDefaults?: ChatRoleParticipantDefaults;
 }
 
 export interface ChatBehaviorRuleConfigUpdate {
@@ -971,6 +990,7 @@ export interface ChatParticipantConfig {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  autoWatchEnabled?: boolean;
   updatedAt: string;
 }
 
@@ -986,6 +1006,7 @@ export interface ChatParticipantConfigUpdate {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  autoWatchEnabled?: boolean;
 }
 
 export interface ChatParticipantInput {
@@ -1000,6 +1021,7 @@ export interface ChatParticipantInput {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  autoWatch?: boolean;
 }
 
 export interface CreateChatConversationRequest {
@@ -1022,6 +1044,7 @@ export interface UpdateChatParticipantRuntimeRequest {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  autoWatch?: boolean;
 }
 
 export interface RemoveChatParticipantRequest {
@@ -1454,10 +1477,22 @@ export interface ChatParticipantCompactionState {
   startedAt: string;
 }
 
+export type ChatParticipantWatcherPausedReason = "wake-limit" | "error";
+
+export interface ChatParticipantWatcherState {
+  lastSeenMessageId?: string;
+  lastRunId?: string;
+  lastTriggeredAt?: string;
+  wakeChainDepth: number;
+  pausedReason?: ChatParticipantWatcherPausedReason;
+  updatedAt: string;
+}
+
 export type ConversationMetadata = Record<string, unknown> & {
   lastMessageByParticipant?: ChatLastMessageByParticipant;
   participantCompactionsByParticipantId?: Record<string, ChatParticipantCompactionState>;
   promptContextPointers?: ChatPromptContextPointers;
+  participantWatchers?: Record<string, ChatParticipantWatcherState>;
 };
 
 export interface Conversation extends ConversationSummary {
@@ -1542,6 +1577,7 @@ export interface AppBridge {
   setCliAgentRunTimeoutMs(timeoutMs: number): Promise<AppSettings>;
   setChatParticipantRequestMaxDepth(maxDepth: number): Promise<AppSettings>;
   setChatParticipantRequestPromptMaxChars(maxChars: number): Promise<AppSettings>;
+  setChatAutoWatchWakeLimit(limit: number): Promise<AppSettings>;
   setChatPromptContext(settings: ChatPromptContextSettings): Promise<AppSettings>;
   saveCloudRunsSettings(update: CloudRunsSettingsUpdate): Promise<AppSettings>;
   testCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerTestResult>;

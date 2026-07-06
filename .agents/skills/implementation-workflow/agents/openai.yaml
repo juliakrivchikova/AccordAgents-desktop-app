@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implementation Workflow"
+  short_description: "Run a multi-agent delivery workflow"
+  default_prompt: "Use $implementation-workflow to coordinate a feature or bug implementation from plan through review."

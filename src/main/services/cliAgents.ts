@@ -2017,10 +2017,14 @@ export class CliAgentRunner {
       );
       const sessionId = this.extractClaudeSessionId(result.stdout) ?? newSessionId ?? options.sessionId;
       this.reportSessionId(options.onSessionId, sessionId);
+      const content = this.extractClaudeText(result.stdout).trim();
+      if (!content) {
+        throw new Error("Claude Code completed without response content.");
+      }
       return this.withAppMcpClientStatus({
         participant,
         ok: true,
-        content: this.extractClaudeText(result.stdout),
+        content,
         durationMs: Date.now() - startedAt,
         sessionId,
         roleRuntime: options.role && !options.sessionId ? "claude-agent" : undefined,
@@ -2392,6 +2396,10 @@ export class CliAgentRunner {
         ? this.finalTextFromMessageItems(current.messages)
         : this.trailingTextBlock(current.streamedText)
     );
+    if (!content.trim()) {
+      current.reject(new Error("Claude warm process completed without response content."));
+      return;
+    }
     const sessionId = this.findSessionId(event) ?? current.sessionId ?? fallbackSessionId;
     this.reportSessionId(current.onSessionId, sessionId);
     const contextUsage = buildAgentContextUsage({

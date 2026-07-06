@@ -25,6 +25,7 @@ import type {
   ChatProviderKind,
   ChatRoleChangeOperation,
   ChatRoleConfig,
+  ChatRoleParticipantDefaults,
   ChatRoleConfigUpdate,
   ManualAgentEnvironmentVariable,
   ProviderSettings,
@@ -37,12 +38,13 @@ import {
   filterAllowedAgentEnvironment,
   normalizeAgentEnvironmentKey
 } from "../../shared/agentEnvironment";
-import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { normalizeChatAgentMode, normalizeChatAgentPermissions, normalizeChatParticipantRequestPermission } from "../../shared/agentPermissions";
 import { normalizeChatAppToolCapabilities } from "../../shared/appTools";
 import {
   normalizeChatParticipantRequestMaxDepth,
   normalizeChatParticipantRequestPromptMaxChars
 } from "../../shared/chatParticipantRequests";
+import { normalizeChatAutoWatchWakeLimit } from "../../shared/chatAutoWatch";
 import { normalizeChatPromptContextSettings } from "../../shared/chatPromptContext";
 import { normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
 import {
@@ -87,6 +89,7 @@ interface StoredSettings {
   cliAgentRunTimeoutMs?: number;
   chatParticipantRequestMaxDepth?: number;
   chatParticipantRequestPromptMaxChars?: number;
+  chatAutoWatchWakeLimit?: number;
   chatPromptContext?: ChatPromptContextSettings;
   cloudRuns?: CloudRunsSettings;
   cloudRunsMode?: CloudRunWorkerMode;
@@ -125,6 +128,11 @@ const CHAT_HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 const CHAT_ROLE_LABEL_MAX_CHARS = 80;
 const CHAT_ROLE_INSTRUCTIONS_MAX_CHARS = 40_000;
 const GENERIC_PARTICIPANT_ROLE_ID = "generic-participant";
+const WORKFLOW_MANAGER_ROLE_ID = "workflow-manager";
+const DEFAULT_ROLE_PARTICIPANT_DEFAULTS: ChatRoleParticipantDefaults = {
+  autoWatch: false,
+  requestParticipants: "ask"
+};
 const SEEDABLE_CHAT_PROVIDER_KINDS: ChatProviderKind[] = ["codex-cli", "claude-code"];
 
 const DEFAULT_ADMINISTRATOR_INSTRUCTIONS = [
@@ -1457,6 +1465,44 @@ const DEFAULT_CODE_REVIEWER_INSTRUCTIONS = [
   "- If no issues are found, say so and name remaining test gaps or residual risk.",
 ].join("\n");
 
+const DEFAULT_WORKFLOW_MANAGER_INSTRUCTIONS = [
+  "---",
+  "name: workflow-manager",
+  "description: Coordinates multi-agent workflows by watching chat activity, deciding when to wait, and assigning next steps.",
+  "---",
+  "",
+  "You are a Workflow Manager. Your job is to coordinate a user-defined workflow in this chat.",
+  "",
+  "## Implementation Workflow",
+  "",
+  "- When User asks to implement, fix, build, polish, release, merge, or QA a feature or bug, use the `implementation-workflow` skill.",
+  "- Follow that skill's stages exactly. Do not skip the requirement confirmation, final-step confirmation, independent Drew/Taylor planning, accord, implementation, reviews, fixes, final review, and final delivery stages.",
+  "- Do not jump directly to implementation or ask only one participant unless the skill stage or User explicitly says to do that.",
+  "- For long-running delegated stages, write the plain `@handle` assignment requested by the skill and then stop. Use participant requests only for bounded waits.",
+  "",
+  "## Core Responsibilities",
+  "",
+  "1. Track the active workflow objective from User instructions and the latest participant outputs.",
+  "2. Decide whether to wait, ask another participant, request accord, summarize status, mark blocked, or mark complete.",
+  "3. Use participant requests only when another participant has a concrete assignment.",
+  "4. Keep assignments specific: say who should do what, what artifact or answer is expected, and what should happen next.",
+  "5. Pause instead of improvising when User has not provided a concrete workflow objective.",
+  "",
+  "## Auto-Watch Behavior",
+  "",
+  "- You may be auto-run when new chat activity appears.",
+  "- Treat auto-watch triggers as checkpoints, not commands to always act.",
+  "- If the new messages do not require a next workflow action, say briefly that you are waiting.",
+  "- Do not create loops. Do not ask participants for work unless their prior assignment is done or User changed direction.",
+  "- If you are blocked on User input, say exactly what User needs to decide.",
+  "",
+  "## Output Style",
+  "",
+  "- Be concise and operational.",
+  "- Prefer short status plus the next concrete assignment.",
+  "- Do not restate the whole workflow unless User asks.",
+].join("\n");
+
 const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
   {
     id: "administrator",
@@ -1464,7 +1510,7 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
     instructions: DEFAULT_ADMINISTRATOR_INSTRUCTIONS,
     version: 11,
     builtIn: true,
-    appToolCapabilities: ["participants.manage"],
+    appToolCapabilities: ["participants.manage"] satisfies ChatAppToolCapability[],
     updatedAt: "2026-06-23T00:00:00.000Z"
   },
   {
@@ -1618,8 +1664,23 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
     version: 1,
     builtIn: true,
     updatedAt: "2026-05-10T00:00:00.000Z"
+  },
+  {
+    id: WORKFLOW_MANAGER_ROLE_ID,
+    label: "Workflow Manager",
+    instructions: DEFAULT_WORKFLOW_MANAGER_INSTRUCTIONS,
+    version: 3,
+    builtIn: true,
+    participantDefaults: {
+      autoWatch: true,
+      requestParticipants: "allow"
+    } satisfies ChatRoleParticipantDefaults,
+    updatedAt: "2026-07-05T18:35:00.000Z"
   }
-];
+].map((role) => ({
+  participantDefaults: { ...DEFAULT_ROLE_PARTICIPANT_DEFAULTS },
+  ...role
+}));
 
 export class SettingsService {
   private readonly settingsPath: string;
@@ -1635,6 +1696,7 @@ export class SettingsService {
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
       chatParticipantRequestPromptMaxChars: this.normalizeChatParticipantRequestPromptMaxChars(stored.chatParticipantRequestPromptMaxChars),
+      chatAutoWatchWakeLimit: this.normalizeChatAutoWatchWakeLimit(stored.chatAutoWatchWakeLimit),
       chatPromptContext: this.normalizeChatPromptContextSettings(stored.chatPromptContext),
       cloudRuns: this.normalizeCloudRunsSettings(stored),
       lastRepoPath: stored.lastRepoPath,
@@ -1691,6 +1753,8 @@ export class SettingsService {
     const roles = stored.chatRoleConfigs ?? DEFAULT_CHAT_ROLES;
     const now = new Date().toISOString();
     const existing = update.id ? roles.find((role) => role.id === update.id) : undefined;
+    const participantDefaultsProvided = Object.prototype.hasOwnProperty.call(update, "participantDefaults");
+    const participantDefaults = this.normalizeRoleParticipantDefaultsForRole(existing?.id ?? "", update.participantDefaults);
     if (existing) {
       if (existing.archivedAt) {
         throw new Error(`Deleted role "${existing.label}" cannot be edited.`);
@@ -1704,6 +1768,9 @@ export class SettingsService {
               appToolCapabilities: update.appToolCapabilities === undefined
                 ? role.appToolCapabilities
                 : normalizeChatAppToolCapabilities(update.appToolCapabilities),
+              participantDefaults: participantDefaultsProvided
+                ? this.normalizeRoleParticipantDefaultsForRole(role.id, participantDefaults)
+                : this.normalizeRoleParticipantDefaultsForRole(role.id, role.participantDefaults),
               version: role.version + 1,
               updatedAt: now
             }
@@ -1726,6 +1793,7 @@ export class SettingsService {
           version: 1,
           builtIn: false,
           appToolCapabilities: normalizeChatAppToolCapabilities(update.appToolCapabilities),
+          participantDefaults: this.normalizeRoleParticipantDefaultsForRole(id, participantDefaults),
           updatedAt: now
         }
       ];
@@ -1788,6 +1856,8 @@ export class SettingsService {
       }
       const label = operation.role.label.trim();
       const instructions = operation.role.instructions.trim();
+      const participantDefaultsProvided = Object.prototype.hasOwnProperty.call(operation.role, "participantDefaults");
+      const participantDefaults = this.normalizeRoleParticipantDefaults(operation.role.participantDefaults);
       if (!label) {
         throw new Error("Role label is required.");
       }
@@ -1821,6 +1891,9 @@ export class SettingsService {
                 appToolCapabilities: operation.role.appToolCapabilities === undefined
                   ? role.appToolCapabilities
                   : normalizeChatAppToolCapabilities(operation.role.appToolCapabilities),
+                participantDefaults: participantDefaultsProvided
+                  ? this.normalizeRoleParticipantDefaultsForRole(role.id, participantDefaults)
+                  : this.normalizeRoleParticipantDefaultsForRole(role.id, role.participantDefaults),
                 version: role.version + 1,
                 updatedAt: now
               }
@@ -1840,6 +1913,7 @@ export class SettingsService {
             version: 1,
             builtIn: false,
             appToolCapabilities: normalizeChatAppToolCapabilities(operation.role.appToolCapabilities),
+            participantDefaults: this.normalizeRoleParticipantDefaultsForRole(id, participantDefaults),
             updatedAt: now
           }
         ];
@@ -1885,6 +1959,7 @@ export class SettingsService {
         agentMode: normalizeChatAgentMode(update.agentMode),
         permissions: normalizeChatAgentPermissions(update.permissions),
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
+        autoWatchEnabled: this.autoWatchEnabledForRole(role, update.autoWatchEnabled),
         updatedAt: now
       };
       participants = participants.some((participant) => participant.id === nextParticipant.id)
@@ -2086,6 +2161,7 @@ export class SettingsService {
       agentMode: normalizeChatAgentMode(update.agentMode),
       permissions: normalizeChatAgentPermissions(update.permissions),
       remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
+      autoWatchEnabled: this.autoWatchEnabledForRole(role, update.autoWatchEnabled),
       updatedAt: now
     };
     stored.chatParticipantConfigs = participants.some((participant) => participant.id === nextParticipant.id)
@@ -2248,6 +2324,13 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  async setChatAutoWatchWakeLimit(limit: number): Promise<AppSettings> {
+    const stored = await this.readStored();
+    stored.chatAutoWatchWakeLimit = this.normalizeChatAutoWatchWakeLimit(limit);
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
   async setChatPromptContext(settings: ChatPromptContextSettings): Promise<AppSettings> {
     const stored = await this.readStored();
     stored.chatPromptContext = this.normalizeChatPromptContextSettings(settings);
@@ -2394,12 +2477,14 @@ export class SettingsService {
         model: typeof existing?.model === "string" ? existing.model.trim() || fallback.model : fallback.model
       };
     });
+    const chatRoleConfigs = this.mergeDefaultRoles(settings.chatRoleConfigs);
     return {
       settingsVersion: 1,
       roundLimitDefault: this.defaultRoundLimit(settings),
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(settings.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(settings.chatParticipantRequestMaxDepth),
       chatParticipantRequestPromptMaxChars: this.normalizeChatParticipantRequestPromptMaxChars(settings.chatParticipantRequestPromptMaxChars),
+      chatAutoWatchWakeLimit: this.normalizeChatAutoWatchWakeLimit(settings.chatAutoWatchWakeLimit),
       chatPromptContext: this.normalizeChatPromptContextSettings(settings.chatPromptContext),
       cloudRuns: this.normalizeCloudRunsSettings(settings),
       cloudRunsMode: settings.cloudRunsMode === "aws" ? "aws" : "ssh",
@@ -2412,10 +2497,10 @@ export class SettingsService {
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
       repoFileOpenAction: this.normalizeRepoFileOpenAction(settings.repoFileOpenAction),
       providers,
-      chatRoleConfigs: this.mergeDefaultRoles(settings.chatRoleConfigs),
+      chatRoleConfigs,
       chatBehaviorRules: this.normalizeBehaviorRules(settings.chatBehaviorRules),
       chatSavedPrompts: this.normalizeSavedPrompts(settings.chatSavedPrompts),
-      chatParticipantConfigs: this.normalizeParticipantConfigs(settings.chatParticipantConfigs),
+      chatParticipantConfigs: this.normalizeParticipantConfigs(settings.chatParticipantConfigs, chatRoleConfigs),
       chatParticipantSeedState: this.normalizeSeedState(settings.chatParticipantSeedState)
     };
   }
@@ -2444,8 +2529,39 @@ export class SettingsService {
       .filter((role) => role.id.trim() && role.label.trim() && role.instructions.trim())
       .map((role) => ({
         ...role,
-        appToolCapabilities: normalizeChatAppToolCapabilities(role.appToolCapabilities)
+        appToolCapabilities: normalizeChatAppToolCapabilities(role.appToolCapabilities),
+        participantDefaults: this.normalizeRoleParticipantDefaultsForRole(role.id, role.participantDefaults)
       }));
+  }
+
+  private normalizeRoleParticipantDefaults(value: unknown): ChatRoleParticipantDefaults | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return {
+        autoWatch: false,
+        requestParticipants: "ask"
+      };
+    }
+    const record = value as Partial<ChatRoleParticipantDefaults>;
+    const requestParticipants = normalizeChatParticipantRequestPermission(record.requestParticipants);
+    return {
+      autoWatch: record.autoWatch === true,
+      requestParticipants
+    };
+  }
+
+  private normalizeRoleParticipantDefaultsForRole(roleId: string, value: unknown): ChatRoleParticipantDefaults {
+    const normalized = this.normalizeRoleParticipantDefaults(value) ?? { ...DEFAULT_ROLE_PARTICIPANT_DEFAULTS };
+    return roleId === WORKFLOW_MANAGER_ROLE_ID
+      ? {
+          ...normalized,
+          autoWatch: true,
+          requestParticipants: "allow"
+        }
+      : normalized;
+  }
+
+  private autoWatchEnabledForRole(role: Pick<ChatRoleConfig, "id">, value: unknown): boolean {
+    return role.id === WORKFLOW_MANAGER_ROLE_ID || value === true;
   }
 
   private normalizeRepoFileOpenAction(action: unknown): RepoFileOpenAction | undefined {
@@ -2696,8 +2812,9 @@ export class SettingsService {
       }));
   }
 
-  private normalizeParticipantConfigs(participants: ChatParticipantConfig[] | undefined): ChatParticipantConfig[] {
+  private normalizeParticipantConfigs(participants: ChatParticipantConfig[] | undefined, roles: ChatRoleConfig[]): ChatParticipantConfig[] {
     const seenHandles = new Set<string>();
+    const roleById = new Map(roles.map((role) => [role.id, role]));
     return (Array.isArray(participants) ? participants : [])
       .filter((participant): participant is ChatParticipantConfig => {
         const handle = typeof participant.handle === "string" ? participant.handle.trim().replace(/^@/, "") : "";
@@ -2721,6 +2838,10 @@ export class SettingsService {
         agentMode: normalizeChatAgentMode((participant as { agentMode?: ChatAgentMode }).agentMode),
         permissions: normalizeChatAgentPermissions((participant as { permissions?: ChatAgentPermissions }).permissions),
         remoteExecution: this.normalizeRemoteExecutionMode((participant as { remoteExecution?: unknown }).remoteExecution),
+        autoWatchEnabled: this.autoWatchEnabledForRole(
+          roleById.get(participant.roleConfigId) ?? { id: participant.roleConfigId },
+          (participant as { autoWatchEnabled?: unknown }).autoWatchEnabled
+        ),
         updatedAt: participant.updatedAt || new Date().toISOString()
       }));
   }
@@ -2878,6 +2999,10 @@ export class SettingsService {
 
   private normalizeChatParticipantRequestPromptMaxChars(value: unknown): number {
     return normalizeChatParticipantRequestPromptMaxChars(value);
+  }
+
+  private normalizeChatAutoWatchWakeLimit(value: unknown): number {
+    return normalizeChatAutoWatchWakeLimit(value);
   }
 
   private normalizeChatPromptContextSettings(value: unknown): ChatPromptContextSettings {

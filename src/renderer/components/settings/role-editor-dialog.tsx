@@ -4,10 +4,12 @@ import { Eye, LockKeyhole, Pencil, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import type { ChatRoleConfig, ChatRoleConfigUpdate } from "../../../shared/types";
-import { ResizableTextarea } from "../primitives";
+import type { ChatParticipantRequestPermission, ChatRoleConfig, ChatRoleConfigUpdate, ChatRoleParticipantDefaults } from "../../../shared/types";
+import { AppSelect, ResizableTextarea } from "../primitives";
+import { ChatParticipantSpecRow } from "../chat/chat-participant-config-panel";
 import { MarkdownText } from "../content/markdown-text";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
+import { ParticipantEditorSwitch } from "./participant-settings-utils";
 import {
   CHAT_ROLE_INSTRUCTIONS_MAX_CHARS,
   CHAT_ROLE_LABEL_MAX_CHARS,
@@ -18,6 +20,44 @@ import {
   slugFromRoleLabel,
   type RoleEditorState
 } from "./role-settings-utils";
+import { WORKFLOW_MANAGER_ROLE_ID } from "../chat/chat-participant-drafts";
+
+const ROLE_REQUEST_PARTICIPANTS_OPTIONS: Array<{ value: ChatParticipantRequestPermission; label: string }> = [
+  { value: "ask", label: "Always ask approval" },
+  { value: "allow", label: "Allow without approval" },
+  { value: "deny", label: "Deny" }
+];
+
+function roleParticipantDefaultsForDisplay(
+  defaults: ChatRoleParticipantDefaults | undefined,
+  roleId: string | undefined
+): ChatRoleParticipantDefaults {
+  if (roleId === WORKFLOW_MANAGER_ROLE_ID) {
+    return {
+      autoWatch: true,
+      requestParticipants: "allow"
+    };
+  }
+  return {
+    autoWatch: defaults?.autoWatch === true,
+    requestParticipants: defaults?.requestParticipants ?? "ask"
+  };
+}
+
+function roleParticipantDefaultsForSave(defaults: ChatRoleParticipantDefaults): ChatRoleParticipantDefaults {
+  return {
+    autoWatch: defaults.autoWatch === true,
+    requestParticipants: defaults.requestParticipants ?? "ask"
+  };
+}
+
+function roleParticipantDefaultsEqual(left: ChatRoleParticipantDefaults, right: ChatRoleParticipantDefaults): boolean {
+  return left.autoWatch === right.autoWatch && left.requestParticipants === right.requestParticipants;
+}
+
+function requestParticipantsLabel(value: ChatParticipantRequestPermission | undefined): string {
+  return ROLE_REQUEST_PARTICIPANTS_OPTIONS.find((option) => option.value === value)?.label ?? "Always ask approval";
+}
 
 export function ChatRoleEditorDialog(props: {
   editor?: RoleEditorState;
@@ -35,11 +75,15 @@ export function ChatRoleEditorDialog(props: {
   const initialLabel = props.editor?.type === "new" ? props.editor.initialLabel ?? "" : role?.label ?? "";
   const initialDescription = props.editor?.type === "new" ? props.editor.initialDescription ?? "" : roleParts.description;
   const initialInstructions = props.editor?.type === "new" ? props.editor.initialInstructions ?? "" : roleParts.body;
+  const initialParticipantDefaults = props.editor?.type === "new"
+    ? roleParticipantDefaultsForDisplay(props.editor.initialParticipantDefaults, undefined)
+    : roleParticipantDefaultsForDisplay(role?.participantDefaults, role?.id);
   const readOnly = props.editor?.type === "edit" && Boolean(role?.builtIn);
   const initialPreview = props.editor?.type === "edit";
   const [label, setLabel] = useState(initialLabel);
   const [description, setDescription] = useState(initialDescription);
   const [instructions, setInstructions] = useState(initialInstructions);
+  const [participantDefaults, setParticipantDefaults] = useState<ChatRoleParticipantDefaults>(initialParticipantDefaults);
   const [preview, setPreview] = useState(initialPreview);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -52,11 +96,20 @@ export function ChatRoleEditorDialog(props: {
     setLabel(initialLabel);
     setDescription(initialDescription);
     setInstructions(initialInstructions);
+    setParticipantDefaults(initialParticipantDefaults);
     setPreview(initialPreview);
     setSaving(false);
     setDeleting(false);
     setDeleteConfirmOpen(false);
-  }, [initialDescription, initialInstructions, initialLabel, initialPreview, open]);
+  }, [
+    initialDescription,
+    initialInstructions,
+    initialLabel,
+    initialParticipantDefaults.autoWatch,
+    initialParticipantDefaults.requestParticipants,
+    initialPreview,
+    open
+  ]);
 
   const trimmedLabel = label.trim();
   const trimmedDescription = description.trim();
@@ -73,11 +126,17 @@ export function ChatRoleEditorDialog(props: {
       ? `Role instructions must be ${CHAT_ROLE_INSTRUCTIONS_MAX_CHARS.toLocaleString()} characters or less.`
       : undefined;
   const changed = props.editor?.type === "new"
-    ? Boolean(trimmedLabel || trimmedDescription || trimmedInstructions)
-    : Boolean(role && (trimmedLabel !== role.label || trimmedDescription !== roleParts.description || trimmedInstructions !== roleParts.body));
+    ? Boolean(trimmedLabel || trimmedDescription || trimmedInstructions || !roleParticipantDefaultsEqual(participantDefaults, initialParticipantDefaults))
+    : Boolean(role && (
+      trimmedLabel !== role.label ||
+      trimmedDescription !== roleParts.description ||
+      trimmedInstructions !== roleParts.body ||
+      !roleParticipantDefaultsEqual(participantDefaults, initialParticipantDefaults)
+    ));
   const canSave = !readOnly && !saving && Boolean(trimmedLabel && trimmedInstructions) && !validation && changed;
   const wordCount = roleWordCount(instructions);
   const title = props.editor?.type === "new" ? trimmedLabel || "New role" : role?.label ?? "Role";
+  const readOnlyDefaults = roleParticipantDefaultsForDisplay(role?.participantDefaults, props.editor?.type === "new" ? undefined : role?.id);
 
   async function save(): Promise<void> {
     if (!canSave) {
@@ -88,7 +147,8 @@ export function ChatRoleEditorDialog(props: {
       await props.onSave({
         id: props.editor?.type === "edit" ? role?.id : undefined,
         label: trimmedLabel,
-        instructions: composedInstructions
+        instructions: composedInstructions,
+        participantDefaults: roleParticipantDefaultsForSave(participantDefaults)
       });
       props.onClose();
     } finally {
@@ -175,6 +235,54 @@ export function ChatRoleEditorDialog(props: {
             placeholder="A short summary of what this role is for..."
             onChange={(event) => setDescription(event.target.value)}
           />
+
+          <section className="roles-default-settings" aria-label="Default participant settings">
+            <span className="roles-default-settings-title">Default participant settings</span>
+            {readOnly ? (
+                <div className="chat-app-tool-review-spec roles-default-settings-table">
+                  <ChatParticipantSpecRow label="Auto-watch">
+                    <ParticipantEditorSwitch
+                      className="roles-default-settings-toggle"
+                      label="Default for new participants"
+                      description="Watch new chat messages and decide whether to act."
+                      checked={readOnlyDefaults.autoWatch === true}
+                      disabled
+                      onChange={() => {}}
+                    />
+                  </ChatParticipantSpecRow>
+                  <ChatParticipantSpecRow label="Request participants">
+                    <strong>{requestParticipantsLabel(readOnlyDefaults.requestParticipants)}</strong>
+                  </ChatParticipantSpecRow>
+              </div>
+            ) : (
+              <div className="chat-app-tool-review-spec roles-default-settings-table">
+                <ChatParticipantSpecRow label="Auto-watch">
+                  <ParticipantEditorSwitch
+                    className="roles-default-settings-toggle"
+                    label="Default for new participants"
+                    description="Watch new chat messages and decide whether to act."
+                    checked={participantDefaults.autoWatch === true}
+                    onChange={(checked) => setParticipantDefaults((current) => ({ ...current, autoWatch: checked }))}
+                  />
+                </ChatParticipantSpecRow>
+                <ChatParticipantSpecRow label="Request participants">
+                  <div className="roles-default-settings-select">
+                    <AppSelect
+                      value={participantDefaults.requestParticipants ?? "ask"}
+                      options={ROLE_REQUEST_PARTICIPANTS_OPTIONS}
+                      placeholder="Request participants"
+                      ariaLabel="Default request participants permission"
+                      testId="settings-role-default-request-participants"
+                      onValueChange={(value) => setParticipantDefaults((current) => ({
+                        ...current,
+                        requestParticipants: value as ChatParticipantRequestPermission
+                      }))}
+                    />
+                  </div>
+                </ChatParticipantSpecRow>
+              </div>
+            )}
+          </section>
 
           <div className="roles-instructions-head">
             <label className="roles-field-label" htmlFor="role-editor-instructions">Instructions</label>

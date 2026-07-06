@@ -27,6 +27,7 @@ import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
   CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT
 } from "../../shared/chatParticipantRequests";
+import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import type {
   AgentHealth,
@@ -1608,11 +1609,13 @@ test("duplicate chat run ids stay active until every owner ends", async () => {
 
   assert.deepEqual(storage.current.metadata.activeRunIds, ["shared-run"]);
   assert.equal(storage.current.metadata.running, true);
+  assert.equal(storage.current.metadata.activeRunOwnersByRunId?.["shared-run"]?.processId, process.pid);
 
   await (service as any).endChatRun(conversation, "shared-run");
 
   assert.equal(storage.current.metadata.activeRunIds, undefined);
   assert.equal(storage.current.metadata.running, false);
+  assert.equal(storage.current.metadata.activeRunOwnersByRunId, undefined);
 });
 
 test("ending one active run preserves survivor metadata", async () => {
@@ -1627,12 +1630,15 @@ test("ending one active run preserves survivor metadata", async () => {
   assert.deepEqual(storage.current.metadata.activeRunIds, ["second-run"]);
   assert.equal(storage.current.metadata.running, true);
   assert.equal(storage.current.metadata.runId, "second-run");
+  assert.equal(storage.current.metadata.activeRunOwnersByRunId?.["second-run"]?.processId, process.pid);
+  assert.equal(storage.current.metadata.activeRunOwnersByRunId?.["first-run"], undefined);
 
   await (service as any).endChatRun(conversation, "second-run");
 
   assert.equal(storage.current.metadata.activeRunIds, undefined);
   assert.equal(storage.current.metadata.running, false);
   assert.equal(storage.current.metadata.runId, undefined);
+  assert.equal(storage.current.metadata.activeRunOwnersByRunId, undefined);
 });
 
 test("ending local launcher keeps remote run active until terminal state", async () => {
@@ -2008,7 +2014,7 @@ test("cancelRun marks remote run failed when remote cancel delivery fails", asyn
 
 test("chat add paths normalize legacy run location to concrete local or remote", async () => {
   const agents: AgentHealth[] = [{ kind: "codex-cli", label: "Codex CLI", installed: true }];
-  const { service, storage } = testService({
+  const { service, storage, tempRoot } = testService({
     agents,
     settings: { chatRoleConfigs: [ROLE] }
   });
@@ -2034,6 +2040,526 @@ test("chat add paths normalize legacy run location to concrete local or remote",
 
   const added = (storage.current.metadata.participants as ChatParticipant[]).find((participant) => participant.handle === "added");
   assert.equal(added?.remoteExecution, "local");
+});
+
+test("auto-watch runtime update enforces one watcher and clears scheduler state on disable", async () => {
+  const codex = chatParticipant("codex-cli");
+  const drew = chatParticipant("claude-code");
+  const conversation = chatConversation([codex, drew]);
+  const { service, storage } = testService({ conversation });
+  const scheduled: Array<{ conversationId: string; reason: string }> = [];
+  (service as any).scheduleAutoWatchEvaluation = (conversationId: string, reason: string) => {
+    scheduled.push({ conversationId, reason });
+  };
+
+  await service.updateParticipantRuntime({
+    conversationId: conversation.id,
+    participantId: codex.id,
+    autoWatch: true
+  });
+
+  let participants = storage.current.metadata.participants as ChatParticipant[];
+  assert.equal(participants.find((participant) => participant.id === codex.id)?.autoWatch, true);
+  assert.equal(storage.current.metadata.participantWatchers[codex.id].wakeChainDepth, 0);
+  assert.deepEqual(scheduled, [{ conversationId: conversation.id, reason: "toggle-on" }]);
+
+  await assert.rejects(
+    () => service.updateParticipantRuntime({
+      conversationId: conversation.id,
+      participantId: drew.id,
+      autoWatch: true
+    }),
+    /Only one participant can watch a chat/
+  );
+
+  await service.updateParticipantRuntime({
+    conversationId: conversation.id,
+    participantId: codex.id,
+    autoWatch: false
+  });
+
+  participants = storage.current.metadata.participants as ChatParticipant[];
+  assert.equal(participants.find((participant) => participant.id === codex.id)?.autoWatch, false);
+  assert.equal(storage.current.metadata.participantWatchers, undefined);
+});
+
+test("Workflow Manager default-on seeding keeps only one active watcher", async () => {
+  const workflowRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "workflow-manager",
+    label: "Workflow Manager",
+    participantDefaults: {
+      autoWatch: true,
+      requestParticipants: "allow"
+    }
+  };
+  const codex = { ...chatParticipant("codex-cli"), autoWatch: true };
+  const conversation = chatConversation([codex]);
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [ROLE, workflowRole] }
+  });
+  const scheduled: Array<{ conversationId: string; reason: string }> = [];
+  (service as any).scheduleAutoWatchEvaluation = (conversationId: string, reason: string) => {
+    scheduled.push({ conversationId, reason });
+  };
+
+  await service.addParticipant({
+    conversationId: conversation.id,
+    participant: { handle: "wm2", roleConfigId: workflowRole.id, kind: "codex-cli" }
+  });
+
+  let participants = storage.current.metadata.participants as ChatParticipant[];
+  const added = participants.find((participant) => participant.handle === "wm2");
+  assert.equal(added?.autoWatch, false);
+  assert.equal(added?.permissions?.requestParticipants, "allow");
+  assert.deepEqual(scheduled, []);
+
+  participants = participants.map((participant) => ({ ...participant, autoWatch: false }));
+  storage.current = chatConversation(participants, { participantWatchers: undefined });
+  await service.addParticipant({
+    conversationId: conversation.id,
+    participant: { handle: "wm3", roleConfigId: workflowRole.id, kind: "codex-cli" }
+  });
+
+  participants = storage.current.metadata.participants as ChatParticipant[];
+  assert.equal(participants.find((participant) => participant.handle === "wm3")?.autoWatch, true);
+  assert.equal(participants.find((participant) => participant.handle === "wm3")?.permissions?.requestParticipants, "allow");
+  assert.deepEqual(scheduled, [{ conversationId: conversation.id, reason: "participant-added" }]);
+});
+
+test("custom role participant defaults apply to new chat participants", async () => {
+  const managerRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "custom-manager",
+    label: "Custom Manager",
+    participantDefaults: {
+      autoWatch: true,
+      requestParticipants: "deny"
+    }
+  };
+  const { service, storage, tempRoot } = testService({
+    agents: [{ kind: "codex-cli", label: "Codex CLI", installed: true }],
+    settings: { chatRoleConfigs: [ROLE, managerRole] }
+  });
+
+  const created = await service.createConversation({
+    title: "Role defaults",
+    participants: [
+      { handle: "manager", roleConfigId: managerRole.id, kind: "codex-cli" }
+    ]
+  });
+
+  let participant = (created.conversation.metadata.participants as ChatParticipant[]).find((item) => item.handle === "manager");
+  assert.equal(participant?.autoWatch, true);
+  assert.equal(participant?.permissions?.requestParticipants, "deny");
+
+  const conversation = chatConversation([]);
+  storage.current = conversation;
+  await service.addParticipant({
+    conversationId: conversation.id,
+    participant: {
+      handle: "manager2",
+      roleConfigId: managerRole.id,
+      kind: "codex-cli",
+      autoWatch: false,
+      permissions: { ...defaultChatAgentPermissions(), requestParticipants: "allow" }
+    }
+  });
+
+  participant = (storage.current.metadata.participants as ChatParticipant[]).find((item) => item.handle === "manager2");
+  assert.equal(participant?.autoWatch, false);
+  assert.equal(participant?.permissions?.requestParticipants, "allow");
+});
+
+test("auto-watch evaluation dispatches watcher from new participant output", async () => {
+  const manager = { ...chatParticipant("codex-cli"), autoWatch: true };
+  const worker = chatParticipant("claude-code");
+  const conversation = chatConversation([manager, worker], {
+    participantWatchers: {
+      [manager.id]: {
+        lastSeenMessageId: "user-message",
+        wakeChainDepth: 0,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push(timelineMessage("worker-reply", "Worker is done.", {
+    role: "participant",
+    participantId: worker.id,
+    participantLabel: `@${worker.handle}`,
+    metadata: { threadId: "user-message" }
+  }));
+  const runs: Array<{ participant: ParticipantConfig; prompt: string }> = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    agents: [
+      { kind: "codex-cli", label: "Codex CLI", installed: true },
+      { kind: "claude-code", label: "Claude Code", installed: true }
+    ],
+    run: async (participant, prompt) => {
+      runs.push({ participant, prompt });
+      return {
+        participant,
+        ok: true,
+        content: "Manager evaluated.",
+        durationMs: 1
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await (service as any).runAutoWatchEvaluation(conversation.id, "test");
+  await waitFor(() => runs.length === 1);
+
+  assert.equal(runs[0].participant.id, manager.id);
+  assert.match(runs[0].prompt, /Auto-watch trigger/);
+  const trigger = storage.current.messages.find((message: ChatMessage) => message.metadata?.autoWatchTrigger);
+  assert.ok(trigger);
+  assert.equal(trigger.metadata?.autoWatchTrigger?.participantId, manager.id);
+  assert.deepEqual(trigger.metadata?.autoWatchTrigger?.messageIds, ["worker-reply"]);
+});
+
+test("auto-watch evaluation can launch a remote watcher from local participant output", async () => {
+  const manager = { ...chatParticipant("codex-cli"), autoWatch: true, remoteExecution: "remote" as const };
+  const worker = chatParticipant("claude-code");
+  const conversation = chatConversation([manager, worker], {
+    participantWatchers: {
+      [manager.id]: {
+        lastSeenMessageId: "user-message",
+        wakeChainDepth: 0,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push(timelineMessage("worker-reply", "Worker is done.", {
+    role: "participant",
+    participantId: worker.id,
+    participantLabel: `@${worker.handle}`,
+    metadata: { threadId: "user-message" }
+  }));
+  let localRuns = 0;
+  let remoteLaunch: { participantId: string; prompt: string; runId: string } | undefined;
+  const { service, tempRoot } = testService({
+    conversation,
+    agents: [
+      { kind: "codex-cli", label: "Codex CLI", installed: true },
+      { kind: "claude-code", label: "Claude Code", installed: true }
+    ],
+    settings: {
+      chatRoleConfigs: [ROLE],
+      cloudRuns: { enabled: true, worker: { host: "worker.example" } }
+    },
+    run: async () => {
+      localRuns += 1;
+      return { ok: true, content: "local fallback", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  service.setRemoteRunService({
+    async startDetachedRun(request): Promise<any> {
+      if (!request.runId) {
+        throw new Error("missing remote run id");
+      }
+      remoteLaunch = {
+        participantId: request.participant.id,
+        prompt: request.prompt,
+        runId: request.runId
+      };
+      return {
+        runId: request.runId,
+        conversationId: request.conversationId,
+        participantId: request.participant.id,
+        status: "running"
+      };
+    },
+    async pollDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    async cancelDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    registerDetachedRunContext(): void {}
+  });
+
+  await (service as any).runAutoWatchEvaluation(conversation.id, "test");
+  await waitFor(() => remoteLaunch !== undefined);
+
+  assert.equal(remoteLaunch?.participantId, manager.id);
+  assert.match(remoteLaunch?.prompt ?? "", /Auto-watch trigger/);
+  assert.equal(localRuns, 0);
+});
+
+test("directly targeted auto-watch participant does not reprocess the trigger user message", async () => {
+  const manager = { ...chatParticipant("codex-cli"), autoWatch: true };
+  const conversation = chatConversation([manager]);
+  const runs: ParticipantConfig[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    agents: [{ kind: "codex-cli", label: "Codex CLI", installed: true }],
+    run: async (participant) => {
+      runs.push(participant);
+      return {
+        participant,
+        ok: true,
+        content: "Direct response.",
+        durationMs: 1
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({ conversationId: conversation.id, content: "@codex please handle this." });
+  await waitFor(() => runs.length === 1);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  const userMessage = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "user" && message.content.includes("please handle this")
+  );
+  assert.ok(userMessage);
+  assert.equal(storage.current.metadata.participantWatchers?.[manager.id]?.lastSeenMessageId, userMessage.id);
+  assert.equal(storage.current.messages.some((message: ChatMessage) => message.metadata?.autoWatchTrigger), false);
+  assert.equal(runs.length, 1);
+});
+
+test("auto-watch wake limit pauses and toggle off-on clears pause state", async () => {
+  const manager = { ...chatParticipant("codex-cli"), autoWatch: true };
+  const worker = chatParticipant("claude-code");
+  const conversation = chatConversation([manager, worker], {
+    participantWatchers: {
+      [manager.id]: {
+        lastSeenMessageId: "user-message",
+        wakeChainDepth: 1,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push(timelineMessage("worker-reply", "Worker is done.", {
+    role: "participant",
+    participantId: worker.id,
+    participantLabel: `@${worker.handle}`,
+    metadata: { threadId: "user-message" }
+  }));
+  const runs: ParticipantConfig[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [ROLE], chatAutoWatchWakeLimit: 1 },
+    run: async (participant) => {
+      runs.push(participant);
+      return {
+        participant,
+        ok: true,
+        content: "Should not run while paused.",
+        durationMs: 1
+      };
+    }
+  });
+
+  await (service as any).runAutoWatchEvaluation(conversation.id, "test");
+
+  assert.equal(runs.length, 0);
+  assert.equal(storage.current.metadata.participantWatchers?.[manager.id]?.pausedReason, "wake-limit");
+
+  await service.updateParticipantRuntime({
+    conversationId: conversation.id,
+    participantId: manager.id,
+    autoWatch: false
+  });
+  await service.updateParticipantRuntime({
+    conversationId: conversation.id,
+    participantId: manager.id,
+    autoWatch: true
+  });
+
+  const watcher = storage.current.metadata.participantWatchers?.[manager.id];
+  assert.equal(watcher?.pausedReason, undefined);
+  assert.equal(watcher?.wakeChainDepth, 0);
+});
+
+test("auto-watch eligible scan excludes self, system, pending, and hidden messages", async () => {
+  const manager = { ...chatParticipant("codex-cli"), autoWatch: true };
+  const worker = chatParticipant("claude-code");
+  const conversation = chatConversation([manager, worker], {
+    participantWatchers: {
+      [manager.id]: {
+        lastSeenMessageId: "user-message",
+        wakeChainDepth: 0,
+        updatedAt: NOW
+      }
+    }
+  });
+  // All pushed after the cursor. Only the final worker reply is eligible;
+  // the manager's own output, a system message, a pending (streaming) message,
+  // and a hidden message must be excluded from the scan.
+  conversation.messages.push(timelineMessage("manager-self", "Manager's own note.", {
+    role: "participant",
+    participantId: manager.id,
+    participantLabel: `@${manager.handle}`,
+    metadata: { threadId: "user-message" }
+  }));
+  conversation.messages.push(timelineMessage("system-note", "System notice.", {
+    role: "system",
+    metadata: { threadId: "user-message" }
+  }));
+  conversation.messages.push(timelineMessage("pending-reply", "Still streaming.", {
+    role: "participant",
+    participantId: worker.id,
+    participantLabel: `@${worker.handle}`,
+    status: "pending",
+    metadata: { threadId: "user-message" }
+  }));
+  conversation.messages.push(timelineMessage("hidden-note", "Hidden housekeeping.", {
+    role: "participant",
+    participantId: worker.id,
+    participantLabel: `@${worker.handle}`,
+    metadata: { threadId: "user-message", hiddenFromTimeline: true }
+  }));
+  conversation.messages.push(timelineMessage("worker-reply", "Worker is done.", {
+    role: "participant",
+    participantId: worker.id,
+    participantLabel: `@${worker.handle}`,
+    metadata: { threadId: "user-message" }
+  }));
+  const runs: Array<{ participant: ParticipantConfig; prompt: string }> = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    agents: [
+      { kind: "codex-cli", label: "Codex CLI", installed: true },
+      { kind: "claude-code", label: "Claude Code", installed: true }
+    ],
+    run: async (participant, prompt) => {
+      runs.push({ participant, prompt });
+      return { participant, ok: true, content: "Manager evaluated.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await (service as any).runAutoWatchEvaluation(conversation.id, "test");
+  await waitFor(() => runs.length === 1);
+
+  assert.equal(runs[0].participant.id, manager.id);
+  const trigger = storage.current.messages.find((message: ChatMessage) => message.metadata?.autoWatchTrigger);
+  assert.ok(trigger);
+  // Only the eligible worker reply is carried into the trigger; the excluded
+  // messages would appear here if the scan let them through.
+  assert.deepEqual(trigger.metadata?.autoWatchTrigger?.messageIds, ["worker-reply"]);
+});
+
+test("auto-watch depth resets when the user sends a new message", async () => {
+  const manager = { ...chatParticipant("codex-cli"), autoWatch: true };
+  const conversation = chatConversation([manager], {
+    participantWatchers: {
+      [manager.id]: {
+        lastSeenMessageId: "user-message",
+        wakeChainDepth: 4,
+        updatedAt: NOW
+      }
+    }
+  });
+  const runs: ParticipantConfig[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    agents: [{ kind: "codex-cli", label: "Codex CLI", installed: true }],
+    run: async (participant) => {
+      runs.push(participant);
+      return { participant, ok: true, content: "Handled.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  // Keep the assertion about depth-reset only: suppress the follow-on evaluation
+  // so it cannot re-increment the counter we are checking.
+  (service as any).scheduleAutoWatchEvaluation = () => {};
+
+  await service.sendMessage({ conversationId: conversation.id, content: "@codex next step." });
+  await waitFor(() => runs.length === 1);
+
+  assert.equal(storage.current.metadata.participantWatchers?.[manager.id]?.wakeChainDepth, 0);
+});
+
+test("auto-watch does not wake a watcher after it is toggled off", async () => {
+  const manager = { ...chatParticipant("codex-cli"), autoWatch: true };
+  const worker = chatParticipant("claude-code");
+  const conversation = chatConversation([manager, worker], {
+    participantWatchers: {
+      [manager.id]: {
+        lastSeenMessageId: "user-message",
+        wakeChainDepth: 0,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push(timelineMessage("worker-reply", "Worker is done.", {
+    role: "participant",
+    participantId: worker.id,
+    participantLabel: `@${worker.handle}`,
+    metadata: { threadId: "user-message" }
+  }));
+  const runs: ParticipantConfig[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    agents: [
+      { kind: "codex-cli", label: "Codex CLI", installed: true },
+      { kind: "claude-code", label: "Claude Code", installed: true }
+    ],
+    run: async (participant) => {
+      runs.push(participant);
+      return { participant, ok: true, content: "Should not run.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.updateParticipantRuntime({
+    conversationId: conversation.id,
+    participantId: manager.id,
+    autoWatch: false
+  });
+  assert.equal(storage.current.metadata.participantWatchers, undefined);
+
+  await (service as any).runAutoWatchEvaluation(conversation.id, "test");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  assert.equal(runs.length, 0);
+  assert.equal(storage.current.messages.some((message: ChatMessage) => message.metadata?.autoWatchTrigger), false);
+});
+
+test("inferred participant request persists hidden request before running target", async () => {
+  const manager = { ...chatParticipant("codex-cli", { requestParticipants: "allow" }), autoWatch: true };
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([manager, target]);
+  const runs: ParticipantConfig[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    agents: [
+      { kind: "codex-cli", label: "Codex CLI", installed: true },
+      { kind: "claude-code", label: "Claude Code", installed: true }
+    ],
+    run: async (participant) => {
+      runs.push(participant);
+      return {
+        participant,
+        ok: true,
+        content: participant.id === manager.id && runs.filter((run) => run.id === manager.id).length === 1
+          ? "@drew Please reply."
+          : "Reply complete.",
+        durationMs: 1
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({ conversationId: conversation.id, content: "@codex coordinate this." });
+  await waitFor(() => runs.some((participant) => participant.id === target.id), 1500);
+
+  const requestMessage = storage.current.messages.find((message: ChatMessage) =>
+    message.metadata?.participantRequest?.source === "inferred"
+  );
+  assert.ok(requestMessage);
+  assert.equal(requestMessage.metadata?.hiddenFromTimeline, true);
+  assert.equal(requestMessage.metadata?.participantRequest?.items[0]?.targetParticipantId, target.id);
+  assert.equal(
+    storage.current.messages.some((message: ChatMessage) => /Participant request message was not found/i.test(message.content)),
+    false
+  );
 });
 
 test("run location is editable only before a participant has durable run history", async () => {
@@ -4768,8 +5294,18 @@ test("recoverStaleChatRun leaves a pending message whose run is still live", () 
 
 test("a swept placeholder is marked, and a late result repairs it preserving reactions", async () => {
   const participant = chatParticipant("codex-cli");
-  const conversation = chatConversation([participant]);
   const runId = "dead-run";
+  const conversation = chatConversation([participant], {
+    activeRunIds: [runId],
+    running: true,
+    activeRunOwnersByRunId: {
+      [runId]: {
+        processId: process.pid,
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    }
+  });
   conversation.messages.push(pendingParticipantMessage(participant, "pending-dead", runId));
   const { service } = testService({ conversation });
 
@@ -4798,6 +5334,32 @@ test("a swept placeholder is marked, and a late result repairs it preserving rea
   assert.equal(repaired.content, "Here is the real answer.");
   assert.equal(repaired.metadata?.staleRunRecovery, undefined);
   assert.equal(repaired.metadata?.reactions?.["✅"]?.[0]?.actorLabel, "User");
+});
+
+test("recoverStaleChatRun preserves runs owned by another live app instance", () => {
+  const participant = chatParticipant("codex-cli");
+  const runId = "external-live-run";
+  const ownerPid = process.ppid > 0 ? process.ppid : 1;
+  const conversation = chatConversation([participant], {
+    activeRunIds: [runId],
+    running: true,
+    activeRunOwnersByRunId: {
+      [runId]: {
+        processId: ownerPid,
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push(pendingParticipantMessage(participant, "pending-external", runId));
+  const { service } = testService({ conversation });
+
+  const changed = (service as any).recoverStaleChatRun(conversation);
+
+  assert.equal(changed, false);
+  assert.deepEqual(conversation.metadata.activeRunIds, [runId]);
+  assert.equal(conversation.metadata.running, true);
+  assert.equal(conversation.messages.find((message: any) => message.id === "pending-external")!.status, "pending");
 });
 
 test("a late result does not resurrect a non-recovery error (user-stopped) message", async () => {
@@ -5266,6 +5828,73 @@ test("participant request permission allow runs without approval", async () => {
   assert.equal(storage.current.metadata.pendingAppToolApprovals, undefined);
 });
 
+test("inferred accord assignment allows facilitator participant requests before nested request", async () => {
+  const manager: ChatParticipant = {
+    ...chatParticipant("codex-cli", { requestParticipants: "allow" }),
+    id: "manager",
+    handle: "nikita"
+  };
+  const drew: ChatParticipant = {
+    ...chatParticipant("codex-cli", { repoRead: true, requestParticipants: "ask" }),
+    id: "drew",
+    handle: "drew-codex-engineer"
+  };
+  const taylor: ChatParticipant = {
+    ...chatParticipant("claude-code", { repoRead: true }),
+    id: "taylor",
+    handle: "taylor-claude-engineer"
+  };
+  const conversation = chatConversation([manager, drew, taylor]);
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (participant) => ({
+      participant,
+      ok: true,
+      content: "Reviewed.",
+      durationMs: 1
+    })
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const sourceMessage = timelineMessage("@nikita-accord", "@drew-codex-engineer have an /accord on exact implementation plan with Taylor.", {
+    role: "participant",
+    participantId: manager.id,
+    participantLabel: `@${manager.handle}`,
+    metadata: {
+      threadId: "@nikita-accord"
+    }
+  });
+  conversation.messages.push(sourceMessage);
+
+  await (service as any).createImplicitParticipantRequestApproval(conversation, manager, [sourceMessage]);
+  await storage.saveConversation(conversation);
+
+  const drewAfterInferredAccord = storage.current.metadata.participants.find((participant: ChatParticipant) => participant.id === drew.id);
+  assert.equal(normalizeChatAgentPermissions(drewAfterInferredAccord?.permissions).requestParticipants, "allow");
+  assert.equal(storage.current.metadata.pendingAppToolApprovals, undefined);
+
+  const result = await service.requestParticipantsFromTool({
+    ...participantRequestActor(drew),
+    participantId: drew.id,
+    roleConfigId: drew.roleConfigId,
+    triggerMessageId: "@nikita-accord",
+    triggerThreadId: "@nikita-accord"
+  }, {
+    requests: [{ target: taylor.handle, prompt: "Review the canonical accord resolution." }],
+    timeoutMs: 5000,
+    resumeRequester: false
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.approvalRequired, false);
+  const nestedRequest = storage.current.messages
+    .filter((message: ChatMessage) => message.metadata?.participantRequest)
+    .at(-1);
+  assert.equal(nestedRequest?.metadata?.participantRequest?.requesterParticipantId, drew.id);
+  assert.equal(nestedRequest?.metadata?.participantRequest?.items[0]?.targetParticipantId, taylor.id);
+  assert.notEqual(nestedRequest?.metadata?.participantRequest?.items[0]?.status, "pending_approval");
+  assert.equal(storage.current.metadata.pendingAppToolApprovals, undefined);
+});
+
 test("participant request stores prompt exactly up to configured max", async () => {
   const requester = chatParticipant("codex-cli", { requestParticipants: "ask" });
   const target = chatParticipant("claude-code");
@@ -5676,6 +6305,7 @@ function testService(options: {
     chatParticipantConfigs?: ChatParticipantConfig[];
     chatParticipantRequestMaxDepth?: number;
     chatParticipantRequestPromptMaxChars?: number;
+    chatAutoWatchWakeLimit?: number;
     chatPromptContext?: AppSettings["chatPromptContext"];
     cloudRuns?: Partial<AppSettings["cloudRuns"]>;
   };
@@ -5704,6 +6334,8 @@ function testService(options: {
   const publicSettings = (): AppSettings => ({
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: 24 * 60 * 60_000,
+    chatAutoWatchWakeLimit: options.settings?.chatAutoWatchWakeLimit
+      ?? CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT,
     chatParticipantRequestMaxDepth: options.settings?.chatParticipantRequestMaxDepth
       ?? CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
     chatParticipantRequestPromptMaxChars: options.settings?.chatParticipantRequestPromptMaxChars

@@ -7,7 +7,7 @@ import { Avatar, avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { avatarForChatParticipant, mapChatAvatarIdToKind } from "./chat-avatars";
 import { CHAT_AGENT_MODE_OPTIONS, chatAgentModeLabel } from "./chat-participant-drafts";
-import { ChatParticipantAvatarField as ChatAppToolAvatarField, ChatParticipantInlineModelRow as ChatAppToolInlineModelRow, ChatParticipantInlinePermissionsRow as ChatAppToolInlinePermissionsRow, ChatParticipantInlineSelectRow as ChatAppToolInlineSelectRow, ChatParticipantSpecRow, rosterPermissionGrantLabels } from "./chat-participant-config-panel";
+import { ChatParticipantAvatarField as ChatAppToolAvatarField, ChatParticipantInlineModelRow as ChatAppToolInlineModelRow, ChatParticipantInlinePermissionsRow as ChatAppToolInlinePermissionsRow, ChatParticipantInlineRequestParticipantsRow as ChatAppToolInlineRequestParticipantsRow, ChatParticipantInlineSelectRow as ChatAppToolInlineSelectRow, ChatParticipantSpecRow, rosterPermissionGrantLabels } from "./chat-participant-config-panel";
 import { participantProviderLabel } from "./chat-conversation-data";
 
 export function ChatAppToolParticipantChangeOperation(props: {
@@ -100,10 +100,8 @@ export function ChatAppToolParticipantChangeOperation(props: {
         const participant = operation.participant;
         const role = props.roles.find((item) => item.id === participant.roleConfigId);
         const rawPermissionLabels = rosterPermissionGrantLabels(participant);
-        const broaderThanDefault = rawPermissionLabels.some((label) => label !== "repo read");
-        // Permissions only apply in "Custom access" (default) mode. Plan only is read-only
-        // and Auto-run manages execution itself, so the toggles are hidden there.
-        const showPermissions = normalizeChatAgentMode(participant.agentMode) === "default";
+        const customAccess = normalizeChatAgentMode(participant.agentMode) === "default";
+        const broaderThanDefault = customAccess && rawPermissionLabels.some((label) => label !== "repo read");
         function patchParticipant(next: Partial<ChatRosterChangeParticipantInput>): void {
           updateNewParticipant(index, { participant: next });
         }
@@ -175,14 +173,18 @@ export function ChatAppToolParticipantChangeOperation(props: {
                 options={CHAT_AGENT_MODE_OPTIONS.map((item) => ({ value: item.value, label: item.label }))}
                 onSelect={(value) => patchParticipant({ agentMode: value as ChatAgentMode })}
               />
-              {showPermissions && (
+              {customAccess && (
                 <ChatAppToolInlinePermissionsRow
                   participant={participant}
                   onChange={(permissions) => patchParticipant({ permissions })}
                 />
               )}
+              <ChatAppToolInlineRequestParticipantsRow
+                participant={participant}
+                onChange={(permissions) => patchParticipant({ permissions })}
+              />
             </div>
-            {showPermissions && broaderThanDefault && (
+            {broaderThanDefault && (
               <div className="chat-app-tool-review-warning">
                 <AlertTriangle size={14} aria-hidden />
                 <span>Permissions are broader than the read-only default.</span>
@@ -265,6 +267,10 @@ export function ChatAppToolExistingParticipantSpec(props: {
           onChange={(next) => props.onOverride({ permissions: next })}
         />
       )}
+      <ChatAppToolInlineRequestParticipantsRow
+        participant={permissionParticipant}
+        onChange={(next) => props.onOverride({ permissions: next })}
+      />
     </>
   );
 }

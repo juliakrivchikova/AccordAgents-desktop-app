@@ -4,6 +4,7 @@ import type {
   AppSettings,
   ChatParticipant,
   ChatParticipantConfig,
+  ChatParticipantWatcherState,
   CloudRunRemoteExecutionMode
 } from "../../../shared/types";
 import { Avatar } from "../avatar/avatar";
@@ -41,13 +42,14 @@ export function ChatParticipantMenu(props: {
   addParticipantDraft: ChatParticipantDraft;
   isRunning: boolean;
   participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
+  participantWatchers?: Record<string, ChatParticipantWatcherState>;
   onDraftChange: (value: string) => void;
   onAddParticipantDraftChange: (draft: ChatParticipantDraft) => void;
   onAddParticipant: () => void;
   onAddSavedParticipant: (participant: ChatParticipantConfig, remoteExecution?: CloudRunRemoteExecutionMode) => void;
   onUpdateParticipantRuntime: (
     participantId: string,
-    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">
+    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "autoWatch">
   ) => void;
   onCompactParticipant: (participantId: string) => void;
   onRemoveParticipant: (participantId: string) => void;
@@ -72,6 +74,7 @@ export function ChatParticipantMenu(props: {
       addValidation={addValidation}
       isRunning={props.isRunning}
       participantStatusById={props.participantStatusById}
+      participantWatchers={props.participantWatchers}
       savedParticipants={savedParticipants}
       hasSavedParticipantConfigs={props.settings.chatParticipantConfigs.length > 0}
       renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant, chatParticipantDisplayName(participant))} />}
@@ -109,6 +112,7 @@ function savedParticipantSummary(settings: AppSettings, participant: ChatPartici
     participant.kind === "codex-cli" ? `run ${chatRunLocationLabel(participant.remoteExecution).toLowerCase()}` : "",
     participant.model,
     participant.reasoningEffort ? `reasoning ${chatReasoningEffortLabel(participant.reasoningEffort)}` : "",
+    participant.autoWatchEnabled ? "auto-watch" : "",
     chatParticipantPermissionSummary(participant)
   ].filter(Boolean).join(" · ");
 }

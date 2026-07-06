@@ -24,15 +24,22 @@ import {
   ChatModelPicker,
   ChatReasoningEffortPicker
 } from "./chat-model-reasoning-pickers";
-import { ChatPermissionsEditor } from "./chat-permissions-editor";
+import {
+  ChatParticipantInlinePermissionsRow,
+  ChatParticipantInlineRequestParticipantsRow
+} from "./chat-participant-config-panel";
 import type { ChatParticipantDraft } from "./chat-participant-drafts";
 import {
   CHAT_AGENT_MODE_OPTIONS,
   CHAT_RUN_LOCATION_OPTIONS,
+  WORKFLOW_MANAGER_ROLE_ID,
   activeChatRoleConfigs,
   normalizeChatRunLocation,
   updateChatParticipantDraft
 } from "./chat-participant-drafts";
+
+const AUTO_WATCH_GENERIC_DESCRIPTION = "Let this participant watch new chat messages and decide whether to act.";
+const AUTO_WATCH_MANAGER_DESCRIPTION = "Workflow Manager always watches new chat messages.";
 
 export function ChatParticipantDraftRow(props: {
   draft: ChatParticipantDraft;
@@ -47,6 +54,7 @@ export function ChatParticipantDraftRow(props: {
   const roleOptions = activeChatRoleConfigs(props.settings).map((role) => ({ value: role.id, label: role.label }));
   const avatarId = normalizedChatAvatarId(props.draft.kind, props.draft.avatarId, props.draft.handle);
   const avatarOptions = chatAvatarOptionsForKind(props.draft.kind);
+  const isWorkflowManager = props.draft.roleConfigId === WORKFLOW_MANAGER_ROLE_ID;
 
   function toggleBehaviorRule(ruleId: string, checked: boolean): void {
     const selected = new Set(props.draft.behaviorRuleIds);
@@ -130,6 +138,33 @@ export function ChatParticipantDraftRow(props: {
           onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { agentMode: value as ChatAgentMode }))}
         />
       </FormRow>
+      {props.draft.agentMode === "default" && (
+        <ChatParticipantInlinePermissionsRow
+          participant={props.draft}
+          onChange={(permissions) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { permissions }))}
+        />
+      )}
+      <FormRow label="Auto-watch">
+        <label
+          className={`chat-behavior-rule-option${isWorkflowManager ? " is-disabled" : ""}`}
+          title={isWorkflowManager ? AUTO_WATCH_MANAGER_DESCRIPTION : AUTO_WATCH_GENERIC_DESCRIPTION}
+        >
+          <input
+            type="checkbox"
+            checked={props.draft.autoWatch}
+            disabled={isWorkflowManager}
+            onChange={(event) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { autoWatch: event.target.checked }))}
+          />
+          <span>Watch new chat activity</span>
+        </label>
+        <div className="text-xs text-muted-foreground">
+          {isWorkflowManager ? AUTO_WATCH_MANAGER_DESCRIPTION : AUTO_WATCH_GENERIC_DESCRIPTION}
+        </div>
+      </FormRow>
+      <ChatParticipantInlineRequestParticipantsRow
+        participant={props.draft}
+        onChange={(permissions) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { permissions }))}
+      />
       <FormRow label="Behavior rules" className="behavior-rules-field">
         {props.settings.chatBehaviorRules.length === 0 ? (
           <div className="text-xs text-muted-foreground">No behavior rules created.</div>
@@ -148,11 +183,6 @@ export function ChatParticipantDraftRow(props: {
           </div>
         )}
       </FormRow>
-      <ChatPermissionsEditor
-        mode={props.draft.agentMode}
-        permissions={props.draft.permissions}
-        onChange={(permissions) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { permissions }))}
-      />
       <FormRow label="Avatar" className="avatar-picker-field">
         <div className="avatar-choice-grid" role="radiogroup" aria-label="Participant avatar">
           {avatarOptions.map((option) => {

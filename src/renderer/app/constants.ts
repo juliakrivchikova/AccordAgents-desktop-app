@@ -5,6 +5,7 @@ import {
   CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT
 } from "../../shared/chatParticipantRequests";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
+import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
 import { AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT } from "../../shared/cloudRuns";
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -12,6 +13,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
   chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
   chatParticipantRequestPromptMaxChars: CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
+  chatAutoWatchWakeLimit: CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT,
   chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
   cloudRuns: {
     enabled: false,

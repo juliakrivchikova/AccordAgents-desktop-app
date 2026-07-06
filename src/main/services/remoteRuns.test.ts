@@ -9,6 +9,7 @@ import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
   CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT
 } from "../../shared/chatParticipantRequests";
+import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import type {
   AppSettings,
@@ -323,6 +324,75 @@ test("detached remote run launches without waiting and projects final output on 
     "detached-run:worker:4"
   ]);
   assert.equal((storage.current.metadata.remoteRunReplay as any)["detached-run"].terminalState, "completed");
+});
+
+test("remote terminal reply schedules auto-watch evaluation", async () => {
+  const manager = { ...chatParticipant(), id: "manager", handle: "manager", autoWatch: true };
+  const worker = { ...chatParticipant(), id: "worker", handle: "worker" };
+  const conversation = chatConversation([manager, worker]);
+  const { remote, service, storage } = await testRemoteRun({ conversation });
+  const scheduled: Array<{ conversationId: string; reason: string }> = [];
+  (service as any).scheduleAutoWatchEvaluation = (conversationId: string, reason: string) => {
+    scheduled.push({ conversationId, reason });
+  };
+  const runId = await remote.startSimulatedRun({ conversationId: conversation.id, runId: "remote-worker-run" });
+  await remote.setConnected(runId, true);
+
+  await remote.appendProviderResult({
+    conversationId: conversation.id,
+    runId,
+    participantId: worker.id,
+    ok: true,
+    content: "Remote worker done.",
+    sourceMessageId: "user-message",
+    threadId: "user-message"
+  });
+
+  assert.equal(
+    storage.current.messages.some((message: Conversation["messages"][number]) =>
+      message.role === "participant" &&
+      message.participantId === worker.id &&
+      message.status === "done" &&
+      message.content === "Remote worker done."
+    ),
+    true
+  );
+  assert.deepEqual(scheduled, [{ conversationId: conversation.id, reason: "remote-run-terminal" }]);
+});
+
+test("remote terminal reply wakes and runs the local manager", async () => {
+  const manager = { ...chatParticipant(), id: "manager", handle: "manager", autoWatch: true };
+  const worker = { ...chatParticipant(), id: "worker", handle: "worker" };
+  const conversation = chatConversation([manager, worker]);
+  conversation.metadata.participantWatchers = {
+    [manager.id]: { lastSeenMessageId: "user-message", wakeChainDepth: 0, updatedAt: NOW }
+  };
+  const runs: Array<{ id: string; prompt: string }> = [];
+  const { remote, service, root } = await testRemoteRun({
+    conversation,
+    run: async (participant: ParticipantConfig, prompt: string) => {
+      runs.push({ id: participant.id, prompt });
+      return { participant, ok: true, content: "Manager evaluated.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => root;
+
+  const runId = await remote.startSimulatedRun({ conversationId: conversation.id, runId: "remote-worker-run" });
+  await remote.setConnected(runId, true);
+  await remote.appendProviderResult({
+    conversationId: conversation.id,
+    runId,
+    participantId: worker.id,
+    ok: true,
+    content: "Remote worker done.",
+    sourceMessageId: "user-message",
+    threadId: "user-message"
+  });
+
+  // Unlike the schedule-only assertion above, let the real evaluation run so the
+  // local manager is actually dispatched off a remote worker's terminal reply.
+  await waitFor(() => runs.some((run) => run.id === manager.id), 2000);
+  assert.match(runs.find((run) => run.id === manager.id)?.prompt ?? "", /Auto-watch trigger/);
 });
 
 test("detached reconnect preserves workerSeq ordering and skips duplicate worker events", async () => {
@@ -1196,6 +1266,7 @@ async function testRemoteRun(options: {
       return {
         roundLimitDefault: 1,
         cliAgentRunTimeoutMs: 24 * 60 * 60_000,
+        chatAutoWatchWakeLimit: CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT,
         chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
         chatParticipantRequestPromptMaxChars: CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
         chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
@@ -1435,6 +1506,7 @@ function coordinatorSettings(patch: { maxRuntimeMs: number; pollIntervalMs: numb
       return {
         roundLimitDefault: 1,
         cliAgentRunTimeoutMs: 24 * 60 * 60_000,
+        chatAutoWatchWakeLimit: CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT,
         chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
         chatParticipantRequestPromptMaxChars: CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
         chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,

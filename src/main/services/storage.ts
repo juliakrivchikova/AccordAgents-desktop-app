@@ -11,9 +11,9 @@ import type {
   ConversationOpenResult,
   ConversationSummary
 } from "../../shared/types";
-import { clearChatRunMetadata, clearParticipantCompactions, readParticipantCompactions } from "../../shared/chatRunState";
+import { clearParticipantCompactions, readParticipantCompactions } from "../../shared/chatRunState";
 import { normalizeInferredParticipantRequestThreads as normalizeInferredParticipantRequestThreadMetadata } from "../../shared/chatParticipantRequestThreads";
-import { INTERRUPTED_RUN_WARNING, sanitizeConversationWarnings, sanitizeWarningList } from "../../shared/warnings";
+import { sanitizeConversationWarnings } from "../../shared/warnings";
 
 const DEFAULT_MESSAGE_PAGE_LIMIT = 80;
 const MAX_MESSAGE_PAGE_LIMIT = 200;
@@ -391,16 +391,6 @@ export class StorageService {
         await this.saveConversation(conversation);
         continue;
       }
-      const warnings = sanitizeWarningList(conversation.metadata.warnings);
-      if (hasPendingParticipantMessage(conversation) && !warnings.includes(INTERRUPTED_RUN_WARNING)) {
-        warnings.push(INTERRUPTED_RUN_WARNING);
-      }
-      conversation.metadata = withRemoteRunMetadata(
-        clearParticipantCompactions(clearLegacyAccordState(clearChatRunMetadata({ ...conversation.metadata, warnings }))),
-        remoteRunIds
-      );
-      conversation.updatedAt = new Date().toISOString();
-      await this.saveConversation(conversation);
     }
   }
 
@@ -479,10 +469,6 @@ export class StorageService {
   private sqliteArgs(args: string[]): string[] {
     return ["-cmd", `.timeout ${SQLITE_BUSY_TIMEOUT_MS}`, ...args];
   }
-}
-
-function hasPendingParticipantMessage(conversation: Conversation): boolean {
-  return conversation.messages.some((message) => message.role === "participant" && message.status === "pending");
 }
 
 function normalizeMessagePageLimit(limit: number | undefined): number {

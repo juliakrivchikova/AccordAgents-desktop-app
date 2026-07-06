@@ -100,7 +100,7 @@ const consensusService = new ConsensusService(gitService, storageService, provid
 });
 const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
-}, userSkillsService);
+}, userSkillsService, (progress) => mainWindow?.webContents.send("conversations:review-progress", progress));
 const remoteRunService = new RemoteRunService(chatService, {
   syncLogger: (event, payload) => {
     void debugLogService.write(event, payload);
@@ -266,6 +266,9 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:set-chat-participant-request-prompt-max-chars", (_event, maxChars: number) => {
     return settingsService.setChatParticipantRequestPromptMaxChars(maxChars);
+  });
+  ipcMain.handle("settings:set-chat-auto-watch-wake-limit", (_event, limit: number) => {
+    return settingsService.setChatAutoWatchWakeLimit(limit);
   });
   ipcMain.handle("settings:set-chat-prompt-context", (_event, settings: ChatPromptContextSettings) => {
     return settingsService.setChatPromptContext(settings);

@@ -20,6 +20,7 @@ export interface SettingsActions {
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
   setChatParticipantRequestPromptMaxChars: (maxChars: number) => Promise<void>;
+  setChatAutoWatchWakeLimit: (limit: number) => Promise<void>;
   setChatPromptContext: (settings: ChatPromptContextSettings) => Promise<void>;
   saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => Promise<void>;
   getAgentEnvironment: () => Promise<AgentEnvironmentSnapshot>;
@@ -54,6 +55,10 @@ export function useSettingsActions(state: AppState): SettingsActions {
 
   async function setChatParticipantRequestPromptMaxChars(maxChars: number): Promise<void> {
     await updateSettings(() => window.consensus.setChatParticipantRequestPromptMaxChars(maxChars));
+  }
+
+  async function setChatAutoWatchWakeLimit(limit: number): Promise<void> {
+    await updateSettings(() => window.consensus.setChatAutoWatchWakeLimit(limit));
   }
 
   async function setChatPromptContext(settings: ChatPromptContextSettings): Promise<void> {
@@ -165,6 +170,7 @@ export function useSettingsActions(state: AppState): SettingsActions {
     setCliAgentRunTimeoutMs,
     setChatParticipantRequestMaxDepth,
     setChatParticipantRequestPromptMaxChars,
+    setChatAutoWatchWakeLimit,
     setChatPromptContext,
     saveCloudRunsSettings,
     getAgentEnvironment,

@@ -23,6 +23,13 @@ const GENERIC_ROLE: ChatRoleConfig = {
   version: 1,
   updatedAt: NOW
 };
+const WORKFLOW_MANAGER_ROLE: ChatRoleConfig = {
+  id: "workflow-manager",
+  label: "Workflow Manager",
+  instructions: "Use implementation-workflow for implementation requests.",
+  version: 1,
+  updatedAt: NOW
+};
 
 test("skill-only send stores explicit content and keeps skill metadata path/content safe", async () => {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-user-skills-"));
@@ -231,6 +238,64 @@ test("inline selected skill text is preserved in storage and prompt", async () =
     assert.equal(userMessage?.content, "@admin /qa please");
     assert.match(capturedPrompt, /@admin \/qa please/);
     assert.match(capturedPrompt, /inline `\/skill-name` text as the native skill invocation/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("Workflow Manager implementation requests do not auto-select implementation-workflow", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-user-skills-"));
+  const repoPath = path.join(tempRoot, "repo");
+  await mkdir(repoPath, { recursive: true });
+  await writeSkill(
+    path.join(repoPath, ".agents", "skills", "implementation-workflow"),
+    "implementation-workflow",
+    "Coordinate implementation workflow",
+    "Confirm requirements, choose the final step, then ask Drew and Taylor for independent plans."
+  );
+
+  try {
+    const userSkills = new UserSkillsService({ homeDir: path.join(tempRoot, "home") });
+    const manager = chatParticipant({
+      id: "workflow-manager-participant",
+      handle: "nikita",
+      roleConfigId: WORKFLOW_MANAGER_ROLE.id,
+      permissions: normalizeChatAgentPermissions({
+        ...defaultChatAgentPermissions(),
+        repoRead: true
+      })
+    });
+    const conversation = chatConversation([manager]);
+    conversation.repoPath = repoPath;
+
+    const { service, storage } = testService({
+      conversation,
+      roles: [ROLE, GENERIC_ROLE, WORKFLOW_MANAGER_ROLE],
+      userSkills,
+      run: async (runParticipant) => {
+        return {
+          participant: runParticipant,
+          ok: true,
+          content: "Skill paused at required user gate: Confirm scope.",
+          durationMs: 1
+        };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+
+    await service.sendMessage({
+      conversationId: conversation.id,
+      runId: "workflow-manager-skill-run",
+      content: "@nikita we need to exclude assistant from accord modal window and polish accord modal design."
+    });
+
+    const saved = storage.current as Conversation;
+    const userMessage = saved.messages.find((message) => message.role === "user");
+    assert.equal(userMessage?.metadata?.skillMentions, undefined);
+    assert.equal(saved.messages.some((message) =>
+      message.role === "system" &&
+      message.content.includes("@nikita was not run")
+    ), false);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -617,6 +682,7 @@ test("shellRulesAreSelectedSkillReads allows read-only skill-dir reads and rejec
 function testService(options: {
   conversation: Conversation;
   userSkills: UserSkillsService;
+  roles?: ChatRoleConfig[];
   run: (participant: ParticipantConfig, prompt: string) => Promise<any>;
   debugWrite?: (event: string, payload: Record<string, unknown>) => Promise<void>;
 }): { service: ChatService; storage: any } {
@@ -636,7 +702,7 @@ function testService(options: {
       providers: Array<{ kind: string; enabled: boolean }>;
     }> {
       return {
-        chatRoleConfigs: [ROLE, GENERIC_ROLE],
+        chatRoleConfigs: options.roles ?? [ROLE, GENERIC_ROLE],
         chatBehaviorRules: [],
         providers: [{ kind: "codex-cli", enabled: true }]
       };

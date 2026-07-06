@@ -142,6 +142,7 @@ function App(): JSX.Element {
           addParticipantDraft={state.chatAddParticipantDraft ?? defaultChatParticipantDraft(state.settings)}
           isRunning={view.conversationRunning}
           participantStatusById={view.participantStatusById}
+          participantWatchers={view.activeChatConversation.metadata.participantWatchers}
           onDraftChange={state.setChatMessageDraft}
           onAddParticipantDraftChange={state.setChatAddParticipantDraft}
           onAddParticipant={() => void chatActions.addChatParticipant()}
@@ -233,6 +234,7 @@ function App(): JSX.Element {
           setCliAgentRunTimeoutMs={settingsActions.setCliAgentRunTimeoutMs}
           setChatParticipantRequestMaxDepth={settingsActions.setChatParticipantRequestMaxDepth}
           setChatParticipantRequestPromptMaxChars={settingsActions.setChatParticipantRequestPromptMaxChars}
+          setChatAutoWatchWakeLimit={settingsActions.setChatAutoWatchWakeLimit}
           setChatPromptContext={settingsActions.setChatPromptContext}
           saveCloudRunsSettings={settingsActions.saveCloudRunsSettings}
           getAgentEnvironment={settingsActions.getAgentEnvironment}
