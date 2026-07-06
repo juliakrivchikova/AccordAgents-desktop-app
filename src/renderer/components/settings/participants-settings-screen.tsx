@@ -54,8 +54,8 @@ export function ParticipantsSettingsScreen(props: {
           <input
             value={query}
             onChange={(event) => setQuery(event.currentTarget.value)}
-            placeholder="Search participants"
-            aria-label="Search participants"
+            placeholder="Search members"
+            aria-label="Search members"
             spellCheck={false}
           />
         </div>
@@ -65,19 +65,19 @@ export function ParticipantsSettingsScreen(props: {
         <span className="participants-toolbar-spacer" />
         <Button className="participants-settings-new-button" size="lg" onClick={() => setEditor({ type: "new" })}>
           <Plus size={16} aria-hidden />
-          New Participant
+          New Member
         </Button>
       </div>
 
       {filteredGroups.length === 0 ? (
         normalizedQuery ? (
           <div className="participants-empty-state participants-empty-state-search">
-            No participants match your search.
+            No members match your search.
           </div>
         ) : (
           <div className="participants-empty-state">
-            <strong>No saved participants</strong>
-            <span>Create a participant preset to reuse it across chats.</span>
+            <strong>No saved members</strong>
+            <span>Create a member preset to reuse it across chats.</span>
           </div>
         )
       ) : (
@@ -131,4 +131,3 @@ export function ParticipantsSettingsScreen(props: {
     </section>
   );
 }
-

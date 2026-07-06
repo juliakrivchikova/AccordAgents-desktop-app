@@ -2,10 +2,10 @@
 name: accord
 visibility: public
 description: >
-  Facilitate a skeptical multi-participant AccordAgents discussion that ends in
-  one canonical resolution approved by every selected participant. Use only when
-  User explicitly wants an accord, multi-participant consensus, cross-checking by
-  named participants, or a resolution approved by multiple agents. Do not use for
+  Facilitate a skeptical multi-member AccordAgents discussion that ends in
+  one canonical resolution approved by every selected member. Use only when
+  User explicitly wants an accord, multi-member consensus, cross-checking by
+  named members, or a resolution approved by multiple agents. Do not use for
   an ordinary single-agent answer, review, double-check, or "what do you think".
 ---
 

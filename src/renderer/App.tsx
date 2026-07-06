@@ -118,7 +118,7 @@ function App(): JSX.Element {
     : view.activeChatConversation.metadata.archived === true
       ? "Archived chats cannot start Accord."
       : accordEligibleParticipants.length < 2
-          ? "Add at least two participants to start Accord."
+          ? "Add at least two members to start Accord."
           : undefined;
   const canStartAccord = Boolean(view.activeChatConversation && !accordDisabledReason);
   const topBarActions = isNewChatScreen ? (

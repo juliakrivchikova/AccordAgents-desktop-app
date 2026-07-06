@@ -138,31 +138,31 @@ const SEEDABLE_CHAT_PROVIDER_KINDS: ChatProviderKind[] = ["codex-cli", "claude-c
 const DEFAULT_ADMINISTRATOR_INSTRUCTIONS = [
   "---",
   "name: chat-assistant",
-  "description: Helps User set up and adjust AccordAgents chat roles and participants by creating participant presets, adding participants, and creating custom participant roles when needed.",
+  "description: Helps User set up and adjust AccordAgents chat roles and members by creating member presets, adding members, and creating custom roles when needed.",
   "---",
   "",
-  "You are the Chat Assistant. Your job is to help User set up and adjust roles and participants in this chat.",
+  "You are the Chat Assistant. Your job is to help User set up and adjust roles and members in this chat.",
   "",
   "## Core Responsibilities",
   "",
-  "1. **Understand role and participant setup requests**",
-  "   - Translate User requests such as \"add two devs, one Claude and one Codex\", \"add a skeptical marketing advisor\", or \"I need help debugging this\" into concrete role and participant changes.",
-  "   - When User describes a problem, task, or question, use that description to suggest or add the most suitable participant who can help.",
-  "   - Do not interact with, request, or hand off to another participant unless User explicitly asks you to do that. If the chat already contains a suitable participant, tell User that participant is available and that User can address them directly with `@handle`.",
+  "1. **Understand role and member setup requests**",
+  "   - Translate User requests such as \"add two devs, one Claude and one Codex\", \"add a skeptical marketing advisor\", or \"I need help debugging this\" into concrete role and member changes.",
+  "   - When User describes a problem, task, or question, use that description to suggest or add the most suitable member who can help.",
+  "   - Do not interact with, request, or hand off to another member unless User explicitly asks you to do that. If the chat already contains a suitable member, tell User that member is available and that User can address them directly with `@handle`.",
   "   - Use `app_roles_describe_options` when you need exact role IDs or role instructions.",
-  "   - Use `app_participants_describe_options` when you need saved participant presets, CLI provider availability, configured models, current handles, or participant validation constraints.",
+  "   - Use `app_participants_describe_options` when you need saved member presets, CLI provider availability, configured models, current handles, or member validation constraints.",
   "   - Reuse an existing built-in or saved role when it fits. Create a custom role only when no existing role fits the user's request.",
-  "   - Explain roles and participants when User asks. A role is a reusable instruction/persona; a participant is a concrete chat actor with a handle, role, provider, model, avatar, and permissions.",
-  "   - If User asks for help with an off-setup task, route the task to a suitable participant. Do not offer Chat Assistant as an option for doing the task. Only handle the task yourself if User explicitly asks Chat Assistant to do it without adding or involving another participant.",
+  "   - Explain roles and members when User asks. A role is a reusable instruction/persona; a member is a concrete chat actor with a handle, role, provider, model, avatar, and permissions.",
+  "   - If User asks for help with an off-setup task, route the task to a suitable member. Do not offer Chat Assistant as an option for doing the task. Only handle the task yourself if User explicitly asks Chat Assistant to do it without adding or involving another member.",
   "",
-  "2. **Use app MCP tools for participant changes**",
+  "2. **Use app MCP tools for member changes**",
   "   - Use `app_roles_request_change` to create roles, edit custom roles, or delete unused custom roles with `archive_role`.",
-  "   - Use `app_participants_request_change` to add a new participant to the current chat or add an existing saved participant preset.",
-  "   - If you create a role for a new participant, use the `draftRoleRef` returned by `app_roles_request_change` as the participant `roleConfigId` in the following `app_participants_request_change` call.",
-  "   - If adding a new participant should make it reusable later, set `saveAsPreset` to true unless User says this is one-off.",
-  "   - Do not claim roles or participants were changed until the app reports that the request was approved.",
-  "   - Do not read repository files, edit files, or request shell/repository/edit permissions by default. For code or repository tasks, first suggest adding a generic participant; proceed only if User explicitly asks Chat Assistant to handle it and enables the needed permissions.",
-  "   - Web access is normal when it helps draft better role or participant setup.",
+  "   - Use `app_participants_request_change` to add a new member to the current chat or add an existing saved member preset.",
+  "   - If you create a role for a new member, use the `draftRoleRef` returned by `app_roles_request_change` as the member `roleConfigId` in the following `app_participants_request_change` call.",
+  "   - If adding a new member should make it reusable later, set `saveAsPreset` to true unless User says this is one-off.",
+  "   - Do not claim roles or members were changed until the app reports that the request was approved.",
+  "   - Do not read repository files, edit files, or request shell/repository/edit permissions by default. For code or repository tasks, first suggest adding a generic member; proceed only if User explicitly asks Chat Assistant to handle it and enables the needed permissions.",
+  "   - Web access is normal when it helps draft better role or member setup.",
   "",
   "3. **Keep setup concise**",
   "   - Explain any assumptions briefly.",
@@ -172,17 +172,17 @@ const DEFAULT_ADMINISTRATOR_INSTRUCTIONS = [
   "",
   "## Roster Defaults",
   "",
-  "- When User has not named a specialization, suggest a generic participant and prefer role ID `generic-participant`.",
-  "- For software development participants, prefer role ID `software-engineer`.",
-  "- For comparison or final synthesis participants, prefer role ID `synthesizer`.",
+  "- When User has not named a specialization, suggest a generic member and prefer role ID `generic-participant`.",
+  "- For software development members, prefer role ID `software-engineer`.",
+  "- For comparison or final synthesis members, prefer role ID `synthesizer`.",
   "- Use short unique handles with letters, numbers, underscores, or hyphens only.",
   "- Do not add another Chat Assistant unless User explicitly asks.",
   "",
   "## Output Style",
   "",
   "- Be direct and brief.",
-  "- For a simple greeting or cold-start setup request, say: \"Hi. I'm Chat Assistant. I can help set up roles and participants for this chat. Tell me who you want in this chat, or what kind of help you need.\"",
-  "- After creating a role or participant request, say that User must approve it in the app.",
+  "- For a simple greeting or cold-start setup request, say: \"Hi. I'm Chat Assistant. I can help set up roles and members for this chat. Tell me who you want in this chat, or what kind of help you need.\"",
+  "- After creating a role or member request, say that User must approve it in the app.",
   "- If the app MCP tool returns pending approval, do not repeat the whole proposal unless User asks.",
 ].join("\n");
 
@@ -1508,14 +1508,14 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
     id: "administrator",
     label: "Chat Assistant",
     instructions: DEFAULT_ADMINISTRATOR_INSTRUCTIONS,
-    version: 11,
+    version: 12,
     builtIn: true,
     appToolCapabilities: ["participants.manage"] satisfies ChatAppToolCapability[],
-    updatedAt: "2026-06-23T00:00:00.000Z"
+    updatedAt: "2026-07-06T00:00:00.000Z"
   },
   {
     id: GENERIC_PARTICIPANT_ROLE_ID,
-    label: "Generic Participant",
+    label: "Generic Member",
     instructions: DEFAULT_GENERIC_PARTICIPANT_INSTRUCTIONS,
     version: 1,
     builtIn: true,
@@ -1824,7 +1824,7 @@ export class SettingsService {
     const usage = this.roleParticipantUsageCount(normalized, stored.chatParticipantConfigs ?? []);
     if (usage > 0) {
       throw new Error(
-        `Role "${role.label}" is used by ${usage} saved participant preset${usage === 1 ? "" : "s"} and cannot be deleted. Reassign or remove them first.`
+        `Role "${role.label}" is used by ${usage} saved member preset${usage === 1 ? "" : "s"} and cannot be deleted. Reassign or remove them first.`
       );
     }
     const now = new Date().toISOString();
@@ -1926,24 +1926,24 @@ export class SettingsService {
       const roleConfigId = roleIdByDraftRoleRef[update.roleConfigId] ?? update.roleConfigId;
       const normalizedId = update.id?.trim();
       if (!CHAT_HANDLE_PATTERN.test(handle)) {
-        throw new Error("Participant names may use letters, numbers, underscores, and hyphens only.");
+        throw new Error("Member names may use letters, numbers, underscores, and hyphens only.");
       }
       const role = roles.find((item) => item.id === roleConfigId);
       if (!role) {
-        throw new Error("Select a role for the participant.");
+        throw new Error("Select a role for the member.");
       }
       const existingParticipant = normalizedId ? participants.find((participant) => participant.id === normalizedId) : undefined;
       if (role.archivedAt && existingParticipant?.roleConfigId !== role.id) {
-        throw new Error(`Deleted role "${role.label}" cannot be assigned to a participant.`);
+        throw new Error(`Deleted role "${role.label}" cannot be assigned to a member.`);
       }
       const duplicate = participants.find(
         (participant) => participant.id !== normalizedId && participant.handle.toLowerCase() === handle.toLowerCase()
       );
       if (duplicate) {
-        throw new Error(`Duplicate participant name: @${handle}.`);
+        throw new Error(`Duplicate member name: @${handle}.`);
       }
       if (update.kind !== "codex-cli" && update.kind !== "claude-code") {
-        throw new Error("Chat supports local CLI participants only.");
+        throw new Error("Chat supports local CLI members only.");
       }
       const requestedRuleIds = new Set(this.normalizeBehaviorRuleIds(update.behaviorRuleIds));
       const behaviorRuleIds = (stored.chatBehaviorRules ?? []).map((rule) => rule.id).filter((id) => requestedRuleIds.has(id));
@@ -2125,27 +2125,27 @@ export class SettingsService {
     const handle = update.handle.trim().replace(/^@/, "");
     const normalizedId = update.id?.trim();
     if (!CHAT_HANDLE_PATTERN.test(handle)) {
-      throw new Error("Participant names may use letters, numbers, underscores, and hyphens only.");
+      throw new Error("Member names may use letters, numbers, underscores, and hyphens only.");
     }
     const role = roles.find((item) => item.id === update.roleConfigId);
     if (!role) {
-      throw new Error("Select a role for the participant.");
+      throw new Error("Select a role for the member.");
     }
     const existingParticipant = normalizedId ? participants.find((participant) => participant.id === normalizedId) : undefined;
     if (role.archivedAt && existingParticipant?.roleConfigId !== role.id) {
-      throw new Error(`Deleted role "${role.label}" cannot be assigned to a participant.`);
+      throw new Error(`Deleted role "${role.label}" cannot be assigned to a member.`);
     }
     const requestedRuleIds = new Set(this.normalizeBehaviorRuleIds(update.behaviorRuleIds));
     const behaviorRuleIds = (stored.chatBehaviorRules ?? []).map((rule) => rule.id).filter((id) => requestedRuleIds.has(id));
     if (update.kind !== "codex-cli" && update.kind !== "claude-code") {
-      throw new Error("Chat supports local CLI participants only.");
+      throw new Error("Chat supports local CLI members only.");
     }
 
     const duplicate = participants.find(
       (participant) => participant.id !== normalizedId && participant.handle.toLowerCase() === handle.toLowerCase()
     );
     if (duplicate) {
-      throw new Error(`Duplicate participant name: @${handle}.`);
+      throw new Error(`Duplicate member name: @${handle}.`);
     }
 
     const now = new Date().toISOString();

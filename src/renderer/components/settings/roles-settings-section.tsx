@@ -3,9 +3,11 @@ import { Plus, Search } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import type { AppSettings, ChatRoleConfig, ChatRoleConfigUpdate } from "../../../shared/types";
+import { displayChatRoleLabel } from "../chat/chat-role-labels";
 import { ChatRoleEditorDialog } from "./role-editor-dialog";
 import { RoleCard } from "./role-card";
 import {
+  displayChatRoleDescription,
   duplicateRoleLabel,
   parseRoleInstructions,
   savedParticipantPresetCountByRole,
@@ -47,20 +49,20 @@ export function RolesSettingsSection(props: {
       if (!normalizedQuery) {
         return true;
       }
-      return `${role.label} ${role.id} ${role.instructions}`.toLowerCase().includes(normalizedQuery);
+      return `${displayChatRoleLabel(role)} ${role.id} ${role.instructions}`.toLowerCase().includes(normalizedQuery);
     })
     .slice()
     .sort((left, right) => {
       const usageDelta = (savedParticipantPresetsByRole.get(right.id) ?? 0) - (savedParticipantPresetsByRole.get(left.id) ?? 0);
-      return usageDelta || left.label.localeCompare(right.label);
+      return usageDelta || displayChatRoleLabel(left).localeCompare(displayChatRoleLabel(right));
     });
 
   const duplicateRole = (role: ChatRoleConfig): void => {
     const parts = parseRoleInstructions(role.instructions);
     setEditor({
       type: "new",
-      initialLabel: duplicateRoleLabel(role.label, roles),
-      initialDescription: parts.description,
+      initialLabel: duplicateRoleLabel(displayChatRoleLabel(role), roles),
+      initialDescription: displayChatRoleDescription(role, parts.description),
       initialInstructions: parts.body,
       initialParticipantDefaults: role.participantDefaults
     });

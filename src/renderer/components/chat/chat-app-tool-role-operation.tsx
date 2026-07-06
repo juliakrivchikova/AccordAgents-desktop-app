@@ -4,6 +4,7 @@ import { AlertTriangle, Eye, Pencil } from "lucide-react";
 import { normalizeChatParticipantRequestPermission } from "../../../shared/agentPermissions";
 import type { ChatParticipantConfig, ChatParticipantRequestPermission, ChatRoleChangeRequest, ChatRoleConfig, ChatRoleParticipantDefaults } from "../../../shared/types";
 import { MarkdownText } from "../content/markdown-text";
+import { displayChatRoleLabel } from "./chat-role-labels";
 import { ChatParticipantInlineAutoWatchRow, ChatParticipantSpecRow } from "./chat-participant-config-panel";
 import {
   composeRoleInstructions,
@@ -73,11 +74,11 @@ export function ChatAppToolRoleChangeOperation(props: {
               </div>
               <div className="chat-app-tool-review-field">
                 <span>Role</span>
-                <strong>{archivedRole?.label ?? operation.role.roleConfigId}</strong>
+                <strong>{displayChatRoleLabel(archivedRole, operation.role.roleConfigId)}</strong>
               </div>
               <div className="chat-app-tool-review-warning">
                 <AlertTriangle size={14} aria-hidden />
-                <span>This role will be deleted. Existing participants keep working under it.</span>
+                <span>This role will be deleted. Existing members keep working under it.</span>
               </div>
             </div>
           );
@@ -186,7 +187,7 @@ function EditableRoleReviewOperation(props: {
       {props.operation.type === "edit_role" && props.savedPresetCount > 0 && (
         <div className="chat-app-tool-review-warning">
           <AlertTriangle size={14} aria-hidden />
-          <span>Editing this role affects participants already using it.</span>
+          <span>Editing this role affects members already using it.</span>
         </div>
       )}
     </div>
@@ -202,9 +203,9 @@ function RoleParticipantDefaultsReview(props: { defaults?: ChatRoleParticipantDe
         checked={autoWatch}
         disabled
         onChange={() => {}}
-        description="Default for new participants using this role."
+        description="Default for new members using this role."
       />
-      <ChatParticipantSpecRow label="Request participants">
+      <ChatParticipantSpecRow label="Request members">
         <strong>{requestParticipantsLabel(requestParticipants)}</strong>
       </ChatParticipantSpecRow>
     </div>

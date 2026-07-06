@@ -67,7 +67,7 @@ export function ChatParticipantMenu(props: {
   const savedParticipants = addableSavedParticipantConfigs(props.settings, props.agents, existingHandles);
   const activeWatcher = props.participants.find((participant) => participant.autoWatch === true);
   const autoWatchConflictReason = activeWatcher
-    ? `Only one participant can watch a chat. Turn off @${activeWatcher.handle} first.`
+    ? `Only one member can watch a chat. Turn off @${activeWatcher.handle} first.`
     : undefined;
 
   return (

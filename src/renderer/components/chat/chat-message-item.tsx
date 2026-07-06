@@ -126,16 +126,16 @@ export function ChatMessageItem(props: {
     approved.length > 0 &&
     pending.length === 0 &&
     !props.hasContinuationReply;
-  const pendingMentionTargetLabel = pending.length === 1 ? chatParticipantReference(pending[0].targetHandle) : `${pending.length} participants`;
+  const pendingMentionTargetLabel = pending.length === 1 ? chatParticipantReference(pending[0].targetHandle) : `${pending.length} members`;
   const approvePendingLabel = continuationRequested
     ? `Ask ${pendingMentionTargetLabel}, then return to ${author}`
     : pending.length === 1
       ? `Ask ${pendingMentionTargetLabel}`
-      : "Ask all mentioned participants";
+      : "Ask all mentioned members";
   const pendingMentionList = pending.map((mention) => chatParticipantReference(mention.targetHandle)).join(", ");
   const mentionApprovalTitle = pending.length === 1
     ? `Do you want to ask ${pendingMentionTargetLabel}?`
-    : `Do you want to ask ${pending.length} mentioned participants?`;
+    : `Do you want to ask ${pending.length} mentioned members?`;
   const mentionApprovalDescription = continuationRequested
     ? `${author} will continue after ${pendingMentionTargetLabel} replies.`
     : `This message mentions ${pendingMentionList}.`;

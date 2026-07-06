@@ -92,16 +92,46 @@ test("default Chat Assistant does not offer itself for off-setup task work", () 
   const assistant = roles.find((role) => role.id === "administrator");
 
   assert.ok(assistant);
-  assert.match(assistant.instructions, /help User set up and adjust roles and participants in this chat/);
-  assert.match(assistant.instructions, /Understand role and participant setup requests/);
-  assert.match(assistant.instructions, /When User describes a problem, task, or question, use that description to suggest or add the most suitable participant who can help/);
-  assert.match(assistant.instructions, /Do not interact with, request, or hand off to another participant unless User explicitly asks you to do that/);
-  assert.match(assistant.instructions, /If the chat already contains a suitable participant, tell User that participant is available and that User can address them directly with `@handle`/);
+  assert.match(assistant.instructions, /help User set up and adjust roles and members in this chat/);
+  assert.match(assistant.instructions, /Understand role and member setup requests/);
+  assert.match(assistant.instructions, /When User describes a problem, task, or question, use that description to suggest or add the most suitable member who can help/);
+  assert.match(assistant.instructions, /Do not interact with, request, or hand off to another member unless User explicitly asks you to do that/);
+  assert.match(assistant.instructions, /If the chat already contains a suitable member, tell User that member is available and that User can address them directly with `@handle`/);
   assert.match(assistant.instructions, /Do not offer Chat Assistant as an option for doing the task/);
   assert.match(assistant.instructions, /Only handle the task yourself if User explicitly asks Chat Assistant/);
+  assert.match(assistant.instructions, /I can help set up roles and members for this chat/);
+  assert.doesNotMatch(assistant.instructions, /I can help set up roles and participants for this chat/);
+  assert.doesNotMatch(assistant.instructions, /roles and participants in this chat/);
+  assert.doesNotMatch(assistant.instructions, /role and participant setup/);
+  assert.doesNotMatch(assistant.instructions, /suitable participant/);
+  assert.doesNotMatch(assistant.instructions, /another participant/);
   assert.match(assistant.instructions, /Do not create a `User choice` block just to offer whether Chat Assistant should handle an off-setup task/);
   assert.doesNotMatch(assistant.instructions, /set up and adjust who participates/);
   assert.doesNotMatch(assistant.instructions, /\b(?:create|edit|manage|set up|adjust)\s+(?:rules|prompts)\b/i);
+});
+
+test("stored v11 Chat Assistant is reseeded with member greeting", () => {
+  const { service } = settingsServiceWith();
+  const defaults = (service as any).mergeDefaultRoles(undefined) as ChatRoleConfig[];
+  const currentAssistant = defaults.find((role) => role.id === "administrator");
+  assert.ok(currentAssistant);
+
+  const storedAssistant: ChatRoleConfig = {
+    ...currentAssistant,
+    instructions: currentAssistant.instructions.replace(
+      "I can help set up roles and members for this chat",
+      "I can help set up roles and participants for this chat"
+    ),
+    version: 11,
+    updatedAt: "2026-06-23T00:00:00.000Z"
+  };
+  const roles = (service as any).mergeDefaultRoles([storedAssistant]) as ChatRoleConfig[];
+  const assistant = roles.find((role) => role.id === "administrator");
+
+  assert.ok(assistant);
+  assert.equal(assistant.version, 12);
+  assert.match(assistant.instructions, /I can help set up roles and members for this chat/);
+  assert.doesNotMatch(assistant.instructions, /I can help set up roles and participants for this chat/);
 });
 
 test("default Workflow Manager only follows implementation workflow when explicitly selected", () => {
@@ -132,16 +162,16 @@ test("rejects archiving a built-in role", async () => {
   assert.equal(writeCount(), 0);
 });
 
-test("rejects archiving a role used by a saved participant preset", async () => {
+test("rejects archiving a role used by a saved member preset", async () => {
   const { service, writeCount } = settingsServiceWith({
     chatRoleConfigs: [makeRole()],
     chatParticipantConfigs: [makeParticipant()]
   });
-  await assert.rejects(() => service.archiveChatRoleConfig("custom-reviewer"), /used by 1 saved participant preset/);
+  await assert.rejects(() => service.archiveChatRoleConfig("custom-reviewer"), /used by 1 saved member preset/);
   assert.equal(writeCount(), 0);
 });
 
-test("deleting the saved participant preset frees the role for archive", async () => {
+test("deleting the saved member preset frees the role for archive", async () => {
   const { service, stored } = settingsServiceWith({
     chatRoleConfigs: [makeRole()],
     chatParticipantConfigs: [makeParticipant()]
@@ -217,7 +247,7 @@ test("custom role participant defaults are editable and preserved when omitted",
   });
 });
 
-test("Workflow Manager saved participant presets force auto-watch on", async () => {
+test("Workflow Manager saved member presets force auto-watch on", async () => {
   const workflowManager = makeRole({
     id: "workflow-manager",
     label: "Workflow Manager",
@@ -258,7 +288,7 @@ test("rejects editing an archived role in a grouped role/participant write", asy
   assert.equal(writeCount(), 0);
 });
 
-test("rejects assigning an archived role to a new saved participant preset", async () => {
+test("rejects assigning an archived role to a new saved member preset", async () => {
   const { service, writeCount } = settingsServiceWith({
     chatRoleConfigs: [makeRole({ archivedAt: "2026-06-19T00:00:00.000Z" })]
   });

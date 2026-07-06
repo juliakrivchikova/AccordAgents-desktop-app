@@ -133,7 +133,7 @@ export function ChatAccordLauncherDialog(props: {
         <DialogHeader className="chat-accord-header">
           <DialogTitle>Start Accord</DialogTitle>
           <DialogDescription>
-            Pick the facilitator, the participants to include, and the decision to resolve.
+            Pick the facilitator, the members to include, and the decision to resolve.
           </DialogDescription>
         </DialogHeader>
 
@@ -141,7 +141,7 @@ export function ChatAccordLauncherDialog(props: {
           <FormRow
             className="chat-accord-field"
             label="Facilitator"
-            hint={`${facilitator ? chatParticipantDisplayName(facilitator) : "The facilitator"} can request selected participants in this chat without another approval.`}
+            hint={`${facilitator ? chatParticipantDisplayName(facilitator) : "The facilitator"} can request selected members in this chat without another approval.`}
           >
             <AppSelect
               value={resolvedFacilitatorId}
@@ -157,7 +157,7 @@ export function ChatAccordLauncherDialog(props: {
             />
           </FormRow>
 
-          <FormRow className="chat-accord-field" label="Participants">
+          <FormRow className="chat-accord-field" label="Members">
             <div className="chat-accord-target-list" data-testid="chat-accord-targets">
               {targetOptions.map((participant) => {
                 const checked = targetIds.includes(participant.id);
@@ -193,7 +193,7 @@ export function ChatAccordLauncherDialog(props: {
                 );
               })}
               {targetOptions.length === 0 && (
-                <div className="chat-accord-empty">Add another participant to start Accord.</div>
+                <div className="chat-accord-empty">Add another member to start Accord.</div>
               )}
             </div>
           </FormRow>
@@ -249,7 +249,7 @@ function validationMessage(facilitatorId: string, targetIds: string[], subject: 
     return "Choose a facilitator.";
   }
   if (targetIds.length === 0) {
-    return "Choose at least one participant.";
+    return "Choose at least one member.";
   }
   if (!subject.trim()) {
     return "Enter a subject.";

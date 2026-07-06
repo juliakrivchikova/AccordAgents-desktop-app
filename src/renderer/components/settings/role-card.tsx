@@ -2,6 +2,7 @@ import { UsersRound } from "lucide-react";
 import type { ChatParticipantConfig, ChatRoleConfig } from "../../../shared/types";
 import { Avatar } from "../avatar/avatar";
 import { avatarForChatParticipant } from "../chat/chat-avatars";
+import { displayChatRoleLabel } from "../chat/chat-role-labels";
 import { RoleKindBadge, roleSummary } from "./role-settings-utils";
 
 export function RoleCard(props: {
@@ -11,6 +12,7 @@ export function RoleCard(props: {
 }): JSX.Element {
   const shownParticipants = props.savedParticipants.slice(0, 3);
   const remaining = props.savedParticipants.length - shownParticipants.length;
+  const roleLabel = displayChatRoleLabel(props.role);
   return (
     <button
       type="button"
@@ -20,11 +22,11 @@ export function RoleCard(props: {
     >
       <span className="roles-card-head">
         <span className="roles-card-title-row">
-          <strong>{props.role.label}</strong>
+          <strong>{roleLabel}</strong>
           <RoleKindBadge builtIn={Boolean(props.role.builtIn)} />
         </span>
         {props.savedParticipants.length > 0 && (
-          <span className="roles-card-participant-count" title={`${props.savedParticipants.length} saved participant preset${props.savedParticipants.length === 1 ? "" : "s"}`}>
+          <span className="roles-card-participant-count" title={`${props.savedParticipants.length} saved member preset${props.savedParticipants.length === 1 ? "" : "s"}`}>
             {props.savedParticipants.length}
           </span>
         )}
@@ -54,4 +56,3 @@ export function RoleCard(props: {
     </button>
   );
 }
-

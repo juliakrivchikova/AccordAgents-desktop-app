@@ -37,8 +37,8 @@ import {
   normalizeAwsRootVolumeSizeGb
 } from "../../../shared/cloudRuns";
 
-const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits transitive participant-to-participant nesting, not repeated rounds by the same requester.";
-const PARTICIPANT_REQUEST_PROMPT_MAX_HELP = "Maximum characters accepted for each participant request prompt. Longer prompts are rejected, not truncated.";
+const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits transitive member-to-member request nesting, not repeated rounds by the same requester.";
+const PARTICIPANT_REQUEST_PROMPT_MAX_HELP = "Maximum characters accepted for each member request prompt. Longer prompts are rejected, not truncated.";
 const AUTO_WATCH_WAKE_LIMIT_HELP = "Pauses auto-watch after this many automatic watcher runs happen without a user message.";
 
 const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
@@ -156,9 +156,9 @@ export function GeneralSettingsSection(props: {
           <div className="gen-card-divider" />
           <div className="gen-row">
             <div className="gen-row-text">
-              <div className="gen-row-title" title={PARTICIPANT_REQUEST_DEPTH_HELP}>Participant request depth</div>
+              <div className="gen-row-title" title={PARTICIPANT_REQUEST_DEPTH_HELP}>Member request depth</div>
               <div className="gen-row-desc">
-                {PARTICIPANT_REQUEST_DEPTH_HELP} Use 1 to prevent requested participants from asking others.
+                {PARTICIPANT_REQUEST_DEPTH_HELP} Use 1 to prevent requested members from asking others.
               </div>
             </div>
             <ParticipantRequestDepthControl
@@ -169,7 +169,7 @@ export function GeneralSettingsSection(props: {
           <div className="gen-card-divider" />
           <div className="gen-row">
             <div className="gen-row-text">
-              <div className="gen-row-title" title={PARTICIPANT_REQUEST_PROMPT_MAX_HELP}>Participant request prompt limit</div>
+              <div className="gen-row-title" title={PARTICIPANT_REQUEST_PROMPT_MAX_HELP}>Member request prompt limit</div>
               <div className="gen-row-desc">
                 {PARTICIPANT_REQUEST_PROMPT_MAX_HELP}
               </div>
@@ -289,7 +289,7 @@ function CloudRunsControl(props: {
       <div className="gen-row">
         <div className="gen-row-text">
           <div className="gen-row-title">Remote Codex worker</div>
-          <div className="gen-row-desc">Run Codex participants marked remote on a worker instead of this machine.</div>
+          <div className="gen-row-desc">Run Codex members marked remote on a worker instead of this machine.</div>
         </div>
         <label className="toggle">
           <input
@@ -1025,7 +1025,7 @@ function ParticipantRequestDepthControl(props: {
             className="gen-timeout-input"
             inputMode="numeric"
             value={depth}
-            aria-label="Participant request max depth"
+            aria-label="Member request max depth"
             title={PARTICIPANT_REQUEST_DEPTH_HELP}
             onChange={(event) => setDepth(event.target.value)}
           />
@@ -1121,7 +1121,7 @@ function ParticipantRequestPromptMaxControl(props: {
             className="gen-timeout-input"
             inputMode="numeric"
             value={maxChars}
-            aria-label="Participant request prompt max characters"
+            aria-label="Member request prompt max characters"
             title={PARTICIPANT_REQUEST_PROMPT_MAX_HELP}
             onChange={(event) => setMaxChars(event.target.value)}
           />

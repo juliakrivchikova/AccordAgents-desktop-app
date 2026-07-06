@@ -310,7 +310,7 @@ test("renameConversation rejects running chats", async () => {
 
   await assert.rejects(
     () => service.renameConversation({ conversationId: conversation.id, title: "New title" }),
-    /cannot be edited while participants are running/
+    /cannot be edited while members are running/
   );
   assert.equal((await storage.getConversation(conversation.id))?.title, "Running chat");
 });
@@ -323,7 +323,7 @@ test("renameConversation rejects when a chat run already owns the run queue", as
   try {
     await assert.rejects(
       () => service.renameConversation({ conversationId: conversation.id, title: "New title" }),
-      /cannot be edited while participants are running/
+      /cannot be edited while members are running/
     );
     assert.equal((await storage.getConversation(conversation.id))?.title, "Queued chat");
   } finally {
@@ -394,7 +394,7 @@ test("setArchived rejects running chats", async () => {
 
   await assert.rejects(
     () => service.setArchived({ conversationId: conversation.id, archived: true }),
-    /cannot be archived while participants are running/
+    /cannot be archived while members are running/
   );
   assert.equal((await storage.getConversation(conversation.id))?.metadata.archived, undefined);
 });
@@ -407,7 +407,7 @@ test("setArchived rejects when a chat run already owns the run queue", async () 
   try {
     await assert.rejects(
       () => service.setArchived({ conversationId: conversation.id, archived: true }),
-      /cannot be archived while participants are running/
+      /cannot be archived while members are running/
     );
     assert.equal((await storage.getConversation(conversation.id))?.metadata.archived, undefined);
   } finally {

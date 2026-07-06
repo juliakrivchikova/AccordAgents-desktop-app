@@ -54,7 +54,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
   const [view, setView] = useState<"roster" | "create">("roster");
   const [showSaved, setShowSaved] = useState(false);
   const [savedRunLocations, setSavedRunLocations] = useState<Record<string, CloudRunRemoteExecutionMode>>({});
-  const participantCountLabel = `${props.participants.length} ${props.participants.length === 1 ? "participant" : "participants"}`;
+  const participantCountLabel = `${props.participants.length} ${props.participants.length === 1 ? "member" : "members"}`;
   const activeWatcher = props.participants.find((participant) => participant.autoWatch === true);
 
   function handleOpenChange(next: boolean): void {
@@ -78,13 +78,13 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
 
   function participantRemoveDisabledReason(participant: ChatParticipant): string | undefined {
     if (props.isRunning) {
-      return "Participants cannot be removed while a turn is running";
+      return "Members cannot be removed while a turn is running";
     }
     if (participant.roleConfigId === CHAT_ASSISTANT_ROLE_ID) {
       return "Chat Assistant cannot be removed";
     }
     if (props.participants.length <= 1) {
-      return "The last participant cannot be removed";
+      return "The last member cannot be removed";
     }
     return undefined;
   }
@@ -99,7 +99,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
         <Button
           variant="outline"
           size="sm"
-          title="Participants"
+          title="Members"
           aria-label={participantCountLabel}
           data-testid="chat-participants-trigger"
           className="chat-participants-trigger h-8 min-w-0 gap-2 rounded-full pl-1 pr-2.5 text-xs"
@@ -131,11 +131,11 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                 type="button"
                 className="chat-participant-back"
                 onClick={() => setView("roster")}
-                aria-label="Back to participants"
+                aria-label="Back to members"
               >
                 <ChevronLeft size={16} aria-hidden />
               </button>
-              <span className="chat-popover-section-title">New participant</span>
+              <span className="chat-popover-section-title">New member</span>
             </div>
             {props.addParticipantEditor}
             {props.addValidation && <div className="inline-error">{props.addValidation}</div>}
@@ -168,7 +168,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                   status={props.participantStatusById.get(participant.id) ?? "idle"}
                   autoWatchDisabledReason={
                     activeWatcher && activeWatcher.id !== participant.id
-                      ? "Only one participant can watch a chat. Turn off the current watcher first."
+                      ? "Only one member can watch a chat. Turn off the current watcher first."
                       : undefined
                   }
                   autoWatchPausedReason={props.participantWatchers?.[participant.id]?.pausedReason}
@@ -191,13 +191,13 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
               onClick={() => setShowSaved((value) => !value)}
             >
               <Plus size={15} aria-hidden className="chat-addsaved-plus" />
-              Add a saved participant
+              Add a saved member
               <ChevronRight size={15} aria-hidden className={`chat-addsaved-chev${showSaved ? " is-open" : ""}`} />
             </button>
             {showSaved && (
               props.savedParticipants.length === 0 ? (
                 <div className="chat-saved-participants-empty">
-                  {props.hasSavedParticipantConfigs ? "All saved participants are already in this chat." : "No saved participants configured."}
+                  {props.hasSavedParticipantConfigs ? "All saved members are already in this chat." : "No saved members configured."}
                 </div>
               ) : (
                 <div className="chat-saved-participant-list">
@@ -247,7 +247,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
             <div className="chat-participant-footer">
               <Button variant="outline" size="sm" disabled={props.isRunning} onClick={() => setView("create")}>
                 <UserPlus size={16} />
-                New participant
+                New member
               </Button>
               <span className="chat-participant-footer-spacer" />
               <button type="button" className="chat-manage-link" onClick={props.onManageInSettings}>

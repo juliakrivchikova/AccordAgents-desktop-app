@@ -9,13 +9,9 @@ import type {
   ChatParticipant,
   ChatParticipantChangeRequest,
   ChatParticipantConfig,
-  ChatParticipantRequestApprovalRequest,
-  ChatPermissionChangeRequest,
   ChatRoleChangeRequest,
   ChatRoleConfig,
-  ChatRoleParticipantChangeRequest,
-  ChatRosterChangeOperation,
-  ChatToolPermissionRequest
+  ChatRoleParticipantChangeRequest
 } from "../../../shared/types";
 import { Avatar, avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
@@ -86,7 +82,7 @@ export function ChatAppToolApprovalCard(props: {
     ? avatarForChatParticipant(requester, requesterLabel)
     : avatarForParticipant(requesterLabel, props.approval.requesterParticipantId);
   const approvalPrompt = effectiveCombinedRequest
-    ? `${chatParticipantReference(props.approval.requesterHandle)} wants to create a role and add a participant`
+    ? `${chatParticipantReference(props.approval.requesterHandle)} wants to create a role and add a member`
     : approvalQuestion(props.approval, permissionRequest, effectiveRoleRequest, effectiveParticipantChange, participantRequest, toolPermissionRequest);
   const displayPrompt = rosterApproval ? rosterApprovalQuestion(props.approval, added) : approvalPrompt;
 
@@ -173,12 +169,12 @@ export function ChatAppToolApprovalCard(props: {
           <span className="message-when">{formatChatTime(props.approval.createdAt)}</span>
         </div>
         <div className={`chat-app-tool-approval-panel ${rosterApproval ? "is-roster-request" : ""} ${reviewChange ? "is-review-change" : ""}`}>
-          {rosterApproval && <div className="chat-app-tool-approval-eyebrow">Participant request</div>}
+          {rosterApproval && <div className="chat-app-tool-approval-eyebrow">Member request</div>}
           {reviewChange && (
             <div className="chat-app-tool-review-header">
               <div className="chat-app-tool-review-chip">
                 <Sparkles size={13} aria-hidden />
-                {effectiveCombinedRequest ? "Role + participant" : effectiveRoleRequest ? roleReviewChipLabel(effectiveRoleRequest) : participantReviewChipLabel(effectiveParticipantChange)}
+                {effectiveCombinedRequest ? "Role + member" : effectiveRoleRequest ? roleReviewChipLabel(effectiveRoleRequest) : participantReviewChipLabel(effectiveParticipantChange)}
               </div>
             </div>
           )}
@@ -203,7 +199,7 @@ export function ChatAppToolApprovalCard(props: {
                   }));
                 }}
               />
-              <div className="chat-app-tool-review-dependency">This participant will use the new role.</div>
+              <div className="chat-app-tool-review-dependency">This member will use the new role.</div>
               <ChatAppToolParticipantChangeOperation
                 request={effectiveCombinedRequest.participantRequest}
                 roles={[...props.roles, ...temporaryRolesForReview(effectiveCombinedRequest.roleRequest)]}
@@ -249,17 +245,17 @@ export function ChatAppToolApprovalCard(props: {
           {rosterApproval && <ChatAppToolRosterPermissionEnvelope operations={added} />}
           {permissionRequest && (
             <p className="chat-app-tool-scope-note">
-              Applies only to {requesterLabel}. Allow once expires after the next run; chat grants stay enabled for this participant in this chat.
+              Applies only to {requesterLabel}. Allow once expires after the next run; chat grants stay enabled for this member in this chat.
             </p>
           )}
           {toolPermissionRequest && (
             <p className="chat-app-tool-scope-note">
-              Applies only to {requesterLabel}. Allow once approves this blocked call; chat grants apply to future {toolPermissionRequest.toolName} calls from this participant in this chat.
+              Applies only to {requesterLabel}. Allow once approves this blocked call; chat grants apply to future {toolPermissionRequest.toolName} calls from this member in this chat.
             </p>
           )}
           {participantRequest && (
             <p className="chat-app-tool-scope-note">
-              Approval runs the requested participant{participantRequest.requests.length === 1 ? "" : "s"} and then returns to {requesterLabel} after replies or errors. {inferredParticipantRequest ? "Inferred requests are approved one time." : "Chat grants apply only to this requester and target set."}
+              Approval runs the requested member{participantRequest.requests.length === 1 ? "" : "s"} and then returns to {requesterLabel} after replies or errors. {inferredParticipantRequest ? "Inferred requests are approved one time." : "Chat grants apply only to this requester and target set."}
             </p>
           )}
           {reviewChange && readOnly ? null : reviewChange ? (

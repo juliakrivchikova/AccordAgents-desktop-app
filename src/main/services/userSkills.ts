@@ -401,7 +401,7 @@ export class UserSkillsService {
         ...mention,
         providerKinds: uniqueProviderKinds(selected.map((variant) => variant.providerKind)),
         scopeKinds: Array.from(new Set(selected.map((variant) => variant.scope))).sort(),
-        statusMessage: needsClearTarget ? "Mention a participant before selecting a skill." : ambiguous ? "Duplicate skill variants are ambiguous." : undefined,
+        statusMessage: needsClearTarget ? "Mention a member before selecting a skill." : ambiguous ? "Duplicate skill variants are ambiguous." : undefined,
         ambiguous
       });
     }

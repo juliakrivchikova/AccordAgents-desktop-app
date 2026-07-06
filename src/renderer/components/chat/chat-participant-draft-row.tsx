@@ -38,7 +38,7 @@ import {
   updateChatParticipantDraft
 } from "./chat-participant-drafts";
 
-const AUTO_WATCH_GENERIC_DESCRIPTION = "Let this participant watch new chat messages and decide whether to act.";
+const AUTO_WATCH_GENERIC_DESCRIPTION = "Let this member watch new chat messages and decide whether to act.";
 const AUTO_WATCH_MANAGER_DESCRIPTION = "Workflow Manager defaults to watching new chat messages.";
 
 export function ChatParticipantDraftRow(props: {
@@ -85,7 +85,7 @@ export function ChatParticipantDraftRow(props: {
         <AppSelect
           value={props.draft.roleConfigId}
           placeholder="Select role"
-          ariaLabel="Participant role"
+          ariaLabel="Member role"
           options={roleOptions}
           onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { roleConfigId: value }))}
         />
@@ -94,7 +94,7 @@ export function ChatParticipantDraftRow(props: {
         <AppSelect
           value={props.draft.kind}
           placeholder="Select CLI"
-          ariaLabel="Participant CLI"
+          ariaLabel="Member CLI"
           options={cliProviders.map((provider) => {
             const health = props.agents.find((agent) => agent.kind === provider.kind);
             return {
@@ -111,7 +111,7 @@ export function ChatParticipantDraftRow(props: {
           <AppSelect
             value={normalizeChatRunLocation(props.draft.remoteExecution)}
             placeholder="Select run location"
-            ariaLabel="Participant run location"
+            ariaLabel="Member run location"
             options={CHAT_RUN_LOCATION_OPTIONS}
             onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, {
               remoteExecution: value as CloudRunRemoteExecutionMode
@@ -138,7 +138,7 @@ export function ChatParticipantDraftRow(props: {
         <AppSelect
           value={props.draft.agentMode}
           placeholder="Select mode"
-          ariaLabel="Participant agent mode"
+          ariaLabel="Member agent mode"
           options={CHAT_AGENT_MODE_OPTIONS}
           onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { agentMode: value as ChatAgentMode }))}
         />
@@ -189,7 +189,7 @@ export function ChatParticipantDraftRow(props: {
         )}
       </FormRow>
       <FormRow label="Avatar" className="avatar-picker-field">
-        <div className="avatar-choice-grid" role="radiogroup" aria-label="Participant avatar">
+        <div className="avatar-choice-grid" role="radiogroup" aria-label="Member avatar">
           {avatarOptions.map((option) => {
             const selected = option.id === avatarId;
             return (
@@ -212,8 +212,8 @@ export function ChatParticipantDraftRow(props: {
         <IconButton
           size="xs"
           icon={X}
-          label="Remove participant"
-          tooltip="Remove participant"
+          label="Remove member"
+          tooltip="Remove member"
           onClick={props.onRemove}
           className="chat-row-remove"
         />

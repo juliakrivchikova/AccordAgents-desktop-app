@@ -61,7 +61,7 @@ export function SettingsView(props: {
         ? "Roles"
         : props.section === "behavior-rules"
           ? "Rules"
-          : props.section === "saved-prompts" ? "Prompts" : "Participants";
+          : props.section === "saved-prompts" ? "Prompts" : "Members";
   const sectionClass = props.section === "participants"
     ? "settings-view-participants"
     : props.section === "roles"

@@ -37,7 +37,7 @@ test("parses participant reply skill frontmatter without stale reply-tool guidan
   assert.ok(stripped.startsWith("---\n"));
   const parsed = parseSkillFrontmatter(stripped);
   assert.equal(parsed.name, "app-chat-reply");
-  assert.ok(parsed.description.includes("Reply to a participant request"));
+  assert.ok(parsed.description.includes("Reply to a member request"));
   assert.match(parsed.body, /answer directly in the\s+active request thread/);
   assert.ok(parsed.body.includes("Ask for clarification"));
   assert.doesNotMatch(parsed.body, /Plain chat messages do not resume the requester/);
@@ -51,7 +51,7 @@ test("parses participant request skill frontmatter", async () => {
   const parsed = parseSkillFrontmatter(stripOuterMarkdownFence(raw));
 
   assert.equal(parsed.name, "app-chat-request");
-  assert.ok(parsed.description.includes("participant request MCP tool"));
+  assert.ok(parsed.description.includes("member request MCP tool"));
   assert.ok(parsed.body.includes("app_chat_request_participants"));
   assert.ok(parsed.body.includes("app_chat_get_participant_request_status"));
 });
@@ -346,7 +346,7 @@ function skillText(body: string): string {
     "---",
     "name: app-chat-reply",
     "description: >",
-    "  Reply to a participant request that was addressed to your handle.",
+    "  Reply to a member request that was addressed to your handle.",
     "---",
     "",
     "# Reply",
@@ -362,7 +362,7 @@ function publicSkillText(body: string): string {
     "name: accord",
     "visibility: public",
     "description: >",
-    "  Facilitate a skeptical multi-participant accord discussion.",
+    "  Facilitate a skeptical multi-member accord discussion.",
     "---",
     "",
     "# Accord",
@@ -377,7 +377,7 @@ function requestSkillText(body: string): string {
     "---",
     "name: app-chat-request",
     "description: >",
-    "  Ask another AccordAgents chat participant using the participant request MCP tool.",
+    "  Ask another AccordAgents chat member using the member request MCP tool.",
     "---",
     "",
     "# Request",

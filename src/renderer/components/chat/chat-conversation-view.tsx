@@ -32,7 +32,7 @@ import {
   liveMessageProgressById
 } from "./chat-conversation-data";
 import { ChatConversationTimeline } from "./chat-conversation-timeline";
-import type { ChatConversationViewProps, ChatMessageFocusRequest } from "./chat-conversation-types";
+import type { ChatConversationViewProps } from "./chat-conversation-types";
 import { ChatThreadPanel } from "./chat-thread-panel";
 import { useChatConversationViewport } from "./use-chat-conversation-viewport";
 import { useChatLocalFileOpen } from "./use-chat-local-file-open";
@@ -289,7 +289,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
                   props.onStopRun?.(runId);
                 }
               } : undefined}
-              placeholder="Mention participants with @name, prompts or skills with /name, or repo files with #path"
+              placeholder="Mention members with @name, prompts or skills with /name, or repo files with #path"
               status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
               testId="chat-main-composer"
               renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}

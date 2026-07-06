@@ -92,7 +92,7 @@ export function ParticipantRuntimeControls(props: {
   const autoWatchPausedTooltip = props.autoWatchPausedReason ? AUTO_WATCH_PAUSED_TOOLTIPS[props.autoWatchPausedReason] : undefined;
   const autoWatchTooltip = props.autoWatchDisabledReason
     ?? autoWatchPausedTooltip
-    ?? (autoWatchOn ? "Auto-watch is enabled for this participant." : "Let this participant watch new chat messages and decide whether to act.");
+    ?? (autoWatchOn ? "Auto-watch is enabled for this member." : "Let this member watch new chat messages and decide whether to act.");
   const autoWatchDisabled = props.disabled || Boolean(props.autoWatchDisabledReason);
 
   return (
@@ -137,10 +137,10 @@ export function ParticipantRuntimeControls(props: {
         />
         <span className="chat-rt-dot" aria-hidden>·</span>
         <GhostSelect
-          ariaLabel="Request participants permission"
+          ariaLabel="Request members permission"
           value={requestPermission}
           displayLabel={`Requests: ${requestPermissionLabel}`}
-          tooltip="Controls whether this participant can ask other chat members for help."
+          tooltip="Controls whether this member can ask other chat members for help."
           muted={requestPermission === "ask"}
           disabled={props.disabled}
           options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
@@ -221,7 +221,7 @@ function AutoWatchToggle(props: {
           <span className="chat-rt-watch-label">{label}</span>
         </label>
       </TooltipTrigger>
-      <TooltipContent side="top">{props.tooltip || "Let this participant watch new chat messages and decide whether to act."}</TooltipContent>
+      <TooltipContent side="top">{props.tooltip || "Let this member watch new chat messages and decide whether to act."}</TooltipContent>
     </Tooltip>
   );
 }

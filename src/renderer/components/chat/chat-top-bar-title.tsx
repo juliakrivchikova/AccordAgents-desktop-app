@@ -121,7 +121,7 @@ export function ChatTopBarTitle(props: {
             size="xs"
             icon={Pencil}
             label="Edit chat name"
-            tooltip={props.isRunning ? "Chat name cannot be edited while participants are running" : "Edit chat name"}
+            tooltip={props.isRunning ? "Chat name cannot be edited while members are running" : "Edit chat name"}
             disabled={props.isRunning}
             data-testid="chat-title-edit"
             onClick={startTitleRename}

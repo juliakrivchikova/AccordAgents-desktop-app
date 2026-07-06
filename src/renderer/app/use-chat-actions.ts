@@ -210,7 +210,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       return false;
     }
     if (skillMentions.length > 0 && hasMultipleMentionedParticipants(content, state.conversation)) {
-      state.setError("A selected skill runs on a single participant. Mention exactly one participant, or remove the skill. Other participants can be brought in by the running skill itself.");
+      state.setError("A selected skill runs on a single member. Mention exactly one member, or remove the skill. Other members can be brought in by the running skill itself.");
       return false;
     }
     const runId = crypto.randomUUID();

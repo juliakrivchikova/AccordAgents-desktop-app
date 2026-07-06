@@ -852,7 +852,7 @@ export class ChatService {
         throw new Error("Only chat conversations can be renamed.");
       }
       if (conversation.metadata.running === true || this.chatHasLiveWork(conversation.id)) {
-        throw new Error("Chat name cannot be edited while participants are running.");
+        throw new Error("Chat name cannot be edited while members are running.");
       }
       const title = this.normalizeChatTitle(request.title);
       const existingAutoTitle = this.chatAutoTitleMetadata(conversation);
@@ -869,7 +869,7 @@ export class ChatService {
       return conversation;
     }, {
       rejectIfQueued: true,
-      queuedMessage: "Chat name cannot be edited while participants are running."
+      queuedMessage: "Chat name cannot be edited while members are running."
     });
   }
 
@@ -884,7 +884,7 @@ export class ChatService {
         throw new Error("Only chat conversations can be archived.");
       }
       if (conversation.metadata.running === true || this.chatHasLiveWork(conversation.id)) {
-        throw new Error("Chat cannot be archived while participants are running.");
+        throw new Error("Chat cannot be archived while members are running.");
       }
       const alreadyArchived = conversation.metadata.archived === true;
       if (request.archived === alreadyArchived) {
@@ -904,7 +904,7 @@ export class ChatService {
       return conversation;
     }, {
       rejectIfQueued: true,
-      queuedMessage: "Chat cannot be archived while participants are running."
+      queuedMessage: "Chat cannot be archived while members are running."
     });
   }
 
@@ -965,7 +965,7 @@ export class ChatService {
       const participants = this.chatParticipants(conversation);
       const target = participants.find((participant) => participant.id === request.participantId);
       if (!target) {
-        throw new Error("Chat participant was not found.");
+        throw new Error("Chat member was not found.");
       }
       const nextRemoteExecution = this.normalizeConcreteRemoteExecutionMode(
         Object.prototype.hasOwnProperty.call(request, "remoteExecution")
@@ -976,7 +976,7 @@ export class ChatService {
         nextRemoteExecution !== this.normalizeConcreteRemoteExecutionMode(target.remoteExecution) &&
         this.chatParticipantHasRun(conversation, target.id)
       ) {
-        throw new Error("Run location is locked after the participant has run. Remove and re-add the participant to change it.");
+        throw new Error("Run location is locked after the member has run. Remove and re-add the member to change it.");
       }
       const autoWatchRequested = Object.prototype.hasOwnProperty.call(request, "autoWatch");
       if (
@@ -984,7 +984,7 @@ export class ChatService {
         request.autoWatch === true &&
         participants.some((participant) => participant.id !== target.id && participant.autoWatch === true)
       ) {
-        throw new Error("Only one participant can watch a chat. Turn off the current watcher first.");
+        throw new Error("Only one member can watch a chat. Turn off the current watcher first.");
       }
       const updated: ChatParticipant = {
         ...target,
@@ -1026,18 +1026,18 @@ export class ChatService {
     }
     return this.withChatMutation(conversation, async () => {
       if (conversation.metadata.running === true || this.chatHasLiveWork(conversation.id)) {
-        throw new Error("Participants cannot be removed while a turn is running.");
+        throw new Error("Members cannot be removed while a turn is running.");
       }
       const participants = this.chatParticipants(conversation);
       const target = participants.find((participant) => participant.id === request.participantId);
       if (!target) {
-        throw new Error("Chat participant was not found.");
+        throw new Error("Chat member was not found.");
       }
       if (target.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID) {
         throw new Error("Chat Assistant cannot be removed from the chat.");
       }
       if (participants.length <= 1) {
-        throw new Error("The last chat participant cannot be removed.");
+        throw new Error("The last chat member cannot be removed.");
       }
       const now = new Date().toISOString();
       // Drop the participant plus its resumable CLI session so a future re-add starts clean.
@@ -1072,7 +1072,7 @@ export class ChatService {
       const conversation = await this.requireChat(request.conversationId);
       const participant = this.compactRequestParticipant(conversation, request);
       if (!participant) {
-        throw new Error("Chat participant was not found.");
+        throw new Error("Chat member was not found.");
       }
       const sessionState = await this.sessionForParticipant(conversation, participant);
       if (!sessionState.session.sessionId) {
@@ -3720,7 +3720,7 @@ export class ChatService {
           throw new Error("Accord facilitator is no longer in this chat.");
         }
         if (facilitator.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID) {
-          throw new Error("The Chat Assistant cannot be an accord facilitator or participant.");
+          throw new Error("The Chat Assistant cannot be an Accord facilitator or member.");
         }
         const subject = request.subject.trim();
         if (!subject) {
@@ -3728,18 +3728,18 @@ export class ChatService {
         }
         const targetIds = Array.from(new Set(request.targetParticipantIds.map((id) => id.trim()).filter(Boolean)));
         if (targetIds.length === 0) {
-          throw new Error("Choose at least one accord participant.");
+          throw new Error("Choose at least one Accord member.");
         }
         if (targetIds.includes(facilitator.id)) {
-          throw new Error("The facilitator cannot also be a selected accord participant.");
+          throw new Error("The facilitator cannot also be a selected Accord member.");
         }
         const targets = targetIds.map((id) => participants.find((participant) => participant.id === id));
         if (targets.some((target) => !target)) {
-          throw new Error("One or more selected accord participants are no longer in this chat.");
+          throw new Error("One or more selected Accord members are no longer in this chat.");
         }
         const selectedTargets = targets as ChatParticipant[];
         if (selectedTargets.some((target) => target.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID)) {
-          throw new Error("The Chat Assistant cannot be an accord facilitator or participant.");
+          throw new Error("The Chat Assistant cannot be an Accord facilitator or member.");
         }
         const content = this.accordStartMessageContent(facilitator, selectedTargets, subject);
         const accordSkill = await this.resolveAccordSkillMention(conversation, facilitator, content);
@@ -4310,14 +4310,14 @@ export class ChatService {
     // Require exactly one target when a skill is selected.
     if (targets.length > 1) {
       throw new Error(
-        "A selected skill runs on a single participant. Mention exactly one participant in this message, or remove the skill. Other participants can be brought in by the running skill itself (for example, /accord contacts them via a participant request)."
+        "A selected skill runs on a single member. Mention exactly one member in this message, or remove the skill. Other members can be brought in by the running skill itself (for example, /accord contacts them via a member request)."
       );
     }
     if (!this.userSkills) {
       throw new Error("Skill selection is unavailable.");
     }
     if (targets.length === 0) {
-      throw new Error("Mention a participant before selecting a skill.");
+      throw new Error("Mention a member before selecting a skill.");
     }
     const skillContext = this.userSkillRunContext(conversation, content, context);
     const validTargets: ChatParticipant[] = [];
@@ -5627,14 +5627,14 @@ export class ChatService {
     }
     return [
       ...lines,
-      "App tools: `app_roles_describe_options` and `app_participants_describe_options` are available for read-only discovery of roles, saved participant presets, current chat participants, CLI providers, model catalogs, reasoning-effort options, defaults, usage counts, and validation rules.",
+      "App tools: `app_roles_describe_options` and `app_participants_describe_options` are available for read-only discovery of roles, saved member presets, current chat members, CLI providers, model catalogs, reasoning-effort options, defaults, usage counts, and validation rules.",
       "Call the describe tools first when you need exact role IDs, saved participant IDs, provider availability, model IDs, reasoning-effort options, configured models, or handle constraints.",
       "App tools: `app_roles_request_change` is available for proposed role creation, custom-role editing, or deleting unused custom roles with `archive_role`. Use `create_role` when no built-in role fits. Do not edit or delete built-in roles.",
-      "App tools: `app_participants_request_change` is available for User-requested participant changes. Use `add_existing_participant_to_chat` for a matching saved participant preset, or `add_new_participant_to_chat` with `saveAsPreset` for a new chat participant.",
-      "Do not choose roles marked archived for new participants; archived roles are kept only so existing saved/current references remain understandable.",
-      "For a new participant whose role does not exist, call `app_roles_request_change` first. The response includes `createdRoleRefs`; use the returned `draftRoleRef` as the participant `roleConfigId` in the following `app_participants_request_change` call so the app can show one grouped review card.",
-      "The app validates proposed role and participant changes and creates a User review card before anything is written.",
-      "`app_roster_request_change` is legacy compatibility only; do not use it for the v1 participant setup flow."
+      "App tools: `app_participants_request_change` is available for User-requested member changes. Use `add_existing_participant_to_chat` for a matching saved member preset, or `add_new_participant_to_chat` with `saveAsPreset` for a new chat member.",
+      "Do not choose roles marked archived for new members; archived roles are kept only so existing saved/current references remain understandable.",
+      "For a new member whose role does not exist, call `app_roles_request_change` first. The response includes `createdRoleRefs`; use the returned `draftRoleRef` as the member `roleConfigId` in the following `app_participants_request_change` call so the app can show one grouped review card.",
+      "The app validates proposed role and member changes and creates a User review card before anything is written.",
+      "`app_roster_request_change` is legacy compatibility only; do not use it for the v1 member setup flow."
     ].join("\n");
   }
 
@@ -6143,7 +6143,7 @@ export class ChatService {
     if (participant.kind !== "codex-cli") {
       return {
         ok: false,
-        message: `@${participant.handle} requested remote execution, but Cloud Runs currently supports Codex participants only.`
+        message: `@${participant.handle} requested remote execution, but Cloud Runs currently supports Codex members only.`
       };
     }
     let workerSettings: CloudRunWorkerSettings;
@@ -7407,7 +7407,7 @@ export class ChatService {
     availableRoles?: ChatRoleConfig[]
   ): Promise<ChatParticipant[]> {
     if (items.length === 0 && existing.length === 0 && !allowEmpty) {
-      throw new Error("Add at least one chat participant.");
+      throw new Error("Add at least one chat member.");
     }
     const settings = await this.settings.getPublicSettings();
     const roles = availableRoles ?? settings.chatRoleConfigs.filter((role) => !role.archivedAt);
@@ -7416,21 +7416,21 @@ export class ChatService {
     return items.map((item) => {
       const handle = item.handle.trim().replace(/^@/, "");
       if (!HANDLE_PATTERN.test(handle)) {
-        throw new Error("Participant names may use letters, numbers, underscores, and hyphens only.");
+        throw new Error("Member names may use letters, numbers, underscores, and hyphens only.");
       }
       const normalized = handle.toLowerCase();
       if (handles.has(normalized)) {
-        throw new Error(`Duplicate participant name: @${handle}.`);
+        throw new Error(`Duplicate member name: @${handle}.`);
       }
       handles.add(normalized);
       if (item.kind !== "codex-cli" && item.kind !== "claude-code") {
-        throw new Error("Chat MVP supports local CLI participants only.");
+        throw new Error("Chat supports local CLI members only.");
       }
       const role = roles.find((candidate) => candidate.id === item.roleConfigId);
       if (!role) {
         const archived = settings.chatRoleConfigs.find((role) => role.id === item.roleConfigId && role.archivedAt);
         if (archived) {
-          throw new Error(`Deleted role "${archived.label}" cannot be used for a new participant.`);
+          throw new Error(`Deleted role "${archived.label}" cannot be used for a new member.`);
         }
         throw new Error(`Unknown role for @${handle}.`);
       }
@@ -7928,7 +7928,7 @@ export class ChatService {
       }))
       .filter((candidate) => Array.from(requestedRoleIds).some((roleId) => candidate.refs.has(roleId)));
     if (matches.length > 1) {
-      throw new Error("Participant request references roles from multiple pending role approvals.");
+      throw new Error("Member request references roles from multiple pending role approvals.");
     }
     return matches[0]
       ? { approval: matches[0].approval, roleRequest: matches[0].roleRequest }
@@ -7977,7 +7977,7 @@ export class ChatService {
         ).length;
         if (usage > 0) {
           throw new Error(
-            `Role "${existing.label}" is used by ${usage} saved participant preset${usage === 1 ? "" : "s"} and cannot be deleted.`
+            `Role "${existing.label}" is used by ${usage} saved member preset${usage === 1 ? "" : "s"} and cannot be deleted.`
           );
         }
       }
@@ -8188,7 +8188,7 @@ export class ChatService {
       if (operation.type === "add_existing_participant_to_chat") {
         const preset = settings.chatParticipantConfigs.find((participant) => participant.id === operation.participantConfigId);
         if (!preset) {
-          throw new Error(`Unknown participant preset in operation ${index + 1}.`);
+          throw new Error(`Unknown member preset in operation ${index + 1}.`);
         }
         // Chat-level overrides are authoritative when present (a field may be undefined,
         // meaning "CLI default"); the saved preset itself is never modified.
@@ -8214,7 +8214,7 @@ export class ChatService {
       if (!role) {
         const archived = settings.chatRoleConfigs.find((item) => item.id === operation.participant.roleConfigId && item.archivedAt);
         if (archived) {
-          throw new Error(`Deleted role "${archived.label}" cannot be used for a new participant.`);
+          throw new Error(`Deleted role "${archived.label}" cannot be used for a new member.`);
         }
       }
       return operation.participant;
@@ -8228,7 +8228,7 @@ export class ChatService {
       }
       const handle = operation.participant.handle.trim().replace(/^@/, "");
       if (savedHandles.has(handle.toLowerCase())) {
-        throw new Error(`Saved participant @${handle} already exists.`);
+        throw new Error(`Saved member @${handle} already exists.`);
       }
       savedHandles.add(handle.toLowerCase());
       const id = randomUUID();
@@ -9003,16 +9003,16 @@ export class ChatService {
     const normalizedRequest = this.normalizePermissionChangeRequest(request);
     const mode = normalizeChatAgentMode(requester.agentMode);
     if (mode === "plan" && normalizedRequest.kind === "portable" && normalizedRequest.permissions.includes("workspaceWrite")) {
-      throw new Error("Plan mode blocks file edits for this participant. Switch the participant to default or auto mode before granting edit access.");
+      throw new Error("Plan mode blocks file edits for this member. Switch the member to default or auto mode before granting edit access.");
     }
     if (mode === "plan" && normalizedRequest.kind === "shellRules") {
-      throw new Error("Plan mode blocks shell commands for this participant. Switch the participant to default or auto mode before granting shell access.");
+      throw new Error("Plan mode blocks shell commands for this member. Switch the member to default or auto mode before granting shell access.");
     }
     if (mode === "plan" && normalizedRequest.kind === "providerNative") {
-      throw new Error("Plan mode blocks provider-native tool grants for this participant. Switch the participant to default or auto mode before granting provider-native access.");
+      throw new Error("Plan mode blocks provider-native tool grants for this member. Switch the member to default or auto mode before granting provider-native access.");
     }
     if (mode === "plan" && normalizedRequest.kind === "githubApp") {
-      throw new Error("Plan mode blocks GitHub App permission grants for this participant. Switch the participant to default or auto mode before granting GitHub write access.");
+      throw new Error("Plan mode blocks GitHub App permission grants for this member. Switch the member to default or auto mode before granting GitHub write access.");
     }
     // Resolve "already granted" against the effective launch profile, not the raw
     // stored toggles. In Auto-review mode the provider preset already grants web/edit,
@@ -9068,7 +9068,7 @@ export class ChatService {
       };
     }
     if (normalizedRequest.provider !== requester.kind) {
-      throw new Error("Provider-native Claude grants can only be approved for Claude Code participants.");
+      throw new Error("Provider-native Claude grants can only be approved for Claude Code members.");
     }
     for (const token of normalizedRequest.allowedTools) {
       if (this.isDeniedProviderNativeAllowedTool(token)) {
@@ -13363,7 +13363,7 @@ export class ChatService {
       return "User";
     }
     if (message.role === "participant") {
-      return message.participantLabel ?? "Participant";
+      return message.participantLabel ?? "Member";
     }
     return message.role;
   }

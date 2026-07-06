@@ -6,6 +6,7 @@ import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogT
 import { Input } from "@/components/ui/input";
 import type { ChatParticipantRequestPermission, ChatRoleConfig, ChatRoleConfigUpdate, ChatRoleParticipantDefaults } from "../../../shared/types";
 import { AppSelect, ResizableTextarea } from "../primitives";
+import { displayChatRoleLabel } from "../chat/chat-role-labels";
 import { ChatParticipantSpecRow } from "../chat/chat-participant-config-panel";
 import { MarkdownText } from "../content/markdown-text";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
@@ -15,6 +16,7 @@ import {
   CHAT_ROLE_LABEL_MAX_CHARS,
   RoleKindBadge,
   composeRoleInstructions,
+  displayChatRoleDescription,
   parseRoleInstructions,
   roleWordCount,
   slugFromRoleLabel,
@@ -72,8 +74,11 @@ export function ChatRoleEditorDialog(props: {
   const role = editingRoleId ? props.roles.find((item) => item.id === editingRoleId) : undefined;
   const open = props.editor?.type === "new" || Boolean(role);
   const roleParts = parseRoleInstructions(role?.instructions ?? "");
-  const initialLabel = props.editor?.type === "new" ? props.editor.initialLabel ?? "" : role?.label ?? "";
-  const initialDescription = props.editor?.type === "new" ? props.editor.initialDescription ?? "" : roleParts.description;
+  const displayLabel = role ? displayChatRoleLabel(role) : undefined;
+  const initialLabel = props.editor?.type === "new" ? props.editor.initialLabel ?? "" : displayLabel ?? "";
+  const initialDescription = props.editor?.type === "new"
+    ? props.editor.initialDescription ?? ""
+    : displayChatRoleDescription(role, roleParts.description);
   const initialInstructions = props.editor?.type === "new" ? props.editor.initialInstructions ?? "" : roleParts.body;
   const initialParticipantDefaults = props.editor?.type === "new"
     ? roleParticipantDefaultsForDisplay(props.editor.initialParticipantDefaults, undefined)
@@ -135,7 +140,7 @@ export function ChatRoleEditorDialog(props: {
     ));
   const canSave = !readOnly && !saving && Boolean(trimmedLabel && trimmedInstructions) && !validation && changed;
   const wordCount = roleWordCount(instructions);
-  const title = props.editor?.type === "new" ? trimmedLabel || "New role" : role?.label ?? "Role";
+  const title = props.editor?.type === "new" ? trimmedLabel || "New role" : displayLabel ?? "Role";
   const readOnlyDefaults = roleParticipantDefaultsForDisplay(role?.participantDefaults, props.editor?.type === "new" ? undefined : role?.id);
 
   async function save(): Promise<void> {
@@ -236,21 +241,21 @@ export function ChatRoleEditorDialog(props: {
             onChange={(event) => setDescription(event.target.value)}
           />
 
-          <section className="roles-default-settings" aria-label="Default participant settings">
-            <span className="roles-default-settings-title">Default participant settings</span>
+          <section className="roles-default-settings" aria-label="Default member settings">
+            <span className="roles-default-settings-title">Default member settings</span>
             {readOnly ? (
                 <div className="chat-app-tool-review-spec roles-default-settings-table">
                   <ChatParticipantSpecRow label="Auto-watch">
                     <ParticipantEditorSwitch
                       className="roles-default-settings-toggle"
-                      label="Default for new participants"
+                      label="Default for new members"
                       description="Watch new chat messages and decide whether to act."
                       checked={readOnlyDefaults.autoWatch === true}
                       disabled
                       onChange={() => {}}
                     />
                   </ChatParticipantSpecRow>
-                  <ChatParticipantSpecRow label="Request participants">
+                  <ChatParticipantSpecRow label="Request members">
                     <strong>{requestParticipantsLabel(readOnlyDefaults.requestParticipants)}</strong>
                   </ChatParticipantSpecRow>
               </div>
@@ -259,19 +264,19 @@ export function ChatRoleEditorDialog(props: {
                 <ChatParticipantSpecRow label="Auto-watch">
                   <ParticipantEditorSwitch
                     className="roles-default-settings-toggle"
-                    label="Default for new participants"
+                    label="Default for new members"
                     description="Watch new chat messages and decide whether to act."
                     checked={participantDefaults.autoWatch === true}
                     onChange={(checked) => setParticipantDefaults((current) => ({ ...current, autoWatch: checked }))}
                   />
                 </ChatParticipantSpecRow>
-                <ChatParticipantSpecRow label="Request participants">
+                <ChatParticipantSpecRow label="Request members">
                   <div className="roles-default-settings-select">
                     <AppSelect
                       value={participantDefaults.requestParticipants ?? "ask"}
                       options={ROLE_REQUEST_PARTICIPANTS_OPTIONS}
-                      placeholder="Request participants"
-                      ariaLabel="Default request participants permission"
+                      placeholder="Request members"
+                      ariaLabel="Default request members permission"
                       testId="settings-role-default-request-participants"
                       onValueChange={(value) => setParticipantDefaults((current) => ({
                         ...current,
@@ -339,7 +344,7 @@ export function ChatRoleEditorDialog(props: {
               className="roles-editor-delete"
               disabled={!canDelete}
               title={usageCount > 0
-                ? `In use by ${usageCount} saved participant preset${usageCount === 1 ? "" : "s"}. Reassign or remove them first.`
+                ? `In use by ${usageCount} saved member preset${usageCount === 1 ? "" : "s"}. Reassign or remove them first.`
                 : undefined}
               data-testid="settings-role-modal-delete"
               onClick={() => setDeleteConfirmOpen(true)}

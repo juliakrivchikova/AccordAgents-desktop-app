@@ -1,14 +1,14 @@
-import { useState } from "react";
 import { AlertTriangle } from "lucide-react";
-import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../../shared/agentPermissions";
+import { normalizeChatAgentMode } from "../../../shared/agentPermissions";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import type { ChatAgentMode, ChatExistingParticipantOverrides, ChatParticipantChangeRequest, ChatParticipantConfig, ChatProviderKind, ChatRoleConfig, ChatRosterChangeParticipantInput } from "../../../shared/types";
 import { Avatar, avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { avatarForChatParticipant, mapChatAvatarIdToKind } from "./chat-avatars";
 import { CHAT_AGENT_MODE_OPTIONS, chatAgentModeLabel } from "./chat-participant-drafts";
-import { ChatParticipantAvatarField as ChatAppToolAvatarField, ChatParticipantInlineAutoWatchRow as ChatAppToolInlineAutoWatchRow, ChatParticipantInlineModelRow as ChatAppToolInlineModelRow, ChatParticipantInlinePermissionsRow as ChatAppToolInlinePermissionsRow, ChatParticipantInlineRequestParticipantsRow as ChatAppToolInlineRequestParticipantsRow, ChatParticipantInlineSelectRow as ChatAppToolInlineSelectRow, ChatParticipantSpecRow, rosterPermissionGrantLabels } from "./chat-participant-config-panel";
+import { ChatParticipantAvatarField as ChatAppToolAvatarField, ChatParticipantInlineAutoWatchRow as ChatAppToolInlineAutoWatchRow, ChatParticipantInlineModelRow as ChatAppToolInlineModelRow, ChatParticipantInlinePermissionsRow as ChatAppToolInlinePermissionsRow, ChatParticipantInlineRequestParticipantsRow as ChatAppToolInlineRequestParticipantsRow, ChatParticipantInlineSelectRow as ChatAppToolInlineSelectRow, rosterPermissionGrantLabels } from "./chat-participant-config-panel";
 import { participantProviderLabel } from "./chat-conversation-data";
+import { displayChatRoleLabel } from "./chat-role-labels";
 
 export function ChatAppToolParticipantChangeOperation(props: {
   request: ChatParticipantChangeRequest;
@@ -38,7 +38,7 @@ export function ChatAppToolParticipantChangeOperation(props: {
     });
   }
 
-  // Chat-level override for a saved participant. The preset's current values seed the
+  // Chat-level override for a saved member. The preset's current values seed the
   // override on first edit so its presence becomes authoritative without mutating the preset.
   function updateExistingOverride(index: number, patch: Partial<ChatExistingParticipantOverrides>): void {
     props.onChange({
@@ -80,13 +80,13 @@ export function ChatAppToolParticipantChangeOperation(props: {
                 <Avatar className="chat-app-tool-review-avatar" spec={savedAvatar} />
                 <div>
                   <strong>{savedParticipant ? chatParticipantReference(savedParticipant.handle) : operation.participantConfigId}</strong>
-                  <span>{savedRole?.label ?? savedParticipant?.roleConfigId ?? "Saved participant preset"}</span>
+                  <span>{displayChatRoleLabel(savedRole, savedParticipant?.roleConfigId ?? "Saved member preset")}</span>
                 </div>
               </div>
               <div className="chat-app-tool-review-spec">
                 <div className="chat-app-tool-review-spec-row">
                   <span>Status</span>
-                  <strong>Already saved participant preset</strong>
+                  <strong>Already saved member preset</strong>
                 </div>
                 {savedParticipant && (
                   <ChatAppToolExistingParticipantSpec
@@ -118,17 +118,17 @@ export function ChatAppToolParticipantChangeOperation(props: {
               />
               <div>
                 <ChatAppToolHandleField handle={participant.handle} onChange={(handle) => patchParticipant({ handle })} />
-                <span>{role?.label ?? participant.roleConfigId}</span>
+                <span>{displayChatRoleLabel(role, participant.roleConfigId)}</span>
               </div>
             </div>
             <div className="chat-app-tool-review-spec">
               <ChatAppToolInlineSelectRow
                 label="Role"
-                value={role?.label ?? participant.roleConfigId}
+                value={displayChatRoleLabel(role, participant.roleConfigId)}
                 current={participant.roleConfigId}
                 options={props.roles
                   .filter((item) => !item.archivedAt || item.id === participant.roleConfigId)
-                  .map((item) => ({ value: item.id, label: item.archivedAt ? `${item.label} (deleted)` : item.label }))}
+                  .map((item) => ({ value: item.id, label: item.archivedAt ? `${displayChatRoleLabel(item)} (deleted)` : displayChatRoleLabel(item) }))}
                 searchable
                 searchPlaceholder="Filter roles"
                 emptyLabel="No roles found"
@@ -206,8 +206,8 @@ export function ChatAppToolParticipantChangeOperation(props: {
                 <span />
               </span>
               <span className="chat-app-tool-review-toggle-text">
-                <strong>Save as participant preset</strong>
-                <span>{operation.saveAsPreset !== false ? "Saved to your presets - reusable in any chat." : "Off - this stays a chat-only participant."}</span>
+                <strong>Save as member preset</strong>
+                <span>{operation.saveAsPreset !== false ? "Saved to your presets - reusable in any chat." : "Off - this stays a chat-only member."}</span>
               </span>
             </label>
           </div>
@@ -217,7 +217,7 @@ export function ChatAppToolParticipantChangeOperation(props: {
   );
 }
 
-// Saved participant in an add-participant approval. The role/provider come from the
+// Saved member in an add-member approval. The role/provider come from the
 // preset (read-only), while Model / Reasoning / Mode / Permissions are editable as
 // chat-level overrides — they apply only to this chat and never touch the saved preset.
 export function ChatAppToolExistingParticipantSpec(props: {
@@ -294,7 +294,7 @@ export function ChatAppToolHandleField(props: { handle: string; onChange: (handl
       <span aria-hidden>@</span>
       <input
         value={props.handle}
-        aria-label="Participant handle"
+        aria-label="Member handle"
         spellCheck={false}
         size={Math.max(props.handle.length + 1, 4)}
         onChange={(event) => props.onChange(event.currentTarget.value.replace(/^@+/, ""))}

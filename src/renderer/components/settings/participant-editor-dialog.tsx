@@ -7,6 +7,7 @@ import type { AgentHealth, AppSettings, ChatAgentMode, ChatParticipantConfigUpda
 import { normalizeChatAgentMode } from "../../../shared/agentPermissions";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import { participantProviderLabel } from "../chat/chat-conversation-data";
+import { displayChatRoleLabel } from "../chat/chat-role-labels";
 import { ChatParticipantAvatarField, ChatParticipantInlineModelRow, ChatParticipantInlinePermissionsRow, ChatParticipantInlineRequestParticipantsRow, ChatParticipantInlineSelectRow, ChatParticipantSpecRow } from "../chat/chat-participant-config-panel";
 import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
 import { CHAT_AGENT_MODE_OPTIONS, WORKFLOW_MANAGER_ROLE_ID, chatAgentModeLabel, chatCliProviderLabel, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
@@ -19,7 +20,7 @@ import {
 } from "./participant-settings-utils";
 
 type ChatParticipantDraftPatch = Parameters<typeof updateChatParticipantDraft>[2];
-const AUTO_WATCH_GENERIC_DESCRIPTION = "Let this participant watch new chat messages and decide whether to act.";
+const AUTO_WATCH_GENERIC_DESCRIPTION = "Let this member watch new chat messages and decide whether to act.";
 const AUTO_WATCH_MANAGER_DESCRIPTION = "Workflow Manager always watches new chat messages.";
 
 export function ParticipantEditorDialog(props: {
@@ -60,13 +61,16 @@ export function ParticipantEditorDialog(props: {
   const validation = validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs, existingHandles, props.settings.chatBehaviorRules)
     ?? validateChatCliAgents([normalized], props.agents);
   const canSave = changed && !validation && !saving;
-  const roleLabel = props.settings.chatRoleConfigs.find((role) => role.id === draft.roleConfigId)?.label ?? draft.roleConfigId;
+  const roleLabel = displayChatRoleLabel(
+    props.settings.chatRoleConfigs.find((role) => role.id === draft.roleConfigId),
+    draft.roleConfigId
+  );
   const isWorkflowManager = draft.roleConfigId === WORKFLOW_MANAGER_ROLE_ID;
   // Hide archived (deleted) roles from the picker so no new references form, but keep the
-  // participant's current role selectable so editing an existing binding never goes blank.
+  // member's current role selectable so editing an existing binding never goes blank.
   const roleOptions = props.settings.chatRoleConfigs
     .filter((role) => !role.archivedAt || role.id === draft.roleConfigId)
-    .map((role) => ({ value: role.id, label: role.archivedAt ? `${role.label} (deleted)` : role.label }));
+    .map((role) => ({ value: role.id, label: role.archivedAt ? `${displayChatRoleLabel(role)} (deleted)` : displayChatRoleLabel(role) }));
   const providerOptions = (["codex-cli", "claude-code"] as ChatProviderKind[]).map((kind) => ({
     value: kind,
     label: chatCliProviderLabel(kind)
@@ -154,10 +158,10 @@ export function ParticipantEditorDialog(props: {
             />
             <span className="participants-editor-title-block">
               <DialogTitle>@{editorHandle}</DialogTitle>
-              <DialogDescription>{roleLabel || "Saved participant preset"}</DialogDescription>
+              <DialogDescription>{roleLabel || "Saved member preset"}</DialogDescription>
             </span>
             <DialogClose asChild>
-              <button type="button" className="participants-editor-close" aria-label="Close participant editor">
+              <button type="button" className="participants-editor-close" aria-label="Close member editor">
                 <X size={15} aria-hidden />
               </button>
             </DialogClose>
@@ -166,7 +170,7 @@ export function ParticipantEditorDialog(props: {
         <div className="participants-editor-body">
           <div className="chat-app-tool-review-spec participants-editor-table">
             <ChatParticipantSpecRow label="Status">
-              <strong>{participant ? "Saved participant preset" : "New participant preset"}</strong>
+              <strong>{participant ? "Saved member preset" : "New member preset"}</strong>
             </ChatParticipantSpecRow>
             <ChatParticipantSpecRow label="Handle">
               <ParticipantEditorHandleField handle={draft.handle} onChange={updateHandle} />
@@ -259,7 +263,7 @@ export function ParticipantEditorDialog(props: {
               size="sm"
               className="participants-editor-delete"
               disabled={saving || deleting}
-              title="Delete this saved participant preset. Existing chats keep their copied participant."
+              title="Delete this saved member preset. Existing chats keep their copied member."
               data-testid="settings-participant-modal-delete"
               onClick={() => setDeleteConfirmOpen(true)}
             >
@@ -282,7 +286,7 @@ export function ParticipantEditorDialog(props: {
       <DeleteConfirmationDialog
         open={deleteConfirmOpen}
         title={`Delete @${participant.handle}?`}
-        description="Delete this saved participant preset? Existing chats keep their copied participant."
+        description="Delete this saved member preset? Existing chats keep their copied member."
         confirmLabel="Delete"
         pending={deleting}
         onOpenChange={setDeleteConfirmOpen}

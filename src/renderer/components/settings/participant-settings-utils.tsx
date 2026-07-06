@@ -1,6 +1,7 @@
 import type { AppSettings, ChatParticipantConfig, ChatProviderKind } from "../../../shared/types";
 import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../../shared/agentPermissions";
 import { participantProviderLabel } from "../chat/chat-conversation-data";
+import { displayChatRoleLabel } from "../chat/chat-role-labels";
 import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
 import { chatParticipantConfigToDraft, defaultChatParticipantDraft } from "../chat/chat-participant-drafts";
 
@@ -16,7 +17,7 @@ export type ParticipantEditorState =
 
 export function participantRoleGroups(settings: AppSettings): ParticipantRoleGroup[] {
   const roleOrder = new Map(settings.chatRoleConfigs.map((role, index) => [role.id, index]));
-  const labels = new Map(settings.chatRoleConfigs.map((role) => [role.id, role.label]));
+  const labels = new Map(settings.chatRoleConfigs.map((role) => [role.id, displayChatRoleLabel(role)]));
   const groups = new Map<string, ParticipantRoleGroup>();
   for (const participant of settings.chatParticipantConfigs) {
     const id = participant.roleConfigId;
@@ -107,7 +108,7 @@ export function participantPermissionChips(participant: ChatParticipantConfig): 
     permissions.workspaceWrite ? { key: "edit", label: "edit files" } : undefined,
     permissions.shell.enabled ? { key: "shell", label: permissions.shell.rules.length > 0 ? "shell rules" : "shell" } : undefined,
     permissions.webAccess ? { key: "web", label: "web access" } : undefined,
-    permissions.requestParticipants === "allow" ? { key: "request-allow", label: "request participants" } : undefined,
+    permissions.requestParticipants === "allow" ? { key: "request-allow", label: "request members" } : undefined,
     permissions.requestParticipants === "deny" ? { key: "request-deny", label: "requests denied" } : undefined,
     nativeToolCount > 0 ? { key: "native", label: "native tools" } : undefined
   ].filter((item): item is { key: string; label: string } => Boolean(item));
@@ -127,7 +128,7 @@ export function ParticipantEditorHandleField(props: { handle: string; onChange: 
       <span aria-hidden>@</span>
       <input
         value={props.handle}
-        aria-label="Participant handle"
+        aria-label="Member handle"
         spellCheck={false}
         size={Math.max(props.handle.length + 1, 4)}
         onChange={(event) => props.onChange(event.currentTarget.value)}

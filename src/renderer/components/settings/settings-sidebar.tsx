@@ -12,7 +12,7 @@ const SETTINGS_NAV: Array<{ section: SettingsSection; label: string; icon: typeo
   { section: "roles", label: "Roles", icon: Circle },
   { section: "behavior-rules", label: "Rules", icon: ListChecks },
   { section: "saved-prompts", label: "Prompts", icon: FileText },
-  { section: "participants", label: "Participants", icon: Users }
+  { section: "participants", label: "Members", icon: Users }
 ];
 
 export function SettingsSidebar(props: {

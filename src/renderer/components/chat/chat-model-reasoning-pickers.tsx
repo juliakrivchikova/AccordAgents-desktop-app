@@ -74,7 +74,7 @@ export function ChatModelPicker(props: {
       <AppSelect
         value={selectValue}
         placeholder={cliSettingLabel}
-        ariaLabel="Participant model"
+        ariaLabel="Member model"
         options={[
           { value: MODEL_DEFAULT_VALUE, label: cliSettingLabel },
           ...models.map((item) => ({
@@ -170,7 +170,7 @@ export function ChatReasoningEffortPicker(props: {
       <AppSelect
         value={reasoningEffort ?? REASONING_DEFAULT_VALUE}
         placeholder={cliSettingLabel}
-        ariaLabel="Participant reasoning effort"
+        ariaLabel="Member reasoning effort"
         options={[
           { value: REASONING_DEFAULT_VALUE, label: cliSettingLabel },
           ...options.map((item) => ({

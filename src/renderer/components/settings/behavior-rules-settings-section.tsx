@@ -102,7 +102,7 @@ function BehaviorRuleCard(props: {
       ) : (
         <span className="behavior-rule-no-participants">
           <Users size={15} aria-hidden />
-          No participants yet
+          No members yet
         </span>
       )}
     </button>
@@ -113,7 +113,7 @@ function BehaviorRuleAvatarStack(props: { participants: ChatParticipantConfig[] 
   const shown = props.participants.slice(0, 3);
   const remaining = props.participants.length - shown.length;
   return (
-    <span className="behavior-rule-avatar-row" aria-label={`${props.participants.length} participants use this rule`}>
+    <span className="behavior-rule-avatar-row" aria-label={`${props.participants.length} ${props.participants.length === 1 ? "member uses" : "members use"} this rule`}>
       <span className="behavior-rule-avatar-stack" aria-hidden>
         {shown.map((participant) => (
           <span className="behavior-rule-avatar-stack-item" key={participant.id}>
@@ -224,7 +224,7 @@ function BehaviorRuleEditorDialog(props: {
             maxLength={CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS}
             rows={9}
             maxHeight={360}
-            placeholder="Describe the rule and how participants should follow it..."
+            placeholder="Describe the rule and how members should follow it..."
           />
           <div className="rules-editor-meta">
             {trimmedInstructions.length}/{CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS} characters
@@ -236,7 +236,7 @@ function BehaviorRuleEditorDialog(props: {
             <ConfirmDeleteButton
               label="Delete"
               title={`Delete ${rule.label}?`}
-              description="This rule will be removed from saved participants that use it."
+              description="This rule will be removed from saved members that use it."
               confirmLabel="Delete rule"
               onConfirm={deleteRule}
             />
@@ -265,7 +265,7 @@ function ruleCardDescription(rule: ChatBehaviorRuleConfig): string {
       .split("\n")
       .map((line) => line.trim())
       .find((line) => line && !line.startsWith("#") && !line.startsWith(">") && !line.startsWith("-"))
-      ?.replace(/\*\*|`/g, "") || "Reusable participant behavior."
+      ?.replace(/\*\*|`/g, "") || "Reusable member behavior."
   );
 }
 
@@ -317,4 +317,3 @@ function ConfirmDeleteButton(props: {
     </Dialog>
   );
 }
-

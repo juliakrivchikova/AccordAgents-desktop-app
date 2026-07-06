@@ -1,4 +1,5 @@
 import type { ChatParticipantConfig, ChatRoleConfig, ChatRoleParticipantDefaults } from "../../../shared/types";
+import { displayChatRoleLabel } from "../chat/chat-role-labels";
 
 export const CHAT_ROLE_LABEL_MAX_CHARS = 80;
 export const CHAT_ROLE_INSTRUCTIONS_MAX_CHARS = 40_000;
@@ -37,7 +38,7 @@ export function savedParticipantPresetsForRole(participants: ChatParticipantConf
 }
 
 export function duplicateRoleLabel(label: string, roles: ChatRoleConfig[]): string {
-  const used = new Set(roles.map((role) => role.label.trim().toLowerCase()));
+  const used = new Set(roles.map((role) => displayChatRoleLabel(role).trim().toLowerCase()));
   const base = `${label} (copy)`;
   if (!used.has(base.toLowerCase())) {
     return base;
@@ -52,7 +53,7 @@ export function duplicateRoleLabel(label: string, roles: ChatRoleConfig[]): stri
 export function roleSummary(role: ChatRoleConfig): string {
   const parts = parseRoleInstructions(role.instructions);
   if (parts.description) {
-    return stripMarkdownLine(parts.description);
+    return stripMarkdownLine(displayChatRoleDescription(role, parts.description));
   }
   const line = parts.body.split(/\r?\n/).map((item) => item.trim()).find((item) =>
     item &&
@@ -60,7 +61,26 @@ export function roleSummary(role: ChatRoleConfig): string {
     !/^#{1,6}\s*$/.test(item) &&
     !/^[-*_]{3,}$/.test(item)
   );
-  return stripMarkdownLine(line ?? "") || "No instructions yet.";
+  return stripMarkdownLine(displayChatRoleDescription(role, line ?? "")) || "No instructions yet.";
+}
+
+export function displayChatRoleDescription(role: ChatRoleConfig | undefined, value: string): string {
+  if (!role?.builtIn) {
+    return value;
+  }
+  return value
+    .replace(/\bGeneric Participant\b/g, "Generic Member")
+    .replace(/\bGeneric Participants\b/g, "Generic Members")
+    .replace(/\bgeneric participant\b/g, "generic member")
+    .replace(/\bgeneric participants\b/g, "generic members")
+    .replace(/\bchat participant\b/g, "chat member")
+    .replace(/\bchat participants\b/g, "chat members")
+    .replace(/\bparticipant presets\b/g, "member presets")
+    .replace(/\bparticipant preset\b/g, "member preset")
+    .replace(/\bparticipants\b/g, "members")
+    .replace(/\bparticipant\b/g, "member")
+    .replace(/\bParticipants\b/g, "Members")
+    .replace(/\bParticipant\b/g, "Member");
 }
 
 function stripMarkdownLine(value: string): string {
@@ -128,4 +148,3 @@ export function slugFromRoleLabel(label: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "") || "custom-role";
 }
-

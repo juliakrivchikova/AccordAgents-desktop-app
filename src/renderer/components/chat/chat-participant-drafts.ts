@@ -382,30 +382,30 @@ export function validateChatParticipantDrafts(
   behaviorRules: ChatBehaviorRuleConfig[] = []
 ): string | undefined {
   if (drafts.length === 0) {
-    return "Add at least one participant.";
+    return "Add at least one member.";
   }
   const handles = new Set(existingHandles);
   for (const draft of drafts) {
     if (!/^[A-Za-z0-9_-]{1,32}$/.test(draft.handle)) {
-      return "Participant names may use letters, numbers, underscores, and hyphens only.";
+      return "Member names may use letters, numbers, underscores, and hyphens only.";
     }
     const normalized = draft.handle.toLowerCase();
     if (handles.has(normalized)) {
-      return `Duplicate participant name: @${draft.handle}.`;
+      return `Duplicate member name: @${draft.handle}.`;
     }
     handles.add(normalized);
     if (!roles.some((role) => role.id === draft.roleConfigId)) {
-      return "Select a role for every participant.";
+      return "Select a role for every member.";
     }
     const availableRuleIds = new Set(behaviorRules.map((rule) => rule.id));
     if (draft.behaviorRuleIds.some((id) => !availableRuleIds.has(id))) {
-      return "Select valid behavior rules for every participant.";
+      return "Select valid behavior rules for every member.";
     }
     if (draft.kind !== "codex-cli" && draft.kind !== "claude-code") {
-      return "Chat supports local CLI participants only.";
+      return "Chat supports local CLI members only.";
     }
     if (draft.avatarId && !isChatAvatarIdForKind(draft.avatarId, draft.kind)) {
-      return "Select an avatar that matches the participant CLI.";
+      return "Select an avatar that matches the member CLI.";
     }
     const shellRules = draft.permissions.shell.enabled ? draft.permissions.shell.rules : [];
     for (const rule of shellRules) {

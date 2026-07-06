@@ -3,9 +3,7 @@ import { AlertTriangle, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type {
   ChatAppToolApproval,
-  ChatAppToolApprovalRequest,
   ChatAppToolApprovalScope,
-  ChatParticipant,
   ChatParticipantChangeRequest,
   ChatParticipantConfig,
   ChatParticipantRequestApprovalRequest,
@@ -28,9 +26,9 @@ export function roleReviewChipLabel(request: ChatRoleChangeRequest): string {
 
 export function participantReviewChipLabel(request: ChatParticipantChangeRequest | undefined): string {
   if (!request || request.operations.length !== 1) {
-    return "Participants";
+    return "Members";
   }
-  return request.operations[0].type === "add_existing_participant_to_chat" ? "Saved participant" : "New participant";
+  return request.operations[0].type === "add_existing_participant_to_chat" ? "Saved member" : "New member";
 }
 
 export function reviewPrimaryLabel(
@@ -52,7 +50,7 @@ export function reviewPrimaryLabel(
     if (participantChange.operations.length !== 1) {
       return "Approve all";
     }
-    return participantChange.operations[0].type === "add_existing_participant_to_chat" ? "Add to chat" : "Add participant";
+    return participantChange.operations[0].type === "add_existing_participant_to_chat" ? "Add to chat" : "Add member";
   }
   return "Approve";
 }
@@ -133,7 +131,7 @@ function reviewResultSummary(
   if (approval.status === "denied") {
     return {
       title: "Request cancelled",
-      detail: "No role or participant changes were made."
+      detail: "No role or member changes were made."
     };
   }
 
@@ -142,13 +140,13 @@ function reviewResultSummary(
 
   if (combinedRequest && participantSummary && roleSummary) {
     return {
-      title: participantSummary.count === 1 ? "Role and participant added" : "Role and participants added",
+      title: participantSummary.count === 1 ? "Role and member added" : "Role and members added",
       detail: `${participantSummary.detail} ${roleSummary.detail}`
     };
   }
   if (participantSummary) {
     return {
-      title: participantSummary.count === 1 ? "Participant added" : "Participants added",
+      title: participantSummary.count === 1 ? "Member added" : "Members added",
       detail: participantSummary.detail
     };
   }
@@ -172,17 +170,17 @@ function participantResultSummary(
   if (request.operations.length > 1) {
     return {
       count: request.operations.length,
-      detail: `${request.operations.length} participants joined this chat.`
+      detail: `${request.operations.length} members joined this chat.`
     };
   }
 
   const operation = request.operations[0];
   if (operation.type === "add_existing_participant_to_chat") {
     const savedParticipant = savedParticipants.find((participant) => participant.id === operation.participantConfigId);
-    const handle = savedParticipant ? chatParticipantReference(savedParticipant.handle) : "The saved participant";
+    const handle = savedParticipant ? chatParticipantReference(savedParticipant.handle) : "The saved member";
     return {
       count: 1,
-      detail: `${handle} joined this chat from your saved participants.`
+      detail: `${handle} joined this chat from your saved members.`
     };
   }
 
@@ -190,7 +188,7 @@ function participantResultSummary(
   return {
     count: 1,
     detail: operation.saveAsPreset === false
-      ? `${handle} joined this chat as a chat-only participant.`
+      ? `${handle} joined this chat as a chat-only member.`
       : `${handle} joined this chat and was saved to your presets.`
   };
 }
@@ -210,7 +208,7 @@ function roleResultSummary(request: ChatRoleChangeRequest | undefined): { title:
   if (operation.type === "archive_role") {
     return {
       title: "Role deleted",
-      detail: "The role was deleted. Existing participants keep working under it."
+      detail: "The role was deleted. Existing members keep working under it."
     };
   }
   const roleName = operation.role.label.trim() || "Role";
@@ -274,16 +272,16 @@ export function approvalOptions(
   }
   if (participantChange) {
     return [
-      { key: "approve", label: participantChange.operations.length === 1 ? "Add participant" : "Add participants", approve: true, scope: "chat" },
+      { key: "approve", label: participantChange.operations.length === 1 ? "Add member" : "Add members", approve: true, scope: "chat" },
       { key: "deny", label: `No, tell ${chatParticipantReference(approval.requesterHandle)} what to do differently`, approve: false }
     ];
   }
   if (added.length > 0 && !permissionRequest && !participantRequest) {
-    const target = added.length === 1 ? `@${added[0].participant.handle}` : "these participants";
+    const target = added.length === 1 ? `@${added[0].participant.handle}` : "these members";
     return [
-      { key: "once", label: added.length === 1 ? "Add to this chat" : "Add these participants to this chat", approve: true, scope: "once" },
+      { key: "once", label: added.length === 1 ? "Add to this chat" : "Add these members to this chat", approve: true, scope: "once" },
       { key: "chat", label: "Add and remember for this chat", approve: true, scope: "chat" },
-      { key: "deny", label: added.length === 1 ? `No, don't add ${target}` : "No, don't add these participants", approve: false }
+      { key: "deny", label: added.length === 1 ? `No, don't add ${target}` : "No, don't add these members", approve: false }
     ];
   }
 
@@ -292,7 +290,7 @@ export function approvalOptions(
     : toolPermissionRequest
       ? `Yes, allow ${chatParticipantReference(approval.requesterHandle)} to use ${toolPermissionRequest.toolName} in this chat`
     : participantRequest
-      ? `Yes, allow ${chatParticipantReference(approval.requesterHandle)} to ask ${participantRequest.requests.length === 1 ? chatParticipantReference(participantRequest.requests[0].target) : "these targets"}`
+      ? `Yes, allow ${chatParticipantReference(approval.requesterHandle)} to ask ${participantRequest.requests.length === 1 ? chatParticipantReference(participantRequest.requests[0].target) : "these members"}`
       : "Yes, allow for this chat";
   return [
     { key: "once", label: "Yes, allow once", approve: true, scope: "once" },
@@ -330,7 +328,7 @@ export function approvalQuestion(
     if (participantRequest.requests.length === 1) {
       return `Do you want to allow ${requester} to ask ${chatParticipantReference(participantRequest.requests[0].target)}?`;
     }
-    return `Do you want to allow ${requester} to ask these participants?`;
+    return `Do you want to allow ${requester} to ask these members?`;
   }
   if (roleRequest) {
     if (roleRequest.operations.length === 1) {
@@ -342,8 +340,8 @@ export function approvalQuestion(
   }
   if (participantChange) {
     return participantChange.operations.length === 1
-      ? `${requester} wants to add a participant`
-      : `${requester} wants to add participants`;
+      ? `${requester} wants to add a member`
+      : `${requester} wants to add members`;
   }
   return `Do you want to allow ${requester} to ${approval.summary.replace(/^Add\s+/, "add ")}?`;
 }

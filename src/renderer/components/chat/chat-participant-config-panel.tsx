@@ -58,7 +58,7 @@ export function ChatParticipantAvatarField(props: {
         </button>
       </PopoverTrigger>
       <PopoverContent align="start" sideOffset={6} className="chat-app-tool-avatar-menu">
-        <div className="chat-app-tool-avatar-grid" role="radiogroup" aria-label="Participant avatar">
+        <div className="chat-app-tool-avatar-grid" role="radiogroup" aria-label="Member avatar">
           {options.map((option) => {
             const selected = option.id === currentId;
             return (
@@ -337,7 +337,7 @@ export function ChatParticipantInlineRequestParticipantsRow(props: {
   const value = PARTICIPANT_REQUEST_PERMISSION_OPTIONS.find((option) => option.value === current)?.label ?? "Always ask approval";
   return (
     <ChatParticipantInlineSelectRow
-      label="Request participants"
+      label="Request members"
       value={value}
       current={current}
       options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
@@ -393,9 +393,9 @@ export function rosterPermissionGrantLabels(participant: ChatRosterChangePartici
     labels.push(permissions.shell.rules.length > 0 ? "shell rules" : "shell access");
   }
   if (permissions.requestParticipants === "allow") {
-    labels.push("request participants");
+    labels.push("request members");
   } else if (permissions.requestParticipants === "deny") {
-    labels.push("participant requests denied");
+    labels.push("member requests denied");
   }
   const claudeToolCount = permissions.providerNative?.["claude-code"]?.allowedTools.length ?? 0;
   if (claudeToolCount > 0) {

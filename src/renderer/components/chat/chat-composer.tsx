@@ -281,7 +281,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
               <button
                 type="button"
                 className="composer-active-run"
-                title="Stop all running participants"
+                title="Stop all running members"
                 aria-label={`Stop ${props.activeRunCount} active ${props.activeRunCount === 1 ? "run" : "runs"}`}
                 onClick={props.onStopAllRuns}
               >

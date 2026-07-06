@@ -11,9 +11,13 @@ import type { ParticipantProfile } from "../content/participant-hover-card";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { chatParticipantPermissionSummary } from "./chat-participant-drafts";
+import { displayChatRoleLabel } from "./chat-role-labels";
 
 export function chatRoleLabel(roles: ChatRoleConfig[], participant: Pick<ChatParticipant, "roleConfigId">): string {
-  return roles.find((role) => role.id === participant.roleConfigId)?.label ?? participant.roleConfigId;
+  return displayChatRoleLabel(
+    roles.find((role) => role.id === participant.roleConfigId),
+    participant.roleConfigId
+  );
 }
 
 export function chatMentionDirectory(

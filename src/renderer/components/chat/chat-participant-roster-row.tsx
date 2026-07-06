@@ -67,7 +67,7 @@ export function ChatParticipantRosterRow(props: {
           size="xs"
           icon={AtSign}
           label={`Mention ${displayName}`}
-          tooltip="Add this participant mention to your message."
+          tooltip="Add this member mention to your message."
           onClick={() => props.onInsertMention(props.participant)}
         />
         <IconButton
@@ -85,7 +85,7 @@ export function ChatParticipantRosterRow(props: {
           size="xs"
           icon={Minimize2}
           label={`Compact ${displayName} context`}
-          tooltip={compactDisabled ? "This participant is busy." : "Compact this participant's underlying session to free context."}
+          tooltip={compactDisabled ? "This member is busy." : "Compact this member's underlying session to free context."}
           disabled={compactDisabled}
           onClick={() => props.onCompactParticipant(props.participant.id)}
         />

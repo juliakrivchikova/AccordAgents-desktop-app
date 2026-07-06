@@ -46,7 +46,7 @@ export function compactCommandOption(query: string | undefined, target: UserSkil
   return {
     id: "compact",
     label: "/compact",
-    description: "Compact the mentioned participant context"
+    description: "Compact the mentioned member context"
   };
 }
 
@@ -158,7 +158,7 @@ export function repoFileBasename(filePath: string): string {
 
 export function skillPickerTargetLabel(target: UserSkillTargetSummary, participants: ChatParticipant[]): string {
   if (!target.hasClearTargets || target.providerKinds.length === 0) {
-    return "Mention a participant to select a skill";
+    return "Mention a member to select a skill";
   }
   const handles = target.participantIds
     .map((id) => participants.find((participant) => participant.id === id)?.handle)

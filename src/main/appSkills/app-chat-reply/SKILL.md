@@ -1,8 +1,8 @@
 ---
 name: app-chat-reply
 description: >
-  Reply to a participant request that was addressed to your handle. Use this
-  skill when another participant triggered your turn through a participant
+  Reply to a member request that was addressed to your handle. Use this
+  skill when another member triggered your turn through a member
   request and your output is the reply they are waiting on.
 ---
 

@@ -6,17 +6,18 @@ import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { participantProviderLabel } from "./chat-conversation-data";
 import { rosterPermissionGrantLabels } from "./chat-participant-config-panel";
+import { displayChatRoleLabel } from "./chat-role-labels";
 
 export function rosterApprovalQuestion(approval: ChatAppToolApproval, added: ChatRosterChangeOperation[]): string {
   const requester = chatParticipantReference(approval.requesterHandle);
-  return `${requester} wants to add ${added.length === 1 ? "a participant" : "participants"} to this chat`;
+  return `${requester} wants to add ${added.length === 1 ? "a member" : "members"} to this chat`;
 }
 
 export function RosterApprovalTitle({ requesterHandle, added }: { requesterHandle: string; added: ChatRosterChangeOperation[] }): JSX.Element {
   return (
     <>
       <span className="chat-app-tool-approval-title-handle">{chatParticipantReference(requesterHandle)}</span>{" "}
-      wants to add {added.length === 1 ? "a participant" : "participants"} to this chat
+      wants to add {added.length === 1 ? "a member" : "members"} to this chat
     </>
   );
 }
@@ -72,7 +73,10 @@ export function ChatAppToolRosterPermissionEnvelope({ operations }: { operations
 }
 
 export function roleLabelForRosterParticipant(participant: ChatRosterChangeParticipantInput, roles: ChatRoleConfig[]): string {
-  return roles.find((role) => role.id === participant.roleConfigId)?.label ?? participant.roleConfigId;
+  return displayChatRoleLabel(
+    roles.find((role) => role.id === participant.roleConfigId),
+    participant.roleConfigId
+  );
 }
 
 export function uniqueLabels(labels: string[]): string[] {

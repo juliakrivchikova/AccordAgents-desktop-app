@@ -3,14 +3,13 @@ import { CONVERSATION_MESSAGE_PAGE_SIZE, mergeLoadedMessagePage, prependMissingM
 import {
   errorText,
   firstPendingPlanItemReview,
-  mergeProgressIntoConversation,
   pendingDecisionResolutions,
   pendingDecisionSelections,
   pendingPlanDecisions
 } from "../components/review/review-conversation-data";
 import { defaultChatParticipantDraft } from "../components/chat/chat-participant-drafts";
 import type { AppState } from "./app-state";
-import { conversationTimeValue, normalizeProjectPath, upsertConversationSummary } from "./conversation-summaries";
+import { conversationTimeValue, normalizeProjectPath } from "./conversation-summaries";
 import { persistLastViewedAt } from "./storage";
 
 export interface ConversationActions {

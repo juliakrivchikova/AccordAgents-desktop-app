@@ -541,7 +541,7 @@ function ParticipantPicker(props: {
   ];
   const selectedOptions = participantOptions.filter(({ config, locked }) => locked || props.selectedParticipantIds.has(config.id));
   const selectedCount = selectedOptions.length;
-  const label = selectedCount > 0 ? `${selectedCount} participant${selectedCount === 1 ? "" : "s"}` : "Add participants";
+  const label = selectedCount > 0 ? `${selectedCount} member${selectedCount === 1 ? "" : "s"}` : "Add members";
 
   function toggleParticipant(id: string): void {
     const removing = props.selectedParticipantIds.has(id);

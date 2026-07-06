@@ -474,7 +474,7 @@ test("provider-native and wildcard denylist validation rejects unsafe requests",
     kind: "providerNative",
     provider: "claude-code",
     allowedTools: ["Read"]
-  }), /only be approved for Claude Code participants/);
+  }), /only be approved for Claude Code members/);
 
   for (const token of ["Bash(*)", "*", "mcp__server__*"]) {
     assert.throws(() => service.preparePermissionChange(claude, {
@@ -2186,7 +2186,7 @@ test("auto-watch runtime update enforces one watcher and clears scheduler state 
       participantId: drew.id,
       autoWatch: true
     }),
-    /Only one participant can watch a chat/
+    /Only one member can watch a chat/
   );
 
   await service.updateParticipantRuntime({
@@ -2817,7 +2817,7 @@ test("explicit remote fails closed for cheap precondition failures", async () =>
       name: "non-codex",
       participant: { ...chatParticipant("claude-code"), remoteExecution: "remote" },
       settings: { chatRoleConfigs: [ROLE], cloudRuns: { enabled: true, worker: { host: "worker.example" } } },
-      message: /supports Codex participants only/
+      message: /supports Codex members only/
     },
     {
       name: "no-host",
@@ -4769,7 +4769,7 @@ test("removeParticipant rejects unsafe removal requests", async () => {
 
     await assert.rejects(
       () => service.removeParticipant({ conversationId: conversation.id, participantId: target.id }),
-      /last chat participant/
+      /last chat member/
     );
   }
 });
@@ -5719,7 +5719,7 @@ test("a selected skill cannot be sent to more than one mentioned participant", a
 
   await assert.rejects(
     () => (service as any).validateChatSkillMentionsForTargets(conversation, "@codex @drew /accord", [mention], [a, b]),
-    /runs on a single participant/
+    /runs on a single member/
   );
 });
 
@@ -7182,7 +7182,7 @@ test("startAccord rejects Chat Assistant as facilitator", async () => {
       targetParticipantIds: [target.id],
       subject: "Pick the launch shape."
     }),
-    /The Chat Assistant cannot be an accord facilitator or participant/
+    /The Chat Assistant cannot be an Accord facilitator or member/
   );
 });
 
@@ -7204,7 +7204,7 @@ test("startAccord rejects Chat Assistant as selected participant", async () => {
       targetParticipantIds: [assistant.id],
       subject: "Pick the launch shape."
     }),
-    /The Chat Assistant cannot be an accord facilitator or participant/
+    /The Chat Assistant cannot be an Accord facilitator or member/
   );
 });
 

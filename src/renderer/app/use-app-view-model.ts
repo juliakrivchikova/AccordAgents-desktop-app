@@ -1,11 +1,10 @@
 import { useMemo } from "react";
-import type { Conversation, ConversationSummary } from "../../shared/types";
+import type { Conversation } from "../../shared/types";
 import { buildChatParticipantStatusMap } from "../../shared/chatRosterStatus";
 import { chatParticipants } from "../components/chat/chat-conversation-data";
 import {
   canRecoverImplementationPlan,
   conversationRelevantRunIds,
-  firstPendingPlanItemReview,
   pendingDecisionResolutions,
   pendingDecisionSelections,
   pendingPlanDecisions,
