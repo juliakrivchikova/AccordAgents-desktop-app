@@ -3472,6 +3472,55 @@ test("participantPermissionPolicy guides blocked repoRead to request before refu
   assert.match(prompt, /app_permissions_request_change/);
 });
 
+test("Claude prompt includes one-shot execution model on first and resumed turns only", () => {
+  const { service } = testService();
+  const permissions = normalizeChatAgentPermissions(defaultChatAgentPermissions());
+  const promptFor = (kind: ChatProviderKind, includeRoleInstructions: boolean): string => {
+    const participant = chatParticipant(kind);
+    const conversation = chatConversation([participant]);
+    const session: ChatParticipantSession = {
+      participantId: participant.id,
+      sessionId: includeRoleInstructions ? "" : "provider-session",
+      roleConfigId: ROLE.id,
+      roleConfigVersion: ROLE.version,
+      roleLabel: ROLE.label,
+      roleInstructions: ROLE.instructions,
+      roleAppToolCapabilities: ROLE.appToolCapabilities,
+      participantKind: kind,
+      participantAgentMode: "default",
+      participantPermissions: permissions,
+      updatedAt: NOW
+    };
+
+    return (service as any).buildPromptParts(
+      conversation,
+      participant,
+      session,
+      conversation.messages[0],
+      "/tmp/accordagents-history",
+      false,
+      {
+        includeRoleInstructions,
+        agentMode: "default",
+        permissions
+      }
+    ).prompt as string;
+  };
+
+  const firstTurn = promptFor("claude-code", true);
+  const resumedTurn = promptFor("claude-code", false);
+  const codexTurn = promptFor("codex-cli", false);
+
+  for (const prompt of [firstTurn, resumedTurn]) {
+    assert.match(prompt, /Claude Code execution model in AccordAgents Chat/);
+    assert.match(prompt, /This chat turn is one-shot/);
+    assert.match(prompt, /Backgrounded Claude work is terminated at turn end/);
+    assert.match(prompt, /Never end a turn by saying you are standing by, waiting, will wait, or will post/);
+  }
+  assert.doesNotMatch(codexTurn, /Claude Code execution model in AccordAgents Chat/);
+  assert.doesNotMatch(codexTurn, /Backgrounded Claude work is terminated at turn end/);
+});
+
 test("participantPermissionPolicy does not suggest escalation for agent-mode masked shell and workspace grants", () => {
   const { service } = testService();
   const prompt = (service as any).participantPermissionPolicy("claude-code", "plan", normalizeChatAgentPermissions({

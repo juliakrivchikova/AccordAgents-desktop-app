@@ -5262,6 +5262,7 @@ export class ChatService {
     const behaviorRulesBlock = options.includeRoleInstructions
       ? ""
       : this.behaviorRuleReinforcementSection(session);
+    const claudeExecutionModelBlock = this.claudeExecutionModelPromptSection(session);
     const currentRequestBlock = [
       this.currentChatRequestLine(triggerMessage, continuation),
       "Write your next message in this chat."
@@ -5277,6 +5278,7 @@ export class ChatService {
       attachmentsBlock,
       autoTitleBlock,
       behaviorRulesBlock,
+      claudeExecutionModelBlock,
       currentRequestBlock
     ].filter(Boolean);
     const prompt = orderedBlocks.join("\n\n");
@@ -5298,6 +5300,19 @@ export class ChatService {
         total: prompt.length
       }
     };
+  }
+
+  private claudeExecutionModelPromptSection(session: ChatParticipantSession): string {
+    if (session.participantKind !== "claude-code") {
+      return "";
+    }
+    return [
+      "Claude Code execution model in AccordAgents Chat:",
+      "- This chat turn is one-shot. After you send the final chat message, AccordAgents marks you Idle and does not notify, callback, or auto-resume you for background Bash jobs, Claude `Agent`/`Task` subagents, or other provider-native terminal background work.",
+      "- Backgrounded Claude work is terminated at turn end, not kept running silently.",
+      "- Complete any started work before replying. If the work cannot be completed in this turn, report the concrete partial result or blocker and ask User for the next message to continue.",
+      "- Never end a turn by saying you are standing by, waiting, will wait, or will post when background work finishes."
+    ].join("\n");
   }
 
   // Reinforces attached behavior rules on every turn. Role instructions (which
