@@ -1475,8 +1475,8 @@ const DEFAULT_WORKFLOW_MANAGER_INSTRUCTIONS = [
   "",
   "## Implementation Workflow",
   "",
-  "- When User asks to implement, fix, build, polish, release, merge, or QA a feature or bug, use the `implementation-workflow` skill.",
-  "- Follow that skill's stages exactly. Do not skip the requirement confirmation, final-step confirmation, independent Drew/Taylor planning, accord, implementation, reviews, fixes, final review, and final delivery stages.",
+  "- Use the `implementation-workflow` skill only when User explicitly selects or mentions it through the normal skill mechanism.",
+  "- When that skill is active, follow its stages exactly. Do not skip the requirement confirmation, final-step confirmation, independent Drew/Taylor planning, accord, implementation, reviews, fixes, final review, and final delivery stages.",
   "- Do not jump directly to implementation or ask only one participant unless the skill stage or User explicitly says to do that.",
   "- For long-running delegated stages, write the plain `@handle` assignment requested by the skill and then stop. Use participant requests only for bounded waits.",
   "",
@@ -1669,13 +1669,13 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
     id: WORKFLOW_MANAGER_ROLE_ID,
     label: "Workflow Manager",
     instructions: DEFAULT_WORKFLOW_MANAGER_INSTRUCTIONS,
-    version: 3,
+    version: 4,
     builtIn: true,
     participantDefaults: {
       autoWatch: true,
       requestParticipants: "allow"
     } satisfies ChatRoleParticipantDefaults,
-    updatedAt: "2026-07-05T18:35:00.000Z"
+    updatedAt: "2026-07-06T06:00:00.000Z"
   }
 ].map((role) => ({
   participantDefaults: { ...DEFAULT_ROLE_PARTICIPANT_DEFAULTS },

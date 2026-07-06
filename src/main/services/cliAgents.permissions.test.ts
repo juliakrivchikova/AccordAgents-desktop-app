@@ -459,6 +459,7 @@ test("claude warm rejects result events without response content", () => {
   const runner = makeRunner() as any;
   const resolved: unknown[] = [];
   const rejected: Error[] = [];
+  const sessionId = "11111111-1111-4111-8111-111111111111";
   const pending = makeClaudeWarmPendingTurn({
     resolve: (result: unknown) => resolved.push(result),
     reject: (error: Error) => rejected.push(error)
@@ -478,6 +479,33 @@ test("claude warm rejects result events without response content", () => {
 
   assert.equal(resolved.length, 0);
   assert.equal(rejected[0]?.message, "Claude warm process completed without response content.");
+});
+
+test("claude warm permits empty result only when explicitly allowed", () => {
+  const runner = makeRunner() as any;
+  const resolved: unknown[] = [];
+  const rejected: Error[] = [];
+  const pending = makeClaudeWarmPendingTurn({
+    resolve: (result: unknown) => resolved.push(result),
+    reject: (error: Error) => rejected.push(error)
+  });
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const fail = (error: Error): never => { throw error; };
+
+  runner.handleClaudeWarmLine(
+    JSON.stringify({ type: "result" }),
+    participant,
+    { allowEmptyContent: true },
+    undefined,
+    pending,
+    () => pending,
+    fail
+  );
+
+  assert.equal(rejected.length, 0);
+  assert.equal((resolved[0] as { ok: boolean; content: string; sessionId: string }).ok, true);
+  assert.equal((resolved[0] as { content: string }).content, "");
+  assert.equal((resolved[0] as { sessionId?: string }).sessionId, undefined);
 });
 
 function chatOptions(overrides: {
@@ -1277,8 +1305,10 @@ test("claude compact uses the compact-specific timeout", async () => {
 test("claude compact runs one-shot so the result reports post-compact usage", async () => {
   const runner = makeRunner() as any;
   let seenWarm: unknown = "unset";
-  runner.runClaude = async (_participant: unknown, _prompt: string, _repoPath: string | undefined, _kind: string, _signal: AbortSignal | undefined, options: { warm?: unknown }) => {
+  let seenAllowEmptyContent: unknown = "unset";
+  runner.runClaude = async (_participant: unknown, _prompt: string, _repoPath: string | undefined, _kind: string, _signal: AbortSignal | undefined, options: { warm?: unknown; allowEmptyContent?: boolean }) => {
     seenWarm = options.warm;
+    seenAllowEmptyContent = options.allowEmptyContent;
     return { ok: true, sessionId: "session-1", contextUsage: { usedTokens: 1995, contextWindowTokens: 1_000_000, percentage: 0, source: "claude-code", updatedAt: "2026-06-17T00:00:00.000Z" } };
   };
 
@@ -1294,6 +1324,7 @@ test("claude compact runs one-shot so the result reports post-compact usage", as
   );
 
   assert.equal(seenWarm, undefined);
+  assert.equal(seenAllowEmptyContent, true);
   assert.equal(result.contextUsage.usedTokens, 1995);
   assert.equal(result.contextUsage.percentage, 0);
 });

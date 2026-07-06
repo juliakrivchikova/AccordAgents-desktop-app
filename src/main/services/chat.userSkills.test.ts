@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import type { ChatMessage, ChatParticipant, ChatParticipantSession, ChatRoleConfig, ChatSkillMention, Conversation, ParticipantConfig } from "../../shared/types";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { ChatService } from "./chat";
 import { UserSkillsService } from "./userSkills";
 
@@ -490,13 +491,13 @@ test("current request line is conditional for selected skill prompts and retry e
   assert.match(normalPrompt, /Current request: answer the triggering message above/);
   assert.doesNotMatch(normalPrompt, /Current request: execute the selected skill workflow/);
 
-  const retrySkillPrompt = (service as any).buildRetryEnvelope(skillMessage, false, session) as string;
+  const retrySkillPrompt = (service as any).buildRetryEnvelope(conversation, skillMessage, false, session) as string;
   assert.match(retrySkillPrompt, /Current request: execute the selected skill workflow for the triggering message/);
 
-  const retryNormalPrompt = (service as any).buildRetryEnvelope(normalMessage, false, session) as string;
+  const retryNormalPrompt = (service as any).buildRetryEnvelope(conversation, normalMessage, false, session) as string;
   assert.match(retryNormalPrompt, /Current request: answer the triggering message above/);
 
-  const continuationPrompt = (service as any).buildRetryEnvelope(skillMessage, true, session) as string;
+  const continuationPrompt = (service as any).buildRetryEnvelope(conversation, skillMessage, true, session) as string;
   assert.match(continuationPrompt, /Current request: control has returned to you after the approved participants have replied/);
   assert.doesNotMatch(continuationPrompt, /Current request: execute the selected skill workflow/);
 });
@@ -700,17 +701,19 @@ function testService(options: {
       chatRoleConfigs: ChatRoleConfig[];
       chatBehaviorRules: [];
       providers: Array<{ kind: string; enabled: boolean }>;
+      chatPromptContext: typeof DEFAULT_CHAT_PROMPT_CONTEXT;
     }> {
       return {
         chatRoleConfigs: options.roles ?? [ROLE, GENERIC_ROLE],
         chatBehaviorRules: [],
-        providers: [{ kind: "codex-cli", enabled: true }]
+        providers: [{ kind: "codex-cli", enabled: true }],
+        chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT
       };
     }
   };
   const cliRunner = {
-    async detectAgents(): Promise<[]> {
-      return [];
+    async detectAgents(): Promise<Array<{ kind: string; label: string; installed: boolean }>> {
+      return [{ kind: "codex-cli", label: "Codex CLI", installed: true }];
     },
     run: options.run
   };

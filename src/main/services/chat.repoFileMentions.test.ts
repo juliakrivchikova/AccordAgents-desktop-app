@@ -1575,6 +1575,7 @@ test("participantRequestStatusForTool preserves running request owned by another
   const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
   const runId = "external-target-run";
   const ownerPid = process.ppid > 0 ? process.ppid : 1;
+  const fresh = new Date().toISOString();
   const conversation = chatConversation([requester, target], "/repo");
   conversation.metadata = {
     ...conversation.metadata,
@@ -1583,8 +1584,9 @@ test("participantRequestStatusForTool preserves running request owned by another
     activeRunOwnersByRunId: {
       [runId]: {
         processId: ownerPid,
+        instanceId: "external-instance",
         startedAt: NOW,
-        updatedAt: NOW
+        updatedAt: fresh
       }
     }
   };

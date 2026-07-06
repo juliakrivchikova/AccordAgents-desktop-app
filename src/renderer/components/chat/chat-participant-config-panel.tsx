@@ -346,6 +346,33 @@ export function ChatParticipantInlineRequestParticipantsRow(props: {
   );
 }
 
+export function ChatParticipantInlineAutoWatchRow(props: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+  description?: string;
+}): JSX.Element {
+  return (
+    <ChatParticipantSpecRow label="Auto-watch">
+      <label className={`chat-app-tool-review-toggle ${props.disabled ? "is-disabled" : ""}`}>
+        <input
+          type="checkbox"
+          checked={props.checked}
+          disabled={props.disabled}
+          onChange={(event) => props.onChange(event.currentTarget.checked)}
+        />
+        <span className={`chat-app-tool-review-switch ${props.checked ? "on" : ""}`} aria-hidden>
+          <span />
+        </span>
+        <span className="chat-app-tool-review-toggle-text">
+          <strong>{props.checked ? "On" : "Off"}</strong>
+          <span>{props.description ?? "Watch new chat activity."}</span>
+        </span>
+      </label>
+    </ChatParticipantSpecRow>
+  );
+}
+
 export function rosterPermissionGrantLabels(participant: ChatRosterChangeParticipantInput): string[] {
   const permissions = effectiveChatAgentPermissionsForProvider(
     participant.kind,

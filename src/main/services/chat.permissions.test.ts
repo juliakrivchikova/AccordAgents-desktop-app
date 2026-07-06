@@ -1641,6 +1641,35 @@ test("ending one active run preserves survivor metadata", async () => {
   assert.equal(storage.current.metadata.activeRunOwnersByRunId, undefined);
 });
 
+test("ending a current run preserves live external run metadata", async () => {
+  const participant = chatParticipant("claude-code");
+  const ownerPid = process.ppid > 0 ? process.ppid : 1;
+  const fresh = new Date().toISOString();
+  const conversation = chatConversation([participant], {
+    activeRunIds: ["external-run"],
+    runId: "external-run",
+    running: true,
+    activeRunOwnersByRunId: {
+      "external-run": {
+        processId: ownerPid,
+        instanceId: "external-instance",
+        startedAt: NOW,
+        updatedAt: fresh
+      }
+    }
+  });
+  const { service, storage } = testService({ conversation });
+
+  await (service as any).beginChatRun(conversation, "current-run");
+  await (service as any).endChatRun(conversation, "current-run");
+
+  assert.deepEqual(storage.current.metadata.activeRunIds, ["external-run"]);
+  assert.equal(storage.current.metadata.runId, "external-run");
+  assert.equal(storage.current.metadata.running, true);
+  assert.equal(storage.current.metadata.activeRunOwnersByRunId?.["external-run"]?.instanceId, "external-instance");
+  assert.equal(storage.current.metadata.activeRunOwnersByRunId?.["current-run"], undefined);
+});
+
 test("ending local launcher keeps remote run active until terminal state", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
@@ -2218,6 +2247,85 @@ test("auto-watch evaluation dispatches watcher from new participant output", asy
   assert.ok(trigger);
   assert.equal(trigger.metadata?.autoWatchTrigger?.participantId, manager.id);
   assert.deepEqual(trigger.metadata?.autoWatchTrigger?.messageIds, ["worker-reply"]);
+});
+
+test("auto-watch cursor is not advanced when watcher dispatch fails before run starts", async () => {
+  const manager = { ...chatParticipant("codex-cli"), autoWatch: true };
+  const worker = chatParticipant("claude-code");
+  const conversation = chatConversation([manager, worker], {
+    participantWatchers: {
+      [manager.id]: {
+        lastSeenMessageId: "user-message",
+        wakeChainDepth: 0,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push(timelineMessage("worker-reply", "Worker is done.", {
+    role: "participant",
+    participantId: worker.id,
+    participantLabel: `@${worker.handle}`,
+    metadata: { threadId: "user-message" }
+  }));
+  const { service, storage } = testService({
+    conversation,
+    agents: [
+      { kind: "codex-cli", label: "Codex CLI", installed: true },
+      { kind: "claude-code", label: "Claude Code", installed: true }
+    ]
+  });
+  let dispatchCalled = false;
+  (service as any).runParticipantBatch = async () => {
+    dispatchCalled = true;
+    throw new Error("dispatch failed before begin");
+  };
+
+  await (service as any).runAutoWatchEvaluation(conversation.id, "test");
+  await waitFor(() => storage.current.metadata.participantWatchers?.[manager.id]?.pausedReason === "error");
+
+  assert.equal(dispatchCalled, true);
+  assert.equal(storage.current.metadata.participantWatchers?.[manager.id]?.lastSeenMessageId, "user-message");
+  assert.equal(storage.current.metadata.participantWatchers?.[manager.id]?.wakeChainDepth, 0);
+  assert.ok(storage.current.messages.find((message: ChatMessage) => message.metadata?.autoWatchTrigger));
+});
+
+test("auto-watch schedules after background participant output drains", async () => {
+  const manager = { ...chatParticipant("codex-cli"), autoWatch: true };
+  const worker = chatParticipant("claude-code");
+  const conversation = chatConversation([manager, worker], {
+    running: true,
+    participantWatchers: {
+      [manager.id]: {
+        lastSeenMessageId: "user-message",
+        wakeChainDepth: 0,
+        updatedAt: NOW
+      }
+    }
+  });
+  const { service, storage } = testService({ conversation });
+  const scheduled: Array<{ conversationId: string; reason: string }> = [];
+  (service as any).scheduleAutoWatchEvaluation = (conversationId: string, reason: string) => {
+    scheduled.push({ conversationId, reason });
+  };
+
+  (service as any).incrementBackgroundRunner(conversation.id);
+  await (service as any).appendParticipantTurnMessages(conversation, worker, [
+    timelineMessage("worker-delayed", "Delayed reply.", {
+      role: "participant",
+      participantId: worker.id,
+      participantLabel: `@${worker.handle}`,
+      metadata: { threadId: "user-message" }
+    })
+  ]);
+  storage.current = clone(conversation);
+
+  assert.deepEqual(scheduled, []);
+
+  (service as any).decrementBackgroundRunner(conversation.id);
+  await waitFor(() => scheduled.length === 1);
+
+  assert.deepEqual(scheduled, [{ conversationId: conversation.id, reason: "background-runner-idle" }]);
+  assert.equal(storage.current.metadata.running, false);
 });
 
 test("auto-watch evaluation can launch a remote watcher from local participant output", async () => {
@@ -4523,6 +4631,147 @@ test("participant request with saveAsPreset false adds a chat-only participant",
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
 });
 
+test("participant app tool honors autoWatch for new participants and saved presets", async () => {
+  const assistant = {
+    ...chatParticipant("codex-cli"),
+    id: "assistant-participant",
+    handle: "assistant",
+    roleConfigId: ADMIN_ROLE.id
+  };
+  const conversation = chatConversation([assistant]);
+  const { service, storage, settingsState } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], chatParticipantConfigs: [] }
+  });
+  const actor = participantManagerActor(conversation.id, assistant);
+
+  const requested = await service.requestParticipantChangeFromTool(actor, {
+    reason: "Add a watcher and save the preset.",
+    operations: [{
+      type: "add_new_participant_to_chat",
+      saveAsPreset: true,
+      participant: {
+        handle: "watcher",
+        roleConfigId: ROLE.id,
+        kind: "codex-cli",
+        autoWatch: true
+      }
+    }]
+  });
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: requested.approvalId as string,
+    approve: true
+  });
+
+  const added = (storage.current.metadata.participants as ChatParticipant[]).find((participant) => participant.handle === "watcher");
+  assert.equal(added?.autoWatch, true);
+  assert.equal(settingsState.chatParticipantConfigs[0]?.autoWatchEnabled, true);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+});
+
+test("existing participant overrides preserve preset auto-watch and execution defaults", async () => {
+  const assistant = {
+    ...chatParticipant("codex-cli"),
+    id: "assistant-participant",
+    handle: "assistant",
+    roleConfigId: ADMIN_ROLE.id
+  };
+  const savedPermissions = normalizeChatAgentPermissions({
+    ...defaultChatAgentPermissions(),
+    requestParticipants: "allow"
+  });
+  const savedParticipant: ChatParticipantConfig = {
+    id: "saved-manager",
+    handle: "saved-manager",
+    roleConfigId: ROLE.id,
+    behaviorRuleIds: [],
+    kind: "codex-cli",
+    model: "gpt-old",
+    permissions: savedPermissions,
+    remoteExecution: "remote",
+    autoWatchEnabled: true,
+    updatedAt: NOW
+  };
+  const conversation = chatConversation([assistant]);
+  const { service, storage } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], chatParticipantConfigs: [savedParticipant] }
+  });
+  const actor = participantManagerActor(conversation.id, assistant);
+
+  const requested = await service.requestParticipantChangeFromTool(actor, {
+    reason: "Add saved participant with model override only.",
+    operations: [{
+      type: "add_existing_participant_to_chat",
+      participantConfigId: savedParticipant.id,
+      overrides: {
+        model: "gpt-new"
+      }
+    }]
+  });
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: requested.approvalId as string,
+    approve: true
+  });
+
+  const added = (storage.current.metadata.participants as ChatParticipant[]).find((participant) => participant.handle === "saved-manager");
+  assert.equal(added?.model, "gpt-new");
+  assert.equal(added?.autoWatch, true);
+  assert.equal(added?.remoteExecution, "remote");
+  assert.equal(added?.permissions?.requestParticipants, "allow");
+});
+
+test("adding saved auto-watch participant through app tool keeps the existing watcher", async () => {
+  const assistant = {
+    ...chatParticipant("codex-cli"),
+    id: "assistant-participant",
+    handle: "assistant",
+    roleConfigId: ADMIN_ROLE.id
+  };
+  const currentWatcher = {
+    ...chatParticipant("claude-code"),
+    id: "current-watcher",
+    handle: "watcher",
+    autoWatch: true
+  };
+  const savedParticipant: ChatParticipantConfig = {
+    id: "saved-manager",
+    handle: "saved-manager",
+    roleConfigId: ROLE.id,
+    behaviorRuleIds: [],
+    kind: "codex-cli",
+    autoWatchEnabled: true,
+    updatedAt: NOW
+  };
+  const conversation = chatConversation([assistant, currentWatcher]);
+  const { service, storage } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], chatParticipantConfigs: [savedParticipant] }
+  });
+  const actor = participantManagerActor(conversation.id, assistant);
+
+  const requested = await service.requestParticipantChangeFromTool(actor, {
+    operations: [{
+      type: "add_existing_participant_to_chat",
+      participantConfigId: savedParticipant.id
+    }]
+  });
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: requested.approvalId as string,
+    approve: true
+  });
+
+  const participants = storage.current.metadata.participants as ChatParticipant[];
+  assert.equal(participants.find((participant) => participant.id === currentWatcher.id)?.autoWatch, true);
+  assert.equal(participants.find((participant) => participant.handle === "saved-manager")?.autoWatch, false);
+});
+
 test("participant creation rejects archived roles for new participants", async () => {
   const assistant = {
     ...chatParticipant("codex-cli"),
@@ -4597,6 +4846,48 @@ test("role option discovery advertises archive_role and archived metadata", asyn
   const archived = options.roles.find((role: { id: string }) => role.id === archivedRole.id);
   assert.equal(archived.archived, true);
   assert.equal(archived.archivedAt, NOW);
+});
+
+test("role app tool approval preserves participant defaults for review and persistence", async () => {
+  const assistant = {
+    ...chatParticipant("codex-cli"),
+    id: "assistant-participant",
+    handle: "assistant",
+    roleConfigId: ADMIN_ROLE.id
+  };
+  const conversation = chatConversation([assistant]);
+  const { service, storage, settingsState } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE] }
+  });
+
+  const requested = await service.requestRoleChangeFromTool(participantManagerActor(conversation.id, assistant), {
+    operations: [{
+      type: "create_role",
+      role: {
+        label: "Workflow-like Manager",
+        instructions: "Coordinate work.",
+        participantDefaults: {
+          autoWatch: true,
+          requestParticipants: "allow"
+        }
+      }
+    }]
+  }) as { approvalId: string };
+
+  const pending = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
+  assert.equal((pending.request as any).operations[0].role.participantDefaults.autoWatch, true);
+  assert.equal((pending.request as any).operations[0].role.participantDefaults.requestParticipants, "allow");
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: requested.approvalId,
+    approve: true
+  });
+
+  const role = settingsState.chatRoleConfigs.find((item) => item.label === "Workflow-like Manager");
+  assert.equal(role?.participantDefaults?.autoWatch, true);
+  assert.equal(role?.participantDefaults?.requestParticipants, "allow");
 });
 
 test("Chat Assistant cannot edit built-in roles through role app tool", async () => {
@@ -5297,6 +5588,7 @@ test("a swept placeholder is marked, and a late result repairs it preserving rea
   const runId = "dead-run";
   const conversation = chatConversation([participant], {
     activeRunIds: [runId],
+    runId,
     running: true,
     activeRunOwnersByRunId: {
       [runId]: {
@@ -5340,14 +5632,17 @@ test("recoverStaleChatRun preserves runs owned by another live app instance", ()
   const participant = chatParticipant("codex-cli");
   const runId = "external-live-run";
   const ownerPid = process.ppid > 0 ? process.ppid : 1;
+  const fresh = new Date().toISOString();
   const conversation = chatConversation([participant], {
     activeRunIds: [runId],
+    runId,
     running: true,
     activeRunOwnersByRunId: {
       [runId]: {
         processId: ownerPid,
+        instanceId: "external-instance",
         startedAt: NOW,
-        updatedAt: NOW
+        updatedAt: fresh
       }
     }
   });
@@ -5360,6 +5655,98 @@ test("recoverStaleChatRun preserves runs owned by another live app instance", ()
   assert.deepEqual(conversation.metadata.activeRunIds, [runId]);
   assert.equal(conversation.metadata.running, true);
   assert.equal(conversation.messages.find((message: any) => message.id === "pending-external")!.status, "pending");
+});
+
+test("recoverStaleChatRun interrupts old local run metadata without an owner", () => {
+  const participant = chatParticipant("codex-cli");
+  const runId = "pre-owner-run";
+  const conversation = chatConversation([participant], {
+    activeRunIds: [runId],
+    runId,
+    running: true
+  });
+  conversation.messages.push(pendingParticipantMessage(participant, "pending-old", runId));
+  const { service } = testService({ conversation });
+
+  const changed = (service as any).recoverStaleChatRun(conversation);
+
+  assert.equal(changed, true);
+  assert.equal(conversation.metadata.activeRunIds, undefined);
+  assert.equal(conversation.metadata.activeRunOwnersByRunId, undefined);
+  assert.equal(conversation.metadata.running, false);
+  const pending = conversation.messages.find((message: any) => message.id === "pending-old")!;
+  assert.equal(pending.status, "error");
+  assert.equal(pending.content, "Interrupted before completion.");
+});
+
+test("recoverStaleChatRun does not preserve stale heartbeat owners even if the pid is live", () => {
+  const participant = chatParticipant("codex-cli");
+  const runId = "stale-heartbeat-run";
+  const ownerPid = process.ppid > 0 ? process.ppid : 1;
+  const conversation = chatConversation([participant], {
+    activeRunIds: [runId],
+    runId,
+    running: true,
+    activeRunOwnersByRunId: {
+      [runId]: {
+        processId: ownerPid,
+        instanceId: "external-instance",
+        startedAt: NOW,
+        updatedAt: "2000-01-01T00:00:00.000Z"
+      }
+    }
+  });
+  conversation.messages.push(pendingParticipantMessage(participant, "pending-stale-owner", runId));
+  const { service } = testService({ conversation });
+
+  const changed = (service as any).recoverStaleChatRun(conversation);
+
+  assert.equal(changed, true);
+  assert.equal(conversation.metadata.activeRunIds, undefined);
+  assert.equal(conversation.metadata.activeRunOwnersByRunId, undefined);
+  assert.equal(conversation.metadata.running, false);
+  assert.equal(conversation.messages.find((message: any) => message.id === "pending-stale-owner")!.status, "error");
+});
+
+test("recoverStaleChatRun clears dead local runs while preserving live remote runs", () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], {
+    activeRunIds: ["remote-run", "local-run"],
+    runId: "remote-run",
+    running: true,
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        conversationId: "conversation-1",
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        worker: { host: "worker.example" },
+        status: "running",
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    },
+    activeRunOwnersByRunId: {
+      "local-run": {
+        processId: process.pid,
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push(pendingParticipantMessage(participant, "pending-remote", "remote-run"));
+  conversation.messages.push(pendingParticipantMessage(participant, "pending-local", "local-run"));
+  const { service } = testService({ conversation });
+
+  const changed = (service as any).recoverStaleChatRun(conversation);
+
+  assert.equal(changed, true);
+  assert.deepEqual(conversation.metadata.activeRunIds, ["remote-run"]);
+  assert.equal(conversation.metadata.runId, "remote-run");
+  assert.equal(conversation.metadata.running, true);
+  assert.equal(conversation.metadata.activeRunOwnersByRunId, undefined);
+  assert.equal(conversation.messages.find((message: any) => message.id === "pending-remote")!.status, "pending");
+  assert.equal(conversation.messages.find((message: any) => message.id === "pending-local")!.status, "error");
 });
 
 test("a late result does not resurrect a non-recovery error (user-stopped) message", async () => {
@@ -6385,6 +6772,7 @@ function testService(options: {
                 label: update.label,
                 instructions: update.instructions,
                 appToolCapabilities: update.appToolCapabilities ?? role.appToolCapabilities,
+                participantDefaults: update.participantDefaults ?? role.participantDefaults,
                 version: role.version + 1,
                 updatedAt: NOW
               }
@@ -6399,6 +6787,7 @@ function testService(options: {
           version: 1,
           builtIn: false,
           appToolCapabilities: update.appToolCapabilities,
+          participantDefaults: update.participantDefaults,
           updatedAt: NOW
         });
       }
@@ -6417,6 +6806,7 @@ function testService(options: {
         agentMode: update.agentMode,
         permissions: normalizeChatAgentPermissions(update.permissions),
         remoteExecution: update.remoteExecution,
+        autoWatchEnabled: update.autoWatchEnabled,
         updatedAt: NOW
       };
       settingsState.chatParticipantConfigs = settingsState.chatParticipantConfigs.some((participant) => participant.id === next.id)
@@ -6443,6 +6833,7 @@ function testService(options: {
             version: 1,
             builtIn: false,
             appToolCapabilities: operation.role.appToolCapabilities,
+            participantDefaults: operation.role.participantDefaults,
             updatedAt: NOW
           });
         } else if (operation.type === "edit_role") {
@@ -6453,6 +6844,7 @@ function testService(options: {
                   label: operation.role.label,
                   instructions: operation.role.instructions,
                   appToolCapabilities: operation.role.appToolCapabilities ?? role.appToolCapabilities,
+                  participantDefaults: operation.role.participantDefaults ?? role.participantDefaults,
                   version: role.version + 1,
                   updatedAt: NOW
                 }

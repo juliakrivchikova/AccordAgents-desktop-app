@@ -157,10 +157,11 @@ If the selected final step is `Merge to main and push`, ask Drew:
 @drew-codex-engineer merge the approved work to main and push
 ```
 
-If the selected final step is `Make a release`, decide what is it (patch/minor/major) and ask Drew to make a release:
+If the selected final step is `Make a release`, the release type must be explicit from the user. If the user has not
+chosen `patch`, `minor`, or `major`, ask before assigning the release. Then ask Drew:
 
 ```text
-@drew-codex-engineer release new version with the implemented work with `npm run release:[patch/minor/major]`
+@drew-codex-engineer release new version with the implemented work with `npm run release:[patch/minor/major chosen by User]`
 ```
 
 ### 11. Report Status

@@ -65,6 +65,10 @@ export function ChatParticipantMenu(props: {
     props.settings.chatBehaviorRules
   ) ?? validateChatCliAgents(addDraft, props.agents);
   const savedParticipants = addableSavedParticipantConfigs(props.settings, props.agents, existingHandles);
+  const activeWatcher = props.participants.find((participant) => participant.autoWatch === true);
+  const autoWatchConflictReason = activeWatcher
+    ? `Only one participant can watch a chat. Turn off @${activeWatcher.handle} first.`
+    : undefined;
 
   return (
     <ChatParticipantMenuView
@@ -84,12 +88,13 @@ export function ChatParticipantMenu(props: {
         props.settings.chatRoleConfigs.find((role) => role.id === participant.roleConfigId)?.archivedAt
       )}
       savedParticipantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
-      savedParticipantSummary={(participant) => savedParticipantSummary(props.settings, participant)}
+      savedParticipantSummary={(participant) => savedParticipantSummary(props.settings, participant, autoWatchConflictReason)}
       addParticipantEditor={(
         <ChatParticipantDraftRow
           draft={props.addParticipantDraft}
           settings={props.settings}
           agents={props.agents}
+          autoWatchDisabledReason={props.addParticipantDraft.autoWatch ? autoWatchConflictReason : undefined}
           renderAvatarOption={(option) => <Avatar className="avatar-choice-preview" spec={avatarForChatAvatarOption(option)} />}
           onChange={props.onAddParticipantDraftChange}
         />
@@ -106,13 +111,13 @@ export function ChatParticipantMenu(props: {
   );
 }
 
-function savedParticipantSummary(settings: AppSettings, participant: ChatParticipantConfig): string {
+function savedParticipantSummary(settings: AppSettings, participant: ChatParticipantConfig, autoWatchConflictReason?: string): string {
   return [
     labelForProviderKind(settings.providers, participant.kind),
     participant.kind === "codex-cli" ? `run ${chatRunLocationLabel(participant.remoteExecution).toLowerCase()}` : "",
     participant.model,
     participant.reasoningEffort ? `reasoning ${chatReasoningEffortLabel(participant.reasoningEffort)}` : "",
-    participant.autoWatchEnabled ? "auto-watch" : "",
+    participant.autoWatchEnabled ? (autoWatchConflictReason ? "auto-watch off: watcher already set" : "auto-watch") : "",
     chatParticipantPermissionSummary(participant)
   ].filter(Boolean).join(" · ");
 }

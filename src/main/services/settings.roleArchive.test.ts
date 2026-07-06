@@ -104,6 +104,16 @@ test("default Chat Assistant does not offer itself for off-setup task work", () 
   assert.doesNotMatch(assistant.instructions, /\b(?:create|edit|manage|set up|adjust)\s+(?:rules|prompts)\b/i);
 });
 
+test("default Workflow Manager only follows implementation workflow when explicitly selected", () => {
+  const { service } = settingsServiceWith();
+  const roles = (service as any).mergeDefaultRoles(undefined) as ChatRoleConfig[];
+  const manager = roles.find((role) => role.id === "workflow-manager");
+
+  assert.ok(manager);
+  assert.match(manager.instructions, /only when User explicitly selects or mentions it through the normal skill mechanism/);
+  assert.doesNotMatch(manager.instructions, /asks to implement, fix, build, polish, release, merge, or QA/);
+});
+
 test("archives an unused custom role and retains the record", async () => {
   const { service, stored, writeCount } = settingsServiceWith({ chatRoleConfigs: [makeRole()] });
   const settings: AppSettings = await service.archiveChatRoleConfig("custom-reviewer");

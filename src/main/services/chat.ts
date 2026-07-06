@@ -314,6 +314,8 @@ const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 100_000;
 const CHAT_ACTIVITY_EVENT_MAX_COUNT = 80;
 const WORKFLOW_MANAGER_ROLE_ID = "workflow-manager";
 const ACTIVE_RUN_OWNERS_KEY = "activeRunOwnersByRunId";
+const CHAT_RUN_OWNER_HEARTBEAT_MS = 15_000;
+const CHAT_RUN_OWNER_STALE_MS = 90_000;
 const CHAT_IMAGE_MAX_ATTACHMENTS = 5;
 const CHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 const CHAT_IMAGE_MAX_DIMENSION = 8192;
@@ -393,6 +395,7 @@ interface ChatAutoTitleEligibilityMetadata {
 
 interface ChatRunOwner {
   processId: number;
+  instanceId?: string;
   startedAt: string;
   updatedAt: string;
 }
@@ -544,6 +547,8 @@ export class ChatService {
   private readonly autoWatchEvaluations = new Set<string>();
   private readonly appToolApprovalDecisionListeners = new Set<(event: ChatAppToolApprovalDecisionEvent) => Promise<void> | void>();
   private readonly remoteRunHandlesByRun = new Map<string, RemoteRunHandle>();
+  private readonly appInstanceId = randomUUID();
+  private runOwnerHeartbeatTimer?: NodeJS.Timeout;
   private remoteRuns?: RemoteRunStarter;
   private remoteRunCoordinator?: RemoteRunCoordinatorControl;
   private cloudRunAws?: CloudRunAwsResolver;
@@ -4373,7 +4378,10 @@ export class ChatService {
     signal: AbortSignal | undefined,
     progress: ProgressCallback | undefined,
     warnings: string[],
-    options: { targetRunIds?: ReadonlyMap<string, string> } = {}
+    options: {
+      targetRunIds?: ReadonlyMap<string, string>;
+      onTargetRunBegun?: (participantId: string, runId: string) => Promise<void> | void;
+    } = {}
   ): Promise<void> {
     let completed = 0;
     const turnSnapshot = this.clone(conversation);
@@ -4461,6 +4469,7 @@ export class ChatService {
         try {
           await this.beginChatRun(conversation, targetRunId);
           runBegun = true;
+          await options.onTargetRunBegun?.(participant.id, targetRunId);
           await this.withChatMutation(conversation, async () => {
             conversation.messages.push(pendingMessage);
             this.recordLastMessageByParticipant(conversation, pendingMessage);
@@ -7272,6 +7281,7 @@ export class ChatService {
       participant: ChatParticipant;
       triggerMessage: ChatMessage;
       runId: string;
+      latestMessageId: string;
     } | undefined;
     try {
       await this.withChatRunLock(conversationId, async () => {
@@ -7288,6 +7298,9 @@ export class ChatService {
           }
           const participant = this.activeAutoWatchParticipant(conversation);
           if (!participant) {
+            return;
+          }
+          if (this.storedMetadataHasProtectedLiveRuns(conversation.metadata)) {
             return;
           }
           let watchers = this.normalizeParticipantWatchers(conversation.metadata.participantWatchers);
@@ -7336,23 +7349,10 @@ export class ChatService {
             }
           });
           conversation.messages.push(triggerMessage);
-          watchers = {
-            ...watchers,
-            [participant.id]: {
-              ...existingState,
-              lastSeenMessageId: latest.id,
-              lastRunId: runId,
-              lastTriggeredAt: now,
-              wakeChainDepth: existingState.wakeChainDepth + 1,
-              updatedAt: now
-            }
-          };
-          delete watchers[participant.id].pausedReason;
-          conversation.metadata = this.metadataWithParticipantWatchers(conversation.metadata, watchers);
           conversation.updatedAt = now;
           await this.saveConversation(conversation);
           this.queueSnapshot(conversation);
-          prepared = { conversation, participant, triggerMessage, runId };
+          prepared = { conversation, participant, triggerMessage, runId, latestMessageId: latest.id };
         });
       });
     } finally {
@@ -7371,7 +7371,12 @@ export class ChatService {
       undefined,
       undefined,
       dispatchWarnings,
-      { targetRunIds: new Map([[run.participant.id, run.runId]]) }
+      {
+        targetRunIds: new Map([[run.participant.id, run.runId]]),
+        onTargetRunBegun: async (participantId, targetRunId) => {
+          await this.advanceAutoWatchCursorAfterRunStarted(run.conversation, participantId, targetRunId, run.latestMessageId);
+        }
+      }
     );
     void dispatchPromise
       .catch(async (error) => {
@@ -7382,6 +7387,35 @@ export class ChatService {
           await this.appendConversationWarnings(run.conversation, dispatchWarnings);
         }
       });
+  }
+
+  private async advanceAutoWatchCursorAfterRunStarted(
+    conversation: Conversation,
+    participantId: string,
+    runId: string,
+    latestMessageId: string
+  ): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      const watchers = this.normalizeParticipantWatchers(conversation.metadata.participantWatchers);
+      const now = new Date().toISOString();
+      const existingState = watchers[participantId] ?? {
+        wakeChainDepth: 0,
+        updatedAt: now
+      };
+      watchers[participantId] = {
+        ...existingState,
+        lastSeenMessageId: latestMessageId,
+        lastRunId: runId,
+        lastTriggeredAt: now,
+        wakeChainDepth: existingState.wakeChainDepth + 1,
+        updatedAt: now
+      };
+      delete watchers[participantId].pausedReason;
+      conversation.metadata = this.metadataWithParticipantWatchers(conversation.metadata, watchers);
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+    });
   }
 
   private async markAutoWatchError(conversationId: string, participantId: string | undefined, error: unknown): Promise<void> {
@@ -8151,7 +8185,8 @@ export class ChatService {
             permissions: permissionsProvided
               ? normalizeChatAgentPermissions(participantRecord.permissions)
               : undefined,
-            remoteExecution: this.normalizeConcreteRemoteExecutionMode(participantRecord.remoteExecution)
+            remoteExecution: this.normalizeConcreteRemoteExecutionMode(participantRecord.remoteExecution),
+            autoWatch: typeof participantRecord.autoWatch === "boolean" ? participantRecord.autoWatch : undefined
           }
         };
       })
@@ -8168,14 +8203,26 @@ export class ChatService {
     if (!("model" in record) && !("reasoningEffort" in record) && !("agentMode" in record) && !("permissions" in record) && !("remoteExecution" in record) && !("autoWatch" in record)) {
       return undefined;
     }
-    return {
-      model: typeof record.model === "string" ? record.model.trim() || undefined : undefined,
-      reasoningEffort: normalizeChatReasoningEffort(record.reasoningEffort),
-      agentMode: normalizeChatAgentMode(record.agentMode),
-      permissions: normalizeChatAgentPermissions(record.permissions),
-      remoteExecution: this.normalizeConcreteRemoteExecutionMode(record.remoteExecution),
-      autoWatch: record.autoWatch === true
-    };
+    const overrides: ChatExistingParticipantOverrides = {};
+    if ("model" in record) {
+      overrides.model = typeof record.model === "string" ? record.model.trim() || undefined : undefined;
+    }
+    if ("reasoningEffort" in record) {
+      overrides.reasoningEffort = normalizeChatReasoningEffort(record.reasoningEffort);
+    }
+    if ("agentMode" in record) {
+      overrides.agentMode = normalizeChatAgentMode(record.agentMode);
+    }
+    if ("permissions" in record) {
+      overrides.permissions = normalizeChatAgentPermissions(record.permissions);
+    }
+    if ("remoteExecution" in record) {
+      overrides.remoteExecution = this.normalizeConcreteRemoteExecutionMode(record.remoteExecution);
+    }
+    if ("autoWatch" in record) {
+      overrides.autoWatch = record.autoWatch === true;
+    }
+    return Object.keys(overrides).length > 0 ? overrides : undefined;
   }
 
   private async prepareParticipantChange(
@@ -8205,15 +8252,15 @@ export class ChatService {
           roleConfigId: preset.roleConfigId,
           behaviorRuleIds: preset.behaviorRuleIds,
           kind: preset.kind,
-          model: overrides ? overrides.model : preset.model,
-          reasoningEffort: overrides
+          model: overrides && "model" in overrides ? overrides.model : preset.model,
+          reasoningEffort: overrides && "reasoningEffort" in overrides
             ? normalizeChatReasoningEffort(overrides.reasoningEffort, preset.kind)
             : preset.reasoningEffort,
           avatarId: preset.avatarId,
-          agentMode: overrides ? normalizeChatAgentMode(overrides.agentMode) : preset.agentMode,
-          permissions: overrides ? overrides.permissions : preset.permissions,
-          remoteExecution: overrides ? overrides.remoteExecution : preset.remoteExecution,
-          autoWatch: overrides ? overrides.autoWatch : preset.autoWatchEnabled
+          agentMode: overrides && "agentMode" in overrides ? normalizeChatAgentMode(overrides.agentMode) : preset.agentMode,
+          permissions: overrides && "permissions" in overrides ? overrides.permissions : preset.permissions,
+          remoteExecution: overrides && "remoteExecution" in overrides ? overrides.remoteExecution : preset.remoteExecution,
+          autoWatch: overrides && "autoWatch" in overrides ? overrides.autoWatch : preset.autoWatchEnabled
         };
       }
       const role = newParticipantRoles.find((item) => item.id === operation.participant.roleConfigId);
@@ -13715,20 +13762,12 @@ export class ChatService {
     if (liveWork) {
       return false;
     }
-    if (activeIds.some((id) => this.isNonTerminalRemoteRun(conversation.metadata, id))) {
-      return false;
-    }
-    if (activeIds.some((id) => this.localRunOwnerState(conversation.metadata, id) === "external-live" || this.localRunOwnerState(conversation.metadata, id) === "unknown")) {
-      return false;
-    }
     const interruptedRequests = this.markOrphanedParticipantRequestsInterrupted(conversation, {
-      ignoreLocalRequestLocks: true,
-      ignoreProtectedExternalRuns: true
+      ignoreLocalRequestLocks: true
     });
     const wasRunning = conversation.metadata.running === true || activeIds.length > 0;
     let pendingSwept = false;
     let hasLivePending = false;
-    let hasProtectedPending = false;
     for (const message of conversation.messages) {
       if (message.status === "pending" && message.role === "participant") {
         if (this.isMessageRunLive(message)) {
@@ -13741,7 +13780,6 @@ export class ChatService {
           this.isMessageRunProtectedByExternalOwner(conversation, message) &&
           !this.isPendingMessageForInterruptedParticipantRequest(conversation, message)
         ) {
-          hasProtectedPending = true;
           continue;
         }
         message.status = "error";
@@ -13761,17 +13799,26 @@ export class ChatService {
       }
     }
     // Only clear run metadata / flag an interrupt when the run is genuinely done.
-    // If any pending bubble is still backed by a live run, leave run metadata
-    // intact so we don't recreate the "live run looks interrupted/idle" state.
-    const shouldClear = wasRunning && !hasLivePending && !hasProtectedPending;
-    if (!interruptedRequests && !pendingSwept && !shouldClear) {
+    // If any pending bubble is still backed by a live run owned by this process,
+    // leave run metadata intact so we don't recreate the "live run looks
+    // interrupted/idle" state. Protected external/remote runs are safe to
+    // preserve through metadataWithLiveRunState while stale local ids are removed.
+    const shouldRefreshRunMetadata = wasRunning && !hasLivePending;
+    let refreshedRunMetadata = false;
+    if (shouldRefreshRunMetadata) {
+      const nextMetadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata);
+      if (this.stableJson(nextMetadata) !== this.stableJson(conversation.metadata)) {
+        conversation.metadata = nextMetadata;
+        refreshedRunMetadata = true;
+      }
+    }
+    if (!interruptedRequests && !pendingSwept && !refreshedRunMetadata) {
       return false;
     }
     if (pendingSwept) {
       conversation.metadata = this.metadataWithInterruptedRunWarning(conversation.metadata);
     }
-    if (shouldClear) {
-      conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
+    if (refreshedRunMetadata) {
       conversation.metadata = this.metadataWithoutAutoTitleEligibility(conversation.metadata);
     }
     conversation.updatedAt = new Date().toISOString();
@@ -13803,7 +13850,14 @@ export class ChatService {
       return true;
     }
     const state = this.localRunOwnerState(conversation.metadata, runId);
-    return state === "external-live" || state === "unknown";
+    return state === "external-live";
+  }
+
+  private storedMetadataHasProtectedLiveRuns(metadata: Record<string, unknown>): boolean {
+    return readActiveRunIds(metadata).some((runId) =>
+      this.isNonTerminalRemoteRun(metadata, runId) ||
+      this.localRunOwnerState(metadata, runId) === "external-live"
+    );
   }
 
   private isPendingMessageForInterruptedParticipantRequest(conversation: Conversation, message: ChatMessage): boolean {
@@ -14041,10 +14095,13 @@ export class ChatService {
       const processId = typeof record.processId === "number" && Number.isFinite(record.processId)
         ? Math.floor(record.processId)
         : undefined;
+      const instanceId = typeof record.instanceId === "string" && record.instanceId.trim()
+        ? record.instanceId.trim()
+        : undefined;
       const startedAt = typeof record.startedAt === "string" ? record.startedAt : "";
       const updatedAt = typeof record.updatedAt === "string" ? record.updatedAt : startedAt;
       if (processId && processId > 0 && startedAt) {
-        owners[runId] = { processId, startedAt, updatedAt };
+        owners[runId] = { processId, instanceId, startedAt, updatedAt };
       }
     }
     return owners;
@@ -14052,16 +14109,11 @@ export class ChatService {
 
   private metadataWithLocalRunOwner(metadata: Record<string, unknown>, runId: string, now = new Date().toISOString()): Record<string, unknown> {
     const owners = this.chatRunOwners(metadata);
-    const existing = owners[runId];
     return {
       ...metadata,
       [ACTIVE_RUN_OWNERS_KEY]: {
         ...owners,
-        [runId]: {
-          processId: process.pid,
-          startedAt: existing?.startedAt ?? now,
-          updatedAt: now
-        }
+        [runId]: this.currentRunOwner(owners[runId], now)
       }
     };
   }
@@ -14077,7 +14129,27 @@ export class ChatService {
     if (owner.processId === process.pid) {
       return "external-dead";
     }
+    if (!owner.instanceId || !this.runOwnerHeartbeatFresh(owner)) {
+      return "external-dead";
+    }
     return this.processAppearsAlive(owner.processId) ? "external-live" : "external-dead";
+  }
+
+  private currentRunOwner(existing: ChatRunOwner | undefined, now: string): ChatRunOwner {
+    return {
+      processId: process.pid,
+      instanceId: this.appInstanceId,
+      startedAt: existing?.instanceId === this.appInstanceId ? existing.startedAt : now,
+      updatedAt: now
+    };
+  }
+
+  private runOwnerHeartbeatFresh(owner: ChatRunOwner): boolean {
+    const updatedAt = Date.parse(owner.updatedAt);
+    if (!Number.isFinite(updatedAt)) {
+      return false;
+    }
+    return Date.now() - updatedAt <= CHAT_RUN_OWNER_STALE_MS;
   }
 
   private processAppearsAlive(processId: number): boolean {
@@ -14366,8 +14438,13 @@ export class ChatService {
     excludingRunId?: string,
     preferredRunId?: string
   ): Record<string, unknown> {
-    const activeRunIds = Array.from(this.activeConversationRunIds.get(conversationId) ?? [])
+    const currentActiveRunIds = Array.from(this.activeConversationRunIds.get(conversationId) ?? [])
       .filter((runId) => runId !== excludingRunId);
+    const protectedStoredRunIds = readActiveRunIds(metadata).filter((runId) =>
+      runId !== excludingRunId &&
+      (this.isNonTerminalRemoteRun(metadata, runId) || this.localRunOwnerState(metadata, runId) === "external-live")
+    );
+    const activeRunIds = Array.from(new Set([...protectedStoredRunIds, ...currentActiveRunIds]));
     const baseMetadata = this.clearedChatRunMetadata(metadata);
     if (activeRunIds.length > 0) {
       const metadataRunId = metadata.runId;
@@ -14385,10 +14462,23 @@ export class ChatService {
         runId,
         activeRunIds
       };
+      const existingOwners = this.chatRunOwners(metadata);
+      const currentActiveRunIdSet = new Set(currentActiveRunIds);
+      const owners: Record<string, ChatRunOwner> = {};
       for (const activeRunId of activeRunIds) {
-        if (!this.isNonTerminalRemoteRun(metadata, activeRunId)) {
-          next = this.metadataWithLocalRunOwner(next, activeRunId);
+        if (this.isNonTerminalRemoteRun(metadata, activeRunId)) {
+          continue;
         }
+        if (currentActiveRunIdSet.has(activeRunId)) {
+          owners[activeRunId] = this.currentRunOwner(existingOwners[activeRunId], new Date().toISOString());
+          continue;
+        }
+        if (this.localRunOwnerState(metadata, activeRunId) === "external-live" && existingOwners[activeRunId]) {
+          owners[activeRunId] = existingOwners[activeRunId];
+        }
+      }
+      if (Object.keys(owners).length > 0) {
+        next[ACTIVE_RUN_OWNERS_KEY] = owners;
       }
       return next;
     }
@@ -14402,6 +14492,7 @@ export class ChatService {
   }
 
   private rememberActiveChatRun(conversationId: string, runId: string): void {
+    this.ensureRunOwnerHeartbeatTimer();
     this.activeRunRefCounts.set(runId, (this.activeRunRefCounts.get(runId) ?? 0) + 1);
     this.activeRunIds.add(runId);
     const runIds = this.activeConversationRunIds.get(conversationId) ?? new Set<string>();
@@ -14410,6 +14501,49 @@ export class ChatService {
     const runCounts = this.activeConversationRunRefCounts.get(conversationId) ?? new Map<string, number>();
     runCounts.set(runId, (runCounts.get(runId) ?? 0) + 1);
     this.activeConversationRunRefCounts.set(conversationId, runCounts);
+  }
+
+  private ensureRunOwnerHeartbeatTimer(): void {
+    if (this.runOwnerHeartbeatTimer) {
+      return;
+    }
+    this.runOwnerHeartbeatTimer = setInterval(() => {
+      void this.heartbeatActiveRunOwners().catch((error) => {
+        void this.debugLogs.write("chat.run-owner-heartbeat.error", {
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
+    }, CHAT_RUN_OWNER_HEARTBEAT_MS);
+    this.runOwnerHeartbeatTimer.unref();
+  }
+
+  private async heartbeatActiveRunOwners(): Promise<void> {
+    const conversationIds = Array.from(this.activeConversationRunIds.keys());
+    if (conversationIds.length === 0) {
+      return;
+    }
+    const now = new Date().toISOString();
+    for (const conversationId of conversationIds) {
+      const runIds = Array.from(this.activeConversationRunIds.get(conversationId) ?? []);
+      if (runIds.length === 0) {
+        continue;
+      }
+      const conversation = await this.storage.getConversation(conversationId);
+      if (!conversation || conversation.kind !== "chat") {
+        continue;
+      }
+      await this.withChatMutation(conversation, async () => {
+        let nextMetadata = conversation.metadata;
+        for (const runId of runIds) {
+          if (!this.isNonTerminalRemoteRun(nextMetadata, runId)) {
+            nextMetadata = this.metadataWithLocalRunOwner(nextMetadata, runId, now);
+          }
+        }
+        conversation.metadata = nextMetadata;
+        conversation.updatedAt = now;
+        await this.saveConversation(conversation);
+      });
+    }
   }
 
   private forgetActiveChatRun(conversationId: string, runId: string): void {
@@ -14486,9 +14620,12 @@ export class ChatService {
       if (this.chatHasLiveWork(conversationId)) {
         return;
       }
-      conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
+      conversation.metadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata);
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
+      if (!this.chatHasLiveWork(conversationId) && !this.storedMetadataHasProtectedLiveRuns(conversation.metadata)) {
+        this.scheduleAutoWatchEvaluation(conversationId, "background-runner-idle");
+      }
     });
   }
 
@@ -14520,6 +14657,25 @@ export class ChatService {
 
   private clone(conversation: Conversation): Conversation {
     return JSON.parse(JSON.stringify(conversation)) as Conversation;
+  }
+
+  private stableJson(value: unknown): string {
+    return JSON.stringify(this.stableJsonValue(value));
+  }
+
+  private stableJsonValue(value: unknown): unknown {
+    if (Array.isArray(value)) {
+      return value.map((item) => this.stableJsonValue(item));
+    }
+    if (!value || typeof value !== "object") {
+      return value;
+    }
+    const record = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort()) {
+      sorted[key] = this.stableJsonValue(record[key]);
+    }
+    return sorted;
   }
 
   private createAgentProgressSink(
