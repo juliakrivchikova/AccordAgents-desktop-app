@@ -11,6 +11,7 @@ Prefer the Makefile aliases; they wrap the npm scripts in `package.json`.
 - `make start` — Build, then run Electron from `dist`.
 - `make typecheck` — Strict TS checks for both main and renderer projects (`tsc --noEmit` against each tsconfig).
 - `make clean` — Remove `dist`.
+- `npm run test:accord` — Build the main process, then run focused Accord launcher preference and target reconciliation tests.
 - `npm run test:permissions` — Build the main process, then run targeted Node service tests for chat permissions/cancellation, repo file mentions, chat rename, role archive behavior, participant request threads, git repo-file listing, CLI permission handling, and warnings.
 - `npm run test:app-skills` — Build the main process, then run app-skill service tests.
 

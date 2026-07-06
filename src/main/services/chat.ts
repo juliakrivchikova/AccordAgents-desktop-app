@@ -3661,6 +3661,9 @@ export class ChatService {
         if (!facilitator) {
           throw new Error("Accord facilitator is no longer in this chat.");
         }
+        if (facilitator.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID) {
+          throw new Error("The Chat Assistant cannot be an accord facilitator or participant.");
+        }
         const subject = request.subject.trim();
         if (!subject) {
           throw new Error("Accord subject is required.");
@@ -3677,6 +3680,9 @@ export class ChatService {
           throw new Error("One or more selected accord participants are no longer in this chat.");
         }
         const selectedTargets = targets as ChatParticipant[];
+        if (selectedTargets.some((target) => target.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID)) {
+          throw new Error("The Chat Assistant cannot be an accord facilitator or participant.");
+        }
         const content = this.accordStartMessageContent(facilitator, selectedTargets, subject);
         const accordSkill = await this.resolveAccordSkillMention(conversation, facilitator, content);
         const updatedFacilitator = this.setParticipantRequestPermission(conversation, facilitator.id, "allow") ?? facilitator;

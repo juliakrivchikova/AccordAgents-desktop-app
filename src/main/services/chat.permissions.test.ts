@@ -5997,6 +5997,50 @@ test("startAccord creates structured accord skill mention and dispatches only th
   assert.equal(result.sourceMessageId, userMessage.id);
 });
 
+test("startAccord rejects Chat Assistant as facilitator", async () => {
+  const assistant = {
+    ...chatParticipant("codex-cli"),
+    id: "assistant-participant",
+    handle: "assistant",
+    roleConfigId: ADMIN_ROLE.id
+  };
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([assistant, target]);
+  const { service } = testService({ conversation });
+
+  await assert.rejects(
+    () => service.startAccord({
+      conversationId: conversation.id,
+      facilitatorParticipantId: assistant.id,
+      targetParticipantIds: [target.id],
+      subject: "Pick the launch shape."
+    }),
+    /The Chat Assistant cannot be an accord facilitator or participant/
+  );
+});
+
+test("startAccord rejects Chat Assistant as selected participant", async () => {
+  const facilitator = chatParticipant("codex-cli");
+  const assistant = {
+    ...chatParticipant("claude-code"),
+    id: "assistant-participant",
+    handle: "assistant-2",
+    roleConfigId: ADMIN_ROLE.id
+  };
+  const conversation = chatConversation([facilitator, assistant]);
+  const { service } = testService({ conversation });
+
+  await assert.rejects(
+    () => service.startAccord({
+      conversationId: conversation.id,
+      facilitatorParticipantId: facilitator.id,
+      targetParticipantIds: [assistant.id],
+      subject: "Pick the launch shape."
+    }),
+    /The Chat Assistant cannot be an accord facilitator or participant/
+  );
+});
+
 test("manual accord structured skill mention flips only the dispatched facilitator", () => {
   const facilitator = chatParticipant("codex-cli");
   const target = chatParticipant("claude-code");

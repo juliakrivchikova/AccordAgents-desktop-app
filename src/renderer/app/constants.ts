@@ -32,5 +32,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
 export const SIDEBAR_COLLAPSED_STORAGE_KEY = "accordagents.sidebarCollapsed";
 export const LAST_VIEWED_AT_STORAGE_KEY = "accordagents.lastViewedAt";
 export const DISMISSED_WARNINGS_STORAGE_KEY = "accordagents.dismissedWarnings.v1";
+export const ACCORD_LAUNCHER_STORAGE_KEY = "accordagents.accordLauncher.v1";
 export const GLOBAL_WARNING_DISMISS_SCOPE = "__global__";
 export const NO_PROJECT_GROUP_KEY = "__no_project__";

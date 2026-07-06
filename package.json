@@ -25,6 +25,7 @@
     "test:storage": "npm run build:main && node --test dist/main/main/services/storage.messages.test.js",
     "test:chat-compact": "npm run build:main && node --test dist/main/main/services/chat.compact.test.js dist/main/main/services/chatParticipantStatus.test.js",
     "test:user-skills": "npm run build:main && node --test dist/main/main/services/userSkills.test.js dist/main/main/services/chat.userSkills.test.js",
+    "test:accord": "npm run build:main && node --test dist/main/main/services/accordLauncherPreferences.test.js",
     "test:avatar-contract": "node --test scripts/avatar-contract.test.mjs",
     "test:permissions": "npm run build:main && node --test dist/main/main/services/chat.permissions.test.js dist/main/main/services/chat.rendererStreaming.test.js dist/main/main/services/remoteRuns.test.js dist/main/main/services/cloudRunAws.test.js dist/main/main/services/cloudRunDoctor.test.js dist/main/main/services/awsWorkerKeyMaterial.test.js dist/main/main/services/awsWorkerLifecycle.test.js dist/main/main/services/chat.roleArchive.test.js dist/main/main/services/chat.repoFileMentions.test.js dist/main/main/services/repoFile.test.js dist/main/main/services/chat.participantRequestThreads.test.js dist/main/main/services/chat.rename.test.js dist/main/main/services/git.repoFiles.test.js dist/main/main/services/cliAgents.permissions.test.js dist/main/main/services/warnings.test.js",
     "lint:renderer-styles": "node scripts/check-renderer-style-guardrails.mjs",

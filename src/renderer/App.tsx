@@ -24,6 +24,7 @@ import { chatRoleLabel } from "./components/chat/chat-conversation-data";
 import { avatarForChatParticipant } from "./components/chat/chat-avatars";
 import { defaultChatParticipantDraft } from "./components/chat/chat-participant-drafts";
 import { Avatar } from "./components/avatar/avatar";
+import { isChatAssistantParticipant } from "./components/conversation/conversation-display";
 import { planDecisionReplies } from "./components/review/review-conversation-data";
 import { useAppState } from "./app/app-state";
 import { useConversationActions } from "./app/use-conversation-actions";
@@ -108,11 +109,15 @@ function App(): JSX.Element {
       <span className="sr-only">Show sidebar</span>
     </Button>
   ) : undefined;
+  const accordEligibleParticipants = React.useMemo(
+    () => view.activeChatParticipants.filter((participant) => !isChatAssistantParticipant(participant)),
+    [view.activeChatParticipants]
+  );
   const accordDisabledReason = !view.activeChatConversation
     ? "Open a chat to start Accord."
     : view.activeChatConversation.metadata.archived === true
       ? "Archived chats cannot start Accord."
-      : view.activeChatParticipants.length < 2
+      : accordEligibleParticipants.length < 2
           ? "Add at least two participants to start Accord."
           : undefined;
   const canStartAccord = Boolean(view.activeChatConversation && !accordDisabledReason);
@@ -208,8 +213,9 @@ function App(): JSX.Element {
       {view.activeChatConversation && (
         <ChatAccordLauncherDialog
           open={accordDialogOpen}
-          participants={view.activeChatParticipants}
+          participants={accordEligibleParticipants}
           disabled={!canStartAccord}
+          participantRoleLabel={(participant) => chatRoleLabel(state.settings.chatRoleConfigs, participant)}
           onOpenChange={setAccordDialogOpen}
           onStart={chatActions.startChatAccord}
         />
