@@ -11,7 +11,7 @@ import type {
   ConversationOpenResult,
   ConversationSummary
 } from "../../shared/types";
-import { clearParticipantCompactions, readParticipantCompactions } from "../../shared/chatRunState";
+import { clearChatRunMetadata, clearParticipantCompactions, readParticipantCompactions } from "../../shared/chatRunState";
 import { normalizeInferredParticipantRequestThreads as normalizeInferredParticipantRequestThreadMetadata } from "../../shared/chatParticipantRequestThreads";
 import { sanitizeConversationWarnings } from "../../shared/warnings";
 
@@ -386,7 +386,7 @@ export class StorageService {
         localActiveRunIds.length === 0 &&
         (!metadataRunId || remoteRunIdSet.has(metadataRunId));
       if (onlyRemoteRunState) {
-        conversation.metadata = withRemoteRunMetadata(clearParticipantCompactions(conversation.metadata), remoteRunIds);
+        conversation.metadata = withRemoteRunMetadata(clearChatRunMetadata(clearParticipantCompactions(conversation.metadata)), remoteRunIds);
         conversation.updatedAt = new Date().toISOString();
         await this.saveConversation(conversation);
         continue;

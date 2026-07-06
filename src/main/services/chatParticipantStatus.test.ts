@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { canCompactParticipant, type ChatParticipantRosterStatus } from "../../shared/chatParticipantStatus";
 import {
+  clearChatRunMetadata,
   clearParticipantCompactions,
+  readActiveRunParticipants,
   readParticipantCompactions,
+  withActiveRunIdRemoved,
   withParticipantCompactionFinished,
   withParticipantCompactionStarted,
   withParticipantCompactionsForRunRemoved
@@ -68,4 +71,38 @@ test("participant compaction helpers add, remove, and clear entries", () => {
   const cleared = clearParticipantCompactions(twoEntries);
   assert.deepEqual(readParticipantCompactions(cleared), {});
   assert.equal("participantCompactionsByParticipantId" in cleared, false);
+});
+
+test("active run participant helpers normalize and clear entries", () => {
+  const metadata = {
+    running: true,
+    runId: "run-1",
+    activeRunIds: ["run-1", "run-2"],
+    activeRunOwnersByRunId: {
+      "run-1": {
+        processId: 123,
+        startedAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z"
+      }
+    },
+    activeRunParticipantIdsByRunId: {
+      "run-1": " participant-1 ",
+      "run-2": "",
+      "run-3": 123,
+      "": "participant-empty"
+    }
+  };
+
+  assert.deepEqual(Array.from(readActiveRunParticipants(metadata)), [["run-1", "participant-1"]]);
+
+  const removed = withActiveRunIdRemoved(metadata, "run-1");
+  assert.deepEqual(readActiveRunParticipants(removed), new Map());
+  assert.equal("activeRunParticipantIdsByRunId" in removed, false);
+
+  const cleared = clearChatRunMetadata(metadata);
+  assert.equal(cleared.running, false);
+  assert.equal(cleared.runId, undefined);
+  assert.equal(cleared.activeRunIds, undefined);
+  assert.equal(cleared.activeRunOwnersByRunId, undefined);
+  assert.equal(cleared.activeRunParticipantIdsByRunId, undefined);
 });

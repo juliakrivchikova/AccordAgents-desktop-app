@@ -2,12 +2,14 @@ import type { ChatParticipantCompactionState } from "./types";
 
 const PARTICIPANT_COMPACTIONS_KEY = "participantCompactionsByParticipantId";
 const ACTIVE_RUN_OWNERS_KEY = "activeRunOwnersByRunId";
+const ACTIVE_RUN_PARTICIPANTS_KEY = "activeRunParticipantIdsByRunId";
 
 export function clearChatRunMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
   const next: Record<string, unknown> = { ...metadata, running: false };
   delete next.runId;
   delete next.activeRunIds;
   delete next[ACTIVE_RUN_OWNERS_KEY];
+  delete next[ACTIVE_RUN_PARTICIPANTS_KEY];
   return next;
 }
 
@@ -38,9 +40,16 @@ export function withActiveRunIdAdded(metadata: Record<string, unknown>, runId: s
 export function withActiveRunIdRemoved(metadata: Record<string, unknown>, runId: string): Record<string, unknown> {
   const list = readActiveRunIds(metadata).filter((id) => id !== runId);
   const next: Record<string, unknown> = { ...metadata, activeRunIds: list };
+  const participants = readActiveRunParticipants(metadata);
+  participants.delete(runId);
   next.running = list.length > 0;
   if (list.length === 0) {
     delete next.activeRunIds;
+  }
+  if (participants.size > 0) {
+    next[ACTIVE_RUN_PARTICIPANTS_KEY] = Object.fromEntries(participants);
+  } else {
+    delete next[ACTIVE_RUN_PARTICIPANTS_KEY];
   }
   return next;
 }
@@ -50,6 +59,21 @@ export function conversationIsRunning(metadata: Record<string, unknown>): boolea
     return true;
   }
   return metadata.running === true;
+}
+
+export function readActiveRunParticipants(metadata: Record<string, unknown>): Map<string, string> {
+  const raw = metadata[ACTIVE_RUN_PARTICIPANTS_KEY];
+  const participants = new Map<string, string>();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return participants;
+  }
+  for (const [runId, value] of Object.entries(raw as Record<string, unknown>)) {
+    const participantId = typeof value === "string" ? value.trim() : "";
+    if (runId.trim() && participantId) {
+      participants.set(runId, participantId);
+    }
+  }
+  return participants;
 }
 
 export function readParticipantCompactions(metadata: Record<string, unknown>): Record<string, ChatParticipantCompactionState> {

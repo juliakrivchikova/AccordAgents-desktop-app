@@ -169,6 +169,7 @@ import type { UserSkillRunContext } from "./userSkills";
 import {
   clearChatRunMetadata,
   readActiveRunIds,
+  readActiveRunParticipants,
   withParticipantCompactionStarted,
   withParticipantCompactionsForRunRemoved
 } from "../../shared/chatRunState";
@@ -340,6 +341,7 @@ const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 100_000;
 const CHAT_ACTIVITY_EVENT_MAX_COUNT = 80;
 const WORKFLOW_MANAGER_ROLE_ID = "workflow-manager";
 const ACTIVE_RUN_OWNERS_KEY = "activeRunOwnersByRunId";
+const ACTIVE_RUN_PARTICIPANTS_KEY = "activeRunParticipantIdsByRunId";
 const CHAT_RUN_OWNER_HEARTBEAT_MS = 15_000;
 const CHAT_RUN_OWNER_STALE_MS = 90_000;
 const CHAT_IMAGE_MAX_ATTACHMENTS = 5;
@@ -14679,22 +14681,35 @@ export class ChatService {
         activeRunIds
       };
       const existingOwners = this.chatRunOwners(metadata);
+      const existingRunParticipants = readActiveRunParticipants(metadata);
       const currentActiveRunIdSet = new Set(currentActiveRunIds);
       const owners: Record<string, ChatRunOwner> = {};
+      const runParticipants: Record<string, string> = {};
       for (const activeRunId of activeRunIds) {
         if (this.isNonTerminalRemoteRun(metadata, activeRunId)) {
           continue;
         }
         if (currentActiveRunIdSet.has(activeRunId)) {
           owners[activeRunId] = this.currentRunOwner(existingOwners[activeRunId], new Date().toISOString());
+          const participantId = this.chatRunMeta.get(activeRunId)?.participantId ?? existingRunParticipants.get(activeRunId);
+          if (participantId) {
+            runParticipants[activeRunId] = participantId;
+          }
           continue;
         }
         if (this.localRunOwnerState(metadata, activeRunId) === "external-live" && existingOwners[activeRunId]) {
           owners[activeRunId] = existingOwners[activeRunId];
+          const participantId = existingRunParticipants.get(activeRunId);
+          if (participantId) {
+            runParticipants[activeRunId] = participantId;
+          }
         }
       }
       if (Object.keys(owners).length > 0) {
         next[ACTIVE_RUN_OWNERS_KEY] = owners;
+      }
+      if (Object.keys(runParticipants).length > 0) {
+        next[ACTIVE_RUN_PARTICIPANTS_KEY] = runParticipants;
       }
       return next;
     }

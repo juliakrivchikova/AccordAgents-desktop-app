@@ -1314,6 +1314,9 @@ test("clearInterruptedRuns preserves active remote run handles without warning",
     running: true,
     runId: "remote-run",
     activeRunIds: ["remote-run"],
+    activeRunParticipantIdsByRunId: {
+      "remote-run": participant.id
+    },
     remoteRunHandles: {
       "remote-run": {
         runId: "remote-run",
@@ -1344,6 +1347,7 @@ test("clearInterruptedRuns preserves active remote run handles without warning",
   assert.equal(saved?.metadata.running, true);
   assert.equal(saved?.metadata.runId, "remote-run");
   assert.deepEqual(saved?.metadata.activeRunIds, ["remote-run"]);
+  assert.equal(saved?.metadata.activeRunParticipantIdsByRunId, undefined);
   assert.equal(saved?.metadata.warnings, undefined);
 });
 

@@ -1489,6 +1489,7 @@ export interface ChatParticipantWatcherState {
 }
 
 export type ConversationMetadata = Record<string, unknown> & {
+  activeRunParticipantIdsByRunId?: Record<string, string>;
   lastMessageByParticipant?: ChatLastMessageByParticipant;
   participantCompactionsByParticipantId?: Record<string, ChatParticipantCompactionState>;
   promptContextPointers?: ChatPromptContextPointers;

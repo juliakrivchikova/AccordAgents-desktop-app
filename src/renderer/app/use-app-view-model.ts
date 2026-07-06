@@ -1,8 +1,7 @@
 import { useMemo } from "react";
 import type { Conversation, ConversationSummary } from "../../shared/types";
-import { readParticipantCompactions } from "../../shared/chatRunState";
-import { chatAppToolApprovals, chatParticipants } from "../components/chat/chat-conversation-data";
-import type { ChatParticipantRosterStatus } from "../components/chat/chat-participant-menu";
+import { buildChatParticipantStatusMap } from "../../shared/chatRosterStatus";
+import { chatParticipants } from "../components/chat/chat-conversation-data";
 import {
   canRecoverImplementationPlan,
   conversationRelevantRunIds,
@@ -59,7 +58,7 @@ export function useAppViewModel(state: AppState) {
   }, [state.conversation, state.progressLog]);
   const activeChatConversation = state.conversation?.kind === "chat" ? state.conversation : undefined;
   const activeChatParticipants = useMemo(() => activeChatConversation ? chatParticipants(activeChatConversation) : [], [activeChatConversation]);
-  const participantStatusById = useMemo(() => buildParticipantStatusMap(activeChatConversation), [activeChatConversation]);
+  const participantStatusById = useMemo(() => buildChatParticipantStatusMap(activeChatConversation), [activeChatConversation]);
   const participantHasRunById = useMemo(() => buildParticipantHasRunMap(activeChatConversation), [activeChatConversation]);
 
   return {
@@ -118,96 +117,4 @@ function buildParticipantHasRunMap(activeChatConversation: Conversation | undefi
     }
   }
   return markers;
-}
-
-function buildParticipantStatusMap(activeChatConversation: Conversation | undefined): Map<string, ChatParticipantRosterStatus> {
-  const statuses = new Map<string, ChatParticipantRosterStatus>();
-  if (!activeChatConversation) {
-    return statuses;
-  }
-
-  const statusRank: Record<Exclude<ChatParticipantRosterStatus, "idle">, number> = {
-    error: 1,
-    stopped: 2,
-    pending: 3,
-    compacting: 4,
-    running: 5
-  };
-  const setStatus = (participantId: string, status: Exclude<ChatParticipantRosterStatus, "idle">): void => {
-    const current = statuses.get(participantId);
-    const currentRank = current && current !== "idle" ? statusRank[current] : 0;
-    if (statusRank[status] > currentRank) {
-      statuses.set(participantId, status);
-    }
-  };
-
-  const liveRunIds = activeRunIdsForConversation(activeChatConversation);
-  const compacting = readParticipantCompactions(activeChatConversation.metadata);
-  for (const [participantId, state] of Object.entries(compacting)) {
-    if (liveRunIds.has(state.runId)) {
-      setStatus(participantId, "compacting");
-    }
-  }
-  const latestTerminalParticipantIds = new Set<string>();
-  for (let index = activeChatConversation.messages.length - 1; index >= 0; index -= 1) {
-    const message = activeChatConversation.messages[index];
-    if (message.role !== "participant" || !message.participantId || message.status === "pending" || latestTerminalParticipantIds.has(message.participantId)) {
-      continue;
-    }
-    latestTerminalParticipantIds.add(message.participantId);
-    if (message.status === "error") {
-      setStatus(message.participantId, message.metadata?.terminalReason === "user-stopped" ? "stopped" : "error");
-    }
-  }
-
-  for (const message of activeChatConversation.messages) {
-    const participantRequest = message.metadata?.participantRequest;
-    if (participantRequest) {
-      for (const item of participantRequest.items) {
-        if (item.status === "pending_approval") {
-          setStatus(item.targetParticipantId, "pending");
-        }
-      }
-    }
-    if (message.participantId) {
-      if (message.metadata?.pendingChoice?.status === "pending") {
-        setStatus(message.participantId, "pending");
-      }
-      if (message.metadata?.pendingMentions?.some((mention) => mention.status === "pending")) {
-        setStatus(message.participantId, "pending");
-      }
-    }
-    const runId = message.metadata?.runId;
-    if (
-      message.role === "participant" &&
-      message.status === "pending" &&
-      message.participantId &&
-      typeof runId === "string" &&
-      liveRunIds.has(runId)
-    ) {
-      setStatus(message.participantId, "running");
-    }
-  }
-
-  for (const approval of chatAppToolApprovals(activeChatConversation)) {
-    if (approval.status === "pending") {
-      setStatus(approval.requesterParticipantId, "pending");
-    }
-  }
-
-  return statuses;
-}
-
-function activeRunIdsForConversation(conversation: Conversation): Set<string> {
-  const metadata = conversation.metadata;
-  const activeRunIds = Array.isArray(metadata.activeRunIds)
-    ? metadata.activeRunIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
-    : [];
-  const compatibilityRunId = typeof metadata.runId === "string" && metadata.runId.trim()
-    ? metadata.runId
-    : undefined;
-  return new Set([
-    ...activeRunIds,
-    ...(compatibilityRunId ? [compatibilityRunId] : [])
-  ]);
 }

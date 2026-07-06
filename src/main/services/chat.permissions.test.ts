@@ -1643,6 +1643,85 @@ test("ending one active run preserves survivor metadata", async () => {
   assert.equal(storage.current.metadata.activeRunOwnersByRunId, undefined);
 });
 
+test("active local run metadata stores participant attribution and clears it when idle", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const serviceAny = service as any;
+  const controller = new AbortController();
+
+  serviceAny.registerTargetRun("target-run", controller, {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    participantHandle: participant.handle
+  });
+  await serviceAny.beginChatRun(conversation, "target-run");
+
+  assert.deepEqual(storage.current.metadata.activeRunIds, ["target-run"]);
+  assert.equal(storage.current.metadata.activeRunParticipantIdsByRunId?.["target-run"], participant.id);
+
+  await serviceAny.endChatRun(conversation, "target-run");
+
+  assert.equal(storage.current.metadata.activeRunIds, undefined);
+  assert.equal(storage.current.metadata.activeRunParticipantIdsByRunId, undefined);
+  serviceAny.unregisterTargetRun("target-run", controller);
+});
+
+test("ending one participant run preserves survivor participant attribution", async () => {
+  const codex = chatParticipant("codex-cli");
+  const claude = chatParticipant("claude-code");
+  const conversation = chatConversation([codex, claude]);
+  const { service, storage } = testService({ conversation });
+  const serviceAny = service as any;
+  const firstController = new AbortController();
+  const secondController = new AbortController();
+
+  serviceAny.registerTargetRun("first-run", firstController, {
+    conversationId: conversation.id,
+    participantId: codex.id,
+    participantHandle: codex.handle
+  });
+  serviceAny.registerTargetRun("second-run", secondController, {
+    conversationId: conversation.id,
+    participantId: claude.id,
+    participantHandle: claude.handle
+  });
+  await serviceAny.beginChatRun(conversation, "first-run");
+  await serviceAny.beginChatRun(conversation, "second-run");
+  await serviceAny.endChatRun(conversation, "first-run");
+
+  assert.deepEqual(storage.current.metadata.activeRunIds, ["second-run"]);
+  assert.equal(storage.current.metadata.activeRunParticipantIdsByRunId?.["first-run"], undefined);
+  assert.equal(storage.current.metadata.activeRunParticipantIdsByRunId?.["second-run"], claude.id);
+
+  await serviceAny.endChatRun(conversation, "second-run");
+
+  assert.equal(storage.current.metadata.activeRunIds, undefined);
+  assert.equal(storage.current.metadata.activeRunParticipantIdsByRunId, undefined);
+  serviceAny.unregisterTargetRun("first-run", firstController);
+  serviceAny.unregisterTargetRun("second-run", secondController);
+});
+
+test("local run owner heartbeat preserves participant attribution map", () => {
+  const participant = chatParticipant("codex-cli");
+  const { service } = testService();
+  const metadata = {
+    running: true,
+    runId: "run-1",
+    activeRunIds: ["run-1"],
+    activeRunParticipantIdsByRunId: {
+      "run-1": participant.id
+    }
+  };
+
+  const updated = (service as any).metadataWithLocalRunOwner(metadata, "run-1", NOW);
+
+  assert.equal(updated.activeRunOwnersByRunId?.["run-1"]?.processId, process.pid);
+  assert.deepEqual(updated.activeRunParticipantIdsByRunId, {
+    "run-1": participant.id
+  });
+});
+
 test("ending a current run preserves live external run metadata", async () => {
   const participant = chatParticipant("claude-code");
   const ownerPid = process.ppid > 0 ? process.ppid : 1;
@@ -1658,6 +1737,9 @@ test("ending a current run preserves live external run metadata", async () => {
         startedAt: NOW,
         updatedAt: fresh
       }
+    },
+    activeRunParticipantIdsByRunId: {
+      "external-run": participant.id
     }
   });
   const { service, storage } = testService({ conversation });
@@ -1669,7 +1751,9 @@ test("ending a current run preserves live external run metadata", async () => {
   assert.equal(storage.current.metadata.runId, "external-run");
   assert.equal(storage.current.metadata.running, true);
   assert.equal(storage.current.metadata.activeRunOwnersByRunId?.["external-run"]?.instanceId, "external-instance");
+  assert.equal(storage.current.metadata.activeRunParticipantIdsByRunId?.["external-run"], participant.id);
   assert.equal(storage.current.metadata.activeRunOwnersByRunId?.["current-run"], undefined);
+  assert.equal(storage.current.metadata.activeRunParticipantIdsByRunId?.["current-run"], undefined);
 });
 
 test("ending local launcher keeps remote run active until terminal state", async () => {
@@ -1699,6 +1783,7 @@ test("ending local launcher keeps remote run active until terminal state", async
   assert.deepEqual(storage.current.metadata.activeRunIds, ["remote-run"]);
   assert.equal(storage.current.metadata.running, true);
   assert.equal(storage.current.metadata.runId, "remote-run");
+  assert.equal(storage.current.metadata.activeRunParticipantIdsByRunId, undefined);
 
   await service.updateRemoteRunHandleState(conversation.id, "remote-run", {
     runId: "remote-run",
@@ -1710,6 +1795,7 @@ test("ending local launcher keeps remote run active until terminal state", async
 
   assert.equal(storage.current.metadata.activeRunIds, undefined);
   assert.equal(storage.current.metadata.running, false);
+  assert.equal(storage.current.metadata.activeRunParticipantIdsByRunId, undefined);
   assert.equal((storage.current.metadata.remoteRunHandles as any)["remote-run"].status, "completed");
 });
 
@@ -5998,6 +6084,9 @@ test("recoverStaleChatRun preserves runs owned by another live app instance", ()
         startedAt: NOW,
         updatedAt: fresh
       }
+    },
+    activeRunParticipantIdsByRunId: {
+      [runId]: participant.id
     }
   });
   conversation.messages.push(pendingParticipantMessage(participant, "pending-external", runId));
@@ -6007,6 +6096,7 @@ test("recoverStaleChatRun preserves runs owned by another live app instance", ()
 
   assert.equal(changed, false);
   assert.deepEqual(conversation.metadata.activeRunIds, [runId]);
+  assert.equal(conversation.metadata.activeRunParticipantIdsByRunId?.[runId], participant.id);
   assert.equal(conversation.metadata.running, true);
   assert.equal(conversation.messages.find((message: any) => message.id === "pending-external")!.status, "pending");
 });
@@ -6017,7 +6107,10 @@ test("recoverStaleChatRun interrupts old local run metadata without an owner", (
   const conversation = chatConversation([participant], {
     activeRunIds: [runId],
     runId,
-    running: true
+    running: true,
+    activeRunParticipantIdsByRunId: {
+      [runId]: participant.id
+    }
   });
   conversation.messages.push(pendingParticipantMessage(participant, "pending-old", runId));
   const { service } = testService({ conversation });
@@ -6027,6 +6120,7 @@ test("recoverStaleChatRun interrupts old local run metadata without an owner", (
   assert.equal(changed, true);
   assert.equal(conversation.metadata.activeRunIds, undefined);
   assert.equal(conversation.metadata.activeRunOwnersByRunId, undefined);
+  assert.equal(conversation.metadata.activeRunParticipantIdsByRunId, undefined);
   assert.equal(conversation.metadata.running, false);
   const pending = conversation.messages.find((message: any) => message.id === "pending-old")!;
   assert.equal(pending.status, "error");
@@ -6048,6 +6142,9 @@ test("recoverStaleChatRun does not preserve stale heartbeat owners even if the p
         startedAt: NOW,
         updatedAt: "2000-01-01T00:00:00.000Z"
       }
+    },
+    activeRunParticipantIdsByRunId: {
+      [runId]: participant.id
     }
   });
   conversation.messages.push(pendingParticipantMessage(participant, "pending-stale-owner", runId));
@@ -6058,6 +6155,7 @@ test("recoverStaleChatRun does not preserve stale heartbeat owners even if the p
   assert.equal(changed, true);
   assert.equal(conversation.metadata.activeRunIds, undefined);
   assert.equal(conversation.metadata.activeRunOwnersByRunId, undefined);
+  assert.equal(conversation.metadata.activeRunParticipantIdsByRunId, undefined);
   assert.equal(conversation.metadata.running, false);
   assert.equal(conversation.messages.find((message: any) => message.id === "pending-stale-owner")!.status, "error");
 });
@@ -6086,6 +6184,9 @@ test("recoverStaleChatRun clears dead local runs while preserving live remote ru
         startedAt: NOW,
         updatedAt: NOW
       }
+    },
+    activeRunParticipantIdsByRunId: {
+      "local-run": participant.id
     }
   });
   conversation.messages.push(pendingParticipantMessage(participant, "pending-remote", "remote-run"));
@@ -6099,6 +6200,7 @@ test("recoverStaleChatRun clears dead local runs while preserving live remote ru
   assert.equal(conversation.metadata.runId, "remote-run");
   assert.equal(conversation.metadata.running, true);
   assert.equal(conversation.metadata.activeRunOwnersByRunId, undefined);
+  assert.equal(conversation.metadata.activeRunParticipantIdsByRunId, undefined);
   assert.equal(conversation.messages.find((message: any) => message.id === "pending-remote")!.status, "pending");
   assert.equal(conversation.messages.find((message: any) => message.id === "pending-local")!.status, "error");
 });
