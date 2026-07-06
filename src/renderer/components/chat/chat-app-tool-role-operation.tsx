@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { AlertTriangle, Eye, Pencil } from "lucide-react";
 
-import type { ChatParticipantConfig, ChatRoleChangeRequest, ChatRoleConfig } from "../../../shared/types";
+import { normalizeChatParticipantRequestPermission } from "../../../shared/agentPermissions";
+import type { ChatParticipantConfig, ChatParticipantRequestPermission, ChatRoleChangeRequest, ChatRoleConfig, ChatRoleParticipantDefaults } from "../../../shared/types";
 import { MarkdownText } from "../content/markdown-text";
+import { ChatParticipantInlineAutoWatchRow, ChatParticipantSpecRow } from "./chat-participant-config-panel";
 import {
   composeRoleInstructions,
   parseRoleInstructions,
@@ -180,6 +182,7 @@ function EditableRoleReviewOperation(props: {
           />
         )}
       </div>
+      <RoleParticipantDefaultsReview defaults={props.operation.role.participantDefaults} />
       {props.operation.type === "edit_role" && props.savedPresetCount > 0 && (
         <div className="chat-app-tool-review-warning">
           <AlertTriangle size={14} aria-hidden />
@@ -188,6 +191,34 @@ function EditableRoleReviewOperation(props: {
       )}
     </div>
   );
+}
+
+function RoleParticipantDefaultsReview(props: { defaults?: ChatRoleParticipantDefaults }): JSX.Element {
+  const autoWatch = props.defaults?.autoWatch === true;
+  const requestParticipants = normalizeChatParticipantRequestPermission(props.defaults?.requestParticipants);
+  return (
+    <div className="chat-app-tool-review-spec">
+      <ChatParticipantInlineAutoWatchRow
+        checked={autoWatch}
+        disabled
+        onChange={() => {}}
+        description="Default for new participants using this role."
+      />
+      <ChatParticipantSpecRow label="Request participants">
+        <strong>{requestParticipantsLabel(requestParticipants)}</strong>
+      </ChatParticipantSpecRow>
+    </div>
+  );
+}
+
+function requestParticipantsLabel(value: ChatParticipantRequestPermission): string {
+  if (value === "allow") {
+    return "Allow without approval";
+  }
+  if (value === "deny") {
+    return "Deny";
+  }
+  return "Always ask approval";
 }
 
 function roleFieldsFromOperation(operation: EditableRoleOperation): RoleReviewFields {

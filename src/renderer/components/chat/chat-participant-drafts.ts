@@ -51,6 +51,7 @@ export interface ChatParticipantDraft {
   agentMode: ChatAgentMode;
   permissions: ChatAgentPermissions;
   remoteExecution?: ChatParticipantConfig["remoteExecution"];
+  autoWatch: boolean;
 }
 
 export interface AddableSavedParticipantConfig {
@@ -95,6 +96,8 @@ export const CHAT_RUN_LOCATION_OPTIONS: Array<{ value: Extract<CloudRunRemoteExe
   { value: "remote", label: "Remote" }
 ];
 
+export const WORKFLOW_MANAGER_ROLE_ID = "workflow-manager";
+
 export function normalizeChatRunLocation(value: unknown): Extract<CloudRunRemoteExecutionMode, "local" | "remote"> {
   return value === "remote" ? "remote" : "local";
 }
@@ -123,6 +126,7 @@ export function defaultChatParticipantDraft(settings: AppSettings, existingHandl
   const roleConfigId = activeChatRoleConfigs(settings)[0]?.id ?? "";
   const kind = provider?.kind === "claude-code" ? "claude-code" : "codex-cli";
   const handle = roleConfigId ? generatedChatHandle(settings, kind, roleConfigId, existingHandles) : "";
+  const roleDefaults = participantDefaultsForRole(settings, roleConfigId);
   return {
     handle,
     roleConfigId,
@@ -131,8 +135,9 @@ export function defaultChatParticipantDraft(settings: AppSettings, existingHandl
     model: provider?.model,
     avatarId: defaultChatAvatarId(kind, handle || roleConfigId),
     agentMode: "default",
-    permissions: defaultChatAgentPermissions(),
-    remoteExecution: "local"
+    permissions: defaultChatParticipantPermissionsForRole(settings, roleConfigId),
+    remoteExecution: "local",
+    autoWatch: roleDefaults.autoWatch === true
   };
 }
 
@@ -148,7 +153,8 @@ export function chatParticipantConfigToDraft(participant: ChatParticipantConfig)
     avatarId: normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle),
     agentMode: normalizeChatAgentMode(participant.agentMode),
     permissions: normalizeChatAgentPermissions(participant.permissions),
-    remoteExecution: normalizeChatRunLocation(participant.remoteExecution)
+    remoteExecution: normalizeChatRunLocation(participant.remoteExecution),
+    autoWatch: participant.roleConfigId === WORKFLOW_MANAGER_ROLE_ID || participant.autoWatchEnabled === true
   };
 }
 
@@ -212,7 +218,8 @@ export function sameParticipantDraft(draft: ChatParticipantDraft, participant: C
     normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle) === normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle) &&
     normalizeChatAgentMode(draft.agentMode) === normalizeChatAgentMode(participant.agentMode) &&
     chatAgentPermissionsEqual(draft.permissions, participant.permissions) &&
-    normalizeChatRunLocation(draft.remoteExecution) === normalizeChatRunLocation(participant.remoteExecution)
+    normalizeChatRunLocation(draft.remoteExecution) === normalizeChatRunLocation(participant.remoteExecution) &&
+    draft.autoWatch === (participant.autoWatchEnabled === true)
   );
 }
 
@@ -260,14 +267,15 @@ export function normalizeChatParticipantDraftForSettings(draft: ChatParticipantD
     avatarId: normalizedChatAvatarId(kind, draft.avatarId, handle || roleConfigId),
     agentMode: normalizeChatAgentMode(draft.agentMode),
     permissions: normalizeChatAgentPermissions(draft.permissions),
-    remoteExecution: normalizeChatRunLocation(draft.remoteExecution)
+    remoteExecution: normalizeChatRunLocation(draft.remoteExecution),
+    autoWatch: isAutoWatchLockedRole(roleConfigId) || draft.autoWatch === true
   };
 }
 
 export function updateChatParticipantDraft(
   draft: ChatParticipantDraft,
   settings: AppSettings,
-  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "behaviorRuleIds" | "kind" | "model" | "reasoningEffort" | "avatarId" | "agentMode" | "permissions" | "remoteExecution">>
+  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "behaviorRuleIds" | "kind" | "model" | "reasoningEffort" | "avatarId" | "agentMode" | "permissions" | "remoteExecution" | "autoWatch">>
 ): ChatParticipantDraft {
   let next = { ...draft, ...patch };
   const kindChanged = patch.kind !== undefined && patch.kind !== draft.kind;
@@ -293,6 +301,32 @@ export function updateChatParticipantDraft(
     next = { ...next, avatarId: defaultChatAvatarId(next.kind, next.handle || next.roleConfigId) };
   }
   const roleChanged = patch.roleConfigId !== undefined && patch.roleConfigId !== draft.roleConfigId;
+  const previousDefaults = participantDefaultsForRole(settings, draft.roleConfigId);
+  const nextDefaults = participantDefaultsForRole(settings, next.roleConfigId);
+  if (roleChanged && patch.permissions === undefined) {
+    let permissions = normalizeChatAgentPermissions(next.permissions);
+    if (previousDefaults.requestParticipants && permissions.requestParticipants === previousDefaults.requestParticipants) {
+      permissions = { ...permissions, requestParticipants: defaultChatAgentPermissions().requestParticipants };
+    }
+    if (nextDefaults.requestParticipants) {
+      permissions = { ...permissions, requestParticipants: nextDefaults.requestParticipants };
+    }
+    next = { ...next, permissions };
+  }
+  if (roleChanged && patch.autoWatch === undefined) {
+    if (previousDefaults.autoWatch === true && next.autoWatch === true) {
+      next = { ...next, autoWatch: false };
+    }
+    if (typeof nextDefaults.autoWatch === "boolean") {
+      next = { ...next, autoWatch: nextDefaults.autoWatch };
+    }
+  }
+  if (isAutoWatchLockedRole(next.roleConfigId)) {
+    next = {
+      ...next,
+      autoWatch: true
+    };
+  }
   if (!draft.handle.trim() || ((roleChanged || kindChanged) && isGeneratedChatHandle(draft.handle))) {
     const handle = generatedChatHandle(settings, next.kind, next.roleConfigId);
     return {
@@ -302,6 +336,26 @@ export function updateChatParticipantDraft(
     };
   }
   return next;
+}
+
+function participantDefaultsForRole(settings: Pick<AppSettings, "chatRoleConfigs">, roleConfigId: string): NonNullable<ChatRoleConfig["participantDefaults"]> {
+  return settings.chatRoleConfigs.find((role) => role.id === roleConfigId)?.participantDefaults ?? {};
+}
+
+function isAutoWatchLockedRole(roleConfigId: string): boolean {
+  return roleConfigId === WORKFLOW_MANAGER_ROLE_ID;
+}
+
+function defaultChatParticipantPermissionsForRole(
+  settings: Pick<AppSettings, "chatRoleConfigs">,
+  roleConfigId: string,
+  permissions = defaultChatAgentPermissions()
+): ChatAgentPermissions {
+  const normalized = normalizeChatAgentPermissions(permissions);
+  const defaults = participantDefaultsForRole(settings, roleConfigId);
+  return defaults.requestParticipants
+    ? { ...normalized, requestParticipants: defaults.requestParticipants }
+    : normalized;
 }
 
 export function normalizedChatDrafts(drafts: ChatParticipantDraft[]): ChatParticipantDraft[] {
@@ -316,7 +370,8 @@ export function normalizedChatDrafts(drafts: ChatParticipantDraft[]): ChatPartic
     avatarId: normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle),
     agentMode: normalizeChatAgentMode(draft.agentMode),
     permissions: normalizeChatAgentPermissions(draft.permissions),
-    remoteExecution: normalizeChatRunLocation(draft.remoteExecution)
+    remoteExecution: normalizeChatRunLocation(draft.remoteExecution),
+    autoWatch: draft.autoWatch === true
   }));
 }
 

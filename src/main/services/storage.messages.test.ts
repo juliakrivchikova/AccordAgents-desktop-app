@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { StorageService } from "./storage";
 import type { ChatMessage, Conversation } from "../../shared/types";
-import { INTERRUPTED_RUN_WARNING } from "../../shared/warnings";
 
 function fakeStorage(queryJson: (sql: string) => Promise<unknown[]>): StorageService {
   const storage = Object.create(StorageService.prototype) as any;
@@ -174,7 +173,7 @@ test("normalizeInferredParticipantRequestThreads does not mark complete when sav
   assert.equal(runSqlStatements.some((sql) => sql.includes("inferred-participant-request-threads-v1")), false);
 });
 
-test("clearInterruptedRuns reads payloads by id instead of queryJson blobs", async () => {
+test("clearInterruptedRuns reads payloads by id and preserves local run state", async () => {
   const conversation = basicConversation("running-conversation", [
     {
       id: "pending",
@@ -195,10 +194,7 @@ test("clearInterruptedRuns reads payloads by id instead of queryJson blobs", asy
 
   await (storage as any).clearInterruptedRuns();
 
-  assert.equal(saved.length, 1);
-  assert.equal(saved[0].metadata.running, false);
-  assert.equal(saved[0].metadata.runId, undefined);
-  assert.deepEqual(saved[0].metadata.warnings, [INTERRUPTED_RUN_WARNING]);
+  assert.equal(saved.length, 0);
   assert.equal(queryJsonSql.length, 1);
   assert.match(queryJsonSql[0], /select id from conversations/);
   assert.doesNotMatch(queryJsonSql[0], /payload_json as payloadJson/);

@@ -4,7 +4,8 @@ import { AtSign, ChevronDown, Minimize2, Trash2 } from "lucide-react";
 
 import { canCompactParticipant } from "../../../shared/chatParticipantStatus";
 import type {
-  ChatParticipant
+  ChatParticipant,
+  ChatParticipantWatcherPausedReason
 } from "../../../shared/types";
 import { IconButton } from "../primitives";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
@@ -16,6 +17,8 @@ export function ChatParticipantRosterRow(props: {
   removeDisabledReason: string | undefined;
   isRunning: boolean;
   status: ChatParticipantRosterStatus;
+  autoWatchDisabledReason?: string;
+  autoWatchPausedReason?: ChatParticipantWatcherPausedReason;
   runLocationLocked: boolean;
   renderParticipantAvatar: (participant: ChatParticipant) => React.ReactNode;
   participantRoleLabel: (participant: ChatParticipant) => string;
@@ -24,7 +27,7 @@ export function ChatParticipantRosterRow(props: {
   onJumpToLastMessage: (participant: ChatParticipant) => void;
   onUpdateParticipantRuntime: (
     participantId: string,
-    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">
+    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "autoWatch">
   ) => void;
   onCompactParticipant: (participantId: string) => void;
   onRemoveParticipant: (participantId: string) => void;
@@ -100,6 +103,8 @@ export function ChatParticipantRosterRow(props: {
         <ParticipantRuntimeControls
           participant={props.participant}
           disabled={props.isRunning}
+          autoWatchDisabledReason={props.autoWatchDisabledReason}
+          autoWatchPausedReason={props.autoWatchPausedReason}
           runLocationLocked={props.runLocationLocked}
           onUpdate={props.onUpdateParticipantRuntime}
         />

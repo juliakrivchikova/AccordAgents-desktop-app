@@ -4,6 +4,7 @@ import type {
   AppSettings,
   ChatParticipant,
   ChatParticipantConfig,
+  ChatParticipantWatcherState,
   CloudRunRemoteExecutionMode
 } from "../../../shared/types";
 import { Avatar } from "../avatar/avatar";
@@ -41,13 +42,14 @@ export function ChatParticipantMenu(props: {
   addParticipantDraft: ChatParticipantDraft;
   isRunning: boolean;
   participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
+  participantWatchers?: Record<string, ChatParticipantWatcherState>;
   onDraftChange: (value: string) => void;
   onAddParticipantDraftChange: (draft: ChatParticipantDraft) => void;
   onAddParticipant: () => void;
   onAddSavedParticipant: (participant: ChatParticipantConfig, remoteExecution?: CloudRunRemoteExecutionMode) => void;
   onUpdateParticipantRuntime: (
     participantId: string,
-    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">
+    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "autoWatch">
   ) => void;
   onCompactParticipant: (participantId: string) => void;
   onRemoveParticipant: (participantId: string) => void;
@@ -63,6 +65,10 @@ export function ChatParticipantMenu(props: {
     props.settings.chatBehaviorRules
   ) ?? validateChatCliAgents(addDraft, props.agents);
   const savedParticipants = addableSavedParticipantConfigs(props.settings, props.agents, existingHandles);
+  const activeWatcher = props.participants.find((participant) => participant.autoWatch === true);
+  const autoWatchConflictReason = activeWatcher
+    ? `Only one participant can watch a chat. Turn off @${activeWatcher.handle} first.`
+    : undefined;
 
   return (
     <ChatParticipantMenuView
@@ -72,6 +78,7 @@ export function ChatParticipantMenu(props: {
       addValidation={addValidation}
       isRunning={props.isRunning}
       participantStatusById={props.participantStatusById}
+      participantWatchers={props.participantWatchers}
       savedParticipants={savedParticipants}
       hasSavedParticipantConfigs={props.settings.chatParticipantConfigs.length > 0}
       renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant, chatParticipantDisplayName(participant))} />}
@@ -81,12 +88,13 @@ export function ChatParticipantMenu(props: {
         props.settings.chatRoleConfigs.find((role) => role.id === participant.roleConfigId)?.archivedAt
       )}
       savedParticipantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
-      savedParticipantSummary={(participant) => savedParticipantSummary(props.settings, participant)}
+      savedParticipantSummary={(participant) => savedParticipantSummary(props.settings, participant, autoWatchConflictReason)}
       addParticipantEditor={(
         <ChatParticipantDraftRow
           draft={props.addParticipantDraft}
           settings={props.settings}
           agents={props.agents}
+          autoWatchDisabledReason={props.addParticipantDraft.autoWatch ? autoWatchConflictReason : undefined}
           renderAvatarOption={(option) => <Avatar className="avatar-choice-preview" spec={avatarForChatAvatarOption(option)} />}
           onChange={props.onAddParticipantDraftChange}
         />
@@ -103,12 +111,13 @@ export function ChatParticipantMenu(props: {
   );
 }
 
-function savedParticipantSummary(settings: AppSettings, participant: ChatParticipantConfig): string {
+function savedParticipantSummary(settings: AppSettings, participant: ChatParticipantConfig, autoWatchConflictReason?: string): string {
   return [
     labelForProviderKind(settings.providers, participant.kind),
     participant.kind === "codex-cli" ? `run ${chatRunLocationLabel(participant.remoteExecution).toLowerCase()}` : "",
     participant.model,
     participant.reasoningEffort ? `reasoning ${chatReasoningEffortLabel(participant.reasoningEffort)}` : "",
+    participant.autoWatchEnabled ? (autoWatchConflictReason ? "auto-watch off: watcher already set" : "auto-watch") : "",
     chatParticipantPermissionSummary(participant)
   ].filter(Boolean).join(" · ");
 }

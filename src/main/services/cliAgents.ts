@@ -87,6 +87,7 @@ export interface CliAgentRunOptions {
   // Skill tool is available for every Claude session.
   selectedSkills?: CliAgentSelectedSkill[];
   timeoutMs?: number;
+  allowEmptyContent?: boolean;
 }
 
 export interface CliAgentSelectedSkill {
@@ -1940,7 +1941,8 @@ export class CliAgentRunner {
       selectedSkills: undefined,
       appMcp: undefined,
       onOutput: undefined,
-      timeoutMs: options.timeoutMs ?? CLI_AGENT_COMPACT_TIMEOUT_MS
+      timeoutMs: options.timeoutMs ?? CLI_AGENT_COMPACT_TIMEOUT_MS,
+      allowEmptyContent: true
     });
     return {
       participant,
@@ -2017,10 +2019,14 @@ export class CliAgentRunner {
       );
       const sessionId = this.extractClaudeSessionId(result.stdout) ?? newSessionId ?? options.sessionId;
       this.reportSessionId(options.onSessionId, sessionId);
+      const content = this.extractClaudeText(result.stdout).trim();
+      if (!content && !options.allowEmptyContent) {
+        throw new Error("Claude Code completed without response content.");
+      }
       return this.withAppMcpClientStatus({
         participant,
         ok: true,
-        content: this.extractClaudeText(result.stdout),
+        content,
         durationMs: Date.now() - startedAt,
         sessionId,
         roleRuntime: options.role && !options.sessionId ? "claude-agent" : undefined,
@@ -2392,6 +2398,10 @@ export class CliAgentRunner {
         ? this.finalTextFromMessageItems(current.messages)
         : this.trailingTextBlock(current.streamedText)
     );
+    if (!content.trim() && !options.allowEmptyContent) {
+      current.reject(new Error("Claude warm process completed without response content."));
+      return;
+    }
     const sessionId = this.findSessionId(event) ?? current.sessionId ?? fallbackSessionId;
     this.reportSessionId(current.onSessionId, sessionId);
     const contextUsage = buildAgentContextUsage({

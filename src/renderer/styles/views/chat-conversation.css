@@ -275,6 +275,99 @@
   font-size: 11px;
 }
 
+.chat-rt-watch {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  gap: 5px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  color: var(--app-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chat-rt-watch:hover {
+  background: var(--app-surface-hover);
+}
+
+.chat-rt-watch.is-on {
+  color: var(--app-text-strong);
+}
+
+.chat-rt-watch.is-paused {
+  color: var(--app-warning);
+}
+
+.chat-rt-watch.is-disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.chat-rt-watch.is-disabled:hover {
+  background: transparent;
+}
+
+.chat-rt-watch input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chat-rt-watch-track {
+  position: relative;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 14px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 999px;
+  background: var(--app-surface-muted);
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.chat-rt-watch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--app-muted);
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+.chat-rt-watch.is-on .chat-rt-watch-track {
+  border-color: var(--app-accent);
+  background: color-mix(in srgb, var(--app-accent) 18%, transparent);
+}
+
+.chat-rt-watch.is-on .chat-rt-watch-thumb {
+  transform: translateX(10px);
+  background: var(--app-accent);
+}
+
+.chat-rt-watch.is-on.is-disabled .chat-rt-watch-track {
+  border-color: var(--app-accent-border);
+  background: var(--app-accent-soft);
+}
+
+.chat-rt-watch.is-on.is-disabled .chat-rt-watch-thumb {
+  background: color-mix(in srgb, var(--app-accent) 72%, var(--app-surface));
+}
+
+.chat-rt-watch.is-disabled:not(.is-on) .chat-rt-watch-track {
+  border-color: var(--app-border);
+  background: var(--app-surface-muted);
+}
+
+.chat-rt-watch-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Ghost dropdown: label + chevron with a transparent native select overlaid. */
 .chat-rt-ghost {
   position: relative;
@@ -1416,6 +1509,85 @@
 .chat-app-tool-inline-edit.is-permissions > span:first-child {
   overflow: visible;
   white-space: normal;
+}
+
+.chat-app-tool-permission-panel {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-app-tool-permission-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-app-tool-permission-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 6px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: var(--app-surface);
+  color: var(--app-muted);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.chat-app-tool-permission-pill svg {
+  flex: 0 0 auto;
+  color: currentColor;
+}
+
+.chat-app-tool-permission-pill.is-selected svg {
+  color: var(--app-accent);
+}
+
+.chat-app-tool-permission-pill:hover {
+  border-color: var(--app-border-strong);
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+}
+
+.chat-app-tool-permission-pill.is-selected {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+}
+
+.chat-app-tool-permission-pill.is-locked {
+  cursor: default;
+}
+
+.chat-app-tool-permission-pill:disabled {
+  opacity: 0.72;
+}
+
+.chat-app-tool-permission-pill:disabled:hover {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-muted);
+}
+
+.chat-app-tool-permission-pill.is-selected:disabled:hover {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+}
+
+.chat-app-tool-permission-pill:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 2px;
 }
 
 .chat-app-tool-inline-menu {

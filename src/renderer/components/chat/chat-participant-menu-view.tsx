@@ -6,6 +6,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import type {
   ChatParticipant,
   ChatParticipantConfig,
+  ChatParticipantWatcherState,
   CloudRunRemoteExecutionMode
 } from "../../../shared/types";
 import { CHAT_ASSISTANT_ROLE_ID, chatParticipantMentionHandle } from "../conversation/conversation-display";
@@ -25,6 +26,7 @@ export interface ChatParticipantMenuViewProps {
   addValidation?: string;
   isRunning: boolean;
   participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
+  participantWatchers?: Record<string, ChatParticipantWatcherState>;
   addParticipantEditor: React.ReactNode;
   savedParticipants: AddableSavedParticipantConfig[];
   hasSavedParticipantConfigs: boolean;
@@ -39,7 +41,7 @@ export interface ChatParticipantMenuViewProps {
   onAddSavedParticipant: (participant: ChatParticipantConfig, remoteExecution?: CloudRunRemoteExecutionMode) => void;
   onUpdateParticipantRuntime: (
     participantId: string,
-    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">
+    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "autoWatch">
   ) => void;
   onCompactParticipant: (participantId: string) => void;
   onRemoveParticipant: (participantId: string) => void;
@@ -53,6 +55,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
   const [showSaved, setShowSaved] = useState(false);
   const [savedRunLocations, setSavedRunLocations] = useState<Record<string, CloudRunRemoteExecutionMode>>({});
   const participantCountLabel = `${props.participants.length} ${props.participants.length === 1 ? "participant" : "participants"}`;
+  const activeWatcher = props.participants.find((participant) => participant.autoWatch === true);
 
   function handleOpenChange(next: boolean): void {
     setOpen(next);
@@ -163,6 +166,12 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                   removeDisabledReason={participantRemoveDisabledReason(participant)}
                   isRunning={props.isRunning}
                   status={props.participantStatusById.get(participant.id) ?? "idle"}
+                  autoWatchDisabledReason={
+                    activeWatcher && activeWatcher.id !== participant.id
+                      ? "Only one participant can watch a chat. Turn off the current watcher first."
+                      : undefined
+                  }
+                  autoWatchPausedReason={props.participantWatchers?.[participant.id]?.pausedReason}
                   renderParticipantAvatar={props.renderParticipantAvatar}
                   participantRoleLabel={props.participantRoleLabel}
                   participantRoleArchived={props.participantRoleArchived}

@@ -23,6 +23,10 @@ import {
   CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_MAX,
   CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_MIN
 } from "../../../shared/chatParticipantRequests";
+import {
+  CHAT_AUTO_WATCH_WAKE_LIMIT_MAX,
+  CHAT_AUTO_WATCH_WAKE_LIMIT_MIN
+} from "../../../shared/chatAutoWatch";
 import { CLI_AGENT_RUN_TIMEOUT_MAX_MS, CLI_AGENT_RUN_TIMEOUT_MIN_MS, cliAgentRunTimeoutHours } from "../../../shared/cliAgentRunSettings";
 import {
   CHAT_PROMPT_CONTEXT_LIMIT_MAX,
@@ -35,6 +39,7 @@ import {
 
 const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits transitive participant-to-participant nesting, not repeated rounds by the same requester.";
 const PARTICIPANT_REQUEST_PROMPT_MAX_HELP = "Maximum characters accepted for each participant request prompt. Longer prompts are rejected, not truncated.";
+const AUTO_WATCH_WAKE_LIMIT_HELP = "Pauses auto-watch after this many automatic watcher runs happen without a user message.";
 
 const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
   "codex-cli": new URL("../../assets/codex-cli.svg", import.meta.url).href,
@@ -53,6 +58,7 @@ export function GeneralSettingsSection(props: {
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
   chatParticipantRequestPromptMaxChars: number;
+  chatAutoWatchWakeLimit: number;
   chatPromptContext: ChatPromptContextSettings;
   cloudRuns: CloudRunsSettings;
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
@@ -60,6 +66,7 @@ export function GeneralSettingsSection(props: {
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
   setChatParticipantRequestPromptMaxChars: (maxChars: number) => Promise<void>;
+  setChatAutoWatchWakeLimit: (limit: number) => Promise<void>;
   setChatPromptContext: (settings: ChatPromptContextSettings) => Promise<void>;
   saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => Promise<void>;
 }): JSX.Element {
@@ -132,6 +139,19 @@ export function GeneralSettingsSection(props: {
               </div>
             </div>
             <PromptContextControl settings={props.chatPromptContext} onChange={props.setChatPromptContext} />
+          </div>
+          <div className="gen-card-divider" />
+          <div className="gen-row">
+            <div className="gen-row-text">
+              <div className="gen-row-title" title={AUTO_WATCH_WAKE_LIMIT_HELP}>Auto-watch run limit</div>
+              <div className="gen-row-desc">
+                {AUTO_WATCH_WAKE_LIMIT_HELP}
+              </div>
+            </div>
+            <AutoWatchWakeLimitControl
+              limit={props.chatAutoWatchWakeLimit}
+              onChange={props.setChatAutoWatchWakeLimit}
+            />
           </div>
           <div className="gen-card-divider" />
           <div className="gen-row">
@@ -1010,6 +1030,54 @@ function ParticipantRequestDepthControl(props: {
             onChange={(event) => setDepth(event.target.value)}
           />
           <span className="gen-timeout-unit">Levels</span>
+        </div>
+        <button
+          type="button"
+          className={`gen-timeout-save ${canSave ? "is-dirty" : ""}`}
+          disabled={!canSave}
+          onClick={() => void props.onChange(parsed)}
+        >
+          Save
+        </button>
+      </div>
+      {validation && <div className="gen-timeout-error">{validation}</div>}
+    </div>
+  );
+}
+
+function AutoWatchWakeLimitControl(props: {
+  limit: number;
+  onChange: (limit: number) => Promise<void>;
+}): JSX.Element {
+  const [limit, setLimit] = useState(String(props.limit));
+  const trimmed = limit.trim();
+  const parsed = Number(trimmed);
+  const validation = trimmed === ""
+    ? undefined
+    : !Number.isFinite(parsed) || !Number.isInteger(parsed)
+      ? "Use a whole number."
+      : parsed < CHAT_AUTO_WATCH_WAKE_LIMIT_MIN || parsed > CHAT_AUTO_WATCH_WAKE_LIMIT_MAX
+        ? `Use ${CHAT_AUTO_WATCH_WAKE_LIMIT_MIN} to ${CHAT_AUTO_WATCH_WAKE_LIMIT_MAX} runs.`
+        : undefined;
+  const canSave = trimmed !== "" && !validation && parsed !== props.limit;
+
+  useEffect(() => {
+    setLimit(String(props.limit));
+  }, [props.limit]);
+
+  return (
+    <div className="gen-row-control">
+      <div className="gen-timeout">
+        <div className="gen-timeout-field">
+          <input
+            className="gen-timeout-input"
+            inputMode="numeric"
+            value={limit}
+            aria-label="Auto-watch run limit"
+            title={AUTO_WATCH_WAKE_LIMIT_HELP}
+            onChange={(event) => setLimit(event.target.value)}
+          />
+          <span className="gen-timeout-unit">Runs</span>
         </div>
         <button
           type="button"

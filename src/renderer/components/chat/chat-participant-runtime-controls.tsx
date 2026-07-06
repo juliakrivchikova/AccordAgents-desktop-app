@@ -13,6 +13,7 @@ import type {
   ChatAgentPermissions,
   ChatParticipant,
   ChatParticipantRequestPermission,
+  ChatParticipantWatcherPausedReason,
   ChatProviderKind,
   ChatReasoningEffort,
   ProviderModelCatalog
@@ -28,19 +29,25 @@ import {
 const REASONING_DEFAULT_VALUE = "__default__";
 const MODEL_DEFAULT_VALUE = "__default_model__";
 const MODEL_MANUAL_VALUE = "__manual_model__";
+const AUTO_WATCH_PAUSED_TOOLTIPS: Record<ChatParticipantWatcherPausedReason, string> = {
+  "wake-limit": "Paused after too many automatic runs. Turn off and on to resume.",
+  error: "Paused after an auto-watch error. Turn off and on to resume."
+};
 const PARTICIPANT_REQUEST_PERMISSION_OPTIONS = [
-  { value: "ask", label: "Ask" },
-  { value: "allow", label: "Allow" },
+  { value: "ask", label: "Always ask approval" },
+  { value: "allow", label: "Allow without approval" },
   { value: "deny", label: "Deny" }
 ];
 
 export function ParticipantRuntimeControls(props: {
   participant: ChatParticipant;
   disabled: boolean;
+  autoWatchDisabledReason?: string;
+  autoWatchPausedReason?: ChatParticipantWatcherPausedReason;
   runLocationLocked: boolean;
   onUpdate: (
     participantId: string,
-    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">
+    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "autoWatch">
   ) => void;
 }): JSX.Element {
   const participant = props.participant;
@@ -52,13 +59,14 @@ export function ParticipantRuntimeControls(props: {
 
   // Build the patch by key presence so an intentional reset (model: "") is forwarded
   // rather than collapsing back to the current value.
-  function update(patch: Partial<Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution">>): void {
+  function update(patch: Partial<Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "autoWatch">>): void {
     props.onUpdate(participant.id, {
       model: "model" in patch ? patch.model : participant.model,
       reasoningEffort: "reasoningEffort" in patch ? patch.reasoningEffort : participant.reasoningEffort,
       agentMode: "agentMode" in patch ? patch.agentMode : participant.agentMode,
       permissions: "permissions" in patch ? patch.permissions : participant.permissions,
-      remoteExecution: "remoteExecution" in patch ? patch.remoteExecution : participant.remoteExecution
+      remoteExecution: "remoteExecution" in patch ? patch.remoteExecution : participant.remoteExecution,
+      autoWatch: "autoWatch" in patch ? patch.autoWatch : participant.autoWatch
     });
   }
 
@@ -73,17 +81,31 @@ export function ParticipantRuntimeControls(props: {
   // always-visible control below rather than living only in the Custom-access panel.
   const requestPermission = normalizedPermissions.requestParticipants;
   const requestPermissionLabel = PARTICIPANT_REQUEST_PERMISSION_OPTIONS
-    .find((option) => option.value === requestPermission)?.label ?? "Ask";
+    .find((option) => option.value === requestPermission)?.label ?? "Always ask approval";
   const grants = [
     effectivePermissions.repoRead ? "repo read" : "",
     effectivePermissions.shell.enabled ? "shell" : "",
     effectivePermissions.workspaceWrite ? "edit" : "",
     effectivePermissions.webAccess ? "web" : ""
   ].filter(Boolean);
+  const autoWatchOn = participant.autoWatch === true;
+  const autoWatchPausedTooltip = props.autoWatchPausedReason ? AUTO_WATCH_PAUSED_TOOLTIPS[props.autoWatchPausedReason] : undefined;
+  const autoWatchTooltip = props.autoWatchDisabledReason
+    ?? autoWatchPausedTooltip
+    ?? (autoWatchOn ? "Auto-watch is enabled for this participant." : "Let this participant watch new chat messages and decide whether to act.");
+  const autoWatchDisabled = props.disabled || Boolean(props.autoWatchDisabledReason);
 
   return (
     <div className="chat-runtime-controls" aria-label={`Runtime controls for ${chatParticipantDisplayName(participant)}`}>
       <div className="chat-rt-meta">
+        <AutoWatchToggle
+          checked={autoWatchOn}
+          disabled={autoWatchDisabled}
+          paused={Boolean(props.autoWatchPausedReason)}
+          tooltip={autoWatchTooltip}
+          onChange={(checked) => update({ autoWatch: checked })}
+        />
+        <span className="chat-rt-dot" aria-hidden>·</span>
         <GhostSelect
           ariaLabel="Mode"
           value={mode}
@@ -171,6 +193,36 @@ export function ParticipantRuntimeControls(props: {
         />
       )}
     </div>
+  );
+}
+
+function AutoWatchToggle(props: {
+  checked: boolean;
+  disabled: boolean;
+  paused: boolean;
+  tooltip: string;
+  onChange: (checked: boolean) => void;
+}): JSX.Element {
+  const label = props.paused ? "Watch: paused" : props.checked ? "Watch: on" : "Watch: off";
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <label className={`chat-rt-watch${props.checked ? " is-on" : ""}${props.paused ? " is-paused" : ""}${props.disabled ? " is-disabled" : ""}`}>
+          <input
+            type="checkbox"
+            checked={props.checked}
+            disabled={props.disabled}
+            aria-label="Auto-watch"
+            onChange={(event) => props.onChange(event.currentTarget.checked)}
+          />
+          <span className="chat-rt-watch-track" aria-hidden>
+            <span className="chat-rt-watch-thumb" />
+          </span>
+          <span className="chat-rt-watch-label">{label}</span>
+        </label>
+      </TooltipTrigger>
+      <TooltipContent side="top">{props.tooltip || "Let this participant watch new chat messages and decide whether to act."}</TooltipContent>
+    </Tooltip>
   );
 }
 

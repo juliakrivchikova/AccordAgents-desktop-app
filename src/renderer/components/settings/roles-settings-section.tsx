@@ -61,7 +61,8 @@ export function RolesSettingsSection(props: {
       type: "new",
       initialLabel: duplicateRoleLabel(role.label, roles),
       initialDescription: parts.description,
-      initialInstructions: parts.body
+      initialInstructions: parts.body,
+      initialParticipantDefaults: role.participantDefaults
     });
   };
 
@@ -133,4 +134,3 @@ export function RolesSettingsSection(props: {
     </section>
   );
 }
-

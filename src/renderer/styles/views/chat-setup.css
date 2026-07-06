@@ -798,6 +798,15 @@
   accent-color: var(--app-accent);
 }
 
+.chat-behavior-rule-option.is-disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.chat-behavior-rule-option input:disabled {
+  cursor: default;
+}
+
 .chat-behavior-rule-option span {
   min-width: 0;
   overflow-wrap: anywhere;

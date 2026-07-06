@@ -59,6 +59,8 @@ const bridge: AppBridge = {
     ipcRenderer.invoke("settings:set-chat-participant-request-max-depth", maxDepth),
   setChatParticipantRequestPromptMaxChars: (maxChars: number) =>
     ipcRenderer.invoke("settings:set-chat-participant-request-prompt-max-chars", maxChars),
+  setChatAutoWatchWakeLimit: (limit: number) =>
+    ipcRenderer.invoke("settings:set-chat-auto-watch-wake-limit", limit),
   setChatPromptContext: (settings: ChatPromptContextSettings) =>
     ipcRenderer.invoke("settings:set-chat-prompt-context", settings),
   saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => ipcRenderer.invoke("settings:save-cloud-runs", update),

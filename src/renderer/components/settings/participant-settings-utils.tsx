@@ -75,12 +75,12 @@ export function participantModeLabel(participant: ChatParticipantConfig): string
 export function participantRequestPermissionLabel(participant: ChatParticipantConfig): string {
   switch (normalizeChatAgentPermissions(participant.permissions).requestParticipants) {
     case "allow":
-      return "Allow";
+      return "Allow without approval";
     case "deny":
       return "Deny";
     case "ask":
     default:
-      return "Ask";
+      return "Always ask approval";
   }
 }
 
@@ -140,11 +140,12 @@ export function ParticipantEditorSwitch(props: {
   label: string;
   description?: string;
   checked: boolean;
+  disabled?: boolean;
   className?: string;
   onChange: (checked: boolean) => void;
 }): JSX.Element {
   return (
-    <label className={`participants-editor-toggle ${props.className ?? ""}`}>
+    <label className={`participants-editor-toggle ${props.disabled ? "is-disabled" : ""} ${props.className ?? ""}`}>
       <span className="participants-editor-toggle-text">
         <strong>{props.label}</strong>
         {props.description?.trim() && <small>{props.description}</small>}
@@ -153,6 +154,7 @@ export function ParticipantEditorSwitch(props: {
         <input
           type="checkbox"
           checked={props.checked}
+          disabled={props.disabled}
           onChange={(event) => props.onChange(event.target.checked)}
         />
         <span aria-hidden />

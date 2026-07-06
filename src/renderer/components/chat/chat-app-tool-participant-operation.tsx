@@ -7,7 +7,7 @@ import { Avatar, avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { avatarForChatParticipant, mapChatAvatarIdToKind } from "./chat-avatars";
 import { CHAT_AGENT_MODE_OPTIONS, chatAgentModeLabel } from "./chat-participant-drafts";
-import { ChatParticipantAvatarField as ChatAppToolAvatarField, ChatParticipantInlineModelRow as ChatAppToolInlineModelRow, ChatParticipantInlinePermissionsRow as ChatAppToolInlinePermissionsRow, ChatParticipantInlineSelectRow as ChatAppToolInlineSelectRow, ChatParticipantSpecRow, rosterPermissionGrantLabels } from "./chat-participant-config-panel";
+import { ChatParticipantAvatarField as ChatAppToolAvatarField, ChatParticipantInlineAutoWatchRow as ChatAppToolInlineAutoWatchRow, ChatParticipantInlineModelRow as ChatAppToolInlineModelRow, ChatParticipantInlinePermissionsRow as ChatAppToolInlinePermissionsRow, ChatParticipantInlineRequestParticipantsRow as ChatAppToolInlineRequestParticipantsRow, ChatParticipantInlineSelectRow as ChatAppToolInlineSelectRow, ChatParticipantSpecRow, rosterPermissionGrantLabels } from "./chat-participant-config-panel";
 import { participantProviderLabel } from "./chat-conversation-data";
 
 export function ChatAppToolParticipantChangeOperation(props: {
@@ -52,7 +52,9 @@ export function ChatAppToolParticipantChangeOperation(props: {
           model: preset?.model,
           reasoningEffort: preset?.reasoningEffort,
           agentMode: preset?.agentMode,
-          permissions: preset?.permissions
+          permissions: preset?.permissions,
+          remoteExecution: preset?.remoteExecution,
+          autoWatch: preset?.autoWatchEnabled === true
         };
         return {
           type: "add_existing_participant_to_chat",
@@ -100,10 +102,8 @@ export function ChatAppToolParticipantChangeOperation(props: {
         const participant = operation.participant;
         const role = props.roles.find((item) => item.id === participant.roleConfigId);
         const rawPermissionLabels = rosterPermissionGrantLabels(participant);
-        const broaderThanDefault = rawPermissionLabels.some((label) => label !== "repo read");
-        // Permissions only apply in "Custom access" (default) mode. Plan only is read-only
-        // and Auto-run manages execution itself, so the toggles are hidden there.
-        const showPermissions = normalizeChatAgentMode(participant.agentMode) === "default";
+        const customAccess = normalizeChatAgentMode(participant.agentMode) === "default";
+        const broaderThanDefault = customAccess && rawPermissionLabels.some((label) => label !== "repo read");
         function patchParticipant(next: Partial<ChatRosterChangeParticipantInput>): void {
           updateNewParticipant(index, { participant: next });
         }
@@ -175,14 +175,22 @@ export function ChatAppToolParticipantChangeOperation(props: {
                 options={CHAT_AGENT_MODE_OPTIONS.map((item) => ({ value: item.value, label: item.label }))}
                 onSelect={(value) => patchParticipant({ agentMode: value as ChatAgentMode })}
               />
-              {showPermissions && (
+              {customAccess && (
                 <ChatAppToolInlinePermissionsRow
                   participant={participant}
                   onChange={(permissions) => patchParticipant({ permissions })}
                 />
               )}
+              <ChatAppToolInlineAutoWatchRow
+                checked={participant.autoWatch === true}
+                onChange={(autoWatch) => patchParticipant({ autoWatch })}
+              />
+              <ChatAppToolInlineRequestParticipantsRow
+                participant={participant}
+                onChange={(permissions) => patchParticipant({ permissions })}
+              />
             </div>
-            {showPermissions && broaderThanDefault && (
+            {broaderThanDefault && (
               <div className="chat-app-tool-review-warning">
                 <AlertTriangle size={14} aria-hidden />
                 <span>Permissions are broader than the read-only default.</span>
@@ -219,10 +227,13 @@ export function ChatAppToolExistingParticipantSpec(props: {
 }): JSX.Element {
   const preset = props.preset;
   const overrides = props.overrides;
-  const model = overrides ? overrides.model : preset.model;
-  const reasoning = overrides ? overrides.reasoningEffort : preset.reasoningEffort;
-  const mode = normalizeChatAgentMode(overrides ? overrides.agentMode : preset.agentMode);
-  const permissions = overrides ? overrides.permissions : preset.permissions;
+  const model = overrides && "model" in overrides ? overrides.model : preset.model;
+  const reasoning = overrides && "reasoningEffort" in overrides ? overrides.reasoningEffort : preset.reasoningEffort;
+  const mode = normalizeChatAgentMode(overrides && "agentMode" in overrides ? overrides.agentMode : preset.agentMode);
+  const permissions = overrides && "permissions" in overrides ? overrides.permissions : preset.permissions;
+  const autoWatch = overrides && "autoWatch" in overrides
+    ? overrides.autoWatch === true
+    : preset.autoWatchEnabled === true;
   const permissionParticipant: ChatRosterChangeParticipantInput = {
     handle: preset.handle,
     roleConfigId: preset.roleConfigId,
@@ -265,6 +276,14 @@ export function ChatAppToolExistingParticipantSpec(props: {
           onChange={(next) => props.onOverride({ permissions: next })}
         />
       )}
+      <ChatAppToolInlineAutoWatchRow
+        checked={autoWatch}
+        onChange={(next) => props.onOverride({ autoWatch: next })}
+      />
+      <ChatAppToolInlineRequestParticipantsRow
+        participant={permissionParticipant}
+        onChange={(next) => props.onOverride({ permissions: next })}
+      />
     </>
   );
 }

@@ -453,6 +453,36 @@ body:has(.roles-editor-dialog) [data-slot="dialog-overlay"] {
   resize: none;
 }
 
+.roles-default-settings {
+  display: grid;
+  gap: 8px;
+  margin-top: 17px;
+}
+
+.roles-default-settings-title {
+  color: var(--app-text-strong);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.roles-default-settings-table.chat-app-tool-review-spec {
+  background: var(--app-surface);
+}
+
+.roles-default-settings-select .app-select-trigger {
+  width: 220px;
+  min-width: 0;
+}
+
+.roles-default-settings-toggle.participants-editor-toggle {
+  width: 100%;
+}
+
+.roles-default-settings-empty {
+  color: var(--app-muted);
+  font-size: 12.5px;
+}
+
 .roles-instructions-head {
   display: flex;
   align-items: center;

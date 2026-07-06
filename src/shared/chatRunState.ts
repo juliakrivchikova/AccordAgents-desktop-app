@@ -1,11 +1,13 @@
 import type { ChatParticipantCompactionState } from "./types";
 
 const PARTICIPANT_COMPACTIONS_KEY = "participantCompactionsByParticipantId";
+const ACTIVE_RUN_OWNERS_KEY = "activeRunOwnersByRunId";
 
 export function clearChatRunMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
   const next: Record<string, unknown> = { ...metadata, running: false };
   delete next.runId;
   delete next.activeRunIds;
+  delete next[ACTIVE_RUN_OWNERS_KEY];
   return next;
 }
 
