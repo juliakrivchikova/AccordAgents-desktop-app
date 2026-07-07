@@ -849,7 +849,8 @@ export class ChatService {
               repoRead: true
             }
           : participant.permissions,
-        remoteExecution: participant.remoteExecution
+        remoteExecution: participant.remoteExecution,
+        skipToolchainPreflight: participant.skipToolchainPreflight
       }));
   }
 
@@ -1009,6 +1010,9 @@ export class ChatService {
           ? normalizeChatAgentPermissions(request.permissions)
           : target.permissions,
         remoteExecution: nextRemoteExecution,
+        skipToolchainPreflight: Object.prototype.hasOwnProperty.call(request, "skipToolchainPreflight")
+          ? request.skipToolchainPreflight === true
+          : target.skipToolchainPreflight,
         autoWatch: autoWatchRequested ? request.autoWatch === true : target.autoWatch
       };
       let nextMetadata = conversation.metadata;
@@ -3019,6 +3023,7 @@ export class ChatService {
         agentMode: normalizeChatAgentMode(participant.agentMode),
         permissions: normalizeChatAgentPermissions(participant.permissions),
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
+        skipToolchainPreflight: participant.skipToolchainPreflight === true,
         updatedAt: participant.updatedAt
       })),
       participantChange: {
@@ -3252,6 +3257,7 @@ export class ChatService {
           agentMode: normalizeChatAgentMode(participant.agentMode),
           permissions: normalizeChatAgentPermissions(participant.permissions),
           remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
+          skipToolchainPreflight: participant.skipToolchainPreflight === true,
           provider
         };
       }),
@@ -5209,6 +5215,7 @@ export class ChatService {
             && runPath === conversation.repoPath
             ? conversation.repoPath
             : undefined;
+          const remoteToolchainLocalPath = remoteSyncLocalPath;
           const handle: RemoteRunHandle = {
             runId,
             conversationId: conversation.id,
@@ -5234,6 +5241,15 @@ export class ChatService {
               kind: "chat",
               repoPath: remoteRunTarget.worker.remoteCwd,
               sync: remoteSyncLocalPath ? { localPath: remoteSyncLocalPath } : undefined,
+              toolchainPreflight: remoteToolchainLocalPath || participant.skipToolchainPreflight === true
+                ? {
+                    localRepoPath: remoteToolchainLocalPath,
+                    skip: participant.skipToolchainPreflight === true
+                  }
+                : undefined,
+              onToolchainAdvisory: (message) => {
+                options.warnings.push(`@${participant.handle}: ${message}`);
+              },
               options: {
                 persistSession: true,
                 role,
@@ -6559,7 +6575,8 @@ export class ChatService {
         model: item.model,
         reasoningEffort: item.reasoningEffort,
         agentMode: item.agentMode,
-        remoteExecution: item.remoteExecution
+        remoteExecution: item.remoteExecution,
+        skipToolchainPreflight: item.skipToolchainPreflight
       }))
     };
   }
@@ -7803,6 +7820,7 @@ export class ChatService {
         agentMode: normalizeChatAgentMode(item.agentMode),
         permissions: this.normalizeParticipantPermissionsForRole(role, item.permissions, item.permissions === undefined),
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(item.remoteExecution),
+        skipToolchainPreflight: item.skipToolchainPreflight === true,
         autoWatch
       };
     });
@@ -8005,6 +8023,7 @@ export class ChatService {
       reasoningEffort: participant.reasoningEffort,
       agentMode: normalizeChatAgentMode(participant.agentMode),
       remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
+      skipToolchainPreflight: participant.skipToolchainPreflight === true,
       autoWatch: participant.autoWatch === true
     };
   }
@@ -8071,6 +8090,7 @@ export class ChatService {
             agentMode: normalizeChatAgentMode(participantRecord.agentMode),
             permissions: normalizeChatAgentPermissions(participantRecord.permissions),
             remoteExecution: this.normalizeConcreteRemoteExecutionMode(participantRecord.remoteExecution),
+            skipToolchainPreflight: participantRecord.skipToolchainPreflight === true,
             autoWatch: participantRecord.autoWatch === true
           }
         };
@@ -8098,6 +8118,7 @@ export class ChatService {
           agentMode: normalizeChatAgentMode(participant.agentMode),
           permissions: normalizeChatAgentPermissions(participant.permissions),
           remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
+          skipToolchainPreflight: participant.skipToolchainPreflight === true,
           autoWatch: participant.autoWatch === true
         }
       }))
@@ -8482,6 +8503,7 @@ export class ChatService {
               ? normalizeChatAgentPermissions(participantRecord.permissions)
               : undefined,
             remoteExecution: this.normalizeConcreteRemoteExecutionMode(participantRecord.remoteExecution),
+            skipToolchainPreflight: participantRecord.skipToolchainPreflight === true,
             autoWatch: typeof participantRecord.autoWatch === "boolean" ? participantRecord.autoWatch : undefined
           }
         };
@@ -8496,7 +8518,7 @@ export class ChatService {
       return undefined;
     }
     const record = raw as Record<string, unknown>;
-    if (!("model" in record) && !("reasoningEffort" in record) && !("agentMode" in record) && !("permissions" in record) && !("remoteExecution" in record) && !("autoWatch" in record)) {
+    if (!("model" in record) && !("reasoningEffort" in record) && !("agentMode" in record) && !("permissions" in record) && !("remoteExecution" in record) && !("skipToolchainPreflight" in record) && !("autoWatch" in record)) {
       return undefined;
     }
     const overrides: ChatExistingParticipantOverrides = {};
@@ -8514,6 +8536,9 @@ export class ChatService {
     }
     if ("remoteExecution" in record) {
       overrides.remoteExecution = this.normalizeConcreteRemoteExecutionMode(record.remoteExecution);
+    }
+    if ("skipToolchainPreflight" in record) {
+      overrides.skipToolchainPreflight = record.skipToolchainPreflight === true;
     }
     if ("autoWatch" in record) {
       overrides.autoWatch = record.autoWatch === true;
@@ -8556,6 +8581,7 @@ export class ChatService {
           agentMode: overrides && "agentMode" in overrides ? normalizeChatAgentMode(overrides.agentMode) : preset.agentMode,
           permissions: overrides && "permissions" in overrides ? overrides.permissions : preset.permissions,
           remoteExecution: overrides && "remoteExecution" in overrides ? overrides.remoteExecution : preset.remoteExecution,
+          skipToolchainPreflight: overrides && "skipToolchainPreflight" in overrides ? overrides.skipToolchainPreflight : preset.skipToolchainPreflight,
           autoWatch: overrides && "autoWatch" in overrides ? overrides.autoWatch : preset.autoWatchEnabled
         };
       }
@@ -8608,6 +8634,7 @@ export class ChatService {
         agentMode: participant.agentMode,
         permissions: participant.permissions,
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
+        skipToolchainPreflight: participant.skipToolchainPreflight === true,
         autoWatchEnabled: participant.autoWatch === true,
         updatedAt: new Date().toISOString()
       });
@@ -8628,6 +8655,7 @@ export class ChatService {
               handle: participant.handle,
               permissions: normalizeChatAgentPermissions(participant.permissions),
               remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
+              skipToolchainPreflight: participant.skipToolchainPreflight === true,
               autoWatch: participant.autoWatch === true
             }
           };
@@ -8653,6 +8681,7 @@ export class ChatService {
         agentMode: preset.agentMode,
         permissions: preset.permissions,
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(preset.remoteExecution),
+        skipToolchainPreflight: preset.skipToolchainPreflight === true,
         autoWatchEnabled: preset.autoWatchEnabled
       });
     }
@@ -8673,6 +8702,7 @@ export class ChatService {
             agentMode: participant.agentMode,
             permissions: participant.permissions,
             remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
+            skipToolchainPreflight: participant.skipToolchainPreflight === true,
             autoWatch: participant.autoWatch === true
           }
         }))
@@ -8698,6 +8728,7 @@ export class ChatService {
       agentMode: preset.agentMode,
       permissions: preset.permissions,
       remoteExecution: this.normalizeConcreteRemoteExecutionMode(preset.remoteExecution),
+      skipToolchainPreflight: preset.skipToolchainPreflight === true,
       autoWatchEnabled: preset.autoWatchEnabled
     }));
     const saved = await this.settings.saveChatRoleParticipantConfigBatch(prepared.role.request.operations, participantUpdates);
@@ -8723,6 +8754,7 @@ export class ChatService {
             agentMode: participant.agentMode,
             permissions: participant.permissions,
             remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
+            skipToolchainPreflight: participant.skipToolchainPreflight === true,
             autoWatch: participant.autoWatch === true
           }
         }))

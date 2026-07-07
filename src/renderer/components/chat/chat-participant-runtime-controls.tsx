@@ -47,7 +47,7 @@ export function ParticipantRuntimeControls(props: {
   runLocationLocked: boolean;
   onUpdate: (
     participantId: string,
-    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "autoWatch">
+    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">
   ) => void;
 }): JSX.Element {
   const participant = props.participant;
@@ -59,13 +59,14 @@ export function ParticipantRuntimeControls(props: {
 
   // Build the patch by key presence so an intentional reset (model: "") is forwarded
   // rather than collapsing back to the current value.
-  function update(patch: Partial<Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "autoWatch">>): void {
+  function update(patch: Partial<Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">>): void {
     props.onUpdate(participant.id, {
       model: "model" in patch ? patch.model : participant.model,
       reasoningEffort: "reasoningEffort" in patch ? patch.reasoningEffort : participant.reasoningEffort,
       agentMode: "agentMode" in patch ? patch.agentMode : participant.agentMode,
       permissions: "permissions" in patch ? patch.permissions : participant.permissions,
       remoteExecution: "remoteExecution" in patch ? patch.remoteExecution : participant.remoteExecution,
+      skipToolchainPreflight: "skipToolchainPreflight" in patch ? patch.skipToolchainPreflight : participant.skipToolchainPreflight,
       autoWatch: "autoWatch" in patch ? patch.autoWatch : participant.autoWatch
     });
   }
@@ -102,6 +103,8 @@ export function ParticipantRuntimeControls(props: {
           checked={autoWatchOn}
           disabled={autoWatchDisabled}
           paused={Boolean(props.autoWatchPausedReason)}
+          ariaLabel="Auto-watch"
+          label={autoWatchPausedTooltip ? "Watch: paused" : autoWatchOn ? "Watch: on" : "Watch: off"}
           tooltip={autoWatchTooltip}
           onChange={(checked) => update({ autoWatch: checked })}
         />
@@ -166,6 +169,20 @@ export function ParticipantRuntimeControls(props: {
                 })}
               />
             )}
+            {runLocation === "remote" && (
+              <>
+                <span className="chat-rt-dot" aria-hidden>·</span>
+                <AutoWatchToggle
+                  checked={participant.skipToolchainPreflight === true}
+                  disabled={props.disabled}
+                  paused={false}
+                  ariaLabel="Skip toolchain preflight"
+                  label={participant.skipToolchainPreflight === true ? "Preflight: skip" : "Preflight: check"}
+                  tooltip="Bypass repository toolchain checks when detection is wrong."
+                  onChange={(checked) => update({ skipToolchainPreflight: checked })}
+                />
+              </>
+            )}
           </>
         )}
         {isCustomAccess && (
@@ -200,10 +217,11 @@ function AutoWatchToggle(props: {
   checked: boolean;
   disabled: boolean;
   paused: boolean;
+  ariaLabel: string;
+  label: string;
   tooltip: string;
   onChange: (checked: boolean) => void;
 }): JSX.Element {
-  const label = props.paused ? "Watch: paused" : props.checked ? "Watch: on" : "Watch: off";
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -212,13 +230,13 @@ function AutoWatchToggle(props: {
             type="checkbox"
             checked={props.checked}
             disabled={props.disabled}
-            aria-label="Auto-watch"
+            aria-label={props.ariaLabel}
             onChange={(event) => props.onChange(event.currentTarget.checked)}
           />
           <span className="chat-rt-watch-track" aria-hidden>
             <span className="chat-rt-watch-thumb" />
           </span>
-          <span className="chat-rt-watch-label">{label}</span>
+          <span className="chat-rt-watch-label">{props.label}</span>
         </label>
       </TooltipTrigger>
       <TooltipContent side="top">{props.tooltip || "Let this member watch new chat messages and decide whether to act."}</TooltipContent>

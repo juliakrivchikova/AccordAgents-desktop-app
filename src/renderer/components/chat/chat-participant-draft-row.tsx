@@ -119,6 +119,23 @@ export function ChatParticipantDraftRow(props: {
           />
         </FormRow>
       )}
+      {props.draft.kind === "codex-cli" && normalizeChatRunLocation(props.draft.remoteExecution) === "remote" && (
+        <FormRow label="Preflight">
+          <label
+            className="chat-behavior-rule-option"
+            title="Bypass repository toolchain checks for this remote member when detection is wrong."
+          >
+            <input
+              type="checkbox"
+              checked={props.draft.skipToolchainPreflight}
+              onChange={(event) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, {
+                skipToolchainPreflight: event.target.checked
+              }))}
+            />
+            <span>Skip toolchain preflight</span>
+          </label>
+        </FormRow>
+      )}
       <FormRow label="Model">
         <ChatModelPicker
           kind={props.draft.kind}

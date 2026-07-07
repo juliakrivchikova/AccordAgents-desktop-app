@@ -6,7 +6,7 @@ import type { CloudRunSshExecRequest } from "./cloudRunDoctor";
 const WORKER = { host: "worker.example", user: "ubuntu", identityFile: "/tmp/key.pem" };
 
 const FULLY_PROVISIONED = [
-  "rsync=ok", "git=ok", "gh=ok", "node=ok", "codex=ok",
+  "rsync=ok", "git=ok", "gh=ok", "java=ok", "node=ok", "codex=ok",
   "build-essential=ok", "sudo=ok", "userns=0",
   "git-name=Dev Example", "git-email=dev@example.com", "codex-auth=ok"
 ].join("\n");
@@ -37,7 +37,7 @@ test("diagnose reports ready when every probe passes", async () => {
 
 test("diagnose fails on required gaps and warns on optional gaps", async () => {
   const probe = [
-    "rsync=ok", "git=ok", "gh=missing", "node=ok", "codex=missing",
+    "rsync=ok", "git=ok", "gh=missing", "java=missing", "node=ok", "codex=missing",
     "build-essential=missing", "sudo=ok", "userns=1",
     "git-name=", "git-email=", "codex-auth=missing"
   ].join("\n");
@@ -49,6 +49,7 @@ test("diagnose fails on required gaps and warns on optional gaps", async () => {
   assert.equal(byId.get("codex-auth"), "fail");
   assert.equal(byId.get("userns"), "fail");
   assert.equal(byId.get("gh"), "warn");
+  assert.equal(byId.get("java"), "warn");
   assert.equal(byId.get("build-essential"), "warn");
   assert.equal(byId.get("git-identity"), "warn");
 });
@@ -91,7 +92,7 @@ test("setup installs only the missing pieces and re-diagnoses", async () => {
       probes += 1;
       return probes === 1
         ? [
-            "rsync=missing", "git=ok", "gh=missing", "node=ok", "codex=missing",
+            "rsync=missing", "git=ok", "gh=missing", "java=missing", "node=ok", "codex=missing",
             "build-essential=ok", "sudo=ok", "userns=1",
             "git-name=", "git-email=", "codex-auth=ok"
           ].join("\n")
@@ -101,7 +102,7 @@ test("setup installs only the missing pieces and re-diagnoses", async () => {
   });
   const report = await service.setup(WORKER);
   const joined = commands.join("\n");
-  assert.match(joined, /apt-get install -y -qq rsync gh/);
+  assert.match(joined, /apt-get install -y -qq rsync gh openjdk-21-jdk/);
   assert.doesNotMatch(joined, /install -y -qq[^\n]*git\b(?![-])/);
   assert.match(joined, /npm install -g @openai\/codex/);
   assert.match(joined, /apparmor_restrict_unprivileged_userns=0/);
@@ -119,7 +120,7 @@ test("setup drives codex device-auth and surfaces url + code to the user", async
         probes += 1;
         return probes === 1
           ? [
-              "rsync=ok", "git=ok", "gh=ok", "node=ok", "codex=ok",
+              "rsync=ok", "git=ok", "gh=ok", "java=ok", "node=ok", "codex=ok",
               "build-essential=ok", "sudo=ok", "userns=0",
               "git-name=Dev", "git-email=dev@example.com", "codex-auth=missing"
             ].join("\n")
@@ -148,7 +149,7 @@ test("setup without sudo skips installs and reports remaining gaps", async () =>
   const { service, commands } = doctorWith(async (request) => {
     if (request.command.includes("have rsync")) {
       return [
-        "rsync=missing", "git=ok", "gh=ok", "node=ok", "codex=ok",
+        "rsync=missing", "git=ok", "gh=ok", "java=ok", "node=ok", "codex=ok",
         "build-essential=ok", "sudo=missing", "userns=0",
         "git-name=Dev", "git-email=dev@example.com", "codex-auth=ok"
       ].join("\n");

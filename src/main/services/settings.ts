@@ -1959,6 +1959,7 @@ export class SettingsService {
         agentMode: normalizeChatAgentMode(update.agentMode),
         permissions: normalizeChatAgentPermissions(update.permissions),
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
+        skipToolchainPreflight: update.skipToolchainPreflight === true,
         autoWatchEnabled: this.autoWatchEnabledForRole(role, update.autoWatchEnabled),
         updatedAt: now
       };
@@ -2161,6 +2162,7 @@ export class SettingsService {
       agentMode: normalizeChatAgentMode(update.agentMode),
       permissions: normalizeChatAgentPermissions(update.permissions),
       remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
+      skipToolchainPreflight: update.skipToolchainPreflight === true,
       autoWatchEnabled: this.autoWatchEnabledForRole(role, update.autoWatchEnabled),
       updatedAt: now
     };
@@ -2838,6 +2840,7 @@ export class SettingsService {
         agentMode: normalizeChatAgentMode((participant as { agentMode?: ChatAgentMode }).agentMode),
         permissions: normalizeChatAgentPermissions((participant as { permissions?: ChatAgentPermissions }).permissions),
         remoteExecution: this.normalizeRemoteExecutionMode((participant as { remoteExecution?: unknown }).remoteExecution),
+        skipToolchainPreflight: (participant as { skipToolchainPreflight?: unknown }).skipToolchainPreflight === true,
         autoWatchEnabled: this.autoWatchEnabledForRole(
           roleById.get(participant.roleConfigId) ?? { id: participant.roleConfigId },
           (participant as { autoWatchEnabled?: unknown }).autoWatchEnabled

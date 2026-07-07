@@ -58,6 +58,8 @@ import {
   chatProcessingTranscriptView,
   chatProcessingTranscriptViewHasHidden
 } from "../../shared/processingTranscript";
+import { issueFromRequirement, RemoteRunPreflightError } from "./toolchainRequirements";
+import type { ToolchainRequirement } from "./toolchainRequirements";
 
 const NOW = "2026-05-17T12:00:00.000Z";
 const ONE_BY_ONE_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
@@ -2904,6 +2906,98 @@ test("explicit remote launch rejection fails the participant bubble instead of f
   );
   assert.match(participantMessage?.content ?? "", /remote run failed to start: ssh connect failed/);
   assert.equal(localRuns, 0);
+});
+
+test("remote chat launch passes user-reachable toolchain preflight skip flag", async () => {
+  const participant = {
+    ...chatParticipant("codex-cli"),
+    remoteExecution: "remote" as const,
+    skipToolchainPreflight: true
+  };
+  const conversation = chatConversation([participant]);
+  let observedPreflight: any;
+  let launchedRunId = "";
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [ROLE], cloudRuns: { enabled: true, worker: { host: "worker.example" } } }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  service.setRemoteRunService({
+    async startDetachedRun(request): Promise<any> {
+      if (!request.runId) {
+        throw new Error("missing remote run id");
+      }
+      observedPreflight = request.toolchainPreflight;
+      launchedRunId = request.runId;
+      return {
+        runId: request.runId,
+        conversationId: request.conversationId,
+        participantId: request.participant.id,
+        status: "running"
+      };
+    },
+    async pollDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    async cancelDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    registerDetachedRunContext(): void {}
+  });
+
+  await service.sendMessage({ conversationId: conversation.id, content: "@codex run remote", runId: "remote-skip-preflight" });
+
+  await waitFor(() => observedPreflight?.skip === true);
+  assert.equal(observedPreflight.skip, true);
+  assert.equal((storage.current.metadata.remoteRunHandles as any)[launchedRunId]?.status, "running");
+});
+
+test("remote launch failure surfaces non-Java toolchain remediation", async () => {
+  const participant = { ...chatParticipant("codex-cli"), remoteExecution: "remote" as const };
+  const conversation = chatConversation([participant]);
+  const goRequirement: ToolchainRequirement = {
+    tool: "go",
+    label: "Go",
+    command: "go",
+    severity: "required",
+    sources: ["go.mod"],
+    remediation: {
+      kind: "worker_setup",
+      message: "Install Go on the worker.",
+      command: "sudo apt-get install -y golang-go"
+    }
+  };
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [ROLE], cloudRuns: { enabled: true, worker: { host: "worker.example" } } }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  service.setRemoteRunService({
+    async startDetachedRun(): Promise<any> {
+      throw new RemoteRunPreflightError([issueFromRequirement(goRequirement, "missing")]);
+    },
+    async pollDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    async cancelDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    registerDetachedRunContext(): void {}
+  });
+
+  await service.sendMessage({ conversationId: conversation.id, content: "@codex run remote", runId: "remote-go-preflight" });
+
+  await waitFor(() => (storage.current.messages as ChatMessage[]).some((message) =>
+    message.role === "participant" &&
+    message.participantId === participant.id &&
+    message.status === "error"
+  ));
+  const participantMessage = (storage.current.messages as ChatMessage[]).find((message) =>
+    message.role === "participant" &&
+    message.participantId === participant.id
+  );
+  assert.match(participantMessage?.content ?? "", /Go/);
+  assert.match(participantMessage?.content ?? "", /Install Go on the worker/);
 });
 
 test("remote fail-closed is participant-scoped in mixed dispatch", async () => {

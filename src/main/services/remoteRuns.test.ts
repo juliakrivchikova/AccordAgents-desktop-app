@@ -38,8 +38,11 @@ import type {
   RemoteDetachedWorkerSnapshot,
   RemoteDetachedWorkerTransport,
   RemoteDetachedWorkerDecisionRequest,
+  RemoteToolchainPreflightProbeRequest,
   RemoteWorkerEvent
 } from "./remoteRuns";
+import { issueFromRequirement } from "./toolchainRequirements";
+import type { ToolchainPreflightIssue } from "./toolchainRequirements";
 
 const NOW = "2026-06-26T12:00:00.000Z";
 
@@ -931,6 +934,7 @@ test("mirror-sync detached run up-syncs before launch and runs codex in the mirr
 
   assert.deepEqual(order, ["sync-up", "launch"]);
   assert.deepEqual(phases, [
+    "Checking remote environment",
     "Syncing project files",
     "Project files synced",
     "Preparing remote sandbox",
@@ -1091,6 +1095,305 @@ test("pre-provisioned remoteCwd mode never touches the mirror sync", async () =>
   const args = worker.launched?.invocation.args ?? [];
   assert.ok(args.includes("sandbox_workspace_write.network_access=true"));
   assert.ok(args.some((arg) => arg === 'sandbox_workspace_write.writable_roots=["/home/ubuntu/work/repo/.git"]'));
+});
+
+test("detached preflight blocks missing Java before mirror sync or launch", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await repoFixture({ "pom.xml": "<project />" });
+  const mirrorSync = new FakeMirrorSync();
+  const worker = new FakeDetachedWorkerTransport();
+  worker.missingTools.add("java");
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker, mirrorSync });
+
+  await assert.rejects(
+    () => remote.startDetachedRun({
+      conversationId: conversation.id,
+      runId: "missing-java-run",
+      participant: participantConfig(participant),
+      prompt: "Verify Java project.",
+      worker: { host: "worker.example", workerRoot: "/srv/worker" },
+      sync: { localPath: localDir },
+      toolchainPreflight: { localRepoPath: localDir }
+    }),
+    /Java\/JDK/
+  );
+
+  assert.deepEqual(worker.preflightRequirements, [["java", "maven"]]);
+  assert.equal(worker.launches, 0);
+  assert.deepEqual(mirrorSync.calls, []);
+});
+
+test("detached preflight aggregates multiple required missing tools", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await repoFixture({
+    "pom.xml": "<project />",
+    "package.json": "{}",
+    "pnpm-lock.yaml": ""
+  });
+  const worker = new FakeDetachedWorkerTransport();
+  worker.missingTools.add("java");
+  worker.missingTools.add("pnpm");
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+
+  await assert.rejects(
+    () => remote.startDetachedRun({
+      conversationId: conversation.id,
+      runId: "missing-many-run",
+      participant: participantConfig(participant),
+      prompt: "Verify mixed project.",
+      worker: { host: "worker.example" },
+      sync: { localPath: localDir },
+      toolchainPreflight: { localRepoPath: localDir }
+    }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /Java\/JDK/);
+      assert.match(message, /pnpm/);
+      return true;
+    }
+  );
+});
+
+test("detached preflight surfaces non-Java remediation text", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await repoFixture({ "go.mod": "module example.com/app\n" });
+  const worker = new FakeDetachedWorkerTransport();
+  worker.missingTools.add("go");
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+
+  await assert.rejects(
+    () => remote.startDetachedRun({
+      conversationId: conversation.id,
+      runId: "missing-go-run",
+      participant: participantConfig(participant),
+      prompt: "Verify Go project.",
+      worker: { host: "worker.example" },
+      sync: { localPath: localDir },
+      toolchainPreflight: { localRepoPath: localDir }
+    }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /Go/);
+      assert.match(message, /Install Go on the worker/);
+      return true;
+    }
+  );
+});
+
+test("wrappers skip Maven and Gradle requirements but still require Java", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await repoFixture({
+    "pom.xml": "<project />",
+    "mvnw": "",
+    "build.gradle": "",
+    "gradlew": ""
+  });
+  const worker = new FakeDetachedWorkerTransport();
+  worker.missingTools.add("java");
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+
+  await assert.rejects(
+    () => remote.startDetachedRun({
+      conversationId: conversation.id,
+      runId: "wrapper-java-run",
+      participant: participantConfig(participant),
+      prompt: "Verify wrapper project.",
+      worker: { host: "worker.example" },
+      sync: { localPath: localDir },
+      toolchainPreflight: { localRepoPath: localDir }
+    }),
+    /Java\/JDK/
+  );
+
+  assert.deepEqual(worker.preflightRequirements, [["java"]]);
+});
+
+test("advisory-only preflight issues do not block detached launch", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await repoFixture({ "Makefile": "test:\n\ttrue\n" });
+  const worker = new FakeDetachedWorkerTransport();
+  worker.missingTools.add("make");
+  const advisories: string[] = [];
+  const { remote } = await testRemoteRun({
+    conversation,
+    detachedWorkerTransport: worker,
+    mirrorSync: new FakeMirrorSync()
+  });
+
+  const state = await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "advisory-run",
+    participant: participantConfig(participant),
+    prompt: "Run advisory project.",
+    worker: { host: "worker.example", workerRoot: "/srv/worker" },
+    sync: { localPath: localDir },
+    toolchainPreflight: { localRepoPath: localDir },
+    onToolchainAdvisory: (message) => advisories.push(message)
+  });
+
+  assert.equal(state.status, "running");
+  assert.equal(worker.launches, 1);
+  assert.equal(advisories.length, 1);
+  assert.match(advisories[0], /make/);
+});
+
+test("pnpm and Yarn lockfiles do not block when corepack is available", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await repoFixture({
+    "package.json": "{}",
+    "pnpm-lock.yaml": "",
+    "yarn.lock": ""
+  });
+  const worker = new FakeDetachedWorkerTransport();
+  worker.missingTools.add("pnpm");
+  worker.missingTools.add("yarn");
+  worker.availableTools.add("corepack");
+  const { remote } = await testRemoteRun({
+    conversation,
+    detachedWorkerTransport: worker,
+    mirrorSync: new FakeMirrorSync()
+  });
+
+  const state = await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "corepack-run",
+    participant: participantConfig(participant),
+    prompt: "Run package-manager project.",
+    worker: { host: "worker.example", workerRoot: "/srv/worker" },
+    sync: { localPath: localDir },
+    toolchainPreflight: { localRepoPath: localDir }
+  });
+
+  assert.equal(state.status, "running");
+  assert.equal(worker.launches, 1);
+  assert.deepEqual(worker.preflightRequirements, [["node", "pnpm", "yarn"]]);
+});
+
+test("toolchain preflight override bypasses missing required tools", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await repoFixture({ "pom.xml": "<project />" });
+  const worker = new FakeDetachedWorkerTransport();
+  worker.missingTools.add("java");
+  const { remote } = await testRemoteRun({
+    conversation,
+    detachedWorkerTransport: worker,
+    mirrorSync: new FakeMirrorSync()
+  });
+
+  const state = await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "skip-preflight-run",
+    participant: participantConfig(participant),
+    prompt: "Skip preflight.",
+    worker: { host: "worker.example", workerRoot: "/srv/worker" },
+    sync: { localPath: localDir },
+    toolchainPreflight: { localRepoPath: localDir, skip: true }
+  });
+
+  assert.equal(state.status, "running");
+  assert.deepEqual(worker.preflightRequirements, []);
+  assert.equal(worker.launches, 1);
+});
+
+test("unsupported platform tooling blocks with unsupported message, not install guidance", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await repoFixture({ "App.xcodeproj/project.pbxproj": "" });
+  const worker = new FakeDetachedWorkerTransport();
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+
+  await assert.rejects(
+    () => remote.startDetachedRun({
+      conversationId: conversation.id,
+      runId: "unsupported-run",
+      participant: participantConfig(participant),
+      prompt: "Verify Xcode project.",
+      worker: { host: "worker.example" },
+      sync: { localPath: localDir },
+      toolchainPreflight: { localRepoPath: localDir }
+    }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /not available on Linux remote workers/);
+      assert.doesNotMatch(message, /Install Xcode/);
+      return true;
+    }
+  );
+
+  assert.deepEqual(worker.preflightRequirements, []);
+  assert.equal(worker.launches, 0);
+});
+
+test("preflight infrastructure failures are not reported as missing tooling", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await repoFixture({ "pom.xml": "<project />" });
+  const worker = new FakeDetachedWorkerTransport();
+  worker.preflightError = new Error("ssh connect failed");
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+
+  await assert.rejects(
+    () => remote.startDetachedRun({
+      conversationId: conversation.id,
+      runId: "preflight-infra-run",
+      participant: participantConfig(participant),
+      prompt: "Verify Java project.",
+      worker: { host: "worker.example" },
+      sync: { localPath: localDir },
+      toolchainPreflight: { localRepoPath: localDir }
+    }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /environment preflight could not complete/);
+      assert.match(message, /ssh connect failed/);
+      assert.doesNotMatch(message, /missing required tooling/);
+      return true;
+    }
+  );
+});
+
+test("real remote run gates preflight before invoking Codex", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await repoFixture({ "pom.xml": "<project />" });
+  const worker = new FakeDetachedWorkerTransport();
+  worker.missingTools.add("java");
+  let codexRuns = 0;
+  const { remote } = await testRemoteRun({
+    conversation,
+    detachedWorkerTransport: worker,
+    codexExecutor: async () => {
+      codexRuns += 1;
+      return {
+        stdout: "",
+        stderr: "",
+        finalMessage: "should not run",
+        exitCode: 0,
+        timedOut: false
+      };
+    }
+  });
+
+  const result = await remote.startRealRun({
+    conversationId: conversation.id,
+    runId: "real-preflight-run",
+    participant: participantConfig(participant),
+    prompt: "Verify Java project.",
+    worker: { host: "worker.example" },
+    toolchainPreflight: { localRepoPath: localDir }
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.content, /Java\/JDK/);
+  assert.equal(codexRuns, 0);
+  assert.deepEqual(worker.preflightRequirements, [["java", "maven"]]);
 });
 
 test("forwardedDesktopEnvironment strips machine-specific vars and keeps the rest", () => {
@@ -1549,6 +1852,16 @@ function participantConfig(participant: ChatParticipant): ParticipantConfig {
   };
 }
 
+async function repoFixture(files: Record<string, string>): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-remote-toolchain-"));
+  await Promise.all(Object.entries(files).map(async ([relativePath, content]) => {
+    const absolutePath = path.join(root, relativePath);
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, content, "utf8");
+  }));
+  return root;
+}
+
 function remoteProviderMessage(participant: ChatParticipant, runId: string, id: string): ChatMessage {
   return {
     id,
@@ -1570,9 +1883,32 @@ class FakeDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
   readonly eventsByRun = new Map<string, RemoteWorkerEvent[]>();
   readonly decisions: RemoteDetachedWorkerDecisionRequest[] = [];
   readonly reaped: RemoteDetachedWorkerSnapshot[] = [];
+  readonly preflightRequirements: string[][] = [];
+  missingTools = new Set<string>();
+  availableTools = new Set<string>();
+  preflightIssues: ToolchainPreflightIssue[] | undefined;
+  preflightError: Error | undefined;
+  launches = 0;
   cancelWithoutWorkerTerminal = false;
 
+  async preflight(request: RemoteToolchainPreflightProbeRequest): Promise<ToolchainPreflightIssue[]> {
+    this.preflightRequirements.push(request.requirements.map((requirement) => requirement.tool));
+    if (this.preflightError) {
+      throw this.preflightError;
+    }
+    if (this.preflightIssues) {
+      return this.preflightIssues;
+    }
+    return request.requirements
+      .filter((requirement) =>
+        this.missingTools.has(requirement.tool) &&
+        !(requirement.alternativeCommands ?? []).some((command) => this.availableTools.has(command))
+      )
+      .map((requirement) => issueFromRequirement(requirement, "missing"));
+  }
+
   async launch(request: RemoteDetachedWorkerLaunchRequest): Promise<RemoteDetachedWorkerSnapshot> {
+    this.launches += 1;
     if (!this.eventsByRun.has(request.runId)) {
       this.eventsByRun.set(request.runId, [{
         kind: "lifecycle",

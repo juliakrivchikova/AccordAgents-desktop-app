@@ -139,6 +139,7 @@ export type CloudRunWorkerCheckId =
   | "rsync"
   | "git"
   | "gh"
+  | "java"
   | "node"
   | "build-essential"
   | "codex"
@@ -527,6 +528,7 @@ export interface ChatParticipant {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
 }
 
@@ -596,6 +598,7 @@ export interface ChatRosterChangeParticipantInput {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
 }
 
@@ -667,6 +670,7 @@ export interface ChatExistingParticipantOverrides {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
 }
 
@@ -822,6 +826,7 @@ export interface ChatRosterCurrentParticipant {
   reasoningEffort?: ChatReasoningEffort;
   agentMode?: ChatAgentMode;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
 }
 
@@ -1078,6 +1083,7 @@ export interface ChatParticipantConfig {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  skipToolchainPreflight?: boolean;
   autoWatchEnabled?: boolean;
   updatedAt: string;
 }
@@ -1094,6 +1100,7 @@ export interface ChatParticipantConfigUpdate {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  skipToolchainPreflight?: boolean;
   autoWatchEnabled?: boolean;
 }
 
@@ -1109,6 +1116,7 @@ export interface ChatParticipantInput {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
 }
 
@@ -1132,6 +1140,7 @@ export interface UpdateChatParticipantRuntimeRequest {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
 }
 

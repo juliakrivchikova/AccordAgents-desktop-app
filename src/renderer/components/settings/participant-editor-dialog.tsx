@@ -10,7 +10,7 @@ import { participantProviderLabel } from "../chat/chat-conversation-data";
 import { displayChatRoleLabel } from "../chat/chat-role-labels";
 import { ChatParticipantAvatarField, ChatParticipantInlineModelRow, ChatParticipantInlinePermissionsRow, ChatParticipantInlineRequestParticipantsRow, ChatParticipantInlineSelectRow, ChatParticipantSpecRow } from "../chat/chat-participant-config-panel";
 import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
-import { CHAT_AGENT_MODE_OPTIONS, WORKFLOW_MANAGER_ROLE_ID, chatAgentModeLabel, chatCliProviderLabel, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
+import { CHAT_AGENT_MODE_OPTIONS, CHAT_RUN_LOCATION_OPTIONS, WORKFLOW_MANAGER_ROLE_ID, chatAgentModeLabel, chatCliProviderLabel, normalizeChatRunLocation, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
 import {
   ParticipantEditorHandleField,
@@ -192,6 +192,25 @@ export function ParticipantEditorDialog(props: {
               options={providerOptions}
               onSelect={(value) => patchDraft({ kind: value as ChatProviderKind })}
             />
+            {draft.kind === "codex-cli" && (
+              <ChatParticipantInlineSelectRow
+                label="Run location"
+                value={normalizeChatRunLocation(draft.remoteExecution) === "remote" ? "Remote" : "Local"}
+                current={normalizeChatRunLocation(draft.remoteExecution)}
+                options={CHAT_RUN_LOCATION_OPTIONS}
+                onSelect={(value) => patchDraft({ remoteExecution: normalizeChatRunLocation(value) })}
+              />
+            )}
+            {draft.kind === "codex-cli" && normalizeChatRunLocation(draft.remoteExecution) === "remote" && (
+              <ChatParticipantSpecRow label="Preflight">
+                <ParticipantEditorSwitch
+                  label="Skip toolchain preflight"
+                  description="Bypass repository toolchain checks when detection is wrong."
+                  checked={draft.skipToolchainPreflight}
+                  onChange={(checked) => patchDraft({ skipToolchainPreflight: checked })}
+                />
+              </ChatParticipantSpecRow>
+            )}
             <ChatParticipantInlineModelRow
               kind={draft.kind}
               model={draft.model}

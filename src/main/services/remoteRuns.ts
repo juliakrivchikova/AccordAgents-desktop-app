@@ -29,6 +29,14 @@ import {
 import type { CodexExecOptions, CodexExecInvocation, CodexExecRemoteSandboxOptions } from "./codexExec";
 import { defaultRemoteMirrorSync, localProjectHasGitDir, remoteMirrorPath } from "./remoteMirrorSync";
 import type { RemoteMirrorSyncRunner } from "./remoteMirrorSync";
+import {
+  detectRepoToolchainRequirements,
+  formatToolchainAdvisoryIssues,
+  issueFromRequirement,
+  RemoteRunPreflightError,
+  RemoteRunPreflightInfrastructureError
+} from "./toolchainRequirements";
+import type { ToolchainIssueCategory, ToolchainPreflightIssue, ToolchainRequirement } from "./toolchainRequirements";
 
 const DEFAULT_APPLY_LIMIT = 200;
 const DEFAULT_REMOTE_RUN_TIMEOUT_MS = 24 * 60 * 60_000;
@@ -201,6 +209,11 @@ export interface RemoteRunStartRequest {
   runId?: string;
 }
 
+export interface RemoteRunToolchainPreflightOptions {
+  localRepoPath?: string;
+  skip?: boolean;
+}
+
 export interface RemoteRunWorkerTarget {
   host: string;
   user?: string;
@@ -220,6 +233,7 @@ export interface RemoteRunRealStartRequest extends RemoteRunStartRequest {
   repoPath?: string;
   diffMode?: GitDiffMode;
   options?: CodexExecOptions;
+  toolchainPreflight?: RemoteRunToolchainPreflightOptions;
   timeoutMs?: number;
   signal?: AbortSignal;
   sourceMessageId?: string;
@@ -238,6 +252,7 @@ export interface RemoteRunDetachedStartRequest extends RemoteRunRealStartRequest
   // an explicit pullMirrorForRun call.
   sync?: { localPath: string };
   onPhase?: (status: ChatRemoteRunStatus) => void;
+  onToolchainAdvisory?: (message: string) => void;
 }
 
 export interface RemoteRunDetachedPollRequest {
@@ -375,6 +390,12 @@ export interface RemoteDetachedWorkerLaunchRequest {
   signal?: AbortSignal;
 }
 
+export interface RemoteToolchainPreflightProbeRequest {
+  worker: RemoteRunWorkerTarget;
+  requirements: ToolchainRequirement[];
+  signal?: AbortSignal;
+}
+
 export interface RemoteDetachedWorkerPollRequest {
   runId: string;
   worker: RemoteRunWorkerTarget;
@@ -407,6 +428,7 @@ export interface RemoteDetachedWorkerSnapshot {
 }
 
 export interface RemoteDetachedWorkerTransport {
+  preflight(request: RemoteToolchainPreflightProbeRequest): Promise<ToolchainPreflightIssue[]>;
   launch(request: RemoteDetachedWorkerLaunchRequest): Promise<RemoteDetachedWorkerSnapshot>;
   poll(request: RemoteDetachedWorkerPollRequest): Promise<RemoteDetachedWorkerSnapshot>;
   cancel(request: RemoteDetachedWorkerCancelRequest): Promise<RemoteDetachedWorkerSnapshot>;
@@ -535,6 +557,13 @@ export class RemoteRunService {
     };
 
     try {
+      await this.ensureRemoteToolchainPreflight(
+        request.worker,
+        {
+          ...request.toolchainPreflight
+        },
+        request.signal
+      );
       const execution = await this.codexExecutor({
         worker: request.worker,
         invocation,
@@ -600,6 +629,21 @@ export class RemoteRunService {
       runId,
       state: "started"
     });
+
+    await this.emitDetachedPhase(runId, request, "launching-session", "Checking remote environment");
+    const advisoryIssues = await this.ensureRemoteToolchainPreflight(
+      request.worker,
+      {
+        ...request.toolchainPreflight,
+        localRepoPath: request.toolchainPreflight?.localRepoPath ?? request.sync?.localPath
+      },
+      request.signal
+    );
+    const advisoryMessage = formatToolchainAdvisoryIssues(advisoryIssues);
+    if (advisoryMessage) {
+      request.onToolchainAdvisory?.(advisoryMessage);
+      await this.emitDetachedPhase(runId, request, "launching-session", "Checking remote environment", advisoryMessage);
+    }
 
     const sync = await this.prepareMirrorForRun(runId, request);
     const effectiveRepoPath = sync?.remotePath ?? request.repoPath;
@@ -1170,6 +1214,37 @@ export class RemoteRunService {
     };
   }
 
+  private async ensureRemoteToolchainPreflight(
+    worker: RemoteRunWorkerTarget,
+    options: RemoteRunToolchainPreflightOptions | undefined,
+    signal: AbortSignal | undefined
+  ): Promise<ToolchainPreflightIssue[]> {
+    if (options?.skip) {
+      return [];
+    }
+    const requirements = await detectRepoToolchainRequirements(options?.localRepoPath);
+    if (requirements.length === 0) {
+      return [];
+    }
+    const localIssues = requirements
+      .filter((requirement) => requirement.unsupportedOnLinux)
+      .map((requirement) => issueFromRequirement(requirement, "unsupported"));
+    const probeRequirements = requirements.filter((requirement) => !requirement.unsupportedOnLinux);
+    let remoteIssues: ToolchainPreflightIssue[] = [];
+    if (probeRequirements.length > 0) {
+      try {
+        remoteIssues = await this.detachedWorkerTransport.preflight({ worker, requirements: probeRequirements, signal });
+      } catch (error) {
+        throw new RemoteRunPreflightInfrastructureError(error instanceof Error ? error.message : String(error));
+      }
+    }
+    const blocking = [...localIssues, ...remoteIssues].filter((issue) => issue.severity === "required");
+    if (blocking.length > 0) {
+      throw new RemoteRunPreflightError(blocking);
+    }
+    return [...localIssues, ...remoteIssues].filter((issue) => issue.severity === "advisory");
+  }
+
   // Explicit, user-initiated write-back: rsync the mirror's working tree into
   // the local project directory (.git and node_modules excluded). Never called
   // automatically — the local tree is only mutated on demand, so a long remote
@@ -1499,6 +1574,20 @@ export class RemoteRunService {
 }
 
 class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
+  async preflight(request: RemoteToolchainPreflightProbeRequest): Promise<ToolchainPreflightIssue[]> {
+    if (request.requirements.length === 0) {
+      return [];
+    }
+    const sshPath = request.worker.sshPath?.trim() || "ssh";
+    const target = remoteSshTarget(request.worker);
+    const sshBaseArgs = remoteSshBaseArgs(request.worker, target);
+    const result = await runCommand(sshPath, [...sshBaseArgs, toolchainProbeScript(request.requirements)], {
+      timeoutMs: 30_000,
+      signal: request.signal
+    });
+    return parseToolchainProbeOutput(request.requirements, result.stdout);
+  }
+
   async launch(request: RemoteDetachedWorkerLaunchRequest): Promise<RemoteDetachedWorkerSnapshot> {
     const sshPath = request.worker.sshPath?.trim() || "ssh";
     const target = remoteSshTarget(request.worker);
@@ -1763,6 +1852,45 @@ async function defaultRemoteCodexExecutor(
 
 function remoteSshTarget(worker: RemoteRunWorkerTarget): string {
   return buildCloudRunSshTarget(worker);
+}
+
+function toolchainProbeScript(requirements: ToolchainRequirement[]): string {
+  return requirements.map((requirement, index) => {
+    const ok = `printf '%s\\n' ${shellQuote(`${index}=ok`)}`;
+    const missing = `printf '%s\\n' ${shellQuote(`${index}=missing`)}`;
+    const probe = `printf '%s\\n' ${shellQuote(`${index}=probe`)}`;
+    const probeCheck = requirement.probeCommand
+      ? `if ${requirement.probeCommand} >/dev/null 2>&1; then ${ok}; else ${probe}; fi`
+      : ok;
+    const alternativeCheck = (requirement.alternativeCommands ?? [])
+      .map((command) => `command -v ${shellQuote(command)} >/dev/null 2>&1 && ${shellQuote(command)} --version >/dev/null 2>&1`)
+      .join(" || ");
+    const alternativeBranch = alternativeCheck ? ` elif ${alternativeCheck}; then ${ok};` : "";
+    return `if command -v ${shellQuote(requirement.command)} >/dev/null 2>&1; then ${probeCheck};${alternativeBranch} else ${missing}; fi`;
+  }).join("; ");
+}
+
+function parseToolchainProbeOutput(
+  requirements: ToolchainRequirement[],
+  stdout: string
+): ToolchainPreflightIssue[] {
+  const statuses = new Map<number, ToolchainIssueCategory | "ok">();
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = line.trim().match(/^(\d+)=(ok|missing|probe)$/);
+    if (!match) {
+      continue;
+    }
+    statuses.set(Number.parseInt(match[1], 10), match[2] as ToolchainIssueCategory | "ok");
+  }
+  const issues: ToolchainPreflightIssue[] = [];
+  requirements.forEach((requirement, index) => {
+    const status = statuses.get(index);
+    if (!status || status === "ok") {
+      return;
+    }
+    issues.push(issueFromRequirement(requirement, status));
+  });
+  return issues;
 }
 
 function replaceArgValue(args: string[], from: string, to: string): string[] {

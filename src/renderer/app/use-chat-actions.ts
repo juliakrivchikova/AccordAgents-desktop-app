@@ -43,7 +43,7 @@ export interface ChatActions {
   respondToChatChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => Promise<void>;
   addChatParticipant: () => Promise<void>;
   addSavedChatParticipant: (config: ChatParticipantConfig, remoteExecution?: CloudRunRemoteExecutionMode) => Promise<void>;
-  updateChatParticipantRuntime: (participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "autoWatch">) => Promise<void>;
+  updateChatParticipantRuntime: (participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">) => Promise<void>;
   removeChatParticipant: (participantId: string) => Promise<void>;
   compactChatParticipant: (participantId: string, options?: ChatRunScopeOptions) => Promise<boolean>;
   startChatAccord: (options: StartChatAccordOptions) => Promise<boolean>;
@@ -314,7 +314,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     await commitChatParticipant(participant);
   }
 
-  async function updateChatParticipantRuntime(participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "autoWatch">): Promise<void> {
+  async function updateChatParticipantRuntime(participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">): Promise<void> {
     if (!state.conversation || state.conversation.kind !== "chat") return;
     state.setError(undefined);
     try {
@@ -326,6 +326,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         agentMode: patch.agentMode,
         permissions: patch.permissions,
         remoteExecution: patch.remoteExecution,
+        skipToolchainPreflight: patch.skipToolchainPreflight,
         autoWatch: patch.autoWatch
       });
       if (saved) state.setConversation(saved);

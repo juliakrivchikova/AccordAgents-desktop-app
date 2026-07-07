@@ -31,6 +31,7 @@ const CHECK_LABELS: Record<CloudRunWorkerCheckId, string> = {
   "rsync": "rsync",
   "git": "git",
   "gh": "GitHub CLI",
+  "java": "Java/JDK",
   "node": "Node.js",
   "build-essential": "Build tools",
   "codex": "Codex CLI",
@@ -119,6 +120,7 @@ export class CloudRunDoctorService {
     if (failing("rsync")) aptPackages.push("rsync");
     if (failing("git")) aptPackages.push("git");
     if (failing("gh")) aptPackages.push("gh");
+    if (failing("java")) aptPackages.push("openjdk-21-jdk");
     if (failing("build-essential")) aptPackages.push("build-essential");
 
     if ((aptPackages.length > 0 || failing("node") || failing("codex") || failing("userns")) && !hasSudo) {
@@ -230,6 +232,7 @@ function probeScript(worker: RemoteRunWorkerTarget): string {
     "have rsync rsync",
     "have git git",
     "have gh gh",
+    "have java java",
     "have node node",
     `have codex ${shellQuotePosix(codexPath)}`,
     "dpkg -s build-essential >/dev/null 2>&1 && printf 'build-essential=ok\\n' || printf 'build-essential=missing\\n'",
@@ -264,6 +267,7 @@ function parseProbeOutput(output: string): CloudRunWorkerCheck[] {
   checks.push(tool("rsync", true, "Needed to sync your project to the worker."));
   checks.push(tool("git", true, "Needed for the agent to commit and push."));
   checks.push(tool("gh", true, "Needed for the agent to open pull requests."));
+  checks.push(tool("java", true, "Needed to verify Java, Maven, and Gradle projects."));
   checks.push(tool("node", true, "Needed to run the detached worker."));
   checks.push(tool("build-essential", true, "Needed to build native npm dependencies."));
   checks.push(tool("codex", true, "The remote agent runtime."));
