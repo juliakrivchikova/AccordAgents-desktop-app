@@ -13,7 +13,8 @@ import type {
 import { ChatComposerAttachmentChips } from "./chat-composer-attachment-chips";
 import {
   CHAT_COMPOSER_TEXTAREA_STYLE,
-  renderSkillHighlightedDraft
+  draftStartsWithPluginMention,
+  renderSlashHighlightedDraft
 } from "./chat-composer-draft-utils";
 import { ChatComposerMenus } from "./chat-composer-menus";
 import {
@@ -70,6 +71,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     images.readyImages.length > 0 ||
     mentions.selectedSkillMentions.length > 0
   );
+  const hasLeadingPluginToken = draftStartsWithPluginMention(props.draft, mentions.selectedPluginMentions);
   const accordTooltip = props.accordDisabledReason ?? "Start an Accord: reach agreement among chat members";
 
   useLayoutEffect(() => {
@@ -140,6 +142,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
           insertMention={mentions.insertMention}
           insertSavedPrompt={mentions.insertSavedPrompt}
           insertSkillMention={mentions.insertSkillMention}
+          insertPluginMention={mentions.insertPluginMention}
           mentionIndex={mentions.mentionIndex}
           mentionOptions={mentions.mentionOptions}
           participantRoleLabel={props.participantRoleLabel}
@@ -151,13 +154,15 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
           visibleFileOptions={mentions.visibleFileOptions}
           visiblePromptOptions={mentions.visiblePromptOptions}
           visibleSkillOptions={mentions.visibleSkillOptions}
+          visiblePluginOptions={mentions.visiblePluginOptions}
         />
         <ResizableTextarea
           ref={textareaRef}
           value={props.draft}
           className={[
             "border-0 bg-transparent text-sm leading-normal shadow-none focus-visible:border-0 focus-visible:ring-0 dark:bg-transparent",
-            mentions.showSkillHighlights ? "skill-highlight-textarea" : ""
+            mentions.showSkillHighlights ? "skill-highlight-textarea" : "",
+            hasLeadingPluginToken ? "has-leading-plugin-token" : ""
           ].filter(Boolean).join(" ")}
           spellCheck={!mentions.showSkillHighlights}
           onChange={(event) => mentions.updateDraft(event.target.value)}
@@ -250,7 +255,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
         />
         {mentions.showSkillHighlights && (
           <div ref={highlightRef} className="chat-draft-highlight" aria-hidden="true">
-            {renderSkillHighlightedDraft(props.draft, mentions.selectedSkillMentions)}
+            {renderSlashHighlightedDraft(props.draft, mentions.selectedSkillMentions, mentions.selectedPluginMentions)}
           </div>
         )}
         </div>

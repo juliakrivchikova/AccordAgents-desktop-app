@@ -17,3 +17,4 @@
 @import "./views/settings-rules.css" layer(components);
 @import "./views/settings-prompts.css" layer(components);
 @import "./views/settings-roles.css" layer(components);
+@import "./views/settings-plugins.css" layer(components);

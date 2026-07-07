@@ -10,6 +10,8 @@ import type {
   UserSkillCapabilityState,
   UserSkillDiagnosticRoot,
   UserSkillDiagnostics,
+  UserSkillListRequest,
+  UserSkillListResult,
   UserSkillScope,
   UserSkillSearchRequest,
   UserSkillSearchResult,
@@ -99,6 +101,28 @@ export class UserSkillsService {
     };
   }
 
+  async listAll(request: UserSkillListRequest = {}): Promise<UserSkillListResult> {
+    const repoPath = typeof request.repoPath === "string" && request.repoPath.trim()
+      ? request.repoPath
+      : undefined;
+    const scan = await this.scan(repoPath);
+    const query = typeof request.query === "string" ? request.query.trim().toLowerCase() : "";
+    const limit = normalizeLimit(request.limit);
+    const matched = scan.variants.filter((variant) => {
+      if (!query) {
+        return true;
+      }
+      return variant.frontmatterName.toLowerCase().includes(query) ||
+        variant.displayName.toLowerCase().includes(query) ||
+        variant.description.toLowerCase().includes(query);
+    });
+    const context = this.defaultListContext(repoPath);
+    return {
+      skills: this.rankByQuery(this.summariesForVariants(matched, context), query).slice(0, limit),
+      diagnostics: this.diagnosticsFromScan(scan, context)
+    };
+  }
+
   // Order results by how well they match the typed query so the first/highlighted entry is the
   // best match: exact name > name prefix > name substring > description-only match, then
   // alphabetical within a tier. Without this, an alphabetical sort can highlight a description-only
@@ -127,6 +151,10 @@ export class UserSkillsService {
 
   async diagnostics(repoPath?: string, context?: UserSkillRunContext): Promise<UserSkillDiagnostics> {
     const scan = await this.scan(repoPath);
+    return this.diagnosticsFromScan(scan, context ?? this.defaultDiagnosticsContext(repoPath));
+  }
+
+  private diagnosticsFromScan(scan: ScanResult, context: UserSkillRunContext): UserSkillDiagnostics {
     return {
       roots: scan.roots.map((root): UserSkillDiagnosticRoot => ({
         label: root.label,
@@ -143,7 +171,7 @@ export class UserSkillsService {
       hiddenInternalCount: scan.roots.reduce((total, root) => total + root.hiddenInternalCount, 0),
       malformedCount: scan.roots.reduce((total, root) => total + root.malformedCount, 0),
       unsafeSymlinkCount: scan.roots.reduce((total, root) => total + root.unsafeSymlinkCount, 0),
-      providerCapabilities: this.capabilityDiagnostics(context ?? this.defaultDiagnosticsContext(repoPath)),
+      providerCapabilities: this.capabilityDiagnostics(context),
       lastScanError: scan.lastScanError
     };
   }
@@ -532,6 +560,22 @@ export class UserSkillsService {
       target: {
         participantIds: [],
         providerKinds: ["codex-cli", "claude-code"],
+        hasClearTargets: true
+      },
+      runRootByProvider
+    };
+  }
+
+  private defaultListContext(repoPath?: string): UserSkillRunContext {
+    const runRootByProvider: Partial<Record<ChatProviderKind, string | undefined>> = {
+      "codex-cli": repoPath,
+      "claude-code": repoPath
+    };
+    return {
+      repoPath,
+      target: {
+        participantIds: [],
+        providerKinds: [],
         hasClearTargets: true
       },
       runRootByProvider

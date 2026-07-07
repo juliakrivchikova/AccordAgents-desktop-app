@@ -24,6 +24,7 @@ import type {
   OpenLocalFileRequest,
   PlanDecisionClarificationRequest,
   PlanItemReviewRequest,
+  PluginListRequest,
   ProviderKind,
   ProviderSettingsUpdate,
   ReadChatAttachmentRequest,
@@ -44,7 +45,9 @@ import type {
   UpdateChatParticipantRuntimeRequest,
   RemoveChatParticipantRequest,
   UserSkillDiagnosticsRequest,
-  UserSkillSearchRequest
+  UserSkillListRequest,
+  UserSkillSearchRequest,
+  UserSkillSummary
 } from "../shared/types";
 import { normalizeExternalUrlForOpen } from "../shared/externalLinks";
 import { ChatService } from "./services/chat";
@@ -66,6 +69,7 @@ import { RemoteRunCoordinator } from "./services/remoteRunCoordinator";
 import { LocalFileOpenerService } from "./services/localFileOpener";
 import { SettingsService } from "./services/settings";
 import { StorageService } from "./services/storage";
+import { PluginService } from "./services/plugins";
 import { UserSkillsService } from "./services/userSkills";
 
 let mainWindow: BrowserWindow | undefined;
@@ -88,6 +92,9 @@ void settingsService.getCliAgentRunTimeoutMs()
   });
 const userSkillsService = new UserSkillsService({
   internalSourceRoot: appSkillsSourceRoot()
+});
+const pluginService = new PluginService({
+  userSkills: userSkillsService
 });
 const appSkillsService = new AppSkillsService({
   sourceRoot: appSkillsSourceRoot(),
@@ -406,6 +413,21 @@ function registerIpc(): void {
       conversation?.kind === "chat" ? conversation.repoPath : undefined,
       conversation?.kind === "chat" ? chatService.userSkillRunContext(conversation, "") : undefined
     );
+  });
+  ipcMain.handle("skills:list-all", (_event, request?: UserSkillListRequest) => {
+    return userSkillsService.listAll({
+      repoPath: typeof request?.repoPath === "string" ? request.repoPath : undefined,
+      query: typeof request?.query === "string" ? request.query : undefined,
+      limit: typeof request?.limit === "number" ? request.limit : undefined
+    });
+  });
+  ipcMain.handle("plugins:list", async (_event, request?: PluginListRequest) => {
+    const resolved = await resolvePluginListRequest(request);
+    return pluginService.list(resolved.request, resolved.skills);
+  });
+  ipcMain.handle("plugins:refresh", async (_event, request?: PluginListRequest) => {
+    const resolved = await resolvePluginListRequest(request);
+    return pluginService.refresh(resolved.request, resolved.skills);
   });
   ipcMain.handle("conversations:list", () => storageService.listConversations());
   ipcMain.handle("conversations:get", async (_event, id: string) => {
@@ -804,6 +826,48 @@ function registerIpc(): void {
     const result = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
     return result.canceled ? undefined : result.filePaths[0];
   });
+}
+
+async function resolvePluginListRequest(request?: PluginListRequest): Promise<{
+  request: PluginListRequest;
+  skills?: UserSkillSummary[];
+}> {
+  const conversationId = typeof request?.conversationId === "string" ? request.conversationId : undefined;
+  const query = typeof request?.query === "string" ? request.query : "";
+  const content = typeof request?.content === "string" ? request.content : "";
+  const limit = typeof request?.limit === "number" ? request.limit : undefined;
+  if (conversationId) {
+    const conversation = await storageService.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return {
+        request: { conversationId, query, content, limit },
+        skills: []
+      };
+    }
+    const skills = await userSkillsService.search(
+      { conversationId: conversation.id, query, content, limit: 100 },
+      chatService.userSkillRunContext(conversation, content)
+    );
+    return {
+      request: { conversationId, repoPath: conversation.repoPath, query, content, limit },
+      skills: skills.skills
+    };
+  }
+  const repoPath = typeof request?.repoPath === "string" ? request.repoPath : undefined;
+  const participants = Array.isArray(request?.participants) ? request.participants : undefined;
+  if (participants) {
+    const skills = await userSkillsService.search(
+      { repoPath, participants, query, content, limit: 100 },
+      await chatService.prospectiveUserSkillRunContext({ repoPath, participants, content })
+    );
+    return {
+      request: { repoPath, participants, query, content, limit },
+      skills: skills.skills
+    };
+  }
+  return {
+    request: { repoPath, query, content, limit }
+  };
 }
 
 void app.whenReady().then(async () => {

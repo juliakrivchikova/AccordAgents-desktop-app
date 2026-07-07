@@ -5,6 +5,7 @@ import type {
   ChatParticipantInput,
   ChatSavedPromptConfig,
   ChatSkillMention,
+  PluginCatalogItem,
   RepoFileMention,
   RepoFileSearchResult,
   UserSkillSummary,
@@ -34,8 +35,10 @@ import {
   replaceActiveMention,
   replaceActiveSkillMention,
   replaceActiveSlashToken,
+  type DraftPluginMention,
   skillPickerTargetLabel
 } from "./chat-composer-draft-utils";
+import { isSlashInvocablePlugin } from "./chat-plugin-options";
 
 export type ChatComposerSearchSource =
   | {
@@ -51,6 +54,9 @@ export type ChatComposerSearchSource =
 
 export function useChatComposerMentions(props: {
   draft: string;
+  initialPluginMentions?: DraftPluginMention[];
+  initialSkillMentions?: ChatSkillMention[];
+  mentionSeedKey?: number;
   searchSource: ChatComposerSearchSource;
   onDraftChange: (value: string) => void;
   onMentionInserted?: (participant: ChatParticipant) => void;
@@ -64,6 +70,7 @@ export function useChatComposerMentions(props: {
   insertMention: (participant: ChatParticipant) => void;
   insertSavedPrompt: (prompt: ChatSavedPromptConfig) => void;
   insertSkillMention: (skill: UserSkillSummary) => void;
+  insertPluginMention: (plugin: PluginCatalogItem) => void;
   insertSlashOptionAtIndex: (index: number) => void;
   mentionIndex: number;
   mentionOptions: ChatParticipant[];
@@ -71,12 +78,14 @@ export function useChatComposerMentions(props: {
   removeFileMention: (filePath: string) => void;
   removeSkillMention: (mention: ChatSkillMention) => void;
   selectedFileMentions: RepoFileMention[];
+  selectedPluginMentions: DraftPluginMention[];
   selectedSkillMentions: ChatSkillMention[];
   setFileIndex: React.Dispatch<React.SetStateAction<number>>;
   setFileQuery: React.Dispatch<React.SetStateAction<string | undefined>>;
   setMentionIndex: React.Dispatch<React.SetStateAction<number>>;
   setMentionQuery: React.Dispatch<React.SetStateAction<string | undefined>>;
   setSelectedFileMentions: React.Dispatch<React.SetStateAction<RepoFileMention[]>>;
+  setSelectedPluginMentions: React.Dispatch<React.SetStateAction<DraftPluginMention[]>>;
   setSelectedSkillMentions: React.Dispatch<React.SetStateAction<ChatSkillMention[]>>;
   setSkillIndex: React.Dispatch<React.SetStateAction<number>>;
   setSkillQuery: React.Dispatch<React.SetStateAction<string | undefined>>;
@@ -89,6 +98,7 @@ export function useChatComposerMentions(props: {
   visibleFileOptions: RepoFileSearchResult[];
   visiblePromptOptions: ChatSavedPromptConfig[];
   visibleSkillOptions: UserSkillSummary[];
+  visiblePluginOptions: PluginCatalogItem[];
   visibleSlashOptionCount: number;
 } {
   const [mentionQuery, setMentionQuery] = useState<string | undefined>();
@@ -99,8 +109,10 @@ export function useChatComposerMentions(props: {
   const [skillQuery, setSkillQuery] = useState<string | undefined>();
   const [skillIndex, setSkillIndex] = useState(0);
   const [skillOptions, setSkillOptions] = useState<UserSkillSummary[]>([]);
+  const [pluginOptions, setPluginOptions] = useState<PluginCatalogItem[]>([]);
   const [skillTarget, setSkillTarget] = useState<UserSkillTargetSummary | undefined>();
   const [selectedSkillMentions, setSelectedSkillMentions] = useState<ChatSkillMention[]>([]);
+  const [selectedPluginMentions, setSelectedPluginMentions] = useState<DraftPluginMention[]>([]);
   const [selectedFileMentions, setSelectedFileMentions] = useState<RepoFileMention[]>([]);
   const fileSearchRequestRef = useRef(0);
   const skillSearchRequestRef = useRef(0);
@@ -124,23 +136,28 @@ export function useChatComposerMentions(props: {
     ? []
     : matchingChatSavedPrompts(props.savedPrompts, skillQuery, { includeBody: false });
   const visibleSkillOptions = skillQuery === undefined ? [] : skillOptions;
+  const visiblePluginOptions = skillQuery === undefined ? [] : pluginOptions.filter((plugin) => isSlashInvocablePlugin(plugin, skillTarget));
   const skillTargetLabel = skillTarget ? skillPickerTargetLabel(skillTarget, props.participants) : undefined;
   const compactOption = props.searchSource.type === "conversation" ? compactCommandOption(skillQuery, skillTarget) : undefined;
   const visibleCommandOptions = compactOption ? [compactOption] : [];
   const visibleSlashOptionCount = slashSuggestionCount({
     commands: visibleCommandOptions,
     prompts: visiblePromptOptions,
-    skills: visibleSkillOptions
+    skills: visibleSkillOptions,
+    plugins: visiblePluginOptions
   });
-  const showSkillHighlights = selectedSkillMentions.some((mention) => draftHasSkillMention(props.draft, mention.frontmatterName));
+  const showSkillHighlights = selectedSkillMentions.some((mention) => draftHasSkillMention(props.draft, mention.frontmatterName)) ||
+    selectedPluginMentions.some((mention) => draftHasSkillMention(props.draft, mention.name));
 
   useEffect(() => {
     setFileQuery(undefined);
     setFileOptions([]);
     setSkillQuery(undefined);
     setSkillOptions([]);
+    setPluginOptions([]);
     setSkillTarget(undefined);
     setSelectedSkillMentions([]);
+    setSelectedPluginMentions([]);
     setSelectedFileMentions([]);
   }, [searchResetKey]);
 
@@ -150,7 +167,16 @@ export function useChatComposerMentions(props: {
 
   useEffect(() => {
     setSelectedSkillMentions((current) => current.filter((mention) => draftHasSkillMention(props.draft, mention.frontmatterName)));
+    setSelectedPluginMentions((current) => current.filter((mention) => draftHasSkillMention(props.draft, mention.name)));
   }, [props.draft]);
+
+  useEffect(() => {
+    if (props.mentionSeedKey === undefined) {
+      return;
+    }
+    setSelectedSkillMentions((props.initialSkillMentions ?? []).filter((mention) => draftHasSkillMention(props.draft, mention.frontmatterName)));
+    setSelectedPluginMentions((props.initialPluginMentions ?? []).filter((mention) => draftHasSkillMention(props.draft, mention.name)));
+  }, [props.mentionSeedKey]);
 
   useEffect(() => {
     if (fileQuery === undefined || !fileSearchAvailable) {
@@ -188,6 +214,7 @@ export function useChatComposerMentions(props: {
   useEffect(() => {
     if (skillQuery === undefined || !skillSearchAvailable) {
       setSkillOptions([]);
+      setPluginOptions([]);
       return;
     }
     const requestId = skillSearchRequestRef.current + 1;
@@ -216,7 +243,18 @@ export function useChatComposerMentions(props: {
       }).catch(() => {
         if (skillSearchRequestRef.current === requestId) {
           setSkillOptions([]);
+          setPluginOptions([]);
           setSkillTarget(undefined);
+        }
+      });
+      void window.consensus.listPlugins(request).then((result) => {
+        if (skillSearchRequestRef.current === requestId) {
+          setPluginOptions(result.plugins);
+          setSkillIndex(0);
+        }
+      }).catch(() => {
+        if (skillSearchRequestRef.current === requestId) {
+          setPluginOptions([]);
         }
       });
     }, 200);
@@ -270,6 +308,7 @@ export function useChatComposerMentions(props: {
     });
     setSkillQuery(undefined);
     setSkillOptions([]);
+    setPluginOptions([]);
     setSkillTarget(undefined);
     setSkillIndex(0);
   }
@@ -278,6 +317,7 @@ export function useChatComposerMentions(props: {
     updateDraftWithCaret(replaceActiveSlashToken(props.draft, prompt.body));
     setSkillQuery(undefined);
     setSkillOptions([]);
+    setPluginOptions([]);
     setSkillTarget(undefined);
     setSkillIndex(0);
   }
@@ -286,6 +326,35 @@ export function useChatComposerMentions(props: {
     updateDraftWithCaret(replaceActiveSkillMention(props.draft, "compact"));
     setSkillQuery(undefined);
     setSkillOptions([]);
+    setPluginOptions([]);
+    setSkillTarget(undefined);
+    setSkillIndex(0);
+  }
+
+  function insertPluginMention(plugin: PluginCatalogItem): void {
+    const invocation = plugin.invocation;
+    if (invocation.kind === "skill-mention") {
+      insertSkillMention(invocation.skill);
+      return;
+    }
+    const insertPluginToken = invocation.kind === "mcp-passive" || plugin.installedProviderKinds.length > 0;
+    if (insertPluginToken) {
+      const prompt = invocation.kind === "prompt-insert" ? invocation.prompt.trim() : "";
+      updateDraftWithCaret(prompt
+        ? replaceActiveSlashToken(props.draft, `/${plugin.name} ${prompt}`)
+        : replaceActiveSkillMention(props.draft, plugin.name));
+      setSelectedPluginMentions((current) => {
+        if (current.some((mention) => mention.name === plugin.name)) {
+          return current;
+        }
+        return [...current, { name: plugin.name, displayName: plugin.displayName, iconUrl: plugin.iconUrl }];
+      });
+    } else if (invocation.kind === "prompt-insert") {
+      updateDraftWithCaret(replaceActiveSlashToken(props.draft, invocation.prompt));
+    }
+    setSkillQuery(undefined);
+    setSkillOptions([]);
+    setPluginOptions([]);
     setSkillTarget(undefined);
     setSkillIndex(0);
   }
@@ -294,7 +363,8 @@ export function useChatComposerMentions(props: {
     const selection = slashSuggestionAtIndex({
       commands: visibleCommandOptions,
       prompts: visiblePromptOptions,
-      skills: visibleSkillOptions
+      skills: visibleSkillOptions,
+      plugins: visiblePluginOptions
     }, index);
     if (!selection) {
       return;
@@ -303,8 +373,10 @@ export function useChatComposerMentions(props: {
       insertCompactCommand();
     } else if (selection.kind === "prompt") {
       insertSavedPrompt(selection.item);
-    } else {
+    } else if (selection.kind === "skill") {
       insertSkillMention(selection.item);
+    } else {
+      insertPluginMention(selection.item);
     }
   }
 
@@ -326,6 +398,7 @@ export function useChatComposerMentions(props: {
     insertMention,
     insertSavedPrompt,
     insertSkillMention,
+    insertPluginMention,
     insertSlashOptionAtIndex,
     mentionIndex,
     mentionOptions,
@@ -333,12 +406,14 @@ export function useChatComposerMentions(props: {
     removeFileMention,
     removeSkillMention,
     selectedFileMentions,
+    selectedPluginMentions,
     selectedSkillMentions,
     setFileIndex,
     setFileQuery,
     setMentionIndex,
     setMentionQuery,
     setSelectedFileMentions,
+    setSelectedPluginMentions,
     setSelectedSkillMentions,
     setSkillIndex,
     setSkillQuery,
@@ -351,6 +426,7 @@ export function useChatComposerMentions(props: {
     visibleFileOptions,
     visiblePromptOptions,
     visibleSkillOptions,
+    visiblePluginOptions,
     visibleSlashOptionCount
   };
 }

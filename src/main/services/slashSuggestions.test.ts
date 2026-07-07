@@ -7,22 +7,25 @@ import {
 } from "../../shared/slashSuggestions";
 import type { ChatSavedPromptConfig } from "../../shared/types";
 
-test("slashSuggestionAtIndex uses command, prompt, skill ordering", () => {
+test("slashSuggestionAtIndex uses command, prompt, skill, plugin ordering", () => {
   const command = { id: "compact", label: "Compact", description: "Summarize context" };
   const prompt = { id: "prompt-1", trigger: "bug", label: "Bug report" };
   const skill = { skillId: "skill-1", displayName: "Office hours" };
+  const plugin = { id: "plugin-1", displayName: "GitHub" };
   const groups = {
     commands: [command],
     prompts: [prompt],
-    skills: [skill]
+    skills: [skill],
+    plugins: [plugin]
   };
 
-  assert.equal(slashSuggestionCount(groups), 3);
+  assert.equal(slashSuggestionCount(groups), 4);
   assert.deepEqual(slashSuggestionAtIndex(groups, 0), { kind: "command", item: command });
   assert.deepEqual(slashSuggestionAtIndex(groups, 1), { kind: "prompt", item: prompt });
   assert.deepEqual(slashSuggestionAtIndex(groups, 2), { kind: "skill", item: skill });
+  assert.deepEqual(slashSuggestionAtIndex(groups, 3), { kind: "plugin", item: plugin });
   assert.equal(slashSuggestionAtIndex(groups, -1), undefined);
-  assert.equal(slashSuggestionAtIndex(groups, 3), undefined);
+  assert.equal(slashSuggestionAtIndex(groups, 4), undefined);
 });
 
 test("matchingChatSavedPrompts ranks exact and prefix trigger matches before broad trigger or label matches", () => {

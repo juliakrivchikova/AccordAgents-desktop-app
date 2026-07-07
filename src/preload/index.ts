@@ -24,6 +24,7 @@ import type {
   OpenLocalFileRequest,
   PlanDecisionClarificationRequest,
   PlanItemReviewRequest,
+  PluginListRequest,
   ProviderSettingsUpdate,
   ReadChatAttachmentRequest,
   RenameChatConversationRequest,
@@ -45,6 +46,7 @@ import type {
   UpdateChatParticipantRuntimeRequest,
   RemoveChatParticipantRequest,
   UserSkillDiagnosticsRequest,
+  UserSkillListRequest,
   UserSkillSearchRequest
 } from "../shared/types";
 
@@ -101,6 +103,9 @@ const bridge: AppBridge = {
   searchRepoFiles: (request: RepoFileSearchRequest) => ipcRenderer.invoke("git:search-repo-files", request),
   searchUserSkills: (request: UserSkillSearchRequest) => ipcRenderer.invoke("skills:search", request),
   getUserSkillDiagnostics: (request?: UserSkillDiagnosticsRequest) => ipcRenderer.invoke("skills:diagnostics", request),
+  listUserSkills: (request?: UserSkillListRequest) => ipcRenderer.invoke("skills:list-all", request),
+  listPlugins: (request?: PluginListRequest) => ipcRenderer.invoke("plugins:list", request),
+  refreshPlugins: (request?: PluginListRequest) => ipcRenderer.invoke("plugins:refresh", request),
   listConversations: () => ipcRenderer.invoke("conversations:list"),
   getConversation: (id: string) => ipcRenderer.invoke("conversations:get", id),
   openConversation: (id: string, limit?: number) => ipcRenderer.invoke("conversations:open", id, limit),
