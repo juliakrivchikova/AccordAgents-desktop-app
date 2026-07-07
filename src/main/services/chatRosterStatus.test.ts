@@ -93,6 +93,48 @@ test("chat roster status preserves compacting for compaction run ids", () => {
   assert.equal(statuses.get(participant.id), "compacting");
 });
 
+test("chat roster status keeps compacting ahead of pending participant run fallback", () => {
+  const statuses = buildChatParticipantStatusMap(conversation({
+    running: true,
+    runId: "compact-run",
+    activeRunIds: ["compact-run"],
+    participantCompactionsByParticipantId: {
+      [participant.id]: {
+        runId: "compact-run",
+        startedAt: NOW
+      }
+    }
+  }, [
+    participantMessage("pending-compact-reply", {
+      status: "pending",
+      metadata: { runId: "compact-run" }
+    })
+  ]));
+
+  assert.equal(statuses.get(participant.id), "compacting");
+});
+
+test("chat roster status trims pending run ids before preserving compacting", () => {
+  const statuses = buildChatParticipantStatusMap(conversation({
+    running: true,
+    runId: "compact-run",
+    activeRunIds: ["compact-run"],
+    participantCompactionsByParticipantId: {
+      [participant.id]: {
+        runId: "compact-run",
+        startedAt: NOW
+      }
+    }
+  }, [
+    participantMessage("pending-padded-compact-reply", {
+      status: "pending",
+      metadata: { runId: " compact-run " }
+    })
+  ]));
+
+  assert.equal(statuses.get(participant.id), "compacting");
+});
+
 test("chat roster status ignores stale attribution without a live run id", () => {
   const statuses = buildChatParticipantStatusMap(conversation({
     activeRunParticipantIdsByRunId: {
@@ -101,6 +143,30 @@ test("chat roster status ignores stale attribution without a live run id", () =>
   }));
 
   assert.equal(statuses.get(participant.id), undefined);
+});
+
+test("chat roster status marks pending participant messages as running without active run metadata", () => {
+  const statuses = buildChatParticipantStatusMap(conversation({}, [
+    participantMessage("pending-reply", {
+      status: "pending",
+      metadata: { runId: "pending-run" }
+    })
+  ]));
+
+  assert.equal(statuses.get(participant.id), "running");
+});
+
+test("chat roster status ignores pending participant messages without a concrete run id", () => {
+  for (const [index, runId] of ["", "   "].entries()) {
+    const statuses = buildChatParticipantStatusMap(conversation({}, [
+      participantMessage(`pending-reply-${index}`, {
+        status: "pending",
+        metadata: { runId }
+      })
+    ]));
+
+    assert.equal(statuses.get(participant.id), undefined, JSON.stringify(runId));
+  }
 });
 
 test("chat roster status keeps pending bubble fallback for old run metadata", () => {

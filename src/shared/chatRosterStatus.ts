@@ -81,13 +81,12 @@ export function buildChatParticipantStatusMap(activeChatConversation: Conversati
         setStatus(message.participantId, "pending");
       }
     }
-    const runId = message.metadata?.runId;
+    const runId = typeof message.metadata?.runId === "string" ? message.metadata.runId.trim() : "";
     if (
       message.role === "participant" &&
       message.status === "pending" &&
       message.participantId &&
-      typeof runId === "string" &&
-      liveRunIds.has(runId) &&
+      runId &&
       !compactingRunIds.has(runId)
     ) {
       setStatus(message.participantId, "running");
