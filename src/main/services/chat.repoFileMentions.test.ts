@@ -1624,7 +1624,7 @@ test("participantRequestStatusForTool preserves running request owned by another
   assert.equal(batch?.items[0]?.status, "running");
 });
 
-test("superseded participant turn closes older pending interactions for that participant", () => {
+test("superseded participant turn preserves older pending choices while closing other pending interactions", () => {
   const requester = chatParticipant();
   const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
   const conversation = chatConversation([requester, target], "/repo");
@@ -1652,10 +1652,121 @@ test("superseded participant turn closes older pending interactions for that par
 
   (service as any).resolveSupersededParticipantInteractions(conversation, requester.id);
 
-  assert.equal(choiceMessage.metadata?.pendingChoice?.status, "cancelled");
+  assert.equal(choiceMessage.metadata?.pendingChoice?.status, "pending");
+  assert.equal(choiceMessage.metadata?.pendingChoice?.cancelledAt, undefined);
   assert.equal(choiceMessage.metadata?.pendingMentions?.[0]?.status, "rejected");
   assert.equal(requestMessage.metadata?.participantRequest?.status, "interrupted");
   assert.equal(requestMessage.metadata?.participantRequest?.items[0]?.status, "interrupted");
+});
+
+test("respondToChoice succeeds after an intervening same-participant turn", async () => {
+  const requester = chatParticipant();
+  const conversation = chatConversation([requester], "/repo");
+  const choiceMessage = participantMessage(requester, "choice-message", "Push approval needed.");
+  choiceMessage.metadata = {
+    ...choiceMessage.metadata,
+    pendingChoice: {
+      id: "choice-1",
+      title: "Push Approval",
+      question: "Push to origin/main?",
+      options: [{ id: "approve", label: "Approve push" }, { id: "hold", label: "Hold" }],
+      status: "pending"
+    }
+  };
+  const laterMessage = participantMessage(requester, "later-message", "");
+  laterMessage.status = "pending";
+  laterMessage.metadata = {
+    ...laterMessage.metadata,
+    runId: "later-run"
+  };
+  conversation.messages.push(choiceMessage, laterMessage);
+  const { service, storage } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+  let routedParticipantId = "";
+  let choiceTriggerMessage: ChatMessage | undefined;
+  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  serviceAny.runParticipantTurnSerialized = async (
+    _conversation: Conversation,
+    participant: ChatParticipant,
+    triggerMessage: ChatMessage
+  ) => {
+    routedParticipantId = participant.id;
+    choiceTriggerMessage = triggerMessage;
+    return [participantMessage(requester, "choice-reply", "Push approval handled.")];
+  };
+
+  serviceAny.resolveSupersededParticipantInteractions(conversation, requester.id, laterMessage.id);
+  assert.equal(choiceMessage.metadata?.pendingChoice?.status, "pending");
+
+  await service.respondToChoice({
+    conversationId: conversation.id,
+    runId: "choice-run",
+    sourceMessageId: choiceMessage.id,
+    choiceId: "choice-1",
+    selectedOptionId: "approve"
+  });
+
+  await waitFor(async () => {
+    const saved = await storage.getConversation(conversation.id);
+    return saved?.messages.some((message) => message.content === "Push approval handled.") === true;
+  });
+
+  const saved = await storage.getConversation(conversation.id);
+  const savedChoice = saved?.messages.find((message) => message.id === choiceMessage.id)?.metadata?.pendingChoice;
+  const savedSelectionMessage = saved?.messages.find((message) =>
+    message.role === "user" &&
+    message.metadata?.sourceMessageId === choiceMessage.id
+  );
+  assert.equal(savedChoice?.status, "selected");
+  assert.equal(savedChoice?.selectedOptionId, "approve");
+  assert.equal(routedParticipantId, requester.id);
+  assert.ok(savedSelectionMessage);
+  assert.ok(choiceTriggerMessage);
+  assert.equal(choiceTriggerMessage.id, savedSelectionMessage.id);
+  assert.equal(choiceTriggerMessage.metadata?.hiddenFromTimeline, true);
+  assert.match(choiceTriggerMessage.content, /Choice: Push Approval/);
+  assert.match(choiceTriggerMessage.content, /Selected option: Approve push/);
+});
+
+test("stopping a later same-participant run leaves older pending choice answerable", async () => {
+  const requester = chatParticipant();
+  const conversation = chatConversation([requester], "/repo");
+  const choiceMessage = participantMessage(requester, "choice-message", "Push approval needed.");
+  choiceMessage.metadata = {
+    ...choiceMessage.metadata,
+    pendingChoice: {
+      id: "choice-1",
+      title: "Push Approval",
+      question: "Push to origin/main?",
+      options: [{ id: "approve", label: "Approve push" }, { id: "hold", label: "Hold" }],
+      status: "pending"
+    }
+  };
+  const laterMessage = participantMessage(requester, "later-message", "");
+  laterMessage.status = "pending";
+  laterMessage.metadata = {
+    ...laterMessage.metadata,
+    runId: "later-run"
+  };
+  conversation.messages.push(choiceMessage, laterMessage);
+  const { service, storage } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+
+  serviceAny.resolveSupersededParticipantInteractions(conversation, requester.id, laterMessage.id);
+  await serviceAny.discardStoppedTargetRun(conversation, "later-run", requester, laterMessage.id);
+
+  const saved = await storage.getConversation(conversation.id);
+  const savedChoice = saved?.messages.find((message) => message.id === choiceMessage.id)?.metadata?.pendingChoice;
+  assert.equal(savedChoice?.status, "pending");
+  assert.equal(savedChoice?.cancelledAt, undefined);
+  assert.equal(saved?.messages.some((message) => message.id === laterMessage.id), false);
+});
+
+test("resolveSupersededParticipantInteractions does not reference pendingChoice", async () => {
+  const source = await readFile(path.join(process.cwd(), "src/main/services/chat.ts"), "utf8");
+  const method = source.match(/private resolveSupersededParticipantInteractions\([\s\S]*?\n  private markPendingAppToolApprovalsForRunTerminal/);
+  assert.ok(method);
+  assert.equal(method?.[0].includes("pendingChoice"), false);
 });
 
 test("stale chat metadata merge cannot resurrect terminal pending states", () => {

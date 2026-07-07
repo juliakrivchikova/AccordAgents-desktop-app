@@ -10951,18 +10951,6 @@ export class ChatService {
       }
       let metadata = message.metadata;
       if (message.participantId === participantId) {
-        const choice = metadata.pendingChoice;
-        if (choice?.status === "pending") {
-          metadata = {
-            ...metadata,
-            pendingChoice: {
-              ...choice,
-              status: "cancelled",
-              cancelledAt: now
-            }
-          };
-          changed = true;
-        }
         if (metadata.pendingMentions?.some((mention) => mention.status === "pending")) {
           metadata = {
             ...metadata,
