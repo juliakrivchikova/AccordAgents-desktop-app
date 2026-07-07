@@ -21,6 +21,9 @@ step yourself.
 - For accord steps, an in-progress accord is not a wrong reply. If the facilitator says accord is still running, pending,
   or waiting on another participant, wait for completion instead of treating it as failure.
 - If interrupted or resumed, read the latest chat context and continue from the last completed stage.
+- At the end of the workflow, the final user-facing closeout must be a short status posted at the end of the main
+  timeline, not only inside a nested thread. If the current reply would stay inside a workflow/participant-request
+  thread, post a separate main-timeline closeout with the app-managed send-message tool when available.
 
 ## Workflow
 
@@ -166,7 +169,18 @@ chosen `patch`, `minor`, or `major`, ask before assigning the release. Then ask 
 
 ### 11. Report Status
 
-When Drew finishes the final step, report the status to the user.
+When Drew finishes the final step, report the status to the user as a short main-timeline closeout.
+
+Include:
+
+- Final outcome and landed artifact, such as commit, branch, PR, release, or app instance details.
+- A short summary of what was implemented.
+- Key verification results.
+- Implicit decisions made while working, especially choices not explicitly selected by the user but agreed during
+  planning, accord, implementation, review, or fixes.
+- Any residual risk or follow-up that remains.
+
+Keep this closeout concise. Do not bury it only in the final workflow thread.
 
 ## Failure Handling
 
