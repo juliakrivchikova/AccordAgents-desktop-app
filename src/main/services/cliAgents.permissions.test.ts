@@ -536,6 +536,11 @@ function chatOptions(overrides: {
   };
 }
 
+function claudeAllowedToolsFromArgs(args: string[]): string[] {
+  const index = args.indexOf("--allowedTools");
+  return index >= 0 ? (args[index + 1] ?? "").split(",").filter(Boolean) : [];
+}
+
 test("claudeToolConfig maps default + workspaceWrite=true to acceptEdits", () => {
   const runner = makeRunner() as any;
   const config = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
@@ -727,20 +732,101 @@ test("claude default chat delegates unmatched tool approvals to app_tool_permiss
   ]);
 });
 
-test("claude auto chat does not pass allowedTools so native auto owns decisions", () => {
+test("claude auto chat passes only read-context app MCP allowedTools", () => {
   const runner = makeRunner() as any;
+  const readContextTools = [
+    "mcp__accord_agents__app_chat_get_context",
+    "mcp__accord_agents__app_chat_get_participants",
+    "mcp__accord_agents__app_chat_get_participant_request_status",
+    "mcp__accord_agents__app_chat_read_messages",
+    "mcp__accord_agents__app_chat_list_attachments",
+    "mcp__accord_agents__app_chat_read_attachment"
+  ];
   const options = chatOptions({
     agentMode: "auto",
     workspaceWrite: false,
     webAccess: true,
     canRequestPermissions: true,
-    appToolNames: ["app_permissions_request_change", "app_tool_permission"]
+    appToolNames: [
+      "app_chat_get_context",
+      "app_chat_get_participants",
+      "app_chat_get_participant_request_status",
+      "app_chat_read_messages",
+      "app_chat_list_attachments",
+      "app_chat_read_attachment",
+      "app_chat_export_attachment",
+      "app_chat_react",
+      "app_chat_send_message",
+      "app_chat_set_title",
+      "app_permissions_request_change",
+      "app_tool_permission"
+    ]
+  });
+  const config = runner.claudeToolConfig("chat", "/repo", [], options);
+  const args = runner.claudeAllowedToolsArgs("chat", options, config);
+  const allowedTools = claudeAllowedToolsFromArgs(args);
+
+  assert.equal(config.allowedTools.length > 0, true);
+  assert.deepEqual(args.slice(0, 1), ["--allowedTools"]);
+  assert.deepEqual(allowedTools, readContextTools);
+  for (const tool of [
+    "mcp__accord_agents__app_chat_export_attachment",
+    "mcp__accord_agents__app_chat_react",
+    "mcp__accord_agents__app_chat_send_message",
+    "mcp__accord_agents__app_chat_set_title",
+    "mcp__accord_agents__app_permissions_request_change",
+    "mcp__accord_agents__app_tool_permission",
+    "Bash",
+    "Edit",
+    "Write",
+    "NotebookEdit",
+    "WebSearch",
+    "WebFetch"
+  ]) {
+    assert.equal(allowedTools.includes(tool), false, `${tool} should not be auto-allowed`);
+  }
+  assert.deepEqual(runner.claudePermissionPromptArgs("chat", options), []);
+});
+
+test("claude auto chat without app MCP still omits allowedTools", () => {
+  const runner = makeRunner() as any;
+  const options = chatOptions({
+    agentMode: "auto",
+    workspaceWrite: false,
+    webAccess: true
   });
   const config = runner.claudeToolConfig("chat", "/repo", [], options);
 
   assert.equal(config.allowedTools.length > 0, true);
   assert.deepEqual(runner.claudeAllowedToolsArgs("chat", options, config), []);
-  assert.deepEqual(runner.claudePermissionPromptArgs("chat", options), []);
+});
+
+test("claude default and plan chats keep full app MCP allowedTools", () => {
+  const runner = makeRunner() as any;
+  for (const agentMode of ["default", "plan"] as const) {
+    const options = chatOptions({
+      agentMode,
+      workspaceWrite: false,
+      canRequestPermissions: true,
+      appToolNames: [
+        "app_chat_list_attachments",
+        "app_chat_read_attachment",
+        "app_chat_export_attachment",
+        "app_permissions_request_change"
+      ]
+    });
+    const config = runner.claudeToolConfig("chat", "/repo", [], options);
+    const allowedTools = claudeAllowedToolsFromArgs(runner.claudeAllowedToolsArgs("chat", options, config));
+
+    for (const tool of [
+      "mcp__accord_agents__app_chat_list_attachments",
+      "mcp__accord_agents__app_chat_read_attachment",
+      "mcp__accord_agents__app_chat_export_attachment",
+      "mcp__accord_agents__app_permissions_request_change"
+    ]) {
+      assert.equal(allowedTools.includes(tool), true, `${agentMode} should keep ${tool}`);
+    }
+  }
 });
 
 test("claude default chat still hard-denies off-toggle capabilities via disallowedTools", () => {

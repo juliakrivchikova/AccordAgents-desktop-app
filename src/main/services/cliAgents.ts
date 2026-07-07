@@ -65,6 +65,14 @@ const CODEX_AUTO_APPROVALS_REVIEWER = "guardian_subagent";
 const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 const APP_TOOL_PERMISSION_TOOL = "app_tool_permission";
 const APP_TOOL_PERMISSION_MCP_TOOL = `mcp__accord_agents__${APP_TOOL_PERMISSION_TOOL}`;
+const CLAUDE_AUTO_READ_CONTEXT_APP_MCP_TOOLS = [
+  "app_chat_get_context",
+  "app_chat_get_participants",
+  "app_chat_get_participant_request_status",
+  "app_chat_read_messages",
+  "app_chat_list_attachments",
+  "app_chat_read_attachment"
+];
 
 export interface CliAgentRunOptions {
   persistSession?: boolean;
@@ -2846,9 +2854,22 @@ export class CliAgentRunner {
   }
 
   private claudeAllowedToolsArgs(kind: ConversationKind, options: CliAgentRunOptions, toolConfig: ClaudeToolConfig): string[] {
-    return this.shouldPassClaudeAllowedTools(kind, options) && toolConfig.allowedTools.length > 0
-      ? ["--allowedTools", toolConfig.allowedTools.join(",")]
-      : [];
+    const allowedTools = this.shouldPassClaudeAllowedTools(kind, options)
+      ? toolConfig.allowedTools
+      : this.claudeAutoAllowedAppMcpTools(kind, options, toolConfig);
+    return allowedTools.length > 0 ? ["--allowedTools", allowedTools.join(",")] : [];
+  }
+
+  private claudeAutoAllowedAppMcpTools(kind: ConversationKind, options: CliAgentRunOptions, toolConfig: ClaudeToolConfig): string[] {
+    if (kind !== "chat" || this.agentModeForRun(kind, options) !== "auto") {
+      return [];
+    }
+    const exposedAppTools = new Set(options.appMcp?.toolNames ?? []);
+    const configuredAllowedTools = new Set(toolConfig.allowedTools);
+    return CLAUDE_AUTO_READ_CONTEXT_APP_MCP_TOOLS
+      .filter((toolName) => exposedAppTools.has(toolName))
+      .map((toolName) => `mcp__accord_agents__${toolName}`)
+      .filter((toolName) => configuredAllowedTools.has(toolName));
   }
 
   private claudeMcpArgs(kind: ConversationKind, options: CliAgentRunOptions): string[] {

@@ -6,6 +6,8 @@ import test from "node:test";
 import {
   APP_CHAT_EXPORT_ATTACHMENT_TOOL,
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
+  APP_CHAT_LIST_ATTACHMENTS_TOOL,
+  APP_CHAT_READ_ATTACHMENT_TOOL,
   APP_CHAT_REACT_TOOL,
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_CHAT_SET_TITLE_TOOL,
@@ -6328,7 +6330,7 @@ test("a declined late result does not spawn an implicit participant request", as
   assert.equal(conversation.messages.some((message: any) => message.metadata?.participantRequest), false);
 });
 
-test("app MCP advertises app_chat_react to chat participants", () => {
+test("app MCP advertises attachment and reaction tools to chat participants", () => {
   const appMcp = new AppMcpService();
   const tools = (appMcp as any).toolsForActor({
     conversationId: "conversation-1",
@@ -6336,11 +6338,24 @@ test("app MCP advertises app_chat_react to chat participants", () => {
     roleConfigId: ROLE.id,
     roleConfigVersion: ROLE.version,
     capabilities: []
-  }) as Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> }; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean } }>;
+  }) as Array<{ name: string; inputSchema?: { properties?: Record<string, unknown>; required?: string[] }; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean } }>;
+  const listTool = tools.find((tool) => tool.name === APP_CHAT_LIST_ATTACHMENTS_TOOL);
+  const readTool = tools.find((tool) => tool.name === APP_CHAT_READ_ATTACHMENT_TOOL);
   const reactionTool = tools.find((tool) => tool.name === APP_CHAT_REACT_TOOL);
   const exportTool = tools.find((tool) => tool.name === APP_CHAT_EXPORT_ATTACHMENT_TOOL);
   const titleTool = tools.find((tool) => tool.name === APP_CHAT_SET_TITLE_TOOL);
 
+  assert.ok(listTool);
+  assert.equal(listTool.annotations?.readOnlyHint, true);
+  assert.equal(listTool.annotations?.destructiveHint, false);
+  assert.ok(listTool.inputSchema?.properties?.messageId);
+  assert.ok(listTool.inputSchema?.properties?.threadId);
+  assert.ok(listTool.inputSchema?.properties?.limit);
+  assert.ok(readTool);
+  assert.equal(readTool.annotations?.readOnlyHint, true);
+  assert.equal(readTool.annotations?.destructiveHint, false);
+  assert.ok(readTool.inputSchema?.properties?.attachmentId);
+  assert.deepEqual(readTool.inputSchema?.required, ["attachmentId"]);
   assert.ok(reactionTool);
   assert.ok(reactionTool.inputSchema?.properties?.messageId);
   assert.ok(reactionTool.inputSchema?.properties?.emoji);
@@ -6361,6 +6376,8 @@ test("appMcpToolNames exposes participant request only with participants.request
   const requestTools = (service as any).appMcpToolNames(["participants.request"]);
 
   assert.equal(defaultTools.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL), false);
+  assert.ok(defaultTools.includes(APP_CHAT_LIST_ATTACHMENTS_TOOL));
+  assert.ok(defaultTools.includes(APP_CHAT_READ_ATTACHMENT_TOOL));
   assert.ok(defaultTools.includes(APP_CHAT_SET_TITLE_TOOL));
   assert.ok(defaultTools.includes(APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL));
   assert.ok(requestTools.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL));
