@@ -7541,11 +7541,38 @@ export class ChatService {
 
   private autoWatchMessagesAfterCursor(conversation: Conversation, participantId: string, cursor?: string): ChatMessage[] {
     const messages = this.autoWatchStableMessages(conversation, participantId);
-    if (!cursor) {
-      return messages;
+    const afterCursor = (() => {
+      if (!cursor) {
+        return messages;
+      }
+      const index = messages.findIndex((message) => message.id === cursor);
+      return index >= 0 ? messages.slice(index + 1) : messages;
+    })();
+    const handledReplyIds = this.autoWatchHandledParticipantRequestReplyIds(conversation, participantId);
+    if (handledReplyIds.size === 0) {
+      return afterCursor;
     }
-    const index = messages.findIndex((message) => message.id === cursor);
-    return index >= 0 ? messages.slice(index + 1) : messages;
+    return afterCursor.filter((message) => !handledReplyIds.has(message.id));
+  }
+
+  private autoWatchHandledParticipantRequestReplyIds(conversation: Conversation, participantId: string): Set<string> {
+    const ids = new Set<string>();
+    for (const { batch } of this.participantRequestMessages(conversation)) {
+      if (
+        batch.requesterParticipantId !== participantId ||
+        batch.resumeRequester !== true ||
+        !batch.autoResumeMessageId
+      ) {
+        continue;
+      }
+      for (const item of batch.items) {
+        const replyMessageId = typeof item.replyMessageId === "string" ? item.replyMessageId.trim() : "";
+        if (replyMessageId) {
+          ids.add(replyMessageId);
+        }
+      }
+    }
+    return ids;
   }
 
   private autoWatchTriggerContent(participant: ChatParticipant, messages: ChatMessage[]): string {
