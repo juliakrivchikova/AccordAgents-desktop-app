@@ -1,4 +1,5 @@
 import type { Conversation, ConversationSummary } from "../../shared/types";
+import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
 import type { ProjectSessionGroup } from "../components/shell";
 import { NO_PROJECT_GROUP_KEY } from "./constants";
 
@@ -79,6 +80,9 @@ function summaryFromConversation(conversation: Conversation): ConversationSummar
   const activeRunIds = conversation.metadata?.activeRunIds;
   const hasActiveRuns = Array.isArray(activeRunIds) && activeRunIds.length > 0;
   const running = Boolean(hasActiveRuns || conversation.metadata?.running);
+  const chatParticipants = conversation.kind === "chat"
+    ? normalizeConversationSummaryChatParticipants(conversation.metadata?.participants)
+    : undefined;
   return {
     id: conversation.id,
     title: conversation.title,
@@ -87,6 +91,7 @@ function summaryFromConversation(conversation: Conversation): ConversationSummar
     updatedAt: conversation.updatedAt,
     repoPath: conversation.repoPath,
     running,
-    archived: conversation.metadata?.archived === true
+    archived: conversation.metadata?.archived === true,
+    ...(chatParticipants ? { chatParticipants } : {})
   };
 }

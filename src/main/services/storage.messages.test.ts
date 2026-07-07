@@ -100,6 +100,47 @@ test("listConversations normalizes the archived flag from json_extract values", 
   );
 });
 
+test("listConversations includes normalized chat participant refs", async () => {
+  const storage = fakeStorage(async (sql) => {
+    if (sql.includes("from conversations") && sql.includes("metadata.participants")) {
+      return [
+        {
+          id: "chat",
+          title: "Chat",
+          kind: "chat",
+          createdAt: "",
+          updatedAt: "",
+          archived: 0,
+          chatParticipantsJson: JSON.stringify([
+            { participantConfigId: " saved-drew ", handle: "@drew-codex-engineer", kind: "codex-cli", ignored: true },
+            { handle: "taylor-claude-engineer", kind: "claude-code" },
+            { participantConfigId: "invalid", handle: "", kind: "codex-cli" },
+            { participantConfigId: "invalid-kind", handle: "jamie", kind: "openai" }
+          ])
+        },
+        {
+          id: "plan",
+          title: "Plan",
+          kind: "implementation-plan",
+          createdAt: "",
+          updatedAt: "",
+          archived: 0,
+          chatParticipantsJson: JSON.stringify([{ participantConfigId: "ignored", handle: "ignored", kind: "codex-cli" }])
+        }
+      ];
+    }
+    throw new Error(`Unexpected query: ${sql}`);
+  });
+
+  const summaries = await storage.listConversations();
+
+  assert.deepEqual(summaries[0].chatParticipants, [
+    { participantConfigId: "saved-drew", handle: "drew-codex-engineer", kind: "codex-cli" },
+    { handle: "taylor-claude-engineer", kind: "claude-code" }
+  ]);
+  assert.equal(summaries[1].chatParticipants, undefined);
+});
+
 test("listConversationMessages returns an empty page when target message id is missing", async () => {
   const storage = fakeStorage(async (sql) => {
     if (sql.includes("select sequence") && sql.includes("message_id")) {

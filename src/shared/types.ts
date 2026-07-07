@@ -1470,6 +1470,13 @@ export interface ConversationSummary {
   repoPath?: string;
   running?: boolean;
   archived?: boolean;
+  chatParticipants?: ConversationSummaryChatParticipant[];
+}
+
+export interface ConversationSummaryChatParticipant {
+  participantConfigId?: string;
+  handle: string;
+  kind: ChatProviderKind;
 }
 
 export interface ChatParticipantCompactionState {

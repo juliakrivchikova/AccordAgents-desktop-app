@@ -265,6 +265,7 @@ function App(): JSX.Element {
                 selectedParticipantIds={state.selectedChatParticipantConfigIds}
                 selectedParticipantRunLocations={state.selectedChatParticipantRunLocations}
                 settings={state.settings}
+                summaries={state.summaries}
                 agents={state.agents}
                 busy={state.busy}
                 renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}

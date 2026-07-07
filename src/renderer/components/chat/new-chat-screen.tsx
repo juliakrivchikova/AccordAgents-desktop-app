@@ -27,6 +27,7 @@ import type {
   ChatImageInput,
   ChatParticipant,
   ChatParticipantConfig,
+  ConversationSummary,
   CloudRunRemoteExecutionMode,
   ChatProviderKind,
   ChatSkillMention,
@@ -56,6 +57,7 @@ import {
   useChatComposerImages
 } from "./use-chat-composer-images";
 import { useChatComposerMentions } from "./use-chat-composer-mentions";
+import { sortSavedParticipantOptionsByUsage } from "./new-chat-participant-usage";
 import {
   CHAT_ASSISTANT_DISPLAY_NAME,
   CHAT_ASSISTANT_HANDLE,
@@ -76,6 +78,7 @@ export function NewChatScreen(props: {
   selectedParticipantIds: Set<string>;
   selectedParticipantRunLocations: Record<string, CloudRunRemoteExecutionMode>;
   settings: AppSettings;
+  summaries: ConversationSummary[];
   agents: AgentHealth[];
   busy: boolean;
   renderParticipantAvatar: (participant: ChatParticipant) => ReactNode;
@@ -98,9 +101,12 @@ export function NewChatScreen(props: {
     [props.agents, props.settings.providers]
   );
   const savedParticipantOptions = useMemo(
-    () => addableSavedParticipantConfigs(props.settings, props.agents, new Set())
-      .filter(({ config }) => !isChatAssistantParticipant(config)),
-    [props.agents, props.settings]
+    () => sortSavedParticipantOptionsByUsage(
+      addableSavedParticipantConfigs(props.settings, props.agents, new Set())
+        .filter(({ config }) => !isChatAssistantParticipant(config)),
+      props.summaries
+    ),
+    [props.agents, props.settings, props.summaries]
   );
   const mentionParticipants = useMemo<ChatParticipant[]>(
     () => [

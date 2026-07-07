@@ -13,6 +13,7 @@ import type {
 } from "../../shared/types";
 import { clearChatRunMetadata, clearParticipantCompactions, readParticipantCompactions } from "../../shared/chatRunState";
 import { normalizeInferredParticipantRequestThreads as normalizeInferredParticipantRequestThreadMetadata } from "../../shared/chatParticipantRequestThreads";
+import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
 import { sanitizeConversationWarnings } from "../../shared/warnings";
 
 const DEFAULT_MESSAGE_PAGE_LIMIT = 80;
@@ -148,6 +149,7 @@ export class StorageService {
       running?: number | string | boolean | null;
       archived?: number | string | boolean | null;
       activeRunIdsCount?: number | string | null;
+      chatParticipantsJson?: string | null;
     }>(
       `select
          id,
@@ -158,7 +160,8 @@ export class StorageService {
          repo_path as repoPath,
          json_extract(payload_json, '$.metadata.running') as running,
          json_extract(payload_json, '$.metadata.archived') as archived,
-         coalesce(json_array_length(payload_json, '$.metadata.activeRunIds'), 0) as activeRunIdsCount
+         coalesce(json_array_length(payload_json, '$.metadata.activeRunIds'), 0) as activeRunIdsCount,
+         json_extract(payload_json, '$.metadata.participants') as chatParticipantsJson
        from conversations
        order by updated_at desc;`
     );
@@ -169,6 +172,9 @@ export class StorageService {
       const runningFlag = row.running === 1 || row.running === "1" || row.running === true || row.running === "true";
       const isRunning = activeCount > 0 || runningFlag;
       const isArchived = row.archived === 1 || row.archived === "1" || row.archived === true || row.archived === "true";
+      const chatParticipants = row.kind === "chat"
+        ? normalizeConversationSummaryChatParticipants(row.chatParticipantsJson)
+        : undefined;
       return {
         id: row.id,
         title: row.title,
@@ -177,7 +183,8 @@ export class StorageService {
         updatedAt: row.updatedAt,
         repoPath: row.repoPath ?? undefined,
         running: isRunning,
-        archived: isArchived
+        archived: isArchived,
+        ...(chatParticipants ? { chatParticipants } : {})
       };
     });
   }
