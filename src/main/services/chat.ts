@@ -529,6 +529,12 @@ interface RemoteRunReplayState {
 }
 
 type RemoteRunReplayStateByRun = Record<string, RemoteRunReplayState>;
+type RemoteRunTerminalOutcome = Exclude<CloudRunStatus, "running" | "unknown">;
+
+interface RemoteRunTerminalizationResult {
+  changed: boolean;
+  autoResumeRequestMessageIds: string[];
+}
 
 interface RemoteRunStarter {
   startDetachedRun(request: RemoteRunDetachedStartRequest): Promise<RemoteDetachedRunState>;
@@ -677,8 +683,13 @@ export class ChatService {
     }
 
     let hydrated = conversation;
+    const autoResumeRequestMessageIds = new Set<string>();
     await this.withChatMutation(conversation, async () => {
       const participantsSynced = await this.syncConversationParticipantsFromSettings(conversation);
+      const terminalRemoteRunsReconciled = this.reconcileTerminalRemoteRunsInConversation(conversation);
+      for (const requestMessageId of terminalRemoteRunsReconciled.autoResumeRequestMessageIds) {
+        autoResumeRequestMessageIds.add(requestMessageId);
+      }
       const recoveredRunState = this.recoverStaleChatRun(conversation);
       const interruptedRequests = this.markOrphanedParticipantRequestsInterrupted(conversation);
       const usageUpdates = nextUsage ? this.contextUsageUpdatesAfterRefresh(conversation, existingUsage, nextUsage) : undefined;
@@ -686,7 +697,7 @@ export class ChatService {
       // Heal pointer maps left stale by the pre-fix index-ordering so roster jump targets
       // the participant's true latest message even before they post again.
       const pointersHealed = this.rebuildLastMessagesByParticipantIfChanged(conversation);
-      if (!usageUpdates && !interruptedRequests && !recoveredRunState && !participantsSynced && !pointersHealed) {
+      if (!usageUpdates && !interruptedRequests && !recoveredRunState && !participantsSynced && !pointersHealed && !terminalRemoteRunsReconciled.changed) {
         hydrated = conversation;
         return;
       }
@@ -699,12 +710,13 @@ export class ChatService {
           }
         };
       }
-      if (interruptedRequests || recoveredRunState) {
+      if (interruptedRequests || recoveredRunState || terminalRemoteRunsReconciled.changed) {
         conversation.updatedAt = new Date().toISOString();
       }
       await this.saveConversation(conversation);
       hydrated = conversation;
     });
+    this.queueParticipantRequestAutoResumes(conversation.id, Array.from(autoResumeRequestMessageIds));
     return hydrated;
   }
 
@@ -1567,6 +1579,7 @@ export class ChatService {
       throw new Error("Remote run replay conversation was not found.");
     }
     let terminalRecordApplied = false;
+    const autoResumeRequestMessageIds = new Set<string>();
     const result = await this.withChatMutation(conversation, async () => {
       const state = this.remoteRunReplayState(conversation, record.runId);
       if (state.appliedRecordIds.includes(record.id)) {
@@ -1644,6 +1657,16 @@ export class ChatService {
         }
         const status = this.remoteRunStatus("terminal", record.ok ? "Completed" : "Failed", undefined, state.remoteRunStatus);
         this.applyRemoteProviderResultRecord(conversation, record, participant, state, status);
+        const terminal = this.applyRemoteTerminalStateToConversation(
+          conversation,
+          record.runId,
+          record.ok ? "completed" : "failed",
+          record.error
+        );
+        for (const requestMessageId of terminal.autoResumeRequestMessageIds) {
+          autoResumeRequestMessageIds.add(requestMessageId);
+        }
+        terminalRecordApplied = terminalRecordApplied || terminal.changed;
         statePatch = {
           providerOutputLineBuffer: undefined,
           providerOutputText: undefined,
@@ -1701,8 +1724,11 @@ export class ChatService {
         updatedAt: new Date().toISOString()
       });
       if (record.kind === "terminal_state") {
-        this.applyRemoteTerminalStateToConversation(conversation, record.runId, record.status, record.reason);
-        terminalRecordApplied = true;
+        const terminal = this.applyRemoteTerminalStateToConversation(conversation, record.runId, record.status, record.reason);
+        for (const requestMessageId of terminal.autoResumeRequestMessageIds) {
+          autoResumeRequestMessageIds.add(requestMessageId);
+        }
+        terminalRecordApplied = terminalRecordApplied || terminal.changed;
       }
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
@@ -1717,6 +1743,7 @@ export class ChatService {
     if (terminalRecordApplied && !this.chatHasLiveWork(record.conversationId)) {
       this.scheduleAutoWatchEvaluation(record.conversationId, "remote-run-terminal");
     }
+    this.queueParticipantRequestAutoResumes(record.conversationId, Array.from(autoResumeRequestMessageIds));
     return result;
   }
 
@@ -1750,6 +1777,73 @@ export class ChatService {
     return handles;
   }
 
+  async reconcileTerminalRemoteRunState(): Promise<void> {
+    const summaries = await this.storage.listConversations();
+    for (const summary of summaries) {
+      if (summary.kind !== "chat") {
+        continue;
+      }
+      const conversation = await this.storage.getConversation(summary.id);
+      if (!conversation || conversation.kind !== "chat") {
+        continue;
+      }
+      const autoResumeRequestMessageIds = new Set<string>();
+      await this.withChatMutation(conversation, async () => {
+        const result = this.reconcileTerminalRemoteRunsInConversation(conversation);
+        if (!result.changed) {
+          return;
+        }
+        for (const requestMessageId of result.autoResumeRequestMessageIds) {
+          autoResumeRequestMessageIds.add(requestMessageId);
+        }
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+      });
+      this.queueParticipantRequestAutoResumes(conversation.id, Array.from(autoResumeRequestMessageIds));
+    }
+  }
+
+  private reconcileTerminalRemoteRunsInConversation(conversation: Conversation): RemoteRunTerminalizationResult {
+    const result: RemoteRunTerminalizationResult = {
+      changed: false,
+      autoResumeRequestMessageIds: []
+    };
+    for (const [runId, terminal] of this.terminalRemoteRunOutcomes(conversation)) {
+      const finalized = this.finalizeRemoteRunPendingMessage(conversation, runId, terminal.outcome, terminal.reason);
+      result.changed = result.changed || finalized.changed;
+      result.autoResumeRequestMessageIds.push(...finalized.autoResumeRequestMessageIds);
+      const beforeMetadata = this.stableJson(conversation.metadata);
+      this.clearRemoteRunActiveState(conversation, runId);
+      conversation.metadata = this.metadataAfterAutoTitleRunTerminal(conversation.id, conversation.metadata, runId);
+      result.changed = result.changed || beforeMetadata !== this.stableJson(conversation.metadata);
+    }
+    return result;
+  }
+
+  private terminalRemoteRunOutcomes(conversation: Conversation): Map<string, { outcome: RemoteRunTerminalOutcome; reason?: string }> {
+    const outcomes = new Map<string, { outcome: RemoteRunTerminalOutcome; reason?: string }>();
+    const handles = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles);
+    for (const [runId, handle] of Object.entries(handles)) {
+      if (this.isRemoteRunTerminal(handle.status)) {
+        outcomes.set(runId, {
+          outcome: handle.status,
+          reason: handle.error
+        });
+      }
+    }
+    const replayStates = this.remoteRunReplayStateByRun(conversation.metadata.remoteRunReplay);
+    for (const [runId, state] of Object.entries(replayStates)) {
+      if (this.isRemoteRunTerminal(state.terminalState) && !outcomes.has(runId)) {
+        outcomes.set(runId, {
+          outcome: state.terminalState,
+          reason: handles[runId]?.error
+        });
+      }
+    }
+    return outcomes;
+  }
+
   async updateRemoteRunHandleState(conversationId: string, runId: string, state: RemoteDetachedRunState): Promise<RemoteRunHandle | undefined> {
     const conversation = await this.storage.getConversation(conversationId);
     if (!conversation || conversation.kind !== "chat") {
@@ -1757,6 +1851,7 @@ export class ChatService {
     }
     let nextHandle: RemoteRunHandle | undefined;
     let terminalStateApplied = false;
+    const autoResumeRequestMessageIds = new Set<string>();
     await this.withChatMutation(conversation, async () => {
       const handles = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles);
       const current = handles[runId];
@@ -1765,8 +1860,16 @@ export class ChatService {
       }
       if (this.isRemoteRunTerminal(current.status)) {
         nextHandle = current;
+        const beforeMetadata = this.stableJson(conversation.metadata);
+        const terminal = this.finalizeRemoteRunPendingMessage(conversation, runId, current.status, current.error);
+        for (const requestMessageId of terminal.autoResumeRequestMessageIds) {
+          autoResumeRequestMessageIds.add(requestMessageId);
+        }
         this.clearRemoteRunActiveState(conversation, runId);
-        terminalStateApplied = true;
+        conversation.metadata = this.metadataAfterAutoTitleRunTerminal(conversation.id, conversation.metadata, runId);
+        terminalStateApplied = terminalStateApplied ||
+          terminal.changed ||
+          beforeMetadata !== this.stableJson(conversation.metadata);
         conversation.updatedAt = new Date().toISOString();
         await this.saveConversation(conversation);
         this.queueSnapshot(conversation);
@@ -1779,8 +1882,16 @@ export class ChatService {
         remoteRunHandles: handles
       };
       if (this.isRemoteRunTerminal(nextHandle.status)) {
+        const beforeTerminalMetadata = this.stableJson(conversation.metadata);
+        const terminal = this.finalizeRemoteRunPendingMessage(conversation, runId, nextHandle.status, nextHandle.error);
+        for (const requestMessageId of terminal.autoResumeRequestMessageIds) {
+          autoResumeRequestMessageIds.add(requestMessageId);
+        }
         this.clearRemoteRunActiveState(conversation, runId);
-        terminalStateApplied = true;
+        conversation.metadata = this.metadataAfterAutoTitleRunTerminal(conversation.id, conversation.metadata, runId);
+        terminalStateApplied = terminalStateApplied ||
+          terminal.changed ||
+          beforeTerminalMetadata !== this.stableJson(conversation.metadata);
         // Transitioned live → terminal: release the AWS idle ref-count so the
         // instance can auto-stop once no runs remain.
         void this.cloudRunAws?.noteRunEnded();
@@ -1798,6 +1909,7 @@ export class ChatService {
     if (terminalStateApplied && !this.chatHasLiveWork(conversationId)) {
       this.scheduleAutoWatchEvaluation(conversationId, "remote-run-terminal");
     }
+    this.queueParticipantRequestAutoResumes(conversationId, Array.from(autoResumeRequestMessageIds));
     return nextHandle;
   }
 
@@ -1863,30 +1975,55 @@ export class ChatService {
   private applyRemoteTerminalStateToConversation(
     conversation: Conversation,
     runId: string,
-    status: Exclude<CloudRunStatus, "running" | "unknown">,
+    status: RemoteRunTerminalOutcome,
     reason?: string
-  ): void {
+  ): RemoteRunTerminalizationResult {
+    const result: RemoteRunTerminalizationResult = {
+      changed: false,
+      autoResumeRequestMessageIds: []
+    };
     const handles = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles);
     const current = handles[runId];
+    const beforeMetadata = this.stableJson(conversation.metadata);
     if (!current) {
+      const terminal = this.finalizeRemoteRunPendingMessage(conversation, runId, status, reason);
+      result.changed = terminal.changed;
+      result.autoResumeRequestMessageIds.push(...terminal.autoResumeRequestMessageIds);
       this.clearRemoteRunActiveState(conversation, runId);
-      return;
+      conversation.metadata = this.metadataAfterAutoTitleRunTerminal(conversation.id, conversation.metadata, runId);
+      result.changed = result.changed || beforeMetadata !== this.stableJson(conversation.metadata);
+      return result;
     }
     const now = new Date().toISOString();
-    const next: RemoteRunHandle = {
-      ...current,
-      status,
-      updatedAt: now,
-      completedAt: current.completedAt ?? now,
-      error: status === "failed" ? reason ?? current.error : current.error
-    };
-    handles[runId] = next;
-    conversation.metadata = {
-      ...conversation.metadata,
-      remoteRunHandles: handles
-    };
+    const shouldUpdateHandle =
+      !this.isRemoteRunTerminal(current.status) ||
+      current.status !== status ||
+      !current.completedAt ||
+      (status === "failed" && typeof reason === "string" && reason.trim() && current.error !== reason);
+    const next: RemoteRunHandle = shouldUpdateHandle
+      ? {
+          ...current,
+          status,
+          updatedAt: now,
+          completedAt: current.completedAt ?? now,
+          error: status === "failed" ? reason ?? current.error : current.error
+        }
+      : current;
+    if (shouldUpdateHandle) {
+      handles[runId] = next;
+      conversation.metadata = {
+        ...conversation.metadata,
+        remoteRunHandles: handles
+      };
+    }
     this.registerRemoteRunHandle(next);
+    const terminal = this.finalizeRemoteRunPendingMessage(conversation, runId, status, next.error);
+    result.changed = terminal.changed;
+    result.autoResumeRequestMessageIds.push(...terminal.autoResumeRequestMessageIds);
     this.clearRemoteRunActiveState(conversation, runId);
+    conversation.metadata = this.metadataAfterAutoTitleRunTerminal(conversation.id, conversation.metadata, runId);
+    result.changed = result.changed || beforeMetadata !== this.stableJson(conversation.metadata);
+    return result;
   }
 
   private mergeRemoteRunHandleState(handle: RemoteRunHandle, state: RemoteDetachedRunState): RemoteRunHandle {
@@ -1976,7 +2113,7 @@ export class ChatService {
     return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : undefined;
   }
 
-  private isRemoteRunTerminal(status: unknown): boolean {
+  private isRemoteRunTerminal(status: unknown): status is RemoteRunTerminalOutcome {
     return status === "completed" || status === "failed" || status === "cancelled";
   }
 
@@ -2000,6 +2137,218 @@ export class ChatService {
   private forgetAllActiveChatRunRefs(conversationId: string, runId: string): void {
     while ((this.activeConversationRunRefCount(conversationId, runId) > 0) || this.activeRunIds.has(runId)) {
       this.forgetActiveChatRun(conversationId, runId);
+    }
+  }
+
+  private finalizeRemoteRunPendingMessage(
+    conversation: Conversation,
+    runId: string,
+    outcome: RemoteRunTerminalOutcome,
+    reason?: string
+  ): RemoteRunTerminalizationResult {
+    const result: RemoteRunTerminalizationResult = {
+      changed: false,
+      autoResumeRequestMessageIds: []
+    };
+    const message = this.remoteRunProviderMessage(conversation, runId);
+    const handle = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles)[runId];
+    const terminalReason = reason ?? handle?.error;
+    const terminalStatus = this.remoteRunStatus(
+      "terminal",
+      this.remoteRunTerminalLabel(outcome),
+      terminalReason,
+      message?.metadata?.remoteRunStatus ?? this.remoteRunReplayState(conversation, runId).remoteRunStatus
+    );
+
+    if (message) {
+      const previousStatus = message.status;
+      const previousMetadata = message.metadata;
+      const shouldWriteMessage =
+        message.status === "pending" ||
+        message.metadata?.remoteRunStatus?.phase !== "terminal";
+      if (shouldWriteMessage) {
+        const metadata: ChatMessageMetadata = {
+          ...message.metadata,
+          runId,
+          appMessageSource: message.metadata?.appMessageSource ?? "remote-run-provider-output",
+          remoteRunStatus: this.normalizedRemoteRunStatus(terminalStatus, message.metadata?.remoteRunStatus),
+          workedMs: message.metadata?.workedMs ?? this.remoteRunWorkedMs(conversation, runId, undefined)
+        };
+        message.metadata = metadata;
+        if (message.status === "pending") {
+          message.status = outcome === "completed" ? "done" : "error";
+          if (!message.content.trim()) {
+            message.content = this.remoteRunTerminalFallbackContent(conversation, runId, outcome, terminalReason);
+          }
+        }
+        this.recordLastMessageByParticipant(conversation, message);
+        result.changed = result.changed ||
+          previousStatus !== message.status ||
+          this.stableJson(previousMetadata ?? {}) !== this.stableJson(message.metadata ?? {});
+      }
+      const requestResult = this.resolveParticipantRequestForRemoteRunMessage(conversation, message, outcome, terminalReason);
+      result.changed = result.changed || requestResult.changed;
+      result.autoResumeRequestMessageIds.push(...requestResult.autoResumeRequestMessageIds);
+    }
+
+    if (outcome !== "completed") {
+      const reasonText = terminalReason ?? this.remoteRunTerminalFallbackContent(conversation, runId, outcome);
+      result.changed = this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, reasonText) || result.changed;
+    }
+    return result;
+  }
+
+  private remoteRunProviderMessage(conversation: Conversation, runId: string): ChatMessage | undefined {
+    const state = this.remoteRunReplayState(conversation, runId);
+    const handle = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles)[runId];
+    const candidateIds = [
+      state.providerOutputMessageId,
+      handle?.providerOutputMessageId,
+      handle?.participantId ? this.remoteProviderProgressMessageId(conversation, runId, handle.participantId) : undefined
+    ].filter((id): id is string => typeof id === "string" && id.trim().length > 0);
+    for (const id of candidateIds) {
+      const message = conversation.messages.find((item) =>
+        item.id === id &&
+        item.role === "participant" &&
+        item.metadata?.runId === runId
+      );
+      if (message) {
+        return message;
+      }
+    }
+    return conversation.messages.find((message) =>
+      message.role === "participant" &&
+      message.metadata?.runId === runId &&
+      (message.status === "pending" ||
+        message.metadata?.appMessageSource === "remote-run-provider-output" ||
+        message.metadata?.appMessageSource === "remote-run-provider")
+    );
+  }
+
+  private remoteRunTerminalLabel(outcome: RemoteRunTerminalOutcome): string {
+    if (outcome === "completed") {
+      return "Completed";
+    }
+    if (outcome === "cancelled") {
+      return "Cancelled";
+    }
+    return "Failed";
+  }
+
+  private remoteRunTerminalFallbackContent(
+    conversation: Conversation,
+    runId: string,
+    outcome: RemoteRunTerminalOutcome,
+    reason?: string
+  ): string {
+    const handle = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles)[runId];
+    const participantHandle = handle?.participantHandle?.trim();
+    const prefix = participantHandle ? `@${participantHandle} remote run` : "Remote run";
+    if (outcome === "completed") {
+      return `${prefix} completed without returning a response.`;
+    }
+    if (outcome === "cancelled") {
+      return reason ? `${prefix} was cancelled: ${reason}` : `${prefix} was cancelled.`;
+    }
+    return reason ? `${prefix} failed: ${reason}` : `${prefix} failed before returning a response.`;
+  }
+
+  private resolveParticipantRequestForRemoteRunMessage(
+    conversation: Conversation,
+    message: ChatMessage,
+    outcome: RemoteRunTerminalOutcome,
+    reason?: string
+  ): RemoteRunTerminalizationResult {
+    const result: RemoteRunTerminalizationResult = {
+      changed: false,
+      autoResumeRequestMessageIds: []
+    };
+    const requestMessageId = message.metadata?.parentMessageId ?? message.metadata?.sourceMessageId;
+    const participantId = message.participantId;
+    if (!requestMessageId || !participantId) {
+      return result;
+    }
+    const requestStatus = this.participantRequestStatusForRemoteRunOutcome(message, outcome);
+    const error = requestStatus === "answered"
+      ? undefined
+      : reason ?? (message.content.trim() || this.remoteRunTerminalFallbackContent(conversation, message.metadata?.runId ?? "", outcome));
+    const now = new Date().toISOString();
+    this.updateParticipantRequestBatch(conversation, requestMessageId, (batch) => {
+      let changed = false;
+      const items = batch.items.map((item) => {
+        const matchesTarget = item.targetParticipantId === participantId;
+        const matchesReply = item.replyMessageId === message.id;
+        if (!matchesTarget && !matchesReply) {
+          return item;
+        }
+        if (!this.isOpenParticipantRequestStatus(item.status) && item.status !== "answered") {
+          return item;
+        }
+        if (
+          item.status === requestStatus &&
+          item.replyMessageId === message.id &&
+          (requestStatus === "answered" || item.error === error)
+        ) {
+          return item;
+        }
+        changed = true;
+        return {
+          ...item,
+          status: requestStatus,
+          replyMessageId: message.id,
+          error,
+          updatedAt: now
+        };
+      });
+      if (!changed) {
+        return batch;
+      }
+      result.changed = true;
+      const nextBatch = {
+        ...batch,
+        items,
+        status: this.rollupParticipantRequestStatus(items),
+        error: batch.error ?? error,
+        updatedAt: now
+      };
+      if (
+        nextBatch.resumeRequester &&
+        !nextBatch.completedInToolCall &&
+        !nextBatch.autoResumeMessageId &&
+        !this.participantRequestHasUnfinishedItems(nextBatch)
+      ) {
+        result.autoResumeRequestMessageIds.push(requestMessageId);
+      }
+      return nextBatch;
+    });
+    return result;
+  }
+
+  private participantRequestStatusForRemoteRunOutcome(
+    message: ChatMessage,
+    outcome: RemoteRunTerminalOutcome
+  ): Extract<ChatParticipantRequestStatus, "answered" | "failed" | "interrupted"> {
+    if (message.status === "done") {
+      return "answered";
+    }
+    if (outcome === "completed") {
+      return "answered";
+    }
+    if (outcome === "cancelled") {
+      return "interrupted";
+    }
+    return "failed";
+  }
+
+  private queueParticipantRequestAutoResumes(conversationId: string, requestMessageIds: string[]): void {
+    for (const requestMessageId of Array.from(new Set(requestMessageIds))) {
+      void this.autoResumeParticipantRequest(conversationId, requestMessageId, this.onReviewProgress).catch((error) => {
+        void this.debugLogs.write("chat.remote-run.participant-request-auto-resume.error", {
+          conversationId,
+          requestMessageId,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
     }
   }
 
@@ -9583,18 +9932,19 @@ export class ChatService {
           batch.id
         );
         const now = new Date().toISOString();
+        const remoteReplyStillRunning = reply ? this.isPendingNonTerminalRemoteReply(conversation, reply) : false;
         this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
           ...current,
           items: current.items.map((candidate) => candidate.targetParticipantId === item.targetParticipantId
             ? {
                 ...candidate,
-                status: waitingOnPermissionApproval
+                status: waitingOnPermissionApproval || remoteReplyStillRunning
                   ? "running"
                   : reply?.status === "error"
                     ? "failed"
                     : "answered",
                 replyMessageId: reply?.id,
-                error: !waitingOnPermissionApproval && reply?.status === "error" ? reply.content : undefined,
+                error: !waitingOnPermissionApproval && !remoteReplyStillRunning && reply?.status === "error" ? reply.content : undefined,
                 updatedAt: now
               }
             : candidate),
@@ -9634,6 +9984,17 @@ export class ChatService {
     await this.ensureHistoryFiles(conversation);
     await this.saveConversation(conversation);
     return { batch: updatedBatch, replies };
+  }
+
+  private isPendingNonTerminalRemoteReply(conversation: Conversation, message: ChatMessage): boolean {
+    const runId = message.metadata?.runId;
+    return (
+      message.role === "participant" &&
+      message.status === "pending" &&
+      typeof runId === "string" &&
+      runId.trim().length > 0 &&
+      this.isNonTerminalRemoteRun(conversation.metadata, runId)
+    );
   }
 
   private async awaitParticipantRequestRunner(
@@ -13975,11 +14336,13 @@ export class ChatService {
     }
     const removedTombstonesApplied = this.applyRemovedChatMessageTombstones(conversation);
     const legacyAccordStateRemoved = this.clearLegacyAccordState(conversation);
-    if (this.recoverStaleChatRun(conversation) || removedTombstonesApplied || legacyAccordStateRemoved) {
-      if (legacyAccordStateRemoved) {
+    const terminalRemoteRunsReconciled = this.reconcileTerminalRemoteRunsInConversation(conversation);
+    if (this.recoverStaleChatRun(conversation) || removedTombstonesApplied || legacyAccordStateRemoved || terminalRemoteRunsReconciled.changed) {
+      if (legacyAccordStateRemoved || terminalRemoteRunsReconciled.changed) {
         conversation.updatedAt = new Date().toISOString();
       }
       await this.saveConversation(conversation);
+      this.queueParticipantRequestAutoResumes(conversation.id, terminalRemoteRunsReconciled.autoResumeRequestMessageIds);
     }
     return conversation;
   }

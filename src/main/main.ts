@@ -811,6 +811,11 @@ void app.whenReady().then(async () => {
   bootstrapAppUpdater(debugLogService);
   await appMcpService.start();
   await storageService.init();
+  await chatService.reconcileTerminalRemoteRunState().catch((error) => {
+    void debugLogService.write("chat.remote-run.reconcile-terminal-state.error", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+  });
   void remoteRunCoordinator.start().catch((error) => {
     void debugLogService.write("remote-run.coordinator.start.error", {
       message: error instanceof Error ? error.message : String(error)

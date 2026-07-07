@@ -18,7 +18,8 @@ import type {
   ChatParticipantSession,
   ChatRoleConfig,
   ChatSkillMention,
-  Conversation
+  Conversation,
+  RemoteRunHandle
 } from "../../shared/types";
 
 const NOW = "2026-05-19T12:00:00.000Z";
@@ -2156,6 +2157,164 @@ test("runParticipantRequest roots inferred recipient replies under the source vi
   assert.equal(requestBatch?.items[0].replyMessageId, "target-reply");
 });
 
+test("runParticipantRequest keeps detached remote target running until terminal state", async () => {
+  const requester = chatParticipant({}, { id: "requester", handle: "drew" });
+  const target = chatParticipant({ repoRead: true }, { id: "target", handle: "taylor" });
+  const runId = "remote-target-run";
+  const conversation = chatConversation([requester, target], "/repo");
+  const requestMessage = participantRequestMessageWithItems(requester, [
+    participantRequestItem(target, "running")
+  ]);
+  conversation.messages.push(requestMessage);
+  const { service, storage } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+  let autoResumeCount = 0;
+  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  serviceAny.refreshStoredChatState = async () => undefined;
+  serviceAny.autoResumeParticipantRequest = async () => {
+    autoResumeCount += 1;
+  };
+  serviceAny.runParticipantTurnSerialized = async (
+    activeConversation: Conversation,
+    participant: ChatParticipant,
+    trigger: ChatMessage
+  ) => {
+    const reply = participantMessage(participant, "remote-pending-reply", "");
+    reply.status = "pending";
+    reply.metadata = {
+      ...reply.metadata,
+      runId,
+      parentMessageId: trigger.id,
+      sourceMessageId: trigger.id,
+      appMessageSource: "remote-run-provider-output"
+    };
+    activeConversation.metadata = {
+      ...activeConversation.metadata,
+      running: true,
+      runId,
+      activeRunIds: [runId],
+      activeRunParticipantIdsByRunId: { [runId]: participant.id },
+      remoteRunHandles: {
+        [runId]: remoteRunHandle({
+          runId,
+          conversationId: activeConversation.id,
+          participantId: participant.id,
+          participantHandle: participant.handle,
+          providerOutputMessageId: reply.id
+        })
+      },
+      remoteRunReplay: {
+        [runId]: {
+          cursorSeq: 0,
+          appliedRecordIds: [],
+          providerOutputMessageId: reply.id
+        }
+      }
+    };
+    return [reply];
+  };
+
+  await serviceAny.startParticipantRequestRunner(conversation.id, requestMessage.id, "request-run", 1);
+
+  const runningSaved = await storage.getConversation(conversation.id);
+  const runningBatch = runningSaved?.messages.find((message) => message.id === requestMessage.id)?.metadata?.participantRequest;
+  assert.equal(runningBatch?.status, "running");
+  assert.equal(runningBatch?.items[0]?.status, "running");
+  assert.equal(runningBatch?.items[0]?.replyMessageId, "remote-pending-reply");
+  assert.equal(autoResumeCount, 0);
+
+  await service.updateRemoteRunHandleState(conversation.id, runId, {
+    runId,
+    conversationId: conversation.id,
+    participantId: target.id,
+    status: "failed",
+    completedAt: "2026-05-19T12:05:00.000Z",
+    error: "remote worker crashed"
+  });
+  await waitFor(() => autoResumeCount === 1);
+
+  const terminalSaved = await storage.getConversation(conversation.id);
+  const terminalBatch = terminalSaved?.messages.find((message) => message.id === requestMessage.id)?.metadata?.participantRequest;
+  const terminalReply = terminalSaved?.messages.find((message) => message.id === "remote-pending-reply");
+  assert.equal(terminalBatch?.status, "failed");
+  assert.equal(terminalBatch?.items[0]?.status, "failed");
+  assert.equal(terminalBatch?.items[0]?.error, "remote worker crashed");
+  assert.equal(terminalReply?.status, "error");
+  assert.match(terminalReply?.content ?? "", /remote worker crashed/);
+  assert.deepEqual(terminalSaved?.metadata.activeRunIds, undefined);
+  assert.equal(terminalSaved?.metadata.running, false);
+  assert.equal(terminalSaved?.metadata.runId, undefined);
+});
+
+test("reconcileTerminalRemoteRunState repairs persisted terminal remote spinner state", async () => {
+  const requester = chatParticipant({}, { id: "requester", handle: "drew" });
+  const target = chatParticipant({ repoRead: true }, { id: "target", handle: "taylor" });
+  const runId = "persisted-terminal-run";
+  const conversation = chatConversation([requester, target], "/repo");
+  const requestMessage = participantRequestMessageWithItems(requester, [
+    participantRequestItem(target, "running")
+  ]);
+  const pending = participantMessage(target, "persisted-pending-reply", "");
+  pending.status = "pending";
+  pending.metadata = {
+    ...pending.metadata,
+    runId,
+    parentMessageId: requestMessage.id,
+    sourceMessageId: requestMessage.id,
+    appMessageSource: "remote-run-provider-output"
+  };
+  conversation.messages.push(requestMessage, pending);
+  conversation.metadata = {
+    ...conversation.metadata,
+    running: true,
+    runId,
+    activeRunIds: [runId],
+    activeRunParticipantIdsByRunId: { [runId]: target.id },
+    remoteRunHandles: {
+      [runId]: remoteRunHandle({
+        runId,
+        conversationId: conversation.id,
+        participantId: target.id,
+        participantHandle: target.handle,
+        providerOutputMessageId: pending.id,
+        status: "failed",
+        completedAt: "2026-05-19T12:05:00.000Z",
+        error: "persisted failure"
+      })
+    },
+    remoteRunReplay: {
+      [runId]: {
+        cursorSeq: 1,
+        appliedRecordIds: ["terminal-record"],
+        providerOutputMessageId: pending.id,
+        terminalState: "failed"
+      }
+    }
+  };
+  const { service, storage } = testService({ conversations: [conversation] });
+  let autoResumeCount = 0;
+  (service as any).autoResumeParticipantRequest = async () => {
+    autoResumeCount += 1;
+  };
+
+  await service.reconcileTerminalRemoteRunState();
+  await waitFor(() => autoResumeCount === 1);
+
+  const saved = await storage.getConversation(conversation.id);
+  const savedMessage = saved?.messages.find((message) => message.id === pending.id);
+  const savedBatch = saved?.messages.find((message) => message.id === requestMessage.id)?.metadata?.participantRequest;
+  assert.equal(savedMessage?.status, "error");
+  assert.match(savedMessage?.content ?? "", /persisted failure/);
+  assert.equal(savedMessage?.metadata?.remoteRunStatus?.phase, "terminal");
+  assert.equal(savedBatch?.status, "failed");
+  assert.equal(savedBatch?.items[0]?.status, "failed");
+  assert.equal(savedBatch?.items[0]?.replyMessageId, pending.id);
+  assert.equal(savedBatch?.items[0]?.error, "persisted failure");
+  assert.deepEqual(saved?.metadata.activeRunIds, undefined);
+  assert.equal(saved?.metadata.running, false);
+  assert.equal(saved?.metadata.runId, undefined);
+});
+
 test("normalizeInferredParticipantRequestThreads hides legacy carriers and reroots descendants", () => {
   const requester = chatParticipant();
   const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
@@ -2244,6 +2403,7 @@ function testService(options: {
   service: ChatService;
   storage: {
     getConversation(id: string): Promise<Conversation | undefined>;
+    listConversations(): Promise<Array<{ id: string; kind: Conversation["kind"] }>>;
     saveConversation(conversation: Conversation): Promise<void>;
   };
 } {
@@ -2252,6 +2412,12 @@ function testService(options: {
     async getConversation(id: string): Promise<Conversation | undefined> {
       const conversation = conversations.get(id);
       return conversation ? cloneConversation(conversation) : undefined;
+    },
+    async listConversations(): Promise<Array<{ id: string; kind: Conversation["kind"] }>> {
+      return Array.from(conversations.values()).map((conversation) => ({
+        id: conversation.id,
+        kind: conversation.kind
+      }));
     },
     async saveConversation(conversation: Conversation): Promise<void> {
       conversations.set(conversation.id, cloneConversation(conversation));
@@ -2387,6 +2553,21 @@ function userMessage(id: string, content: string): ChatMessage {
     createdAt: NOW,
     status: "done",
     metadata: { threadId: id }
+  };
+}
+
+function remoteRunHandle(patch: Partial<RemoteRunHandle> = {}): RemoteRunHandle {
+  const startedAt = patch.startedAt ?? NOW;
+  return {
+    runId: "remote-run",
+    conversationId: "conversation-1",
+    participantId: "participant-1",
+    participantHandle: "drew",
+    worker: { host: "worker.example" },
+    status: "running",
+    startedAt,
+    updatedAt: patch.updatedAt ?? startedAt,
+    ...patch
   };
 }
 

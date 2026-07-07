@@ -14,6 +14,7 @@ import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import type {
   AppSettings,
   ChatAppToolApproval,
+  ChatMessage,
   ChatParticipant,
   ChatRoleConfig,
   Conversation,
@@ -1236,6 +1237,171 @@ test("real remote codex non-zero exit records failed provider result", async () 
   assert.equal((storage.current.metadata.remoteRunReplay as any)["failed-run"].terminalState, "failed");
 });
 
+test("failed remote handle terminalizes pending provider message and clears active state", async () => {
+  const participant = chatParticipant();
+  const runId = "failed-detached-run";
+  const conversation = chatConversation([participant]);
+  const pending = remoteProviderMessage(participant, runId, "pending-provider-output");
+  conversation.messages.push(pending);
+  conversation.metadata = {
+    ...conversation.metadata,
+    running: true,
+    runId,
+    activeRunIds: [runId],
+    activeRunParticipantIdsByRunId: { [runId]: participant.id },
+    remoteRunHandles: {
+      [runId]: remoteRunHandle({
+        runId,
+        conversationId: conversation.id,
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        providerOutputMessageId: pending.id
+      })
+    },
+    remoteRunReplay: {
+      [runId]: {
+        cursorSeq: 0,
+        appliedRecordIds: [],
+        providerOutputMessageId: pending.id
+      }
+    }
+  };
+  const { service, storage } = await testRemoteRun({ conversation });
+
+  await service.updateRemoteRunHandleState(conversation.id, runId, {
+    runId,
+    conversationId: conversation.id,
+    participantId: participant.id,
+    status: "failed",
+    completedAt: "2026-06-26T12:03:00.000Z",
+    error: "worker died"
+  });
+
+  const saved = storage.current as Conversation;
+  const savedMessage = saved.messages.find((message) => message.id === pending.id);
+  assert.equal(savedMessage?.status, "error");
+  assert.match(savedMessage?.content ?? "", /worker died/);
+  assert.equal(savedMessage?.metadata?.remoteRunStatus?.phase, "terminal");
+  assert.equal(savedMessage?.metadata?.remoteRunStatus?.label, "Failed");
+  assert.deepEqual(saved.metadata.activeRunIds, undefined);
+  assert.equal(saved.metadata.running, false);
+  assert.equal(saved.metadata.runId, undefined);
+  assert.equal((saved.metadata.remoteRunHandles as Record<string, RemoteRunHandle>)[runId]?.status, "failed");
+});
+
+test("bare failed terminal_state replay terminalizes pending provider message", async () => {
+  const participant = chatParticipant();
+  const runId = "terminal-state-run";
+  const conversation = chatConversation([participant]);
+  const pending = remoteProviderMessage(participant, runId, "pending-terminal-output");
+  conversation.messages.push(pending);
+  conversation.metadata = {
+    ...conversation.metadata,
+    running: true,
+    runId,
+    activeRunIds: [runId],
+    activeRunParticipantIdsByRunId: { [runId]: participant.id },
+    remoteRunHandles: {
+      [runId]: remoteRunHandle({
+        runId,
+        conversationId: conversation.id,
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        providerOutputMessageId: pending.id
+      })
+    },
+    remoteRunReplay: {
+      [runId]: {
+        cursorSeq: 0,
+        appliedRecordIds: [],
+        providerOutputMessageId: pending.id
+      }
+    }
+  };
+  const { service, storage } = await testRemoteRun({ conversation });
+
+  await service.applyRemoteRunReplayRecord({
+    id: "terminal-failed",
+    conversationId: conversation.id,
+    runId,
+    kind: "terminal_state",
+    seq: 1,
+    createdAt: "2026-06-26T12:04:00.000Z",
+    status: "failed",
+    reason: "deadline exceeded"
+  });
+
+  const saved = storage.current as Conversation;
+  const savedMessage = saved.messages.find((message) => message.id === pending.id);
+  assert.equal(savedMessage?.status, "error");
+  assert.match(savedMessage?.content ?? "", /deadline exceeded/);
+  assert.equal(savedMessage?.metadata?.remoteRunStatus?.phase, "terminal");
+  assert.deepEqual(saved.metadata.activeRunIds, undefined);
+  assert.equal(saved.metadata.runId, undefined);
+  assert.equal((saved.metadata.remoteRunReplay as any)[runId].terminalState, "failed");
+});
+
+test("terminal replay does not clobber provider_result-finalized message", async () => {
+  const participant = chatParticipant();
+  const runId = "provider-result-run";
+  const conversation = chatConversation([participant]);
+  const pending = remoteProviderMessage(participant, runId, "pending-provider-result-output");
+  conversation.messages.push(pending);
+  conversation.metadata = {
+    ...conversation.metadata,
+    running: true,
+    runId,
+    activeRunIds: [runId],
+    activeRunParticipantIdsByRunId: { [runId]: participant.id },
+    remoteRunHandles: {
+      [runId]: remoteRunHandle({
+        runId,
+        conversationId: conversation.id,
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        providerOutputMessageId: pending.id
+      })
+    },
+    remoteRunReplay: {
+      [runId]: {
+        cursorSeq: 0,
+        appliedRecordIds: [],
+        providerOutputMessageId: pending.id
+      }
+    }
+  };
+  const { service, storage } = await testRemoteRun({ conversation });
+
+  await service.applyRemoteRunReplayRecord({
+    id: "provider-result",
+    conversationId: conversation.id,
+    runId,
+    kind: "provider_result",
+    seq: 1,
+    createdAt: "2026-06-26T12:04:00.000Z",
+    participantId: participant.id,
+    ok: true,
+    content: "Finished remotely.",
+    sourceMessageId: "user-message"
+  });
+  await service.applyRemoteRunReplayRecord({
+    id: "late-terminal-failed",
+    conversationId: conversation.id,
+    runId,
+    kind: "terminal_state",
+    seq: 2,
+    createdAt: "2026-06-26T12:05:00.000Z",
+    status: "failed",
+    reason: "late poll failure"
+  });
+
+  const saved = storage.current as Conversation;
+  const savedMessage = saved.messages.find((message) => message.id === pending.id);
+  assert.equal(savedMessage?.status, "done");
+  assert.equal(savedMessage?.content, "Finished remotely.");
+  assert.equal(savedMessage?.metadata?.remoteRunStatus?.phase, "terminal");
+});
+
 async function testRemoteRun(options: {
   conversation?: Conversation;
   run?: (...args: any[]) => Promise<any>;
@@ -1380,6 +1546,23 @@ function participantConfig(participant: ChatParticipant): ParticipantConfig {
     label: `@${participant.handle}`,
     model: participant.model,
     reasoningEffort: participant.reasoningEffort
+  };
+}
+
+function remoteProviderMessage(participant: ChatParticipant, runId: string, id: string): ChatMessage {
+  return {
+    id,
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "",
+    createdAt: NOW,
+    status: "pending",
+    metadata: {
+      runId,
+      sourceMessageId: "user-message",
+      appMessageSource: "remote-run-provider-output"
+    }
   };
 }
 
