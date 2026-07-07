@@ -1,4 +1,5 @@
 import type { CSSProperties, ReactNode } from "react";
+import { Puzzle } from "lucide-react";
 
 import type {
   ChatParticipant,
@@ -19,6 +20,12 @@ export interface SlashCommandOption {
   id: "compact";
   label: string;
   description: string;
+}
+
+export interface DraftPluginMention {
+  name: string;
+  displayName: string;
+  iconUrl?: string;
 }
 
 export function activeMentionQuery(value: string): string | undefined {
@@ -113,10 +120,26 @@ export function draftHasSkillMention(value: string, skillName: string): boolean 
   return new RegExp(`(^|\\s)/${escapeRegExp(skillName)}(?=\\s|$)`).test(value);
 }
 
-export function renderSkillHighlightedDraft(value: string, mentions: ChatSkillMention[]): ReactNode[] {
-  const byName = new Map<string, ChatSkillMention>();
-  for (const mention of mentions) {
-    byName.set(mention.frontmatterName, mention);
+export function draftStartsWithPluginMention(value: string, pluginMentions: DraftPluginMention[]): boolean {
+  return pluginMentions.some((mention) => new RegExp(`^/${escapeRegExp(mention.name)}(?=\\s|$)`).test(value));
+}
+
+export function renderSlashHighlightedDraft(
+  value: string,
+  skillMentions: ChatSkillMention[],
+  pluginMentions: DraftPluginMention[] = []
+): ReactNode[] {
+  const byName = new Map<string, { className: string; icon?: ReactNode }>();
+  for (const mention of pluginMentions) {
+    byName.set(mention.name, {
+      className: "chat-draft-plugin-token",
+      icon: mention.iconUrl
+        ? <img className="chat-draft-plugin-token-icon" src={mention.iconUrl} alt="" aria-hidden="true" />
+        : <Puzzle className="chat-draft-plugin-token-icon" size={15} strokeWidth={2.2} aria-hidden="true" />
+    });
+  }
+  for (const mention of skillMentions) {
+    byName.set(mention.frontmatterName, { className: "chat-draft-skill-token" });
   }
   const names = Array.from(byName.keys()).sort((left, right) => right.length - left.length);
   if (names.length === 0 || !value) {
@@ -134,8 +157,10 @@ export function renderSkillHighlightedDraft(value: string, mentions: ChatSkillMe
     if (start > cursor) {
       nodes.push(value.slice(cursor, start));
     }
+    const token = byName.get(name);
     nodes.push(
-      <span className="chat-draft-skill-token" key={`${name}-${index}`}>
+      <span className={token?.className ?? "chat-draft-skill-token"} key={`${name}-${index}`}>
+        {token?.icon}
         {value.slice(start, end)}
       </span>
     );

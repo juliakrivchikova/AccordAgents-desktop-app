@@ -4043,6 +4043,46 @@
   grid-template-columns: 36px minmax(88px, max-content) minmax(0, 1fr) auto auto;
 }
 
+.skill-mention-menu .slash-item-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.skill-mention-menu .slash-item-copy > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-mention-menu .slash-disabled-reason {
+  color: var(--app-warning);
+  font-size: 11px;
+}
+
+.skill-mention-menu .slash-provider-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 130px;
+}
+
+.skill-mention-menu .slash-provider-chips > span {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 62px;
+  align-items: center;
+  border: 1px solid var(--app-border-subtle);
+  border-radius: 999px;
+  padding: 1px 6px;
+  color: var(--app-muted);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+
 .skill-mention-menu-context {
   padding: 8px 10px;
   border-bottom: 1px solid var(--app-border-subtle);
@@ -4100,6 +4140,13 @@
   justify-content: center;
   width: 28px;
   color: var(--app-success);
+}
+
+.file-mention-icon.has-image img {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  object-fit: contain;
 }
 
 .repo-file-reference-footer {

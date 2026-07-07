@@ -1,5 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
+import type { ChatSkillMention, PluginCatalogItem } from "../shared/types";
 import {
   RefreshCw,
   Settings,
@@ -23,6 +24,7 @@ import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
 import { chatRoleLabel } from "./components/chat/chat-conversation-data";
 import { avatarForChatParticipant } from "./components/chat/chat-avatars";
 import { defaultChatParticipantDraft } from "./components/chat/chat-participant-drafts";
+import type { DraftPluginMention } from "./components/chat/chat-composer-draft-utils";
 import { Avatar } from "./components/avatar/avatar";
 import { isChatAssistantParticipant } from "./components/conversation/conversation-display";
 import { planDecisionReplies } from "./components/review/review-conversation-data";
@@ -48,6 +50,12 @@ function App(): JSX.Element {
   const view = useAppViewModel(state);
   const [appVersion, setAppVersion] = React.useState("");
   const [accordDialogOpen, setAccordDialogOpen] = React.useState(false);
+  const [newChatPrefill, setNewChatPrefill] = React.useState<{
+    key: number;
+    prompt: string;
+    pluginMentions: DraftPluginMention[];
+    skillMentions: ChatSkillMention[];
+  }>();
 
   React.useEffect(() => {
     let cancelled = false;
@@ -74,6 +82,25 @@ function App(): JSX.Element {
   };
   const closeSettings = (): void => {
     state.setSidebarMode("history");
+  };
+  const tryPluginInNewChat = (plugin: PluginCatalogItem): void => {
+    if (state.busy) {
+      return;
+    }
+    const draft = pluginNewChatDraft(plugin);
+    if (!draft.trim()) {
+      return;
+    }
+    void conversationActions.newChatSession().then(() => {
+      state.setQuestion(draft);
+      setNewChatPrefill({
+        key: Date.now(),
+        prompt: draft,
+        ...pluginNewChatMentions(plugin, draft)
+      });
+      state.setSidebarMode("history");
+      state.setSidebarCollapsed(false);
+    });
   };
 
   const openingConversationDescription = view.openingConversation
@@ -246,6 +273,7 @@ function App(): JSX.Element {
           getAgentEnvironment={settingsActions.getAgentEnvironment}
           saveAgentEnvironmentVariable={settingsActions.saveAgentEnvironmentVariable}
           deleteAgentEnvironmentVariable={settingsActions.deleteAgentEnvironmentVariable}
+          onTryPluginInChat={tryPluginInNewChat}
           sidebarCollapsed={state.sidebarCollapsed}
           onExpandSidebar={() => state.setSidebarCollapsed(false)}
           onClose={closeSettings}
@@ -267,6 +295,10 @@ function App(): JSX.Element {
                 settings={state.settings}
                 summaries={state.summaries}
                 agents={state.agents}
+                initialPluginMentions={newChatPrefill?.pluginMentions}
+                initialSkillMentions={newChatPrefill?.skillMentions}
+                prefillPrompt={newChatPrefill?.prompt}
+                prefillRequestKey={newChatPrefill?.key}
                 busy={state.busy}
                 renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}
                 participantRoleLabel={(participant) => chatRoleLabel(state.settings.chatRoleConfigs, participant)}
@@ -384,6 +416,49 @@ function App(): JSX.Element {
       )}
     </AppShell>
   );
+}
+
+function pluginNewChatDraft(plugin: PluginCatalogItem): string {
+  const prompt = plugin.invocation.kind === "prompt-insert" ? plugin.invocation.prompt.trim() : "";
+  const tokenName = plugin.invocation.kind === "skill-mention"
+    ? plugin.invocation.skill.frontmatterName
+    : plugin.name;
+  const includeToken = plugin.invocation.kind !== "prompt-insert" || plugin.installedProviderKinds.length > 0;
+  if (!includeToken) {
+    return prompt;
+  }
+  return `/${tokenName}${prompt ? ` ${prompt}` : " "}`;
+}
+
+function pluginNewChatMentions(
+  plugin: PluginCatalogItem,
+  draft: string
+): { pluginMentions: DraftPluginMention[]; skillMentions: ChatSkillMention[] } {
+  if (plugin.invocation.kind === "skill-mention" && draftHasSlashToken(draft, plugin.invocation.skill.frontmatterName)) {
+    const skill = plugin.invocation.skill;
+    const mention: ChatSkillMention = {
+      skillId: skill.skillId,
+      displayName: skill.displayName,
+      frontmatterName: skill.frontmatterName,
+      description: skill.description,
+      contentHash: skill.contentHash,
+      capabilityState: skill.capabilityState,
+      variants: skill.variants
+    };
+    return { pluginMentions: [], skillMentions: [mention] };
+  }
+  if (draftHasSlashToken(draft, plugin.name)) {
+    return {
+      pluginMentions: [{ name: plugin.name, displayName: plugin.displayName, iconUrl: plugin.iconUrl }],
+      skillMentions: []
+    };
+  }
+  return { pluginMentions: [], skillMentions: [] };
+}
+
+function draftHasSlashToken(draft: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|\\s)/${escaped}(?=\\s|$)`).test(draft);
 }
 
 createRoot(document.getElementById("root") as HTMLElement).render(

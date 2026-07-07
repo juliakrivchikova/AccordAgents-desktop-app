@@ -1,4 +1,4 @@
-import { ArrowLeft, Circle, FileText, KeyRound, ListChecks, Settings, SlidersHorizontal, Users } from "lucide-react";
+import { ArrowLeft, Circle, FileText, KeyRound, ListChecks, Plug, Settings, SlidersHorizontal, Users } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { SidebarPanelIcon } from "../shell/sidebar-panel-icon";
@@ -12,6 +12,7 @@ const SETTINGS_NAV: Array<{ section: SettingsSection; label: string; icon: typeo
   { section: "roles", label: "Roles", icon: Circle },
   { section: "behavior-rules", label: "Rules", icon: ListChecks },
   { section: "saved-prompts", label: "Prompts", icon: FileText },
+  { section: "plugins", label: "Plugins & Skills", icon: Plug },
   { section: "participants", label: "Members", icon: Users }
 ];
 

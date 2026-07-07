@@ -170,6 +170,10 @@
   caret-color: var(--app-text-strong);
 }
 
+.new-chat-prompt.skill-highlight-textarea.has-leading-plugin-token {
+  text-indent: calc(0.95em + 4px);
+}
+
 .new-chat-prompt.skill-highlight-textarea::placeholder {
   color: transparent;
   opacity: 0;

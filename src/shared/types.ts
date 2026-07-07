@@ -331,6 +331,12 @@ export interface UserSkillSearchResult {
   skills: UserSkillSummary[];
 }
 
+export interface UserSkillListRequest {
+  repoPath?: string;
+  query?: string;
+  limit?: number;
+}
+
 export interface UserSkillDiagnosticsRequest {
   conversationId?: string;
 }
@@ -360,6 +366,88 @@ export interface UserSkillDiagnostics {
     message?: string;
   }>;
   lastScanError?: string;
+}
+
+export interface UserSkillListResult {
+  skills: UserSkillSummary[];
+  diagnostics: UserSkillDiagnostics;
+}
+
+export type PluginSourceScope = "personal" | "workspace" | "bundled";
+
+export type PluginInvocationKind = "skill-mention" | "prompt-insert" | "mcp-passive";
+
+export type PluginProviderStatus = "invocable" | "available" | "needs-setup" | "unsupported" | "malformed";
+
+export interface PluginInstallRecord {
+  providerKind: ChatProviderKind;
+  key: string;
+  enabled: boolean;
+  sourceLabel: string;
+  scope?: string;
+  version?: string;
+  installedAt?: string;
+  installPath?: string;
+}
+
+export interface PluginProviderAvailability {
+  providerKind: ChatProviderKind;
+  status: PluginProviderStatus;
+  capabilityState: UserSkillCapabilityState;
+  message?: string;
+}
+
+export type PluginInvocationDescriptor =
+  | {
+      kind: "skill-mention";
+      skill: UserSkillSummary;
+    }
+  | {
+      kind: "prompt-insert";
+      prompt: string;
+    }
+  | {
+      kind: "mcp-passive";
+    };
+
+export interface PluginCatalogItem {
+  id: string;
+  name: string;
+  displayName: string;
+  description?: string;
+  category?: string;
+  iconUrl?: string;
+  brandColor?: string;
+  providerKind: ChatProviderKind;
+  sourceScope: PluginSourceScope;
+  sourceLabel: string;
+  manifestPath?: string;
+  pluginPath?: string;
+  installRecords: PluginInstallRecord[];
+  installedProviderKinds: ChatProviderKind[];
+  invocation: PluginInvocationDescriptor;
+  providerAvailability: PluginProviderAvailability[];
+  statusMessage?: string;
+}
+
+export interface PluginListDiagnostics {
+  checkedSources: string[];
+  errors: string[];
+  updatedAt: string;
+}
+
+export interface PluginListRequest {
+  conversationId?: string;
+  repoPath?: string;
+  participants?: ChatParticipantInput[];
+  query?: string;
+  content?: string;
+  limit?: number;
+}
+
+export interface PluginListResult {
+  plugins: PluginCatalogItem[];
+  diagnostics: PluginListDiagnostics;
 }
 
 export type ChatRoleRuntime = "claude-agent" | "codex-developer-instructions" | "prompt-fallback";
@@ -1619,6 +1707,9 @@ export interface AppBridge {
   searchRepoFiles(request: RepoFileSearchRequest): Promise<RepoFileSearchResult[]>;
   searchUserSkills(request: UserSkillSearchRequest): Promise<UserSkillSearchResult>;
   getUserSkillDiagnostics(request?: UserSkillDiagnosticsRequest): Promise<UserSkillDiagnostics>;
+  listUserSkills(request?: UserSkillListRequest): Promise<UserSkillListResult>;
+  listPlugins(request?: PluginListRequest): Promise<PluginListResult>;
+  refreshPlugins(request?: PluginListRequest): Promise<PluginListResult>;
   listConversations(): Promise<ConversationSummary[]>;
   getConversation(id: string): Promise<Conversation | undefined>;
   openConversation(id: string, limit?: number): Promise<ConversationOpenResult | undefined>;

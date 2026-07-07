@@ -21,6 +21,20 @@
   color: var(--app-text-strong);
 }
 
+.settings-view .settings-view-head-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.settings-view .settings-view-head-actions > button {
+  border: 0 !important;
+  box-shadow: none !important;
+  color: #878d9a;
+}
+
 .settings-view .gen-section {
   max-width: 740px;
   margin: 0 0 24px;

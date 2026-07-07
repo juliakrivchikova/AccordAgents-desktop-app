@@ -1,3 +1,4 @@
+import { type ReactNode, useState } from "react";
 import type {
   AgentEnvironmentSnapshot,
   AgentHealth,
@@ -9,6 +10,7 @@ import type {
   ChatSavedPromptConfigUpdate,
   CloudRunsSettingsUpdate,
   DeleteAgentEnvironmentVariableRequest,
+  PluginCatalogItem,
   ProviderSettings,
   RepoFileOpenAction,
   SaveAgentEnvironmentVariableRequest
@@ -22,9 +24,10 @@ import { GeneralSettingsSection } from "./general-settings-section";
 import { BehaviorRuleSettingsSection } from "./behavior-rules-settings-section";
 import { SavedPromptsSettingsSection } from "./saved-prompts-settings-section";
 import { EnvironmentSettingsSection } from "./environment-settings-section";
+import { PluginsSettingsSection } from "./plugins/plugins-settings-section";
 import { X } from "lucide-react";
 
-export type SettingsSection = "general" | "environment" | "roles" | "behavior-rules" | "saved-prompts" | "participants";
+export type SettingsSection = "general" | "environment" | "roles" | "behavior-rules" | "saved-prompts" | "participants" | "plugins";
 
 export function SettingsView(props: {
   section: SettingsSection;
@@ -49,10 +52,12 @@ export function SettingsView(props: {
   getAgentEnvironment: () => Promise<AgentEnvironmentSnapshot>;
   saveAgentEnvironmentVariable: (request: SaveAgentEnvironmentVariableRequest) => Promise<AgentEnvironmentSnapshot>;
   deleteAgentEnvironmentVariable: (request: DeleteAgentEnvironmentVariableRequest) => Promise<AgentEnvironmentSnapshot>;
+  onTryPluginInChat: (plugin: PluginCatalogItem) => void;
   sidebarCollapsed: boolean;
   onExpandSidebar: () => void;
   onClose: () => void;
 }): JSX.Element {
+  const [pluginHeaderAction, setPluginHeaderAction] = useState<ReactNode>();
   const title = props.section === "general"
     ? "General"
     : props.section === "environment"
@@ -61,7 +66,9 @@ export function SettingsView(props: {
         ? "Roles"
         : props.section === "behavior-rules"
           ? "Rules"
-          : props.section === "saved-prompts" ? "Prompts" : "Members";
+          : props.section === "saved-prompts"
+            ? "Prompts"
+            : props.section === "plugins" ? "Plugins & Skills" : "Members";
   const sectionClass = props.section === "participants"
     ? "settings-view-participants"
     : props.section === "roles"
@@ -90,14 +97,17 @@ export function SettingsView(props: {
             )}
             <h1>{title}</h1>
           </div>
-          <IconButton
-            size="sm"
-            icon={X}
-            label="Close settings"
-            tooltip="Close settings"
-            variant="outline"
-            onClick={props.onClose}
-          />
+          <div className="settings-view-head-actions">
+            {props.section === "plugins" && pluginHeaderAction}
+            <IconButton
+              size="sm"
+              icon={X}
+              label="Close settings"
+              tooltip="Close settings"
+              variant="ghost"
+              onClick={props.onClose}
+            />
+          </div>
         </div>
         {props.section === "roles" && (
           <RolesSettingsSection
@@ -133,6 +143,13 @@ export function SettingsView(props: {
             getAgentEnvironment={props.getAgentEnvironment}
             saveAgentEnvironmentVariable={props.saveAgentEnvironmentVariable}
             deleteAgentEnvironmentVariable={props.deleteAgentEnvironmentVariable}
+          />
+        )}
+        {props.section === "plugins" && (
+          <PluginsSettingsSection
+            repoPath={props.settings.lastRepoPath}
+            onTryPluginInChat={props.onTryPluginInChat}
+            onHeaderActionChange={setPluginHeaderAction}
           />
         )}
         {props.section === "general" && (

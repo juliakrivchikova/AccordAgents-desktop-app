@@ -86,6 +86,22 @@ test("discovers Codex personal skills from both runtime and documented roots", a
   });
 });
 
+test("listAll returns context-free Settings skill summaries with provider availability", async () => {
+  await withTempWorkspace(async ({ homeDir, repoPath }) => {
+    await writeSkill(path.join(homeDir, ".agents/skills/qa"), "qa", "QA", "codex body");
+    await writeSkill(path.join(homeDir, ".claude/skills/qa"), "qa", "QA", "claude body");
+    await writeSkill(path.join(repoPath, ".agents/skills/repo-only"), "repo-only", "Repo only", "repo body");
+    const service = new UserSkillsService({ homeDir });
+
+    const result = await service.listAll({ repoPath, query: "qa", limit: 20 });
+
+    assert.deepEqual(result.skills.map((skill) => skill.frontmatterName), ["qa"]);
+    assert.deepEqual(result.skills[0].providerKinds, ["claude-code", "codex-cli"]);
+    assert.equal(result.skills[0].capabilityState, "invocable");
+    assert.equal(result.diagnostics.visibleCount, 3);
+  });
+});
+
 test("ranks the exact query match first so the highlighted result is correct", async () => {
   await withTempWorkspace(async ({ homeDir, repoPath }) => {
     // `browse` only matches "qa" via its description; `qa` is the exact name and must rank first.

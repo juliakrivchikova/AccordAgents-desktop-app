@@ -50,7 +50,9 @@ import { providerLabel } from "./chat-conversation-data";
 import { ChatComposerAttachmentChips } from "./chat-composer-attachment-chips";
 import { ChatComposerMenus } from "./chat-composer-menus";
 import {
-  renderSkillHighlightedDraft
+  type DraftPluginMention,
+  draftStartsWithPluginMention,
+  renderSlashHighlightedDraft
 } from "./chat-composer-draft-utils";
 import {
   revokePendingImageUrls,
@@ -73,6 +75,10 @@ const NEW_CHAT_MENU_VIEWPORT_MARGIN = 16;
 
 export function NewChatScreen(props: {
   prompt: string;
+  initialPluginMentions?: DraftPluginMention[];
+  initialSkillMentions?: ChatSkillMention[];
+  prefillPrompt?: string;
+  prefillRequestKey?: number;
   repoPath: string;
   repoInfo?: GitRepoInfo;
   selectedParticipantIds: Set<string>;
@@ -95,6 +101,7 @@ export function NewChatScreen(props: {
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const handledPrefillCaretKeyRef = useRef<number | undefined>();
   const images = useChatComposerImages(undefined);
   const assistantParticipant = useMemo(
     () => newChatAssistantParticipant(props.settings, props.agents),
@@ -136,6 +143,9 @@ export function NewChatScreen(props: {
   );
   const mentions = useChatComposerMentions({
     draft: props.prompt,
+    initialPluginMentions: props.initialPluginMentions,
+    initialSkillMentions: props.initialSkillMentions,
+    mentionSeedKey: props.prefillRequestKey,
     searchSource,
     onDraftChange: props.onPromptChange,
     participants: mentionParticipants,
@@ -149,6 +159,7 @@ export function NewChatScreen(props: {
   const validation = validateChatStartupDrafts(prospectiveParticipantDrafts, props.settings.chatRoleConfigs, props.agents, props.settings.chatBehaviorRules);
   const hasPrompt = props.prompt.trim().length > 0;
   const canStart = (hasPrompt || images.readyImages.length > 0 || mentions.selectedSkillMentions.length > 0) && !images.hasInvalidImages && !props.busy && !validation;
+  const hasLeadingPluginToken = draftStartsWithPluginMention(props.prompt, mentions.selectedPluginMentions);
 
   useLayoutEffect(() => {
     resizeNewChatPrompt(promptRef.current);
@@ -193,6 +204,32 @@ export function NewChatScreen(props: {
     textarea.setSelectionRange(position, position);
     mentions.pendingCaretRef.current = undefined;
   }, [mentions.pendingCaretRef, props.prompt]);
+
+  useLayoutEffect(() => {
+    if (
+      props.prefillRequestKey === undefined ||
+      props.prefillPrompt === undefined ||
+      props.prompt !== props.prefillPrompt ||
+      handledPrefillCaretKeyRef.current === props.prefillRequestKey
+    ) {
+      return;
+    }
+    const textarea = promptRef.current;
+    if (!textarea) {
+      return;
+    }
+    const placeCaretAtEnd = (): void => {
+      const position = textarea.value.length;
+      textarea.focus();
+      textarea.setSelectionRange(position, position);
+      textarea.scrollTop = textarea.scrollHeight;
+      textarea.scrollLeft = textarea.scrollWidth;
+    };
+    placeCaretAtEnd();
+    const frameId = window.requestAnimationFrame(placeCaretAtEnd);
+    handledPrefillCaretKeyRef.current = props.prefillRequestKey;
+    return () => window.cancelAnimationFrame(frameId);
+  }, [props.prefillPrompt, props.prefillRequestKey, props.prompt]);
 
   function syncHighlightScroll(event: UIEvent<HTMLTextAreaElement>): void {
     if (!highlightRef.current) {
@@ -254,6 +291,7 @@ export function NewChatScreen(props: {
             insertMention={mentions.insertMention}
             insertSavedPrompt={mentions.insertSavedPrompt}
             insertSkillMention={mentions.insertSkillMention}
+            insertPluginMention={mentions.insertPluginMention}
             mentionIndex={mentions.mentionIndex}
             mentionOptions={mentions.mentionOptions}
             participantRoleLabel={props.participantRoleLabel}
@@ -266,10 +304,15 @@ export function NewChatScreen(props: {
             visibleFileOptions={mentions.visibleFileOptions}
             visiblePromptOptions={mentions.visiblePromptOptions}
             visibleSkillOptions={mentions.visibleSkillOptions}
+            visiblePluginOptions={mentions.visiblePluginOptions}
           />
           <textarea
             ref={promptRef}
-            className={["new-chat-prompt", mentions.showSkillHighlights ? "skill-highlight-textarea" : ""].filter(Boolean).join(" ")}
+            className={[
+              "new-chat-prompt",
+              mentions.showSkillHighlights ? "skill-highlight-textarea" : "",
+              hasLeadingPluginToken ? "has-leading-plugin-token" : ""
+            ].filter(Boolean).join(" ")}
             value={props.prompt}
             placeholder="What are you working on?"
             rows={3}
@@ -361,7 +404,7 @@ export function NewChatScreen(props: {
           />
           {mentions.showSkillHighlights && (
             <div ref={highlightRef} className="chat-draft-highlight" aria-hidden="true">
-              {renderSkillHighlightedDraft(props.prompt, mentions.selectedSkillMentions)}
+              {renderSlashHighlightedDraft(props.prompt, mentions.selectedSkillMentions, mentions.selectedPluginMentions)}
             </div>
           )}
         </div>

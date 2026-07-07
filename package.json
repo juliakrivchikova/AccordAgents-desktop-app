@@ -25,6 +25,7 @@
     "test:storage": "npm run build:main && node --test dist/main/main/services/storage.messages.test.js",
     "test:chat-compact": "npm run build:main && node --test dist/main/main/services/chat.compact.test.js dist/main/main/services/chatParticipantStatus.test.js dist/main/main/services/chatRosterStatus.test.js",
     "test:user-skills": "npm run build:main && node --test dist/main/main/services/userSkills.test.js dist/main/main/services/chat.userSkills.test.js",
+    "test:plugins": "npm run build:main && node --test dist/main/main/services/plugins.test.js",
     "test:accord": "npm run build:main && node --test dist/main/main/services/accordLauncherPreferences.test.js",
     "test:avatar-contract": "node --test scripts/avatar-contract.test.mjs",
     "test:member-copy": "node --test scripts/member-copy-guard.test.mjs",
