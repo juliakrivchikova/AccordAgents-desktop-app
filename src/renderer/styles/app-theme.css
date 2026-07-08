@@ -13,8 +13,10 @@
   --app-header-height: 52px;
   --app-sidebar-width: 266px;
   --app-bg: #f6f7f9;
+  --app-new-chat-bg: #fbfbfc;
+  --bg-sunken: #f4f5f7;
   --app-workspace-bg: #ffffff;
-  --app-sidebar-bg: #f1f2f5;
+  --app-sidebar-bg: var(--bg-sunken);
   --app-header-bg: #ffffff;
   --app-surface: #ffffff;
   --app-surface-subtle: #f7f8fa;
@@ -157,7 +159,7 @@
   --chart-4: #df5a4d;
   --chart-5: #8b5cf6;
   --radius: 0.5rem;
-  --sidebar: #f1f2f5;
+  --sidebar: var(--bg-sunken);
   --sidebar-foreground: #424955;
   --sidebar-primary: #16191f;
   --sidebar-primary-foreground: #ffffff;
@@ -170,6 +172,7 @@
 .dark {
   color-scheme: dark;
   --app-bg: #0d0f13;
+  --bg-sunken: #121419;
   --app-workspace-bg: #181b21;
   --app-sidebar-bg: #121419;
   --app-header-bg: #181b21;

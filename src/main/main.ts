@@ -74,6 +74,11 @@ import { UserSkillsService } from "./services/userSkills";
 
 let mainWindow: BrowserWindow | undefined;
 
+const userDataDirOverride = process.env.ACCORDAGENTS_USER_DATA_DIR?.trim();
+if (userDataDirOverride) {
+  app.setPath("userData", path.resolve(userDataDirOverride));
+}
+
 const gitService = new GitService();
 const settingsService = new SettingsService();
 const agentEnvironmentService = new AgentEnvironmentService(settingsService);
@@ -177,18 +182,25 @@ async function openExternalUrl(url: unknown): Promise<void> {
 }
 
 function createWindow(): void {
+  const windowTitle = process.env.ACCORDAGENTS_WINDOW_TITLE?.trim() || "AccordAgents";
   mainWindow = new BrowserWindow({
     width: 1080,
     height: 720,
     minWidth: 1080,
     minHeight: 720,
-    title: "AccordAgents",
+    title: windowTitle,
     backgroundColor: "#f5f2ec",
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
+    }
+  });
+  mainWindow.on("page-title-updated", (event) => {
+    if (windowTitle !== "AccordAgents") {
+      event.preventDefault();
+      mainWindow?.setTitle(windowTitle);
     }
   });
 

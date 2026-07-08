@@ -197,6 +197,9 @@ function App(): JSX.Element {
   return (
     <AppShell
       sidebarCollapsed={state.sidebarCollapsed}
+      sidebarWidth={state.sidebarWidth}
+      onSidebarWidthChange={state.setSidebarWidth}
+      className={isNewChatScreen ? "is-new-chat-screen" : undefined}
       sidebar={
         state.sidebarMode === "settings" ? (
           <SettingsSidebar

@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from "./constants";
 import { conversationTimeValue, upsertConversationSummary } from "./conversation-summaries";
 import type { AppState } from "./app-state";
-import { persistLastViewedAt } from "./storage";
+import { persistLastViewedAt, persistSidebarWidth } from "./storage";
 import {
   conversationMatchesSnapshot,
   conversationRelevantRunIds,
@@ -29,6 +29,10 @@ export function useAppEffects(state: AppState, refreshAll: () => Promise<void>):
       // Local storage can be unavailable in restricted browser contexts.
     }
   }, [state.sidebarCollapsed]);
+
+  useEffect(() => {
+    persistSidebarWidth(state.sidebarWidth);
+  }, [state.sidebarWidth]);
 
   useEffect(() => {
     return window.consensus.onReviewProgress((progress) => {

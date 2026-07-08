@@ -15,7 +15,7 @@ import type { SettingsSection } from "../components/settings/settings-view";
 import type { ChatMessageFocusRequest } from "../components/chat/chat-conversation-view";
 import type { ChatParticipantDraft } from "../components/chat/chat-participant-drafts";
 import { DEFAULT_SETTINGS } from "./constants";
-import { readDismissedWarningsFromStorage, readInitialSidebarCollapsed, readLastViewedAtFromStorage } from "./storage";
+import { readDismissedWarningsFromStorage, readInitialSidebarCollapsed, readInitialSidebarWidth, readLastViewedAtFromStorage } from "./storage";
 import type { DismissedWarningMap } from "./storage";
 
 export type SidebarMode = "history" | "settings";
@@ -40,6 +40,8 @@ export interface AppState {
   setActiveSettingsSection: StateSetter<SettingsSection>;
   sidebarCollapsed: boolean;
   setSidebarCollapsed: StateSetter<boolean>;
+  sidebarWidth: number;
+  setSidebarWidth: StateSetter<number>;
   selectedThreadId: string | undefined;
   setSelectedThreadId: StateSetter<string | undefined>;
   focusedThreadId: string | undefined;
@@ -111,6 +113,7 @@ export function useAppState(): AppState {
   const [sidebarMode, setSidebarMode] = useState<SidebarMode>("history");
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readInitialSidebarCollapsed);
+  const [sidebarWidth, setSidebarWidth] = useState(readInitialSidebarWidth);
   const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>();
   const [focusedThreadId, setFocusedThreadId] = useState<string | undefined>();
   const [kind, setKind] = useState<ConversationKind>("chat");
@@ -147,8 +150,8 @@ export function useAppState(): AppState {
   return {
     settings, setSettings, agents, setAgents, summaries, setSummaries, conversation, setConversation,
     messagePage, setMessagePage, olderMessagesLoading, setOlderMessagesLoading, sidebarMode, setSidebarMode,
-    activeSettingsSection, setActiveSettingsSection, sidebarCollapsed, setSidebarCollapsed, selectedThreadId,
-    setSelectedThreadId, focusedThreadId, setFocusedThreadId, kind, setKind, question, setQuestion, repoPath,
+    activeSettingsSection, setActiveSettingsSection, sidebarCollapsed, setSidebarCollapsed, sidebarWidth,
+    setSidebarWidth, selectedThreadId, setSelectedThreadId, focusedThreadId, setFocusedThreadId, kind, setKind, question, setQuestion, repoPath,
     setRepoPath, repoInfo, setRepoInfo, warnings, setWarnings, dismissedWarningKeysByScope,
     setDismissedWarningKeysByScope, initializing, setInitializing, historyLoading, setHistoryLoading,
     openingConversationId, setOpeningConversationId, busy, setBusy, currentRunId, setCurrentRunId,

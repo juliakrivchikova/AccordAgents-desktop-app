@@ -4,8 +4,15 @@
    sidebar's contents. */
 
 .app-shell-root {
+  position: relative;
   grid-template-columns: var(--app-sidebar-width) minmax(0, 1fr);
   transition: grid-template-columns 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.app-shell-root.resizing-sidebar {
+  cursor: col-resize;
+  user-select: none;
+  transition: none;
 }
 
 .app-shell-root[data-sidebar-collapsed="true"] {
@@ -26,23 +33,38 @@
   pointer-events: none;
 }
 
+.app-shell-sidebar-resizer {
+  position: absolute;
+  z-index: calc(var(--z-sidebar) + 1);
+  top: 0;
+  bottom: 0;
+  left: calc(var(--app-sidebar-width) - 5px);
+  width: 10px;
+  cursor: col-resize;
+  touch-action: none;
+  background: transparent;
+}
+
+.app-shell-sidebar-resizer::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 50%;
+  width: 1px;
+  background: transparent;
+  transform: translateX(-0.5px);
+}
+
+.app-shell-sidebar-resizer:hover::before,
+.app-shell-root.resizing-sidebar .app-shell-sidebar-resizer::before {
+  background: var(--app-border-strong);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .app-shell-root {
     transition: none;
   }
 }
 
-/* Frosted glass sidebar + the hairline that separates it from the workspace.
-   The translucent fill + backdrop blur reads as glass while staying legible
-   over the solid workspace behind it. */
 [data-shell="sidebar"] {
-  border-right: 1px solid var(--app-shell-border);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--app-sidebar-bg) 74%, transparent),
-      color-mix(in srgb, var(--app-sidebar-bg) 88%, transparent)
-    );
-  backdrop-filter: blur(20px) saturate(155%);
-  -webkit-backdrop-filter: blur(20px) saturate(155%);
+  background: var(--app-sidebar-bg);
 }

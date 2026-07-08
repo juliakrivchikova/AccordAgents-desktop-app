@@ -1,5 +1,11 @@
 /* chat setup styles. Keep token-driven; migrate rules into components as views are extracted. */
 
+:root:not(.dark) .app-shell-root.is-new-chat-screen {
+  --bg: var(--app-new-chat-bg);
+  --app-bg: var(--bg);
+  --app-workspace-bg: var(--bg);
+}
+
 [data-shell="topbar"].new-chat-topbar {
   height: 56px !important;
   padding-right: 20px !important;
