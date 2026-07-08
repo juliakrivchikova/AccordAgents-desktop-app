@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useMemo, useRef } from "react";
-import { ArrowUp, ImagePlus, Loader2, RefreshCw, X } from "lucide-react";
+import { ArrowUp, ImagePlus, RefreshCw } from "lucide-react";
 
 import { ResizableTextarea } from "@/renderer/components/primitives";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -16,6 +16,7 @@ import {
   draftStartsWithPluginMention,
   renderSlashHighlightedDraft
 } from "./chat-composer-draft-utils";
+import { ChatActiveRunPopover, type ChatActiveRunParticipantRow } from "./chat-active-run-popover";
 import { ChatComposerMenus } from "./chat-composer-menus";
 import {
   revokePendingImageUrls,
@@ -32,7 +33,9 @@ export interface ChatComposerProps {
   placeholder: string;
   isRunning: boolean;
   activeRunCount?: number;
+  activeRunParticipantRows?: ChatActiveRunParticipantRow[];
   onStopAllRuns?: () => void;
+  onStopParticipantRuns?: (runIds: string[]) => void;
   status?: React.ReactNode;
   className?: string;
   rows?: number;
@@ -73,6 +76,8 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
   );
   const hasLeadingPluginToken = draftStartsWithPluginMention(props.draft, mentions.selectedPluginMentions);
   const accordTooltip = props.accordDisabledReason ?? "Start an Accord: reach agreement among chat members";
+  const activeRunCount = props.activeRunCount ?? 0;
+  const activeRunParticipantRows = props.activeRunParticipantRows ?? [];
 
   useLayoutEffect(() => {
     const pendingCaret = mentions.pendingCaretRef.current;
@@ -282,18 +287,15 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
             >
               <ImagePlus size={18} />
             </button>
-            {(props.activeRunCount ?? 0) > 0 && props.onStopAllRuns && (
-              <button
-                type="button"
-                className="composer-active-run"
-                title="Stop all running members"
-                aria-label={`Stop ${props.activeRunCount} active ${props.activeRunCount === 1 ? "run" : "runs"}`}
-                onClick={props.onStopAllRuns}
-              >
-                <Loader2 size={13} className="spin" aria-hidden />
-                <span>{props.activeRunCount} active {props.activeRunCount === 1 ? "run" : "runs"}</span>
-                <X size={13} aria-hidden />
-              </button>
+            {activeRunCount > 0 && props.onStopAllRuns && (
+              <ChatActiveRunPopover
+                activeRunCount={activeRunCount}
+                activeRunParticipantRows={activeRunParticipantRows}
+                renderParticipantAvatar={props.renderParticipantAvatar}
+                participantRoleLabel={props.participantRoleLabel}
+                onStopAllRuns={props.onStopAllRuns}
+                onStopParticipantRuns={props.onStopParticipantRuns}
+              />
             )}
           </div>
           <div className="chat-composer-actions">

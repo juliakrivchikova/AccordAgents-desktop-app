@@ -7031,7 +7031,48 @@ export class ChatService {
     } else {
       delete merged.remoteRunReplay;
     }
+    const remoteRunHandles = this.mergeStoredRemoteRunHandles(
+      storedMetadata.remoteRunHandles,
+      currentMetadata.remoteRunHandles
+    );
+    if (Object.keys(remoteRunHandles).length > 0) {
+      merged.remoteRunHandles = remoteRunHandles;
+    } else {
+      delete merged.remoteRunHandles;
+    }
     return merged;
+  }
+
+  private mergeStoredRemoteRunHandles(storedValue: unknown, currentValue: unknown): Record<string, RemoteRunHandle> {
+    const stored = this.remoteRunHandleByRun(storedValue);
+    const current = this.remoteRunHandleByRun(currentValue);
+    const handles: Record<string, RemoteRunHandle> = {};
+    for (const runId of new Set([...Object.keys(stored), ...Object.keys(current)])) {
+      const storedHandle = stored[runId];
+      const currentHandle = current[runId];
+      if (!storedHandle) {
+        handles[runId] = currentHandle;
+        continue;
+      }
+      if (!currentHandle) {
+        handles[runId] = storedHandle;
+        continue;
+      }
+      const storedTerminal = this.isRemoteRunTerminal(storedHandle.status);
+      const currentTerminal = this.isRemoteRunTerminal(currentHandle.status);
+      if (storedTerminal !== currentTerminal) {
+        handles[runId] = storedTerminal ? storedHandle : currentHandle;
+        continue;
+      }
+      handles[runId] = this.remoteRunHandleTimestamp(storedHandle) > this.remoteRunHandleTimestamp(currentHandle)
+        ? storedHandle
+        : currentHandle;
+    }
+    return handles;
+  }
+
+  private remoteRunHandleTimestamp(handle: RemoteRunHandle): string {
+    return handle.completedAt ?? handle.updatedAt ?? handle.startedAt ?? "";
   }
 
   private mergeStoredChatParticipantMetadata(
@@ -14856,7 +14897,11 @@ export class ChatService {
   }
 
   cancelRun(runId: string): boolean {
-    const controllers = this.chatRunControllers.get(runId);
+    const targetRunId = runId.trim();
+    if (!targetRunId) {
+      return false;
+    }
+    const controllers = this.chatRunControllers.get(targetRunId);
     let cancelled = false;
     if (controllers && controllers.size > 0) {
       for (const controller of controllers) {
@@ -14864,7 +14909,7 @@ export class ChatService {
       }
       cancelled = true;
     }
-    const remoteHandle = this.remoteRunHandlesByRun.get(runId);
+    const remoteHandle = this.remoteRunHandlesByRun.get(targetRunId);
     const worker = remoteHandle && !this.isRemoteRunTerminal(remoteHandle.status)
       ? cloudRunWorkerTargetFromSettings(remoteHandle.worker)
       : undefined;
@@ -14872,27 +14917,176 @@ export class ChatService {
       cancelled = true;
       void this.remoteRuns.cancelDetachedRun({
         conversationId: remoteHandle.conversationId,
-        runId,
+        runId: targetRunId,
         worker,
         reason: "user cancelled"
       })
-        .then((state) => this.updateRemoteRunHandleState(remoteHandle.conversationId, runId, state))
+        .then((state) => this.updateRemoteRunHandleState(remoteHandle.conversationId, targetRunId, state))
         .catch((error) => {
           void this.debugLogs.write("chat.remote-run.cancel.error", {
             conversationId: remoteHandle.conversationId,
-            runId,
+            runId: targetRunId,
             message: error instanceof Error ? error.message : String(error)
           });
-          void this.markRemoteRunCancelFailed(remoteHandle, runId, error).catch((failure) => {
+          void this.markRemoteRunCancelFailed(remoteHandle, targetRunId, error).catch((failure) => {
             void this.debugLogs.write("chat.remote-run.cancel-failure-state.error", {
               conversationId: remoteHandle.conversationId,
-              runId,
+              runId: targetRunId,
               message: failure instanceof Error ? failure.message : String(failure)
             });
           });
         });
     }
-    return cancelled;
+    if (!cancelled) {
+      void this.cancelStoredRun(targetRunId).catch((error) => {
+        void this.debugLogs.write("chat.cancel-stored-run.error", {
+          runId: targetRunId,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
+      return true;
+    }
+    return true;
+  }
+
+  private async cancelStoredRun(runId: string): Promise<boolean> {
+    const targetRunId = runId.trim();
+    if (!targetRunId) {
+      return false;
+    }
+    const summaries = await this.storage.listConversations();
+    for (const summary of summaries) {
+      if (summary.kind !== "chat") {
+        continue;
+      }
+      const conversation = await this.storage.getConversation(summary.id);
+      if (!conversation || conversation.kind !== "chat") {
+        continue;
+      }
+      const activeRunIds = readActiveRunIds(conversation.metadata);
+      const handles = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles);
+      const handle = handles[targetRunId];
+      if (!activeRunIds.includes(targetRunId) && this.chatRunId(conversation) !== targetRunId && !handle) {
+        continue;
+      }
+      if (handle && !this.isRemoteRunTerminal(handle.status)) {
+        this.registerRemoteRunHandle(handle);
+        const worker = cloudRunWorkerTargetFromSettings(handle.worker);
+        if (worker && this.remoteRuns) {
+          try {
+            const state = await this.remoteRuns.cancelDetachedRun({
+              conversationId: handle.conversationId,
+              runId: targetRunId,
+              worker,
+              reason: "user cancelled"
+            });
+            await this.updateRemoteRunHandleState(handle.conversationId, targetRunId, state);
+          } catch (error) {
+            void this.debugLogs.write("chat.remote-run.cancel.error", {
+              conversationId: handle.conversationId,
+              runId: targetRunId,
+              message: error instanceof Error ? error.message : String(error)
+            });
+            await this.markRemoteRunCancelFailed(handle, targetRunId, error);
+          }
+          return true;
+        }
+        await this.cancelStoredRemoteRunWithoutDelivery(conversation, targetRunId);
+        return true;
+      }
+      await this.cancelStoredOrphanedRun(conversation, targetRunId);
+      return true;
+    }
+    return false;
+  }
+
+  private async cancelStoredRemoteRunWithoutDelivery(conversation: Conversation, runId: string): Promise<void> {
+    const autoResumeRequestMessageIds = new Set<string>();
+    await this.withChatMutation(conversation, async () => {
+      const terminal = this.applyRemoteTerminalStateToConversation(
+        conversation,
+        runId,
+        "cancelled",
+        "user cancelled before remote cancellation could be delivered"
+      );
+      for (const requestMessageId of terminal.autoResumeRequestMessageIds) {
+        autoResumeRequestMessageIds.add(requestMessageId);
+      }
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+    });
+    if (!this.chatHasLiveWork(conversation.id)) {
+      this.scheduleAutoWatchEvaluation(conversation.id, "stored-remote-run-cancelled");
+    }
+    this.queueParticipantRequestAutoResumes(conversation.id, Array.from(autoResumeRequestMessageIds));
+  }
+
+  private async cancelStoredOrphanedRun(conversation: Conversation, runId: string): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      this.forgetAllActiveChatRunRefs(conversation.id, runId);
+      const activeBefore = readActiveRunIds(conversation.metadata);
+      conversation.metadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata, runId);
+      const activeAfter = new Set(readActiveRunIds(conversation.metadata));
+      const removedRunIds = activeBefore.filter((activeRunId) => !activeAfter.has(activeRunId));
+      for (const removedRunId of removedRunIds) {
+        this.markStoredParticipantRunStoppedByUser(conversation, removedRunId);
+        this.markPendingAppToolApprovalsForRunTerminal(conversation, removedRunId, "Stopped by user.");
+        conversation.metadata = withParticipantCompactionsForRunRemoved(conversation.metadata, removedRunId);
+        conversation.metadata = this.metadataAfterAutoTitleRunTerminal(conversation.id, conversation.metadata, removedRunId);
+      }
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+    });
+    if (!this.chatHasLiveWork(conversation.id)) {
+      this.scheduleAutoWatchEvaluation(conversation.id, "stored-orphaned-run-cancelled");
+    }
+  }
+
+  private markStoredParticipantRunStoppedByUser(conversation: Conversation, runId: string): boolean {
+    let changed = false;
+    const participantsById = new Map<string, ChatParticipant>();
+    const participants = conversation.metadata.participants;
+    if (Array.isArray(participants)) {
+      for (const participant of participants) {
+        if (participant && typeof participant === "object" && !Array.isArray(participant)) {
+          const item = participant as ChatParticipant;
+          if (typeof item.id === "string") {
+            participantsById.set(item.id, item);
+          }
+        }
+      }
+    }
+    for (const message of conversation.messages) {
+      if (
+        message.role !== "participant" ||
+        message.metadata?.runId !== runId ||
+        (
+          message.status !== "pending" &&
+          (message.status !== "error" || message.metadata?.terminalReason === "user-stopped")
+        )
+      ) {
+        continue;
+      }
+      const before = this.stableJson(message);
+      const participant = message.participantId ? participantsById.get(message.participantId) : undefined;
+      if (participant) {
+        this.markParticipantMessageStoppedByUser(message, participant);
+      } else {
+        message.status = "error";
+        if (!message.content.trim()) {
+          message.content = "Stopped by user.";
+        }
+        message.metadata = {
+          ...message.metadata,
+          terminalReason: "user-stopped"
+        };
+      }
+      this.recordLastMessageByParticipant(conversation, message);
+      changed = changed || before !== this.stableJson(message);
+    }
+    return changed;
   }
 
   private async withChatMutation<T>(

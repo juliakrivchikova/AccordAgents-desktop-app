@@ -1,6 +1,9 @@
-import { readActiveRunParticipants, readParticipantCompactions } from "./chatRunState";
+import { activeRunSummaryForConversation } from "./chatActiveRuns";
+import { readParticipantCompactions } from "./chatRunState";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import type { ChatAppToolApproval, Conversation } from "./types";
+
+export { activeRunIdsForConversation, activeRunSummaryForConversation } from "./chatActiveRuns";
 
 type NonIdleRosterStatus = Exclude<ChatParticipantRosterStatus, "idle">;
 
@@ -30,7 +33,8 @@ export function buildChatParticipantStatusMap(activeChatConversation: Conversati
     }
   };
 
-  const liveRunIds = activeRunIdsForConversation(activeChatConversation);
+  const activeRuns = activeRunSummaryForConversation(activeChatConversation);
+  const liveRunIds = new Set(activeRuns.runIds);
   const compactingRunIds = new Set<string>();
   const compacting = readParticipantCompactions(activeChatConversation.metadata);
   for (const [participantId, state] of Object.entries(compacting)) {
@@ -40,16 +44,11 @@ export function buildChatParticipantStatusMap(activeChatConversation: Conversati
     }
   }
 
-  const localRunParticipants = readActiveRunParticipants(activeChatConversation.metadata);
-  const remoteRunParticipants = activeRemoteRunParticipants(activeChatConversation.metadata, liveRunIds);
-  for (const runId of liveRunIds) {
+  for (const [runId, participantId] of activeRuns.participantIdsByRunId) {
     if (compactingRunIds.has(runId)) {
       continue;
     }
-    const participantId = localRunParticipants.get(runId) ?? remoteRunParticipants.get(runId);
-    if (participantId) {
-      setStatus(participantId, "running");
-    }
+    setStatus(participantId, "running");
   }
 
   const latestTerminalParticipantIds = new Set<string>();
@@ -102,20 +101,6 @@ export function buildChatParticipantStatusMap(activeChatConversation: Conversati
   return statuses;
 }
 
-export function activeRunIdsForConversation(conversation: Pick<Conversation, "metadata">): Set<string> {
-  const metadata = conversation.metadata;
-  const activeRunIds = Array.isArray(metadata.activeRunIds)
-    ? metadata.activeRunIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
-    : [];
-  const compatibilityRunId = typeof metadata.runId === "string" && metadata.runId.trim()
-    ? metadata.runId
-    : undefined;
-  return new Set([
-    ...activeRunIds,
-    ...(compatibilityRunId ? [compatibilityRunId] : [])
-  ]);
-}
-
 function chatParticipantIds(conversation: Conversation): Set<string> {
   const participants = conversation.metadata.participants;
   const ids = new Set<string>();
@@ -132,28 +117,6 @@ function chatParticipantIds(conversation: Conversation): Set<string> {
     }
   }
   return ids;
-}
-
-function activeRemoteRunParticipants(metadata: Record<string, unknown>, liveRunIds: Set<string>): Map<string, string> {
-  const handles = metadata.remoteRunHandles;
-  const participants = new Map<string, string>();
-  if (!handles || typeof handles !== "object" || Array.isArray(handles)) {
-    return participants;
-  }
-  for (const [runId, raw] of Object.entries(handles as Record<string, unknown>)) {
-    if (!liveRunIds.has(runId) || !raw || typeof raw !== "object" || Array.isArray(raw)) {
-      continue;
-    }
-    const record = raw as Record<string, unknown>;
-    if (record.status === "completed" || record.status === "failed" || record.status === "cancelled") {
-      continue;
-    }
-    const participantId = typeof record.participantId === "string" ? record.participantId.trim() : "";
-    if (participantId) {
-      participants.set(runId, participantId);
-    }
-  }
-  return participants;
 }
 
 function chatAppToolApprovals(conversation: Conversation): ChatAppToolApproval[] {

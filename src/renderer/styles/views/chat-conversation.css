@@ -3667,9 +3667,7 @@
 .composer-active-run {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
   height: 26px;
-  padding: 0 9px;
   border: 1px solid var(--app-border);
   border-radius: var(--radius-pill);
   background: transparent;
@@ -3677,7 +3675,7 @@
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
-  cursor: pointer;
+  overflow: hidden;
   transition: border-color 130ms ease, color 130ms ease, background 130ms ease;
 }
 
@@ -3687,13 +3685,157 @@
   background: var(--app-surface-hover);
 }
 
-.composer-active-run:focus-visible {
+.composer-active-run-info,
+.composer-active-run-stop {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.composer-active-run-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  min-width: 0;
+  padding: 0 7px 0 9px;
+}
+
+.composer-active-run-stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 25px;
+  height: 24px;
+  margin-right: 1px;
+  border-radius: var(--radius-pill);
+}
+
+.composer-active-run-info:hover {
+  color: var(--app-text-strong);
+}
+
+.composer-active-run-stop:hover {
+  background: color-mix(in srgb, var(--app-danger) 10%, transparent);
+  color: var(--app-danger);
+}
+
+.composer-active-run-info:focus-visible,
+.composer-active-run-stop:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
 
 .composer-active-run .spin {
   color: var(--app-accent);
+}
+
+.composer-active-run-popover {
+  display: grid;
+  gap: 8px;
+}
+
+.composer-active-run-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 2px 0;
+}
+
+.composer-active-run-popover-count {
+  color: var(--app-muted);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.composer-active-run-list {
+  display: grid;
+  gap: 3px;
+}
+
+.composer-active-run-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 26px;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 5px 6px;
+  border-radius: 7px;
+}
+
+.composer-active-run-row .mini-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  font-size: 11px;
+}
+
+.composer-active-run-row-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.composer-active-run-row-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-active-run-row-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.composer-active-run-row-role {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--app-muted);
+  font-size: 11px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-active-run-row-stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--app-muted);
+  cursor: pointer;
+}
+
+.composer-active-run-row-stop:hover {
+  background: color-mix(in srgb, var(--app-danger) 10%, transparent);
+  color: var(--app-danger);
+}
+
+.composer-active-run-row-stop:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.composer-active-run-empty {
+  padding: 8px 6px 6px;
+  color: var(--app-muted);
+  font-size: 12px;
 }
 
 .chat-composer-hint {

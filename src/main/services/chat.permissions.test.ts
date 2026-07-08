@@ -2135,6 +2135,110 @@ test("cancelRun marks remote run failed when remote cancel delivery fails", asyn
   assert.equal((storage.current.metadata.remoteRunHandles as any)["remote-run"].status, "failed");
 });
 
+test("cancelRun cancels persisted remote runs without in-memory handles", async () => {
+  const codex = chatParticipant("codex-cli");
+  const claude = chatParticipant("claude-code");
+  const now = "2026-06-27T22:05:00.000Z";
+  const remoteOne = {
+    runId: "remote-one",
+    conversationId: "conversation-1",
+    participantId: codex.id,
+    participantHandle: codex.handle,
+    worker: { host: "worker-one.example" },
+    status: "running",
+    startedAt: now,
+    updatedAt: now
+  };
+  const remoteTwo = {
+    runId: "remote-two",
+    conversationId: "conversation-1",
+    participantId: claude.id,
+    participantHandle: claude.handle,
+    worker: { host: "worker-two.example" },
+    status: "running",
+    startedAt: now,
+    updatedAt: now
+  };
+  const conversation = chatConversation([codex, claude], {
+    running: true,
+    runId: "remote-one",
+    activeRunIds: ["remote-one", "remote-two"],
+    remoteRunHandles: {
+      "remote-one": remoteOne,
+      "remote-two": remoteTwo
+    }
+  });
+  const { service, storage } = testService({ conversation });
+  const cancelledRunIds: string[] = [];
+  service.setRemoteRunService({
+    async startDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    async pollDetachedRun(): Promise<any> {
+      throw new Error("not used");
+    },
+    async cancelDetachedRun(request: any): Promise<any> {
+      cancelledRunIds.push(request.runId);
+      return {
+        runId: request.runId,
+        conversationId: conversation.id,
+        participantId: request.runId === "remote-one" ? codex.id : claude.id,
+        status: "cancelled",
+        completedAt: now
+      };
+    },
+    registerDetachedRunContext(): void {}
+  });
+
+  assert.equal(service.cancelRun("remote-one"), true);
+  assert.equal(service.cancelRun("remote-two"), true);
+
+  await waitFor(() => storage.current.metadata.activeRunIds === undefined);
+  assert.deepEqual(cancelledRunIds.sort(), ["remote-one", "remote-two"]);
+  assert.equal(storage.current.metadata.running, false);
+  assert.equal(storage.current.metadata.runId, undefined);
+  assert.equal((storage.current.metadata.remoteRunHandles as any)["remote-one"].status, "cancelled");
+  assert.equal((storage.current.metadata.remoteRunHandles as any)["remote-two"].status, "cancelled");
+});
+
+test("cancelRun force clears stale local and orphaned active run ids", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], {
+    running: true,
+    runId: "local-run",
+    activeRunIds: ["local-run", "orphan-run"],
+    activeRunOwnersByRunId: {
+      "local-run": {
+        processId: process.pid,
+        instanceId: "dead-instance",
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    },
+    activeRunParticipantIdsByRunId: {
+      "local-run": participant.id,
+      "orphan-run": participant.id
+    }
+  });
+  conversation.messages.push(pendingParticipantMessage(participant, "pending-local", "local-run"));
+  conversation.messages.push(pendingParticipantMessage(participant, "pending-orphan", "orphan-run"));
+  const { service, storage } = testService({ conversation });
+
+  assert.equal(service.cancelRun("local-run"), true);
+  assert.equal(service.cancelRun("orphan-run"), true);
+
+  await waitFor(() => storage.current.metadata.activeRunIds === undefined);
+  assert.equal(storage.current.metadata.running, false);
+  assert.equal(storage.current.metadata.runId, undefined);
+  assert.equal(storage.current.metadata.activeRunOwnersByRunId, undefined);
+  assert.equal(storage.current.metadata.activeRunParticipantIdsByRunId, undefined);
+  for (const messageId of ["pending-local", "pending-orphan"]) {
+    const message = storage.current.messages.find((item: ChatMessage) => item.id === messageId);
+    assert.equal(message?.status, "error");
+    assert.equal(message?.metadata?.terminalReason, "user-stopped");
+  }
+});
+
 test("chat add paths normalize legacy run location to concrete local or remote", async () => {
   const agents: AgentHealth[] = [{ kind: "codex-cli", label: "Codex CLI", installed: true }];
   const { service, storage, tempRoot } = testService({
@@ -7642,6 +7746,16 @@ function testService(options: {
   const tempRoot = path.join(tmpdir(), "accordagents-chat-permissions-test");
   const storage = {
     current: options.conversation ? clone(options.conversation) : undefined,
+    async listConversations(): Promise<Array<{ id: string; title: string; kind: Conversation["kind"]; createdAt: string; updatedAt: string; running?: boolean }>> {
+      return this.current ? [{
+        id: this.current.id,
+        title: this.current.title,
+        kind: this.current.kind,
+        createdAt: this.current.createdAt,
+        updatedAt: this.current.updatedAt,
+        running: this.current.metadata.running === true || Array.isArray(this.current.metadata.activeRunIds)
+      }] : [];
+    },
     async getConversation(id: string): Promise<Conversation | undefined> {
       return this.current?.id === id ? clone(this.current) : undefined;
     },

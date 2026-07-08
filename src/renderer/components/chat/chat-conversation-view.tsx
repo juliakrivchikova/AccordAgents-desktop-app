@@ -10,6 +10,7 @@ import type {
   Conversation,
   RepoFileMention
 } from "../../../shared/types";
+import { activeRunSummaryForConversation } from "../../../shared/chatActiveRuns";
 import { Avatar } from "../avatar/avatar";
 import { LocalFileLinkContext, LocalFileOpenChooser } from "../content/local-file-link";
 import { MessageLinkContext } from "../content/markdown-text";
@@ -52,9 +53,20 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
       ),
     [props.conversation.metadata]
   );
-  const activeRunIdsForChat = useMemo(() => activeRunIdsForConversation(props.conversation), [
+  const activeRunSummary = useMemo(() => activeRunSummaryForConversation(props.conversation), [
     props.conversation.metadata,
     props.conversation.messages
+  ]);
+  const participantsById = useMemo(() => new Map(participants.map((participant) => [participant.id, participant])), [participants]);
+  const activeRunParticipantRows = useMemo(() => activeRunSummary.participantIds.flatMap((participantId) => {
+    const participant = participantsById.get(participantId);
+    const status = props.participantStatusById.get(participantId);
+    const runIds = activeRunSummary.runIdsByParticipantId.get(participantId) ?? [];
+    return participant && status && status !== "idle" && runIds.length > 0 ? [{ participant, runIds, status }] : [];
+  }), [
+    activeRunSummary,
+    participantsById,
+    props.participantStatusById
   ]);
   const topLevelMessages = useMemo(() => chatTopLevelMessages(props.conversation), [props.conversation.messages]);
   const threadSummaries = useMemo(() => chatThreadSummaryMap(props.conversation), [props.conversation.messages]);
@@ -283,9 +295,15 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               accordDisabledReason={props.accordDisabledReason}
               onOpenAccord={props.onOpenAccord}
               isRunning={props.isRunning}
-              activeRunCount={activeRunIdsForChat.length}
+              activeRunCount={activeRunSummary.runIds.length}
+              activeRunParticipantRows={activeRunParticipantRows}
               onStopAllRuns={props.onStopRun ? () => {
-                for (const runId of activeRunIdsForChat) {
+                for (const runId of activeRunSummary.runIds) {
+                  props.onStopRun?.(runId);
+                }
+              } : undefined}
+              onStopParticipantRuns={props.onStopRun ? (runIds) => {
+                for (const runId of runIds) {
                   props.onStopRun?.(runId);
                 }
               } : undefined}
@@ -336,30 +354,6 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     </MessageLinkContext.Provider>
     </MentionDirectoryContext.Provider>
   );
-}
-
-function activeRunIdsForConversation(conversation: Conversation): string[] {
-  const ids: string[] = [];
-  const seen = new Set<string>();
-  const active = conversation.metadata?.activeRunIds;
-  if (Array.isArray(active)) {
-    for (const id of active) {
-      if (typeof id === "string" && id && !seen.has(id)) {
-        seen.add(id);
-        ids.push(id);
-      }
-    }
-  }
-  for (const message of conversation.messages) {
-    if (message.status === "pending" && message.role === "participant") {
-      const id = message.metadata?.runId;
-      if (typeof id === "string" && id && !seen.has(id)) {
-        seen.add(id);
-        ids.push(id);
-      }
-    }
-  }
-  return ids;
 }
 
 function latestNonMessageProgress(progress: ChatConversationViewProps["progress"]): ChatConversationViewProps["progress"][number] | undefined {
