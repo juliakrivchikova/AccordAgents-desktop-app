@@ -1,5 +1,10 @@
 import type { ChatActivityItem, Conversation } from "../../shared/types";
-import { CONVERSATION_MESSAGE_PAGE_SIZE, mergeLoadedMessagePage, prependMissingMessages } from "../lib/conversation-message-pages";
+import {
+  CONVERSATION_MESSAGE_PAGE_SIZE,
+  mergeLoadedMessagePage,
+  mergeMissingMessagesByCreatedAt,
+  prependMissingMessages
+} from "../lib/conversation-message-pages";
 import {
   errorText,
   firstPendingPlanItemReview,
@@ -136,6 +141,11 @@ export function useConversationActions(state: AppState): ConversationActions {
     if (!conversation || !messageId) {
       return;
     }
+    await ensureActivityTargetMessagesLoaded(
+      conversation,
+      messageId,
+      item.target.threadRootId?.trim() || undefined
+    );
     await waitForNextFrame();
     state.chatMessageFocusNonceRef.current += 1;
     state.setChatMessageFocusRequest({
@@ -143,6 +153,33 @@ export function useConversationActions(state: AppState): ConversationActions {
       threadRootId: item.target.threadRootId?.trim() || undefined,
       nonce: state.chatMessageFocusNonceRef.current
     });
+  }
+
+  async function ensureActivityTargetMessagesLoaded(
+    conversation: Conversation,
+    messageId: string,
+    threadRootId?: string
+  ): Promise<void> {
+    let loadedMessages = conversation.messages;
+    const targetIds = [...new Set([messageId, threadRootId].filter((id): id is string => Boolean(id)))];
+    for (const targetId of targetIds) {
+      if (loadedMessages.some((message) => message.id === targetId)) {
+        continue;
+      }
+      const page = await window.consensus.listConversationMessages({
+        conversationId: conversation.id,
+        aroundMessageId: targetId,
+        limit: CONVERSATION_MESSAGE_PAGE_SIZE
+      });
+      if (page.messages.length === 0) {
+        continue;
+      }
+      loadedMessages = mergeMissingMessagesByCreatedAt(loadedMessages, page.messages);
+      state.setConversation((current) => current?.id === conversation.id
+        ? { ...current, messages: mergeMissingMessagesByCreatedAt(current.messages, page.messages) }
+        : current);
+      state.setMessagePage((current) => mergeLoadedMessagePage(current, page));
+    }
   }
 
   function markConversationViewed(conversation: Conversation): void {

@@ -185,6 +185,37 @@ test("buildChatActivityItems emits pending approval, choice, mentions, and parti
   assert.deepEqual(items.map((item) => item.kind), ["approval", "choice", "mention", "participant-request"]);
   assert.ok(items.every((item) => item.status === "pending"));
   assert.equal(items[0].target.approvalId, "approval-1");
+  assert.equal(items.find((item) => item.kind === "choice")?.preview, "choice content");
+  assert.equal(items.find((item) => item.kind === "mention")?.preview, "mention content");
+  assert.equal(items.find((item) => item.kind === "participant-request")?.preview, "request content");
+});
+
+test("buildChatActivityItems falls back to pending metadata when a pending message has no body", () => {
+  const items = buildChatActivityItems(conversation({
+    messages: [
+      participantMessage("choice", {
+        content: "",
+        metadata: {
+          pendingChoice: {
+            id: "choice-1",
+            title: "Manual Check",
+            question: "Is the opened app instance acceptable?",
+            options: [{ id: "accept", label: "Accept" }],
+            status: "pending"
+          }
+        }
+      }),
+      participantMessage("mention", {
+        content: "",
+        metadata: {
+          pendingMentions: [{ targetParticipantId: "p2", targetHandle: "taylor", status: "pending" }]
+        }
+      })
+    ]
+  }));
+
+  assert.equal(items.find((item) => item.kind === "choice")?.preview, "Is the opened app instance acceptable?");
+  assert.equal(items.find((item) => item.kind === "mention")?.preview, "@taylor");
 });
 
 test("buildChatActivityItems emits recent finished participant messages after last viewed", () => {
