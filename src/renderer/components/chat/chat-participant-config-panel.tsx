@@ -4,11 +4,19 @@ import { Check, ChevronDown, ShieldCheck } from "lucide-react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../../shared/agentPermissions";
+import {
+  effectiveChatAgentPermissionsForProvider,
+  normalizeChatAgentMode,
+  normalizeChatAgentPermissions,
+  normalizeChatRoleManagementPermission,
+  normalizeOptionalChatParticipantRequestPermission,
+  resolveChatManageRolesParticipantsPermission
+} from "../../../shared/agentPermissions";
 import type {
   ChatAgentPermissions,
   ChatParticipantRequestPermission,
   ChatProviderKind,
+  ChatRoleParticipantDefaults,
   ChatRosterChangeParticipantInput,
   ProviderModelCatalog
 } from "../../../shared/types";
@@ -21,7 +29,6 @@ const PARTICIPANT_REQUEST_PERMISSION_OPTIONS: Array<{ value: ChatParticipantRequ
   { value: "allow", label: "Allow without approval" },
   { value: "deny", label: "Deny" }
 ];
-
 export function ChatParticipantSpecRow(props: {
   label: string;
   children: React.ReactNode;
@@ -334,7 +341,7 @@ export function ChatParticipantInlineRequestParticipantsRow(props: {
 }): JSX.Element {
   const permissions = normalizeChatAgentPermissions(props.participant.permissions);
   const current = permissions.requestParticipants;
-  const value = PARTICIPANT_REQUEST_PERMISSION_OPTIONS.find((option) => option.value === current)?.label ?? "Always ask approval";
+  const value = participantRequestPermissionLabel(current);
   return (
     <ChatParticipantInlineSelectRow
       label="Request members"
@@ -342,6 +349,32 @@ export function ChatParticipantInlineRequestParticipantsRow(props: {
       current={current}
       options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
       onSelect={(requestParticipants) => props.onChange({ ...permissions, requestParticipants: requestParticipants as ChatParticipantRequestPermission })}
+    />
+  );
+}
+
+export function ChatParticipantInlineManageRolesParticipantsRow(props: {
+  participant: Pick<ChatRosterChangeParticipantInput, "permissions">;
+  roleDefaults?: ChatRoleParticipantDefaults;
+  onChange: (permissions: ChatAgentPermissions) => void;
+}): JSX.Element {
+  const permissions = normalizeChatAgentPermissions(props.participant.permissions);
+  const explicit = normalizeOptionalChatParticipantRequestPermission(permissions.manageRolesParticipants);
+  const roleDefault = normalizeChatRoleManagementPermission(props.roleDefaults?.manageRolesParticipants);
+  const resolution = resolveChatManageRolesParticipantsPermission(roleDefault, explicit);
+  const current = resolution.effective;
+  return (
+    <ChatParticipantInlineSelectRow
+      label="Manage roles & members"
+      value={participantRequestPermissionLabel(resolution.effective)}
+      current={current}
+      options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
+      onSelect={(manageRolesParticipants) =>
+        props.onChange({
+          ...permissions,
+          manageRolesParticipants: manageRolesParticipants as ChatParticipantRequestPermission
+        })
+      }
     />
   );
 }
@@ -397,6 +430,13 @@ export function rosterPermissionGrantLabels(participant: ChatRosterChangePartici
   } else if (permissions.requestParticipants === "deny") {
     labels.push("member requests denied");
   }
+  if (permissions.manageRolesParticipants === "allow") {
+    labels.push("manage members");
+  } else if (permissions.manageRolesParticipants === "ask") {
+    labels.push("manage asks");
+  } else if (permissions.manageRolesParticipants === "deny") {
+    labels.push("management denied");
+  }
   const claudeToolCount = permissions.providerNative?.["claude-code"]?.allowedTools.length ?? 0;
   if (claudeToolCount > 0) {
     labels.push(claudeToolCount === 1 ? "Claude tool" : `${claudeToolCount} Claude tools`);
@@ -407,4 +447,14 @@ export function rosterPermissionGrantLabels(participant: ChatRosterChangePartici
 export function participantPermissionSummaryLabels(participant: ChatRosterChangeParticipantInput): string[] {
   const labels = rosterPermissionGrantLabels(participant);
   return labels.length > 0 ? labels : ["No extra permissions"];
+}
+
+export function participantRequestPermissionLabel(value: ChatParticipantRequestPermission): string {
+  if (value === "allow") {
+    return "Allow without approval";
+  }
+  if (value === "deny") {
+    return "Deny";
+  }
+  return "Always ask approval";
 }

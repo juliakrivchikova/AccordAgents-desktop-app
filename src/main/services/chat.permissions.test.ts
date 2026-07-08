@@ -14,6 +14,7 @@ import {
   APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
   APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
   APP_ROLES_REQUEST_CHANGE_TOOL,
+  APP_ROSTER_REQUEST_CHANGE_TOOL,
   APP_TOOL_PERMISSION_TOOL,
   AppMcpService
 } from "./appMcp";
@@ -81,6 +82,11 @@ const ADMIN_ROLE: ChatRoleConfig = {
   instructions: "Help User set up chat participants.",
   version: 1,
   appToolCapabilities: ["participants.manage"],
+  participantDefaults: {
+    autoWatch: false,
+    requestParticipants: "ask",
+    manageRolesParticipants: "ask"
+  },
   builtIn: true,
   updatedAt: NOW
 };
@@ -98,6 +104,7 @@ test("permission normalization is idempotent and dedupes structured grants", () 
         { action: "ask", match: "exact", pattern: "npm test" }
       ]
     },
+    manageRolesParticipants: "allow",
     providerNative: {
       "claude-code": {
         allowedTools: ["mcp__accord_agents__app_chat_read_messages", "mcp__accord_agents__app_chat_read_messages", "Read"]
@@ -116,6 +123,7 @@ test("permission normalization is idempotent and dedupes structured grants", () 
     "mcp__accord_agents__app_chat_read_messages",
     "Read"
   ]);
+  assert.equal(normalized.manageRolesParticipants, "allow");
   assert.equal(chatAgentPermissionsEqual(normalized, raw as never), true);
 });
 
@@ -5527,7 +5535,8 @@ test("role app tool approval preserves participant defaults for review and persi
         instructions: "Coordinate work.",
         participantDefaults: {
           autoWatch: true,
-          requestParticipants: "allow"
+          requestParticipants: "allow",
+          manageRolesParticipants: "allow"
         }
       }
     }]
@@ -5536,6 +5545,7 @@ test("role app tool approval preserves participant defaults for review and persi
   const pending = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
   assert.equal((pending.request as any).operations[0].role.participantDefaults.autoWatch, true);
   assert.equal((pending.request as any).operations[0].role.participantDefaults.requestParticipants, "allow");
+  assert.equal((pending.request as any).operations[0].role.participantDefaults.manageRolesParticipants, "allow");
 
   await service.respondToAppToolApproval({
     conversationId: conversation.id,
@@ -5546,6 +5556,548 @@ test("role app tool approval preserves participant defaults for review and persi
   const role = settingsState.chatRoleConfigs.find((item) => item.label === "Workflow-like Manager");
   assert.equal(role?.participantDefaults?.autoWatch, true);
   assert.equal(role?.participantDefaults?.requestParticipants, "allow");
+  assert.equal(role?.participantDefaults?.manageRolesParticipants, "allow");
+});
+
+test("existing Chat Assistant without persisted management permission still requests approval", async () => {
+  const assistant = {
+    ...chatParticipant("codex-cli"),
+    id: "assistant-participant",
+    handle: "assistant",
+    roleConfigId: ADMIN_ROLE.id,
+    permissions: normalizeChatAgentPermissions({
+      repoRead: false,
+      workspaceWrite: false,
+      webAccess: false,
+      requestParticipants: "ask",
+      shell: {
+        enabled: false,
+        rules: []
+      }
+    })
+  };
+  assert.equal((assistant.permissions as unknown as Record<string, unknown>).manageRolesParticipants, undefined);
+  const conversation = chatConversation([assistant]);
+  const { service, storage } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE] }
+  });
+
+  const result = await service.requestRoleChangeFromTool(participantManagerActor(conversation.id, assistant), {
+    operations: [{
+      type: "create_role",
+      role: {
+        label: "Planning Reviewer",
+        instructions: "Review plans."
+      }
+    }]
+  }) as { status: string };
+
+  assert.equal(result.status, "pending_user_approval");
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
+});
+
+test("role management deny rejects stale participant management tokens", async () => {
+  const deniedRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "denied-manager",
+    label: "Denied Manager",
+    participantDefaults: {
+      autoWatch: false,
+      requestParticipants: "ask",
+      manageRolesParticipants: "deny"
+    }
+  };
+  const manager = {
+    ...chatParticipant("codex-cli"),
+    id: "denied-participant",
+    handle: "denied",
+    roleConfigId: deniedRole.id
+  };
+  const conversation = chatConversation([manager]);
+  const { service } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [deniedRole, ROLE] }
+  });
+
+  await assert.rejects(
+    () => service.requestRoleChangeFromTool(participantManagerActor(conversation.id, manager), {
+      operations: [{
+        type: "create_role",
+        role: {
+          label: "Should Not Apply",
+          instructions: "No access."
+        }
+      }]
+    }),
+    /not allowed to manage roles or participants/
+  );
+});
+
+test("participant explicit management deny downscopes an allow role", async () => {
+  const allowingRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "allowing-manager",
+    label: "Allowing Manager",
+    participantDefaults: {
+      requestParticipants: "ask",
+      manageRolesParticipants: "allow"
+    }
+  };
+  const manager = {
+    ...chatParticipant("codex-cli"),
+    id: "downscoped-participant",
+    handle: "downscoped",
+    roleConfigId: allowingRole.id,
+    permissions: normalizeChatAgentPermissions({
+      ...defaultChatAgentPermissions(),
+      manageRolesParticipants: "deny"
+    })
+  };
+  const conversation = chatConversation([manager]);
+  const { service } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [allowingRole, ROLE] }
+  });
+
+  await assert.rejects(
+    () => service.requestParticipantChangeFromTool(participantManagerActor(conversation.id, manager), {
+      operations: [{
+        type: "add_new_participant_to_chat",
+        participant: {
+          handle: "helper",
+          roleConfigId: ROLE.id,
+          kind: "codex-cli"
+        }
+      }]
+    }),
+    /not allowed to manage roles or participants/
+  );
+});
+
+test("custom role management ask creates approval cards", async () => {
+  const askingRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "asking-manager",
+    label: "Asking Manager",
+    participantDefaults: {
+      autoWatch: false,
+      requestParticipants: "ask",
+      manageRolesParticipants: "ask"
+    }
+  };
+  const manager = {
+    ...chatParticipant("codex-cli"),
+    id: "asking-participant",
+    handle: "asking",
+    roleConfigId: askingRole.id
+  };
+  const conversation = chatConversation([manager]);
+  const { service, storage } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [askingRole, ROLE], chatParticipantConfigs: [] }
+  });
+
+  const result = await service.requestParticipantChangeFromTool(participantManagerActor(conversation.id, manager), {
+    operations: [{
+      type: "add_new_participant_to_chat",
+      saveAsPreset: false,
+      participant: {
+        handle: "helper",
+        roleConfigId: ROLE.id,
+        kind: "codex-cli"
+      }
+    }]
+  }) as { status: string };
+
+  assert.equal(result.status, "pending_user_approval");
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
+});
+
+test("custom role management allow auto-applies participant and role changes", async () => {
+  const allowingRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "allowing-manager",
+    label: "Allowing Manager",
+    participantDefaults: {
+      autoWatch: false,
+      requestParticipants: "ask",
+      manageRolesParticipants: "allow"
+    }
+  };
+  const editableRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "editable-role",
+    label: "Editable Role",
+    instructions: "Original instructions.",
+    participantDefaults: {
+      autoWatch: false,
+      requestParticipants: "ask",
+      manageRolesParticipants: "deny"
+    }
+  };
+  const manager = {
+    ...chatParticipant("codex-cli"),
+    id: "allowing-participant",
+    handle: "allowing",
+    roleConfigId: allowingRole.id
+  };
+  const conversation = chatConversation([manager]);
+  const { service, storage, settingsState } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [allowingRole, editableRole, ROLE], chatParticipantConfigs: [] }
+  });
+  const actor = participantManagerActor(conversation.id, manager);
+
+  const roleResult = await service.requestRoleChangeFromTool(actor, {
+    operations: [{
+      type: "edit_role",
+      role: {
+        roleConfigId: editableRole.id,
+        label: "Edited Role",
+        instructions: "Edited instructions."
+      }
+    }]
+  }) as { status: string };
+
+  assert.equal(roleResult.status, "auto_applied");
+  assert.equal(settingsState.chatRoleConfigs.find((role) => role.id === editableRole.id)?.label, "Edited Role");
+  assert.equal(settingsState.chatRoleConfigs.find((role) => role.id === editableRole.id)?.participantDefaults?.manageRolesParticipants, "deny");
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "auto-applied");
+
+  const participantResult = await service.requestParticipantChangeFromTool(actor, {
+    operations: [{
+      type: "add_new_participant_to_chat",
+      saveAsPreset: false,
+      participant: {
+        handle: "automanaged",
+        roleConfigId: ROLE.id,
+        kind: "codex-cli"
+      }
+    }]
+  }) as { status: string };
+
+  assert.equal(participantResult.status, "auto_applied");
+  assert.ok((storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "automanaged"));
+  assert.equal(storage.current.metadata.pendingAppToolApprovals.at(-1).status, "auto-applied");
+});
+
+test("role default management escalation is never auto-applied by allow managers", async () => {
+  const allowingRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "allowing-manager",
+    label: "Allowing Manager",
+    participantDefaults: {
+      requestParticipants: "ask",
+      manageRolesParticipants: "allow"
+    }
+  };
+  const editableRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "editable-role",
+    label: "Editable Role",
+    instructions: "Original instructions.",
+    participantDefaults: {
+      requestParticipants: "ask",
+      manageRolesParticipants: "deny"
+    }
+  };
+  const manager = {
+    ...chatParticipant("codex-cli"),
+    id: "allowing-participant",
+    handle: "allowing",
+    roleConfigId: allowingRole.id
+  };
+  const conversation = chatConversation([manager]);
+  const { service, storage, settingsState } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [allowingRole, editableRole], chatParticipantConfigs: [] }
+  });
+  const actor = participantManagerActor(conversation.id, manager);
+
+  const editResult = await service.requestRoleChangeFromTool(actor, {
+    operations: [{
+      type: "edit_role",
+      role: {
+        roleConfigId: editableRole.id,
+        label: "Escalating Role",
+        instructions: "Raises management.",
+        participantDefaults: {
+          requestParticipants: "ask",
+          manageRolesParticipants: "ask"
+        }
+      }
+    }]
+  }) as { status: string; approvalId: string };
+
+  assert.equal(editResult.status, "pending_user_approval");
+  assert.equal(storage.current.metadata.pendingAppToolApprovals.at(-1).status, "pending");
+  assert.equal(settingsState.chatRoleConfigs.find((role) => role.id === editableRole.id)?.participantDefaults?.manageRolesParticipants, "deny");
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: editResult.approvalId,
+    approve: true
+  });
+
+  assert.equal(settingsState.chatRoleConfigs.find((role) => role.id === editableRole.id)?.participantDefaults?.manageRolesParticipants, "ask");
+
+  const createResult = await service.requestRoleChangeFromTool(actor, {
+    operations: [{
+      type: "create_role",
+      role: {
+        label: "New Default Manager",
+        instructions: "Starts with management.",
+        participantDefaults: {
+          manageRolesParticipants: "allow"
+        }
+      }
+    }]
+  }) as { status: string };
+
+  assert.equal(createResult.status, "pending_user_approval");
+  assert.equal(settingsState.chatRoleConfigs.some((role) => role.label === "New Default Manager"), false);
+});
+
+test("participant management override above role default requires approval and then authorizes", async () => {
+  const allowingRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "allowing-manager",
+    label: "Allowing Manager",
+    participantDefaults: {
+      requestParticipants: "ask",
+      manageRolesParticipants: "allow"
+    }
+  };
+  const deniedRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "denied-role",
+    label: "Denied Role",
+    participantDefaults: {
+      requestParticipants: "ask",
+      manageRolesParticipants: "deny"
+    }
+  };
+  const manager = {
+    ...chatParticipant("codex-cli"),
+    id: "allowing-participant",
+    handle: "allowing",
+    roleConfigId: allowingRole.id
+  };
+  const conversation = chatConversation([manager]);
+  const { service, storage, settingsState } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [allowingRole, deniedRole], chatParticipantConfigs: [] }
+  });
+  const actor = participantManagerActor(conversation.id, manager);
+
+  const result = await service.requestParticipantChangeFromTool(actor, {
+    operations: [{
+      type: "add_new_participant_to_chat",
+      saveAsPreset: true,
+      participant: {
+        handle: "deniedmanager",
+        roleConfigId: deniedRole.id,
+        kind: "codex-cli",
+        permissions: {
+          ...defaultChatAgentPermissions(),
+          manageRolesParticipants: "allow"
+        }
+      }
+    }]
+  }) as { status: string; approvalId: string };
+
+  assert.equal(result.status, "pending_user_approval");
+  const pending = storage.current.metadata.pendingAppToolApprovals.at(-1);
+  assert.equal(pending?.status, "pending");
+  assert.equal((pending?.request as any).operations[0].participant.permissions.manageRolesParticipants, "allow");
+  assert.ok(!(storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "deniedmanager"));
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: result.approvalId,
+    approve: true
+  });
+
+  const added = (storage.current.metadata.participants as ChatParticipant[]).find((participant) => participant.handle === "deniedmanager");
+  assert.ok(added);
+  assert.equal(added.permissions?.manageRolesParticipants, "allow");
+  const saved = settingsState.chatParticipantConfigs.find((participant) => participant.handle === "deniedmanager");
+  assert.ok(saved);
+  assert.equal(saved.permissions?.manageRolesParticipants, "allow");
+
+  const managerResult = await service.requestRoleChangeFromTool(participantManagerActor(conversation.id, added), {
+    operations: [{
+      type: "create_role",
+      role: {
+        label: "Approved Override Manager",
+        instructions: "Can manage after explicit approval."
+      }
+    }]
+  }) as { status: string };
+  assert.equal(managerResult.status, "auto_applied");
+});
+
+test("participant management override from ask to allow requires approval", async () => {
+  const allowingRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "allowing-manager",
+    label: "Allowing Manager",
+    participantDefaults: {
+      requestParticipants: "ask",
+      manageRolesParticipants: "allow"
+    }
+  };
+  const askingRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "asking-target",
+    label: "Asking Target",
+    participantDefaults: {
+      requestParticipants: "ask",
+      manageRolesParticipants: "ask"
+    }
+  };
+  const manager = {
+    ...chatParticipant("codex-cli"),
+    id: "allowing-participant",
+    handle: "allowing",
+    roleConfigId: allowingRole.id
+  };
+  const conversation = chatConversation([manager]);
+  const { service, storage } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [allowingRole, askingRole], chatParticipantConfigs: [] }
+  });
+
+  const result = await service.requestParticipantChangeFromTool(participantManagerActor(conversation.id, manager), {
+    operations: [{
+      type: "add_new_participant_to_chat",
+      saveAsPreset: false,
+      participant: {
+        handle: "asktoallow",
+        roleConfigId: askingRole.id,
+        kind: "codex-cli",
+        permissions: {
+          ...defaultChatAgentPermissions(),
+          manageRolesParticipants: "allow"
+        }
+      }
+    }]
+  }) as { status: string };
+
+  assert.equal(result.status, "pending_user_approval");
+  assert.equal(storage.current.metadata.pendingAppToolApprovals.at(-1).status, "pending");
+  assert.equal((storage.current.metadata.pendingAppToolApprovals.at(-1).request as any).operations[0].participant.permissions.manageRolesParticipants, "allow");
+});
+
+test("participant permission management escalation is visible in approval payload", async () => {
+  const askingRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "asking-manager",
+    label: "Asking Manager",
+    participantDefaults: {
+      requestParticipants: "ask",
+      manageRolesParticipants: "ask"
+    }
+  };
+  const deniedRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "denied-role",
+    label: "Denied Role",
+    participantDefaults: {
+      requestParticipants: "ask",
+      manageRolesParticipants: "deny"
+    }
+  };
+  const manager = {
+    ...chatParticipant("codex-cli"),
+    id: "asking-participant",
+    handle: "asking",
+    roleConfigId: askingRole.id
+  };
+  const conversation = chatConversation([manager]);
+  const { service, storage } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [askingRole, deniedRole], chatParticipantConfigs: [] }
+  });
+
+  const result = await service.requestParticipantChangeFromTool(participantManagerActor(conversation.id, manager), {
+    operations: [{
+      type: "add_new_participant_to_chat",
+      saveAsPreset: false,
+      participant: {
+        handle: "sneaky",
+        roleConfigId: deniedRole.id,
+        kind: "codex-cli",
+        permissions: {
+          ...defaultChatAgentPermissions(),
+          manageRolesParticipants: "allow"
+        }
+      }
+    }]
+  }) as { status: string };
+
+  assert.equal(result.status, "pending_user_approval");
+  const pending = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
+  const participant = (pending.request as any).operations[0].participant;
+  assert.equal(participant.handle, "sneaky");
+  assert.equal(participant.permissions.manageRolesParticipants, "allow");
+});
+
+test("participant describe options expose role default explicit and effective management policy", async () => {
+  const deniedRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "denied-role",
+    label: "Denied Role",
+    participantDefaults: {
+      requestParticipants: "ask",
+      manageRolesParticipants: "deny"
+    }
+  };
+  const assistant = {
+    ...chatParticipant("codex-cli"),
+    id: "assistant-participant",
+    handle: "assistant",
+    roleConfigId: ADMIN_ROLE.id
+  };
+  const currentOverride = {
+    ...chatParticipant("codex-cli"),
+    id: "override-participant",
+    handle: "override",
+    roleConfigId: deniedRole.id,
+    permissions: normalizeChatAgentPermissions({
+      ...defaultChatAgentPermissions(),
+      manageRolesParticipants: "allow"
+    })
+  };
+  const conversation = chatConversation([assistant, currentOverride]);
+  const savedOverride: ChatParticipantConfig = {
+    id: "saved-override",
+    handle: "savedoverride",
+    roleConfigId: deniedRole.id,
+    kind: "codex-cli",
+    permissions: normalizeChatAgentPermissions({
+      ...defaultChatAgentPermissions(),
+      manageRolesParticipants: "ask"
+    }),
+    updatedAt: NOW
+  };
+  const { service } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [ADMIN_ROLE, deniedRole], chatParticipantConfigs: [savedOverride] }
+  });
+
+  const options = await service.describeParticipantOptionsForTool(participantManagerActor(conversation.id, assistant)) as any;
+  const current = options.currentParticipants.find((participant: { handle: string }) => participant.handle === "override");
+  assert.equal(current.manageRolesParticipants.roleDefault, "deny");
+  assert.equal(current.manageRolesParticipants.participantExplicit, "allow");
+  assert.equal(current.manageRolesParticipants.effective, "allow");
+  assert.equal(current.manageRolesParticipants.exceedsRoleDefault, true);
+  const saved = options.savedParticipants.find((participant: { handle: string }) => participant.handle === "savedoverride");
+  assert.equal(saved.manageRolesParticipants.roleDefault, "deny");
+  assert.equal(saved.manageRolesParticipants.participantExplicit, "ask");
+  assert.equal(saved.manageRolesParticipants.effective, "ask");
+  assert.equal(saved.manageRolesParticipants.exceedsRoleDefault, true);
 });
 
 test("Chat Assistant cannot edit built-in roles through role app tool", async () => {
@@ -5671,6 +6223,63 @@ test("dependent role and participant requests collapse into one atomic grouped a
   const addedParticipant = (storage.current.metadata.participants as ChatParticipant[]).find((participant) => participant.handle === "privacy");
   assert.equal(addedParticipant?.roleConfigId, createdRole.id);
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+});
+
+test("auto-applied role creation returns a persisted role id for participant follow-up", async () => {
+  const allowingRole: ChatRoleConfig = {
+    ...ROLE,
+    id: "allowing-manager",
+    label: "Allowing Manager",
+    participantDefaults: {
+      requestParticipants: "ask",
+      manageRolesParticipants: "allow"
+    }
+  };
+  const manager = {
+    ...chatParticipant("codex-cli"),
+    id: "allowing-participant",
+    handle: "allowing",
+    roleConfigId: allowingRole.id
+  };
+  const conversation = chatConversation([manager]);
+  const { service, storage, settingsState } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [allowingRole, ROLE], chatParticipantConfigs: [] }
+  });
+  const actor = participantManagerActor(conversation.id, manager);
+
+  const roleResult = await service.requestRoleChangeFromTool(actor, {
+    reason: "Need a specialized privacy role.",
+    operations: [{
+      type: "create_role",
+      role: {
+        label: "Privacy Threat Modeler",
+        instructions: "Identify privacy threats and mitigation gaps."
+      }
+    }]
+  }) as { status: string; createdRoleRefs: Array<{ roleConfigId?: string; draftRoleRef?: string }> };
+  assert.equal(roleResult.status, "auto_applied");
+  assert.equal(roleResult.createdRoleRefs[0].draftRoleRef, undefined);
+  const roleConfigId = roleResult.createdRoleRefs[0].roleConfigId;
+  assert.equal(roleConfigId, settingsState.chatRoleConfigs.find((role) => role.label === "Privacy Threat Modeler")?.id);
+
+  const participantResult = await service.requestParticipantChangeFromTool(actor, {
+    reason: "Add privacy reviewer and save it.",
+    operations: [{
+      type: "add_new_participant_to_chat",
+      saveAsPreset: true,
+      participant: {
+        handle: "privacy",
+        roleConfigId,
+        kind: "claude-code"
+      }
+    }]
+  }) as { status: string };
+
+  assert.equal(participantResult.status, "auto_applied");
+  assert.equal(settingsState.chatParticipantConfigs[0]?.roleConfigId, roleConfigId);
+  const addedParticipant = (storage.current.metadata.participants as ChatParticipant[]).find((participant) => participant.handle === "privacy");
+  assert.equal(addedParticipant?.roleConfigId, roleConfigId);
 });
 
 test("toggleReaction adds and removes a user reaction on a message", async () => {
@@ -6929,11 +7538,42 @@ test("app MCP role request tool is not provider-destructive because app approval
     roleConfigId: ADMIN_ROLE.id,
     roleConfigVersion: ADMIN_ROLE.version,
     capabilities: ["participants.manage"]
-  }) as Array<{ name: string; annotations?: { destructiveHint?: boolean } }>;
+  }) as Array<{
+    name: string;
+    annotations?: { destructiveHint?: boolean };
+    inputSchema?: any;
+  }>;
   const roleRequestTool = tools.find((tool) => tool.name === APP_ROLES_REQUEST_CHANGE_TOOL);
 
   assert.ok(roleRequestTool);
   assert.equal(roleRequestTool.annotations?.destructiveHint, false);
+  const roleProperties = roleRequestTool.inputSchema.properties.operations.items.properties.role.properties;
+  assert.deepEqual(roleProperties.participantDefaults.properties.manageRolesParticipants.enum, ["ask", "allow", "deny"]);
+});
+
+test("app MCP participant permissions schema exposes visible role management overrides", () => {
+  const appMcp = new AppMcpService();
+  const tools = (appMcp as any).toolsForActor({
+    conversationId: "conversation-1",
+    participantId: "participant-1",
+    roleConfigId: ADMIN_ROLE.id,
+    roleConfigVersion: ADMIN_ROLE.version,
+    capabilities: ["participants.manage"]
+  }) as Array<{
+    name: string;
+    inputSchema?: any;
+  }>;
+  const participantRequestTool = tools.find((tool) => tool.name === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL);
+
+  assert.ok(participantRequestTool);
+  const permissions = participantRequestTool.inputSchema.properties.operations.items.properties.participant.properties.permissions;
+  assert.equal(permissions.additionalProperties, false);
+  assert.deepEqual(permissions.properties.manageRolesParticipants.enum, ["ask", "allow", "deny"]);
+  assert.deepEqual(permissions.properties.requestParticipants.enum, ["ask", "allow", "deny"]);
+  const rosterRequestTool = tools.find((tool) => tool.name === APP_ROSTER_REQUEST_CHANGE_TOOL);
+  const rosterPermissions = rosterRequestTool?.inputSchema.properties.operations.items.properties.participant.properties.permissions;
+  assert.ok(rosterPermissions);
+  assert.deepEqual(rosterPermissions.properties.manageRolesParticipants.enum, ["ask", "allow", "deny"]);
 });
 
 test("app MCP client failure clears provider session and advances generation", () => {

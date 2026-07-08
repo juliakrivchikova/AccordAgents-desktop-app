@@ -8,7 +8,15 @@ import { normalizeChatAgentMode } from "../../../shared/agentPermissions";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import { participantProviderLabel } from "../chat/chat-conversation-data";
 import { displayChatRoleLabel } from "../chat/chat-role-labels";
-import { ChatParticipantAvatarField, ChatParticipantInlineModelRow, ChatParticipantInlinePermissionsRow, ChatParticipantInlineRequestParticipantsRow, ChatParticipantInlineSelectRow, ChatParticipantSpecRow } from "../chat/chat-participant-config-panel";
+import {
+  ChatParticipantAvatarField,
+  ChatParticipantInlineManageRolesParticipantsRow,
+  ChatParticipantInlineModelRow,
+  ChatParticipantInlinePermissionsRow,
+  ChatParticipantInlineRequestParticipantsRow,
+  ChatParticipantInlineSelectRow,
+  ChatParticipantSpecRow
+} from "../chat/chat-participant-config-panel";
 import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
 import { CHAT_AGENT_MODE_OPTIONS, CHAT_RUN_LOCATION_OPTIONS, WORKFLOW_MANAGER_ROLE_ID, chatAgentModeLabel, chatCliProviderLabel, normalizeChatRunLocation, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
@@ -65,6 +73,7 @@ export function ParticipantEditorDialog(props: {
     props.settings.chatRoleConfigs.find((role) => role.id === draft.roleConfigId),
     draft.roleConfigId
   );
+  const selectedRole = props.settings.chatRoleConfigs.find((role) => role.id === draft.roleConfigId);
   const isWorkflowManager = draft.roleConfigId === WORKFLOW_MANAGER_ROLE_ID;
   // Hide archived (deleted) roles from the picker so no new references form, but keep the
   // member's current role selectable so editing an existing binding never goes blank.
@@ -250,6 +259,11 @@ export function ParticipantEditorDialog(props: {
             </ChatParticipantSpecRow>
             <ChatParticipantInlineRequestParticipantsRow
               participant={draftParticipant}
+              onChange={(permissions) => patchDraft({ permissions })}
+            />
+            <ChatParticipantInlineManageRolesParticipantsRow
+              participant={draftParticipant}
+              roleDefaults={selectedRole?.participantDefaults}
               onChange={(permissions) => patchDraft({ permissions })}
             />
           </div>

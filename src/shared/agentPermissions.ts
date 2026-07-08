@@ -1,4 +1,11 @@
-import type { ChatAgentMode, ChatAgentPermissions, ChatParticipantRequestPermission, ChatProviderKind, ChatShellPermissionRule } from "./types";
+import type {
+  ChatAgentMode,
+  ChatAgentPermissions,
+  ChatManageRolesParticipantsResolution,
+  ChatParticipantRequestPermission,
+  ChatProviderKind,
+  ChatShellPermissionRule
+} from "./types";
 
 export const DEFAULT_CHAT_AGENT_MODE: ChatAgentMode = "default";
 export const CHAT_SHELL_RULE_PATTERN_MAX_LENGTH = 160;
@@ -23,11 +30,13 @@ export function defaultChatAgentPermissions(): ChatAgentPermissions {
 
 export function cloneChatAgentPermissions(permissions: ChatAgentPermissions): ChatAgentPermissions {
   const providerNative = cloneProviderNativePermissions(permissions.providerNative);
+  const manageRolesParticipants = normalizeOptionalChatParticipantRequestPermission(permissions.manageRolesParticipants);
   return {
     repoRead: permissions.repoRead,
     workspaceWrite: permissions.workspaceWrite,
     webAccess: permissions.webAccess,
     requestParticipants: normalizeChatParticipantRequestPermission(permissions.requestParticipants),
+    ...(manageRolesParticipants ? { manageRolesParticipants } : {}),
     shell: {
       enabled: permissions.shell.enabled,
       rules: normalizeChatShellPermissionRules(permissions.shell.rules)
@@ -48,11 +57,13 @@ export function normalizeChatAgentPermissions(value: unknown): ChatAgentPermissi
     ? record.shell as Partial<ChatAgentPermissions["shell"]>
     : {};
   const providerNative = normalizeProviderNativePermissions(record.providerNative);
+  const manageRolesParticipants = normalizeOptionalChatParticipantRequestPermission(record.manageRolesParticipants);
   return {
     repoRead: typeof record.repoRead === "boolean" ? record.repoRead : DEFAULT_CHAT_AGENT_PERMISSIONS.repoRead,
     workspaceWrite: typeof record.workspaceWrite === "boolean" ? record.workspaceWrite : DEFAULT_CHAT_AGENT_PERMISSIONS.workspaceWrite,
     webAccess: typeof record.webAccess === "boolean" ? record.webAccess : DEFAULT_CHAT_AGENT_PERMISSIONS.webAccess,
     requestParticipants: normalizeChatParticipantRequestPermission(record.requestParticipants),
+    ...(manageRolesParticipants ? { manageRolesParticipants } : {}),
     shell: {
       enabled: typeof shell.enabled === "boolean" ? shell.enabled : DEFAULT_CHAT_AGENT_PERMISSIONS.shell.enabled,
       rules: normalizeChatShellPermissionRules(shell.rules)
@@ -109,9 +120,47 @@ export function chatAgentPermissionsEqual(left: ChatAgentPermissions | undefined
 }
 
 export function normalizeChatParticipantRequestPermission(value: unknown): ChatParticipantRequestPermission {
-  return value === "allow" || value === "deny" || value === "ask"
-    ? value
-    : DEFAULT_CHAT_AGENT_PERMISSIONS.requestParticipants;
+  return normalizeOptionalChatParticipantRequestPermission(value) ?? DEFAULT_CHAT_AGENT_PERMISSIONS.requestParticipants;
+}
+
+export function normalizeOptionalChatParticipantRequestPermission(value: unknown): ChatParticipantRequestPermission | undefined {
+  return value === "allow" || value === "deny" || value === "ask" ? value : undefined;
+}
+
+export function normalizeChatRoleManagementPermission(value: unknown): ChatParticipantRequestPermission {
+  return normalizeOptionalChatParticipantRequestPermission(value) ?? "deny";
+}
+
+export function chatParticipantRequestPermissionRank(value: ChatParticipantRequestPermission): number {
+  if (value === "allow") {
+    return 2;
+  }
+  if (value === "ask") {
+    return 1;
+  }
+  return 0;
+}
+
+export function chatParticipantRequestPermissionExceeds(
+  left: ChatParticipantRequestPermission,
+  right: ChatParticipantRequestPermission
+): boolean {
+  return chatParticipantRequestPermissionRank(left) > chatParticipantRequestPermissionRank(right);
+}
+
+export function resolveChatManageRolesParticipantsPermission(
+  roleDefaultValue: unknown,
+  participantExplicitValue: unknown
+): ChatManageRolesParticipantsResolution {
+  const roleDefault = normalizeChatRoleManagementPermission(roleDefaultValue);
+  const participantExplicit = normalizeOptionalChatParticipantRequestPermission(participantExplicitValue);
+  const effective = participantExplicit ?? roleDefault;
+  return {
+    roleDefault,
+    ...(participantExplicit ? { participantExplicit } : {}),
+    effective,
+    exceedsRoleDefault: chatParticipantRequestPermissionExceeds(effective, roleDefault)
+  };
 }
 
 export function isChatShellPermissionPatternSafe(pattern: string): boolean {

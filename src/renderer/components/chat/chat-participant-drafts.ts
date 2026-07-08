@@ -22,7 +22,8 @@ import {
   effectiveChatAgentPermissionsForProvider,
   isChatShellPermissionPatternSafe,
   normalizeChatAgentMode,
-  normalizeChatAgentPermissions
+  normalizeChatAgentPermissions,
+  normalizeChatRoleManagementPermission
 } from "../../../shared/agentPermissions";
 import { normalizeChatReasoningEffort } from "../../../shared/reasoningEffort";
 import {
@@ -143,7 +144,9 @@ export function defaultChatParticipantDraft(settings: AppSettings, existingHandl
   };
 }
 
-export function chatParticipantConfigToDraft(participant: ChatParticipantConfig): ChatParticipantDraft {
+export function chatParticipantConfigToDraft(
+  participant: ChatParticipantConfig
+): ChatParticipantDraft {
   return {
     participantConfigId: participant.id,
     handle: participant.handle,
@@ -243,6 +246,9 @@ export function chatParticipantPermissionSummary(participant: Pick<ChatParticipa
     permissions.webAccess ? "web" : "",
     permissions.requestParticipants === "allow" ? "request allow" : "",
     permissions.requestParticipants === "deny" ? "request deny" : "",
+    permissions.manageRolesParticipants === "allow" ? "manage allow" : "",
+    permissions.manageRolesParticipants === "ask" ? "manage ask" : "",
+    permissions.manageRolesParticipants === "deny" ? "manage deny" : "",
     (permissions.providerNative?.["claude-code"]?.allowedTools.length ?? 0) > 0 ? "native tools" : ""
   ].filter(Boolean);
   return `${chatAgentModeLabel(mode)}${enabled.length > 0 ? ` · ${enabled.join(", ")}` : ""}`;
@@ -316,6 +322,16 @@ export function updateChatParticipantDraft(
     if (nextDefaults.requestParticipants) {
       permissions = { ...permissions, requestParticipants: nextDefaults.requestParticipants };
     }
+    const previousManage = normalizeChatRoleManagementPermission(previousDefaults.manageRolesParticipants);
+    if (
+      normalizeChatRoleManagementPermission(permissions.manageRolesParticipants) === previousManage ||
+      permissions.manageRolesParticipants === undefined
+    ) {
+      permissions = {
+        ...permissions,
+        manageRolesParticipants: normalizeChatRoleManagementPermission(nextDefaults.manageRolesParticipants)
+      };
+    }
     next = { ...next, permissions };
   }
   if (roleChanged && patch.autoWatch === undefined) {
@@ -358,9 +374,11 @@ function defaultChatParticipantPermissionsForRole(
 ): ChatAgentPermissions {
   const normalized = normalizeChatAgentPermissions(permissions);
   const defaults = participantDefaultsForRole(settings, roleConfigId);
-  return defaults.requestParticipants
-    ? { ...normalized, requestParticipants: defaults.requestParticipants }
-    : normalized;
+  return {
+    ...normalized,
+    ...(defaults.requestParticipants ? { requestParticipants: defaults.requestParticipants } : {}),
+    manageRolesParticipants: normalizeChatRoleManagementPermission(defaults.manageRolesParticipants)
+  };
 }
 
 export function normalizedChatDrafts(drafts: ChatParticipantDraft[]): ChatParticipantDraft[] {

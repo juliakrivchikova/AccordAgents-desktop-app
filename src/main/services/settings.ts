@@ -38,8 +38,14 @@ import {
   filterAllowedAgentEnvironment,
   normalizeAgentEnvironmentKey
 } from "../../shared/agentEnvironment";
-import { normalizeChatAgentMode, normalizeChatAgentPermissions, normalizeChatParticipantRequestPermission } from "../../shared/agentPermissions";
-import { normalizeChatAppToolCapabilities } from "../../shared/appTools";
+import {
+  normalizeChatAgentMode,
+  normalizeChatAgentPermissions,
+  normalizeChatParticipantRequestPermission,
+  normalizeChatRoleManagementPermission,
+  normalizeOptionalChatParticipantRequestPermission
+} from "../../shared/agentPermissions";
+import { hasChatAppToolCapability, normalizeChatAppToolCapabilities } from "../../shared/appTools";
 import {
   normalizeChatParticipantRequestMaxDepth,
   normalizeChatParticipantRequestPromptMaxChars
@@ -131,7 +137,8 @@ const GENERIC_PARTICIPANT_ROLE_ID = "generic-participant";
 const WORKFLOW_MANAGER_ROLE_ID = "workflow-manager";
 const DEFAULT_ROLE_PARTICIPANT_DEFAULTS: ChatRoleParticipantDefaults = {
   autoWatch: false,
-  requestParticipants: "ask"
+  requestParticipants: "ask",
+  manageRolesParticipants: "deny"
 };
 const SEEDABLE_CHAT_PROVIDER_KINDS: ChatProviderKind[] = ["codex-cli", "claude-code"];
 
@@ -1511,6 +1518,10 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
     version: 12,
     builtIn: true,
     appToolCapabilities: ["participants.manage"] satisfies ChatAppToolCapability[],
+    participantDefaults: {
+      ...DEFAULT_ROLE_PARTICIPANT_DEFAULTS,
+      manageRolesParticipants: "ask"
+    } satisfies ChatRoleParticipantDefaults,
     updatedAt: "2026-07-06T00:00:00.000Z"
   },
   {
@@ -1672,6 +1683,7 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
     version: 4,
     builtIn: true,
     participantDefaults: {
+      ...DEFAULT_ROLE_PARTICIPANT_DEFAULTS,
       autoWatch: true,
       requestParticipants: "allow"
     } satisfies ChatRoleParticipantDefaults,
@@ -1754,7 +1766,14 @@ export class SettingsService {
     const now = new Date().toISOString();
     const existing = update.id ? roles.find((role) => role.id === update.id) : undefined;
     const participantDefaultsProvided = Object.prototype.hasOwnProperty.call(update, "participantDefaults");
-    const participantDefaults = this.normalizeRoleParticipantDefaultsForRole(existing?.id ?? "", update.participantDefaults);
+    const participantDefaults = this.normalizeRoleParticipantDefaultsForRole(
+      {
+        id: existing?.id ?? "",
+        appToolCapabilities: update.appToolCapabilities
+      },
+      update.participantDefaults,
+      { inferLegacyManage: !participantDefaultsProvided }
+    );
     if (existing) {
       if (existing.archivedAt) {
         throw new Error(`Deleted role "${existing.label}" cannot be edited.`);
@@ -1769,8 +1788,8 @@ export class SettingsService {
                 ? role.appToolCapabilities
                 : normalizeChatAppToolCapabilities(update.appToolCapabilities),
               participantDefaults: participantDefaultsProvided
-                ? this.normalizeRoleParticipantDefaultsForRole(role.id, participantDefaults)
-                : this.normalizeRoleParticipantDefaultsForRole(role.id, role.participantDefaults),
+                ? this.normalizeRoleParticipantDefaultsForRole(role, participantDefaults, { inferLegacyManage: false })
+                : this.normalizeRoleParticipantDefaultsForRole(role, role.participantDefaults),
               version: role.version + 1,
               updatedAt: now
             }
@@ -1793,7 +1812,11 @@ export class SettingsService {
           version: 1,
           builtIn: false,
           appToolCapabilities: normalizeChatAppToolCapabilities(update.appToolCapabilities),
-          participantDefaults: this.normalizeRoleParticipantDefaultsForRole(id, participantDefaults),
+          participantDefaults: this.normalizeRoleParticipantDefaultsForRole(
+            { id, appToolCapabilities: update.appToolCapabilities },
+            participantDefaults,
+            { inferLegacyManage: false }
+          ),
           updatedAt: now
         }
       ];
@@ -1892,8 +1915,8 @@ export class SettingsService {
                   ? role.appToolCapabilities
                   : normalizeChatAppToolCapabilities(operation.role.appToolCapabilities),
                 participantDefaults: participantDefaultsProvided
-                  ? this.normalizeRoleParticipantDefaultsForRole(role.id, participantDefaults)
-                  : this.normalizeRoleParticipantDefaultsForRole(role.id, role.participantDefaults),
+                  ? this.normalizeRoleParticipantDefaultsForRole(role, participantDefaults, { inferLegacyManage: false })
+                  : this.normalizeRoleParticipantDefaultsForRole(role, role.participantDefaults),
                 version: role.version + 1,
                 updatedAt: now
               }
@@ -1913,7 +1936,11 @@ export class SettingsService {
             version: 1,
             builtIn: false,
             appToolCapabilities: normalizeChatAppToolCapabilities(operation.role.appToolCapabilities),
-            participantDefaults: this.normalizeRoleParticipantDefaultsForRole(id, participantDefaults),
+            participantDefaults: this.normalizeRoleParticipantDefaultsForRole(
+              { id, appToolCapabilities: operation.role.appToolCapabilities },
+              participantDefaults,
+              { inferLegacyManage: false }
+            ),
             updatedAt: now
           }
         ];
@@ -2532,34 +2559,56 @@ export class SettingsService {
       .map((role) => ({
         ...role,
         appToolCapabilities: normalizeChatAppToolCapabilities(role.appToolCapabilities),
-        participantDefaults: this.normalizeRoleParticipantDefaultsForRole(role.id, role.participantDefaults)
+        participantDefaults: this.normalizeRoleParticipantDefaultsForRole(role, role.participantDefaults)
       }));
   }
 
-  private normalizeRoleParticipantDefaults(value: unknown): ChatRoleParticipantDefaults | undefined {
+  private normalizeRoleParticipantDefaults(value: unknown): ChatRoleParticipantDefaults {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       return {
         autoWatch: false,
-        requestParticipants: "ask"
+        requestParticipants: "ask",
+        manageRolesParticipants: "deny"
       };
     }
     const record = value as Partial<ChatRoleParticipantDefaults>;
     const requestParticipants = normalizeChatParticipantRequestPermission(record.requestParticipants);
+    const manageRolesParticipants = normalizeChatRoleManagementPermission(record.manageRolesParticipants);
     return {
       autoWatch: record.autoWatch === true,
-      requestParticipants
+      requestParticipants,
+      manageRolesParticipants
     };
   }
 
-  private normalizeRoleParticipantDefaultsForRole(roleId: string, value: unknown): ChatRoleParticipantDefaults {
-    const normalized = this.normalizeRoleParticipantDefaults(value) ?? { ...DEFAULT_ROLE_PARTICIPANT_DEFAULTS };
+  private normalizeRoleParticipantDefaultsForRole(
+    role: string | Pick<ChatRoleConfig, "id" | "appToolCapabilities">,
+    value: unknown,
+    options: { inferLegacyManage?: boolean } = {}
+  ): ChatRoleParticipantDefaults {
+    const roleId = typeof role === "string" ? role : role.id;
+    const normalized = this.normalizeRoleParticipantDefaults(value);
+    const record = value && typeof value === "object" && !Array.isArray(value)
+      ? value as Partial<ChatRoleParticipantDefaults>
+      : {};
+    const hasExplicitManage = normalizeOptionalChatParticipantRequestPermission(record.manageRolesParticipants) !== undefined;
+    const legacyManage = options.inferLegacyManage !== false &&
+      !hasExplicitManage &&
+      typeof role !== "string" &&
+      hasChatAppToolCapability(role.appToolCapabilities, "participants.manage");
+    const withRolePolicy = {
+      ...normalized,
+      manageRolesParticipants: roleId === "administrator" || legacyManage
+        ? "ask"
+        : normalized.manageRolesParticipants
+    } satisfies ChatRoleParticipantDefaults;
     return roleId === WORKFLOW_MANAGER_ROLE_ID
       ? {
-          ...normalized,
+          ...withRolePolicy,
           autoWatch: true,
           requestParticipants: "allow"
         }
-      : normalized;
+      : withRolePolicy;
   }
 
   private autoWatchEnabledForRole(role: Pick<ChatRoleConfig, "id">, value: unknown): boolean {

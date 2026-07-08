@@ -37,24 +37,29 @@ function roleParticipantDefaultsForDisplay(
   if (roleId === WORKFLOW_MANAGER_ROLE_ID) {
     return {
       autoWatch: true,
-      requestParticipants: "allow"
+      requestParticipants: "allow",
+      manageRolesParticipants: defaults?.manageRolesParticipants ?? "deny"
     };
   }
   return {
     autoWatch: defaults?.autoWatch === true,
-    requestParticipants: defaults?.requestParticipants ?? "ask"
+    requestParticipants: defaults?.requestParticipants ?? "ask",
+    manageRolesParticipants: defaults?.manageRolesParticipants ?? "deny"
   };
 }
 
 function roleParticipantDefaultsForSave(defaults: ChatRoleParticipantDefaults): ChatRoleParticipantDefaults {
   return {
     autoWatch: defaults.autoWatch === true,
-    requestParticipants: defaults.requestParticipants ?? "ask"
+    requestParticipants: defaults.requestParticipants ?? "ask",
+    manageRolesParticipants: defaults.manageRolesParticipants ?? "deny"
   };
 }
 
 function roleParticipantDefaultsEqual(left: ChatRoleParticipantDefaults, right: ChatRoleParticipantDefaults): boolean {
-  return left.autoWatch === right.autoWatch && left.requestParticipants === right.requestParticipants;
+  return left.autoWatch === right.autoWatch &&
+    left.requestParticipants === right.requestParticipants &&
+    left.manageRolesParticipants === right.manageRolesParticipants;
 }
 
 function requestParticipantsLabel(value: ChatParticipantRequestPermission | undefined): string {
@@ -111,6 +116,7 @@ export function ChatRoleEditorDialog(props: {
     initialInstructions,
     initialLabel,
     initialParticipantDefaults.autoWatch,
+    initialParticipantDefaults.manageRolesParticipants,
     initialParticipantDefaults.requestParticipants,
     initialPreview,
     open
@@ -258,6 +264,9 @@ export function ChatRoleEditorDialog(props: {
                   <ChatParticipantSpecRow label="Request members">
                     <strong>{requestParticipantsLabel(readOnlyDefaults.requestParticipants)}</strong>
                   </ChatParticipantSpecRow>
+                  <ChatParticipantSpecRow label="Manage roles & members">
+                    <strong>{requestParticipantsLabel(readOnlyDefaults.manageRolesParticipants)}</strong>
+                  </ChatParticipantSpecRow>
               </div>
             ) : (
               <div className="chat-app-tool-review-spec roles-default-settings-table">
@@ -281,6 +290,21 @@ export function ChatRoleEditorDialog(props: {
                       onValueChange={(value) => setParticipantDefaults((current) => ({
                         ...current,
                         requestParticipants: value as ChatParticipantRequestPermission
+                      }))}
+                    />
+                  </div>
+                </ChatParticipantSpecRow>
+                <ChatParticipantSpecRow label="Manage roles & members">
+                  <div className="roles-default-settings-select">
+                    <AppSelect
+                      value={participantDefaults.manageRolesParticipants ?? "deny"}
+                      options={ROLE_REQUEST_PARTICIPANTS_OPTIONS}
+                      placeholder="Manage roles & members"
+                      ariaLabel="Default manage roles and members permission"
+                      testId="settings-role-default-manage-roles-participants"
+                      onValueChange={(value) => setParticipantDefaults((current) => ({
+                        ...current,
+                        manageRolesParticipants: value as ChatParticipantRequestPermission
                       }))}
                     />
                   </div>
