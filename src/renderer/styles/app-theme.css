@@ -11,12 +11,15 @@
   -webkit-font-smoothing: antialiased;
 
   --app-header-height: 52px;
+  --app-rail-width: 74px;
   --app-sidebar-width: 266px;
   --app-bg: #f6f7f9;
   --app-new-chat-bg: #fbfbfc;
   --bg-sunken: #f4f5f7;
   --app-workspace-bg: #ffffff;
   --app-sidebar-bg: var(--bg-sunken);
+  --app-rail-bg: #eef1f5;
+  --app-rail-fg: #687181;
   --app-header-bg: #ffffff;
   --app-surface: #ffffff;
   --app-surface-subtle: #f7f8fa;
@@ -175,6 +178,8 @@
   --bg-sunken: #121419;
   --app-workspace-bg: #181b21;
   --app-sidebar-bg: #121419;
+  --app-rail-bg: #0d0f13;
+  --app-rail-fg: #8f98a8;
   --app-header-bg: #181b21;
   --app-surface: #181b21;
   --app-surface-subtle: #1d2128;

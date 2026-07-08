@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { buildChatActivityItemsForConversationUpdate, mergeChatActivityItems } from "../../shared/chatActivity";
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from "./constants";
 import { conversationTimeValue, upsertConversationSummary } from "./conversation-summaries";
 import type { AppState } from "./app-state";
@@ -17,9 +18,17 @@ import {
   normalizeChatParticipantDraftForSettings
 } from "../components/chat/chat-participant-drafts";
 
-export function useAppEffects(state: AppState, refreshAll: () => Promise<void>): void {
+export function useAppEffects(
+  state: AppState,
+  refreshAll: () => Promise<void>,
+  refreshActivity: () => Promise<void>
+): void {
   useEffect(() => {
     void refreshAll();
+  }, []);
+
+  useEffect(() => {
+    void refreshActivity();
   }, []);
 
   useEffect(() => {
@@ -50,7 +59,15 @@ export function useAppEffects(state: AppState, refreshAll: () => Promise<void>):
       state.setSummaries((current) => upsertConversationSummary(current, updated));
       state.setConversation((current) => {
         const isActive = current?.id === updated.id;
-        if (!conversationMatchesSnapshot(current, updated, state.currentRunId)) {
+        const matchesCurrentSnapshot = conversationMatchesSnapshot(current, updated, state.currentRunId);
+        const activityItems = buildChatActivityItemsForConversationUpdate(updated, {
+          lastViewedAt: state.lastViewedAtRef.current[updated.id],
+          treatAsViewed: isActive && matchesCurrentSnapshot
+        });
+        state.setActivityItems((activityCurrent) => mergeChatActivityItems(activityCurrent, activityItems, {
+          replaceConversationId: updated.id
+        }));
+        if (!matchesCurrentSnapshot) {
           if (!isActive) {
             const lastViewed = state.lastViewedAtRef.current[updated.id];
             if (!lastViewed || conversationTimeValue(updated.updatedAt) > conversationTimeValue(lastViewed)) {

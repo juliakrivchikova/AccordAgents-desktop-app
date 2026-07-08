@@ -9,20 +9,24 @@ import {
 } from "../../lib/sidebar-sizing";
 
 export interface AppShellProps {
+  rail: React.ReactNode;
   sidebar: React.ReactNode;
   topBar: React.ReactNode;
   children: React.ReactNode;
   sidebarCollapsed?: boolean;
+  sidebarHidden?: boolean;
   sidebarWidth: number;
   onSidebarWidthChange: (width: number) => void;
   className?: string;
 }
 
 export const AppShell = ({
+  rail,
   sidebar,
   topBar,
   children,
   sidebarCollapsed = false,
+  sidebarHidden = false,
   sidebarWidth,
   onSidebarWidthChange,
   className
@@ -31,6 +35,7 @@ export const AppShell = ({
   const cleanupResizeRef = React.useRef<(() => void) | null>(null);
   const [isResizingSidebar, setIsResizingSidebar] = React.useState(false);
   const normalizedSidebarWidth = normalizeAppSidebarWidth(sidebarWidth);
+  const secondarySidebarCollapsed = sidebarCollapsed || sidebarHidden;
 
   // Tear down any in-flight drag listeners if the shell unmounts mid-resize.
   React.useEffect(() => () => cleanupResizeRef.current?.(), []);
@@ -44,11 +49,12 @@ export const AppShell = ({
     event.currentTarget.setPointerCapture(event.pointerId);
     setIsResizingSidebar(true);
     const rect = root.getBoundingClientRect();
+    const railWidth = appRailWidth(root);
     const minWidth = MIN_APP_SIDEBAR_WIDTH;
-    const maxWidth = maxAppSidebarWidthForContainer(rect.width);
+    const maxWidth = maxAppSidebarWidthForContainer(rect.width - railWidth);
 
     const move = (moveEvent: PointerEvent): void => {
-      const nextWidth = Math.round(moveEvent.clientX - rect.left);
+      const nextWidth = Math.round(moveEvent.clientX - rect.left - railWidth);
       onSidebarWidthChange(Math.min(maxWidth, Math.max(minWidth, nextWidth)));
     };
     const stop = (): void => {
@@ -65,7 +71,8 @@ export const AppShell = ({
   return (
     <div
       data-shell="root"
-      data-sidebar-collapsed={sidebarCollapsed ? "true" : undefined}
+      data-sidebar-collapsed={secondarySidebarCollapsed ? "true" : undefined}
+      data-sidebar-hidden={sidebarHidden ? "true" : undefined}
       ref={rootRef}
       style={{ "--app-sidebar-width": `${normalizedSidebarWidth}px` } as React.CSSProperties}
       className={cn(
@@ -74,12 +81,15 @@ export const AppShell = ({
         className
       )}
     >
+      <div data-shell="rail-slot" className="app-shell-rail-slot">
+        {rail}
+      </div>
       {/* The sidebar stays mounted while collapsed so the slot width can animate
           and its scroll/expansion state survives a hide/show. */}
-      <div data-shell="sidebar-slot" className="app-shell-sidebar-slot" aria-hidden={sidebarCollapsed || undefined}>
+      <div data-shell="sidebar-slot" className="app-shell-sidebar-slot" aria-hidden={secondarySidebarCollapsed || undefined}>
         {sidebar}
       </div>
-      {!sidebarCollapsed && (
+      {!secondarySidebarCollapsed && (
         <div
           className="app-shell-sidebar-resizer"
           role="separator"
@@ -101,3 +111,9 @@ export const AppShell = ({
     </div>
   );
 };
+
+function appRailWidth(root: HTMLElement): number {
+  const value = getComputedStyle(root).getPropertyValue("--app-rail-width");
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 74;
+}

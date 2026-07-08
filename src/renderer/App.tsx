@@ -12,11 +12,11 @@ import { Toaster } from "@/components/ui/sonner";
 import { ModeToggle } from "./components/mode-toggle";
 import { ThemeProvider } from "./components/theme-provider";
 import { AppLoadingState } from "./components/loading-states";
-import { AppShell, Sidebar, SidebarPanelIcon, TopBar } from "./components/shell";
+import { AppRail, AppShell, Sidebar, SidebarPanelIcon, TopBar } from "./components/shell";
+import { ActivityView } from "./components/activity/activity-view";
 import { SettingsView, type SettingsSection } from "./components/settings/settings-view";
 import { SettingsSidebar } from "./components/settings/settings-sidebar";
-import { SlackView } from "./components/review/review-view";
-import { ChatConversationView } from "./components/chat/chat-conversation-view";
+import { ConversationPanel } from "./components/conversation/conversation-panel";
 import { ChatParticipantMenu } from "./components/chat/chat-participant-menu";
 import { ChatAccordLauncherDialog } from "./components/chat/chat-accord-launcher-dialog";
 import { NewChatScreen } from "./components/chat/new-chat-screen";
@@ -27,7 +27,6 @@ import { defaultChatParticipantDraft } from "./components/chat/chat-participant-
 import type { DraftPluginMention } from "./components/chat/chat-composer-draft-utils";
 import { Avatar } from "./components/avatar/avatar";
 import { isChatAssistantParticipant } from "./components/conversation/conversation-display";
-import { planDecisionReplies } from "./components/review/review-conversation-data";
 import { useAppState } from "./app/app-state";
 import { useConversationActions } from "./app/use-conversation-actions";
 import { useAppEffects } from "./app/use-app-effects";
@@ -37,6 +36,7 @@ import { useReviewPlanActions } from "./app/use-review-plan-actions";
 import { useSettingsActions } from "./app/use-settings-actions";
 import { useAppViewModel } from "./app/use-app-view-model";
 import { AppNotices } from "./app/app-notices";
+import { pluginNewChatDraft, pluginNewChatMentions } from "./app/plugin-new-chat";
 import "./styles/app.css";
 
 function App(): JSX.Element {
@@ -46,7 +46,7 @@ function App(): JSX.Element {
   const reviewDecisionActions = useReviewDecisionActions(state, conversationActions);
   const reviewPlanActions = useReviewPlanActions(state, conversationActions);
   const settingsActions = useSettingsActions(state);
-  useAppEffects(state, conversationActions.refreshAll);
+  useAppEffects(state, conversationActions.refreshAll, conversationActions.refreshActivity);
   const view = useAppViewModel(state);
   const [appVersion, setAppVersion] = React.useState("");
   const [accordDialogOpen, setAccordDialogOpen] = React.useState(false);
@@ -77,11 +77,11 @@ function App(): JSX.Element {
 
   const openSettingsSection = (section: SettingsSection): void => {
     state.setActiveSettingsSection(section);
-    state.setSidebarMode("settings");
+    state.setRailView("settings");
     state.setSidebarCollapsed(false);
   };
   const closeSettings = (): void => {
-    state.setSidebarMode("history");
+    state.setRailView("chats");
   };
   const tryPluginInNewChat = (plugin: PluginCatalogItem): void => {
     if (state.busy) {
@@ -98,7 +98,7 @@ function App(): JSX.Element {
         prompt: draft,
         ...pluginNewChatMentions(plugin, draft)
       });
-      state.setSidebarMode("history");
+      state.setRailView("chats");
       state.setSidebarCollapsed(false);
     });
   };
@@ -120,7 +120,7 @@ function App(): JSX.Element {
       : isNewChatScreen
         ? undefined
         : "New chat";
-  const topBarLeading = state.sidebarCollapsed ? (
+  const topBarLeading = state.railView === "chats" && state.sidebarCollapsed ? (
     <Button
       type="button"
       variant="ghost"
@@ -193,15 +193,45 @@ function App(): JSX.Element {
       </Button>
     </>
   );
+  const conversationPanel = view.hasResultContext ? (
+    <ConversationPanel
+      state={state}
+      view={view}
+      conversationActions={conversationActions}
+      chatActions={chatActions}
+      reviewDecisionActions={reviewDecisionActions}
+      reviewPlanActions={reviewPlanActions}
+      settingsActions={settingsActions}
+      openingConversationDescription={openingConversationDescription}
+      accordDisabledReason={accordDisabledReason}
+      onOpenAccord={() => setAccordDialogOpen(true)}
+    />
+  ) : undefined;
 
   return (
     <AppShell
+      rail={
+        <AppRail
+          activeView={state.railView}
+          activityCount={state.activityItems.length}
+          onSelect={(nextView) => {
+            state.setRailView(nextView);
+            if (nextView !== "activity") {
+              state.setSelectedActivityItem(undefined);
+            }
+            if (nextView === "settings") {
+              state.setSidebarCollapsed(false);
+            }
+          }}
+        />
+      }
       sidebarCollapsed={state.sidebarCollapsed}
+      sidebarHidden={state.railView === "activity"}
       sidebarWidth={state.sidebarWidth}
       onSidebarWidthChange={state.setSidebarWidth}
       className={isNewChatScreen ? "is-new-chat-screen" : undefined}
       sidebar={
-        state.sidebarMode === "settings" ? (
+        state.railView === "settings" ? (
           <SettingsSidebar
             section={state.activeSettingsSection}
             appVersion={appVersion}
@@ -229,7 +259,7 @@ function App(): JSX.Element {
           />
         )
       }
-      topBar={state.sidebarMode === "settings" ? null : <TopBar leading={topBarLeading} title={topBarTitle} actions={topBarActions} className={isNewChatScreen ? "new-chat-topbar" : undefined} />}
+      topBar={state.railView === "settings" || state.railView === "activity" ? null : <TopBar leading={topBarLeading} title={topBarTitle} actions={topBarActions} className={isNewChatScreen ? "new-chat-topbar" : undefined} />}
     >
       <AppNotices
         error={state.error}
@@ -252,7 +282,7 @@ function App(): JSX.Element {
         />
       )}
 
-      {state.sidebarMode === "settings" ? (
+      {state.railView === "settings" ? (
         <SettingsView
           section={state.activeSettingsSection}
           settings={state.settings}
@@ -280,6 +310,29 @@ function App(): JSX.Element {
           sidebarCollapsed={state.sidebarCollapsed}
           onExpandSidebar={() => state.setSidebarCollapsed(false)}
           onClose={closeSettings}
+        />
+      ) : state.railView === "activity" ? (
+        <ActivityView
+          items={state.activityItems}
+          selectedItem={state.selectedActivityItem}
+          loading={state.activityLoading}
+          error={state.activityError}
+          detail={(
+            <div className="content-area result-layout activity-conversation-content">
+              {conversationPanel ?? <AppLoadingState title="Loading chat" description={openingConversationDescription} />}
+            </div>
+          )}
+          onSelect={(item) => {
+            state.setSelectedActivityItem(item);
+            void conversationActions.openConversationAndFocusActivityItem(item);
+          }}
+          onOpenInChat={(item) => {
+            state.setRailView("chats");
+            state.setSidebarCollapsed(false);
+            state.setSelectedActivityItem(undefined);
+            void conversationActions.openConversationAndFocusActivityItem(item);
+          }}
+          onRetry={() => void conversationActions.refreshActivity()}
         />
       ) : state.initializing ? (
         <div className="content-area compose-layout">
@@ -320,148 +373,11 @@ function App(): JSX.Element {
             </section>
           )}
 
-          {view.hasResultContext && (
-            <section className={`conversation-panel ${view.conversationKind === "chat" ? "chat-conversation-panel" : ""}`}>
-              {view.isOpeningConversation ? (
-                <AppLoadingState title="Loading chat" description={openingConversationDescription} />
-              ) : view.conversationKind === "chat" && state.conversation ? (
-                <ChatConversationView
-                  conversation={state.conversation}
-                  settings={state.settings}
-                  progress={view.visibleProgressLog}
-                  isRunning={view.conversationRunning}
-                  participantStatusById={view.participantStatusById}
-                  hasOlderMessages={Boolean(state.messagePage?.hasMoreBefore)}
-                  olderMessagesLoading={state.olderMessagesLoading}
-                  draft={state.chatMessageDraft}
-                  onDraftChange={state.setChatMessageDraft}
-                  onLoadOlderMessages={() => void conversationActions.loadOlderConversationMessages()}
-                  onLoadMessagePageForMessage={conversationActions.loadConversationMessagePageForMessage}
-                  messageFocusRequest={state.chatMessageFocusRequest}
-                  onSend={(repoFileMentions, imageAttachments, skillMentions) => chatActions.sendChatMessage({ repoFileMentions, imageAttachments, skillMentions })}
-                  accordDisabledReason={accordDisabledReason}
-                  onOpenAccord={() => setAccordDialogOpen(true)}
-                  onSendThread={(rootMessage, content, repoFileMentions, imageAttachments, skillMentions) => chatActions.sendChatMessage({
-                    content,
-                    skillMentions,
-                    repoFileMentions,
-                    imageAttachments,
-                    threadId: rootMessage.metadata?.threadId ?? rootMessage.id,
-                    parentMessageId: rootMessage.id,
-                    chatThreadRootId: rootMessage.id
-                  })}
-                  onApproveMentions={(sourceMessageId, targetParticipantIds, continueRequester) =>
-                    void chatActions.respondToChatMentions(sourceMessageId, targetParticipantIds, true, continueRequester)
-                  }
-                  onRejectMentions={(sourceMessageId, targetParticipantIds) =>
-                    void chatActions.respondToChatMentions(sourceMessageId, targetParticipantIds, false)
-                  }
-                  onRespondToChoice={(sourceMessageId, choiceId, response) => chatActions.respondToChatChoice(sourceMessageId, choiceId, response)}
-                  onToggleReaction={(messageId, emoji) => void chatActions.toggleChatReaction(messageId, emoji)}
-                  onRespondToAppToolApproval={chatActions.respondToChatAppToolApproval}
-                  setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
-                  onCompactParticipant={(participantId) => chatActions.compactChatParticipant(participantId)}
-                  onStopRun={(runId) => void window.consensus.cancelReview(runId)}
-                />
-              ) : (
-                <SlackView
-                  conversation={state.conversation}
-                  progress={view.visibleProgressLog}
-                  kind={view.conversationKind}
-                  isRunning={view.conversationRunning}
-                  hasOlderMessages={Boolean(state.messagePage?.hasMoreBefore)}
-                  olderMessagesLoading={state.olderMessagesLoading}
-                  onLoadOlderMessages={() => void conversationActions.loadOlderConversationMessages()}
-                  selectedThreadId={state.selectedThreadId}
-                  focusedThreadId={state.focusedThreadId}
-                  onSelectThread={(id) => {
-                    state.setSelectedThreadId(id);
-                    if (!id) state.setFocusedThreadId(undefined);
-                  }}
-                  onFocusThread={(id) => {
-                    state.setSelectedThreadId(id);
-                    state.setFocusedThreadId(id);
-                  }}
-                  onExitFocus={() => state.setFocusedThreadId(undefined)}
-                  onCloseThread={() => {
-                    state.setSelectedThreadId(undefined);
-                    state.setFocusedThreadId(undefined);
-                  }}
-                  pendingDecisions={view.pendingDecisions}
-                  decisionReplies={[...planDecisionReplies(state.conversation), ...Object.values(state.pendingClarifications)]}
-                  decisionAnswers={view.visibleDecisionAnswers}
-                  decisionResolutions={view.visibleDecisionResolutions}
-                  clarificationDrafts={state.clarificationDrafts}
-                  planItemReviewDrafts={state.planItemReviewDrafts}
-                  planCorrectionDraft={state.planCorrectionDraft}
-                  canComposePlan={view.canComposePlan}
-                  reviewedPlanItemCount={view.reviewedPlanItemCount}
-                  reviewablePlanItemCount={view.reviewablePlanItems.length}
-                  canRecoverPlan={view.canRecoverPlan}
-                  onDecisionAnswer={(decisionId, optionId) => void reviewDecisionActions.selectDecisionAnswer(decisionId, optionId)}
-                  onResolveDecision={(decisionId) => void reviewDecisionActions.resolveDecisionThread(decisionId)}
-                  onClarificationDraftChange={(decisionId, value) => state.setClarificationDrafts((current) => ({ ...current, [decisionId]: value }))}
-                  onAskClarification={(decisionId) => void reviewDecisionActions.askDecisionClarification(decisionId)}
-                  onPlanItemReviewDraftChange={(findingId, value) => state.setPlanItemReviewDrafts((current) => ({ ...current, [findingId]: value }))}
-                  onConfirmPlanItem={(findingId) => void reviewDecisionActions.confirmPlanItem(findingId)}
-                  onCommentPlanItem={(findingId) => void reviewDecisionActions.commentOnPlanItem(findingId)}
-                  onPlanCorrectionDraftChange={state.setPlanCorrectionDraft}
-                  onContinue={() => void reviewDecisionActions.continueReview()}
-                  onComposePlan={() => void reviewPlanActions.composeImplementationPlan()}
-                  onRetryFinalPlan={() => void reviewPlanActions.retryFinalPlanSynthesis()}
-                  onRecoverPlan={() => void reviewPlanActions.recoverImplementationPlan()}
-                  onRevisePlan={() => void reviewPlanActions.reviseImplementationPlan()}
-                />
-              )}
-            </section>
-          )}
+          {conversationPanel}
         </div>
       )}
     </AppShell>
   );
-}
-
-function pluginNewChatDraft(plugin: PluginCatalogItem): string {
-  const prompt = plugin.invocation.kind === "prompt-insert" ? plugin.invocation.prompt.trim() : "";
-  const tokenName = plugin.invocation.kind === "skill-mention"
-    ? plugin.invocation.skill.frontmatterName
-    : plugin.name;
-  const includeToken = plugin.invocation.kind !== "prompt-insert" || plugin.installedProviderKinds.length > 0;
-  if (!includeToken) {
-    return prompt;
-  }
-  return `/${tokenName}${prompt ? ` ${prompt}` : " "}`;
-}
-
-function pluginNewChatMentions(
-  plugin: PluginCatalogItem,
-  draft: string
-): { pluginMentions: DraftPluginMention[]; skillMentions: ChatSkillMention[] } {
-  if (plugin.invocation.kind === "skill-mention" && draftHasSlashToken(draft, plugin.invocation.skill.frontmatterName)) {
-    const skill = plugin.invocation.skill;
-    const mention: ChatSkillMention = {
-      skillId: skill.skillId,
-      displayName: skill.displayName,
-      frontmatterName: skill.frontmatterName,
-      description: skill.description,
-      contentHash: skill.contentHash,
-      capabilityState: skill.capabilityState,
-      variants: skill.variants
-    };
-    return { pluginMentions: [], skillMentions: [mention] };
-  }
-  if (draftHasSlashToken(draft, plugin.name)) {
-    return {
-      pluginMentions: [{ name: plugin.name, displayName: plugin.displayName, iconUrl: plugin.iconUrl }],
-      skillMentions: []
-    };
-  }
-  return { pluginMentions: [], skillMentions: [] };
-}
-
-function draftHasSlashToken(draft: string, name: string): boolean {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(^|\\s)/${escaped}(?=\\s|$)`).test(draft);
 }
 
 createRoot(document.getElementById("root") as HTMLElement).render(

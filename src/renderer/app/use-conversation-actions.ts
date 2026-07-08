@@ -1,4 +1,4 @@
-import type { Conversation } from "../../shared/types";
+import type { ChatActivityItem, Conversation } from "../../shared/types";
 import { CONVERSATION_MESSAGE_PAGE_SIZE, mergeLoadedMessagePage, prependMissingMessages } from "../lib/conversation-message-pages";
 import {
   errorText,
@@ -14,8 +14,10 @@ import { persistLastViewedAt } from "./storage";
 
 export interface ConversationActions {
   refreshAll: () => Promise<void>;
+  refreshActivity: () => Promise<void>;
   refreshConversations: () => Promise<void>;
   openConversation: (id: string) => Promise<void>;
+  openConversationAndFocusActivityItem: (item: ChatActivityItem) => Promise<void>;
   loadOlderConversationMessages: () => Promise<void>;
   loadConversationMessagePageForMessage: (messageId: string) => Promise<boolean>;
   jumpToParticipantLastMessage: (participantId: string) => void;
@@ -31,6 +33,21 @@ export interface ConversationActions {
 export function useConversationActions(state: AppState): ConversationActions {
   async function refreshConversations(): Promise<void> {
     state.setSummaries(await window.consensus.listConversations());
+  }
+
+  async function refreshActivity(): Promise<void> {
+    state.setActivityLoading(true);
+    state.setActivityError(undefined);
+    try {
+      const result = await window.consensus.listChatActivity({
+        lastViewedAtByConversationId: state.lastViewedAtRef.current
+      });
+      state.setActivityItems(result.items);
+    } catch (caught) {
+      state.setActivityError(errorText(caught));
+    } finally {
+      state.setActivityLoading(false);
+    }
   }
 
   async function refreshAll(): Promise<void> {
@@ -61,6 +78,10 @@ export function useConversationActions(state: AppState): ConversationActions {
   }
 
   async function openConversation(id: string): Promise<void> {
+    await openConversationForSelection(id);
+  }
+
+  async function openConversationForSelection(id: string): Promise<Conversation | undefined> {
     const requestId = state.openConversationRequestRef.current + 1;
     state.openConversationRequestRef.current = requestId;
     state.setError(undefined);
@@ -69,14 +90,15 @@ export function useConversationActions(state: AppState): ConversationActions {
     }
     if (state.conversation?.id === id) {
       state.setOpeningConversationId(undefined);
-      return;
+      markConversationViewed(state.conversation);
+      return state.conversation;
     }
     state.setOpeningConversationId(id);
     try {
       await waitForNextFrame();
       const result = await window.consensus.openConversation(id, CONVERSATION_MESSAGE_PAGE_SIZE);
       if (requestId !== state.openConversationRequestRef.current) {
-        return;
+        return undefined;
       }
       const next = result?.conversation;
       const nextPendingDecisions = pendingPlanDecisions(next);
@@ -85,14 +107,7 @@ export function useConversationActions(state: AppState): ConversationActions {
       state.setMessagePage(result?.messagePage);
       if (next) {
         state.setKind(next.kind);
-        state.lastViewedAtRef.current = { ...state.lastViewedAtRef.current, [next.id]: next.updatedAt };
-        persistLastViewedAt(state.lastViewedAtRef.current);
-        state.setUnreadConversationIds((prev) => {
-          if (!prev.has(next.id)) return prev;
-          const ns = new Set(prev);
-          ns.delete(next.id);
-          return ns;
-        });
+        markConversationViewed(next);
       }
       state.setSelectedThreadId(nextPendingDecisions[0]?.id ?? nextPendingItem?.id);
       state.setFocusedThreadId(undefined);
@@ -102,15 +117,46 @@ export function useConversationActions(state: AppState): ConversationActions {
       state.setPendingClarifications({});
       state.setPlanItemReviewDrafts({});
       state.setPlanCorrectionDraft("");
+      return next;
     } catch (caught) {
       if (requestId === state.openConversationRequestRef.current) {
         state.setError(errorText(caught));
       }
+      return undefined;
     } finally {
       if (requestId === state.openConversationRequestRef.current) {
         state.setOpeningConversationId(undefined);
       }
     }
+  }
+
+  async function openConversationAndFocusActivityItem(item: ChatActivityItem): Promise<void> {
+    const conversation = await openConversationForSelection(item.conversationId);
+    const messageId = item.target.messageId?.trim();
+    if (!conversation || !messageId) {
+      return;
+    }
+    await waitForNextFrame();
+    state.chatMessageFocusNonceRef.current += 1;
+    state.setChatMessageFocusRequest({
+      messageId,
+      threadRootId: item.target.threadRootId?.trim() || undefined,
+      nonce: state.chatMessageFocusNonceRef.current
+    });
+  }
+
+  function markConversationViewed(conversation: Conversation): void {
+    state.lastViewedAtRef.current = { ...state.lastViewedAtRef.current, [conversation.id]: conversation.updatedAt };
+    persistLastViewedAt(state.lastViewedAtRef.current);
+    state.setUnreadConversationIds((prev) => {
+      if (!prev.has(conversation.id)) return prev;
+      const ns = new Set(prev);
+      ns.delete(conversation.id);
+      return ns;
+    });
+    state.setActivityItems((current) =>
+      current.filter((item) => item.conversationId !== conversation.id || item.status !== "recent")
+    );
   }
 
   async function loadOlderConversationMessages(): Promise<void> {
@@ -303,7 +349,7 @@ export function useConversationActions(state: AppState): ConversationActions {
   }
 
   return {
-    refreshAll, refreshConversations, openConversation, loadOlderConversationMessages,
+    refreshAll, refreshActivity, refreshConversations, openConversation, openConversationAndFocusActivityItem, loadOlderConversationMessages,
     loadConversationMessagePageForMessage, jumpToParticipantLastMessage, selectRepo,
     inspectRepo, rememberRepoPath, cancelReview, newChatSession, newProjectSession,
     updateSelectedChatParticipantConfigIds: state.setSelectedChatParticipantConfigIds
