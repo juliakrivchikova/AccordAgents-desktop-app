@@ -7,9 +7,7 @@ import type {
   ChatProviderKind,
   PluginCatalogItem,
   PluginListResult,
-  PluginProviderAvailability,
   UserSkillListResult,
-  UserSkillScope,
   UserSkillSummary
 } from "../../../../shared/types";
 
@@ -161,6 +159,7 @@ export function PluginsSettingsSection(props: {
           skills={visibleSkills}
           loading={state.loading}
           onCopy={copyText}
+          showProviderMarks={providerFilter === "all"}
         />
       )}
     </section>
@@ -315,7 +314,9 @@ function SkillCatalog(props: {
   skills: UserSkillSummary[];
   loading: boolean;
   onCopy: (label: string, text: string) => Promise<void>;
+  showProviderMarks: boolean;
 }): JSX.Element {
+  const grouped = groupSkills(props.skills);
   if (!props.loading && props.skills.length === 0) {
     return (
       <div className="plugins-empty-state" data-testid="skills-empty-state">
@@ -324,9 +325,24 @@ function SkillCatalog(props: {
     );
   }
   return (
-    <div className="plugins-card-grid" data-testid="skills-catalog">
-      {props.skills.map((skill) => (
-        <SkillCard skill={skill} onCopy={props.onCopy} key={skill.skillId} />
+    <div className="plugins-catalog" data-testid="skills-catalog">
+      {grouped.map((group) => (
+        <section className="plugins-catalog-section" data-testid={`skills-${group.id}-section`} key={group.id}>
+          <div className="plugins-catalog-heading">
+            <h2>{group.title}</h2>
+            <span>{group.skills.length}</span>
+          </div>
+          <div className="plugins-card-grid plugins-skill-list">
+            {group.skills.map((skill) => (
+              <SkillCard
+                skill={skill}
+                onCopy={props.onCopy}
+                showProviderMarks={props.showProviderMarks}
+                key={skill.skillId}
+              />
+            ))}
+          </div>
+        </section>
       ))}
     </div>
   );
@@ -335,20 +351,31 @@ function SkillCatalog(props: {
 function SkillCard(props: {
   skill: UserSkillSummary;
   onCopy: (label: string, text: string) => Promise<void>;
+  showProviderMarks: boolean;
 }): JSX.Element {
   return (
     <article className="plugins-card" data-testid="skill-card">
-      <div className="plugins-card-head">
+      <div className="plugins-card-main">
         <span className="plugins-card-icon"><ListChecks size={18} aria-hidden /></span>
-        <div>
-          <h2>{props.skill.displayName}</h2>
-          <span>{props.skill.scopeKinds.map(sourceLabel).join(" / ")}</span>
+        <div className="plugins-card-copy">
+          <div className="plugins-card-title-row">
+            <h2>{props.skill.displayName}</h2>
+          </div>
+          {props.showProviderMarks && (
+            <div className="plugins-skill-provider-row">
+              {props.skill.providerKinds.map((providerKind) => (
+                <ProviderMark providerKind={providerKind} key={providerKind} />
+              ))}
+            </div>
+          )}
+          <p>{props.skill.description ?? props.skill.statusMessage ?? "User skill"}</p>
+          <div className="plugins-skill-meta">
+            <span>{skillScopeLabel(props.skill)}</span>
+            <span>{props.skill.capabilityState === "invocable" ? "Usable from /" : "Discovery only"}</span>
+          </div>
         </div>
       </div>
-      <p>{props.skill.description ?? props.skill.statusMessage ?? "User skill"}</p>
-      <ProviderStatusList availability={skillAvailability(props.skill)} />
-      <div className="plugins-card-foot">
-        <span>{props.skill.capabilityState === "invocable" ? "Usable from /" : "Discovery only"}</span>
+      <div className="plugins-row-actions">
         <Button type="button" variant="outline" size="sm" onClick={() => void props.onCopy(props.skill.displayName, `/${props.skill.frontmatterName}`)}>
           <Copy size={14} aria-hidden />
           Copy
@@ -356,39 +383,6 @@ function SkillCard(props: {
       </div>
     </article>
   );
-}
-
-function ProviderStatusList(props: { availability: PluginProviderAvailability[] }): JSX.Element {
-  return (
-    <div className="plugins-provider-status">
-      {props.availability.map((provider) => (
-        <span className={`plugins-provider-chip is-${provider.status}`} title={provider.message} key={provider.providerKind}>
-          {providerLabel(provider.providerKind)}
-          <strong>{providerStatusLabel(provider)}</strong>
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function skillAvailability(skill: UserSkillSummary): PluginProviderAvailability[] {
-  return (["codex-cli", "claude-code"] as ChatProviderKind[]).map((providerKind) => {
-    const variant = skill.variants.find((item) => item.providerKind === providerKind);
-    if (!variant) {
-      return {
-        providerKind,
-        status: "unsupported",
-        capabilityState: "unsupported",
-        message: "No local variant for this provider."
-      };
-    }
-    return {
-      providerKind,
-      status: variant.capabilityState === "invocable" ? "invocable" : "available",
-      capabilityState: variant.capabilityState,
-      message: skill.statusMessage
-    };
-  });
 }
 
 function matchesSkill(skill: UserSkillSummary, query: string, provider: ProviderFilter): boolean {
@@ -408,6 +402,19 @@ function matchesPlugin(plugin: PluginCatalogItem, query: string, provider: Provi
     (plugin.category?.toLowerCase().includes(query) ?? false);
   const providerMatch = provider === "all" || plugin.providerKind === provider;
   return queryMatch && providerMatch;
+}
+
+function groupSkills(skills: UserSkillSummary[]): Array<{ id: "project" | "personal"; title: string; skills: UserSkillSummary[] }> {
+  const projectSkills = skills.filter((skill) => skill.scopeKinds.includes("repo"));
+  const personalSkills = skills.filter((skill) => !skill.scopeKinds.includes("repo"));
+  return [
+    { id: "project" as const, title: "Project skills", skills: projectSkills },
+    { id: "personal" as const, title: "Personal skills", skills: personalSkills }
+  ].filter((group) => group.skills.length > 0);
+}
+
+function skillScopeLabel(skill: UserSkillSummary): string {
+  return skill.scopeKinds.includes("repo") ? "Project skill" : "Personal skill";
 }
 
 function pluginAction(plugin: PluginCatalogItem): { button: string; label: string; text: string } | undefined {
@@ -435,30 +442,10 @@ function pluginAction(plugin: PluginCatalogItem): { button: string; label: strin
   return undefined;
 }
 
-function providerStatusLabel(provider: PluginProviderAvailability): string {
-  if (provider.status === "invocable") {
-    return "Usable";
-  }
-  if (provider.status === "available") {
-    return "Available";
-  }
-  if (provider.status === "needs-setup") {
-    return "Setup";
-  }
-  if (provider.status === "malformed") {
-    return "Invalid";
-  }
-  return "Unsupported";
-}
-
 function providerLabel(providerKind: ChatProviderKind): string {
   return providerKind === "codex-cli" ? "Codex" : "Claude";
 }
 
 function providerClass(providerKind: ChatProviderKind): string {
   return providerKind === "codex-cli" ? "is-codex" : "is-claude";
-}
-
-function sourceLabel(scope: UserSkillScope): string {
-  return scope === "repo" ? "Repo" : "Personal";
 }
