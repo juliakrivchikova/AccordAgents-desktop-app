@@ -13,8 +13,9 @@ step yourself.
 - Use plain `@handle` assignments for long-running delegated stages, then stop and wait for auto-watch to wake you when
   participants reply.
 - Use participant requests only for bounded asks where waiting/resume is useful.
-- Treat user-confirmed requirements, non-goals, acceptance criteria, and final-step choice as locked constraints. At each
-  workflow step, check that plans, accord outputs, implementation, reviews, fixes, and final delivery still respect them.
+- Treat only the user's explicit requirement text, explicit user clarifications, user-confirmed acceptance criteria, and
+  final-step choice as locked constraints. Do not invent non-goals, affected surfaces, or implementation limits on the
+  user's behalf.
 - Before starting the next workflow step, verify the current step actually completed with the expected output from the
   required participant(s). If a participant replied with something other than what was requested, report it to the user
   and ask how to proceed.
@@ -24,18 +25,34 @@ step yourself.
 - At the end of the workflow, the final user-facing closeout must be a short status posted at the end of the main
   timeline, not only inside a nested thread. If the current reply would stay inside a workflow/participant-request
   thread, post a separate main-timeline closeout with the app-managed send-message tool when available.
+
+## Reference-Parity Gate
+
+When the user says a new setting or flow should work "like", "same as", or "next to" an existing feature, that existing
+feature is a locked reference.
+
+Plans, accord resolutions, reviews, and QA must:
+
+- identify the exact reference UI or behavior;
+- copy its interaction model, labels, density, and persistence pattern unless the user explicitly approves a deviation;
+- reject added warning cards, explanatory banners, new labels, or extra states not present in the reference.
+
+Before final QA, verify the new UI beside the reference feature and answer: "Does this look and behave like the
+referenced existing feature, with no invented UX?"
+
 ## Workflow
 
-### 1. Understand Requirement
+### 1. Relay And Confirm Requirement
 
-Restate the requirement in concrete user-facing terms, including observable behavior, affected surfaces, non-goals, and
-acceptance criteria.
+Restate what the user actually said as a concise relay-ready requirement for Drew and Taylor. Include explicit references
+the user gave, such as a design handoff path, screenshot, bug report, or pasted requirement. You may include concise
+acceptance criteria as observable completion checks derived directly from the user's words or explicit references. Do not
+add manager-authored scope, non-goals, affected surfaces, file lists, tests, or implementation constraints unless the user
+explicitly stated them.
 
-Scope confirmation is for locking what the user expects to see happen, not the implementation strategy. If prior context
-includes a technical diagnosis or proposed fix, translate it into desired behavior and acceptance criteria only if user
-explicitly approved it, otherwise implementation details are not to be locked during scope confirmation. Do not lock
-specific files, internal mechanisms, tests, or code structure during this step unless the user explicitly names them as
-requirements; those details belong in the independent planning and accord stages.
+If the user's request is clear enough to pass to Drew and Taylor, do not expand it. If a necessary user-owned decision is
+missing or ambiguous, ask one concise clarification before continuing. If the user invokes the workflow immediately after
+stating the requirement, treat that requirement as confirmed and continue to the final-step choice.
 
 Ask:
 
@@ -48,8 +65,9 @@ O2: Revise | I will update the scope first.
 R: O1
 ```
 
-If the user has already clearly confirmed the scope, continue. During subsequent steps, make sure other participants
-follow what was confirmed with the user. If there is a good reason to revise it - stop flow and ask for user approval, don't continue silently.
+If the user has already clearly confirmed the requirement, continue. During subsequent steps, make sure other participants
+follow the user's stated requirement and clarifications. If there is a good reason to revise it, stop flow and ask for
+user approval; don't continue silently.
 
 ### 2. Confirm Final Step
 
@@ -74,7 +92,7 @@ To ask both Drew and Taylor to prepare implementation plans, respond as follows:
 ```text
 @drew-codex-engineer @taylor-claude-engineer we need to [implement new feature/fix bug]:
 
-[feature/bug description]
+[user's stated feature/bug description and explicit references, without manager-added scope]
 
 prepare exact implementation plan independently, add plan for QA verification steps and full test coverage
 ```

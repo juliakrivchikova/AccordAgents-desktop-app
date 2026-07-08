@@ -87,6 +87,9 @@ export function ChatParticipantMenu(props: {
       participantRoleArchived={(participant) => Boolean(
         props.settings.chatRoleConfigs.find((role) => role.id === participant.roleConfigId)?.archivedAt
       )}
+      participantRoleDefaults={(participant) =>
+        props.settings.chatRoleConfigs.find((role) => role.id === participant.roleConfigId)?.participantDefaults
+      }
       savedParticipantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
       savedParticipantSummary={(participant) => savedParticipantSummary(props.settings, participant, autoWatchConflictReason)}
       addParticipantEditor={(

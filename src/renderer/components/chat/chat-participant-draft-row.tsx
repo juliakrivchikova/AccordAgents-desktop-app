@@ -26,6 +26,7 @@ import {
 } from "./chat-model-reasoning-pickers";
 import {
   ChatParticipantInlinePermissionsRow,
+  ChatParticipantInlineManageRolesParticipantsRow,
   ChatParticipantInlineRequestParticipantsRow
 } from "./chat-participant-config-panel";
 import type { ChatParticipantDraft } from "./chat-participant-drafts";
@@ -60,6 +61,7 @@ export function ChatParticipantDraftRow(props: {
   const autoWatchChecked = props.autoWatchDisabledReason ? false : props.draft.autoWatch;
   const autoWatchDescription = props.autoWatchDisabledReason
     ?? (isWorkflowManager ? AUTO_WATCH_MANAGER_DESCRIPTION : AUTO_WATCH_GENERIC_DESCRIPTION);
+  const selectedRole = props.settings.chatRoleConfigs.find((role) => role.id === props.draft.roleConfigId);
 
   function toggleBehaviorRule(ruleId: string, checked: boolean): void {
     const selected = new Set(props.draft.behaviorRuleIds);
@@ -185,6 +187,11 @@ export function ChatParticipantDraftRow(props: {
       </FormRow>
       <ChatParticipantInlineRequestParticipantsRow
         participant={props.draft}
+        onChange={(permissions) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { permissions }))}
+      />
+      <ChatParticipantInlineManageRolesParticipantsRow
+        participant={props.draft}
+        roleDefaults={selectedRole?.participantDefaults}
         onChange={(permissions) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { permissions }))}
       />
       <FormRow label="Behavior rules" className="behavior-rules-field">

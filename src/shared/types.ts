@@ -243,6 +243,14 @@ export interface ChatRoleConfig {
 export interface ChatRoleParticipantDefaults {
   autoWatch?: boolean;
   requestParticipants?: ChatParticipantRequestPermission;
+  manageRolesParticipants?: ChatParticipantRequestPermission;
+}
+
+export interface ChatManageRolesParticipantsResolution {
+  roleDefault: ChatParticipantRequestPermission;
+  participantExplicit?: ChatParticipantRequestPermission;
+  effective: ChatParticipantRequestPermission;
+  exceedsRoleDefault: boolean;
 }
 
 export interface ChatBehaviorRuleConfig {
@@ -503,6 +511,7 @@ export interface ChatAgentPermissions {
   workspaceWrite: boolean;
   webAccess: boolean;
   requestParticipants: ChatParticipantRequestPermission;
+  manageRolesParticipants?: ChatParticipantRequestPermission;
   shell: {
     enabled: boolean;
     rules: ChatShellPermissionRule[];
@@ -538,6 +547,7 @@ export interface ChatParticipantSession {
   roleConfigId: string;
   roleConfigVersion: number;
   roleAppToolCapabilities?: ChatAppToolCapability[];
+  roleParticipantDefaults?: ChatRoleParticipantDefaults;
   roleRuntime?: ChatRoleRuntime;
   participantKind?: ChatProviderKind;
   participantModel?: string;
@@ -825,6 +835,8 @@ export interface ChatRosterCurrentParticipant {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   agentMode?: ChatAgentMode;
+  permissions?: ChatAgentPermissions;
+  manageRolesParticipants?: ChatManageRolesParticipantsResolution;
   remoteExecution?: CloudRunRemoteExecutionMode;
   skipToolchainPreflight?: boolean;
   autoWatch?: boolean;

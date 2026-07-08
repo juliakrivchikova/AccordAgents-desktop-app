@@ -5,6 +5,7 @@ import { AtSign, ChevronDown, Minimize2, Trash2 } from "lucide-react";
 import { canCompactParticipant } from "../../../shared/chatParticipantStatus";
 import type {
   ChatParticipant,
+  ChatRoleParticipantDefaults,
   ChatParticipantWatcherPausedReason
 } from "../../../shared/types";
 import { IconButton } from "../primitives";
@@ -19,6 +20,7 @@ export function ChatParticipantRosterRow(props: {
   status: ChatParticipantRosterStatus;
   autoWatchDisabledReason?: string;
   autoWatchPausedReason?: ChatParticipantWatcherPausedReason;
+  roleParticipantDefaults?: ChatRoleParticipantDefaults;
   runLocationLocked: boolean;
   renderParticipantAvatar: (participant: ChatParticipant) => React.ReactNode;
   participantRoleLabel: (participant: ChatParticipant) => string;
@@ -105,6 +107,7 @@ export function ChatParticipantRosterRow(props: {
           disabled={props.isRunning}
           autoWatchDisabledReason={props.autoWatchDisabledReason}
           autoWatchPausedReason={props.autoWatchPausedReason}
+          roleParticipantDefaults={props.roleParticipantDefaults}
           runLocationLocked={props.runLocationLocked}
           onUpdate={props.onUpdateParticipantRuntime}
         />

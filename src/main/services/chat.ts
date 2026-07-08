@@ -29,6 +29,7 @@ import type {
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
   ChatParticipantInput,
+  ChatParticipantRequestPermission,
   ChatParticipantWatcherState,
   CloudRunRemoteExecutionMode,
   ChatExistingParticipantOverrides,
@@ -116,7 +117,11 @@ import {
   isChatShellPermissionPatternSafe,
   normalizeChatParticipantRequestPermission,
   normalizeChatAgentMode,
-  normalizeChatAgentPermissions
+  normalizeChatAgentPermissions,
+  normalizeChatRoleManagementPermission,
+  normalizeOptionalChatParticipantRequestPermission,
+  chatParticipantRequestPermissionExceeds,
+  resolveChatManageRolesParticipantsPermission
 } from "../../shared/agentPermissions";
 import { normalizeAgentContextUsage } from "../../shared/agentContext";
 import {
@@ -188,8 +193,14 @@ interface ResolvedChatParticipantRole {
   label: string;
   version: number;
   appToolCapabilities?: ChatAppToolCapability[];
+  participantDefaults?: ChatRoleParticipantDefaults;
   instructions: string;
   behaviorRules: ChatBehaviorRuleSnapshot[];
+}
+
+interface ParticipantManagementAuthorization {
+  requester: ChatParticipant;
+  manageRolesParticipants: ChatParticipantRequestPermission;
 }
 
 interface ChatPromptSectionSizes {
@@ -273,7 +284,7 @@ interface CompactChatCommand {
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 18;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 19;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const CHAT_ADMINISTRATOR_ROLE_ID = "administrator";
@@ -440,11 +451,13 @@ interface PreparedRosterChange {
   request: ChatRosterChangeRequest;
   participants: ChatParticipant[];
   summary: string;
+  managementEscalation: boolean;
 }
 
 interface PreparedRoleChange {
   request: ChatRoleChangeRequest;
   summary: string;
+  managementEscalation: boolean;
 }
 
 interface PreparedParticipantChange {
@@ -452,6 +465,7 @@ interface PreparedParticipantChange {
   participants: ChatParticipant[];
   presetParticipantConfigs: ChatParticipantConfig[];
   summary: string;
+  managementEscalation: boolean;
 }
 
 interface PreparedRoleParticipantChange {
@@ -459,6 +473,7 @@ interface PreparedRoleParticipantChange {
   role: PreparedRoleChange;
   participant: PreparedParticipantChange;
   summary: string;
+  managementEscalation: boolean;
 }
 
 interface PreparedPermissionChange {
@@ -1125,10 +1140,9 @@ export class ChatService {
       const runPath = this.runPathForParticipant(conversation, participant, workspacePath, agentMode, permissions);
       const cliParticipant = this.cliParticipantForSession(participant, session);
       const agentEnvironment = await this.manualAgentEnvironmentForRun();
-      const appMcpToolInventoryKey = this.appMcpToolInventoryKey(this.appMcpToolNames([
-        ...normalizeChatAppToolCapabilities(session.roleAppToolCapabilities),
-        "permissions.request"
-      ]));
+      const appMcpToolInventoryKey = this.appMcpToolInventoryKey(
+        this.appMcpToolNames(this.appToolCapabilitiesForRun(session, permissions))
+      );
       const result = await this.cliRunner.compactSession(cliParticipant, runPath, undefined, "chat", signal, {
         persistSession: true,
         sessionId: session.sessionId,
@@ -1379,17 +1393,11 @@ export class ChatService {
   async requestRosterChangeFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
     await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
-    const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
-    if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
-    }
-    if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-      throw new Error("The issued app-tool token does not grant participant management.");
-    }
+    const { requester, manageRolesParticipants } = await this.requireParticipantManager(conversation, actor);
 
     const prepared = await this.prepareRosterChange(conversation, this.normalizeRosterChangeRequest(rawRequest));
     const policy = this.matchingAppToolApprovalPolicy(conversation, requester, APP_ROSTER_REQUEST_CHANGE_TOOL, "participants.manage");
-    if (policy) {
+    if ((manageRolesParticipants === "allow" || policy) && !prepared.managementEscalation) {
       const approval = this.newAppToolApproval(
         conversation,
         requester,
@@ -2898,15 +2906,10 @@ export class ChatService {
     await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
     const participants = this.chatParticipants(conversation);
-    const requester = participants.find((participant) => participant.id === actor.participantId);
-    if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
-    }
-    if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-      throw new Error("The issued app-tool token does not grant participant management.");
-    }
+    const { requester } = await this.requireParticipantManager(conversation, actor);
 
     const settings = await this.settings.getPublicSettings();
+    const roleById = new Map(settings.chatRoleConfigs.map((role) => [role.id, role]));
     const agents = await this.cliRunner.detectAgents().catch((): AgentHealth[] => []);
     const defaultKind = this.preferredChatProviderKind(settings.providers, agents);
     const providers: ChatRosterAvailableProvider[] = await Promise.all((["codex-cli", "claude-code"] as ChatProviderKind[]).map(async (kind) => {
@@ -2931,9 +2934,15 @@ export class ChatService {
       conversationId: conversation.id,
       requester: {
         ...this.rosterParticipantSummary(conversation, requester),
+        permissions: normalizeChatAgentPermissions(requester.permissions),
+        manageRolesParticipants: this.manageRolesParticipantsResolutionForRole(roleById.get(requester.roleConfigId), requester.permissions),
         appToolCapabilities: normalizeChatAppToolCapabilities(actor.capabilities)
       },
-      currentParticipants: participants.map((participant) => this.rosterParticipantSummary(conversation, participant)),
+      currentParticipants: participants.map((participant) => ({
+        ...this.rosterParticipantSummary(conversation, participant),
+        permissions: normalizeChatAgentPermissions(participant.permissions),
+        manageRolesParticipants: this.manageRolesParticipantsResolutionForRole(roleById.get(participant.roleConfigId), participant.permissions)
+      })),
       roles: settings.chatRoleConfigs.map((role) => ({
         id: role.id,
         label: role.label,
@@ -2941,7 +2950,8 @@ export class ChatService {
         builtIn: Boolean(role.builtIn),
         archivedAt: role.archivedAt,
         archived: Boolean(role.archivedAt),
-        appToolCapabilities: normalizeChatAppToolCapabilities(role.appToolCapabilities)
+        appToolCapabilities: normalizeChatAppToolCapabilities(role.appToolCapabilities),
+        participantDefaults: role.participantDefaults
       })),
       providers,
       agentModes: ["default", "plan", "auto"],
@@ -2969,7 +2979,7 @@ export class ChatService {
   async describeRoleOptionsForTool(actor: ChatAppMcpActor): Promise<Record<string, unknown>> {
     await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
-    const requester = this.requireParticipantManager(conversation, actor);
+    const { requester } = await this.requireParticipantManager(conversation, actor);
     const settings = await this.settings.getPublicSettings();
     const presetUsageCounts = new Map<string, number>();
     for (const participant of settings.chatParticipantConfigs) {
@@ -2993,6 +3003,7 @@ export class ChatService {
         archivedAt: role.archivedAt,
         archived: Boolean(role.archivedAt),
         appToolCapabilities: normalizeChatAppToolCapabilities(role.appToolCapabilities),
+        participantDefaults: role.participantDefaults,
         instructions: role.instructions,
         usage: {
           savedParticipantPresets: presetUsageCounts.get(role.id) ?? 0,
@@ -3009,6 +3020,7 @@ export class ChatService {
   async describeParticipantOptionsForTool(actor: ChatAppMcpActor): Promise<Record<string, unknown>> {
     const roster = await this.describeRosterOptionsForTool(actor);
     const settings = await this.settings.getPublicSettings();
+    const roleById = new Map(settings.chatRoleConfigs.map((role) => [role.id, role]));
     return {
       ...roster,
       savedParticipants: settings.chatParticipantConfigs.map((participant) => ({
@@ -3022,6 +3034,7 @@ export class ChatService {
         avatarId: participant.avatarId,
         agentMode: normalizeChatAgentMode(participant.agentMode),
         permissions: normalizeChatAgentPermissions(participant.permissions),
+        manageRolesParticipants: this.manageRolesParticipantsResolutionForRole(roleById.get(participant.roleConfigId), participant.permissions),
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
         skipToolchainPreflight: participant.skipToolchainPreflight === true,
         updatedAt: participant.updatedAt
@@ -3036,8 +3049,49 @@ export class ChatService {
   async requestRoleChangeFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
     await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
-    const requester = this.requireParticipantManager(conversation, actor);
+    const { requester, manageRolesParticipants } = await this.requireParticipantManager(conversation, actor);
     const prepared = await this.prepareRoleChange(this.normalizeRoleChangeRequest(rawRequest));
+    if (manageRolesParticipants === "allow" && !prepared.managementEscalation) {
+      const approval = this.newAppToolApproval(
+        conversation,
+        requester,
+        APP_ROLES_REQUEST_CHANGE_TOOL,
+        "participants.manage",
+        prepared.request,
+        prepared.summary,
+        "auto-applied"
+      );
+      const appliedRoles = await this.applyPreparedRoleChange(prepared);
+      this.upsertAppToolApproval(conversation, {
+        ...approval,
+        updatedAt: new Date().toISOString()
+      });
+      conversation.messages.push(this.message(
+        "system",
+        `Auto-applied role request from @${requester.handle}: ${prepared.summary}.`,
+        undefined,
+        { threadId: "system" }
+      ));
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+      return {
+        ok: true,
+        status: "auto_applied",
+        approvalId: approval.id,
+        summary: prepared.summary,
+        roles: appliedRoles.map((role) => ({ id: role.id, label: role.label })),
+        createdRoleRefs: prepared.request.operations
+          .map((operation, operationIndex) => operation.type === "create_role"
+            ? {
+                operationIndex,
+                label: operation.role.label,
+                roleConfigId: appliedRoles.find((role) => role.label === operation.role.label)?.id
+              }
+            : undefined)
+          .filter((item): item is { operationIndex: number; label: string; roleConfigId: string | undefined } => Boolean(item))
+      };
+    }
     const approval = this.newAppToolApproval(
       conversation,
       requester,
@@ -3074,7 +3128,7 @@ export class ChatService {
   async requestParticipantChangeFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
     await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
-    const requester = this.requireParticipantManager(conversation, actor);
+    const { requester, manageRolesParticipants } = await this.requireParticipantManager(conversation, actor);
     const request = this.normalizeParticipantChangeRequest(rawRequest);
     const pendingRoleApproval = this.pendingRoleApprovalForParticipantRequest(conversation, requester, request);
     if (pendingRoleApproval) {
@@ -3084,6 +3138,36 @@ export class ChatService {
         roleRequest: pendingRoleApproval.roleRequest,
         participantRequest: request
       });
+      if (manageRolesParticipants === "allow" && !prepared.managementEscalation) {
+        const applied = await this.applyPreparedRoleParticipantChange(conversation, prepared);
+        const approval: ChatAppToolApproval = {
+          ...pendingRoleApproval.approval,
+          toolName: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
+          request: applied.request,
+          summary: applied.summary,
+          status: "auto-applied",
+          approvalScope: "chat",
+          appliedParticipantIds: applied.participants.map((participant) => participant.id),
+          updatedAt: new Date().toISOString()
+        };
+        this.upsertAppToolApproval(conversation, approval);
+        conversation.messages.push(this.message(
+          "system",
+          `Auto-applied role and participant request from @${requester.handle}: ${applied.summary}.`,
+          undefined,
+          { threadId: "system" }
+        ));
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+        return {
+          ok: true,
+          status: "auto_applied",
+          approvalId: approval.id,
+          summary: applied.summary,
+          addedParticipants: applied.participants.map((participant) => `@${participant.handle}`)
+        };
+      }
       const approval: ChatAppToolApproval = {
         ...pendingRoleApproval.approval,
         toolName: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
@@ -3107,6 +3191,37 @@ export class ChatService {
     }
 
     const prepared = await this.prepareParticipantChange(conversation, request);
+    if (manageRolesParticipants === "allow" && !prepared.managementEscalation) {
+      const approval = this.newAppToolApproval(
+        conversation,
+        requester,
+        APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
+        "participants.manage",
+        prepared.request,
+        prepared.summary,
+        "auto-applied"
+      );
+      const applied = await this.applyPreparedParticipantChange(conversation, prepared);
+      approval.appliedParticipantIds = applied.map((participant) => participant.id);
+      approval.updatedAt = new Date().toISOString();
+      this.upsertAppToolApproval(conversation, approval);
+      conversation.messages.push(this.message(
+        "system",
+        `Auto-applied participant request from @${requester.handle}: ${prepared.summary}.`,
+        undefined,
+        { threadId: "system" }
+      ));
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+      return {
+        ok: true,
+        status: "auto_applied",
+        approvalId: approval.id,
+        summary: prepared.summary,
+        addedParticipants: applied.map((participant) => `@${participant.handle}`)
+      };
+    }
     const approval = this.newAppToolApproval(
       conversation,
       requester,
@@ -3250,7 +3365,11 @@ export class ChatService {
           roleLabel: this.roleLabelForParticipant(conversation, participant),
           roleVersion: role?.version ?? participant.roleConfigVersion,
           behaviorRuleIds: this.normalizeBehaviorRuleIds(participant.behaviorRuleIds),
-          appToolCapabilities: normalizeChatAppToolCapabilities(role?.appToolCapabilities),
+          appToolCapabilities: this.appToolCapabilitiesForRolePolicy(
+            role?.appToolCapabilities,
+            role?.participantDefaults,
+            normalizeChatAgentPermissions(participant.permissions)
+          ),
           kind: participant.kind,
           model: participant.model,
           reasoningEffort: participant.reasoningEffort,
@@ -5113,14 +5232,7 @@ export class ChatService {
     // or scoped back to role config, default-mode escalation silently denies every
     // un-pre-approved tool call. Keep it always-on (or give the bridge its own
     // capability) if you change this.
-    const requestParticipantsPermission = normalizeChatParticipantRequestPermission(permissions.requestParticipants);
-    const roleAppToolCapabilities = normalizeChatAppToolCapabilities(session.roleAppToolCapabilities)
-      .filter((capability) => capability !== "participants.request");
-    const appToolCapabilities = normalizeChatAppToolCapabilities([
-      ...roleAppToolCapabilities,
-      "permissions.request",
-      ...(requestParticipantsPermission === "deny" ? [] : ["participants.request" as const])
-    ]);
+    const appToolCapabilities = this.appToolCapabilitiesForRun(session, permissions);
     const appMcpToolNames = this.appMcpToolNames(appToolCapabilities);
     const appMcpToolInventoryKey = this.appMcpToolInventoryKey(appMcpToolNames);
     const appMcpClientGenerationId = this.appMcpClientGenerationId(conversation, participant, session, appMcpToolInventoryKey);
@@ -5954,6 +6066,7 @@ export class ChatService {
   private appToolPromptPolicy(session: ChatParticipantSession): string {
     const agentMode = normalizeChatAgentMode(session.participantAgentMode);
     const canRequestPermissions = this.canRequestPermissionChanges(session);
+    const manageRolesParticipantsPermission = this.manageRolesParticipantsPermissionForSession(session);
     const permissionPolicyLines = canRequestPermissions
       ? this.isAdministratorSession(session)
         ? [
@@ -5984,12 +6097,22 @@ export class ChatService {
       "With the default `resumeRequester: true`, participant replies return through a fresh auto-resumed requester turn even if targets finish before timeout; stop when the tool returns `pending_approval` or `running`. Use `resumeRequester: false` only when you explicitly need completed target replies inline in the same turn.",
       ...permissionPolicyLines
     ];
-    if (!hasChatAppToolCapability(session.roleAppToolCapabilities, "participants.manage")) {
+    if (manageRolesParticipantsPermission === "deny") {
       return [
         ...lines,
         "Roster management app tools are not available to this participant."
       ].join("\n");
     }
+    const roleParticipantWorkflowLines = manageRolesParticipantsPermission === "allow"
+      ? [
+          "For a new member whose role does not exist, call `app_roles_request_change` first. When it returns `status: \"auto_applied\"`, use the returned `createdRoleRefs[].roleConfigId` as the member `roleConfigId` in the following `app_participants_request_change` call.",
+          "`draftRoleRef` is only for pending grouped-review role responses; do not use a draft ref after an auto-applied role change.",
+          "The app validates proposed role and member changes. With this role's current policy, valid non-escalating role/member changes are auto-applied and written with an audit system message. Any change that grants or raises role/member management permission creates a User review card."
+        ]
+      : [
+          "For a new member whose role does not exist, call `app_roles_request_change` first. The response includes `createdRoleRefs`; use the returned `draftRoleRef` as the member `roleConfigId` in the following `app_participants_request_change` call so the app can show one grouped review card.",
+          "The app validates proposed role and member changes and creates a User review card before anything is written."
+        ];
     return [
       ...lines,
       "App tools: `app_roles_describe_options` and `app_participants_describe_options` are available for read-only discovery of roles, saved member presets, current chat members, CLI providers, model catalogs, reasoning-effort options, defaults, usage counts, and validation rules.",
@@ -5997,10 +6120,55 @@ export class ChatService {
       "App tools: `app_roles_request_change` is available for proposed role creation, custom-role editing, or deleting unused custom roles with `archive_role`. Use `create_role` when no built-in role fits. Do not edit or delete built-in roles.",
       "App tools: `app_participants_request_change` is available for User-requested member changes. Use `add_existing_participant_to_chat` for a matching saved member preset, or `add_new_participant_to_chat` with `saveAsPreset` for a new chat member.",
       "Do not choose roles marked archived for new members; archived roles are kept only so existing saved/current references remain understandable.",
-      "For a new member whose role does not exist, call `app_roles_request_change` first. The response includes `createdRoleRefs`; use the returned `draftRoleRef` as the member `roleConfigId` in the following `app_participants_request_change` call so the app can show one grouped review card.",
-      "The app validates proposed role and member changes and creates a User review card before anything is written.",
+      ...roleParticipantWorkflowLines,
       "`app_roster_request_change` is legacy compatibility only; do not use it for the v1 member setup flow."
     ].join("\n");
+  }
+
+  private manageRolesParticipantsPermissionForSession(session: ChatParticipantSession): ChatParticipantRequestPermission {
+    return resolveChatManageRolesParticipantsPermission(
+      session.roleParticipantDefaults?.manageRolesParticipants,
+      session.participantPermissions?.manageRolesParticipants
+    ).effective;
+  }
+
+  private async manageRolesParticipantsPermissionForParticipant(participant: ChatParticipant): Promise<ChatParticipantRequestPermission> {
+    const role = await this.resolvedRoleForParticipant(participant);
+    return resolveChatManageRolesParticipantsPermission(
+      role?.participantDefaults?.manageRolesParticipants,
+      normalizeChatAgentPermissions(participant.permissions).manageRolesParticipants
+    ).effective;
+  }
+
+  private appToolCapabilitiesForRun(
+    session: ChatParticipantSession,
+    permissions: ChatAgentPermissions
+  ): ChatAppToolCapability[] {
+    return this.appToolCapabilitiesForRolePolicy(
+      session.roleAppToolCapabilities,
+      session.roleParticipantDefaults,
+      permissions
+    );
+  }
+
+  private appToolCapabilitiesForRolePolicy(
+    roleAppToolCapabilities: unknown,
+    roleParticipantDefaults: ChatRoleParticipantDefaults | undefined,
+    permissions: ChatAgentPermissions
+  ): ChatAppToolCapability[] {
+    const requestParticipantsPermission = normalizeChatParticipantRequestPermission(permissions.requestParticipants);
+    const manageRolesParticipantsPermission = resolveChatManageRolesParticipantsPermission(
+      roleParticipantDefaults?.manageRolesParticipants,
+      permissions.manageRolesParticipants
+    ).effective;
+    const staticRoleAppToolCapabilities = normalizeChatAppToolCapabilities(roleAppToolCapabilities)
+      .filter((capability) => capability !== "participants.request" && capability !== "participants.manage");
+    return normalizeChatAppToolCapabilities([
+      ...staticRoleAppToolCapabilities,
+      "permissions.request",
+      ...(requestParticipantsPermission === "deny" ? [] : ["participants.request" as const]),
+      ...(manageRolesParticipantsPermission === "deny" ? [] : ["participants.manage" as const])
+    ]);
   }
 
   private appMcpToolNames(capabilities: ChatAppToolCapability[]): string[] {
@@ -6175,6 +6343,7 @@ export class ChatService {
       roleConfigId: role.id,
       roleConfigVersion: role.version,
       roleAppToolCapabilities: normalizeChatAppToolCapabilities(role.appToolCapabilities),
+      roleParticipantDefaults: role.participantDefaults,
       roleRuntime: this.preferredRoleRuntimeFor(participant),
       participantKind: participant.kind,
       participantModel: participant.model?.trim() || undefined,
@@ -6203,6 +6372,7 @@ export class ChatService {
       roleAppToolCapabilities: role
         ? normalizeChatAppToolCapabilities(role.appToolCapabilities)
         : normalizeChatAppToolCapabilities(existing.roleAppToolCapabilities),
+      roleParticipantDefaults: role?.participantDefaults ?? existing.roleParticipantDefaults,
       roleRuntime: this.isKnownRoleRuntime(existing.roleRuntime)
         ? existing.roleRuntime
         : this.preferredRoleRuntimeForKind(participantKind),
@@ -6229,6 +6399,7 @@ export class ChatService {
       session.roleLabel !== role.label ||
       session.roleInstructions !== role.instructions ||
       !chatAppToolCapabilitiesEqual(session.roleAppToolCapabilities, role.appToolCapabilities) ||
+      JSON.stringify(session.roleParticipantDefaults ?? {}) !== JSON.stringify(role.participantDefaults ?? {}) ||
       !this.behaviorRuleSnapshotsEqual(session.participantBehaviorRules, role.behaviorRules)
     );
   }
@@ -6369,6 +6540,7 @@ export class ChatService {
       roleConfigVersion: session.roleConfigVersion,
       roleInstructionsHash: this.shortHash(session.roleInstructions),
       roleAppToolCapabilities: normalizeChatAppToolCapabilities(session.roleAppToolCapabilities),
+      roleParticipantDefaults: session.roleParticipantDefaults ?? {},
       roleRuntime: session.roleRuntime ?? "",
       participantBehaviorRules: (session.participantBehaviorRules ?? []).map((rule) => ({
         id: rule.id,
@@ -6419,6 +6591,7 @@ export class ChatService {
       label: role.label,
       version: role.version,
       appToolCapabilities: normalizeChatAppToolCapabilities(role.appToolCapabilities),
+      participantDefaults: role.participantDefaults,
       instructions: this.roleInstructionsWithBehaviorRules(role.instructions, behaviorRules),
       behaviorRules
     };
@@ -7900,6 +8073,9 @@ export class ChatService {
     useRoleDefault: boolean
   ): ChatAgentPermissions {
     const normalized = normalizeChatAgentPermissions(permissions);
+    // Role/member management is intentionally not copied from the role here.
+    // Undefined means "inherit" so role edits affect inheriting participants;
+    // an explicit participant value is preserved and resolved at runtime.
     return useRoleDefault && role.participantDefaults?.requestParticipants
       ? { ...normalized, requestParticipants: role.participantDefaults.requestParticipants }
       : normalized;
@@ -7911,12 +8087,16 @@ export class ChatService {
     }
     const record = value as Partial<ChatRoleParticipantDefaults>;
     const requestParticipants = normalizeChatParticipantRequestPermission(record.requestParticipants);
+    const manageRolesParticipants = normalizeOptionalChatParticipantRequestPermission(record.manageRolesParticipants);
     const defaults: ChatRoleParticipantDefaults = {};
     if (typeof record.autoWatch === "boolean") {
       defaults.autoWatch = record.autoWatch;
     }
     if (requestParticipants !== "ask") {
       defaults.requestParticipants = requestParticipants;
+    }
+    if (manageRolesParticipants) {
+      defaults.manageRolesParticipants = manageRolesParticipants;
     }
     return Object.keys(defaults).length > 0 ? defaults : undefined;
   }
@@ -8096,7 +8276,10 @@ export class ChatService {
     };
   }
 
-  private requireParticipantManager(conversation: Conversation, actor: ChatAppMcpActor): ChatParticipant {
+  private async requireParticipantManager(
+    conversation: Conversation,
+    actor: ChatAppMcpActor
+  ): Promise<ParticipantManagementAuthorization> {
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
       throw new Error("The requesting participant is no longer in this chat.");
@@ -8104,10 +8287,11 @@ export class ChatService {
     if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
       throw new Error("The issued app-tool token does not grant participant management.");
     }
-    if (requester.roleConfigId !== CHAT_ADMINISTRATOR_ROLE_ID) {
-      throw new Error("Only Chat Assistant can create roles or manage participants through these app tools.");
+    const manageRolesParticipants = await this.manageRolesParticipantsPermissionForParticipant(requester);
+    if (manageRolesParticipants === "deny") {
+      throw new Error("This participant's role is not allowed to manage roles or participants.");
     }
-    return requester;
+    return { requester, manageRolesParticipants };
   }
 
   private normalizeRosterChangeRequest(raw: unknown): ChatRosterChangeRequest {
@@ -8167,9 +8351,11 @@ export class ChatService {
   }
 
   private async prepareRosterChange(conversation: Conversation, request: ChatRosterChangeRequest): Promise<PreparedRosterChange> {
+    const settings = await this.settings.getPublicSettings();
+    const roleById = new Map(settings.chatRoleConfigs.map((role) => [role.id, role]));
     const existing = this.chatParticipants(conversation);
     const participantInputs = request.operations.map((operation) => operation.participant);
-    const participants = await this.validateParticipants(participantInputs, existing);
+    const participants = await this.validateParticipants(participantInputs, existing, false, settings.chatRoleConfigs);
     const normalizedRequest: ChatRosterChangeRequest = {
       reason: request.reason,
       operations: participants.map((participant) => ({
@@ -8194,7 +8380,10 @@ export class ChatService {
     return {
       request: normalizedRequest,
       participants,
-      summary: `Add ${this.formatHandleList(participants.map((participant) => `@${participant.handle}`))}`
+      summary: `Add ${this.formatHandleList(participants.map((participant) => `@${participant.handle}`))}`,
+      managementEscalation: participants.some((participant) =>
+        this.participantManagementChangeEscalates(roleById.get(participant.roleConfigId), participant.permissions)
+      )
     };
   }
 
@@ -8422,7 +8611,8 @@ export class ChatService {
     }
     return {
       request,
-      summary: this.roleChangeSummary(request.operations, settings.chatRoleConfigs)
+      summary: this.roleChangeSummary(request.operations, settings.chatRoleConfigs),
+      managementEscalation: this.roleChangeManagementEscalates(request, settings.chatRoleConfigs)
     };
   }
 
@@ -8445,7 +8635,8 @@ export class ChatService {
       },
       role,
       participant,
-      summary: `${role.summary}; ${participant.summary}`
+      summary: `${role.summary}; ${participant.summary}`,
+      managementEscalation: role.managementEscalation || participant.managementEscalation
     };
   }
 
@@ -8504,6 +8695,50 @@ export class ChatService {
     return labels.length === 1
       ? labels[0][0].toUpperCase() + labels[0].slice(1)
       : `Apply ${operations.length} role changes`;
+  }
+
+  private roleChangeManagementEscalates(request: ChatRoleChangeRequest, roles: ChatRoleConfig[]): boolean {
+    return request.operations.some((operation) => {
+      if (operation.type === "archive_role") {
+        return false;
+      }
+      if (operation.type === "create_role") {
+        const nextDefault = normalizeChatRoleManagementPermission(operation.role.participantDefaults?.manageRolesParticipants);
+        return chatParticipantRequestPermissionExceeds(nextDefault, "deny");
+      }
+      const existing = roles.find((role) => role.id === operation.role.roleConfigId);
+      const previousDefault = normalizeChatRoleManagementPermission(existing?.participantDefaults?.manageRolesParticipants);
+      const nextDefault = Object.prototype.hasOwnProperty.call(operation.role, "participantDefaults")
+        ? normalizeChatRoleManagementPermission(operation.role.participantDefaults?.manageRolesParticipants)
+        : previousDefault;
+      return chatParticipantRequestPermissionExceeds(nextDefault, previousDefault);
+    });
+  }
+
+  private manageRolesParticipantsResolutionForRole(
+    role: ChatRoleConfig | undefined,
+    permissions: unknown
+  ) {
+    return resolveChatManageRolesParticipantsPermission(
+      role?.participantDefaults?.manageRolesParticipants,
+      normalizeChatAgentPermissions(permissions).manageRolesParticipants
+    );
+  }
+
+  private participantManagementChangeEscalates(
+    role: ChatRoleConfig | undefined,
+    nextPermissions: unknown,
+    previousPermissions?: unknown
+  ): boolean {
+    const next = this.manageRolesParticipantsResolutionForRole(role, nextPermissions);
+    if (next.exceedsRoleDefault) {
+      return true;
+    }
+    if (previousPermissions === undefined) {
+      return false;
+    }
+    const previous = this.manageRolesParticipantsResolutionForRole(role, previousPermissions);
+    return chatParticipantRequestPermissionExceeds(next.effective, previous.effective);
   }
 
   private normalizeParticipantChangeRequest(raw: unknown): ChatParticipantChangeRequest {
@@ -8621,6 +8856,7 @@ export class ChatService {
   ): Promise<PreparedParticipantChange> {
     const settings = await this.settings.getPublicSettings();
     const roles = [...settings.chatRoleConfigs, ...temporaryRoles];
+    const roleById = new Map(roles.map((role) => [role.id, role]));
     const newParticipantRoles = [
       ...settings.chatRoleConfigs.filter((role) => !role.archivedAt),
       ...temporaryRoles
@@ -8681,6 +8917,15 @@ export class ChatService {
       ...participant,
       participantConfigId: participant.participantConfigId ?? savedPresetIdByOperationIndex.get(index)
     }));
+    const managementEscalation = participants.some((participant, index) => {
+      const operation = request.operations[index];
+      const role = roleById.get(participant.roleConfigId);
+      if (operation?.type === "add_existing_participant_to_chat") {
+        const preset = settings.chatParticipantConfigs.find((item) => item.id === operation.participantConfigId);
+        return this.participantManagementChangeEscalates(role, participant.permissions, preset?.permissions);
+      }
+      return this.participantManagementChangeEscalates(role, participant.permissions);
+    });
     for (const [index, operation] of request.operations.entries()) {
       if (operation.type !== "add_new_participant_to_chat" || !operation.saveAsPreset) {
         continue;
@@ -8731,7 +8976,8 @@ export class ChatService {
       },
       participants,
       presetParticipantConfigs,
-      summary: `Add ${this.formatHandleList(participants.map((participant) => `@${participant.handle}`))}`
+      summary: `Add ${this.formatHandleList(participants.map((participant) => `@${participant.handle}`))}`,
+      managementEscalation
     };
   }
 
@@ -8776,7 +9022,8 @@ export class ChatService {
         }))
       },
       participants: prepared.participants,
-      summary: prepared.summary
+      summary: prepared.summary,
+      managementEscalation: prepared.managementEscalation
     });
   }
 
@@ -8828,7 +9075,8 @@ export class ChatService {
         }))
       },
       participants,
-      summary: prepared.participant.summary
+      summary: prepared.participant.summary,
+      managementEscalation: prepared.managementEscalation
     });
     const participantRequest: ChatParticipantChangeRequest = {
       reason: prepared.participant.request.reason,

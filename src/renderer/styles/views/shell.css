@@ -4,6 +4,7 @@
    sidebar's contents. */
 
 .app-shell-root {
+  position: relative;
   grid-template-columns: var(--app-sidebar-width) minmax(0, 1fr);
   transition: grid-template-columns 280ms cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -24,6 +25,24 @@
 
 .app-shell-root[data-sidebar-collapsed="true"] .app-shell-sidebar-slot {
   pointer-events: none;
+}
+
+.app-shell-sidebar-resizer {
+  position: absolute;
+  z-index: 20;
+  top: 0;
+  bottom: 0;
+  left: var(--app-sidebar-width);
+  width: 8px;
+  transform: translateX(-4px);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.app-shell-root.resizing-sidebar,
+.app-shell-root.resizing-sidebar * {
+  cursor: col-resize;
+  user-select: none;
 }
 
 @media (prefers-reduced-motion: reduce) {

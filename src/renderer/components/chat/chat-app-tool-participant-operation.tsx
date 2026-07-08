@@ -1,12 +1,27 @@
 import { AlertTriangle } from "lucide-react";
-import { normalizeChatAgentMode } from "../../../shared/agentPermissions";
+import {
+  chatParticipantRequestPermissionExceeds,
+  normalizeChatAgentMode,
+  normalizeChatAgentPermissions,
+  resolveChatManageRolesParticipantsPermission
+} from "../../../shared/agentPermissions";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import type { ChatAgentMode, ChatExistingParticipantOverrides, ChatParticipantChangeRequest, ChatParticipantConfig, ChatProviderKind, ChatRoleConfig, ChatRosterChangeParticipantInput } from "../../../shared/types";
 import { Avatar, avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { avatarForChatParticipant, mapChatAvatarIdToKind } from "./chat-avatars";
 import { CHAT_AGENT_MODE_OPTIONS, chatAgentModeLabel } from "./chat-participant-drafts";
-import { ChatParticipantAvatarField as ChatAppToolAvatarField, ChatParticipantInlineAutoWatchRow as ChatAppToolInlineAutoWatchRow, ChatParticipantInlineModelRow as ChatAppToolInlineModelRow, ChatParticipantInlinePermissionsRow as ChatAppToolInlinePermissionsRow, ChatParticipantInlineRequestParticipantsRow as ChatAppToolInlineRequestParticipantsRow, ChatParticipantInlineSelectRow as ChatAppToolInlineSelectRow, rosterPermissionGrantLabels } from "./chat-participant-config-panel";
+import {
+  ChatParticipantAvatarField as ChatAppToolAvatarField,
+  ChatParticipantInlineAutoWatchRow as ChatAppToolInlineAutoWatchRow,
+  ChatParticipantInlineManageRolesParticipantsRow as ChatAppToolInlineManageRolesParticipantsRow,
+  ChatParticipantInlineModelRow as ChatAppToolInlineModelRow,
+  ChatParticipantInlinePermissionsRow as ChatAppToolInlinePermissionsRow,
+  ChatParticipantInlineRequestParticipantsRow as ChatAppToolInlineRequestParticipantsRow,
+  ChatParticipantInlineSelectRow as ChatAppToolInlineSelectRow,
+  participantRequestPermissionLabel,
+  rosterPermissionGrantLabels
+} from "./chat-participant-config-panel";
 import { participantProviderLabel } from "./chat-conversation-data";
 import { displayChatRoleLabel } from "./chat-role-labels";
 
@@ -89,11 +104,12 @@ export function ChatAppToolParticipantChangeOperation(props: {
                   <strong>Already saved member preset</strong>
                 </div>
                 {savedParticipant && (
-                  <ChatAppToolExistingParticipantSpec
-                    preset={savedParticipant}
-                    overrides={operation.overrides}
-                    onOverride={(patch) => updateExistingOverride(index, patch)}
-                  />
+              <ChatAppToolExistingParticipantSpec
+                preset={savedParticipant}
+                role={savedRole}
+                overrides={operation.overrides}
+                onOverride={(patch) => updateExistingOverride(index, patch)}
+              />
                 )}
               </div>
             </div>
@@ -189,6 +205,15 @@ export function ChatAppToolParticipantChangeOperation(props: {
                 participant={participant}
                 onChange={(permissions) => patchParticipant({ permissions })}
               />
+              <ChatAppToolInlineManageRolesParticipantsRow
+                participant={participant}
+                roleDefaults={role?.participantDefaults}
+                onChange={(permissions) => patchParticipant({ permissions })}
+              />
+              <ParticipantManagementReview
+                role={role}
+                permissions={participant.permissions}
+              />
             </div>
             {broaderThanDefault && (
               <div className="chat-app-tool-review-warning">
@@ -222,6 +247,7 @@ export function ChatAppToolParticipantChangeOperation(props: {
 // chat-level overrides — they apply only to this chat and never touch the saved preset.
 export function ChatAppToolExistingParticipantSpec(props: {
   preset: ChatParticipantConfig;
+  role?: ChatRoleConfig;
   overrides?: ChatExistingParticipantOverrides;
   onOverride: (patch: Partial<ChatExistingParticipantOverrides>) => void;
 }): JSX.Element {
@@ -284,6 +310,55 @@ export function ChatAppToolExistingParticipantSpec(props: {
         participant={permissionParticipant}
         onChange={(next) => props.onOverride({ permissions: next })}
       />
+      <ChatAppToolInlineManageRolesParticipantsRow
+        participant={permissionParticipant}
+        roleDefaults={props.role?.participantDefaults}
+        onChange={(next) => props.onOverride({ permissions: next })}
+      />
+      <ParticipantManagementReview
+        role={props.role}
+        permissions={permissions}
+        previousPermissions={preset.permissions}
+      />
+    </>
+  );
+}
+
+function ParticipantManagementReview(props: {
+  role?: ChatRoleConfig;
+  permissions?: ChatRosterChangeParticipantInput["permissions"];
+  previousPermissions?: ChatRosterChangeParticipantInput["permissions"];
+}): JSX.Element {
+  const resolution = resolveChatManageRolesParticipantsPermission(
+    props.role?.participantDefaults?.manageRolesParticipants,
+    normalizeChatAgentPermissions(props.permissions).manageRolesParticipants
+  );
+  const previous = props.previousPermissions === undefined
+    ? undefined
+    : resolveChatManageRolesParticipantsPermission(
+        props.role?.participantDefaults?.manageRolesParticipants,
+        normalizeChatAgentPermissions(props.previousPermissions).manageRolesParticipants
+      );
+  const raisesPrevious = previous
+    ? chatParticipantRequestPermissionExceeds(resolution.effective, previous.effective)
+    : false;
+  const showWarning = resolution.exceedsRoleDefault || raisesPrevious;
+  return (
+    <>
+      <div className="chat-app-tool-review-spec-row">
+        <span>Management effective</span>
+        <strong>{participantRequestPermissionLabel(resolution.effective)}</strong>
+      </div>
+      {showWarning && (
+        <div className="chat-app-tool-review-warning">
+          <AlertTriangle size={14} aria-hidden />
+          <span>
+            Management escalation: role default {participantRequestPermissionLabel(resolution.roleDefault)}
+            {resolution.participantExplicit ? `, participant override ${participantRequestPermissionLabel(resolution.participantExplicit)}` : ""}
+            {previous && raisesPrevious ? `, previous ${participantRequestPermissionLabel(previous.effective)}` : ""}.
+          </span>
+        </div>
+      )}
     </>
   );
 }

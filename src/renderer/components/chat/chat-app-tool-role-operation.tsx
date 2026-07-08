@@ -1,7 +1,11 @@
 import { useState } from "react";
 import { AlertTriangle, Eye, Pencil } from "lucide-react";
 
-import { normalizeChatParticipantRequestPermission } from "../../../shared/agentPermissions";
+import {
+  chatParticipantRequestPermissionExceeds,
+  normalizeChatParticipantRequestPermission,
+  normalizeChatRoleManagementPermission
+} from "../../../shared/agentPermissions";
 import type { ChatParticipantConfig, ChatParticipantRequestPermission, ChatRoleChangeRequest, ChatRoleConfig, ChatRoleParticipantDefaults } from "../../../shared/types";
 import { MarkdownText } from "../content/markdown-text";
 import { displayChatRoleLabel } from "./chat-role-labels";
@@ -84,6 +88,7 @@ export function ChatAppToolRoleChangeOperation(props: {
           );
         }
         const roleConfigId = operation.type === "edit_role" ? operation.role.roleConfigId : undefined;
+        const existingRole = roleConfigId ? props.roles.find((role) => role.id === roleConfigId) : undefined;
         const savedPresetCount = roleConfigId
           ? props.savedParticipants.filter((participant) => participant.roleConfigId === roleConfigId).length
           : 0;
@@ -91,6 +96,7 @@ export function ChatAppToolRoleChangeOperation(props: {
           <EditableRoleReviewOperation
             key={roleOperationKey(operation, index)}
             operation={operation}
+            existingRole={existingRole}
             savedPresetCount={savedPresetCount}
             onChange={(patch) => updateRole(index, patch)}
           />
@@ -102,6 +108,7 @@ export function ChatAppToolRoleChangeOperation(props: {
 
 function EditableRoleReviewOperation(props: {
   operation: EditableRoleOperation;
+  existingRole?: ChatRoleConfig;
   savedPresetCount: number;
   onChange: (patch: { label: string; instructions: string }) => void;
 }): JSX.Element {
@@ -183,7 +190,13 @@ function EditableRoleReviewOperation(props: {
           />
         )}
       </div>
-      <RoleParticipantDefaultsReview defaults={props.operation.role.participantDefaults} />
+      <RoleParticipantDefaultsReview defaults={roleParticipantDefaultsForOperation(props.operation, props.existingRole)} />
+      {roleManagementDefaultEscalates(props.operation, props.existingRole) && (
+        <div className="chat-app-tool-review-warning">
+          <AlertTriangle size={14} aria-hidden />
+          <span>Management escalation: this role default grants or raises role/member management for inheriting members.</span>
+        </div>
+      )}
       {props.operation.type === "edit_role" && props.savedPresetCount > 0 && (
         <div className="chat-app-tool-review-warning">
           <AlertTriangle size={14} aria-hidden />
@@ -194,9 +207,29 @@ function EditableRoleReviewOperation(props: {
   );
 }
 
+function roleManagementDefaultEscalates(operation: EditableRoleOperation, existingRole?: ChatRoleConfig): boolean {
+  const nextDefault = normalizeChatRoleManagementPermission(
+    roleParticipantDefaultsForOperation(operation, existingRole)?.manageRolesParticipants
+  );
+  const previousDefault = operation.type === "edit_role"
+    ? normalizeChatRoleManagementPermission(existingRole?.participantDefaults?.manageRolesParticipants)
+    : "deny";
+  return chatParticipantRequestPermissionExceeds(nextDefault, previousDefault);
+}
+
+function roleParticipantDefaultsForOperation(
+  operation: EditableRoleOperation,
+  existingRole?: ChatRoleConfig
+): ChatRoleParticipantDefaults | undefined {
+  return Object.prototype.hasOwnProperty.call(operation.role, "participantDefaults")
+    ? operation.role.participantDefaults
+    : existingRole?.participantDefaults;
+}
+
 function RoleParticipantDefaultsReview(props: { defaults?: ChatRoleParticipantDefaults }): JSX.Element {
   const autoWatch = props.defaults?.autoWatch === true;
   const requestParticipants = normalizeChatParticipantRequestPermission(props.defaults?.requestParticipants);
+  const manageRolesParticipants = normalizeChatRoleManagementPermission(props.defaults?.manageRolesParticipants);
   return (
     <div className="chat-app-tool-review-spec">
       <ChatParticipantInlineAutoWatchRow
@@ -207,6 +240,9 @@ function RoleParticipantDefaultsReview(props: { defaults?: ChatRoleParticipantDe
       />
       <ChatParticipantSpecRow label="Request members">
         <strong>{requestParticipantsLabel(requestParticipants)}</strong>
+      </ChatParticipantSpecRow>
+      <ChatParticipantSpecRow label="Manage roles & members">
+        <strong>{requestParticipantsLabel(manageRolesParticipants)}</strong>
       </ChatParticipantSpecRow>
     </div>
   );

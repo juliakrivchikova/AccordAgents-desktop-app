@@ -26,6 +26,49 @@ export const APP_CHAT_REACT_TOOL = "app_chat_react";
 export const APP_CHAT_SEND_MESSAGE_TOOL = "app_chat_send_message";
 export const APP_CHAT_SET_TITLE_TOOL = "app_chat_set_title";
 
+const CHAT_AGENT_PERMISSION_INPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    repoRead: { type: "boolean" },
+    workspaceWrite: { type: "boolean" },
+    webAccess: { type: "boolean" },
+    requestParticipants: {
+      type: "string",
+      enum: ["ask", "allow", "deny"]
+    },
+    manageRolesParticipants: {
+      type: "string",
+      enum: ["ask", "allow", "deny"],
+      description: "Participant-specific role/member management behavior. Omit to inherit the selected role default."
+    },
+    shell: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean" },
+        rules: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              action: { type: "string", enum: ["allow", "ask", "deny"] },
+              pattern: { type: "string" },
+              match: { type: "string", enum: ["exact", "prefix"] }
+            },
+            required: ["action", "pattern", "match"]
+          }
+        }
+      }
+    },
+    providerNative: {
+      type: "object",
+      additionalProperties: true
+    }
+  }
+} as const;
+
 export interface AppMcpActor {
   conversationId: string;
   participantId: string;
@@ -1013,10 +1056,26 @@ export class AppMcpService {
                         roleConfigId: { type: "string", description: "Required for edit_role and archive_role: the id of the existing role." },
                         draftRoleRef: {
                           type: "string",
-                          description: "Temporary role reference returned by this tool for create_role operations. Use it as participant.roleConfigId in a following participant request when the participant depends on this new role."
+                          description: "Temporary role reference for pending grouped-review create_role operations. Use it in a following participant request only when the role request response is pending_user_approval; auto_applied responses return a persisted roleConfigId instead."
                         },
                         label: { type: "string" },
-                        instructions: { type: "string" }
+                        instructions: { type: "string" },
+                        participantDefaults: {
+                          type: "object",
+                          additionalProperties: false,
+                          properties: {
+                            autoWatch: { type: "boolean" },
+                            requestParticipants: {
+                              type: "string",
+                              enum: ["ask", "allow", "deny"]
+                            },
+                            manageRolesParticipants: {
+                              type: "string",
+                              enum: ["ask", "allow", "deny"]
+                            }
+                          },
+                          description: "Default member behavior for participants using this role. manageRolesParticipants controls whether members with this role can manage roles and chat members."
+                        }
                       }
                       // Per-type field requirements (create_role/edit_role need label+instructions;
                       // archive_role needs roleConfigId) are enforced by ChatService.normalizeRoleChangeRequest.
@@ -1093,7 +1152,7 @@ export class AppMcpService {
                         },
                         avatarId: { type: "string" },
                         agentMode: { type: "string", enum: ["default", "plan", "auto"] },
-                        permissions: { type: "object" }
+                        permissions: CHAT_AGENT_PERMISSION_INPUT_SCHEMA
                       },
                       required: ["handle", "roleConfigId", "kind"]
                     }
@@ -1167,7 +1226,7 @@ export class AppMcpService {
                         },
                         avatarId: { type: "string" },
                         agentMode: { type: "string", enum: ["default", "plan", "auto"] },
-                        permissions: { type: "object" }
+                        permissions: CHAT_AGENT_PERMISSION_INPUT_SCHEMA
                       },
                       required: ["handle", "roleConfigId", "kind"]
                     }

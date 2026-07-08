@@ -214,13 +214,15 @@ test("custom role participant defaults are editable and preserved when omitted",
     instructions: "Review things.",
     participantDefaults: {
       autoWatch: true,
-      requestParticipants: "allow"
+      requestParticipants: "allow",
+      manageRolesParticipants: "allow"
     }
   });
   let role = stored().chatRoleConfigs.find((item) => item.id === "custom-reviewer");
   assert.deepEqual(role?.participantDefaults, {
     autoWatch: true,
-    requestParticipants: "allow"
+    requestParticipants: "allow",
+    manageRolesParticipants: "allow"
   });
 
   await service.saveChatRoleConfig({
@@ -231,7 +233,8 @@ test("custom role participant defaults are editable and preserved when omitted",
   role = stored().chatRoleConfigs.find((item) => item.id === "custom-reviewer");
   assert.deepEqual(role?.participantDefaults, {
     autoWatch: true,
-    requestParticipants: "allow"
+    requestParticipants: "allow",
+    manageRolesParticipants: "allow"
   });
 
   await service.saveChatRoleConfig({
@@ -243,7 +246,53 @@ test("custom role participant defaults are editable and preserved when omitted",
   role = stored().chatRoleConfigs.find((item) => item.id === "custom-reviewer");
   assert.deepEqual(role?.participantDefaults, {
     autoWatch: false,
-    requestParticipants: "ask"
+    requestParticipants: "ask",
+    manageRolesParticipants: "deny"
+  });
+});
+
+test("role management defaults normalize safely for legacy roles", () => {
+  const { service } = settingsServiceWith();
+  const roles = (service as any).mergeDefaultRoles([
+    makeRole({
+      participantDefaults: {
+        autoWatch: true,
+        requestParticipants: "allow"
+      }
+    }),
+    makeRole({
+      id: "legacy-manager",
+      label: "Legacy Manager",
+      appToolCapabilities: ["participants.manage"],
+      participantDefaults: {
+        autoWatch: false,
+        requestParticipants: "ask"
+      }
+    })
+  ]) as ChatRoleConfig[];
+
+  const custom = roles.find((role) => role.id === "custom-reviewer");
+  assert.deepEqual(custom?.participantDefaults, {
+    autoWatch: true,
+    requestParticipants: "allow",
+    manageRolesParticipants: "deny"
+  });
+
+  const legacyManager = roles.find((role) => role.id === "legacy-manager");
+  assert.deepEqual(legacyManager?.participantDefaults, {
+    autoWatch: false,
+    requestParticipants: "ask",
+    manageRolesParticipants: "ask"
+  });
+
+  const assistant = roles.find((role) => role.id === "administrator");
+  assert.deepEqual(assistant?.participantDefaults?.manageRolesParticipants, "ask");
+
+  const workflow = roles.find((role) => role.id === "workflow-manager");
+  assert.deepEqual(workflow?.participantDefaults, {
+    autoWatch: true,
+    requestParticipants: "allow",
+    manageRolesParticipants: "deny"
   });
 });
 
@@ -254,7 +303,8 @@ test("Workflow Manager saved member presets force auto-watch on", async () => {
     builtIn: true,
     participantDefaults: {
       autoWatch: true,
-      requestParticipants: "allow"
+      requestParticipants: "allow",
+      manageRolesParticipants: "deny"
     }
   });
   const { service, stored } = settingsServiceWith({ chatRoleConfigs: [workflowManager] });
@@ -268,6 +318,30 @@ test("Workflow Manager saved member presets force auto-watch on", async () => {
   });
 
   assert.equal(stored().chatParticipantConfigs[0]?.autoWatchEnabled, true);
+});
+
+test("saved member permissions preserve explicit role management overrides", async () => {
+  const { service, stored } = settingsServiceWith({ chatRoleConfigs: [makeRole()] });
+
+  await service.saveChatParticipantConfig({
+    handle: "manager",
+    roleConfigId: "custom-reviewer",
+    behaviorRuleIds: [],
+    kind: "codex-cli",
+    permissions: {
+      repoRead: true,
+      workspaceWrite: false,
+      webAccess: false,
+      requestParticipants: "ask",
+      manageRolesParticipants: "allow",
+      shell: {
+        enabled: false,
+        rules: []
+      }
+    } as never
+  });
+
+  assert.equal(stored().chatParticipantConfigs[0]?.permissions?.manageRolesParticipants, "allow");
 });
 
 test("rejects editing an archived role in a grouped role/participant write", async () => {

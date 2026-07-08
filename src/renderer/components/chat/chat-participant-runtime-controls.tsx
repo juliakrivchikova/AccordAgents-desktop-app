@@ -5,7 +5,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import {
   effectiveChatAgentPermissionsForProvider,
   normalizeChatAgentMode,
-  normalizeChatAgentPermissions
+  normalizeChatAgentPermissions,
+  normalizeChatRoleManagementPermission,
+  normalizeOptionalChatParticipantRequestPermission
 } from "../../../shared/agentPermissions";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import type {
@@ -13,6 +15,7 @@ import type {
   ChatAgentPermissions,
   ChatParticipant,
   ChatParticipantRequestPermission,
+  ChatRoleParticipantDefaults,
   ChatParticipantWatcherPausedReason,
   ChatProviderKind,
   ChatReasoningEffort,
@@ -44,6 +47,7 @@ export function ParticipantRuntimeControls(props: {
   disabled: boolean;
   autoWatchDisabledReason?: string;
   autoWatchPausedReason?: ChatParticipantWatcherPausedReason;
+  roleParticipantDefaults?: ChatRoleParticipantDefaults;
   runLocationLocked: boolean;
   onUpdate: (
     participantId: string,
@@ -83,6 +87,11 @@ export function ParticipantRuntimeControls(props: {
   const requestPermission = normalizedPermissions.requestParticipants;
   const requestPermissionLabel = PARTICIPANT_REQUEST_PERMISSION_OPTIONS
     .find((option) => option.value === requestPermission)?.label ?? "Always ask approval";
+  const roleManageDefault = normalizeChatRoleManagementPermission(props.roleParticipantDefaults?.manageRolesParticipants);
+  const explicitManagePermission = normalizeOptionalChatParticipantRequestPermission(normalizedPermissions.manageRolesParticipants);
+  const managePermission = explicitManagePermission ?? roleManageDefault;
+  const managePermissionLabel = PARTICIPANT_REQUEST_PERMISSION_OPTIONS
+    .find((option) => option.value === managePermission)?.label ?? "Deny";
   const grants = [
     effectivePermissions.repoRead ? "repo read" : "",
     effectivePermissions.shell.enabled ? "shell" : "",
@@ -150,6 +159,24 @@ export function ParticipantRuntimeControls(props: {
           onChange={(value) => update({
             permissions: { ...normalizedPermissions, requestParticipants: value as ChatParticipantRequestPermission }
           })}
+        />
+        <span className="chat-rt-dot" aria-hidden>·</span>
+        <GhostSelect
+          ariaLabel="Manage roles and members permission"
+          value={managePermission}
+          displayLabel={`Manage: ${managePermissionLabel}`}
+          tooltip="Controls whether this member can add or change roles and chat members."
+          muted={managePermission === "deny"}
+          disabled={props.disabled}
+          options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
+          onChange={(value) => {
+            update({
+              permissions: {
+                ...normalizedPermissions,
+                manageRolesParticipants: value as ChatParticipantRequestPermission
+              }
+            });
+          }}
         />
         {participant.kind === "codex-cli" && (
           <>

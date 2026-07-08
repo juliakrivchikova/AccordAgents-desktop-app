@@ -37,6 +37,7 @@ import { useReviewPlanActions } from "./app/use-review-plan-actions";
 import { useSettingsActions } from "./app/use-settings-actions";
 import { useAppViewModel } from "./app/use-app-view-model";
 import { AppNotices } from "./app/app-notices";
+import { DEFAULT_APP_SIDEBAR_WIDTH } from "./lib/sidebar-sizing";
 import "./styles/app.css";
 
 function App(): JSX.Element {
@@ -50,6 +51,7 @@ function App(): JSX.Element {
   const view = useAppViewModel(state);
   const [appVersion, setAppVersion] = React.useState("");
   const [accordDialogOpen, setAccordDialogOpen] = React.useState(false);
+  const [sidebarWidth, setSidebarWidth] = React.useState(DEFAULT_APP_SIDEBAR_WIDTH);
   const [newChatPrefill, setNewChatPrefill] = React.useState<{
     key: number;
     prompt: string;
@@ -197,6 +199,8 @@ function App(): JSX.Element {
   return (
     <AppShell
       sidebarCollapsed={state.sidebarCollapsed}
+      sidebarWidth={sidebarWidth}
+      onSidebarWidthChange={setSidebarWidth}
       sidebar={
         state.sidebarMode === "settings" ? (
           <SettingsSidebar

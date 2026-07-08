@@ -6,6 +6,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import type {
   ChatParticipant,
   ChatParticipantConfig,
+  ChatRoleParticipantDefaults,
   ChatParticipantWatcherState,
   CloudRunRemoteExecutionMode
 } from "../../../shared/types";
@@ -34,6 +35,7 @@ export interface ChatParticipantMenuViewProps {
   renderSavedParticipantAvatar: (participant: ChatParticipantConfig) => React.ReactNode;
   participantRoleLabel: (participant: ChatParticipant) => string;
   participantRoleArchived: (participant: ChatParticipant) => boolean;
+  participantRoleDefaults: (participant: ChatParticipant) => ChatRoleParticipantDefaults | undefined;
   savedParticipantRoleLabel: (participant: ChatParticipantConfig) => string;
   savedParticipantSummary: (participant: ChatParticipantConfig) => string;
   onDraftChange: (value: string) => void;
@@ -172,6 +174,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                       : undefined
                   }
                   autoWatchPausedReason={props.participantWatchers?.[participant.id]?.pausedReason}
+                  roleParticipantDefaults={props.participantRoleDefaults(participant)}
                   renderParticipantAvatar={props.renderParticipantAvatar}
                   participantRoleLabel={props.participantRoleLabel}
                   participantRoleArchived={props.participantRoleArchived}
