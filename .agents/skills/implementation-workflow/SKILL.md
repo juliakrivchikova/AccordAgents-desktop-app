@@ -24,12 +24,18 @@ step yourself.
 - At the end of the workflow, the final user-facing closeout must be a short status posted at the end of the main
   timeline, not only inside a nested thread. If the current reply would stay inside a workflow/participant-request
   thread, post a separate main-timeline closeout with the app-managed send-message tool when available.
-
 ## Workflow
 
 ### 1. Understand Requirement
 
-Restate the requirement in concrete terms, including behavior, affected surfaces, non-goals, and acceptance criteria.
+Restate the requirement in concrete user-facing terms, including observable behavior, affected surfaces, non-goals, and
+acceptance criteria.
+
+Scope confirmation is for locking what the user expects to see happen, not the implementation strategy. If prior context
+includes a technical diagnosis or proposed fix, translate it into desired behavior and acceptance criteria only if user
+explicitly approved it, otherwise implementation details are not to be locked during scope confirmation. Do not lock
+specific files, internal mechanisms, tests, or code structure during this step unless the user explicitly names them as
+requirements; those details belong in the independent planning and accord stages.
 
 Ask:
 
@@ -42,7 +48,8 @@ O2: Revise | I will update the scope first.
 R: O1
 ```
 
-If the user has already clearly confirmed the scope, continue.
+If the user has already clearly confirmed the scope, continue. During subsequent steps, make sure other participants
+follow what was confirmed with the user. If there is a good reason to revise it - stop flow and ask for user approval, don't continue silently.
 
 ### 2. Confirm Final Step
 
