@@ -50,6 +50,10 @@ acceptance criteria as observable completion checks derived directly from the us
 add manager-authored scope, non-goals, affected surfaces, file lists, tests, or implementation constraints unless the user
 explicitly stated them.
 
+Polish imprecise user wording into standard product, design, or engineering terminology when the meaning is clear, while
+preserving the user's intent. For example, translate "thin sidebar" to "left navigation rail" when describing app chrome.
+If the wording could change meaning, ask the user instead of guessing.
+
 If the user's request is clear enough to pass to Drew and Taylor, do not expand it. If a necessary user-owned decision is
 missing or ambiguous, ask one concise clarification before continuing. If the user invokes the workflow immediately after
 stating the requirement, treat that requirement as confirmed and continue to the final-step choice.

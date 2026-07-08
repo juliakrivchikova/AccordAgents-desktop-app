@@ -2325,7 +2325,8 @@ test("Workflow Manager default-on seeding keeps only one active watcher", async 
     label: "Workflow Manager",
     participantDefaults: {
       autoWatch: true,
-      requestParticipants: "allow"
+      requestParticipants: "allow",
+      manageRolesParticipants: "allow"
     }
   };
   const codex = { ...chatParticipant("codex-cli"), autoWatch: true };
@@ -2348,6 +2349,7 @@ test("Workflow Manager default-on seeding keeps only one active watcher", async 
   const added = participants.find((participant) => participant.handle === "wm2");
   assert.equal(added?.autoWatch, false);
   assert.equal(added?.permissions?.requestParticipants, "allow");
+  assert.equal(added?.permissions?.manageRolesParticipants, undefined);
   assert.deepEqual(scheduled, []);
 
   participants = participants.map((participant) => ({ ...participant, autoWatch: false }));
@@ -2360,6 +2362,7 @@ test("Workflow Manager default-on seeding keeps only one active watcher", async 
   participants = storage.current.metadata.participants as ChatParticipant[];
   assert.equal(participants.find((participant) => participant.handle === "wm3")?.autoWatch, true);
   assert.equal(participants.find((participant) => participant.handle === "wm3")?.permissions?.requestParticipants, "allow");
+  assert.equal(participants.find((participant) => participant.handle === "wm3")?.permissions?.manageRolesParticipants, undefined);
   assert.deepEqual(scheduled, [{ conversationId: conversation.id, reason: "participant-added" }]);
 });
 

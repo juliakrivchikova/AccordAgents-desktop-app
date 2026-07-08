@@ -292,8 +292,50 @@ test("role management defaults normalize safely for legacy roles", () => {
   assert.deepEqual(workflow?.participantDefaults, {
     autoWatch: true,
     requestParticipants: "allow",
-    manageRolesParticipants: "deny"
+    manageRolesParticipants: "allow"
   });
+});
+
+test("Workflow Manager upgrade allows existing saved member presets to manage roles", () => {
+  const { service } = settingsServiceWith();
+  const merged = (service as any).mergeDefaults({
+    settingsVersion: 1,
+    roundLimitDefault: 1,
+    providers: [],
+    chatRoleConfigs: [
+      makeRole({
+        id: "workflow-manager",
+        label: "Workflow Manager",
+        builtIn: true,
+        version: 4,
+        participantDefaults: {
+          autoWatch: true,
+          requestParticipants: "allow",
+          manageRolesParticipants: "ask"
+        }
+      })
+    ],
+    chatParticipantConfigs: [
+      makeParticipant({
+        roleConfigId: "workflow-manager",
+        permissions: {
+          repoRead: true,
+          workspaceWrite: false,
+          webAccess: false,
+          requestParticipants: "allow",
+          manageRolesParticipants: "ask",
+          shell: {
+            enabled: false,
+            rules: []
+          }
+        } as never
+      })
+    ]
+  });
+
+  const workflow = merged.chatRoleConfigs.find((role: ChatRoleConfig) => role.id === "workflow-manager");
+  assert.equal(workflow?.participantDefaults?.manageRolesParticipants, "allow");
+  assert.equal(merged.chatParticipantConfigs[0]?.permissions?.manageRolesParticipants, "allow");
 });
 
 test("Workflow Manager saved member presets force auto-watch on", async () => {
@@ -304,7 +346,7 @@ test("Workflow Manager saved member presets force auto-watch on", async () => {
     participantDefaults: {
       autoWatch: true,
       requestParticipants: "allow",
-      manageRolesParticipants: "deny"
+      manageRolesParticipants: "allow"
     }
   });
   const { service, stored } = settingsServiceWith({ chatRoleConfigs: [workflowManager] });

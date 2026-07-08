@@ -1680,14 +1680,15 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
     id: WORKFLOW_MANAGER_ROLE_ID,
     label: "Workflow Manager",
     instructions: DEFAULT_WORKFLOW_MANAGER_INSTRUCTIONS,
-    version: 4,
+    version: 5,
     builtIn: true,
     participantDefaults: {
       ...DEFAULT_ROLE_PARTICIPANT_DEFAULTS,
       autoWatch: true,
-      requestParticipants: "allow"
+      requestParticipants: "allow",
+      manageRolesParticipants: "allow"
     } satisfies ChatRoleParticipantDefaults,
-    updatedAt: "2026-07-06T06:00:00.000Z"
+    updatedAt: "2026-07-08T00:00:00.000Z"
   }
 ].map((role) => ({
   participantDefaults: { ...DEFAULT_ROLE_PARTICIPANT_DEFAULTS },
@@ -2506,6 +2507,7 @@ export class SettingsService {
         model: typeof existing?.model === "string" ? existing.model.trim() || fallback.model : fallback.model
       };
     });
+    const migrateWorkflowManagerParticipantManagement = this.shouldMigrateWorkflowManagerParticipantManagement(settings.chatRoleConfigs);
     const chatRoleConfigs = this.mergeDefaultRoles(settings.chatRoleConfigs);
     return {
       settingsVersion: 1,
@@ -2529,9 +2531,19 @@ export class SettingsService {
       chatRoleConfigs,
       chatBehaviorRules: this.normalizeBehaviorRules(settings.chatBehaviorRules),
       chatSavedPrompts: this.normalizeSavedPrompts(settings.chatSavedPrompts),
-      chatParticipantConfigs: this.normalizeParticipantConfigs(settings.chatParticipantConfigs, chatRoleConfigs),
+      chatParticipantConfigs: this.normalizeParticipantConfigs(
+        settings.chatParticipantConfigs,
+        chatRoleConfigs,
+        { migrateWorkflowManagerParticipantManagement }
+      ),
       chatParticipantSeedState: this.normalizeSeedState(settings.chatParticipantSeedState)
     };
+  }
+
+  private shouldMigrateWorkflowManagerParticipantManagement(roles: ChatRoleConfig[] | undefined): boolean {
+    const existing = Array.isArray(roles) ? roles.find((role) => role.id === WORKFLOW_MANAGER_ROLE_ID) : undefined;
+    const fallback = DEFAULT_CHAT_ROLES.find((role) => role.id === WORKFLOW_MANAGER_ROLE_ID);
+    return !existing || (existing.builtIn === true && fallback !== undefined && existing.version < fallback.version);
   }
 
   private hasLegacyProviderData(settings: StoredSettings): boolean {
@@ -2606,7 +2618,8 @@ export class SettingsService {
       ? {
           ...withRolePolicy,
           autoWatch: true,
-          requestParticipants: "allow"
+          requestParticipants: "allow",
+          manageRolesParticipants: "allow"
         }
       : withRolePolicy;
   }
@@ -2863,7 +2876,11 @@ export class SettingsService {
       }));
   }
 
-  private normalizeParticipantConfigs(participants: ChatParticipantConfig[] | undefined, roles: ChatRoleConfig[]): ChatParticipantConfig[] {
+  private normalizeParticipantConfigs(
+    participants: ChatParticipantConfig[] | undefined,
+    roles: ChatRoleConfig[],
+    options: { migrateWorkflowManagerParticipantManagement?: boolean } = {}
+  ): ChatParticipantConfig[] {
     const seenHandles = new Set<string>();
     const roleById = new Map(roles.map((role) => [role.id, role]));
     return (Array.isArray(participants) ? participants : [])
@@ -2877,25 +2894,30 @@ export class SettingsService {
         seenHandles.add(normalized);
         return typeof participant.id === "string" && typeof participant.roleConfigId === "string";
       })
-      .map((participant) => ({
-        id: participant.id,
-        handle: participant.handle.trim().replace(/^@/, ""),
-        roleConfigId: participant.roleConfigId,
-        behaviorRuleIds: this.normalizeBehaviorRuleIds((participant as { behaviorRuleIds?: unknown }).behaviorRuleIds),
-        kind: participant.kind,
-        model: participant.model?.trim() || undefined,
-        reasoningEffort: normalizeChatReasoningEffort((participant as { reasoningEffort?: unknown }).reasoningEffort, participant.kind),
-        avatarId: participant.avatarId?.trim() || undefined,
-        agentMode: normalizeChatAgentMode((participant as { agentMode?: ChatAgentMode }).agentMode),
-        permissions: normalizeChatAgentPermissions((participant as { permissions?: ChatAgentPermissions }).permissions),
-        remoteExecution: this.normalizeRemoteExecutionMode((participant as { remoteExecution?: unknown }).remoteExecution),
-        skipToolchainPreflight: (participant as { skipToolchainPreflight?: unknown }).skipToolchainPreflight === true,
-        autoWatchEnabled: this.autoWatchEnabledForRole(
-          roleById.get(participant.roleConfigId) ?? { id: participant.roleConfigId },
-          (participant as { autoWatchEnabled?: unknown }).autoWatchEnabled
-        ),
-        updatedAt: participant.updatedAt || new Date().toISOString()
-      }));
+      .map((participant) => {
+        const permissions = normalizeChatAgentPermissions((participant as { permissions?: ChatAgentPermissions }).permissions);
+        return {
+          id: participant.id,
+          handle: participant.handle.trim().replace(/^@/, ""),
+          roleConfigId: participant.roleConfigId,
+          behaviorRuleIds: this.normalizeBehaviorRuleIds((participant as { behaviorRuleIds?: unknown }).behaviorRuleIds),
+          kind: participant.kind,
+          model: participant.model?.trim() || undefined,
+          reasoningEffort: normalizeChatReasoningEffort((participant as { reasoningEffort?: unknown }).reasoningEffort, participant.kind),
+          avatarId: participant.avatarId?.trim() || undefined,
+          agentMode: normalizeChatAgentMode((participant as { agentMode?: ChatAgentMode }).agentMode),
+          permissions: options.migrateWorkflowManagerParticipantManagement && participant.roleConfigId === WORKFLOW_MANAGER_ROLE_ID
+            ? { ...permissions, manageRolesParticipants: "allow" as const }
+            : permissions,
+          remoteExecution: this.normalizeRemoteExecutionMode((participant as { remoteExecution?: unknown }).remoteExecution),
+          skipToolchainPreflight: (participant as { skipToolchainPreflight?: unknown }).skipToolchainPreflight === true,
+          autoWatchEnabled: this.autoWatchEnabledForRole(
+            roleById.get(participant.roleConfigId) ?? { id: participant.roleConfigId },
+            (participant as { autoWatchEnabled?: unknown }).autoWatchEnabled
+          ),
+          updatedAt: participant.updatedAt || new Date().toISOString()
+        };
+      });
   }
 
   private normalizeSeedState(value: unknown): ChatParticipantSeedState {

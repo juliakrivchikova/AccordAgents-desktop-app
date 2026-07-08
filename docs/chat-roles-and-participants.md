@@ -7,7 +7,7 @@ Read this before changing role presets, participant settings, or chat session be
 ## Core Types
 
 - `ChatRoleConfig` in `src/shared/types.ts` describes a reusable role: `id`, `label`, `instructions`, `version`, `builtIn`, `appToolCapabilities`, optional participant creation defaults in `participantDefaults`, `updatedAt`, and optional `archivedAt`. A role with `archivedAt` set is soft-deleted: it stays in settings so existing references keep resolving, but is hidden from the Roles list and from role pickers.
-- `ChatRoleConfig.appToolCapabilities` is the server-enforced grant list for app MCP tools. In the built-ins, only the internal `administrator` role, displayed as Chat Assistant, has `participants.manage`.
+- `ChatRoleConfig.appToolCapabilities` is the server-enforced grant list for app MCP tools. Role/member management is also controlled by `participantDefaults.manageRolesParticipants`; the built-in Workflow Manager defaults this to `allow`, while Chat Assistant defaults it to `ask`.
 - `ChatParticipantConfig` describes a saved participant preset in settings: `handle`, `roleConfigId`, `kind`, optional `model`, optional `reasoningEffort`, optional `avatarId`, `agentMode`, and `permissions`.
 - `ChatParticipant` is the participant shape copied into a chat conversation. It is stored in `conversation.metadata.participants`. `participantConfigId` optionally links it back to the saved participant preset it came from.
 - `ChatParticipantSession` is the runtime session lock for a participant. It stores the CLI `sessionId`, resolved `roleLabel`, resolved `roleInstructions`, `roleConfigVersion`, resolved app-tool capabilities, runtime type, model, agent mode, permissions, and `lastSyncedMessageId`.
