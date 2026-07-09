@@ -67,6 +67,15 @@ function clearLegacyAccordState(metadata: Conversation["metadata"]): Conversatio
   return next;
 }
 
+function hasPendingAppToolApprovals(conversation: Conversation): boolean {
+  return Array.isArray(conversation.metadata.pendingAppToolApprovals) &&
+    conversation.metadata.pendingAppToolApprovals.some((approval) =>
+      approval &&
+      typeof approval === "object" &&
+      (approval as { status?: unknown }).status === "pending"
+    );
+}
+
 function nonTerminalRemoteRunIds(value: unknown): string[] {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return [];
@@ -248,7 +257,10 @@ export class StorageService {
     }
 
     const conversationIds = [...conversationsById.keys()];
-    const messages = await this.activityMessageRows(conversationIds, conversationLimit);
+    const approvalConversationIds = [...conversationsById.values()]
+      .filter((conversation) => hasPendingAppToolApprovals(conversation))
+      .map((conversation) => conversation.id);
+    const messages = await this.activityMessageRows(conversationIds, conversationLimit, approvalConversationIds);
     for (const row of messages) {
       const conversation = conversationsById.get(row.conversationId);
       if (!conversation) {
@@ -524,7 +536,8 @@ export class StorageService {
 
   private async activityMessageRows(
     conversationIds: string[],
-    conversationLimit: number
+    conversationLimit: number,
+    approvalConversationIds: string[] = []
   ): Promise<{ conversationId: string; sequence: number; payloadJson: string }[]> {
     const idList = sqlStringList(conversationIds);
     const pendingRows = await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
@@ -568,8 +581,27 @@ export class StorageService {
         limit ${Math.max(DEFAULT_CHAT_ACTIVITY_LIMIT, conversationLimit * 8)};
       `
     );
+    const approvalContextRows = approvalConversationIds.length > 0
+      ? await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
+        `
+          select conversationId, sequence, payloadJson
+          from (
+            select
+              conversation_id as conversationId,
+              sequence,
+              payload_json as payloadJson,
+              row_number() over (partition by conversation_id order by created_at desc) as rowNumber
+            from conversation_messages
+            where conversation_id in ${sqlStringList(approvalConversationIds)}
+              and coalesce(json_extract(payload_json, '$.role'), '') != 'system'
+          )
+          where rowNumber <= 48
+          order by conversationId, sequence;
+        `
+      )
+      : [];
     const byKey = new Map<string, { conversationId: string; sequence: number; payloadJson: string }>();
-    for (const row of [...pendingRows, ...pendingParticipantRows, ...participantRows]) {
+    for (const row of [...pendingRows, ...pendingParticipantRows, ...participantRows, ...approvalContextRows]) {
       byKey.set(`${row.conversationId}:${row.sequence}`, row);
     }
     return [...byKey.values()];

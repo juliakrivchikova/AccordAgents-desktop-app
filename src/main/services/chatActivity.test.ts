@@ -218,6 +218,45 @@ test("buildChatActivityItems falls back to pending metadata when a pending messa
   assert.equal(items.find((item) => item.kind === "mention")?.preview, "@taylor");
 });
 
+test("buildChatActivityItems targets visible requester message for approval without trigger message", () => {
+  const approval: ChatAppToolApproval = {
+    id: "approval-1",
+    conversationId: "conversation-1",
+    requesterParticipantId: participant.id,
+    requesterHandle: participant.handle,
+    requesterRoleConfigId: "engineer",
+    toolName: "app_roles_request_change",
+    capability: "participants.manage",
+    status: "pending",
+    request: { kind: "portable", permissions: ["workspaceWrite"] },
+    summary: "Create role \"Mathematician\"",
+    createdAt: "2026-01-08T11:00:00.000Z",
+    updatedAt: "2026-01-08T11:00:00.000Z"
+  };
+  const items = buildChatActivityItems(conversation({
+    metadata: { pendingAppToolApprovals: [approval] },
+    messages: [
+      participantMessage("source", {
+        content: "Requested a new `Mathematician` role. Please approve it in the app review card.",
+        createdAt: "2026-01-08T10:59:00.000Z"
+      }),
+      {
+        id: "hidden-system",
+        role: "system",
+        content: "Role approval needed from @drew-codex-engineer: Create role \"Mathematician\".",
+        createdAt: "2026-01-08T11:00:00.000Z",
+        status: "done",
+        metadata: { threadId: "system" }
+      }
+    ]
+  }));
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].kind, "approval");
+  assert.equal(items[0].target.messageId, "source");
+  assert.equal(items[0].preview, "Requested a new `Mathematician` role. Please approve it in the app review card.");
+});
+
 test("buildChatActivityItems emits recent finished participant messages after last viewed", () => {
   const items = buildChatActivityItems(conversation({
     messages: [

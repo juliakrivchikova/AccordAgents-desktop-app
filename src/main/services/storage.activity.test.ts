@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { StorageService } from "./storage";
-import type { ChatMessage, Conversation } from "../../shared/types";
+import type { ChatAppToolApproval, ChatMessage, Conversation } from "../../shared/types";
 
 function fakeStorage(queryJson: (sql: string) => Promise<unknown[]>): StorageService {
   const storage = Object.create(StorageService.prototype) as any;
@@ -80,6 +80,54 @@ test("listChatActivity finds pending participant messages outside the recent par
   assert.equal(result.items[0].status, "running");
   assert.equal(result.items[0].target.runId, "legacy-running-run");
   assert.equal(result.items[0].target.messageId, "pending-run-message");
+});
+
+test("listChatActivity includes visible approval context messages for approval targets", async () => {
+  const approval: ChatAppToolApproval = {
+    id: "approval-1",
+    conversationId: "chat-1",
+    requesterParticipantId: "participant-1",
+    requesterHandle: "drew-codex-engineer",
+    requesterRoleConfigId: "engineer",
+    toolName: "app_roles_request_change",
+    capability: "participants.manage",
+    status: "pending",
+    request: { kind: "portable", permissions: ["workspaceWrite"] },
+    summary: "Create role \"Mathematician\"",
+    createdAt: "2026-01-08T11:00:00.000Z",
+    updatedAt: "2026-01-08T11:00:00.000Z"
+  };
+  const chat = conversation("chat-1", "create a new role for mathematician");
+  chat.metadata.pendingAppToolApprovals = [approval];
+  const sourceMessage = participantMessage("approval-source", {
+    content: "Requested a new `Mathematician` role. Please approve it in the app review card.",
+    createdAt: "2026-01-08T10:59:00.000Z"
+  });
+  const storage = fakeStorage(async (sql) => {
+    if (sql.includes("coalesce(nullif(body_json")) {
+      return [{ id: chat.id, bodyJson: JSON.stringify({ ...chat, messages: [] }) }];
+    }
+    if (sql.includes("$.metadata.pendingChoice.status")) {
+      return [];
+    }
+    if (sql.includes("$.role") && sql.includes("participant") && sql.includes("$.status') = 'pending'")) {
+      return [];
+    }
+    if (sql.includes("$.role") && sql.includes("participant") && sql.includes("$.status') = 'done'")) {
+      return [];
+    }
+    if (sql.includes("row_number() over")) {
+      return [{ conversationId: chat.id, sequence: 2, payloadJson: JSON.stringify(sourceMessage) }];
+    }
+    throw new Error(`Unexpected query: ${sql}`);
+  });
+
+  const result = await storage.listChatActivity();
+
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].kind, "approval");
+  assert.equal(result.items[0].target.messageId, "approval-source");
+  assert.equal(result.items[0].preview, sourceMessage.content);
 });
 
 test("listChatActivity returns bounded sorted items with resolvable message targets", async () => {

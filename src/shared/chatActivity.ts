@@ -179,6 +179,8 @@ function pendingApprovalItems(
     }
     const participant = participants.get(approval.requesterParticipantId);
     const triggerMessageId = cleanString(approval.resumeContext?.triggerMessageId);
+    const targetMessage = timelineMessageForApproval(conversation.messages, approval, triggerMessageId);
+    const messageId = targetMessage?.id ?? triggerMessageId;
     return [{
       id: `approval:${conversation.id}:${approval.id}`,
       conversationId: conversation.id,
@@ -187,18 +189,43 @@ function pendingApprovalItems(
       status: "pending" as const,
       kind: "approval" as const,
       title: participant ? `@${participant.handle} needs approval` : "Approval required",
-      preview: approval.summary || approval.toolName || "A tool request is waiting for approval.",
+      preview: previewText(targetMessage?.content) || approval.summary || approval.toolName || "A tool request is waiting for approval.",
       createdAt: approval.createdAt,
       updatedAt: approval.updatedAt,
       participant,
       target: {
         approvalId: approval.id,
         runId: approval.resumeContext?.runId,
-        messageId: triggerMessageId,
-        threadRootId: triggerMessageId
+        messageId,
+        threadRootId: threadRootIdForMessage(targetMessage) || messageId
       }
     }];
   });
+}
+
+function timelineMessageForApproval(
+  messages: ChatMessage[],
+  approval: ChatAppToolApproval,
+  triggerMessageId: string
+): ChatMessage | undefined {
+  const exact = triggerMessageId
+    ? messages.find((message) => message.id === triggerMessageId && message.role !== "system")
+    : undefined;
+  if (exact) {
+    return exact;
+  }
+  const approvalMs = timeValue(approval.createdAt);
+  const requesterParticipantId = cleanString(approval.requesterParticipantId);
+  const visibleMessages = messages.filter((message) =>
+    message.role !== "system" &&
+    (!approvalMs || timeValue(message.createdAt) <= approvalMs)
+  );
+  const requesterMessages = requesterParticipantId
+    ? visibleMessages.filter((message) => cleanString(message.participantId) === requesterParticipantId)
+    : [];
+  return newestMessageByCreatedAt(requesterMessages)
+    ?? newestMessageByCreatedAt(visibleMessages)
+    ?? newestMessageByCreatedAt(messages.filter((message) => message.role !== "system"));
 }
 
 function pendingMessageItems(
@@ -353,6 +380,13 @@ function newestMessageForRun(messages: ChatMessage[], runId: string): ChatMessag
     }
   }
   return undefined;
+}
+
+function newestMessageByCreatedAt(messages: ChatMessage[]): ChatMessage | undefined {
+  return [...messages].sort((left, right) => {
+    const timeDelta = timeValue(right.createdAt) - timeValue(left.createdAt);
+    return timeDelta || right.id.localeCompare(left.id);
+  })[0];
 }
 
 function chatAppToolApprovals(value: unknown): ChatAppToolApproval[] {
