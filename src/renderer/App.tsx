@@ -3,7 +3,6 @@ import { createRoot } from "react-dom/client";
 import type { ChatSkillMention, PluginCatalogItem } from "../shared/types";
 import {
   RefreshCw,
-  Settings,
   XCircle
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -148,15 +147,7 @@ function App(): JSX.Element {
           ? "Add at least two members to start Accord."
           : undefined;
   const canStartAccord = Boolean(view.activeChatConversation && !accordDisabledReason);
-  const topBarActions = isNewChatScreen ? (
-    <>
-      <ModeToggle />
-      <Button variant="ghost" size="icon-sm" className="topbar-icon-button" title="Settings" aria-label="Settings" onClick={() => openSettingsSection(state.activeSettingsSection)}>
-        <Settings aria-hidden />
-        <span className="sr-only">Settings</span>
-      </Button>
-    </>
-  ) : (
+  const topBarActions = isNewChatScreen ? undefined : (
     <>
       {state.busy && (
         <Button variant="outline" size="sm" onClick={() => void conversationActions.cancelReview()}>
@@ -186,11 +177,6 @@ function App(): JSX.Element {
           onManageInSettings={() => openSettingsSection("participants")}
         />
       )}
-      <ModeToggle />
-      <Button variant="ghost" size="icon-sm" className="topbar-icon-button" title="Refresh" aria-label="Refresh" onClick={() => void conversationActions.refreshAll()}>
-        <RefreshCw aria-hidden />
-        <span className="sr-only">Refresh</span>
-      </Button>
     </>
   );
   const conversationPanel = view.hasResultContext ? (
@@ -210,6 +196,15 @@ function App(): JSX.Element {
 
   return (
     <AppShell
+      topStrip={(
+        <div className="app-shell-top-strip-actions">
+          <ModeToggle />
+          <Button variant="ghost" size="icon-sm" className="topbar-icon-button" title="Refresh" aria-label="Refresh" onClick={() => void conversationActions.refreshAll()}>
+            <RefreshCw aria-hidden />
+            <span className="sr-only">Refresh</span>
+          </Button>
+        </div>
+      )}
       rail={
         <AppRail
           activeView={state.railView}

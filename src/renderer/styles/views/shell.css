@@ -23,11 +23,34 @@
 
 .app-shell-top-strip {
   z-index: calc(var(--z-sidebar) + 2);
+  display: flex;
   grid-column: 1 / -1;
   grid-row: 1;
   min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 15px;
   background: var(--app-rail-bg);
   -webkit-app-region: drag;
+}
+
+.app-shell-top-strip-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+
+.app-shell-top-strip .topbar-icon-button {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  color: var(--app-rail-fg);
+}
+
+.app-shell-top-strip .topbar-icon-button:hover {
+  background: var(--app-rail-hover) !important;
+  color: var(--app-rail-fg-active);
 }
 
 .app-shell-rail-slot {
