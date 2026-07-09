@@ -327,11 +327,24 @@
   scroll-padding-top: 28px;
 }
 
+.activity-detail-body .chat-view[data-focus-navigating="true"] .chat-timeline,
+.activity-detail-body .chat-view[data-focus-navigating="true"] .chat-thread-panel {
+  visibility: hidden;
+}
+
 .activity-detail-body .chat-message.message-focused {
-  box-sizing: border-box;
-  padding: 16px;
+  position: relative;
+  isolation: isolate;
+  background: transparent;
+}
+
+.activity-detail-body .chat-message.message-focused::before {
+  position: absolute;
+  z-index: -1;
+  inset: -16px;
   border-radius: 12px;
   background: var(--app-accent-soft);
+  content: "";
 }
 
 .activity-detail-body .chat-message.message-focused .message-body {

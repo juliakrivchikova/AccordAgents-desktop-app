@@ -1,6 +1,5 @@
 import type { ChatActivityItem, ChatMessage, Conversation } from "../../shared/types";
 import { buildChatActivityItems, mergeChatActivityItems } from "../../shared/chatActivity";
-import { focusRenderedMessage } from "../components/content/markdown-text";
 import {
   CONVERSATION_MESSAGE_PAGE_SIZE,
   mergeLoadedMessagePage,
@@ -145,13 +144,24 @@ export function useConversationActions(state: AppState): ConversationActions {
   }
 
   async function openConversationAndFocusActivityItem(item: ChatActivityItem): Promise<void> {
+    const pendingFocusNonce = state.chatMessageFocusNonceRef.current + 1;
+    state.chatMessageFocusNonceRef.current = pendingFocusNonce;
+    state.setChatMessageFocusRequest({
+      conversationId: item.conversationId,
+      messageId: item.target.messageId?.trim() ?? "",
+      threadRootId: item.target.threadRootId?.trim() || undefined,
+      nonce: pendingFocusNonce,
+      pending: true
+    });
     const conversation = await openConversationForSelection(item.conversationId);
     if (!conversation) {
+      clearPendingActivityFocus(pendingFocusNonce);
       return;
     }
     const resolvedItem = resolveLoadedActivityItemTarget(item, conversation);
     const messageId = resolvedItem.target.messageId?.trim();
     if (!messageId) {
+      clearPendingActivityFocus(pendingFocusNonce);
       return;
     }
     state.setSelectedActivityItem((current) => current?.id === item.id ? resolvedItem : current);
@@ -163,11 +173,15 @@ export function useConversationActions(state: AppState): ConversationActions {
     await waitForNextFrame();
     state.chatMessageFocusNonceRef.current += 1;
     state.setChatMessageFocusRequest({
+      conversationId: item.conversationId,
       messageId,
       threadRootId: resolvedItem.target.threadRootId?.trim() || undefined,
       nonce: state.chatMessageFocusNonceRef.current
     });
-    scheduleActivityDomFocus(messageId);
+  }
+
+  function clearPendingActivityFocus(nonce: number): void {
+    state.setChatMessageFocusRequest((current) => current?.nonce === nonce ? undefined : current);
   }
 
   function resolveLoadedActivityItemTarget(item: ChatActivityItem, conversation: Conversation): ChatActivityItem {
@@ -220,58 +234,6 @@ export function useConversationActions(state: AppState): ConversationActions {
     const metadata = message.metadata as Record<string, unknown> | undefined;
     const value = metadata?.chatThreadRootId ?? metadata?.parentMessageId ?? metadata?.threadId;
     return typeof value === "string" && value.trim() ? value.trim() : undefined;
-  }
-
-  function scheduleActivityDomFocus(messageId: string): void {
-    const attempt = (): void => {
-      const message = visibleMessageElement(messageId);
-      if (!message) {
-        return;
-      }
-      focusRenderedMessage(message.parentElement, messageId, { scroll: false });
-      const scroller = scrollParentForMessage(message);
-      if (!scroller) {
-        return;
-      }
-      const delta = message.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
-      if (Number.isFinite(delta) && Math.abs(delta) > 1) {
-        scroller.scrollTop += delta;
-      }
-    };
-    window.requestAnimationFrame(() => {
-      attempt();
-      window.requestAnimationFrame(attempt);
-      window.setTimeout(attempt, 120);
-      window.setTimeout(attempt, 320);
-      window.setTimeout(attempt, 700);
-    });
-  }
-
-  function visibleMessageElement(messageId: string): HTMLElement | undefined {
-    return Array.from(document.querySelectorAll<HTMLElement>(`[data-message-id="${cssEscape(messageId)}"]`))
-      .find((candidate) => {
-        const rect = candidate.getBoundingClientRect();
-        const style = window.getComputedStyle(candidate);
-        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
-      });
-  }
-
-  function scrollParentForMessage(message: HTMLElement): HTMLElement | undefined {
-    let current = message.parentElement;
-    while (current) {
-      const style = window.getComputedStyle(current);
-      if (/(auto|scroll)/.test(style.overflowY) && current.scrollHeight > current.clientHeight + 2) {
-        return current;
-      }
-      current = current.parentElement;
-    }
-    return document.scrollingElement instanceof HTMLElement ? document.scrollingElement : undefined;
-  }
-
-  function cssEscape(value: string): string {
-    return typeof CSS !== "undefined" && typeof CSS.escape === "function"
-      ? CSS.escape(value)
-      : value.replace(/["\\]/g, "\\$&");
   }
 
   async function ensureActivityTargetMessagesLoaded(
