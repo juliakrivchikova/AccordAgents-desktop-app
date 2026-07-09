@@ -332,31 +332,6 @@
   visibility: hidden;
 }
 
-.activity-detail-body .chat-message.message-focused {
-  position: relative;
-  isolation: isolate;
-  background: transparent;
-}
-
-.activity-detail-body .chat-message.message-focused::before {
-  position: absolute;
-  z-index: -1;
-  inset: -16px;
-  border-radius: 12px;
-  background: var(--app-accent-soft);
-  content: "";
-}
-
-.activity-detail-body .chat-message.message-focused .message-body {
-  border-color: transparent;
-  background: transparent;
-  box-shadow: none;
-}
-
-.activity-detail-body .chat-message.message-flash .message-body {
-  animation: none;
-}
-
 .activity-empty,
 .activity-detail-empty {
   display: flex;

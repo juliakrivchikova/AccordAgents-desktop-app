@@ -10,6 +10,7 @@ const conversationActions = read("src/renderer/app/use-conversation-actions.ts")
 const conversationViewport = read("src/renderer/components/chat/use-chat-conversation-viewport.ts");
 const focusNavigation = read("src/renderer/components/chat/use-chat-focus-navigation.ts");
 const activityStyles = read("src/renderer/styles/views/activity.css");
+const chatStyles = read("src/renderer/styles/views/chat-conversation.css");
 
 test("Activity focus intent is registered before opening the target conversation", () => {
   const actionStart = conversationActions.indexOf("async function openConversationAndFocusActivityItem");
@@ -35,21 +36,22 @@ test("chat viewport has one focus scroll owner", () => {
   );
 });
 
-test("focused Activity highlight does not resize virtualized message rows", () => {
+test("focused Activity highlight is shared with Chats without resizing virtualized rows", () => {
   assert.doesNotMatch(
-    activityStyles,
-    /\.activity-detail-body \.chat-message\.message-focused\s*\{[^}]*padding:/s
+    chatStyles,
+    /\.chat-message\.message-focused\s*\{[^}]*padding:/s
   );
   assert.match(
-    activityStyles,
-    /\.activity-detail-body \.chat-message\.message-focused::before\s*\{[^}]*inset:\s*-16px;/s
+    chatStyles,
+    /\.chat-message\.message-focused::before\s*\{[^}]*inset:\s*-16px;/s
   );
+  assert.doesNotMatch(activityStyles, /\.activity-detail-body \.chat-message\.message-focused/);
   assert.match(
     activityStyles,
     /\.chat-view\[data-focus-navigating="true"\] \.chat-timeline/
   );
   assert.match(
-    activityStyles,
-    /\.activity-detail-body \.chat-message\.message-flash \.message-body\s*\{[^}]*animation:\s*none;/s
+    chatStyles,
+    /\.chat-message\.message-flash \.message-body\s*\{[^}]*animation:\s*none;/s
   );
 });
