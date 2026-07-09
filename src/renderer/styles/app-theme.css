@@ -12,6 +12,7 @@
 
   --app-header-height: 52px;
   --app-rail-width: 90px;
+  --activity-list-width: 400px;
   --app-sidebar-width: 266px;
   --app-bg: #f6f7f9;
   --app-new-chat-bg: #fbfbfc;
@@ -25,9 +26,6 @@
   --app-rail-fg-active: #2a2440;
   --app-rail-hover: rgba(42, 36, 64, 0.06);
   --app-rail-active: rgba(125, 95, 211, 0.16);
-  --app-window-control-red: #ff5f57;
-  --app-window-control-yellow: #febc2e;
-  --app-window-control-green: #28c840;
   --app-header-bg: #ffffff;
   --app-surface: #ffffff;
   --app-surface-subtle: #f7f8fa;

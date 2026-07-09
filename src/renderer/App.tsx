@@ -9,9 +9,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+import { ModeToggle } from "./components/mode-toggle";
 import { ThemeProvider } from "./components/theme-provider";
 import { AppLoadingState } from "./components/loading-states";
-import { AppRail, AppShell, AppTopStrip, Sidebar, SidebarPanelIcon, TopBar } from "./components/shell";
+import { AppRail, AppShell, Sidebar, SidebarPanelIcon, TopBar } from "./components/shell";
 import { ActivityView } from "./components/activity/activity-view";
 import { SettingsView, type SettingsSection } from "./components/settings/settings-view";
 import { SettingsSidebar } from "./components/settings/settings-sidebar";
@@ -149,6 +150,7 @@ function App(): JSX.Element {
   const canStartAccord = Boolean(view.activeChatConversation && !accordDisabledReason);
   const topBarActions = isNewChatScreen ? (
     <>
+      <ModeToggle />
       <Button variant="ghost" size="icon-sm" className="topbar-icon-button" title="Settings" aria-label="Settings" onClick={() => openSettingsSection(state.activeSettingsSection)}>
         <Settings aria-hidden />
         <span className="sr-only">Settings</span>
@@ -184,6 +186,7 @@ function App(): JSX.Element {
           onManageInSettings={() => openSettingsSection("participants")}
         />
       )}
+      <ModeToggle />
       <Button variant="ghost" size="icon-sm" className="topbar-icon-button" title="Refresh" aria-label="Refresh" onClick={() => void conversationActions.refreshAll()}>
         <RefreshCw aria-hidden />
         <span className="sr-only">Refresh</span>
@@ -207,7 +210,6 @@ function App(): JSX.Element {
 
   return (
     <AppShell
-      topStrip={<AppTopStrip />}
       rail={
         <AppRail
           activeView={state.railView}

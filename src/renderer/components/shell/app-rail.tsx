@@ -12,8 +12,9 @@ const ITEMS: { view: RailView; label: string; icon: typeof MessageSquare }[] = [
 ];
 
 export function AppRail({ activeView, onSelect }: AppRailProps): JSX.Element {
+  const platform = navigator.userAgent.includes("Macintosh") ? "mac" : undefined;
   return (
-    <nav className="app-rail" aria-label="Primary" data-shell="rail">
+    <nav className="app-rail" aria-label="Primary" data-shell="rail" data-platform={platform}>
       <div className="app-rail-primary">
         {ITEMS.map((item) => {
           const Icon = item.icon;
