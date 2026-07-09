@@ -202,12 +202,17 @@ function CloudRunsControl(props: {
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<CloudRunWorkerDoctorReport | null>(null);
   const [setupProgress, setSetupProgress] = useState<CloudRunWorkerSetupProgress | null>(null);
+  const [copiedAuthCode, setCopiedAuthCode] = useState(false);
 
   useEffect(() => {
     setDraft(props.settings);
   }, [props.settings]);
 
   useEffect(() => window.consensus.onCloudRunSetupProgress(setSetupProgress), []);
+
+  useEffect(() => {
+    setCopiedAuthCode(false);
+  }, [setupProgress?.authCode]);
 
   const patch = (update: CloudRunsSettingsUpdate): void => {
     setDraft((current) => ({
@@ -284,6 +289,16 @@ function CloudRunsControl(props: {
     void savePatch({ mode });
   };
 
+  const copyAuthCode = async (): Promise<void> => {
+    const authCode = setupProgress?.authCode;
+    if (!authCode) {
+      return;
+    }
+    await navigator.clipboard.writeText(authCode);
+    setCopiedAuthCode(true);
+    window.setTimeout(() => setCopiedAuthCode(false), 1400);
+  };
+
   return (
     <div className="gen-card">
       <div className="gen-row">
@@ -304,8 +319,13 @@ function CloudRunsControl(props: {
           <span />
         </label>
       </div>
-      <div className="gen-card-divider" />
-      <div className="gen-row">
+      <fieldset
+        className="gen-cloud-runs-settings"
+        data-testid="remote-codex-worker-settings"
+        disabled={!draft.enabled}
+      >
+        <div className="gen-card-divider" />
+        <div className="gen-row">
         <div className="gen-row-text">
           <div className="gen-row-title">Worker source</div>
           <div className="gen-row-desc">Let the app create and manage an EC2 worker, or point it at a box you own.</div>
@@ -398,7 +418,24 @@ function CloudRunsControl(props: {
               >
                 Open the sign-in page
               </button>
-              {setupProgress.authCode ? ` and enter code ${setupProgress.authCode}` : ""}
+              {setupProgress.authCode ? (
+                <>
+                  {" and enter code "}
+                  <code className="gen-doctor-auth-code" data-testid="cloud-run-device-auth-code">
+                    {setupProgress.authCode}
+                  </code>
+                  <button
+                    type="button"
+                    className="gen-doctor-auth-copy"
+                    data-testid="cloud-run-device-auth-copy"
+                    aria-label={copiedAuthCode ? "Copied device authentication code" : "Copy device authentication code"}
+                    onClick={() => void copyAuthCode()}
+                  >
+                    {copiedAuthCode ? <CheckCircle2 size={13} aria-hidden /> : <Copy size={13} aria-hidden />}
+                    <span>{copiedAuthCode ? "Copied" : "Copy"}</span>
+                  </button>
+                </>
+              ) : null}
             </div>
           )}
         </div>
@@ -431,6 +468,7 @@ function CloudRunsControl(props: {
           </ul>
         </>
       )}
+      </fieldset>
     </div>
   );
 }
