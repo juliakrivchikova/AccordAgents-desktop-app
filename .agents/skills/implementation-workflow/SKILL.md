@@ -26,6 +26,23 @@ step yourself.
   timeline, not only inside a nested thread. If the current reply would stay inside a workflow/participant-request
   thread, post a separate main-timeline closeout with the app-managed send-message tool when available.
 
+## Main-Timeline Idle Status
+
+Whenever all assigned participant work is complete and the workflow cannot make further progress without User input,
+leave the main timeline with a short status message as the latest visible message. This applies before the final workflow
+step is complete and is separate from the final closeout.
+
+The idle status must include:
+
+- current workflow stage;
+- last completed artifact or review result;
+- whether any participant work is still running;
+- the exact User decision needed;
+- what happens after the likely choices.
+
+If the manager is replying inside a nested workflow or participant-request thread, also post the same concise status to
+the main timeline with the app-managed send-message tool when available.
+
 ## Reference-Parity Gate
 
 When the user says a new setting or flow should work "like", "same as", or "next to" an existing feature, that existing
@@ -87,7 +104,8 @@ O3: Open app instance | Open a separate app instance so you can check manually.
 R: O3
 ```
 
-Continue only after the user chooses one final step.
+Before pausing for this choice, follow the Main-Timeline Idle Status rule so the main timeline says progress is waiting
+on User's final-step decision. Continue only after the user chooses one final step.
 
 ### 3. Ask Both Drew And Taylor To Prepare Implementation Plan
 
@@ -167,7 +185,7 @@ To ask Drew to implement fixes, respond as follows:
 To ask Taylor for final review, respond as follows:
 
 ```text
-@taylor-claude-engineer review again and confirm implementation is ready for main
+@taylor-claude-engineer review the full implementation diff again, not only the agreed fixes: check the whole worktree diff against the locked scope and canonical plan, look for regressions introduced by the fix round, and confirm implementation is ready for main
 ```
 
 If Taylor does not approve, return to the required-fix accord stage.
