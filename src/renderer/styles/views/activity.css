@@ -353,6 +353,10 @@
   box-shadow: none;
 }
 
+.activity-detail-body .chat-message.message-flash .message-body {
+  animation: none;
+}
+
 .activity-empty,
 .activity-detail-empty {
   display: flex;

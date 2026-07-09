@@ -48,4 +48,8 @@ test("focused Activity highlight does not resize virtualized message rows", () =
     activityStyles,
     /\.chat-view\[data-focus-navigating="true"\] \.chat-timeline/
   );
+  assert.match(
+    activityStyles,
+    /\.activity-detail-body \.chat-message\.message-flash \.message-body\s*\{[^}]*animation:\s*none;/s
+  );
 });
