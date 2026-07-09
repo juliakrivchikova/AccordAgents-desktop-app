@@ -328,6 +328,8 @@
 }
 
 .activity-detail-body .chat-message.message-focused {
+  box-sizing: border-box;
+  padding: 16px;
   border-radius: 12px;
   background: var(--app-accent-soft);
 }
