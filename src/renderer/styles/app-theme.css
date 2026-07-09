@@ -11,12 +11,21 @@
   -webkit-font-smoothing: antialiased;
 
   --app-header-height: 52px;
+  --app-rail-width: 90px;
+  --activity-list-width: 400px;
   --app-sidebar-width: 266px;
   --app-bg: #f6f7f9;
   --app-new-chat-bg: #fbfbfc;
+  --app-activity-bg: #fbfbfc;
+  --app-activity-token: #0ea5a5;
   --bg-sunken: #f4f5f7;
   --app-workspace-bg: #ffffff;
   --app-sidebar-bg: var(--bg-sunken);
+  --app-rail-bg: #2e1642;
+  --app-rail-fg: rgba(255, 255, 255, 0.68);
+  --app-rail-fg-active: #ffffff;
+  --app-rail-hover: rgba(255, 255, 255, 0.08);
+  --app-rail-active: rgba(255, 255, 255, 0.16);
   --app-header-bg: #ffffff;
   --app-surface: #ffffff;
   --app-surface-subtle: #f7f8fa;
@@ -172,9 +181,16 @@
 .dark {
   color-scheme: dark;
   --app-bg: #0d0f13;
+  --app-activity-bg: #181b21;
+  --app-activity-token: #5eead4;
   --bg-sunken: #121419;
   --app-workspace-bg: #181b21;
   --app-sidebar-bg: #121419;
+  --app-rail-bg: #1f0f2d;
+  --app-rail-fg: rgba(255, 255, 255, 0.68);
+  --app-rail-fg-active: #ffffff;
+  --app-rail-hover: rgba(255, 255, 255, 0.08);
+  --app-rail-active: rgba(255, 255, 255, 0.16);
   --app-header-bg: #181b21;
   --app-surface: #181b21;
   --app-surface-subtle: #1d2128;

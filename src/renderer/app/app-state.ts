@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import type {
   AgentHealth,
   AppSettings,
+  ChatActivityItem,
   CloudRunRemoteExecutionMode,
   Conversation,
   ConversationKind,
@@ -18,7 +19,7 @@ import { DEFAULT_SETTINGS } from "./constants";
 import { readDismissedWarningsFromStorage, readInitialSidebarCollapsed, readInitialSidebarWidth, readLastViewedAtFromStorage } from "./storage";
 import type { DismissedWarningMap } from "./storage";
 
-export type SidebarMode = "history" | "settings";
+export type RailView = "chats" | "activity" | "settings";
 export type StateSetter<T> = React.Dispatch<React.SetStateAction<T>>;
 
 export interface AppState {
@@ -34,8 +35,18 @@ export interface AppState {
   setMessagePage: StateSetter<ConversationMessagePageInfo | undefined>;
   olderMessagesLoading: boolean;
   setOlderMessagesLoading: StateSetter<boolean>;
-  sidebarMode: SidebarMode;
-  setSidebarMode: StateSetter<SidebarMode>;
+  railView: RailView;
+  setRailView: StateSetter<RailView>;
+  activityItems: ChatActivityItem[];
+  setActivityItems: StateSetter<ChatActivityItem[]>;
+  activityLoading: boolean;
+  setActivityLoading: StateSetter<boolean>;
+  activityError: string | undefined;
+  setActivityError: StateSetter<string | undefined>;
+  activityFocusError: string | undefined;
+  setActivityFocusError: StateSetter<string | undefined>;
+  selectedActivityItem: ChatActivityItem | undefined;
+  setSelectedActivityItem: StateSetter<ChatActivityItem | undefined>;
   activeSettingsSection: SettingsSection;
   setActiveSettingsSection: StateSetter<SettingsSection>;
   sidebarCollapsed: boolean;
@@ -99,6 +110,9 @@ export interface AppState {
   progressLogRef: React.MutableRefObject<ReviewProgress[]>;
   openConversationRequestRef: React.MutableRefObject<number>;
   chatMessageFocusNonceRef: React.MutableRefObject<number>;
+  activityRefreshRequestRef: React.MutableRefObject<number>;
+  activityRevisionByConversationRef: React.MutableRefObject<Record<string, number>>;
+  archivedConversationIdsRef: React.MutableRefObject<Set<string>>;
   lastViewedAtRef: React.MutableRefObject<Record<string, string>>;
   startingChatRef: React.MutableRefObject<boolean>;
 }
@@ -110,7 +124,12 @@ export function useAppState(): AppState {
   const [conversation, setConversation] = useState<Conversation | undefined>();
   const [messagePage, setMessagePage] = useState<ConversationMessagePageInfo | undefined>();
   const [olderMessagesLoading, setOlderMessagesLoading] = useState(false);
-  const [sidebarMode, setSidebarMode] = useState<SidebarMode>("history");
+  const [railView, setRailView] = useState<RailView>("chats");
+  const [activityItems, setActivityItems] = useState<ChatActivityItem[]>([]);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [activityError, setActivityError] = useState<string | undefined>();
+  const [activityFocusError, setActivityFocusError] = useState<string | undefined>();
+  const [selectedActivityItem, setSelectedActivityItem] = useState<ChatActivityItem | undefined>();
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readInitialSidebarCollapsed);
   const [sidebarWidth, setSidebarWidth] = useState(readInitialSidebarWidth);
@@ -144,12 +163,18 @@ export function useAppState(): AppState {
   const progressLogRef = useRef<ReviewProgress[]>([]);
   const openConversationRequestRef = useRef(0);
   const chatMessageFocusNonceRef = useRef(0);
+  const activityRefreshRequestRef = useRef(0);
+  const activityRevisionByConversationRef = useRef<Record<string, number>>({});
+  const archivedConversationIdsRef = useRef<Set<string>>(new Set());
   const lastViewedAtRef = useRef<Record<string, string>>(readLastViewedAtFromStorage());
   const startingChatRef = useRef(false);
 
   return {
     settings, setSettings, agents, setAgents, summaries, setSummaries, conversation, setConversation,
-    messagePage, setMessagePage, olderMessagesLoading, setOlderMessagesLoading, sidebarMode, setSidebarMode,
+    messagePage, setMessagePage, olderMessagesLoading, setOlderMessagesLoading, railView, setRailView,
+    activityItems, setActivityItems, activityLoading, setActivityLoading, activityError, setActivityError,
+    activityFocusError, setActivityFocusError,
+    selectedActivityItem, setSelectedActivityItem,
     activeSettingsSection, setActiveSettingsSection, sidebarCollapsed, setSidebarCollapsed, sidebarWidth,
     setSidebarWidth, selectedThreadId, setSelectedThreadId, focusedThreadId, setFocusedThreadId, kind, setKind, question, setQuestion, repoPath,
     setRepoPath, repoInfo, setRepoInfo, warnings, setWarnings, dismissedWarningKeysByScope,
@@ -162,6 +187,8 @@ export function useAppState(): AppState {
     selectedChatParticipantRunLocations, setSelectedChatParticipantRunLocations,
     chatMessageDraft, setChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
-    setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef, lastViewedAtRef, startingChatRef
+    setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef,
+    activityRefreshRequestRef, activityRevisionByConversationRef, archivedConversationIdsRef,
+    lastViewedAtRef, startingChatRef
   };
 }

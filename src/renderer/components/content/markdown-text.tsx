@@ -60,7 +60,11 @@ function Mention({ handle }: { handle: string }): JSX.Element {
   );
 }
 
-export function focusRenderedMessage(root: ParentNode | null | undefined, messageId: string): boolean {
+export function focusRenderedMessage(
+  root: ParentNode | null | undefined,
+  messageId: string,
+  options: { scroll?: boolean } = {}
+): boolean {
   if (!root || typeof window === "undefined") {
     return false;
   }
@@ -69,7 +73,12 @@ export function focusRenderedMessage(root: ParentNode | null | undefined, messag
   if (!el) {
     return false;
   }
-  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (options.scroll !== false) {
+    el.scrollIntoView({ behavior: "smooth", block: "start", inline: "nearest" });
+  }
+  root.querySelectorAll<HTMLElement>(".message-focused")
+    .forEach((candidate) => candidate.classList.remove("message-focused"));
+  el.classList.add("message-focused");
   el.classList.add("message-flash");
   window.setTimeout(() => el.classList.remove("message-flash"), 1500);
   return true;

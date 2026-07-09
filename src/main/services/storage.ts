@@ -9,8 +9,18 @@ import type {
   ConversationMessagePageInfo,
   ConversationMessagePageRequest,
   ConversationOpenResult,
-  ConversationSummary
+  ConversationSummary,
+  ListChatActivityRequest,
+  ListChatActivityResult
 } from "../../shared/types";
+import {
+  DEFAULT_CHAT_ACTIVITY_LIMIT,
+  DEFAULT_CHAT_ACTIVITY_RECENT_CONVERSATION_LIMIT,
+  DEFAULT_CHAT_ACTIVITY_RECENT_WINDOW_DAYS,
+  buildChatActivityItems,
+  limitChatActivityItems,
+  sortChatActivityItems
+} from "../../shared/chatActivity";
 import { clearChatRunMetadata, clearParticipantCompactions, readParticipantCompactions } from "../../shared/chatRunState";
 import { normalizeInferredParticipantRequestThreads as normalizeInferredParticipantRequestThreadMetadata } from "../../shared/chatParticipantRequestThreads";
 import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
@@ -29,6 +39,16 @@ function sqlString(value: string | undefined | null): string {
     return "NULL";
   }
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+function sqlStringList(values: string[]): string {
+  return values.length > 0 ? `(${values.map((value) => sqlString(value)).join(", ")})` : "('')";
+}
+
+function sqlStringPairList(values: Array<[string, string]>): string {
+  return values.length > 0
+    ? `(${values.map(([left, right]) => `(${sqlString(left)}, ${sqlString(right)})`).join(", ")})`
+    : "(('', ''))";
 }
 
 function clearLegacyAccordState(metadata: Conversation["metadata"]): Conversation["metadata"] {
@@ -51,6 +71,25 @@ function clearLegacyAccordState(metadata: Conversation["metadata"]): Conversatio
     next.appToolApprovalPolicies = policies;
   }
   return next;
+}
+
+function hasPendingAppToolApprovals(conversation: Conversation): boolean {
+  return Array.isArray(conversation.metadata.pendingAppToolApprovals) &&
+    conversation.metadata.pendingAppToolApprovals.some((approval) =>
+      approval &&
+      typeof approval === "object" &&
+      (approval as { status?: unknown }).status === "pending"
+    );
+}
+
+function pendingApprovalTriggerTargets(conversation: Conversation): Array<[string, string]> {
+  if (!Array.isArray(conversation.metadata.pendingAppToolApprovals)) {
+    return [];
+  }
+  return conversation.metadata.pendingAppToolApprovals.flatMap((approval) => {
+    const messageId = approval?.status === "pending" ? approval.resumeContext?.triggerMessageId?.trim() : "";
+    return messageId ? [[conversation.id, messageId] as [string, string]] : [];
+  });
 }
 
 function nonTerminalRemoteRunIds(value: unknown): string[] {
@@ -187,6 +226,91 @@ export class StorageService {
         ...(chatParticipants ? { chatParticipants } : {})
       };
     });
+  }
+
+  async listChatActivity(request: ListChatActivityRequest = {}): Promise<ListChatActivityResult> {
+    await this.init();
+    const limit = normalizePositiveInteger(request.limit, DEFAULT_CHAT_ACTIVITY_LIMIT);
+    const conversationLimit = normalizePositiveInteger(
+      request.recentConversationLimit,
+      DEFAULT_CHAT_ACTIVITY_RECENT_CONVERSATION_LIMIT
+    );
+    const recentWindowDays = normalizePositiveInteger(
+      request.recentWindowDays,
+      DEFAULT_CHAT_ACTIVITY_RECENT_WINDOW_DAYS
+    );
+    const rows = await this.queryJson<{
+      id: string;
+      bodyJson: string;
+    }>(
+      `select
+         id,
+         coalesce(nullif(body_json, ''), json_set(payload_json, '$.messages', json_array())) as bodyJson
+       from conversations
+       where kind = 'chat'
+         and coalesce(json_extract(payload_json, '$.metadata.archived'), 0) not in (1, '1', 'true')
+       order by updated_at desc
+       limit ${conversationLimit};`
+    );
+    if (rows.length === 0) {
+      return { items: [], generatedAt: new Date().toISOString() };
+    }
+
+    const conversationsById = new Map<string, Conversation>();
+    for (const row of rows) {
+      try {
+        const conversation = JSON.parse(row.bodyJson) as Conversation;
+        conversation.metadata = clearLegacyAccordState(conversation.metadata);
+        conversation.messages = [];
+        sanitizeConversationWarnings(conversation);
+        conversationsById.set(conversation.id, conversation);
+      } catch {
+        continue;
+      }
+    }
+    if (conversationsById.size === 0) {
+      return { items: [], generatedAt: new Date().toISOString() };
+    }
+
+    const conversationIds = [...conversationsById.keys()];
+    const approvalConversationIds = [...conversationsById.values()]
+      .filter((conversation) => hasPendingAppToolApprovals(conversation))
+      .map((conversation) => conversation.id);
+    const approvalTriggerTargets = [...conversationsById.values()].flatMap(pendingApprovalTriggerTargets);
+    const messages = await this.activityMessageRows(
+      conversationIds,
+      conversationLimit,
+      approvalConversationIds,
+      approvalTriggerTargets
+    );
+    for (const row of messages) {
+      const conversation = conversationsById.get(row.conversationId);
+      if (!conversation) {
+        continue;
+      }
+      try {
+        conversation.messages.push(JSON.parse(row.payloadJson) as ChatMessage);
+      } catch {
+        continue;
+      }
+    }
+    for (const conversation of conversationsById.values()) {
+      conversation.messages.sort((left, right) => {
+        const timeDelta = Date.parse(left.createdAt) - Date.parse(right.createdAt);
+        return timeDelta || left.id.localeCompare(right.id);
+      });
+    }
+
+    const items = [...conversationsById.values()].flatMap((conversation) =>
+      buildChatActivityItems(conversation, {
+        recentWindowDays,
+        lastViewedAt: request.lastViewedAtByConversationId?.[conversation.id]
+      })
+    );
+    return {
+      items: limitChatActivityItems(sortChatActivityItems(items), limit),
+      generatedAt: new Date().toISOString()
+    };
   }
 
   async getConversation(id: string): Promise<Conversation | undefined> {
@@ -432,6 +556,114 @@ export class StorageService {
     return rows.flatMap((row) => typeof row.id === "string" && row.id.trim() ? [row.id] : []);
   }
 
+  private async activityMessageRows(
+    conversationIds: string[],
+    conversationLimit: number,
+    approvalConversationIds: string[] = [],
+    approvalTriggerTargets: Array<[string, string]> = []
+  ): Promise<{ conversationId: string; sequence: number; payloadJson: string }[]> {
+    const idList = sqlStringList(conversationIds);
+    const pendingRows = await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
+      `
+        select conversation_id as conversationId, sequence, payload_json as payloadJson
+        from conversation_messages
+        where conversation_id in ${idList}
+          and (
+            json_extract(payload_json, '$.metadata.pendingChoice.status') = 'pending'
+            or exists (
+              select 1
+              from json_each(payload_json, '$.metadata.pendingMentions') as mention
+              where json_extract(mention.value, '$.status') = 'pending'
+            )
+            or json_extract(payload_json, '$.metadata.participantRequest.status') = 'pending_approval'
+          )
+        order by created_at desc;
+      `
+    );
+    const pendingParticipantRows = await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
+      `
+        select conversation_id as conversationId, sequence, payload_json as payloadJson
+        from conversation_messages
+        where conversation_id in ${idList}
+          and json_extract(payload_json, '$.role') = 'participant'
+          and json_extract(payload_json, '$.status') = 'pending'
+          and json_extract(payload_json, '$.metadata.runId') is not null
+        order by created_at desc
+        limit ${Math.max(DEFAULT_CHAT_ACTIVITY_LIMIT, conversationLimit * 2)};
+      `
+    );
+    const participantRows = await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
+      `
+        select conversation_id as conversationId, sequence, payload_json as payloadJson
+        from conversation_messages
+        where conversation_id in ${idList}
+          and json_extract(payload_json, '$.role') = 'participant'
+          and json_extract(payload_json, '$.status') = 'done'
+        order by created_at desc
+        limit ${Math.max(DEFAULT_CHAT_ACTIVITY_LIMIT, conversationLimit * 8)};
+      `
+    );
+    const approvalContextRows = approvalConversationIds.length > 0
+      ? await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
+        `
+          select conversationId, sequence, payloadJson
+          from (
+            select
+              conversation_id as conversationId,
+              sequence,
+              payload_json as payloadJson,
+              row_number() over (partition by conversation_id order by created_at desc) as rowNumber
+            from conversation_messages
+            where conversation_id in ${sqlStringList(approvalConversationIds)}
+              and coalesce(json_extract(payload_json, '$.role'), '') != 'system'
+          )
+          where rowNumber <= 48
+          order by conversationId, sequence;
+        `
+      )
+      : [];
+    const approvalTriggerRows = approvalTriggerTargets.length > 0
+      ? await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
+        `
+          select conversation_id as conversationId, sequence, payload_json as payloadJson
+          from conversation_messages
+          where (conversation_id, message_id) in ${sqlStringPairList(approvalTriggerTargets)};
+        `
+      )
+      : [];
+    const activitySourceTargets = [...pendingRows, ...pendingParticipantRows, ...approvalTriggerRows].flatMap((row) => {
+      try {
+        const message = JSON.parse(row.payloadJson) as ChatMessage;
+        const ids = [message.metadata?.sourceMessageId, message.metadata?.parentMessageId, message.metadata?.chatThreadRootId]
+          .flatMap((value) => typeof value === "string" && value.trim() ? [value.trim()] : []);
+        return [...new Set(ids)].map((messageId) => [row.conversationId, messageId] as [string, string]);
+      } catch {
+        return [];
+      }
+    });
+    const activitySourceRows = activitySourceTargets.length > 0
+      ? await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
+        `
+          select conversation_id as conversationId, sequence, payload_json as payloadJson
+          from conversation_messages
+          where (conversation_id, message_id) in ${sqlStringPairList(activitySourceTargets)};
+        `
+      )
+      : [];
+    const byKey = new Map<string, { conversationId: string; sequence: number; payloadJson: string }>();
+    for (const row of [
+      ...pendingRows,
+      ...pendingParticipantRows,
+      ...participantRows,
+      ...approvalContextRows,
+      ...approvalTriggerRows,
+      ...activitySourceRows
+    ]) {
+      byKey.set(`${row.conversationId}:${row.sequence}`, row);
+    }
+    return [...byKey.values()];
+  }
+
   private async readConversationPayloadById(id: string): Promise<string | undefined> {
     const payloadJson = await this.queryText(
       `select payload_json from conversations where id = ${sqlString(id)} limit 1;`
@@ -483,6 +715,11 @@ function normalizeMessagePageLimit(limit: number | undefined): number {
     return DEFAULT_MESSAGE_PAGE_LIMIT;
   }
   return Math.max(1, Math.min(MAX_MESSAGE_PAGE_LIMIT, Math.floor(limit as number)));
+}
+
+function normalizePositiveInteger(value: unknown, fallback: number): number {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
 }
 
 function conversationBody(conversation: Conversation): Conversation {

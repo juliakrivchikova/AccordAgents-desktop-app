@@ -539,16 +539,21 @@
   opacity: 0.5;
 }
 
+.message-focused .message-body {
+  background: color-mix(in srgb, var(--app-accent) 13%, var(--app-surface));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--app-accent) 24%, transparent);
+}
+
 .message-flash .message-body {
   animation: message-flash 1.5s ease-out;
 }
 
 @keyframes message-flash {
   0% {
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-success) 45%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 34%, transparent);
   }
   100% {
-    box-shadow: 0 0 0 0 transparent;
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--app-accent) 24%, transparent);
   }
 }
 

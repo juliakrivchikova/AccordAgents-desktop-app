@@ -1,5 +1,7 @@
 export { AppShell } from "./app-shell";
 export type { AppShellProps } from "./app-shell";
+export { AppRail } from "./app-rail";
+export type { AppRailProps } from "./app-rail";
 
 export { Sidebar } from "./sidebar";
 export type { ProjectSessionGroup, SidebarProps } from "./sidebar";

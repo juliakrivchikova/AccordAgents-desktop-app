@@ -1,4 +1,9 @@
 import { useEffect } from "react";
+import {
+  buildChatActivityItemsForConversationUpdate,
+  mergeChatActivityItems,
+  preservedRecentChatActivityItems
+} from "../../shared/chatActivity";
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from "./constants";
 import { conversationTimeValue, upsertConversationSummary } from "./conversation-summaries";
 import type { AppState } from "./app-state";
@@ -17,9 +22,17 @@ import {
   normalizeChatParticipantDraftForSettings
 } from "../components/chat/chat-participant-drafts";
 
-export function useAppEffects(state: AppState, refreshAll: () => Promise<void>): void {
+export function useAppEffects(
+  state: AppState,
+  refreshAll: () => Promise<void>,
+  refreshActivity: () => Promise<void>
+): void {
   useEffect(() => {
     void refreshAll();
+  }, []);
+
+  useEffect(() => {
+    void refreshActivity();
   }, []);
 
   useEffect(() => {
@@ -47,10 +60,39 @@ export function useAppEffects(state: AppState, refreshAll: () => Promise<void>):
 
   useEffect(() => {
     return window.consensus.onConversationUpdated((updated) => {
+      const archived = updated.archived === true || updated.metadata.archived === true;
+      state.activityRevisionByConversationRef.current = {
+        ...state.activityRevisionByConversationRef.current,
+        [updated.id]: (state.activityRevisionByConversationRef.current[updated.id] ?? 0) + 1
+      };
+      const archivedConversationIds = new Set(state.archivedConversationIdsRef.current);
+      if (archived) {
+        archivedConversationIds.add(updated.id);
+      } else {
+        archivedConversationIds.delete(updated.id);
+      }
+      state.archivedConversationIdsRef.current = archivedConversationIds;
       state.setSummaries((current) => upsertConversationSummary(current, updated));
+      if (archived) {
+        state.setSelectedActivityItem((current) => current?.conversationId === updated.id ? undefined : current);
+      }
       state.setConversation((current) => {
         const isActive = current?.id === updated.id;
-        if (!conversationMatchesSnapshot(current, updated, state.currentRunId)) {
+        const matchesCurrentSnapshot = conversationMatchesSnapshot(current, updated, state.currentRunId);
+        const activityItems = buildChatActivityItemsForConversationUpdate(updated, {
+          lastViewedAt: state.lastViewedAtRef.current[updated.id],
+          treatAsViewed: isActive && matchesCurrentSnapshot
+        });
+        state.setActivityItems((activityCurrent) => {
+          const preservedReadItems = preservedRecentChatActivityItems(activityCurrent, updated.id, {
+            archived,
+            treatAsRead: isActive
+          });
+          return mergeChatActivityItems(activityCurrent, [...activityItems, ...preservedReadItems], {
+            replaceConversationId: updated.id
+          });
+        });
+        if (!matchesCurrentSnapshot) {
           if (!isActive) {
             const lastViewed = state.lastViewedAtRef.current[updated.id];
             if (!lastViewed || conversationTimeValue(updated.updatedAt) > conversationTimeValue(lastViewed)) {

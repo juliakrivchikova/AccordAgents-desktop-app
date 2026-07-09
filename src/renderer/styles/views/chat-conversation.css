@@ -849,6 +849,7 @@
   overflow: auto;
   overflow-anchor: none;
   padding: 18px 28px 8px;
+  scroll-padding-top: 22px;
   background: var(--app-surface);
 }
 
@@ -2854,6 +2855,31 @@
   overflow: visible;
 }
 
+.chat-message.message-focused {
+  position: relative;
+  isolation: isolate;
+  background: transparent;
+}
+
+.chat-message.message-focused::before {
+  position: absolute;
+  z-index: -1;
+  inset: -16px;
+  border-radius: 12px;
+  background: var(--app-accent-soft);
+  content: "";
+}
+
+.chat-message.message-focused .message-body {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.chat-message.message-flash .message-body {
+  animation: none;
+}
+
 /* Grouped icon-only hover toolbar, floating top-right (design handoff §4). */
 .chat-message .message-actions {
   position: absolute;
@@ -4015,6 +4041,7 @@
   min-height: 0;
   overflow: auto;
   padding: 16px 20px 8px;
+  scroll-padding-top: 22px;
 }
 
 .chat-thread-replies {
