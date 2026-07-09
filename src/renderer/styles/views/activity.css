@@ -1,9 +1,45 @@
 .activity-view {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(320px, 400px) minmax(0, 1fr);
+  grid-template-columns: var(--activity-list-width, 400px) minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   background: var(--app-activity-bg);
+}
+
+.activity-list-resizer {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--activity-list-width, 400px) - 5px);
+  width: 10px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.activity-list-resizer::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 50%;
+  width: 1px;
+  background: transparent;
+  transform: translateX(-0.5px);
+}
+
+.activity-list-resizer:hover::before,
+.activity-list-resizer:focus-visible::before,
+.activity-view[data-resizing="true"] .activity-list-resizer::before {
+  background: var(--app-accent);
+}
+
+.activity-list-resizer:focus-visible {
+  outline: none;
+}
+
+.activity-view[data-resizing="true"] {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .activity-list-pane {
@@ -324,6 +360,10 @@
 
 @media (max-width: 900px) {
   .activity-view {
-    grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+    grid-template-columns: min(var(--activity-list-width, 340px), 340px) minmax(0, 1fr);
+  }
+
+  .activity-list-resizer {
+    left: calc(min(var(--activity-list-width, 340px), 340px) - 5px);
   }
 }

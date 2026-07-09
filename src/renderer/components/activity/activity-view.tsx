@@ -1,4 +1,5 @@
 import { ArrowRight, MessageSquare, RefreshCw } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type React from "react";
 import type { ChatActivityItem, ChatActivityParticipantSummary } from "../../../shared/types";
 import { resolveSelectedChatActivityItem } from "../../../shared/chatActivity";
@@ -6,6 +7,14 @@ import { Avatar } from "../avatar/avatar";
 import { avatarForChatParticipant } from "../chat/chat-avatars";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import { Button } from "@/components/ui/button";
+
+const ACTIVITY_LIST_WIDTH_STORAGE_KEY = "accordagents-activity-list-width";
+const DEFAULT_ACTIVITY_LIST_WIDTH = 400;
+const MIN_ACTIVITY_LIST_WIDTH = 320;
+const MAX_ACTIVITY_LIST_WIDTH = 560;
+const NARROW_ACTIVITY_LIST_WIDTH = 260;
+const NARROW_ACTIVITY_LIST_MAX_WIDTH = 340;
+const MIN_ACTIVITY_DETAIL_WIDTH = 360;
 
 export interface ActivityViewProps {
   items: ChatActivityItem[];
@@ -29,9 +38,77 @@ export function ActivityView({
   onRetry
 }: ActivityViewProps): JSX.Element {
   const selectedItem = resolveSelectedChatActivityItem(items, selectedItemProp);
+  const rootRef = useRef<HTMLElement>(null);
+  const cleanupResizeRef = useRef<(() => void) | null>(null);
+  const [listWidth, setListWidth] = useState(readStoredActivityListWidth);
+  const [resizing, setResizing] = useState(false);
+
+  useEffect(() => () => cleanupResizeRef.current?.(), []);
+
+  useEffect(() => {
+    window.localStorage.setItem(ACTIVITY_LIST_WIDTH_STORAGE_KEY, String(listWidth));
+  }, [listWidth]);
+
+  const resizeLimits = (): { min: number; max: number } => {
+    const containerWidth = rootRef.current?.getBoundingClientRect().width ?? Number.POSITIVE_INFINITY;
+    const narrow = containerWidth <= 900;
+    const min = narrow ? NARROW_ACTIVITY_LIST_WIDTH : MIN_ACTIVITY_LIST_WIDTH;
+    const designMax = narrow ? NARROW_ACTIVITY_LIST_MAX_WIDTH : MAX_ACTIVITY_LIST_WIDTH;
+    return {
+      min,
+      max: Math.max(min, Math.min(designMax, containerWidth - MIN_ACTIVITY_DETAIL_WIDTH))
+    };
+  };
+
+  const updateListWidth = (width: number): void => {
+    const { min, max } = resizeLimits();
+    setListWidth(Math.round(Math.min(max, Math.max(min, width))));
+  };
+
+  const startResize = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const root = rootRef.current;
+    if (!root) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setResizing(true);
+    const rootLeft = root.getBoundingClientRect().left;
+    const move = (moveEvent: PointerEvent): void => updateListWidth(moveEvent.clientX - rootLeft);
+    const stop = (): void => {
+      setResizing(false);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      cleanupResizeRef.current = null;
+    };
+    cleanupResizeRef.current = stop;
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop, { once: true });
+  };
+
+  const resizeWithKeyboard = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      updateListWidth(listWidth - 16);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      updateListWidth(listWidth + 16);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      updateListWidth(resizeLimits().min);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      updateListWidth(resizeLimits().max);
+    }
+  };
+
   return (
-    <section className="activity-view" aria-label="Activity">
-      <aside className="activity-list-pane">
+    <section
+      ref={rootRef}
+      className="activity-view"
+      data-resizing={resizing ? "true" : undefined}
+      aria-label="Activity"
+      style={{ "--activity-list-width": `${listWidth}px` } as React.CSSProperties}
+    >
+      <aside id="activity-list-pane" className="activity-list-pane">
         <div className="activity-list-header">
           <h1>Activity</h1>
         </div>
@@ -62,6 +139,21 @@ export function ActivityView({
           )}
         </div>
       </aside>
+      <div
+        className="activity-list-resizer"
+        role="separator"
+        tabIndex={0}
+        aria-label="Resize activity list"
+        aria-controls="activity-list-pane"
+        aria-orientation="vertical"
+        aria-valuemin={resizeLimits().min}
+        aria-valuemax={resizeLimits().max}
+        aria-valuenow={listWidth}
+        title="Resize activity list"
+        onPointerDown={startResize}
+        onKeyDown={resizeWithKeyboard}
+        onDoubleClick={() => updateListWidth(DEFAULT_ACTIVITY_LIST_WIDTH)}
+      />
       <div className="activity-detail-pane">
         <div className="activity-detail-header">
           <MessageSquare className="activity-detail-header-icon" aria-hidden="true" size={17} strokeWidth={1.75} />
@@ -90,6 +182,13 @@ export function ActivityView({
       </div>
     </section>
   );
+}
+
+function readStoredActivityListWidth(): number {
+  const stored = Number.parseFloat(window.localStorage.getItem(ACTIVITY_LIST_WIDTH_STORAGE_KEY) ?? "");
+  return Number.isFinite(stored)
+    ? Math.min(MAX_ACTIVITY_LIST_WIDTH, Math.max(NARROW_ACTIVITY_LIST_WIDTH, stored))
+    : DEFAULT_ACTIVITY_LIST_WIDTH;
 }
 
 function ActivityRow({
