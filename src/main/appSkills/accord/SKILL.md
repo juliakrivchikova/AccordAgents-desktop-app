@@ -3,7 +3,7 @@ name: accord
 visibility: public
 description: >
   Facilitate a skeptical multi-member AccordAgents discussion that ends in
-  one canonical resolution approved by every selected member. Use only when
+  one agreed resolution approved by every selected member. Use only when
   User explicitly wants an accord, multi-member consensus, cross-checking by
   named members, or a resolution approved by multiple agents. Do not use for
   an ordinary single-agent answer, review, double-check, or "what do you think".
@@ -12,7 +12,7 @@ description: >
 # Accord
 
 Use this skill to lead a bounded, skeptical discussion between current
-AccordAgents chat participants and produce one canonical resolution.
+AccordAgents chat participants and produce one agreed resolution.
 
 Use it only when User explicitly wants an accord: multi-participant consensus,
 cross-checking by named participants, combined findings, or a plan/decision
@@ -23,20 +23,20 @@ ask before starting.
 
 ## Core Rule
 
-Approval authority is the `✅` reactor set on the canonical message. Consensus is
+Approval authority is the `✅` reactor set on the resolution message. Consensus is
 reached only when:
 
 - You have skeptically reviewed and approved the final resolution yourself.
-- You published one canonical resolution message with `app_chat_send_message`.
-- You added your own `✅` reaction to that canonical message.
-- Every selected participant read that exact canonical message (by its
+- You published one agreed resolution message with `app_chat_send_message`.
+- You added your own `✅` reaction to that resolution message.
+- Every selected participant read that exact resolution message (by its
   `messageId`).
-- The canonical message's `metadata.reactions["✅"]` includes you and every
+- The resolution message's `metadata.reactions["✅"]` includes you and every
   selected participant actor.
 - No selected participant has an unresolved objection or correction outstanding
   against that exact message.
 
-Approval is determined by the `✅` reactor identity on the canonical message, not
+Approval is determined by the `✅` reactor identity on the resolution message, not
 by any exact reply text. A participant's text reply is only a signal: it can
 raise an objection/correction, but it is not required as a second approval step.
 Do not claim consensus from prose alone, and do not require any participant to
@@ -78,7 +78,7 @@ Do not silently choose participants when User did not name them.
 Do not force a specific number of participants. A single
 `app_chat_request_participants` call can target at most 4 selected participants;
 if User explicitly wants more, handle them in sequential batches while preserving
-the same canonical approval process, and stay within the participant-request rate
+the same approval process, and stay within the participant-request rate
 limits (do not issue more than 8 participant requests per minute).
 
 ## Workflow
@@ -93,17 +93,17 @@ limits (do not issue more than 8 participant requests per minute).
    User choice.
 7. Review the candidate yourself skeptically.
 8. If corrections are needed, revise before publishing.
-9. Publish one canonical resolution message as a reply to User's original
+9. Publish one agreed resolution message as a reply to User's original
    request using `app_chat_send_message`. It returns the `messageId` and
    `sequence`; the message is immediately visible to you for the rest of this
    turn.
-10. Add your own `✅` reaction to the canonical message using `app_chat_react`.
-11. Ask selected participants to read and approve that exact canonical message by
+10. Add your own `✅` reaction to the resolution message using `app_chat_react`.
+11. Ask selected participants to read and approve that exact resolution message by
     `messageId`.
 12. If a participant objects, run one focused follow-up round for that disputed
-    item (see Disputed Dispositions). Revise and publish a new canonical message
+    item (see Disputed Dispositions). Revise and publish a new resolution message
     when warranted, or ask User for any User-owned decision.
-13. Verify approval by reading the canonical message and checking its `✅`
+13. Verify approval by reading the resolution message and checking its `✅`
     reactor set.
 14. Report consensus only after verification, or clearly report that consensus
     was not reached.
@@ -182,7 +182,7 @@ Examples:
   choosing silently.
 - Rejecting or reframing a participant concern is not a unilateral facilitator
   decision. It must be visible in `Reasoning / Dispositions` and approved by the
-  participant through the canonical message approval flow.
+  participant through the resolution message approval flow.
 
 ## Reasoning / Dispositions
 
@@ -190,7 +190,7 @@ Accepted participant concerns should be incorporated directly into the
 resolution. Do not list accepted concerns separately just to say they were
 accepted.
 
-The canonical resolution must include a `Reasoning / Dispositions` section only
+The agreed resolution must include a `Reasoning / Dispositions` section only
 when a participant concern was reframed, rejected, or resolved by User choice.
 
 For each such concern, include:
@@ -210,10 +210,10 @@ Disposition meanings:
 - resolved by User choice: the concern depended on User-owned preference,
   requirement, scope, priority, or risk tolerance, and User chose a path
 
-Participant approval of the canonical message means approval of both the final
+Participant approval of the resolution message means approval of both the final
 resolution and every entry in `Reasoning / Dispositions`.
 
-Do not include unresolved objections in an approved canonical resolution. If a
+Do not include unresolved objections in an approved resolution. If a
 selected participant still rejects a disposition or keeps an objection, there is
 no accord yet.
 
@@ -221,7 +221,7 @@ no accord yet.
 
 If a concern depends on User-owned preference, requirement, scope, priority, or
 risk tolerance, pause and ask User with the app's user-choice format before
-publishing the canonical resolution.
+publishing the resolution.
 
 Do not hide User-owned decisions inside the resolution as "deferred to User."
 
@@ -237,17 +237,17 @@ reached or blocked on User decision.
 
 ## Disputed Dispositions
 
-If the canonical message reframes or rejects a participant concern, that
+If the resolution message reframes or rejects a participant concern, that
 disposition must be visible in `Reasoning / Dispositions`.
 
 During approval, the participant either approves that disposition by reacting
-`✅` to the canonical message or objects.
+`✅` to the resolution message or objects.
 
 If the participant objects, run exactly one focused follow-up round for that
 disputed item:
 
 ```text
-You did not approve this disposition in the canonical resolution.
+You did not approve this disposition in the resolution.
 
 Original concern from the participant (use plain name, no `@`):
 ...
@@ -269,7 +269,7 @@ Outcomes after that single focused round:
 
 - If the participant accepts the disposition, continue approval.
 - If the participant provides a valid correction, revise and publish a new
-  canonical message, then run a fresh approval round on the new message.
+  resolution message, then run a fresh approval round on the new message.
 - If the issue depends on User-owned criteria, ask User with the user-choice
   format.
 - If the participant still rejects the disposition and no User-owned decision can
@@ -278,7 +278,7 @@ Outcomes after that single focused round:
 
 ## Facilitator Self-Review
 
-Before publishing any canonical resolution, review it yourself skeptically.
+Before publishing any resolution, review it yourself skeptically.
 
 Check:
 
@@ -293,25 +293,25 @@ Check:
 Only publish after you personally agree the resolution is exhaustive and
 correct.
 
-## Publish Canonical Resolution
+## Publish the Resolution
 
 Publish the candidate/final resolution as a reply to User's original request, in
 User's original thread. The publish step returns the new message's id, and the
-message is visible to you immediately. That returned id is the canonical approval
+message is visible to you immediately. That returned id is the approval
 target.
 
 Immediately add your own `✅` reaction to that message. If reacting is ever denied
 because the message is not yet visible, re-read it by its id and retry once; if it
 still fails, stop and report that you could not attach your approval reaction.
 
-### Referencing the canonical message
+### Referencing the resolution message
 
-Whenever you mention the canonical message in text User will see (the approval
+Whenever you mention the resolution message in text User will see (the approval
 request, the final consensus line, follow-ups), reference it as a link instead of
 pasting the raw id. Write a short label and the id like this:
 
 ```text
-[the resolution](#msg:CANONICAL_MESSAGE_ID)
+[the resolution](#msg:RESOLUTION_MESSAGE_ID)
 ```
 
 The app renders that as a clickable link that scrolls to the message. The link is
@@ -322,11 +322,11 @@ alone, nothing else.
 
 ## Approval Round Prompt
 
-Ask every selected participant to approve the same canonical message. Reference it
+Ask every selected participant to approve the same resolution message. Reference it
 with the message link so the request reads cleanly:
 
 ```text
-Please review the canonical resolution: [the resolution](#msg:CANONICAL_MESSAGE_ID).
+Please review the resolution: [the resolution](#msg:RESOLUTION_MESSAGE_ID).
 This is the only version under approval.
 
 Stay skeptical. Do not accept the facilitator's reasoning by default. Double check
@@ -344,7 +344,7 @@ automatically — do not repost it as a separate message.
 If a participant objects, continue with the single focused follow-up in Disputed
 Dispositions. Ask User with the user-choice format if the issue depends on
 User-owned criteria. When warranted, revise the resolution, publish a new
-canonical message, add your own `✅`, and ask participants to approve the new
+resolution message, add your own `✅`, and ask participants to approve the new
 message. Older approvals do not count for the new message.
 
 ## Approval Verification
@@ -356,11 +356,11 @@ non-approval: address it before claiming consensus, even if other reactions are
 present.
 
 If a participant's reply corrects or disputes the resolution, do not re-ask them
-to approve the same version. Revise the resolution, publish a new canonical
+to approve the same version. Revise the resolution, publish a new resolution
 message, add your own `✅`, and run a fresh approval round on the new message.
 Never request a reaction again on a version a participant has corrected.
 
-Before claiming consensus, call `app_chat_read_messages` with the canonical
+Before claiming consensus, call `app_chat_read_messages` with the resolution
 `messageId` and inspect `metadata.reactions["✅"]`.
 
 Approval is complete only when the `✅` reactors include:
@@ -379,7 +379,7 @@ run is interrupted). When you are invoked again for the same accord, do not
 blindly republish or re-request participants. First:
 
 1. Read the original thread with `app_chat_read_messages`.
-2. Identify the latest canonical accord candidate message, if one exists, and
+2. Identify the latest candidate resolution message, if one exists, and
    read it by `messageId`.
 3. Check its `✅` reactor set and any participant replies posted since that
    message.
@@ -391,15 +391,15 @@ blindly republish or re-request participants. First:
 If consensus is reached, reply briefly with the message link (not a raw id):
 
 ```text
-Consensus: approved by facilitator, a, b, c on [the resolution](#msg:CANONICAL_MESSAGE_ID).
+Consensus: approved by facilitator, a, b, c on [the resolution](#msg:RESOLUTION_MESSAGE_ID).
 ```
 
-Do not repeat the full resolution if the canonical message already contains it,
+Do not repeat the full resolution if the resolution message already contains it,
 unless User asks for a copy.
 
 "Consensus: not reached" is a final outcome only. Report it only after the single
 focused follow-up is exhausted. Never report it while the accord is still in
-progress, and never publish a new canonical message in the same turn after
+progress, and never publish a new resolution message in the same turn after
 reporting it. If approval is simply still pending, say so instead (a short waiting
 status), not "not reached".
 
@@ -425,11 +425,11 @@ User decision needed:
 
 - Use `app_chat_get_participants` for roster discovery.
 - Use `app_chat_read_messages` to inspect context, and to read the exact
-  canonical message by `messageId` (including its `metadata.reactions`).
+  resolution message by `messageId` (including its `metadata.reactions`).
 - Use `app_chat_request_participants` for participant answers.
-- Use `app_chat_send_message` to publish the canonical resolution; reuse its
+- Use `app_chat_send_message` to publish the resolution; reuse its
   returned `messageId` as the approval target.
-- Use `app_chat_react` to add your own `✅` to the canonical message.
+- Use `app_chat_react` to add your own `✅` to the resolution message.
 - Do not rely on plain `@mentions` when another participant is expected to
   answer.
 - Do not put `@handle` mentions in any accord message you send. You reach
