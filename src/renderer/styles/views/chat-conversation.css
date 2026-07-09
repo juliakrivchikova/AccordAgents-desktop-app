@@ -326,6 +326,11 @@
   transition: background 120ms ease, border-color 120ms ease;
 }
 
+.chat-rt-watch:not(.is-on):not(.is-disabled) .chat-rt-watch-track {
+  border-color: var(--app-muted);
+  background: var(--app-muted);
+}
+
 .chat-rt-watch-thumb {
   position: absolute;
   top: 2px;
@@ -335,6 +340,10 @@
   border-radius: 999px;
   background: var(--app-muted);
   transition: transform 120ms ease, background 120ms ease;
+}
+
+.chat-rt-watch:not(.is-on):not(.is-disabled) .chat-rt-watch-thumb {
+  background: var(--app-surface);
 }
 
 .chat-rt-watch.is-on .chat-rt-watch-track {
@@ -2118,6 +2127,18 @@
   background: var(--app-surface-subtle);
 }
 
+.chat-app-tool-review-toggle.is-disabled,
+.chat-app-tool-review-fieldset:disabled .chat-app-tool-review-toggle {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.chat-app-tool-review-toggle.is-disabled:hover,
+.chat-app-tool-review-fieldset:disabled .chat-app-tool-review-toggle:hover {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+}
+
 .chat-app-tool-review-toggle input {
   position: absolute;
   opacity: 0;
@@ -2137,6 +2158,11 @@
   border-radius: var(--radius-pill);
   background: var(--app-surface-hover);
   transition: background 150ms ease, border-color 150ms ease;
+}
+
+.chat-app-tool-review-toggle input:not(:checked):not(:disabled) + .chat-app-tool-review-switch {
+  border-color: var(--app-muted);
+  background: var(--app-muted);
 }
 
 .chat-app-tool-review-switch.on {

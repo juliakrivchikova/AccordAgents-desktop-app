@@ -36,10 +36,12 @@ import {
   AWS_WORKER_ROOT_VOLUME_SIZE_GB_OPTIONS,
   normalizeAwsRootVolumeSizeGb
 } from "../../../shared/cloudRuns";
+import { writeClipboardText, type ClipboardWriteResult } from "../../../shared/clipboard";
 
 const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits transitive member-to-member request nesting, not repeated rounds by the same requester.";
 const PARTICIPANT_REQUEST_PROMPT_MAX_HELP = "Maximum characters accepted for each member request prompt. Longer prompts are rejected, not truncated.";
 const AUTO_WATCH_WAKE_LIMIT_HELP = "Pauses auto-watch after this many automatic watcher runs happen without a user message.";
+type ClipboardFeedback = "idle" | ClipboardWriteResult;
 
 const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
   "codex-cli": new URL("../../assets/codex-cli.svg", import.meta.url).href,
@@ -183,10 +185,7 @@ export function GeneralSettingsSection(props: {
       </section>
 
       <section className="gen-section">
-        <div className="gen-section-head">
-          <h2 className="gen-section-title">Cloud Runs (beta)</h2>
-          <span className="gen-section-meta">{props.cloudRuns.enabled ? "Enabled" : "Disabled"}</span>
-        </div>
+        <h2 className="gen-section-title gen-section-title-solo">Cloud Runs (beta)</h2>
         <CloudRunsControl settings={props.cloudRuns} onSave={props.saveCloudRunsSettings} />
       </section>
     </>
@@ -202,12 +201,17 @@ function CloudRunsControl(props: {
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<CloudRunWorkerDoctorReport | null>(null);
   const [setupProgress, setSetupProgress] = useState<CloudRunWorkerSetupProgress | null>(null);
+  const [authCopyFeedback, setAuthCopyFeedback] = useState<ClipboardFeedback>("idle");
 
   useEffect(() => {
     setDraft(props.settings);
   }, [props.settings]);
 
   useEffect(() => window.consensus.onCloudRunSetupProgress(setSetupProgress), []);
+
+  useEffect(() => {
+    setAuthCopyFeedback("idle");
+  }, [setupProgress?.authCode]);
 
   const patch = (update: CloudRunsSettingsUpdate): void => {
     setDraft((current) => ({
@@ -284,6 +288,27 @@ function CloudRunsControl(props: {
     void savePatch({ mode });
   };
 
+  const copyAuthCode = async (): Promise<void> => {
+    const authCode = setupProgress?.authCode;
+    if (!authCode) {
+      return;
+    }
+    const result = await writeClipboardText(authCode, (value) => navigator.clipboard.writeText(value));
+    setAuthCopyFeedback(result);
+    window.setTimeout(() => setAuthCopyFeedback("idle"), 1400);
+  };
+
+  const authCopyLabel = authCopyFeedback === "copied"
+    ? "Copied"
+    : authCopyFeedback === "failed"
+      ? "Copy failed"
+      : "Copy";
+  const authCopyAriaLabel = authCopyFeedback === "copied"
+    ? "Copied device authentication code"
+    : authCopyFeedback === "failed"
+      ? "Copy device authentication code failed"
+      : "Copy device authentication code";
+
   return (
     <div className="gen-card">
       <div className="gen-row">
@@ -294,18 +319,24 @@ function CloudRunsControl(props: {
         <label className="toggle">
           <input
             type="checkbox"
+            data-testid="remote-codex-worker-toggle"
             checked={draft.enabled}
             disabled={busy}
             onChange={(event) => {
               const enabled = event.target.checked;
-              void savePatch({ enabled }, enabled ? "Cloud Runs enabled." : "Cloud Runs disabled.");
+              void savePatch({ enabled });
             }}
           />
           <span />
         </label>
       </div>
-      <div className="gen-card-divider" />
-      <div className="gen-row">
+      <fieldset
+        className="gen-cloud-runs-settings"
+        data-testid="remote-codex-worker-settings"
+        disabled={!draft.enabled}
+      >
+        <div className="gen-card-divider" />
+        <div className="gen-row">
         <div className="gen-row-text">
           <div className="gen-row-title">Worker source</div>
           <div className="gen-row-desc">Let the app create and manage an EC2 worker, or point it at a box you own.</div>
@@ -398,7 +429,26 @@ function CloudRunsControl(props: {
               >
                 Open the sign-in page
               </button>
-              {setupProgress.authCode ? ` and enter code ${setupProgress.authCode}` : ""}
+              {setupProgress.authCode ? (
+                <>
+                  {" and enter code "}
+                  <code className="gen-doctor-auth-code" data-testid="cloud-run-device-auth-code">
+                    {setupProgress.authCode}
+                  </code>
+                  <button
+                    type="button"
+                    className="gen-doctor-auth-copy"
+                    data-testid="cloud-run-device-auth-copy"
+                    aria-label={authCopyAriaLabel}
+                    onClick={() => void copyAuthCode()}
+                  >
+                    {authCopyFeedback === "copied"
+                      ? <CheckCircle2 size={13} aria-hidden />
+                      : <Copy size={13} aria-hidden />}
+                    <span aria-live="polite">{authCopyLabel}</span>
+                  </button>
+                </>
+              ) : null}
             </div>
           )}
         </div>
@@ -431,6 +481,7 @@ function CloudRunsControl(props: {
           </ul>
         </>
       )}
+      </fieldset>
     </div>
   );
 }
@@ -476,14 +527,14 @@ function AwsWorkerPanel(props: {
   const [status, setStatus] = useState<AwsWorkerStatus | null>(null);
   const [message, setMessage] = useState<string>("");
   const [busy, setBusy] = useState(false);
-  const [copiedCommand, setCopiedCommand] = useState(false);
+  const [commandCopyFeedback, setCommandCopyFeedback] = useState<ClipboardFeedback>("idle");
 
   useEffect(() => {
     void window.consensus.getAwsWorkerStatus().then(setStatus).catch(() => undefined);
   }, []);
 
   useEffect(() => {
-    setCopiedCommand(false);
+    setCommandCopyFeedback("idle");
   }, [command]);
 
   const loadCommand = async (): Promise<void> => {
@@ -540,10 +591,21 @@ function AwsWorkerPanel(props: {
     if (!command) {
       return;
     }
-    await navigator.clipboard.writeText(command);
-    setCopiedCommand(true);
-    window.setTimeout(() => setCopiedCommand(false), 1400);
+    const result = await writeClipboardText(command, (value) => navigator.clipboard.writeText(value));
+    setCommandCopyFeedback(result);
+    window.setTimeout(() => setCommandCopyFeedback("idle"), 1400);
   };
+
+  const commandCopyLabel = commandCopyFeedback === "copied"
+    ? "Copied"
+    : commandCopyFeedback === "failed"
+      ? "Copy failed"
+      : "Copy";
+  const commandCopyAriaLabel = commandCopyFeedback === "copied"
+    ? "Copied AWS setup command"
+    : commandCopyFeedback === "failed"
+      ? "Copy AWS setup command failed"
+      : "Copy AWS setup command";
 
   const remove = async (): Promise<void> => {
     setBusy(true);
@@ -627,13 +689,16 @@ function AwsWorkerPanel(props: {
           <button
             type="button"
             className="gen-aws-copy"
-            aria-label={copiedCommand ? "Copied AWS setup command" : "Copy AWS setup command"}
+            data-testid="aws-worker-command-copy"
+            aria-label={commandCopyAriaLabel}
             onClick={() => void copyCommand()}
           >
-            {copiedCommand ? <CheckCircle2 size={14} aria-hidden /> : <Copy size={14} aria-hidden />}
-            <span>{copiedCommand ? "Copied" : "Copy"}</span>
+            {commandCopyFeedback === "copied"
+              ? <CheckCircle2 size={14} aria-hidden />
+              : <Copy size={14} aria-hidden />}
+            <span aria-live="polite">{commandCopyLabel}</span>
           </button>
-          <pre className="gen-aws-command" aria-label="AWS setup command">{command}</pre>
+          <pre className="gen-aws-command" data-testid="aws-worker-command" aria-label="AWS setup command">{command}</pre>
         </div>
       ) : null}
       <div className="gen-card-divider" />

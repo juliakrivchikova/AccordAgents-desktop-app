@@ -907,6 +907,14 @@ ul.markdown-list {
   cursor: pointer;
 }
 
+.toggle input:not(:checked):not(:disabled) + span {
+  background: var(--app-muted);
+}
+
+.toggle input:disabled + span {
+  cursor: default;
+}
+
 .toggle span::before {
   content: "";
   position: absolute;
@@ -921,6 +929,14 @@ ul.markdown-list {
 
 .toggle input:checked + span {
   background: var(--app-success);
+}
+
+.toggle input:checked:disabled + span {
+  background: var(--app-accent-soft);
+}
+
+.toggle input:checked:disabled + span::before {
+  background: color-mix(in srgb, var(--app-accent) 72%, var(--app-surface));
 }
 
 .toggle input:checked + span::before {

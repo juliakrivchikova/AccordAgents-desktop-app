@@ -211,14 +211,12 @@ function ManualVariableList(props: {
           <KeyRound size={16} aria-hidden />
           <div className="env-manual-main">
             <strong>{variable.key}</strong>
-            <span>
-              {variable.enabled ? "Enabled" : "Disabled"}
-              {variable.overridesDetected ? " · overrides propagated key" : ""}
-            </span>
+            {variable.overridesDetected && <span>Overrides propagated key</span>}
           </div>
           <label className="toggle env-toggle">
             <input
               type="checkbox"
+              aria-label={`Enable ${variable.key}`}
               checked={variable.enabled}
               disabled={props.busyKey === variable.key}
               onChange={(event) => void props.onToggle(variable, event.target.checked)}
