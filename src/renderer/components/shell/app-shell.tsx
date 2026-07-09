@@ -81,6 +81,7 @@ export const AppShell = ({
         className
       )}
     >
+      <div data-shell="top-strip" className="app-shell-top-strip" aria-hidden="true" />
       <div data-shell="rail-slot" className="app-shell-rail-slot">
         {rail}
       </div>

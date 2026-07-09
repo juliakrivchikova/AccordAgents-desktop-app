@@ -230,7 +230,7 @@ function ActivityRow({
           </span>
           <span className="activity-row-time">{relativeTime(item.updatedAt)}</span>
         </span>
-        <ActivityPreview text={item.preview} />
+        <span className="activity-row-preview">{item.preview}</span>
       </span>
     </button>
   );
@@ -239,19 +239,6 @@ function ActivityRow({
 function activityActorHandle(item: ChatActivityItem): string {
   const handle = item.participant?.handle.trim().replace(/^@+/, "");
   return handle ? `@${handle}` : "Activity";
-}
-
-function ActivityPreview({ text }: { text: string }): JSX.Element {
-  const parts = text.split(/([#@][A-Za-z0-9_./-]+)/g);
-  return (
-    <span className="activity-row-preview">
-      {parts.map((part, index) => (
-        /^[#@]/.test(part)
-          ? <span key={`${part}-${index}`} className="activity-row-token">{part}</span>
-          : part
-      ))}
-    </span>
-  );
 }
 
 function avatarForActivityParticipant(participant: ChatActivityParticipantSummary) {

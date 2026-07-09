@@ -241,17 +241,14 @@
 
 .activity-row-preview {
   display: -webkit-box;
-  color: var(--app-text-strong);
+  color: var(--app-text);
+  font-family: var(--font-body);
   font-size: 15px;
+  font-weight: 400;
   line-height: 24px;
+  letter-spacing: 0;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
-}
-
-.activity-row-token {
-  color: var(--app-activity-token);
-  font-family: var(--font-code);
-  font-size: 0.92em;
 }
 
 .activity-detail-pane {
@@ -318,7 +315,16 @@
 }
 
 .activity-detail-body .chat-timeline {
+  padding-top: 30px;
+  padding-left: 40px;
   padding-bottom: max(240px, 42vh);
+  scroll-padding-top: 30px;
+}
+
+.activity-detail-body .chat-thread-body {
+  padding-top: 28px;
+  padding-left: 32px;
+  scroll-padding-top: 28px;
 }
 
 .activity-detail-body .chat-message.message-focused {
