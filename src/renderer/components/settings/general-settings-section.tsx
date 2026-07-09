@@ -183,10 +183,7 @@ export function GeneralSettingsSection(props: {
       </section>
 
       <section className="gen-section">
-        <div className="gen-section-head">
-          <h2 className="gen-section-title">Cloud Runs (beta)</h2>
-          <span className="gen-section-meta">{props.cloudRuns.enabled ? "Enabled" : "Disabled"}</span>
-        </div>
+        <h2 className="gen-section-title gen-section-title-solo">Cloud Runs (beta)</h2>
         <CloudRunsControl settings={props.cloudRuns} onSave={props.saveCloudRunsSettings} />
       </section>
     </>
@@ -306,7 +303,7 @@ function CloudRunsControl(props: {
           <div className="gen-row-title">Remote Codex worker</div>
           <div className="gen-row-desc">Run Codex members marked remote on a worker instead of this machine.</div>
         </div>
-        <label className="toggle">
+        <label className="toggle gen-cloud-runs-toggle">
           <input
             type="checkbox"
             checked={draft.enabled}
