@@ -64,9 +64,14 @@ export function useAppEffects(
           lastViewedAt: state.lastViewedAtRef.current[updated.id],
           treatAsViewed: isActive && matchesCurrentSnapshot
         });
-        state.setActivityItems((activityCurrent) => mergeChatActivityItems(activityCurrent, activityItems, {
-          replaceConversationId: updated.id
-        }));
+        state.setActivityItems((activityCurrent) => {
+          const preservedReadItems = activityCurrent
+            .filter((item) => item.conversationId === updated.id && item.status === "recent")
+            .map((item) => (isActive ? { ...item, read: true } : item));
+          return mergeChatActivityItems(activityCurrent, [...activityItems, ...preservedReadItems], {
+            replaceConversationId: updated.id
+          });
+        });
         if (!matchesCurrentSnapshot) {
           if (!isActive) {
             const lastViewed = state.lastViewedAtRef.current[updated.id];

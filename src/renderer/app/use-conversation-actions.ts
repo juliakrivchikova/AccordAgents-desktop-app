@@ -1,4 +1,6 @@
-import type { ChatActivityItem, Conversation } from "../../shared/types";
+import type { ChatActivityItem, ChatMessage, Conversation } from "../../shared/types";
+import { buildChatActivityItems, mergeChatActivityItems } from "../../shared/chatActivity";
+import { focusRenderedMessage } from "../components/content/markdown-text";
 import {
   CONVERSATION_MESSAGE_PAGE_SIZE,
   mergeLoadedMessagePage,
@@ -47,7 +49,14 @@ export function useConversationActions(state: AppState): ConversationActions {
       const result = await window.consensus.listChatActivity({
         lastViewedAtByConversationId: state.lastViewedAtRef.current
       });
-      state.setActivityItems(result.items);
+      state.setActivityItems((current) => {
+        const preservedReadItems = current
+          .filter((item) => item.status === "recent")
+          .map((item) => ({ ...item, read: true }));
+        return preservedReadItems.length > 0
+          ? mergeChatActivityItems(preservedReadItems, result.items)
+          : result.items;
+      });
     } catch (caught) {
       state.setActivityError(errorText(caught));
     } finally {
@@ -137,22 +146,132 @@ export function useConversationActions(state: AppState): ConversationActions {
 
   async function openConversationAndFocusActivityItem(item: ChatActivityItem): Promise<void> {
     const conversation = await openConversationForSelection(item.conversationId);
-    const messageId = item.target.messageId?.trim();
-    if (!conversation || !messageId) {
+    if (!conversation) {
       return;
     }
+    const resolvedItem = resolveLoadedActivityItemTarget(item, conversation);
+    const messageId = resolvedItem.target.messageId?.trim();
+    if (!messageId) {
+      return;
+    }
+    state.setSelectedActivityItem((current) => current?.id === item.id ? resolvedItem : current);
     await ensureActivityTargetMessagesLoaded(
       conversation,
       messageId,
-      item.target.threadRootId?.trim() || undefined
+      resolvedItem.target.threadRootId?.trim() || undefined
     );
     await waitForNextFrame();
     state.chatMessageFocusNonceRef.current += 1;
     state.setChatMessageFocusRequest({
       messageId,
-      threadRootId: item.target.threadRootId?.trim() || undefined,
+      threadRootId: resolvedItem.target.threadRootId?.trim() || undefined,
       nonce: state.chatMessageFocusNonceRef.current
     });
+    scheduleActivityDomFocus(messageId);
+  }
+
+  function resolveLoadedActivityItemTarget(item: ChatActivityItem, conversation: Conversation): ChatActivityItem {
+    if (item.target.messageId?.trim()) {
+      return item;
+    }
+    const candidates = buildChatActivityItems(conversation, {
+      lastViewedAt: state.lastViewedAtRef.current[conversation.id]
+    });
+    return candidates.find((candidate) => candidate.id === item.id && candidate.target.messageId?.trim())
+      ?? candidates.find((candidate) =>
+        candidate.kind === item.kind &&
+        candidate.target.messageId?.trim() &&
+        candidate.target.runId &&
+        candidate.target.runId === item.target.runId
+      )
+      ?? resolveRunActivityItemFromLoadedMessages(item, conversation)
+      ?? item;
+  }
+
+  function resolveRunActivityItemFromLoadedMessages(item: ChatActivityItem, conversation: Conversation): ChatActivityItem | undefined {
+    if (item.status !== "running" && item.kind !== "run") {
+      return undefined;
+    }
+    const runId = item.target.runId?.trim();
+    const message = runId
+      ? [...conversation.messages].reverse().find((candidate) => {
+        const metadata = candidate.metadata as Record<string, unknown> | undefined;
+        return metadata?.runId === runId || metadata?.remoteRunId === runId;
+      })
+      : undefined;
+    const fallbackMessage = message ?? [...conversation.messages].reverse().find((candidate) =>
+      candidate.role === "participant" &&
+      candidate.status === "pending"
+    );
+    if (!fallbackMessage) {
+      return undefined;
+    }
+    return {
+      ...item,
+      target: {
+        ...item.target,
+        messageId: fallbackMessage.id,
+        threadRootId: loadedMessageThreadRootId(fallbackMessage) ?? item.target.threadRootId
+      }
+    };
+  }
+
+  function loadedMessageThreadRootId(message: ChatMessage): string | undefined {
+    const metadata = message.metadata as Record<string, unknown> | undefined;
+    const value = metadata?.chatThreadRootId ?? metadata?.parentMessageId ?? metadata?.threadId;
+    return typeof value === "string" && value.trim() ? value.trim() : undefined;
+  }
+
+  function scheduleActivityDomFocus(messageId: string): void {
+    const attempt = (): void => {
+      const message = visibleMessageElement(messageId);
+      if (!message) {
+        return;
+      }
+      focusRenderedMessage(message.parentElement, messageId, { scroll: false });
+      const scroller = scrollParentForMessage(message);
+      if (!scroller) {
+        return;
+      }
+      const delta = message.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+      if (Number.isFinite(delta) && Math.abs(delta) > 1) {
+        scroller.scrollTop += delta;
+      }
+    };
+    window.requestAnimationFrame(() => {
+      attempt();
+      window.requestAnimationFrame(attempt);
+      window.setTimeout(attempt, 120);
+      window.setTimeout(attempt, 320);
+      window.setTimeout(attempt, 700);
+    });
+  }
+
+  function visibleMessageElement(messageId: string): HTMLElement | undefined {
+    return Array.from(document.querySelectorAll<HTMLElement>(`[data-message-id="${cssEscape(messageId)}"]`))
+      .find((candidate) => {
+        const rect = candidate.getBoundingClientRect();
+        const style = window.getComputedStyle(candidate);
+        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+      });
+  }
+
+  function scrollParentForMessage(message: HTMLElement): HTMLElement | undefined {
+    let current = message.parentElement;
+    while (current) {
+      const style = window.getComputedStyle(current);
+      if (/(auto|scroll)/.test(style.overflowY) && current.scrollHeight > current.clientHeight + 2) {
+        return current;
+      }
+      current = current.parentElement;
+    }
+    return document.scrollingElement instanceof HTMLElement ? document.scrollingElement : undefined;
+  }
+
+  function cssEscape(value: string): string {
+    return typeof CSS !== "undefined" && typeof CSS.escape === "function"
+      ? CSS.escape(value)
+      : value.replace(/["\\]/g, "\\$&");
   }
 
   async function ensureActivityTargetMessagesLoaded(

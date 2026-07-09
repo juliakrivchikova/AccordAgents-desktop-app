@@ -149,7 +149,7 @@ export function useChatConversationViewport(props: {
   }
 
   function scheduleFocusRenderedMessage(messageId: string): void {
-    const focus = (): boolean => focusRenderedMessage(viewRef.current, messageId);
+    const focus = (): boolean => alignRenderedMessageToTimelineStart(messageId);
     window.requestAnimationFrame(() => {
       if (focus()) {
         return;
@@ -164,15 +164,44 @@ export function useChatConversationViewport(props: {
     });
   }
 
+  function renderedMessageElement(messageId: string): HTMLElement | undefined {
+    return Array.from(viewRef.current?.querySelectorAll<HTMLElement>("[data-message-id]") ?? [])
+      .find((candidate) => candidate.dataset.messageId === messageId);
+  }
+
+  function alignRenderedMessageToTimelineStart(messageId: string): boolean {
+    if (!focusRenderedMessage(viewRef.current, messageId, { scroll: false })) {
+      return false;
+    }
+    const message = renderedMessageElement(messageId);
+    const scroller = message ? scrollParentForMessage(message) : timelineRef.current;
+    if (!message || !scroller) {
+      return true;
+    }
+    const delta = message.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+    if (Number.isFinite(delta) && Math.abs(delta) > 1) {
+      scroller.scrollTop += delta;
+    }
+    return true;
+  }
+
+  function scrollParentForMessage(message: HTMLElement): HTMLElement | undefined {
+    let current = message.parentElement;
+    while (current && current !== viewRef.current?.parentElement) {
+      const style = window.getComputedStyle(current);
+      if (/(auto|scroll)/.test(style.overflowY) && current.scrollHeight > current.clientHeight + 2) {
+        return current;
+      }
+      current = current.parentElement;
+    }
+    return timelineRef.current ?? undefined;
+  }
+
   function scheduleScrollToRowAndFocus(messageId: string, rowIndex: number): void {
     const attempt = (): boolean => {
-      if (focusRenderedMessage(viewRef.current, messageId)) {
-        detachFromBottom();
-        return true;
-      }
       detachFromBottom();
       chatVirtualizer.scrollToIndex(rowIndex, { align: "start" });
-      return false;
+      return alignRenderedMessageToTimelineStart(messageId);
     };
     if (attempt()) {
       return;
@@ -185,15 +214,11 @@ export function useChatConversationViewport(props: {
       window.setTimeout(attempt, 80);
       window.setTimeout(attempt, 180);
       window.setTimeout(attempt, 320);
+      window.setTimeout(attempt, 640);
     });
   }
 
   function focusLoadedChatMessage(messageId: string, threadRootId?: string): boolean {
-    if (focusRenderedMessage(viewRef.current, messageId)) {
-      detachFromBottom();
-      return true;
-    }
-
     const rowIndex = props.chatTimelineRows.findIndex((row) => row.type === "message" && row.message.id === messageId);
     if (rowIndex >= 0) {
       scheduleScrollToRowAndFocus(messageId, rowIndex);
@@ -214,7 +239,12 @@ export function useChatConversationViewport(props: {
         return false;
       }
       props.setSelectedThreadRootId(rootId);
-      scheduleFocusRenderedMessage(messageId);
+      const rootRowIndex = props.chatTimelineRows.findIndex((row) => row.type === "message" && row.message.id === rootId);
+      if (rootRowIndex >= 0) {
+        scheduleScrollToRowAndFocus(messageId, rootRowIndex);
+      } else {
+        scheduleFocusRenderedMessage(messageId);
+      }
       return true;
     }
 
