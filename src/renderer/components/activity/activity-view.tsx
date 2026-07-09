@@ -104,6 +104,7 @@ function ActivityRow({
       type="button"
       className="activity-row"
       data-status={item.status}
+      data-read={item.read ? "true" : undefined}
       data-active={active ? "true" : undefined}
       aria-current={active ? "true" : undefined}
       onClick={onSelect}

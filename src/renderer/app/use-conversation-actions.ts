@@ -192,8 +192,13 @@ export function useConversationActions(state: AppState): ConversationActions {
       return ns;
     });
     state.setActivityItems((current) =>
-      current.filter((item) => item.conversationId !== conversation.id || item.status !== "recent")
+      current.map((item) => item.conversationId === conversation.id && item.status === "recent"
+        ? { ...item, read: true }
+        : item)
     );
+    state.setSelectedActivityItem((current) => current?.conversationId === conversation.id && current.status === "recent"
+      ? { ...current, read: true }
+      : current);
   }
 
   async function loadOlderConversationMessages(): Promise<void> {

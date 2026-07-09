@@ -2828,6 +2828,11 @@
   overflow: visible;
 }
 
+.chat-message.message-focused .message-body {
+  background: color-mix(in srgb, var(--app-accent) 13%, var(--app-surface));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--app-accent) 24%, transparent);
+}
+
 /* Grouped icon-only hover toolbar, floating top-right (design handoff §4). */
 .chat-message .message-actions {
   position: absolute;

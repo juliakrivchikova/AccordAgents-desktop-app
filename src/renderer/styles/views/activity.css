@@ -80,6 +80,12 @@
   background: var(--app-accent-soft);
 }
 
+.activity-row[data-read="true"] .activity-status-dot {
+  opacity: 0;
+  box-shadow: none;
+  animation: none;
+}
+
 .activity-row:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);

@@ -1672,6 +1672,7 @@ export interface ChatActivityItem {
   conversationTitle: string;
   repoPath?: string;
   status: ChatActivityStatus;
+  read?: boolean;
   kind: ChatActivityKind;
   title: string;
   preview: string;

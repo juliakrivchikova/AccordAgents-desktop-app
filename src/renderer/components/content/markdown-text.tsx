@@ -70,6 +70,9 @@ export function focusRenderedMessage(root: ParentNode | null | undefined, messag
     return false;
   }
   el.scrollIntoView({ behavior: "smooth", block: "center" });
+  root.querySelectorAll<HTMLElement>(".message-focused")
+    .forEach((candidate) => candidate.classList.remove("message-focused"));
+  el.classList.add("message-focused");
   el.classList.add("message-flash");
   window.setTimeout(() => el.classList.remove("message-flash"), 1500);
   return true;
