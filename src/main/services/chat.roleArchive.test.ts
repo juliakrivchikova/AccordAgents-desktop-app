@@ -38,6 +38,7 @@ function chatServiceWithRoles(roles: ChatRoleConfig[]) {
           mode: "ssh",
           worker: {},
           hasAwsCredentials: false,
+          awsInstanceType: "t3.small",
           awsRootVolumeSizeGb: 8,
           maxRuntimeMs: 24 * 60 * 60_000,
           pollIntervalMs: 2_500

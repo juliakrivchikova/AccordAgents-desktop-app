@@ -38,11 +38,10 @@ test("scoped policy limits state changes to tagged instances in-region", () => {
   const create = policy.Statement.find((statement) => statement.Sid === "CreateInfra");
   assert.ok(create);
   assert.ok(create.Action.includes("ec2:DeleteKeyPair"));
-  assert.ok(create.Action.includes("ec2:DeleteSecurityGroup"));
+  assert.ok(create.Action.includes("ec2:RunInstances"));
   const manage = policy.Statement.find((statement) => statement.Sid === "ManageTaggedInstances");
   assert.ok(manage);
   assert.deepEqual(manage.Action.sort(), ["ec2:StartInstances", "ec2:StopInstances", "ec2:TerminateInstances"]);
-  assert.equal(manage.Condition.StringEquals["aws:RequestedRegion"], "eu-west-1");
   assert.equal(manage.Condition.StringEquals[`ec2:ResourceTag/${AWS_WORKER_TAG_KEY}`], "1");
 });
 
@@ -231,20 +230,20 @@ test("createWorker rotates fresh key material when AWS reports a duplicate key p
 
 test("ensureRunning starts a stopped instance and rebuilds ingress to the current IP", async () => {
   const client = new FakeEc2Client({ state: "stopped", publicIp: undefined });
-  const ip = await lifecycleWith(client).ensureRunning(CREDS, HANDLE);
+  const info = await lifecycleWith(client).ensureRunning(CREDS, HANDLE);
   assert.equal(client.startCount, 1);
-  assert.equal(ip, "2.2.2.2");
-  assert.equal(client.revokedCount, 1);
-  assert.deepEqual(client.revokedSecurityGroups, ["sg-123"]);
+  assert.equal(info.publicIp, "2.2.2.2");
+  assert.equal(client.revokedCount, 0);
+  assert.deepEqual(client.revokedSecurityGroups, []);
   assert.deepEqual([...client.ingressCidrs], ["203.0.113.9/32"]);
 });
 
 test("ensureRunning on a running instance does not start again but still refreshes ingress", async () => {
   const client = new FakeEc2Client({ state: "running", publicIp: "5.5.5.5" });
-  const ip = await lifecycleWith(client).ensureRunning(CREDS, HANDLE);
+  const info = await lifecycleWith(client).ensureRunning(CREDS, HANDLE);
   assert.equal(client.startCount, 0);
-  assert.equal(ip, "5.5.5.5");
-  assert.equal(client.revokedCount, 1);
+  assert.equal(info.publicIp, "5.5.5.5");
+  assert.equal(client.revokedCount, 0);
 });
 
 test("ensureRunning refuses a terminated instance", async () => {
@@ -252,7 +251,7 @@ test("ensureRunning refuses a terminated instance", async () => {
   await assert.rejects(() => lifecycleWith(client).ensureRunning(CREDS, HANDLE), /no longer exists/);
 });
 
-test("idle auto-stop fires only after the last run ends and is cancelled by a new run", async () => {
+test("shared workers are never auto-stopped from per-process idle state", async () => {
   const client = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
   const timers: Array<() => void> = [];
   const lifecycle = new AwsWorkerLifecycle({
@@ -274,7 +273,7 @@ test("idle auto-stop fires only after the last run ends and is cancelled by a ne
   // Last run ends → idle timer stops it.
   lifecycle.runEnded(CREDS, HANDLE);
   await new Promise((resolve) => setTimeout(resolve, 60));
-  assert.equal(client.stopCount, 1);
+  assert.equal(client.stopCount, 0);
   void timers;
 });
 

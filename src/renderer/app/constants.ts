@@ -6,7 +6,10 @@ import {
 } from "../../shared/chatParticipantRequests";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
-import { AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT } from "../../shared/cloudRuns";
+import {
+  AWS_WORKER_INSTANCE_TYPE_DEFAULT,
+  AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT
+} from "../../shared/cloudRuns";
 
 export const DEFAULT_SETTINGS: AppSettings = {
   roundLimitDefault: 2,
@@ -20,6 +23,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     mode: "ssh",
     worker: {},
     hasAwsCredentials: false,
+    awsInstanceType: AWS_WORKER_INSTANCE_TYPE_DEFAULT,
     awsRootVolumeSizeGb: AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT,
     maxRuntimeMs: 24 * 60 * 60_000,
     pollIntervalMs: 2_500

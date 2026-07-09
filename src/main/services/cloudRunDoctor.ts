@@ -164,6 +164,20 @@ export class CloudRunDoctorService {
     return this.diagnose(settings);
   }
 
+  async waitForCloudInit(
+    settings: CloudRunWorkerSettings,
+    onProgress?: (progress: CloudRunWorkerSetupProgress) => void
+  ): Promise<void> {
+    const worker = workerTarget(settings);
+    if (!worker) throw new Error("Worker host is not configured.");
+    onProgress?.({ stage: "cloud-init", message: "Waiting for the worker base image…" });
+    await this.sshExec({
+      worker,
+      command: "command -v cloud-init >/dev/null 2>&1 && sudo -n cloud-init status --wait >/dev/null || true",
+      timeoutMs: 10 * 60_000
+    });
+  }
+
   private async fix(worker: RemoteRunWorkerTarget, command: string): Promise<void> {
     await this.sshExec({ worker, command, timeoutMs: FIX_TIMEOUT_MS });
   }

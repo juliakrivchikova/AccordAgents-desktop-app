@@ -14,6 +14,8 @@ import type {
   ChatAgentPermissions,
   ChatAppToolCapability,
   AwsWorkerHandleInfo,
+  AwsWorkerOperationSnapshot,
+  AwsWorkerSpec,
   CloudRunsSettings,
   CloudRunsSettingsUpdate,
   CloudRunRemoteExecutionMode,
@@ -55,6 +57,8 @@ import { normalizeChatPromptContextSettings } from "../../shared/chatPromptConte
 import { normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
 import {
   AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT,
+  AWS_WORKER_INSTANCE_TYPE_DEFAULT,
+  normalizeAwsInstanceType,
   normalizeAwsRootVolumeSizeGb,
   normalizeOptionalAwsRootVolumeSizeGb
 } from "../../shared/cloudRuns";
@@ -102,6 +106,12 @@ interface StoredSettings {
   encryptedAwsCredentials?: string;
   awsWorkerHandle?: AwsWorkerHandleInfo;
   awsWorkerRegion?: string;
+  cloudRunsDeviceId?: string;
+  awsWorkerOperation?: AwsWorkerOperationSnapshot;
+  awsWorkerSpecAcceptance?: {
+    instanceId: string;
+    desired: AwsWorkerSpec;
+  };
   agentEnvironment?: StoredAgentEnvironmentSettings;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
@@ -125,6 +135,7 @@ const DEFAULT_CLOUD_RUNS_SETTINGS: CloudRunsSettings = {
   mode: "ssh",
   worker: {},
   hasAwsCredentials: false,
+  awsInstanceType: AWS_WORKER_INSTANCE_TYPE_DEFAULT,
   awsRootVolumeSizeGb: AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT,
   maxRuntimeMs: 24 * 60 * 60_000,
   pollIntervalMs: 2_500
@@ -2378,6 +2389,9 @@ export class SettingsService {
       cloudRuns: {
         ...(stored.cloudRuns ?? DEFAULT_CLOUD_RUNS_SETTINGS),
         enabled: update.enabled ?? stored.cloudRuns?.enabled ?? false,
+        awsInstanceType: update.awsInstanceType
+          ?? stored.cloudRuns?.awsInstanceType
+          ?? DEFAULT_CLOUD_RUNS_SETTINGS.awsInstanceType,
         awsRootVolumeSizeGb: update.awsRootVolumeSizeGb
           ?? stored.cloudRuns?.awsRootVolumeSizeGb
           ?? DEFAULT_CLOUD_RUNS_SETTINGS.awsRootVolumeSizeGb,
@@ -2522,6 +2536,11 @@ export class SettingsService {
       encryptedAwsCredentials: typeof settings.encryptedAwsCredentials === "string" ? settings.encryptedAwsCredentials : undefined,
       awsWorkerHandle: this.normalizeAwsWorkerHandle(settings.awsWorkerHandle),
       awsWorkerRegion: typeof settings.awsWorkerRegion === "string" ? settings.awsWorkerRegion.trim() || undefined : undefined,
+      cloudRunsDeviceId: typeof settings.cloudRunsDeviceId === "string" && settings.cloudRunsDeviceId.trim()
+        ? settings.cloudRunsDeviceId.trim()
+        : undefined,
+      awsWorkerOperation: this.normalizeAwsWorkerOperation(settings.awsWorkerOperation),
+      awsWorkerSpecAcceptance: this.normalizeAwsWorkerSpecAcceptance(settings.awsWorkerSpecAcceptance),
       agentEnvironment: {
         variables: this.normalizeAgentEnvironmentVariables(settings.agentEnvironment?.variables)
       },
@@ -2728,6 +2747,7 @@ export class SettingsService {
       hasAwsCredentials: typeof stored.encryptedAwsCredentials === "string" && stored.encryptedAwsCredentials.length > 0,
       awsHandle: stored.awsWorkerHandle,
       awsRegion: stored.awsWorkerRegion,
+      awsInstanceType: normalizeAwsInstanceType(record.awsInstanceType),
       awsRootVolumeSizeGb: normalizeAwsRootVolumeSizeGb(record.awsRootVolumeSizeGb),
       maxRuntimeMs,
       pollIntervalMs
@@ -2774,6 +2794,55 @@ export class SettingsService {
     await this.writeStored(stored);
   }
 
+  async saveAwsWorkerConnection(credentials: AwsWorkerCredentials, handle: AwsWorkerHandleInfo): Promise<void> {
+    const stored = await this.readStored();
+    const json = JSON.stringify(credentials);
+    stored.encryptedAwsCredentials = safeStorage.isEncryptionAvailable()
+      ? safeStorage.encryptString(json).toString("base64")
+      : Buffer.from(json, "utf8").toString("base64");
+    stored.awsWorkerRegion = credentials.region;
+    stored.awsWorkerHandle = handle;
+    stored.cloudRunsMode = "aws";
+    await this.writeStored(stored);
+  }
+
+  async getCloudRunsDeviceId(): Promise<string> {
+    const stored = await this.readStored();
+    const existing = stored.cloudRunsDeviceId?.trim();
+    if (existing) {
+      return existing;
+    }
+    const created = randomUUID();
+    stored.cloudRunsDeviceId = created;
+    await this.writeStored(stored);
+    return created;
+  }
+
+  async saveAwsWorkerOperation(operation: AwsWorkerOperationSnapshot | undefined): Promise<void> {
+    const stored = await this.readStored();
+    stored.awsWorkerOperation = operation;
+    await this.writeStored(stored);
+  }
+
+  async getAwsWorkerOperation(): Promise<AwsWorkerOperationSnapshot | undefined> {
+    const stored = await this.readStored();
+    return this.normalizeAwsWorkerOperation(stored.awsWorkerOperation);
+  }
+
+  async saveAwsWorkerSpecAcceptance(instanceId: string, desired: AwsWorkerSpec): Promise<void> {
+    const stored = await this.readStored();
+    stored.awsWorkerSpecAcceptance = { instanceId, desired };
+    await this.writeStored(stored);
+  }
+
+  async hasAwsWorkerSpecAcceptance(instanceId: string, desired: AwsWorkerSpec): Promise<boolean> {
+    const stored = await this.readStored();
+    const acceptance = this.normalizeAwsWorkerSpecAcceptance(stored.awsWorkerSpecAcceptance);
+    return acceptance?.instanceId === instanceId
+      && acceptance.desired.instanceType === desired.instanceType
+      && acceptance.desired.rootVolumeSizeGb === desired.rootVolumeSizeGb;
+  }
+
   async setCloudRunsMode(mode: CloudRunWorkerMode): Promise<void> {
     const stored = await this.readStored();
     stored.cloudRunsMode = mode;
@@ -2785,6 +2854,8 @@ export class SettingsService {
     stored.encryptedAwsCredentials = undefined;
     stored.awsWorkerHandle = undefined;
     stored.awsWorkerRegion = undefined;
+    stored.awsWorkerOperation = undefined;
+    stored.awsWorkerSpecAcceptance = undefined;
     await this.writeStored(stored);
   }
 
@@ -2805,10 +2876,54 @@ export class SettingsService {
       instanceId,
       securityGroupId,
       keyName,
+      accessKeyName: typeof record.accessKeyName === "string" && record.accessKeyName.trim()
+        ? record.accessKeyName.trim()
+        : keyName,
+      launchKeyName: typeof record.launchKeyName === "string" && record.launchKeyName.trim()
+        ? record.launchKeyName.trim()
+        : keyName,
       region,
-      instanceType: typeof record.instanceType === "string" && record.instanceType.trim() ? record.instanceType.trim() : "t3.small",
+      instanceType: normalizeAwsInstanceType(record.instanceType),
       ...(rootVolumeSizeGb ? { rootVolumeSizeGb } : {}),
+      ...(typeof record.rootVolumeId === "string" && record.rootVolumeId.trim() ? { rootVolumeId: record.rootVolumeId.trim() } : {}),
+      ...(typeof record.availabilityZone === "string" && record.availabilityZone.trim() ? { availabilityZone: record.availabilityZone.trim() } : {}),
+      ...(typeof record.vCpu === "number" && record.vCpu > 0 ? { vCpu: Math.floor(record.vCpu) } : {}),
+      ...(typeof record.memoryMiB === "number" && record.memoryMiB > 0 ? { memoryMiB: Math.floor(record.memoryMiB) } : {}),
+      ...(typeof record.adopted === "boolean" ? { adopted: record.adopted } : {}),
       createdAt: typeof record.createdAt === "string" && record.createdAt ? record.createdAt : new Date().toISOString()
+    };
+  }
+
+  private normalizeAwsWorkerOperation(value: unknown): AwsWorkerOperationSnapshot | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+    const record = value as Partial<AwsWorkerOperationSnapshot>;
+    const phases = new Set(["starting", "waiting-running", "setting-up", "ready", "needs-decision", "error"]);
+    if (typeof record.operationId !== "string" || !record.operationId.trim()
+      || typeof record.phase !== "string" || !phases.has(record.phase)
+      || typeof record.message !== "string" || typeof record.updatedAt !== "string") {
+      return undefined;
+    }
+    return record as AwsWorkerOperationSnapshot;
+  }
+
+  private normalizeAwsWorkerSpecAcceptance(value: unknown): { instanceId: string; desired: AwsWorkerSpec } | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+    const record = value as { instanceId?: unknown; desired?: Partial<AwsWorkerSpec> };
+    if (typeof record.instanceId !== "string" || !record.instanceId.trim() || !record.desired) {
+      return undefined;
+    }
+    return {
+      instanceId: record.instanceId.trim(),
+      desired: {
+        instanceType: normalizeAwsInstanceType(record.desired.instanceType),
+        rootVolumeSizeGb: normalizeAwsRootVolumeSizeGb(record.desired.rootVolumeSizeGb),
+        ...(typeof record.desired.vCpu === "number" ? { vCpu: Math.floor(record.desired.vCpu) } : {}),
+        ...(typeof record.desired.memoryMiB === "number" ? { memoryMiB: Math.floor(record.desired.memoryMiB) } : {})
+      }
     };
   }
 

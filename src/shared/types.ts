@@ -36,11 +36,42 @@ export type CloudRunWorkerMode = "ssh" | "aws";
 export interface AwsWorkerHandleInfo {
   instanceId: string;
   securityGroupId: string;
+  // keyName is retained for stored-settings compatibility and mirrors the
+  // device-local access key name for new handles.
   keyName: string;
+  accessKeyName?: string;
+  launchKeyName?: string;
   region: string;
   instanceType: string;
   rootVolumeSizeGb?: number;
+  rootVolumeId?: string;
+  availabilityZone?: string;
+  vCpu?: number;
+  memoryMiB?: number;
+  adopted?: boolean;
   createdAt: string;
+}
+
+export interface AwsWorkerSpec {
+  instanceType: string;
+  rootVolumeSizeGb: number;
+  vCpu?: number;
+  memoryMiB?: number;
+}
+
+export interface AwsWorkerActualSpec extends AwsWorkerSpec {
+  instanceId: string;
+  region: string;
+  availabilityZone?: string;
+  rootVolumeId?: string;
+}
+
+export interface AwsWorkerSpecMismatch {
+  instanceId: string;
+  actual: AwsWorkerActualSpec;
+  desired: AwsWorkerSpec;
+  diskTooSmall: boolean;
+  computeTooSmall: boolean;
 }
 
 export interface CloudRunsSettings {
@@ -52,6 +83,7 @@ export interface CloudRunsSettings {
   hasAwsCredentials: boolean;
   awsHandle?: AwsWorkerHandleInfo;
   awsRegion?: string;
+  awsInstanceType: string;
   awsRootVolumeSizeGb: number;
   maxRuntimeMs: number;
   pollIntervalMs: number;
@@ -61,6 +93,7 @@ export interface CloudRunsSettingsUpdate {
   enabled?: boolean;
   mode?: CloudRunWorkerMode;
   worker?: CloudRunWorkerSettings;
+  awsInstanceType?: string;
   awsRootVolumeSizeGb?: number;
   maxRuntimeMs?: number;
   pollIntervalMs?: number;
@@ -120,12 +153,53 @@ export interface AwsWorkerStatus {
   state?: AwsWorkerLifecycleState;
   publicIp?: string;
   message?: string;
+  actualSpec?: AwsWorkerActualSpec;
+  specMismatch?: AwsWorkerSpecMismatch;
+  operation?: AwsWorkerOperationSnapshot;
 }
 
 export interface ConnectAwsWorkerRequest {
   blob: string;
   instanceType?: string;
   rootVolumeSizeGb?: number;
+}
+
+export type AwsWorkerStartPhase =
+  | "starting"
+  | "waiting-running"
+  | "setting-up"
+  | "ready"
+  | "needs-decision"
+  | "error";
+
+export type AwsWorkerSpecResolution = "keep" | "grow-disk" | "recreate";
+
+export interface AwsWorkerStartRequest {
+  operationId: string;
+  blob?: string;
+  instanceType?: string;
+  rootVolumeSizeGb?: number;
+  resolution?: AwsWorkerSpecResolution;
+  expectedInstanceId?: string;
+}
+
+export interface AwsWorkerOperationSnapshot {
+  operationId: string;
+  phase: AwsWorkerStartPhase;
+  message: string;
+  updatedAt: string;
+  retryable?: boolean;
+  error?: string;
+  authUrl?: string;
+  authCode?: string;
+  status?: AwsWorkerStatus;
+  specMismatch?: AwsWorkerSpecMismatch;
+}
+
+export interface AwsWorkerStartResult {
+  operation: AwsWorkerOperationSnapshot;
+  status: AwsWorkerStatus;
+  report?: CloudRunWorkerDoctorReport;
 }
 
 export interface CloudRunWorkerTestResult {
@@ -1703,6 +1777,8 @@ export interface AppBridge {
   onCloudRunSetupProgress(callback: (progress: CloudRunWorkerSetupProgress) => void): () => void;
   getAwsWorkerBootstrapCommand(region: string): Promise<string>;
   connectAwsWorker(request: ConnectAwsWorkerRequest): Promise<AwsWorkerStatus>;
+  startAwsWorker(request: AwsWorkerStartRequest): Promise<AwsWorkerStartResult>;
+  onAwsWorkerProgress(callback: (progress: AwsWorkerOperationSnapshot) => void): () => void;
   getAwsWorkerStatus(): Promise<AwsWorkerStatus>;
   stopAwsWorker(): Promise<AwsWorkerStatus>;
   deleteAwsWorker(): Promise<AwsWorkerStatus>;

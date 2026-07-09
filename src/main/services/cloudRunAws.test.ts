@@ -36,6 +36,7 @@ class FakeSettings {
         worker: {},
         hasAwsCredentials: Boolean(this.credentials),
         awsHandle: this.handle,
+        awsInstanceType: "t3.small",
         awsRootVolumeSizeGb: this.awsRootVolumeSizeGb,
         maxRuntimeMs: 24 * 60 * 60_000,
         pollIntervalMs: 2_500
@@ -77,11 +78,25 @@ class FakeEc2Client implements Ec2Client {
   importError: Error | undefined;
   describeError: Error | undefined;
   terminateError: Error | undefined;
+  discovered: AwsWorkerInstanceInfo[] = [];
+  runCount = 0;
 
   constructor(public state: AwsWorkerInstanceInfo | undefined = { instanceId: "i-new", state: "running", publicIp: "198.51.100.5" }) {}
 
   async resolveUbuntuImage(): Promise<{ imageId: string; rootDeviceName: string }> {
     return { imageId: "ami-ubuntu", rootDeviceName: "/dev/sda1" };
+  }
+
+  async listEnabledRegions(): Promise<string[]> {
+    return ["us-east-1"];
+  }
+
+  async findWorkerInstances(): Promise<AwsWorkerInstanceInfo[]> {
+    return this.discovered;
+  }
+
+  async describeInstanceType(instanceType: string): Promise<{ vCpu: number; memoryMiB: number }> {
+    return instanceType === "t3.medium" ? { vCpu: 2, memoryMiB: 4096 } : { vCpu: 2, memoryMiB: 2048 };
   }
 
   async keyPairExists(): Promise<boolean> {
@@ -117,6 +132,7 @@ class FakeEc2Client implements Ec2Client {
   }
 
   async runInstance(): Promise<string> {
+    this.runCount += 1;
     return "i-new";
   }
 
@@ -164,6 +180,7 @@ function serviceWith(
     deleteKeyMaterial: async () => undefined,
     currentPublicIp: async () => "203.0.113.9",
     privateKeyPathForKeyName: (keyName) => `/keys/${keyName}.pem`
+    ,workerAccess: { ensureAccess: async () => undefined } as any
   });
 }
 
@@ -224,7 +241,7 @@ test("connectWorker describe failure tells the user to delete the existing worke
   assert.deepEqual(settings.handle, OLD_HANDLE);
 });
 
-test("deleteWorker clears settings but warns when termination fails", async () => {
+test("deleteWorker retains settings when termination fails", async () => {
   const settings = new FakeSettings();
   settings.credentials = OLD_CREDS;
   settings.handle = OLD_HANDLE;
@@ -234,16 +251,14 @@ test("deleteWorker clears settings but warns when termination fails", async () =
   const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, oldClient]]));
 
   const status = await service.deleteWorker();
-  assert.equal(status.configured, false);
-  assert.match(status.message ?? "", /Settings cleared/);
-  assert.match(status.message ?? "", /i-old may still exist/);
-  assert.match(status.message ?? "", /EC2 console/);
-  assert.equal(settings.credentials, undefined);
-  assert.equal(settings.handle, undefined);
-  assert.equal(settings.mode, "ssh");
+  assert.equal(status.configured, true);
+  assert.match(status.message ?? "", /not deleted/);
+  assert.deepEqual(settings.credentials, OLD_CREDS);
+  assert.deepEqual(settings.handle, OLD_HANDLE);
+  assert.equal(settings.mode, "aws");
 });
 
-test("ensureWorkerForRun resolves the SSH identity file from the persisted key name", async () => {
+test("ensureWorkerForRun uses the current device SSH identity", async () => {
   const settings = new FakeSettings();
   settings.credentials = OLD_CREDS;
   settings.handle = OLD_HANDLE;
@@ -253,7 +268,62 @@ test("ensureWorkerForRun resolves the SSH identity file from the persisted key n
 
   const worker = await service.ensureWorkerForRun();
   assert.equal(worker.host, "198.51.100.10");
-  assert.equal(worker.identityFile, "/keys/accordagents-worker-old.pem");
-  assert.deepEqual(oldClient.revokedSecurityGroups, ["sg-old"]);
+  assert.equal(worker.identityFile, "/keys/accordagents-worker-new.pem");
+  assert.deepEqual(oldClient.revokedSecurityGroups, []);
   assert.deepEqual(oldClient.authorizedCidrs, ["203.0.113.9/32"]);
+});
+
+test("prepareWorker adopts the tagged account worker without creating a duplicate", async () => {
+  const settings = new FakeSettings();
+  const client = new FakeEc2Client();
+  client.discovered = [{
+    instanceId: "i-shared",
+    state: "running",
+    publicIp: "198.51.100.20",
+    region: "us-east-1",
+    availabilityZone: "us-east-1a",
+    securityGroupId: "sg-shared",
+    keyName: "launch-key",
+    instanceType: "t3.medium",
+    vCpu: 2,
+    memoryMiB: 4096,
+    rootVolumeId: "vol-shared",
+    rootVolumeSizeGb: 32
+  }];
+  const service = serviceWith(settings, new Map([[NEW_CREDS.accessKeyId, client]]));
+  const prepared = await service.prepareWorker({
+    operationId: "adopt-op",
+    blob: encodeWorkerBlob(NEW_CREDS),
+    instanceType: "t3.small",
+    rootVolumeSizeGb: 8
+  });
+  assert.equal(prepared.info.instanceId, "i-shared");
+  assert.equal(prepared.handle.adopted, true);
+  assert.equal(prepared.mismatch, undefined);
+  assert.equal(client.runCount, 0);
+});
+
+test("prepareWorker returns an explicit mismatch for an undersized tagged worker", async () => {
+  const settings = new FakeSettings();
+  const client = new FakeEc2Client();
+  client.discovered = [{
+    instanceId: "i-small",
+    state: "stopped",
+    region: "us-east-1",
+    securityGroupId: "sg-small",
+    instanceType: "t3.small",
+    vCpu: 2,
+    memoryMiB: 2048,
+    rootVolumeSizeGb: 8
+  }];
+  const service = serviceWith(settings, new Map([[NEW_CREDS.accessKeyId, client]]));
+  const prepared = await service.prepareWorker({
+    operationId: "mismatch-op",
+    blob: encodeWorkerBlob(NEW_CREDS),
+    instanceType: "t3.medium",
+    rootVolumeSizeGb: 16
+  });
+  assert.equal(prepared.mismatch?.computeTooSmall, true);
+  assert.equal(prepared.mismatch?.diskTooSmall, true);
+  assert.equal(client.runCount, 0);
 });

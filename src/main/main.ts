@@ -11,6 +11,7 @@ import type {
   CloudRunsSettingsUpdate,
   CloudRunWorkerSettings,
   ConnectAwsWorkerRequest,
+  AwsWorkerStartRequest,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
@@ -61,6 +62,7 @@ import { ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./
 import { buildCloudRunSshTarget, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { CloudRunDoctorService } from "./services/cloudRunDoctor";
 import { CloudRunAwsService } from "./services/cloudRunAws";
+import { AwsWorkerSetupService } from "./services/awsWorkerSetup";
 import { DebugLogService } from "./services/debugLogs";
 import { GitService } from "./services/git";
 import { ProviderRunner } from "./services/providers";
@@ -131,6 +133,8 @@ const cloudRunAwsService = new CloudRunAwsService(settingsService, {
     void debugLogService.write(event, payload);
   }
 });
+const awsWorkerSetupService = new AwsWorkerSetupService(cloudRunAwsService, cloudRunDoctorService, settingsService);
+void awsWorkerSetupService.recoverInterruptedOperation();
 chatService.setCloudRunAwsService(cloudRunAwsService);
 const remoteRunCoordinator = new RemoteRunCoordinator(remoteRunService, chatService, settingsService, debugLogService);
 chatService.setRemoteRunService(remoteRunService);
@@ -308,6 +312,10 @@ function registerIpc(): void {
     cloudRunAwsService.bootstrapCommand(String(region ?? "").trim() || "us-east-1"));
   ipcMain.handle("cloud-runs:aws-connect", (_event, request: ConnectAwsWorkerRequest) =>
     cloudRunAwsService.connectWorker(request.blob, request.instanceType, request.rootVolumeSizeGb));
+  ipcMain.handle("cloud-runs:aws-start", (event, request: AwsWorkerStartRequest) =>
+    awsWorkerSetupService.start(request, (progress) => {
+      if (!event.sender.isDestroyed()) event.sender.send("cloud-runs:aws-progress", progress);
+    }));
   ipcMain.handle("cloud-runs:aws-status", () => cloudRunAwsService.status());
   ipcMain.handle("cloud-runs:aws-stop", () => cloudRunAwsService.stopWorker());
   ipcMain.handle("cloud-runs:aws-delete", () => cloudRunAwsService.deleteWorker());

@@ -31,19 +31,22 @@ export function buildScopedWorkerPolicy(region: string): unknown {
     Version: "2012-10-17",
     Statement: [
       {
-        Sid: "DescribeInRegion",
+        Sid: "DiscoverWorkers",
         Effect: "Allow",
         Action: [
+          "ec2:DescribeRegions",
           "ec2:DescribeInstances",
           "ec2:DescribeInstanceStatus",
+          "ec2:DescribeInstanceTypes",
           "ec2:DescribeImages",
+          "ec2:DescribeVolumes",
+          "ec2:DescribeVolumesModifications",
           "ec2:DescribeSecurityGroups",
           "ec2:DescribeSubnets",
           "ec2:DescribeVpcs",
           "ec2:DescribeKeyPairs"
         ],
-        Resource: "*",
-        Condition: regionCondition
+        Resource: "*"
       },
       {
         Sid: "CreateInfra",
@@ -54,9 +57,6 @@ export function buildScopedWorkerPolicy(region: string): unknown {
           "ec2:CreateKeyPair",
           "ec2:DeleteKeyPair",
           "ec2:CreateSecurityGroup",
-          "ec2:DeleteSecurityGroup",
-          "ec2:AuthorizeSecurityGroupIngress",
-          "ec2:RevokeSecurityGroupIngress",
           "ec2:CreateTags"
         ],
         Resource: "*",
@@ -73,8 +73,35 @@ export function buildScopedWorkerPolicy(region: string): unknown {
         Resource: "*",
         Condition: {
           StringEquals: {
-            "aws:RequestedRegion": region,
             [`ec2:ResourceTag/${AWS_WORKER_TAG_KEY}`]: AWS_WORKER_TAG_VALUE
+          }
+        }
+      },
+      {
+        Sid: "ManageTaggedWorkerStorageAndNetwork",
+        Effect: "Allow",
+        Action: [
+          "ec2:ModifyVolume",
+          "ec2:DeleteSecurityGroup",
+          "ec2:AuthorizeSecurityGroupIngress",
+          "ec2:RevokeSecurityGroupIngress"
+        ],
+        Resource: "*",
+        Condition: {
+          StringEquals: {
+            [`ec2:ResourceTag/${AWS_WORKER_TAG_KEY}`]: AWS_WORKER_TAG_VALUE
+          }
+        }
+      },
+      {
+        Sid: "ConnectToTaggedWorkers",
+        Effect: "Allow",
+        Action: ["ec2-instance-connect:SendSSHPublicKey"],
+        Resource: "*",
+        Condition: {
+          StringEquals: {
+            [`aws:ResourceTag/${AWS_WORKER_TAG_KEY}`]: AWS_WORKER_TAG_VALUE,
+            "ec2:osuser": "ubuntu"
           }
         }
       }
@@ -157,6 +184,8 @@ export function buildWorkerCloudInit(): string {
     "  - rsync",
     "  - build-essential",
     "  - curl",
+    "  - cloud-guest-utils",
+    "  - ec2-instance-connect",
     "runcmd:",
     "  - [ bash, -lc, \"curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs\" ]",
     "  - [ bash, -lc, \"npm install -g @openai/codex\" ]",
@@ -176,6 +205,7 @@ export interface WorkerInstanceSpec {
   tagKey: string;
   tagValue: string;
   rootVolumeSizeGb: number;
+  clientToken?: string;
 }
 
 export function buildWorkerInstanceSpec(options: {
@@ -185,6 +215,7 @@ export function buildWorkerInstanceSpec(options: {
   securityGroupId: string;
   instanceType?: string;
   rootVolumeSizeGb?: number;
+  clientToken?: string;
 }): WorkerInstanceSpec {
   return {
     imageId: options.imageId,
@@ -195,7 +226,8 @@ export function buildWorkerInstanceSpec(options: {
     userData: Buffer.from(buildWorkerCloudInit(), "utf8").toString("base64"),
     tagKey: AWS_WORKER_TAG_KEY,
     tagValue: AWS_WORKER_TAG_VALUE,
-    rootVolumeSizeGb: normalizeAwsRootVolumeSizeGb(options.rootVolumeSizeGb)
+    rootVolumeSizeGb: normalizeAwsRootVolumeSizeGb(options.rootVolumeSizeGb),
+    clientToken: options.clientToken?.trim() || undefined
   };
 }
 

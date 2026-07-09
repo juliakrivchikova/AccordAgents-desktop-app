@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install dev start build build-main package make-mac-arm64 signed-mac-arm64 release-patch release-minor release-major lint-colors lint-lines lint-unused typecheck clean
+.PHONY: help install dev start build build-main package make-mac-arm64 signed-mac-arm64 release-patch release-minor release-major test-cloud-runs lint-colors lint-lines lint-unused typecheck clean
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*## "; print "Available targets:"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -37,6 +37,9 @@ release-minor: ## Bump minor, sign macOS arm64 artifacts, and publish GitHub Rel
 
 release-major: ## Bump major, sign macOS arm64 artifacts, and publish GitHub Release
 	npm run release:major
+
+test-cloud-runs: ## Run focused shared AWS worker tests
+	npm run test:cloud-runs
 
 lint-colors: ## Check renderer style guardrails
 	npm run lint:renderer-styles
