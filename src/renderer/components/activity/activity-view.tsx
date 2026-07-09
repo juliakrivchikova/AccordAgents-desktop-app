@@ -1,4 +1,4 @@
-import { MessageSquare, RefreshCw } from "lucide-react";
+import { ArrowRight, MessageSquare, RefreshCw } from "lucide-react";
 import type React from "react";
 import type { ChatActivityItem, ChatActivityParticipantSummary } from "../../../shared/types";
 import { resolveSelectedChatActivityItem } from "../../../shared/chatActivity";
@@ -33,10 +33,7 @@ export function ActivityView({
     <section className="activity-view" aria-label="Activity">
       <aside className="activity-list-pane">
         <div className="activity-list-header">
-          <div>
-            <h1>Activity</h1>
-            <p>{loading ? "Updating" : `${items.length} active item${items.length === 1 ? "" : "s"}`}</p>
-          </div>
+          <h1>Activity</h1>
         </div>
         <div className="activity-list" role="list">
           {error ? (
@@ -67,14 +64,18 @@ export function ActivityView({
       </aside>
       <div className="activity-detail-pane">
         <div className="activity-detail-header">
-          <div>
-            <p className="activity-detail-kicker">{selectedItem ? statusLabel(selectedItem.status) : "Activity"}</p>
-            <h2>{selectedItem?.conversationTitle ?? "Select an item"}</h2>
-          </div>
+          <MessageSquare className="activity-detail-header-icon" aria-hidden="true" size={17} strokeWidth={1.75} />
+          <h2>{selectedItem?.conversationTitle ?? "Select an item"}</h2>
           {selectedItem && (
-            <Button variant="outline" size="sm" onClick={() => onOpenInChat(selectedItem)}>
-              <MessageSquare aria-hidden />
-              Open in chat
+            <Button
+              className="activity-open-chat"
+              variant="ghost"
+              size="icon-sm"
+              title="Open in chat"
+              aria-label="Open in chat"
+              onClick={() => onOpenInChat(selectedItem)}
+            >
+              <ArrowRight aria-hidden />
             </Button>
           )}
         </div>
@@ -123,20 +124,27 @@ function ActivityRow({
           <span className="activity-row-title">{item.conversationTitle}</span>
           <span className="activity-row-time">{relativeTime(item.updatedAt)}</span>
         </span>
-        <span className="activity-row-preview">{item.preview}</span>
+        <ActivityPreview text={item.preview} />
       </span>
     </button>
   );
 }
 
-function avatarForActivityParticipant(participant: ChatActivityParticipantSummary) {
-  return avatarForChatParticipant(participant, chatParticipantDisplayName(participant));
+function ActivityPreview({ text }: { text: string }): JSX.Element {
+  const parts = text.split(/([#@][A-Za-z0-9_./-]+)/g);
+  return (
+    <span className="activity-row-preview">
+      {parts.map((part, index) => (
+        /^[#@]/.test(part)
+          ? <span key={`${part}-${index}`} className="activity-row-token">{part}</span>
+          : part
+      ))}
+    </span>
+  );
 }
 
-function statusLabel(status: ChatActivityItem["status"]): string {
-  if (status === "pending") return "Pending";
-  if (status === "running") return "Running";
-  return "Recent";
+function avatarForActivityParticipant(participant: ChatActivityParticipantSummary) {
+  return avatarForChatParticipant(participant, chatParticipantDisplayName(participant));
 }
 
 function relativeTime(value: string): string {

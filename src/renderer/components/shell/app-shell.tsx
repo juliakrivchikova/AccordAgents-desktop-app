@@ -9,6 +9,7 @@ import {
 } from "../../lib/sidebar-sizing";
 
 export interface AppShellProps {
+  topStrip: React.ReactNode;
   rail: React.ReactNode;
   sidebar: React.ReactNode;
   topBar: React.ReactNode;
@@ -21,6 +22,7 @@ export interface AppShellProps {
 }
 
 export const AppShell = ({
+  topStrip,
   rail,
   sidebar,
   topBar,
@@ -81,6 +83,9 @@ export const AppShell = ({
         className
       )}
     >
+      <header data-shell="top-strip" className="app-shell-top-strip">
+        {topStrip}
+      </header>
       <div data-shell="rail-slot" className="app-shell-rail-slot">
         {rail}
       </div>
@@ -115,5 +120,5 @@ export const AppShell = ({
 function appRailWidth(root: HTMLElement): number {
   const value = getComputedStyle(root).getPropertyValue("--app-rail-width");
   const parsed = Number.parseFloat(value);
-  return Number.isFinite(parsed) ? parsed : 74;
+  return Number.isFinite(parsed) ? parsed : 90;
 }
