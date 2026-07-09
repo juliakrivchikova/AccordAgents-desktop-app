@@ -43,6 +43,19 @@ The idle status must include:
 If the manager is replying inside a nested workflow or participant-request thread, also post the same concise status to
 the main timeline with the app-managed send-message tool when available.
 
+## Main-Timeline User Choices
+
+Post any User choice that can pause or unblock the workflow on the main timeline, not only inside a nested workflow or
+participant-request thread. Do not leave a hidden pending choice card in a thread as the only unblock path.
+
+This applies to requirement confirmation, final-step selection, release type selection, retry/continue decisions after
+participant failure, and any user-owned clarification that blocks progress. If the current turn is inside a thread, post
+the choice plus a concise status to the main timeline with the app-managed send-message tool when available.
+
+If User clearly answers a pending choice in prose instead of through the choice card, treat the prose answer as the
+choice and continue the workflow. Also leave the next status on the main timeline so stale hidden choice state is not the
+latest visible workflow signal.
+
 ## Reference-Parity Gate
 
 When the user says a new setting or flow should work "like", "same as", or "next to" an existing feature, that existing
@@ -75,7 +88,7 @@ If the user's request is clear enough to pass to Drew and Taylor, do not expand 
 missing or ambiguous, ask one concise clarification before continuing. If the user invokes the workflow immediately after
 stating the requirement, treat that requirement as confirmed and continue to the final-step choice.
 
-Ask:
+Ask on the main timeline:
 
 ```text
 User choice:
@@ -104,8 +117,9 @@ O3: Open app instance | Open a separate app instance so you can check manually.
 R: O3
 ```
 
-Before pausing for this choice, follow the Main-Timeline Idle Status rule so the main timeline says progress is waiting
-on User's final-step decision. Continue only after the user chooses one final step.
+The final-step choice must be visible on the main timeline. Before pausing for this choice, follow the Main-Timeline
+Idle Status and Main-Timeline User Choices rules so the main timeline says progress is waiting on User's final-step
+decision. Continue only after the user chooses one final step.
 
 ### 3. Ask Both Drew And Taylor To Prepare Implementation Plan
 
@@ -208,7 +222,7 @@ If the selected final step is `Merge to main and push`, ask Drew:
 ```
 
 If the selected final step is `Make a release`, the release type must be explicit from the user. If the user has not
-chosen `patch`, `minor`, or `major`, ask before assigning the release. Then ask Drew:
+chosen `patch`, `minor`, or `major`, ask on the main timeline before assigning the release. Then ask Drew:
 
 ```text
 @drew-codex-engineer release new version with the implemented work with `npm run release:[patch/minor/major chosen by User]`
@@ -232,7 +246,7 @@ Keep this closeout concise. Do not bury it only in the final workflow thread.
 ## Failure Handling
 
 - If a participant request is pending approval or running, stop and wait for app resume.
-- If one participant fails during independent plan/review, tell the user and ask whether to retry or continue with one
-  answer.
+- If one participant fails during independent plan/review, tell the user on the main timeline and ask whether to retry or
+  continue with one answer.
 - If the user sends new requirements mid-run, update the state and choose the right restart point: scope confirmation,
   plan accord, or fix-list accord.
