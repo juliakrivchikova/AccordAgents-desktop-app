@@ -76,7 +76,7 @@ export const AppShell = ({
       ref={rootRef}
       style={{ "--app-sidebar-width": `${normalizedSidebarWidth}px` } as React.CSSProperties}
       className={cn(
-        "app-shell-root grid h-full min-h-0 bg-[var(--app-workspace-bg)] text-foreground",
+        "app-shell-root grid h-full min-h-0 text-foreground",
         isResizingSidebar && "resizing-sidebar",
         className
       )}
