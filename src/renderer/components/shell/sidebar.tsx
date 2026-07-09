@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Archive, ArchiveRestore, ChevronDown, ChevronRight, Loader2, Pencil, Plus, Settings } from "lucide-react";
+import { Archive, ArchiveRestore, ChevronDown, ChevronRight, Loader2, Pencil, Plus } from "lucide-react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
@@ -39,9 +39,7 @@ export interface SidebarProps {
   onNewProjectSession: (repoPath?: string) => void;
   onArchive?: (id: string) => void;
   onUnarchive?: (id: string) => void;
-  onOpenSettings?: () => void;
   onToggleSidebar?: () => void;
-  appVersion?: string;
 }
 
 export const Sidebar = ({
@@ -57,9 +55,7 @@ export const Sidebar = ({
   onNewProjectSession,
   onArchive,
   onUnarchive,
-  onOpenSettings,
-  onToggleSidebar,
-  appVersion
+  onToggleSidebar
 }: SidebarProps): JSX.Element => {
   const [collapsedProjectKeys, setCollapsedProjectKeys] = useState<Set<string>>(new Set());
   const [expandedProjectKeys, setExpandedProjectKeys] = useState<Set<string>>(new Set());
@@ -278,25 +274,6 @@ export const Sidebar = ({
         </div>
       </ScrollArea>
 
-      {onOpenSettings && (
-        <div className="shrink-0 px-[var(--app-gutter-tight)] py-2">
-          <button
-            type="button"
-            onClick={onOpenSettings}
-            data-testid="sidebar-settings"
-            className={cn(
-              "inline-flex h-8 w-full items-center justify-start gap-2 rounded-md",
-              "bg-transparent px-2.5 text-[13px] font-medium text-[var(--app-text)]",
-              "transition-colors hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text-strong)]",
-              "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
-            )}
-          >
-            <Settings className="size-[15px] text-muted-foreground" aria-hidden />
-            <span>Settings</span>
-            {appVersion && <span className="ml-auto shrink-0 text-[11px] font-medium text-muted-foreground">v{appVersion}</span>}
-          </button>
-        </div>
-      )}
     </aside>
   );
 };

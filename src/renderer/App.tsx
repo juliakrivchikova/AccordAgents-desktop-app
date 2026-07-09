@@ -247,13 +247,11 @@ function App(): JSX.Element {
             busy={state.busy}
             loading={state.historyLoading}
             unreadIds={state.unreadConversationIds}
-            appVersion={appVersion}
             onSelect={(id) => void conversationActions.openConversation(id)}
             onNewSession={() => void conversationActions.newChatSession()}
             onNewProjectSession={(projectRepoPath) => void conversationActions.newProjectSession(projectRepoPath)}
             onArchive={(id) => void chatActions.setChatArchived(id, true)}
             onUnarchive={(id) => void chatActions.setChatArchived(id, false)}
-            onOpenSettings={() => openSettingsSection(state.activeSettingsSection)}
             onToggleSidebar={() => state.setSidebarCollapsed(true)}
           />
         )
