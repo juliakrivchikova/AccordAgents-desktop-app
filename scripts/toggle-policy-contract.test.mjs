@@ -1,0 +1,53 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+
+function read(path) {
+  return readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+}
+
+const generalSettings = read("src/renderer/components/settings/general-settings-section.tsx");
+const environmentSettings = read("src/renderer/components/settings/environment-settings-section.tsx");
+const toggleCss = read("src/renderer/styles/views/content-markdown.css");
+const approvalCss = read("src/renderer/styles/views/chat-conversation.css");
+const generalCss = read("src/renderer/styles/views/settings-general.css");
+
+test("Remote Codex worker keeps its toggle outside a disabled dependent fieldset", () => {
+  assert.match(generalSettings, /data-testid="remote-codex-worker-toggle"/);
+  assert.match(
+    generalSettings,
+    /data-testid="remote-codex-worker-settings"\s+disabled=\{!draft\.enabled\}/
+  );
+});
+
+test("both worker copy buttons use guarded exact-payload clipboard writes", () => {
+  assert.equal(generalSettings.match(/writeClipboardText\(/g)?.length, 2);
+  assert.match(generalSettings, /writeClipboardText\(authCode,/);
+  assert.match(generalSettings, /writeClipboardText\(command,/);
+  assert.equal(generalSettings.match(/\? "Copy failed"/g)?.length, 2);
+  assert.doesNotMatch(generalSettings, /await navigator\.clipboard\.writeText/);
+});
+
+test("generic toggles distinguish usable-off and disabled-checked states", () => {
+  assert.match(toggleCss, /\.toggle input:not\(:checked\):not\(:disabled\) \+ span\s*\{/);
+  assert.match(toggleCss, /\.toggle input:checked:disabled \+ span\s*\{/);
+});
+
+test("approval toggles derive disabled visuals from the native input and fieldset", () => {
+  assert.match(
+    approvalCss,
+    /\.chat-app-tool-review-toggle input:not\(:checked\):not\(:disabled\) \+ \.chat-app-tool-review-switch/
+  );
+  assert.match(
+    approvalCss,
+    /\.chat-app-tool-review-fieldset:disabled \.chat-app-tool-review-toggle/
+  );
+});
+
+test("copy focus and manual toggle accessibility contracts remain explicit", () => {
+  assert.match(
+    generalCss,
+    /\.gen-doctor-auth-copy:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--app-accent\)/s
+  );
+  assert.match(environmentSettings, /aria-label=\{`Enable \$\{variable\.key\}`\}/);
+});

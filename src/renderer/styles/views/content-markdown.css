@@ -931,6 +931,14 @@ ul.markdown-list {
   background: var(--app-success);
 }
 
+.toggle input:checked:disabled + span {
+  background: var(--app-accent-soft);
+}
+
+.toggle input:checked:disabled + span::before {
+  background: color-mix(in srgb, var(--app-accent) 72%, var(--app-surface));
+}
+
 .toggle input:checked + span::before {
   transform: translateX(18px);
 }

@@ -216,6 +216,7 @@ function ManualVariableList(props: {
           <label className="toggle env-toggle">
             <input
               type="checkbox"
+              aria-label={`Enable ${variable.key}`}
               checked={variable.enabled}
               disabled={props.busyKey === variable.key}
               onChange={(event) => void props.onToggle(variable, event.target.checked)}

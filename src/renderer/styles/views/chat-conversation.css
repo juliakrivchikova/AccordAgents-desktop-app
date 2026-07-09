@@ -2127,12 +2127,14 @@
   background: var(--app-surface-subtle);
 }
 
-.chat-app-tool-review-toggle.is-disabled {
+.chat-app-tool-review-toggle.is-disabled,
+.chat-app-tool-review-fieldset:disabled .chat-app-tool-review-toggle {
   cursor: default;
   opacity: 0.72;
 }
 
-.chat-app-tool-review-toggle.is-disabled:hover {
+.chat-app-tool-review-toggle.is-disabled:hover,
+.chat-app-tool-review-fieldset:disabled .chat-app-tool-review-toggle:hover {
   border-color: var(--app-border);
   background: var(--app-surface);
 }
@@ -2158,7 +2160,7 @@
   transition: background 150ms ease, border-color 150ms ease;
 }
 
-.chat-app-tool-review-toggle:not(.is-disabled) .chat-app-tool-review-switch:not(.on) {
+.chat-app-tool-review-toggle input:not(:checked):not(:disabled) + .chat-app-tool-review-switch {
   border-color: var(--app-muted);
   background: var(--app-muted);
 }

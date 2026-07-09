@@ -568,7 +568,11 @@
 .settings-view .gen-doctor-auth-copy:focus-visible {
   border-color: var(--app-border-strong);
   color: var(--app-text-strong);
-  outline: none;
+}
+
+.settings-view .gen-doctor-auth-copy:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 2px;
 }
 
 .settings-view .gen-segmented {
