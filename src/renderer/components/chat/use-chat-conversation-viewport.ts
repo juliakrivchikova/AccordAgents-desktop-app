@@ -171,7 +171,7 @@ export function useChatConversationViewport(props: {
         return true;
       }
       detachFromBottom();
-      chatVirtualizer.scrollToIndex(rowIndex, { align: "center" });
+      chatVirtualizer.scrollToIndex(rowIndex, { align: "start" });
       return false;
     };
     if (attempt()) {
