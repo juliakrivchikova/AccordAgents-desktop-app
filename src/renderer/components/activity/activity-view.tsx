@@ -7,6 +7,7 @@ import { Avatar } from "../avatar/avatar";
 import { avatarForChatParticipant } from "../chat/chat-avatars";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import { Button } from "@/components/ui/button";
+import { Notice } from "../primitives";
 
 const ACTIVITY_LIST_WIDTH_STORAGE_KEY = "accordagents-activity-list-width";
 const DEFAULT_ACTIVITY_LIST_WIDTH = 400;
@@ -21,6 +22,7 @@ export interface ActivityViewProps {
   selectedItem?: ChatActivityItem;
   loading: boolean;
   error?: string;
+  detailError?: string;
   detail: React.ReactNode;
   onSelect: (item: ChatActivityItem) => void;
   onOpenInChat: (item: ChatActivityItem) => void;
@@ -32,6 +34,7 @@ export function ActivityView({
   selectedItem: selectedItemProp,
   loading,
   error,
+  detailError,
   detail,
   onSelect,
   onOpenInChat,
@@ -172,6 +175,11 @@ export function ActivityView({
           )}
         </div>
         <div className="activity-detail-body">
+          {detailError && (
+            <div className="mx-3 mt-2" role="alert">
+              <Notice tone="error">{detailError}</Notice>
+            </div>
+          )}
           {selectedItem ? detail : (
             <div className="activity-detail-empty">
               <h2>No activity selected</h2>

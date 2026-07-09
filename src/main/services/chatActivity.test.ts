@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   buildChatActivityItems,
   buildChatActivityItemsForConversationUpdate,
+  preservedRecentChatActivityItems,
+  reconcileChatActivityRefreshItems,
   resolveSelectedChatActivityItem
 } from "../../shared/chatActivity";
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
@@ -302,6 +304,86 @@ test("buildChatActivityItems shows the target message actor for approval activit
   assert.equal(items[0].participant?.roleConfigId, "administrator");
 });
 
+test("buildChatActivityItems follows hidden approval triggers to a visible source message", () => {
+  const approval: ChatAppToolApproval = {
+    id: "approval-hidden-trigger",
+    conversationId: "conversation-1",
+    requesterParticipantId: participant.id,
+    requesterHandle: participant.handle,
+    requesterRoleConfigId: "engineer",
+    toolName: "app_roles_request_change",
+    capability: "participants.manage",
+    status: "pending",
+    request: { kind: "portable", permissions: ["workspaceWrite"] },
+    summary: "Create role",
+    createdAt: "2026-01-08T11:00:00.000Z",
+    updatedAt: "2026-01-08T11:00:00.000Z",
+    resumeContext: { runId: "approval-run", triggerMessageId: "hidden-trigger" }
+  };
+  const items = buildChatActivityItems(conversation({
+    metadata: { pendingAppToolApprovals: [approval] },
+    messages: [
+      participantMessage("visible-source", {
+        content: "Visible approval request",
+        createdAt: "2026-01-08T10:58:00.000Z"
+      }),
+      participantMessage("hidden-trigger", {
+        content: "Internal trigger",
+        createdAt: "2026-01-08T10:59:00.000Z",
+        metadata: {
+          hiddenFromTimeline: true,
+          sourceMessageId: "visible-source"
+        }
+      })
+    ]
+  }));
+
+  assert.equal(items[0]?.target.messageId, "visible-source");
+  assert.equal(items[0]?.preview, "Visible approval request");
+});
+
+test("buildChatActivityItems never targets hidden internal messages", () => {
+  const items = buildChatActivityItems(conversation({
+    messages: [
+      participantMessage("visible-source", {
+        content: "Visible source message",
+        createdAt: "2026-01-08T10:58:00.000Z"
+      }),
+      participantMessage("hidden-choice", {
+        content: "Internal request wrapper",
+        createdAt: "2026-01-08T10:59:00.000Z",
+        metadata: {
+          hiddenFromTimeline: true,
+          sourceMessageId: "visible-source",
+          pendingChoice: {
+            id: "choice-hidden",
+            title: "Internal choice",
+            question: "Choose",
+            options: [{ id: "yes", label: "Yes" }],
+            status: "pending"
+          }
+        }
+      }),
+      participantMessage("hidden-finished", {
+        content: "Internal completed wrapper",
+        createdAt: "2026-01-08T11:00:00.000Z",
+        metadata: {
+          hiddenFromTimeline: true,
+          sourceMessageId: "visible-source"
+        }
+      })
+    ]
+  }), {
+    now: NOW,
+    lastViewedAt: "2026-01-08T10:00:00.000Z"
+  });
+
+  assert.equal(items.find((item) => item.kind === "choice")?.target.messageId, "visible-source");
+  assert.equal(items.find((item) => item.kind === "choice")?.preview, "Visible source message");
+  assert.ok(items.every((item) => item.target.messageId !== "hidden-choice"));
+  assert.ok(items.every((item) => item.target.messageId !== "hidden-finished"));
+});
+
 test("buildChatActivityItems emits recent finished participant messages after last viewed", () => {
   const items = buildChatActivityItems(conversation({
     messages: [
@@ -323,6 +405,23 @@ test("buildChatActivityItems emits recent finished participant messages after la
   assert.equal(items[0].status, "recent");
   assert.equal(items[0].target.messageId, "new");
   assert.equal(items[0].target.threadRootId, "root");
+});
+
+test("buildChatActivityItems emits recent finished participant messages without a run id", () => {
+  const items = buildChatActivityItems(conversation({
+    messages: [participantMessage("runless-finished", {
+      createdAt: "2026-01-08T11:00:00.000Z",
+      metadata: {}
+    })]
+  }), {
+    now: NOW,
+    lastViewedAt: "2026-01-08T10:00:00.000Z"
+  });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].id, "recent:conversation-1:runless-finished");
+  assert.equal(items[0].target.messageId, "runless-finished");
+  assert.equal(items[0].target.runId, undefined);
 });
 
 test("buildChatActivityItemsForConversationUpdate treats active snapshots as viewed", () => {
@@ -368,6 +467,79 @@ test("resolveSelectedChatActivityItem keeps a selected recent target after it is
 
   assert.equal(resolved?.id, selected.id);
   assert.equal(resolved?.target.messageId, "finished");
+});
+
+test("reconcileChatActivityRefreshItems preserves newer live state without marking it read", () => {
+  const [liveItem] = buildChatActivityItems(conversation({
+    messages: [participantMessage("live-finished", {
+      createdAt: "2026-01-08T11:00:00.000Z",
+      metadata: { runId: "live-run" }
+    })]
+  }), {
+    now: NOW,
+    lastViewedAt: "2026-01-08T10:00:00.000Z"
+  });
+
+  const reconciled = reconcileChatActivityRefreshItems([liveItem], [], {
+    revisionsAtStart: { "conversation-1": 1 },
+    revisionsNow: { "conversation-1": 2 }
+  });
+
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].id, liveItem.id);
+  assert.equal(reconciled[0].read, undefined);
+});
+
+test("reconcileChatActivityRefreshItems preserves only explicit read recents and drops archived rows", () => {
+  const [recentItem] = buildChatActivityItems(conversation({
+    messages: [participantMessage("finished", {
+      createdAt: "2026-01-08T11:00:00.000Z",
+      metadata: { runId: "finished-run" }
+    })]
+  }), {
+    now: NOW,
+    lastViewedAt: "2026-01-08T10:00:00.000Z"
+  });
+  const readItem = { ...recentItem, read: true };
+
+  assert.deepEqual(reconcileChatActivityRefreshItems([recentItem], [], {
+    revisionsAtStart: {},
+    revisionsNow: {}
+  }), []);
+  assert.equal(reconcileChatActivityRefreshItems([readItem], [], {
+    revisionsAtStart: {},
+    revisionsNow: {}
+  })[0]?.read, true);
+  assert.deepEqual(reconcileChatActivityRefreshItems([readItem], [], {
+    revisionsAtStart: {},
+    revisionsNow: {},
+    archivedConversationIds: new Set(["conversation-1"])
+  }), []);
+});
+
+test("preservedRecentChatActivityItems drops archived live rows and only marks active rows read", () => {
+  const [recentItem] = buildChatActivityItems(conversation({
+    messages: [participantMessage("finished", {
+      createdAt: "2026-01-08T11:00:00.000Z",
+      metadata: { runId: "finished-run" }
+    })]
+  }), {
+    now: NOW,
+    lastViewedAt: "2026-01-08T10:00:00.000Z"
+  });
+
+  assert.deepEqual(preservedRecentChatActivityItems([recentItem], "conversation-1", {
+    archived: true,
+    treatAsRead: true
+  }), []);
+  assert.deepEqual(preservedRecentChatActivityItems([recentItem], "conversation-1", {
+    archived: false,
+    treatAsRead: false
+  }), []);
+  assert.equal(preservedRecentChatActivityItems([recentItem], "conversation-1", {
+    archived: false,
+    treatAsRead: true
+  })[0]?.read, true);
 });
 
 test("buildChatActivityItems excludes archived and non-chat conversations", () => {

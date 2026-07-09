@@ -1,5 +1,9 @@
 import { useEffect } from "react";
-import { buildChatActivityItemsForConversationUpdate, mergeChatActivityItems } from "../../shared/chatActivity";
+import {
+  buildChatActivityItemsForConversationUpdate,
+  mergeChatActivityItems,
+  preservedRecentChatActivityItems
+} from "../../shared/chatActivity";
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from "./constants";
 import { conversationTimeValue, upsertConversationSummary } from "./conversation-summaries";
 import type { AppState } from "./app-state";
@@ -56,7 +60,22 @@ export function useAppEffects(
 
   useEffect(() => {
     return window.consensus.onConversationUpdated((updated) => {
+      const archived = updated.archived === true || updated.metadata.archived === true;
+      state.activityRevisionByConversationRef.current = {
+        ...state.activityRevisionByConversationRef.current,
+        [updated.id]: (state.activityRevisionByConversationRef.current[updated.id] ?? 0) + 1
+      };
+      const archivedConversationIds = new Set(state.archivedConversationIdsRef.current);
+      if (archived) {
+        archivedConversationIds.add(updated.id);
+      } else {
+        archivedConversationIds.delete(updated.id);
+      }
+      state.archivedConversationIdsRef.current = archivedConversationIds;
       state.setSummaries((current) => upsertConversationSummary(current, updated));
+      if (archived) {
+        state.setSelectedActivityItem((current) => current?.conversationId === updated.id ? undefined : current);
+      }
       state.setConversation((current) => {
         const isActive = current?.id === updated.id;
         const matchesCurrentSnapshot = conversationMatchesSnapshot(current, updated, state.currentRunId);
@@ -65,9 +84,10 @@ export function useAppEffects(
           treatAsViewed: isActive && matchesCurrentSnapshot
         });
         state.setActivityItems((activityCurrent) => {
-          const preservedReadItems = activityCurrent
-            .filter((item) => item.conversationId === updated.id && item.status === "recent")
-            .map((item) => (isActive ? { ...item, read: true } : item));
+          const preservedReadItems = preservedRecentChatActivityItems(activityCurrent, updated.id, {
+            archived,
+            treatAsRead: isActive
+          });
           return mergeChatActivityItems(activityCurrent, [...activityItems, ...preservedReadItems], {
             replaceConversationId: updated.id
           });

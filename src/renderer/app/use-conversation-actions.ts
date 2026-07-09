@@ -1,5 +1,6 @@
 import type { ChatActivityItem, ChatMessage, Conversation } from "../../shared/types";
-import { buildChatActivityItems, mergeChatActivityItems } from "../../shared/chatActivity";
+import { buildChatActivityItems, reconcileChatActivityRefreshItems } from "../../shared/chatActivity";
+import { executeChatActivityFocus } from "../../shared/chatActivityFocus";
 import {
   CONVERSATION_MESSAGE_PAGE_SIZE,
   mergeLoadedMessagePage,
@@ -24,6 +25,7 @@ export interface ConversationActions {
   refreshConversations: () => Promise<void>;
   openConversation: (id: string) => Promise<void>;
   openConversationAndFocusActivityItem: (item: ChatActivityItem) => Promise<void>;
+  clearChatMessageFocus: () => void;
   loadOlderConversationMessages: () => Promise<void>;
   loadConversationMessagePageForMessage: (messageId: string) => Promise<boolean>;
   jumpToParticipantLastMessage: (participantId: string) => void;
@@ -38,28 +40,44 @@ export interface ConversationActions {
 
 export function useConversationActions(state: AppState): ConversationActions {
   async function refreshConversations(): Promise<void> {
-    state.setSummaries(await window.consensus.listConversations());
+    const summaries = await window.consensus.listConversations();
+    state.archivedConversationIdsRef.current = new Set(
+      summaries.filter((summary) => summary.archived === true).map((summary) => summary.id)
+    );
+    state.setSummaries(summaries);
   }
 
   async function refreshActivity(): Promise<void> {
+    const requestId = state.activityRefreshRequestRef.current + 1;
+    state.activityRefreshRequestRef.current = requestId;
+    const revisionsAtStart = { ...state.activityRevisionByConversationRef.current };
     state.setActivityLoading(true);
     state.setActivityError(undefined);
     try {
       const result = await window.consensus.listChatActivity({
         lastViewedAtByConversationId: state.lastViewedAtRef.current
       });
+      if (requestId !== state.activityRefreshRequestRef.current) {
+        return;
+      }
       state.setActivityItems((current) => {
-        const preservedReadItems = current
-          .filter((item) => item.status === "recent")
-          .map((item) => ({ ...item, read: true }));
-        return preservedReadItems.length > 0
-          ? mergeChatActivityItems(preservedReadItems, result.items)
-          : result.items;
+        return reconcileChatActivityRefreshItems(current, result.items, {
+          revisionsAtStart,
+          revisionsNow: state.activityRevisionByConversationRef.current,
+          archivedConversationIds: state.archivedConversationIdsRef.current
+        });
       });
+      state.setSelectedActivityItem((current) =>
+        current && state.archivedConversationIdsRef.current.has(current.conversationId) ? undefined : current
+      );
     } catch (caught) {
-      state.setActivityError(errorText(caught));
+      if (requestId === state.activityRefreshRequestRef.current) {
+        state.setActivityError(errorText(caught));
+      }
     } finally {
-      state.setActivityLoading(false);
+      if (requestId === state.activityRefreshRequestRef.current) {
+        state.setActivityLoading(false);
+      }
     }
   }
 
@@ -75,6 +93,9 @@ export function useConversationActions(state: AppState): ConversationActions {
       const seededSettings = await window.consensus.getSettings();
       state.setSettings(seededSettings);
       state.setAgents(nextAgents);
+      state.archivedConversationIdsRef.current = new Set(
+        nextSummaries.filter((summary) => summary.archived === true).map((summary) => summary.id)
+      );
       state.setSummaries(nextSummaries);
       const explicitRepoPath = (seededSettings.lastRepoPath ?? nextSettings.lastRepoPath)?.trim();
       const rememberedRepoPath = explicitRepoPath || nextSummaries.find((summary) => summary.repoPath?.trim())?.repoPath?.trim();
@@ -91,6 +112,7 @@ export function useConversationActions(state: AppState): ConversationActions {
   }
 
   async function openConversation(id: string): Promise<void> {
+    clearChatMessageFocus();
     await openConversationForSelection(id);
   }
 
@@ -146,6 +168,7 @@ export function useConversationActions(state: AppState): ConversationActions {
   async function openConversationAndFocusActivityItem(item: ChatActivityItem): Promise<void> {
     const pendingFocusNonce = state.chatMessageFocusNonceRef.current + 1;
     state.chatMessageFocusNonceRef.current = pendingFocusNonce;
+    state.setActivityFocusError(undefined);
     state.setChatMessageFocusRequest({
       conversationId: item.conversationId,
       messageId: item.target.messageId?.trim() ?? "",
@@ -153,31 +176,51 @@ export function useConversationActions(state: AppState): ConversationActions {
       nonce: pendingFocusNonce,
       pending: true
     });
-    const conversation = await openConversationForSelection(item.conversationId);
-    if (!conversation) {
-      clearPendingActivityFocus(pendingFocusNonce);
-      return;
-    }
-    const resolvedItem = resolveLoadedActivityItemTarget(item, conversation);
-    const messageId = resolvedItem.target.messageId?.trim();
-    if (!messageId) {
-      clearPendingActivityFocus(pendingFocusNonce);
-      return;
-    }
-    state.setSelectedActivityItem((current) => current?.id === item.id ? resolvedItem : current);
-    await ensureActivityTargetMessagesLoaded(
-      conversation,
-      messageId,
-      resolvedItem.target.threadRootId?.trim() || undefined
-    );
-    await waitForNextFrame();
-    state.chatMessageFocusNonceRef.current += 1;
-    state.setChatMessageFocusRequest({
-      conversationId: item.conversationId,
-      messageId,
-      threadRootId: resolvedItem.target.threadRootId?.trim() || undefined,
-      nonce: state.chatMessageFocusNonceRef.current
+    let conversationRequestId: number | undefined;
+    const isCurrent = (): boolean =>
+      state.chatMessageFocusNonceRef.current === pendingFocusNonce &&
+      (conversationRequestId === undefined || state.openConversationRequestRef.current === conversationRequestId);
+
+    await executeChatActivityFocus<Conversation, ChatActivityItem>({
+      isCurrent,
+      openConversation: async () => {
+        const conversation = await openConversationForSelection(item.conversationId);
+        conversationRequestId = state.openConversationRequestRef.current;
+        return conversation;
+      },
+      resolveTarget: (conversation) => {
+        const resolvedItem = resolveLoadedActivityItemTarget(item, conversation);
+        return resolvedItem.target.messageId?.trim() ? resolvedItem : undefined;
+      },
+      onTargetResolved: (resolvedItem) => {
+        state.setSelectedActivityItem((current) => current?.id === item.id ? resolvedItem : current);
+      },
+      ensureTargetLoaded: (conversation, resolvedItem) => ensureActivityTargetMessagesLoaded(
+        conversation,
+        resolvedItem.target.messageId?.trim() ?? "",
+        resolvedItem.target.threadRootId?.trim() || undefined,
+        isCurrent
+      ),
+      beforeCommit: waitForNextFrame,
+      commit: (resolvedItem) => {
+        state.setChatMessageFocusRequest({
+          conversationId: item.conversationId,
+          messageId: resolvedItem.target.messageId?.trim() ?? "",
+          threadRootId: resolvedItem.target.threadRootId?.trim() || undefined,
+          nonce: pendingFocusNonce
+        });
+      },
+      clear: () => clearPendingActivityFocus(pendingFocusNonce),
+      fail: (caught) => {
+        state.setActivityFocusError(errorText(caught));
+      }
     });
+  }
+
+  function clearChatMessageFocus(): void {
+    state.chatMessageFocusNonceRef.current += 1;
+    state.setChatMessageFocusRequest(undefined);
+    state.setActivityFocusError(undefined);
   }
 
   function clearPendingActivityFocus(nonce: number): void {
@@ -239,11 +282,15 @@ export function useConversationActions(state: AppState): ConversationActions {
   async function ensureActivityTargetMessagesLoaded(
     conversation: Conversation,
     messageId: string,
-    threadRootId?: string
-  ): Promise<void> {
+    threadRootId: string | undefined,
+    isCurrent: () => boolean
+  ): Promise<boolean> {
     let loadedMessages = conversation.messages;
     const targetIds = [...new Set([messageId, threadRootId].filter((id): id is string => Boolean(id)))];
     for (const targetId of targetIds) {
+      if (!isCurrent()) {
+        return false;
+      }
       if (loadedMessages.some((message) => message.id === targetId)) {
         continue;
       }
@@ -252,8 +299,11 @@ export function useConversationActions(state: AppState): ConversationActions {
         aroundMessageId: targetId,
         limit: CONVERSATION_MESSAGE_PAGE_SIZE
       });
+      if (!isCurrent()) {
+        return false;
+      }
       if (page.messages.length === 0) {
-        continue;
+        throw new Error("The selected activity message is no longer available.");
       }
       loadedMessages = mergeMissingMessagesByCreatedAt(loadedMessages, page.messages);
       state.setConversation((current) => current?.id === conversation.id
@@ -261,6 +311,7 @@ export function useConversationActions(state: AppState): ConversationActions {
         : current);
       state.setMessagePage((current) => mergeLoadedMessagePage(current, page));
     }
+    return targetIds.every((targetId) => loadedMessages.some((message) => message.id === targetId));
   }
 
   function markConversationViewed(conversation: Conversation): void {
@@ -359,6 +410,7 @@ export function useConversationActions(state: AppState): ConversationActions {
     }
     state.chatMessageFocusNonceRef.current += 1;
     state.setChatMessageFocusRequest({
+      conversationId: state.conversation?.id,
       messageId: entry.messageId,
       threadRootId: typeof entry.threadRootId === "string" && entry.threadRootId.trim() ? entry.threadRootId : undefined,
       nonce: state.chatMessageFocusNonceRef.current
@@ -418,6 +470,7 @@ export function useConversationActions(state: AppState): ConversationActions {
   }
 
   function resetNewChatState(): void {
+    clearChatMessageFocus();
     state.setConversation(undefined);
     state.setMessagePage(undefined);
     state.setOlderMessagesLoading(false);
@@ -472,7 +525,7 @@ export function useConversationActions(state: AppState): ConversationActions {
   }
 
   return {
-    refreshAll, refreshActivity, refreshConversations, openConversation, openConversationAndFocusActivityItem, loadOlderConversationMessages,
+    refreshAll, refreshActivity, refreshConversations, openConversation, openConversationAndFocusActivityItem, clearChatMessageFocus, loadOlderConversationMessages,
     loadConversationMessagePageForMessage, jumpToParticipantLastMessage, selectRepo,
     inspectRepo, rememberRepoPath, cancelReview, newChatSession, newProjectSession,
     updateSelectedChatParticipantConfigIds: state.setSelectedChatParticipantConfigIds

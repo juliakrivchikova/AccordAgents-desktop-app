@@ -385,7 +385,7 @@ export function useChatConversationViewport(props: {
     if (focusChatMessage(request.messageId, request.threadRootId)) {
       focusNavigation.revealWhenStable(request.messageId, request.nonce);
     }
-  }, [props.messageFocusRequest?.nonce]);
+  }, [props.messageFocusRequest?.nonce, props.messageFocusRequest?.pending]);
 
   useLayoutEffect(() => {
     if (hasUnconsumedFocusIntent()) {
@@ -423,7 +423,7 @@ export function useChatConversationViewport(props: {
     focusNavigation.cancel();
     setStickToBottom(true);
     scheduleScrollToChatBottom();
-  }, [props.conversationId, props.messageFocusRequest?.nonce]);
+  }, [props.conversationId, props.messageFocusRequest?.nonce, props.messageFocusRequest?.pending]);
 
   return {
     chatVirtualItems,

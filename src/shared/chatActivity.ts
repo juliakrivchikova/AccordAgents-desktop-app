@@ -28,6 +28,13 @@ export interface BuildChatActivityItemsForUpdateOptions extends BuildChatActivit
   treatAsViewed?: boolean;
 }
 
+export interface ReconcileChatActivityRefreshOptions {
+  revisionsAtStart: Record<string, number>;
+  revisionsNow: Record<string, number>;
+  archivedConversationIds?: ReadonlySet<string>;
+  limit?: number;
+}
+
 export function buildChatActivityItems(
   conversation: Conversation | undefined,
   options: BuildChatActivityItemsOptions = {}
@@ -53,7 +60,10 @@ export function buildChatActivityItems(
   for (const runId of activeRuns.runIds) {
     runningRunIds.add(runId);
     const participantId = activeRuns.participantIdsByRunId.get(runId);
-    const message = newestMessageForRun(conversation.messages, runId);
+    const runMessage = newestMessageForRun(conversation.messages, runId);
+    const message = runMessage && isVisibleTimelineMessage(runMessage)
+      ? runMessage
+      : referencedVisibleMessage(runMessage, conversation.messages);
     const participant = participantId ? participants.get(participantId) : participantForMessage(message, participants);
     const timestamp = message?.createdAt ?? conversation.updatedAt;
     items.push({
@@ -77,11 +87,11 @@ export function buildChatActivityItems(
   }
 
   for (const message of conversation.messages) {
-    if (message.role !== "participant" || message.status !== "done") {
+    if (message.role !== "participant" || message.status !== "done" || !isVisibleTimelineMessage(message)) {
       continue;
     }
     const runId = cleanString(message.metadata?.runId);
-    if (!runId || runningRunIds.has(runId)) {
+    if (runId && runningRunIds.has(runId)) {
       continue;
     }
     const updatedAt = message.createdAt;
@@ -103,7 +113,7 @@ export function buildChatActivityItems(
       updatedAt,
       participant,
       target: {
-        runId,
+        ...(runId ? { runId } : {}),
         messageId: message.id,
         threadRootId: threadRootIdForMessage(message)
       }
@@ -150,6 +160,53 @@ export function mergeChatActivityItems(
     byId.set(item.id, item);
   }
   return limitChatActivityItems(sortChatActivityItems(dedupeChatActivityItems([...byId.values()])), options.limit);
+}
+
+export function reconcileChatActivityRefreshItems(
+  current: ChatActivityItem[],
+  incoming: ChatActivityItem[],
+  options: ReconcileChatActivityRefreshOptions
+): ChatActivityItem[] {
+  const archivedConversationIds = options.archivedConversationIds ?? new Set<string>();
+  const changedConversationIds = new Set<string>();
+  for (const [conversationId, revision] of Object.entries(options.revisionsNow)) {
+    if (revision !== (options.revisionsAtStart[conversationId] ?? 0)) {
+      changedConversationIds.add(conversationId);
+    }
+  }
+
+  const acceptedIncoming = incoming.filter((item) =>
+    !archivedConversationIds.has(item.conversationId) &&
+    !changedConversationIds.has(item.conversationId)
+  );
+  const preservedCurrent = current.filter((item) => {
+    if (archivedConversationIds.has(item.conversationId)) {
+      return false;
+    }
+    if (changedConversationIds.has(item.conversationId)) {
+      return true;
+    }
+    return item.status === "recent" && item.read === true;
+  });
+
+  return mergeChatActivityItems(acceptedIncoming, preservedCurrent, { limit: options.limit });
+}
+
+export function preservedRecentChatActivityItems(
+  items: ChatActivityItem[],
+  conversationId: string,
+  options: { archived: boolean; treatAsRead: boolean }
+): ChatActivityItem[] {
+  if (options.archived) {
+    return [];
+  }
+  return items
+    .filter((item) =>
+      item.conversationId === conversationId &&
+      item.status === "recent" &&
+      (item.read === true || options.treatAsRead)
+    )
+    .map((item) => ({ ...item, read: true }));
 }
 
 export function sortChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] {
@@ -209,16 +266,21 @@ function timelineMessageForApproval(
   approval: ChatAppToolApproval,
   triggerMessageId: string
 ): ChatMessage | undefined {
-  const exact = triggerMessageId
-    ? messages.find((message) => message.id === triggerMessageId && message.role !== "system")
+  const triggerMessage = triggerMessageId
+    ? messages.find((message) => message.id === triggerMessageId)
     : undefined;
+  const exact = triggerMessage && isVisibleTimelineMessage(triggerMessage) ? triggerMessage : undefined;
   if (exact) {
     return exact;
+  }
+  const visibleReference = referencedVisibleMessage(triggerMessage, messages);
+  if (visibleReference) {
+    return visibleReference;
   }
   const approvalMs = timeValue(approval.createdAt);
   const requesterParticipantId = cleanString(approval.requesterParticipantId);
   const visibleMessages = messages.filter((message) =>
-    message.role !== "system" &&
+    isVisibleTimelineMessage(message) &&
     (!approvalMs || timeValue(message.createdAt) <= approvalMs)
   );
   const requesterMessages = requesterParticipantId
@@ -226,7 +288,28 @@ function timelineMessageForApproval(
     : [];
   return newestMessageByCreatedAt(requesterMessages)
     ?? newestMessageByCreatedAt(visibleMessages)
-    ?? newestMessageByCreatedAt(messages.filter((message) => message.role !== "system"));
+    ?? newestMessageByCreatedAt(messages.filter(isVisibleTimelineMessage));
+}
+
+function referencedVisibleMessage(
+  message: ChatMessage | undefined,
+  messages: ChatMessage[]
+): ChatMessage | undefined {
+  const metadata = message?.metadata;
+  const referencedIds = [metadata?.sourceMessageId, metadata?.parentMessageId, metadata?.chatThreadRootId]
+    .map(cleanString)
+    .filter(Boolean);
+  for (const id of referencedIds) {
+    const referenced = messages.find((candidate) => candidate.id === id && isVisibleTimelineMessage(candidate));
+    if (referenced) {
+      return referenced;
+    }
+  }
+  return undefined;
+}
+
+function isVisibleTimelineMessage(message: ChatMessage): boolean {
+  return message.role !== "system" && message.metadata?.hiddenFromTimeline !== true;
 }
 
 function pendingMessageItems(
@@ -235,12 +318,18 @@ function pendingMessageItems(
   participants: Map<string, ChatActivityParticipantSummary>
 ): ChatActivityItem[] {
   const items: ChatActivityItem[] = [];
-  const participant = participantForMessage(message, participants);
+  const targetMessage = isVisibleTimelineMessage(message)
+    ? message
+    : referencedVisibleMessage(message, conversation.messages);
+  if (!targetMessage) {
+    return items;
+  }
+  const participant = participantForMessage(targetMessage, participants);
   const runId = cleanString(message.metadata?.runId);
   const target = {
     ...(runId ? { runId } : {}),
-    messageId: message.id,
-    threadRootId: threadRootIdForMessage(message)
+    messageId: targetMessage.id,
+    threadRootId: threadRootIdForMessage(targetMessage)
   };
   const updatedAt = message.createdAt;
 
@@ -253,7 +342,7 @@ function pendingMessageItems(
       status: "pending",
       kind: "choice",
       title: message.metadata.pendingChoice.title || "Choice required",
-      preview: previewText(message.content) || message.metadata.pendingChoice.question || "A participant is waiting for a choice.",
+      preview: previewText(targetMessage.content) || message.metadata.pendingChoice.question || "A participant is waiting for a choice.",
       createdAt: message.createdAt,
       updatedAt,
       participant,
@@ -273,7 +362,7 @@ function pendingMessageItems(
       status: "pending",
       kind: "mention",
       title: "Mention approval required",
-      preview: previewText(message.content) || pendingMentions.map((mention) => `@${mention.targetHandle}`).join(", "),
+      preview: previewText(targetMessage.content) || pendingMentions.map((mention) => `@${mention.targetHandle}`).join(", "),
       createdAt: message.createdAt,
       updatedAt,
       participant,
@@ -290,7 +379,7 @@ function pendingMessageItems(
       status: "pending",
       kind: "participant-request",
       title: "Participant request approval required",
-      preview: previewText(message.content) || participantRequestPreview(message),
+      preview: previewText(targetMessage.content) || participantRequestPreview(message),
       createdAt: message.createdAt,
       updatedAt,
       participant,
@@ -304,8 +393,16 @@ function pendingMessageItems(
 function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] {
   const byId = new Map<string, ChatActivityItem>();
   const strongestByRun = new Map<string, ChatActivityItem>();
+  const strongestByMessage = new Map<string, ChatActivityItem>();
   for (const item of items) {
     byId.set(item.id, item);
+    const messageId = cleanString(item.target.messageId);
+    if (messageId) {
+      const existingMessageItem = strongestByMessage.get(messageId);
+      if (!existingMessageItem || STATUS_RANK[item.status] < STATUS_RANK[existingMessageItem.status]) {
+        strongestByMessage.set(messageId, item);
+      }
+    }
     const runId = cleanString(item.target.runId);
     if (!runId) {
       continue;
@@ -317,6 +414,10 @@ function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] 
   }
 
   return [...byId.values()].filter((item) => {
+    const messageId = cleanString(item.target.messageId);
+    if (messageId && item.status === "recent" && strongestByMessage.get(messageId)?.id !== item.id) {
+      return false;
+    }
     const runId = cleanString(item.target.runId);
     if (!runId || item.status !== "recent") {
       return true;

@@ -75,6 +75,7 @@ function App(): JSX.Element {
   }, []);
 
   const openSettingsSection = (section: SettingsSection): void => {
+    conversationActions.clearChatMessageFocus();
     state.setActiveSettingsSection(section);
     state.setRailView("settings");
     state.setSidebarCollapsed(false);
@@ -199,7 +200,19 @@ function App(): JSX.Element {
       topStrip={(
         <div className="app-shell-top-strip-actions">
           <ModeToggle />
-          <Button variant="ghost" size="icon-sm" className="topbar-icon-button" title="Refresh" aria-label="Refresh" onClick={() => void conversationActions.refreshAll()}>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="topbar-icon-button"
+            title="Refresh"
+            aria-label="Refresh"
+            onClick={() => void (async () => {
+              await conversationActions.refreshAll();
+              if (state.railView === "activity") {
+                await conversationActions.refreshActivity();
+              }
+            })()}
+          >
             <RefreshCw aria-hidden />
             <span className="sr-only">Refresh</span>
           </Button>
@@ -209,6 +222,9 @@ function App(): JSX.Element {
         <AppRail
           activeView={state.railView}
           onSelect={(nextView) => {
+            if (nextView !== "activity") {
+              conversationActions.clearChatMessageFocus();
+            }
             state.setRailView(nextView);
             if (nextView !== "activity") {
               state.setSelectedActivityItem(undefined);
@@ -309,6 +325,7 @@ function App(): JSX.Element {
           selectedItem={state.selectedActivityItem}
           loading={state.activityLoading}
           error={state.activityError}
+          detailError={state.activityFocusError}
           detail={(
             <div className="content-area result-layout activity-conversation-content">
               {conversationPanel ?? <AppLoadingState title="Loading chat" description={openingConversationDescription} />}

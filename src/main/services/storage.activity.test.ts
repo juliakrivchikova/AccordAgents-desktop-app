@@ -130,6 +130,70 @@ test("listChatActivity includes visible approval context messages for approval t
   assert.equal(result.items[0].preview, sourceMessage.content);
 });
 
+test("listChatActivity resolves explicit approval triggers outside the bounded context window", async () => {
+  const approval: ChatAppToolApproval = {
+    id: "approval-triggered",
+    conversationId: "chat-1",
+    requesterParticipantId: "participant-1",
+    requesterHandle: "drew-codex-engineer",
+    requesterRoleConfigId: "engineer",
+    toolName: "app_roles_request_change",
+    capability: "participants.manage",
+    status: "pending",
+    request: { kind: "portable", permissions: ["workspaceWrite"] },
+    summary: "Create role",
+    createdAt: "2026-01-01T11:00:00.000Z",
+    updatedAt: "2026-01-01T11:00:00.000Z",
+    resumeContext: { runId: "run-1", triggerMessageId: "exact-trigger" }
+  };
+  const chat = conversation("chat-1", "Approval chat");
+  chat.metadata.pendingAppToolApprovals = [approval];
+  const exactTrigger = participantMessage("exact-trigger", {
+    content: "Internal approval trigger",
+    createdAt: "2026-01-01T10:59:00.000Z",
+    metadata: {
+      hiddenFromTimeline: true,
+      sourceMessageId: "visible-source",
+      parentMessageId: "visible-source"
+    }
+  });
+  const visibleSource = participantMessage("visible-source", {
+    content: "Exact approval request",
+    createdAt: "2026-01-01T10:58:00.000Z"
+  });
+  const unrelatedContext = participantMessage("newer-context", {
+    content: "Unrelated newer message",
+    createdAt: "2026-01-08T11:59:00.000Z"
+  });
+  const queries: string[] = [];
+  const storage = fakeStorage(async (sql) => {
+    queries.push(sql);
+    if (sql.includes("coalesce(nullif(body_json")) {
+      return [{ id: chat.id, bodyJson: JSON.stringify({ ...chat, messages: [] }) }];
+    }
+    if (sql.includes("$.metadata.pendingChoice.status")) return [];
+    if (sql.includes("$.role") && sql.includes("$.status') = 'pending'")) return [];
+    if (sql.includes("$.role") && sql.includes("$.status') = 'done'")) return [];
+    if (sql.includes("row_number() over")) {
+      return [{ conversationId: chat.id, sequence: 60, payloadJson: JSON.stringify(unrelatedContext) }];
+    }
+    if (sql.includes("(conversation_id, message_id) in") && sql.includes("exact-trigger")) {
+      return [{ conversationId: chat.id, sequence: 1, payloadJson: JSON.stringify(exactTrigger) }];
+    }
+    if (sql.includes("(conversation_id, message_id) in") && sql.includes("visible-source")) {
+      return [{ conversationId: chat.id, sequence: 2, payloadJson: JSON.stringify(visibleSource) }];
+    }
+    throw new Error(`Unexpected query: ${sql}`);
+  });
+
+  const result = await storage.listChatActivity();
+
+  assert.equal(result.items[0]?.target.messageId, "visible-source");
+  assert.equal(result.items[0]?.preview, "Exact approval request");
+  assert.ok(queries.some((sql) => sql.includes("('chat-1', 'exact-trigger')")));
+  assert.ok(queries.some((sql) => sql.includes("('chat-1', 'visible-source')")));
+});
+
 test("listChatActivity returns bounded sorted items with resolvable message targets", async () => {
   const chat = conversation("chat-1", "Activity chat");
   const message = participantMessage("recent-reply", {

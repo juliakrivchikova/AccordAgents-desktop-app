@@ -45,6 +45,12 @@ function sqlStringList(values: string[]): string {
   return values.length > 0 ? `(${values.map((value) => sqlString(value)).join(", ")})` : "('')";
 }
 
+function sqlStringPairList(values: Array<[string, string]>): string {
+  return values.length > 0
+    ? `(${values.map(([left, right]) => `(${sqlString(left)}, ${sqlString(right)})`).join(", ")})`
+    : "(('', ''))";
+}
+
 function clearLegacyAccordState(metadata: Conversation["metadata"]): Conversation["metadata"] {
   const policies = Array.isArray(metadata.appToolApprovalPolicies)
     ? metadata.appToolApprovalPolicies.filter((policy) =>
@@ -74,6 +80,16 @@ function hasPendingAppToolApprovals(conversation: Conversation): boolean {
       typeof approval === "object" &&
       (approval as { status?: unknown }).status === "pending"
     );
+}
+
+function pendingApprovalTriggerTargets(conversation: Conversation): Array<[string, string]> {
+  if (!Array.isArray(conversation.metadata.pendingAppToolApprovals)) {
+    return [];
+  }
+  return conversation.metadata.pendingAppToolApprovals.flatMap((approval) => {
+    const messageId = approval?.status === "pending" ? approval.resumeContext?.triggerMessageId?.trim() : "";
+    return messageId ? [[conversation.id, messageId] as [string, string]] : [];
+  });
 }
 
 function nonTerminalRemoteRunIds(value: unknown): string[] {
@@ -260,7 +276,13 @@ export class StorageService {
     const approvalConversationIds = [...conversationsById.values()]
       .filter((conversation) => hasPendingAppToolApprovals(conversation))
       .map((conversation) => conversation.id);
-    const messages = await this.activityMessageRows(conversationIds, conversationLimit, approvalConversationIds);
+    const approvalTriggerTargets = [...conversationsById.values()].flatMap(pendingApprovalTriggerTargets);
+    const messages = await this.activityMessageRows(
+      conversationIds,
+      conversationLimit,
+      approvalConversationIds,
+      approvalTriggerTargets
+    );
     for (const row of messages) {
       const conversation = conversationsById.get(row.conversationId);
       if (!conversation) {
@@ -537,7 +559,8 @@ export class StorageService {
   private async activityMessageRows(
     conversationIds: string[],
     conversationLimit: number,
-    approvalConversationIds: string[] = []
+    approvalConversationIds: string[] = [],
+    approvalTriggerTargets: Array<[string, string]> = []
   ): Promise<{ conversationId: string; sequence: number; payloadJson: string }[]> {
     const idList = sqlStringList(conversationIds);
     const pendingRows = await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
@@ -576,7 +599,6 @@ export class StorageService {
         where conversation_id in ${idList}
           and json_extract(payload_json, '$.role') = 'participant'
           and json_extract(payload_json, '$.status') = 'done'
-          and json_extract(payload_json, '$.metadata.runId') is not null
         order by created_at desc
         limit ${Math.max(DEFAULT_CHAT_ACTIVITY_LIMIT, conversationLimit * 8)};
       `
@@ -600,8 +622,43 @@ export class StorageService {
         `
       )
       : [];
+    const approvalTriggerRows = approvalTriggerTargets.length > 0
+      ? await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
+        `
+          select conversation_id as conversationId, sequence, payload_json as payloadJson
+          from conversation_messages
+          where (conversation_id, message_id) in ${sqlStringPairList(approvalTriggerTargets)};
+        `
+      )
+      : [];
+    const activitySourceTargets = [...pendingRows, ...pendingParticipantRows, ...approvalTriggerRows].flatMap((row) => {
+      try {
+        const message = JSON.parse(row.payloadJson) as ChatMessage;
+        const ids = [message.metadata?.sourceMessageId, message.metadata?.parentMessageId, message.metadata?.chatThreadRootId]
+          .flatMap((value) => typeof value === "string" && value.trim() ? [value.trim()] : []);
+        return [...new Set(ids)].map((messageId) => [row.conversationId, messageId] as [string, string]);
+      } catch {
+        return [];
+      }
+    });
+    const activitySourceRows = activitySourceTargets.length > 0
+      ? await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
+        `
+          select conversation_id as conversationId, sequence, payload_json as payloadJson
+          from conversation_messages
+          where (conversation_id, message_id) in ${sqlStringPairList(activitySourceTargets)};
+        `
+      )
+      : [];
     const byKey = new Map<string, { conversationId: string; sequence: number; payloadJson: string }>();
-    for (const row of [...pendingRows, ...pendingParticipantRows, ...participantRows, ...approvalContextRows]) {
+    for (const row of [
+      ...pendingRows,
+      ...pendingParticipantRows,
+      ...participantRows,
+      ...approvalContextRows,
+      ...approvalTriggerRows,
+      ...activitySourceRows
+    ]) {
       byKey.set(`${row.conversationId}:${row.sequence}`, row);
     }
     return [...byKey.values()];
