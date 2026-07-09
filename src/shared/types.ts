@@ -1656,6 +1656,7 @@ export interface ChatActivityParticipantSummary {
   id: string;
   handle: string;
   kind: ChatProviderKind;
+  roleConfigId?: string;
   avatarId?: string;
 }
 

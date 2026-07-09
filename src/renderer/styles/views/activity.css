@@ -218,6 +218,10 @@
   height: 100%;
 }
 
+.activity-detail-body .chat-timeline {
+  padding-bottom: max(240px, 42vh);
+}
+
 .activity-empty,
 .activity-detail-empty {
   display: flex;

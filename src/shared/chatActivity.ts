@@ -177,9 +177,10 @@ function pendingApprovalItems(
     if (approval.status !== "pending") {
       return [];
     }
-    const participant = participants.get(approval.requesterParticipantId);
     const triggerMessageId = cleanString(approval.resumeContext?.triggerMessageId);
     const targetMessage = timelineMessageForApproval(conversation.messages, approval, triggerMessageId);
+    const participant = participantForMessage(targetMessage, participants)
+      ?? participants.get(approval.requesterParticipantId);
     const messageId = targetMessage?.id ?? triggerMessageId;
     return [{
       id: `approval:${conversation.id}:${approval.id}`,
@@ -341,6 +342,7 @@ function participantSummaries(conversation: Conversation): Map<string, ChatActiv
       id,
       handle,
       kind,
+      roleConfigId: cleanString(participant.roleConfigId) || undefined,
       avatarId: cleanString(participant.avatarId)
     });
   }
@@ -353,6 +355,14 @@ function participantForMessage(
 ): ChatActivityParticipantSummary | undefined {
   if (!message) {
     return undefined;
+  }
+  if (message.role === "system") {
+    return {
+      id: "chat-assistant",
+      handle: "assistant",
+      kind: "codex-cli",
+      roleConfigId: "administrator"
+    };
   }
   const participantId = cleanString(message.participantId);
   if (participantId) {
@@ -368,8 +378,14 @@ function participantForMessage(
   return {
     id: participantId || handle,
     handle,
-    kind: handle.toLowerCase().includes("claude") ? "claude-code" : "codex-cli"
+    kind: handle.toLowerCase().includes("claude") ? "claude-code" : "codex-cli",
+    roleConfigId: isChatAssistantHandle(handle) ? "administrator" : undefined
   };
+}
+
+function isChatAssistantHandle(handle: string): boolean {
+  const normalized = handle.trim().replace(/^@/, "").toLowerCase();
+  return normalized === "assistant" || normalized === "admin";
 }
 
 function newestMessageForRun(messages: ChatMessage[], runId: string): ChatMessage | undefined {

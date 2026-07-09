@@ -14,6 +14,12 @@ const participant: ChatParticipant = {
   roleConfigId: "engineer",
   kind: "codex-cli"
 };
+const chatAssistant: ChatParticipant = {
+  id: "participant-assistant",
+  handle: "admin",
+  roleConfigId: "administrator",
+  kind: "codex-cli"
+};
 const remoteParticipant: ChatParticipant = {
   id: "participant-2",
   handle: "taylor-claude-engineer",
@@ -33,7 +39,7 @@ function conversation(patch: Partial<Conversation> = {}): Conversation {
     findings: [],
     ...rest,
     metadata: {
-      participants: [participant, remoteParticipant],
+      participants: [participant, chatAssistant, remoteParticipant],
       ...metadata
     }
   };
@@ -255,6 +261,45 @@ test("buildChatActivityItems targets visible requester message for approval with
   assert.equal(items[0].kind, "approval");
   assert.equal(items[0].target.messageId, "source");
   assert.equal(items[0].preview, "Requested a new `Mathematician` role. Please approve it in the app review card.");
+});
+
+test("buildChatActivityItems shows the target message actor for approval activity", () => {
+  const approval: ChatAppToolApproval = {
+    id: "approval-1",
+    conversationId: "conversation-1",
+    requesterParticipantId: participant.id,
+    requesterHandle: participant.handle,
+    requesterRoleConfigId: "engineer",
+    toolName: "app_roles_request_change",
+    capability: "participants.manage",
+    status: "pending",
+    request: { kind: "portable", permissions: ["workspaceWrite"] },
+    summary: "Create role \"Mathematician\"",
+    createdAt: "2026-01-08T11:00:00.000Z",
+    updatedAt: "2026-01-08T11:00:00.000Z",
+    resumeContext: { runId: "approval-run", triggerMessageId: "assistant-message" }
+  };
+  const items = buildChatActivityItems(conversation({
+    metadata: { pendingAppToolApprovals: [approval] },
+    messages: [
+      participantMessage("requester-message", {
+        content: "Please create a role.",
+        createdAt: "2026-01-08T10:58:00.000Z"
+      }),
+      participantMessage("assistant-message", {
+        participantId: chatAssistant.id,
+        participantLabel: "@admin",
+        content: "Requested a new `Mathematician` role. Please approve it in the app review card.",
+        createdAt: "2026-01-08T10:59:00.000Z"
+      }, chatAssistant)
+    ]
+  }));
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].kind, "approval");
+  assert.equal(items[0].target.messageId, "assistant-message");
+  assert.equal(items[0].participant?.handle, "admin");
+  assert.equal(items[0].participant?.roleConfigId, "administrator");
 });
 
 test("buildChatActivityItems emits recent finished participant messages after last viewed", () => {

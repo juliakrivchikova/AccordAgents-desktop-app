@@ -4,6 +4,7 @@ import type { ChatActivityItem, ChatActivityParticipantSummary } from "../../../
 import { resolveSelectedChatActivityItem } from "../../../shared/chatActivity";
 import { Avatar } from "../avatar/avatar";
 import { avatarForChatParticipant } from "../chat/chat-avatars";
+import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import { Button } from "@/components/ui/button";
 
 export interface ActivityViewProps {
@@ -129,7 +130,7 @@ function ActivityRow({
 }
 
 function avatarForActivityParticipant(participant: ChatActivityParticipantSummary) {
-  return avatarForChatParticipant(participant, `@${participant.handle}`);
+  return avatarForChatParticipant(participant, chatParticipantDisplayName(participant));
 }
 
 function statusLabel(status: ChatActivityItem["status"]): string {
