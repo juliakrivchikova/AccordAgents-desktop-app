@@ -17,6 +17,10 @@
   transition: none;
 }
 
+.app-shell-root.switching-sidebar-visibility {
+  transition: none;
+}
+
 .app-shell-root[data-sidebar-collapsed="true"] {
   grid-template-columns: var(--app-rail-width) 0 minmax(0, 1fr);
 }

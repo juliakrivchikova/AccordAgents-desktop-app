@@ -35,12 +35,17 @@ export const AppShell = ({
 }: AppShellProps): JSX.Element => {
   const rootRef = React.useRef<HTMLDivElement>(null);
   const cleanupResizeRef = React.useRef<(() => void) | null>(null);
+  const previousSidebarHiddenRef = React.useRef(sidebarHidden);
   const [isResizingSidebar, setIsResizingSidebar] = React.useState(false);
   const normalizedSidebarWidth = normalizeAppSidebarWidth(sidebarWidth);
   const secondarySidebarCollapsed = sidebarCollapsed || sidebarHidden;
+  const sidebarVisibilityChanged = previousSidebarHiddenRef.current !== sidebarHidden;
 
   // Tear down any in-flight drag listeners if the shell unmounts mid-resize.
   React.useEffect(() => () => cleanupResizeRef.current?.(), []);
+  React.useLayoutEffect(() => {
+    previousSidebarHiddenRef.current = sidebarHidden;
+  }, [sidebarHidden]);
 
   function startSidebarResize(event: React.PointerEvent<HTMLDivElement>): void {
     const root = rootRef.current;
@@ -80,6 +85,7 @@ export const AppShell = ({
       className={cn(
         "app-shell-root grid h-full min-h-0 text-foreground",
         isResizingSidebar && "resizing-sidebar",
+        sidebarVisibilityChanged && "switching-sidebar-visibility",
         className
       )}
     >
