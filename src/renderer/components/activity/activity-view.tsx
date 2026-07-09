@@ -119,10 +119,9 @@ function ActivityRow({
       )}
       <span className="activity-row-main">
         <span className="activity-row-topline">
-          <span className="activity-row-title">{item.title}</span>
+          <span className="activity-row-title">{item.conversationTitle}</span>
           <span className="activity-row-time">{relativeTime(item.updatedAt)}</span>
         </span>
-        <span className="activity-row-context">{item.conversationTitle}</span>
         <span className="activity-row-preview">{item.preview}</span>
       </span>
     </button>

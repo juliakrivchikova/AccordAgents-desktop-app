@@ -150,7 +150,6 @@
 }
 
 .activity-row-title,
-.activity-row-context,
 .activity-row-preview {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -168,13 +167,6 @@
   flex: 0 0 auto;
   color: var(--app-muted);
   font-size: var(--text-xs);
-}
-
-.activity-row-context {
-  color: var(--app-muted);
-  font-size: var(--text-sm);
-  line-height: var(--leading-tight);
-  white-space: nowrap;
 }
 
 .activity-row-preview {
