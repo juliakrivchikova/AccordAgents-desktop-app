@@ -1644,7 +1644,7 @@ test("bare failed terminal_state replay terminalizes pending provider message", 
   assert.equal((saved.metadata.remoteRunReplay as any)[runId].terminalState, "failed");
 });
 
-test("terminal replay does not clobber provider_result-finalized message", async () => {
+test("terminal replay preserves provider_result content while applying lifecycle outcome", async () => {
   const participant = chatParticipant();
   const runId = "provider-result-run";
   const conversation = chatConversation([participant]);
@@ -1700,9 +1700,10 @@ test("terminal replay does not clobber provider_result-finalized message", async
 
   const saved = storage.current as Conversation;
   const savedMessage = saved.messages.find((message) => message.id === pending.id);
-  assert.equal(savedMessage?.status, "done");
+  assert.equal(savedMessage?.status, "error");
   assert.equal(savedMessage?.content, "Finished remotely.");
   assert.equal(savedMessage?.metadata?.remoteRunStatus?.phase, "terminal");
+  assert.equal(savedMessage?.metadata?.remoteRunStatus?.label, "Failed");
 });
 
 async function testRemoteRun(options: {

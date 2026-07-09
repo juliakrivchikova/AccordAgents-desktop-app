@@ -36,6 +36,7 @@ import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import type {
   AgentHealth,
   AppSettings,
+  ChatAgentActivityEvent,
   ChatAppToolApproval,
   ChatAppToolApprovalPolicy,
   ChatBehaviorRuleConfig,
@@ -1824,7 +1825,7 @@ test("remote provider_result without durationMs gets workedMs from handle timing
         participantId: participant.id,
         participantHandle: participant.handle,
         worker: { host: "worker.example" },
-        status: "completed",
+        status: "running",
         startedAt,
         completedAt,
         updatedAt: completedAt
@@ -1843,6 +1844,15 @@ test("remote provider_result without durationMs gets workedMs from handle timing
     participantId: participant.id,
     ok: true,
     content: "Remote answer."
+  } as any);
+  await service.applyRemoteRunReplayRecord({
+    kind: "terminal_state",
+    id: "remote-run:terminal",
+    seq: 2,
+    runId: "remote-run",
+    conversationId: conversation.id,
+    status: "completed",
+    createdAt: completedAt
   } as any);
 
   const msg = storage.current.messages.find(
@@ -2079,6 +2089,395 @@ test("remote provider text keeps processing start stable across chunks", async (
     (storage.current.metadata.remoteRunReplay as any)["remote-run"].remoteRunStatus.processingStartedAt,
     firstStartedAt
   );
+});
+
+test("remote provider activity survives split JSONL and renders before text", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], {
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        conversationId: "conversation-1",
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        providerOutputMessageId: "pending-remote",
+        worker: { host: "worker.example" },
+        status: "running",
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push({
+    id: "pending-remote",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "",
+    createdAt: NOW,
+    status: "pending",
+    metadata: { runId: "remote-run", appMessageSource: "remote-run-provider-output" }
+  });
+  const { service, storage } = testService({ conversation });
+  const commandLine = JSON.stringify({
+    type: "item.started",
+    item: { type: "command_execution", command: "rg remote" }
+  });
+  const splitAt = Math.floor(commandLine.length / 2);
+
+  await service.applyRemoteRunReplayRecord({
+    id: "remote-run:provider-output:1",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 1,
+    createdAt: NOW,
+    kind: "provider_output",
+    participantId: participant.id,
+    stream: "stdout",
+    content: commandLine.slice(0, splitAt)
+  } as any);
+
+  assert.equal(storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote")?.metadata?.activityEvents, undefined);
+
+  const activityResult = await service.applyRemoteRunReplayRecord({
+    id: "remote-run:provider-output:2",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 2,
+    createdAt: NOW,
+    kind: "provider_output",
+    participantId: participant.id,
+    stream: "stdout",
+    content: `${commandLine.slice(splitAt)}\n`
+  } as any);
+
+  const activityMessage = storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote");
+  assert.equal(activityResult.applied, true);
+  assert.equal(activityMessage?.status, "pending");
+  assert.equal(activityMessage?.content, "");
+  assert.deepEqual(activityMessage?.metadata?.activityEvents?.map((event: ChatAgentActivityEvent) => [event.sequence, event.label]), [[1, "Running command"]]);
+
+  const textResult = await service.applyRemoteRunReplayRecord({
+    id: "remote-run:provider-output:3",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 3,
+    createdAt: NOW,
+    kind: "provider_output",
+    participantId: participant.id,
+    stream: "stdout",
+    content: `${JSON.stringify({ type: "agent_message_delta", delta: "Remote text." })}\n`
+  } as any);
+  const duplicate = await service.applyRemoteRunReplayRecord({
+    id: "remote-run:provider-output:3",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 3,
+    createdAt: NOW,
+    kind: "provider_output",
+    participantId: participant.id,
+    stream: "stdout",
+    content: `${JSON.stringify({ type: "agent_message_delta", delta: "Remote text." })}\n`
+  } as any);
+
+  const message = storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote");
+  const replay = (storage.current.metadata.remoteRunReplay as any)["remote-run"];
+  assert.equal(textResult.applied, true);
+  assert.equal(duplicate.applied, false);
+  assert.equal(message?.content, "Remote text.");
+  assert.deepEqual(message?.metadata?.activityEvents?.map((event: ChatAgentActivityEvent) => [event.sequence, event.label]), [[1, "Running command"]]);
+  assert.equal(message?.metadata?.remoteRunStatus?.phase, "processing-request");
+  assert.equal(replay.providerOutputLineBuffer, "");
+  assert.equal(replay.providerActivitySequence, 1);
+  assert.equal(replay.providerActivityEvents.length, 1);
+});
+
+test("remote activity accumulator survives restart, dedupes labels, and stays bounded", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], {
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        conversationId: "conversation-1",
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        providerOutputMessageId: "pending-remote",
+        worker: { host: "worker.example" },
+        status: "running",
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push({
+    id: "pending-remote",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "",
+    createdAt: NOW,
+    status: "pending",
+    metadata: { runId: "remote-run", appMessageSource: "remote-run-provider-output" }
+  });
+  const first = testService({ conversation });
+  await first.service.applyRemoteRunReplayRecord({
+    id: "remote-run:provider-output:first",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 1,
+    createdAt: NOW,
+    kind: "provider_output",
+    participantId: participant.id,
+    stream: "stdout",
+    content: `${JSON.stringify({ type: "item.started", item: { type: "mcp_tool_call", name: "first_tool" } })}\n`
+  } as any);
+
+  const restarted = testService({ conversation: JSON.parse(JSON.stringify(first.storage.current)) });
+  const toolLines = Array.from({ length: 82 }, (_, index) => JSON.stringify({
+    type: "item.started",
+    item: { type: "mcp_tool_call", name: `tool_${index}` }
+  }));
+  toolLines.push(toolLines.at(-1) as string);
+  await restarted.service.applyRemoteRunReplayRecord({
+    id: "remote-run:provider-output:restored",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 2,
+    createdAt: "2026-06-27T22:00:01.000Z",
+    kind: "provider_output",
+    participantId: participant.id,
+    stream: "stdout",
+    content: `${toolLines.join("\n")}\n`
+  } as any);
+
+  const replay = (restarted.storage.current.metadata.remoteRunReplay as any)["remote-run"];
+  const message = restarted.storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote");
+  assert.equal(replay.providerActivitySequence, 83);
+  assert.equal(replay.providerActivityEvents.length, 80);
+  assert.equal(replay.providerOmittedActivityEventCount, 3);
+  assert.equal(replay.providerActivityEvents[0].label, "Using tool_2");
+  assert.equal(replay.providerActivityEvents.at(-1).label, "Using tool_81");
+  assert.equal(message?.metadata?.activityEvents?.length, 80);
+});
+
+test("stale conversation replay merge does not double-count omitted remote activity", async () => {
+  const participant = chatParticipant("codex-cli");
+  const activityEvents = (from: number, to: number): ChatAgentActivityEvent[] =>
+    Array.from({ length: to - from + 1 }, (_, index) => {
+      const sequence = from + index;
+      return {
+        id: `remote-run:activity:${sequence}`,
+        sequence,
+        kind: "tool",
+        label: `Using tool_${sequence}`,
+        createdAt: `2026-06-27T22:00:00.${String(sequence).padStart(3, "0")}Z`,
+        status: "started"
+      };
+    });
+  const conversation = chatConversation([participant], {
+    remoteRunReplay: {
+      "remote-run": {
+        cursorSeq: 140,
+        appliedRecordIds: [],
+        providerActivityEvents: activityEvents(61, 140),
+        providerActivitySequence: 140,
+        providerActivityLabel: "Using tool_140",
+        providerOmittedActivityEventCount: 60,
+        updatedAt: "2026-06-27T22:00:01.000Z"
+      }
+    }
+  });
+  const staleConversation = clone(conversation);
+  const { service, storage } = testService({ conversation });
+  storage.current.metadata.remoteRunReplay["remote-run"] = {
+    cursorSeq: 150,
+    appliedRecordIds: [],
+    providerActivityEvents: activityEvents(71, 150),
+    providerActivitySequence: 150,
+    providerActivityLabel: "Using tool_150",
+    providerOmittedActivityEventCount: 70,
+    updatedAt: "2026-06-27T22:00:02.000Z"
+  };
+
+  await (service as any).refreshStoredChatState(staleConversation);
+
+  const replay = (staleConversation.metadata.remoteRunReplay as any)["remote-run"];
+  assert.equal(replay.providerActivitySequence, 150);
+  assert.equal(replay.providerActivityEvents.length, 80);
+  assert.equal(replay.providerActivityEvents[0].sequence, 71);
+  assert.equal(replay.providerActivityEvents.at(-1).sequence, 150);
+  assert.equal(replay.providerOmittedActivityEventCount, 70);
+});
+
+test("remote provider result keeps exact content until terminal lifecycle finalizes", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], {
+    running: true,
+    runId: "remote-run",
+    activeRunIds: ["remote-run"],
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        conversationId: "conversation-1",
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        providerOutputMessageId: "pending-remote",
+        worker: { host: "worker.example" },
+        status: "running",
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push({
+    id: "pending-remote",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "Partial.",
+    createdAt: NOW,
+    status: "pending",
+    metadata: {
+      runId: "remote-run",
+      appMessageSource: "remote-run-provider-output",
+      activityEvents: [{
+        id: "remote-run:activity:1",
+        sequence: 1,
+        kind: "tool",
+        label: "Running command",
+        createdAt: NOW
+      }]
+    }
+  });
+  const { service, storage } = testService({ conversation });
+
+  await service.applyRemoteRunReplayRecord({
+    id: "remote-run:provider-result",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 1,
+    createdAt: NOW,
+    kind: "provider_result",
+    participantId: participant.id,
+    ok: true,
+    content: "Authoritative final."
+  } as any);
+  assert.equal(storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote")?.status, "pending");
+  assert.equal(storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote")?.content, "Authoritative final.");
+
+  await service.applyRemoteRunReplayRecord({
+    id: "remote-run:terminal",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 2,
+    createdAt: "2026-06-27T22:00:01.000Z",
+    kind: "terminal_state",
+    status: "completed"
+  } as any);
+
+  const messages = storage.current.messages.filter((item: ChatMessage) => item.role === "participant");
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].status, "done");
+  assert.equal(messages[0].content, "Authoritative final.");
+  assert.equal(messages[0].metadata?.activityEvents, undefined);
+  assert.equal(messages[0].metadata?.remoteRunStatus?.label, "Completed");
+  assert.deepEqual(storage.current.metadata.activeRunIds, undefined);
+});
+
+test("remote cancellation suppresses late output, result, and permission side effects", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], {
+    running: true,
+    runId: "remote-run",
+    activeRunIds: ["remote-run"],
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        conversationId: "conversation-1",
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        providerOutputMessageId: "pending-remote",
+        worker: { host: "worker.example" },
+        status: "running",
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push({
+    id: "pending-remote",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "Partial remote content.",
+    createdAt: NOW,
+    status: "pending",
+    metadata: {
+      runId: "remote-run",
+      appMessageSource: "remote-run-provider-output",
+      activityEvents: [{
+        id: "remote-run:activity:1",
+        sequence: 1,
+        kind: "tool",
+        label: "Running command",
+        createdAt: NOW
+      }]
+    }
+  });
+  const { service, storage } = testService({ conversation });
+
+  await service.updateRemoteRunHandleState(conversation.id, "remote-run", {
+    runId: "remote-run",
+    conversationId: conversation.id,
+    participantId: participant.id,
+    status: "cancelled",
+    completedAt: "2026-06-27T22:00:01.000Z",
+    error: "user cancelled"
+  });
+  await service.applyRemoteRunReplayRecord({
+    id: "remote-run:late-result",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 1,
+    createdAt: NOW,
+    kind: "provider_result",
+    participantId: participant.id,
+    ok: true,
+    content: "Late final must not win."
+  } as any);
+  await service.applyRemoteRunReplayRecord({
+    id: "remote-run:late-output",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 2,
+    createdAt: NOW,
+    kind: "provider_output",
+    participantId: participant.id,
+    stream: "stdout",
+    content: `${JSON.stringify({ type: "agent_message_delta", delta: "Late text." })}\n`
+  } as any);
+  await service.applyRemoteRunReplayRecord({
+    id: "remote-run:late-permission",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 3,
+    createdAt: NOW,
+    kind: "permission_pending",
+    participantId: participant.id,
+    requestId: "late-permission",
+    request: { kind: "portable", permissions: ["webAccess"] },
+    runPermissions: defaultChatAgentPermissions()
+  } as any);
+
+  const message = storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote");
+  assert.equal(message?.status, "error");
+  assert.equal(message?.content, "Partial remote content.");
+  assert.equal(message?.metadata?.remoteRunStatus?.label, "Cancelled");
+  assert.equal(message?.metadata?.activityEvents, undefined);
+  assert.equal((storage.current.metadata.remoteRunReplay as any)["remote-run"].cursorSeq, 3);
+  assert.deepEqual(storage.current.metadata.pendingAppToolApprovals ?? [], []);
+  assert.equal(storage.current.messages.some((item: ChatMessage) => item.content.includes("Late final")), false);
+  assert.equal(storage.current.messages.some((item: ChatMessage) => item.content.includes("Permission approval needed")), false);
 });
 
 test("cancelRun marks remote run failed when remote cancel delivery fails", async () => {
@@ -4785,6 +5184,15 @@ test("remote prompt context advances only after successful provider result repla
     sourceMessageId: storage.current.messages.find((message: ChatMessage) =>
       message.role === "user" && message.content.includes("Remote question")
     )?.id
+  });
+  await service.applyRemoteRunReplayRecord({
+    id: "remote-context-terminal",
+    conversationId: conversation.id,
+    runId: launchedRunId,
+    seq: 2,
+    createdAt: "2026-05-17T12:03:01.000Z",
+    kind: "terminal_state",
+    status: "completed"
   });
 
   const remoteTrigger = storage.current.messages.find((message: ChatMessage) =>

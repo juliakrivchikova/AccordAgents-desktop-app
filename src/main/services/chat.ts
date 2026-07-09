@@ -539,8 +539,19 @@ interface RemoteRunReplayState {
   providerOutputText?: string;
   providerOutputLineBuffer?: string;
   providerSessionId?: string;
+  providerActivityEvents?: ChatAgentActivityEvent[];
+  providerActivitySequence?: number;
+  providerActivityLabel?: string;
+  providerOmittedActivityEventCount?: number;
   remoteRunStatus?: ChatRemoteRunStatus;
   updatedAt?: string;
+}
+
+interface ChatActivityAccumulator {
+  events: ChatAgentActivityEvent[];
+  sequence: number;
+  label?: string;
+  omittedCount: number;
 }
 
 type RemoteRunReplayStateByRun = Record<string, RemoteRunReplayState>;
@@ -1620,7 +1631,10 @@ export class ChatService {
 
       let permissionResult: ChatPermissionRequestToolResult | undefined;
       let statePatch: Partial<RemoteRunReplayState> = {};
-      if (record.kind === "lifecycle") {
+      const suppressPresentation = this.remoteRunPresentationIsTerminal(conversation, record.runId) &&
+        record.kind !== "terminal_state" &&
+        record.kind !== "permission_decision";
+      if (!suppressPresentation && record.kind === "lifecycle") {
         const participantId = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles)[record.runId]?.participantId;
         if (participantId && record.remoteRunStatus) {
           const providerOutputMessageId = this.applyRemoteRunStatusToPendingMessage(
@@ -1635,7 +1649,7 @@ export class ChatService {
             remoteRunStatus: record.remoteRunStatus
           };
         }
-      } else if (record.kind === "output_text") {
+      } else if (!suppressPresentation && record.kind === "output_text") {
         const participant = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
         if (!participant) {
           throw new Error("Remote run output references a participant that is no longer in this chat.");
@@ -1660,31 +1674,19 @@ export class ChatService {
         );
         conversation.messages.push(message);
         this.recordLastMessageByParticipant(conversation, message);
-      } else if (record.kind === "provider_output") {
+      } else if (!suppressPresentation && record.kind === "provider_output") {
         statePatch = this.applyRemoteProviderOutputRecord(conversation, record, state);
-      } else if (record.kind === "provider_result") {
+      } else if (!suppressPresentation && record.kind === "provider_result") {
         const participant = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
         if (!participant) {
           throw new Error("Remote run provider result references a participant that is no longer in this chat.");
         }
-        const status = this.remoteRunStatus("terminal", record.ok ? "Completed" : "Failed", undefined, state.remoteRunStatus);
-        this.applyRemoteProviderResultRecord(conversation, record, participant, state, status);
-        const terminal = this.applyRemoteTerminalStateToConversation(
-          conversation,
-          record.runId,
-          record.ok ? "completed" : "failed",
-          record.error
-        );
-        for (const requestMessageId of terminal.autoResumeRequestMessageIds) {
-          autoResumeRequestMessageIds.add(requestMessageId);
-        }
-        terminalRecordApplied = terminalRecordApplied || terminal.changed;
+        this.applyRemoteProviderResultRecord(conversation, record, participant, state);
         statePatch = {
           providerOutputLineBuffer: undefined,
-          providerOutputText: undefined,
-          remoteRunStatus: status
+          providerOutputText: undefined
         };
-      } else if (record.kind === "permission_pending") {
+      } else if (!suppressPresentation && record.kind === "permission_pending") {
         const requester = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
         if (!requester) {
           throw new Error("Remote run permission request references a participant that is no longer in this chat.");
@@ -1726,13 +1728,16 @@ export class ChatService {
       if (record.kind === "permission_pending" && permissionResult?.requestId) {
         permissionRequestIdsByRecordId[record.id] = permissionResult.requestId;
       }
+      const terminalState = record.kind === "terminal_state"
+        ? this.remoteRunPresentedTerminalOutcome(conversation, record.runId) ?? record.status
+        : nextState.terminalState;
       this.setRemoteRunReplayState(conversation, record.runId, {
         ...nextState,
         ...statePatch,
         cursorSeq: Math.max(nextState.cursorSeq, record.seq),
         appliedRecordIds: this.remoteRunAppliedRecordIds([...nextState.appliedRecordIds, record.id]),
         permissionRequestIdsByRecordId,
-        terminalState: record.kind === "terminal_state" ? record.status : nextState.terminalState,
+        terminalState,
         updatedAt: new Date().toISOString()
       });
       if (record.kind === "terminal_state") {
@@ -1996,9 +2001,11 @@ export class ChatService {
     };
     const handles = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles);
     const current = handles[runId];
+    const presentedOutcome = this.remoteRunPresentedTerminalOutcome(conversation, runId);
+    const effectiveStatus = presentedOutcome ?? status;
     const beforeMetadata = this.stableJson(conversation.metadata);
     if (!current) {
-      const terminal = this.finalizeRemoteRunPendingMessage(conversation, runId, status, reason);
+      const terminal = this.finalizeRemoteRunPendingMessage(conversation, runId, effectiveStatus, reason);
       result.changed = terminal.changed;
       result.autoResumeRequestMessageIds.push(...terminal.autoResumeRequestMessageIds);
       this.clearRemoteRunActiveState(conversation, runId);
@@ -2008,17 +2015,14 @@ export class ChatService {
     }
     const now = new Date().toISOString();
     const shouldUpdateHandle =
-      !this.isRemoteRunTerminal(current.status) ||
-      current.status !== status ||
-      !current.completedAt ||
-      (status === "failed" && typeof reason === "string" && reason.trim() && current.error !== reason);
+      !this.isRemoteRunTerminal(current.status) || !current.completedAt;
     const next: RemoteRunHandle = shouldUpdateHandle
       ? {
           ...current,
-          status,
+          status: effectiveStatus,
           updatedAt: now,
           completedAt: current.completedAt ?? now,
-          error: status === "failed" ? reason ?? current.error : current.error
+          error: effectiveStatus === "completed" ? current.error : current.error ?? reason
         }
       : current;
     if (shouldUpdateHandle) {
@@ -2029,7 +2033,10 @@ export class ChatService {
       };
     }
     this.registerRemoteRunHandle(next);
-    const terminal = this.finalizeRemoteRunPendingMessage(conversation, runId, status, next.error);
+    if (effectiveStatus === "completed") {
+      this.commitPromptContextPointerAdvance(conversation, next.participantId, next.promptContextPointerAdvance);
+    }
+    const terminal = this.finalizeRemoteRunPendingMessage(conversation, runId, effectiveStatus, next.error);
     result.changed = terminal.changed;
     result.autoResumeRequestMessageIds.push(...terminal.autoResumeRequestMessageIds);
     this.clearRemoteRunActiveState(conversation, runId);
@@ -2129,6 +2136,31 @@ export class ChatService {
     return status === "completed" || status === "failed" || status === "cancelled";
   }
 
+  private remoteRunPresentedTerminalOutcome(
+    conversation: Conversation,
+    runId: string
+  ): RemoteRunTerminalOutcome | undefined {
+    const handle = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles)[runId];
+    if (this.isRemoteRunTerminal(handle?.status)) {
+      return handle.status;
+    }
+    const message = this.remoteRunProviderMessage(conversation, runId);
+    const isRemoteMessage = message?.metadata?.appMessageSource === "remote-run-provider-output" ||
+      message?.metadata?.appMessageSource === "remote-run-provider";
+    if (message && (message.metadata?.remoteRunStatus?.phase === "terminal" || (isRemoteMessage && message.status !== "pending"))) {
+      if (message.metadata?.terminalReason === "user-stopped" || /cancel|stop/i.test(message.metadata?.remoteRunStatus?.label ?? "")) {
+        return "cancelled";
+      }
+      return message.status === "done" ? "completed" : "failed";
+    }
+    const replayTerminal = this.remoteRunReplayState(conversation, runId).terminalState;
+    return this.isRemoteRunTerminal(replayTerminal) ? replayTerminal : undefined;
+  }
+
+  private remoteRunPresentationIsTerminal(conversation: Conversation, runId: string): boolean {
+    return Boolean(this.remoteRunPresentedTerminalOutcome(conversation, runId));
+  }
+
   private isNonTerminalRemoteRun(metadata: Record<string, unknown>, runId: string): boolean {
     const handle = this.remoteRunHandleByRun(metadata.remoteRunHandles)[runId];
     return Boolean(handle && !this.isRemoteRunTerminal(handle.status));
@@ -2186,6 +2218,7 @@ export class ChatService {
           remoteRunStatus: this.normalizedRemoteRunStatus(terminalStatus, message.metadata?.remoteRunStatus),
           workedMs: message.metadata?.workedMs ?? this.remoteRunWorkedMs(conversation, runId, undefined)
         };
+        delete metadata.activityEvents;
         message.metadata = metadata;
         if (message.status === "pending") {
           message.status = outcome === "completed" ? "done" : "error";
@@ -2383,8 +2416,15 @@ export class ChatService {
     const lineBuffer = complete ? "" : parts.at(-1) ?? "";
     let cumulative = state.providerOutputText ?? "";
     let sessionId = state.providerSessionId;
-    let changed = false;
+    let textChanged = false;
+    let activityChanged = false;
     let remoteRunStatus = state.remoteRunStatus;
+    let activity: ChatActivityAccumulator = {
+      events: state.providerActivityEvents ?? [],
+      sequence: state.providerActivitySequence ?? 0,
+      label: state.providerActivityLabel,
+      omittedCount: state.providerOmittedActivityEventCount ?? 0
+    };
     const accumulator = { value: cumulative };
     for (const rawLine of lines) {
       const line = rawLine.trim();
@@ -2392,13 +2432,22 @@ export class ChatService {
         continue;
       }
       emitCodexLiveOutput(line, (event) => {
-        if (event.kind !== "text") {
+        if (event.kind === "tool") {
+          const nextActivity = this.appendChatActivity(record.runId, activity, event, {
+            createdAt: record.createdAt,
+            afterContentLength: cumulative.length > 0 ? cumulative.length : undefined
+          });
+          if (nextActivity.sequence !== activity.sequence) {
+            activity = nextActivity;
+            activityChanged = true;
+            remoteRunStatus = this.remoteRunStatus("processing-request", "Processing request", undefined, remoteRunStatus);
+          }
           return;
         }
         const next = event.cumulative ?? `${cumulative}${event.text}`;
         if (next !== cumulative) {
           cumulative = next;
-          changed = true;
+          textChanged = true;
           remoteRunStatus = this.remoteRunStatus("processing-request", "Processing request", undefined, remoteRunStatus);
         }
       }, accumulator, (nextSessionId) => {
@@ -2406,14 +2455,15 @@ export class ChatService {
       });
     }
     let providerOutputMessageId = state.providerOutputMessageId ?? this.remoteProviderProgressMessageId(conversation, record.runId, record.participantId);
-    if (changed && cumulative.trim()) {
+    if ((textChanged && cumulative.trim()) || activityChanged) {
       providerOutputMessageId = this.upsertRemoteProviderProgressMessage(
         conversation,
         record,
         participant,
         cumulative,
         providerOutputMessageId,
-        remoteRunStatus
+        remoteRunStatus,
+        activity.events
       ) ?? providerOutputMessageId;
     }
     return {
@@ -2421,6 +2471,10 @@ export class ChatService {
       providerOutputText: cumulative,
       providerOutputLineBuffer: lineBuffer,
       providerSessionId: sessionId,
+      providerActivityEvents: activity.events,
+      providerActivitySequence: activity.sequence,
+      providerActivityLabel: activity.label,
+      providerOmittedActivityEventCount: activity.omittedCount,
       remoteRunStatus
     };
   }
@@ -2431,7 +2485,8 @@ export class ChatService {
     participant: ChatParticipant,
     content: string,
     messageId: string | undefined,
-    remoteRunStatus: ChatRemoteRunStatus | undefined
+    remoteRunStatus: ChatRemoteRunStatus | undefined,
+    activityEvents: ChatAgentActivityEvent[]
   ): string | undefined {
     const existingId = messageId ?? this.remoteProviderProgressMessageId(conversation, record.runId, record.participantId);
     const existing = existingId
@@ -2444,6 +2499,7 @@ export class ChatService {
         ...existing.metadata,
         runId: record.runId,
         appMessageSource: "remote-run-provider-output",
+        activityEvents: activityEvents.length > 0 ? activityEvents : undefined,
         ...(remoteRunStatus ? { remoteRunStatus: this.normalizedRemoteRunStatus(remoteRunStatus, existing.metadata?.remoteRunStatus) } : {})
       };
       this.recordLastMessageByParticipant(conversation, existing);
@@ -2462,6 +2518,7 @@ export class ChatService {
       {
         runId: record.runId,
         appMessageSource: "remote-run-provider-output",
+        activityEvents: activityEvents.length > 0 ? activityEvents : undefined,
         ...(remoteRunStatus ? { remoteRunStatus: this.normalizedRemoteRunStatus(remoteRunStatus) } : {})
       },
       "pending"
@@ -2475,8 +2532,7 @@ export class ChatService {
     conversation: Conversation,
     record: Extract<RemoteRunReplayRecord, { kind: "provider_result" }>,
     participant: ChatParticipant,
-    state: RemoteRunReplayState,
-    remoteRunStatus: ChatRemoteRunStatus
+    state: RemoteRunReplayState
   ): void {
     const existingId = state.providerOutputMessageId ?? this.remoteProviderProgressMessageId(conversation, record.runId, record.participantId);
     const existing = existingId
@@ -2494,18 +2550,13 @@ export class ChatService {
       // handle's startedAt -> completedAt so the "Worked for ..." chip renders
       // for remote runs like it does for local ones.
       workedMs: this.remoteRunWorkedMs(conversation, record.runId, record.durationMs),
-      appMessageSource: "remote-run-provider",
-      remoteRunStatus: this.normalizedRemoteRunStatus(remoteRunStatus, existing?.metadata?.remoteRunStatus)
+      appMessageSource: "remote-run-provider"
     };
     if (existing) {
       existing.content = content;
-      existing.status = record.ok ? "done" : "error";
+      existing.status = "pending";
       existing.metadata = metadata;
       this.recordLastMessageByParticipant(conversation, existing);
-      if (record.ok) {
-        const handle = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles)[record.runId];
-        this.commitPromptContextPointerAdvance(conversation, participant.id, handle?.promptContextPointerAdvance);
-      }
       return;
     }
     const message = this.message(
@@ -2519,14 +2570,10 @@ export class ChatService {
         reasoningEffort: participant.reasoningEffort
       },
       metadata,
-      record.ok ? "done" : "error"
+      "pending"
     );
     conversation.messages.push(message);
     this.recordLastMessageByParticipant(conversation, message);
-    if (record.ok) {
-      const handle = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles)[record.runId];
-      this.commitPromptContextPointerAdvance(conversation, participant.id, handle?.promptContextPointerAdvance);
-    }
   }
 
   private remoteRunWorkedMs(
@@ -7289,7 +7336,11 @@ export class ChatService {
         [runId]: {
           ...state,
           appliedRecordIds: this.remoteRunAppliedRecordIds(state.appliedRecordIds),
-          permissionRequestIdsByRecordId: this.remoteRunStringMap(state.permissionRequestIdsByRecordId)
+          permissionRequestIdsByRecordId: this.remoteRunStringMap(state.permissionRequestIdsByRecordId),
+          providerActivityEvents: this.remoteRunActivityEvents(state.providerActivityEvents),
+          providerActivitySequence: this.normalizeOptionalInteger(state.providerActivitySequence),
+          providerActivityLabel: state.providerActivityLabel?.trim() || undefined,
+          providerOmittedActivityEventCount: this.normalizeOptionalInteger(state.providerOmittedActivityEventCount)
         }
       }
     };
@@ -7307,6 +7358,18 @@ export class ChatService {
         ...storedState.appliedRecordIds,
         ...currentState.appliedRecordIds
       ]);
+      const activity = this.mergeRemoteRunActivityEvents(
+        storedState.providerActivityEvents,
+        currentState.providerActivityEvents
+      );
+      const currentActivityIsLatest = !storedState.updatedAt || Boolean(
+        currentState.updatedAt && currentState.updatedAt >= storedState.updatedAt
+      );
+      const providerActivitySequence = Math.max(
+        storedState.providerActivitySequence ?? 0,
+        currentState.providerActivitySequence ?? 0,
+        activity.events.at(-1)?.sequence ?? 0
+      );
       merged[runId] = {
         cursorSeq: Math.max(storedState.cursorSeq, currentState.cursorSeq),
         appliedRecordIds,
@@ -7319,6 +7382,12 @@ export class ChatService {
         providerOutputText: currentState.providerOutputText ?? storedState.providerOutputText,
         providerOutputLineBuffer: currentState.providerOutputLineBuffer ?? storedState.providerOutputLineBuffer,
         providerSessionId: currentState.providerSessionId ?? storedState.providerSessionId,
+        providerActivityEvents: activity.events.length > 0 ? activity.events : undefined,
+        providerActivitySequence,
+        providerActivityLabel: currentActivityIsLatest
+          ? currentState.providerActivityLabel ?? storedState.providerActivityLabel
+          : storedState.providerActivityLabel ?? currentState.providerActivityLabel,
+        providerOmittedActivityEventCount: Math.max(0, providerActivitySequence - activity.events.length),
         remoteRunStatus: this.latestRemoteRunStatus(currentState.remoteRunStatus, storedState.remoteRunStatus),
         updatedAt: currentState.updatedAt && storedState.updatedAt
           ? currentState.updatedAt >= storedState.updatedAt
@@ -7359,6 +7428,12 @@ export class ChatService {
       const providerOutputText = typeof record.providerOutputText === "string" ? record.providerOutputText : undefined;
       const providerOutputLineBuffer = typeof record.providerOutputLineBuffer === "string" ? record.providerOutputLineBuffer : undefined;
       const providerSessionId = typeof record.providerSessionId === "string" ? record.providerSessionId : undefined;
+      const providerActivityEvents = this.remoteRunActivityEvents(record.providerActivityEvents);
+      const providerActivitySequence = this.normalizeOptionalInteger(record.providerActivitySequence);
+      const providerActivityLabel = typeof record.providerActivityLabel === "string"
+        ? record.providerActivityLabel.trim() || undefined
+        : undefined;
+      const providerOmittedActivityEventCount = this.normalizeOptionalInteger(record.providerOmittedActivityEventCount);
       const remoteRunStatus = this.remoteRunStatusFromMetadata(record.remoteRunStatus);
       states[runId] = {
         cursorSeq,
@@ -7369,11 +7444,77 @@ export class ChatService {
         providerOutputText,
         providerOutputLineBuffer,
         providerSessionId,
+        providerActivityEvents,
+        providerActivitySequence,
+        providerActivityLabel,
+        providerOmittedActivityEventCount,
         remoteRunStatus,
         updatedAt
       };
     }
     return states;
+  }
+
+  private remoteRunActivityEvents(value: unknown): ChatAgentActivityEvent[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    const byId = new Map<string, ChatAgentActivityEvent>();
+    for (const item of value) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        continue;
+      }
+      const record = item as Record<string, unknown>;
+      const id = typeof record.id === "string" ? record.id.trim() : "";
+      const sequence = this.normalizeOptionalInteger(record.sequence);
+      const label = typeof record.label === "string" ? record.label.trim() : "";
+      const createdAt = typeof record.createdAt === "string" ? record.createdAt : "";
+      if (!id || !sequence || !label || !createdAt || !this.isChatAgentActivityKind(record.kind)) {
+        continue;
+      }
+      const status = record.status === "started" || record.status === "completed" || record.status === "failed"
+        ? record.status
+        : undefined;
+      byId.set(id, {
+        id,
+        sequence,
+        kind: record.kind,
+        label,
+        detail: typeof record.detail === "string" ? record.detail.trim() || undefined : undefined,
+        createdAt,
+        status,
+        afterContentLength: this.normalizeOptionalInteger(record.afterContentLength)
+      });
+    }
+    return Array.from(byId.values())
+      .sort((left, right) => left.sequence - right.sequence || left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+      .slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT);
+  }
+
+  private mergeRemoteRunActivityEvents(
+    stored: ChatAgentActivityEvent[] | undefined,
+    current: ChatAgentActivityEvent[] | undefined
+  ): { events: ChatAgentActivityEvent[]; dropped: number } {
+    const byId = new Map<string, ChatAgentActivityEvent>();
+    for (const event of [...(stored ?? []), ...(current ?? [])]) {
+      byId.set(event.id, event);
+    }
+    const events = Array.from(byId.values())
+      .sort((left, right) => left.sequence - right.sequence || left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    const dropped = Math.max(0, events.length - CHAT_ACTIVITY_EVENT_MAX_COUNT);
+    return {
+      events: dropped > 0 ? events.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT) : events,
+      dropped
+    };
+  }
+
+  private isChatAgentActivityKind(value: unknown): value is ChatAgentActivityEvent["kind"] {
+    return value === "tool" ||
+      value === "command" ||
+      value === "file-edit" ||
+      value === "web" ||
+      value === "approval" ||
+      value === "status";
   }
 
   private remoteRunStatusFromMetadata(value: unknown): ChatRemoteRunStatus | undefined {
@@ -15776,6 +15917,42 @@ export class ChatService {
     return sorted;
   }
 
+  private appendChatActivity(
+    runId: string,
+    current: ChatActivityAccumulator,
+    event: CliAgentOutputEvent,
+    options: { createdAt?: string; afterContentLength?: number } = {}
+  ): ChatActivityAccumulator {
+    const label = event.text.trim().replace(/\s+/g, " ");
+    if (!label || label === current.label) {
+      return current;
+    }
+    const sequence = current.sequence + 1;
+    const nextEvent: ChatAgentActivityEvent = {
+      id: `${runId}:activity:${sequence}`,
+      sequence,
+      kind: event.activityKind ?? "tool",
+      label,
+      detail: event.activityDetail?.trim() || undefined,
+      createdAt: options.createdAt ?? new Date().toISOString(),
+      status: event.activityStatus ?? "started",
+      afterContentLength: options.afterContentLength
+    };
+    let events = [...current.events, nextEvent];
+    let omittedCount = current.omittedCount;
+    if (events.length > CHAT_ACTIVITY_EVENT_MAX_COUNT) {
+      const dropped = events.length - CHAT_ACTIVITY_EVENT_MAX_COUNT;
+      omittedCount += dropped;
+      events = events.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT);
+    }
+    return {
+      events,
+      sequence,
+      label,
+      omittedCount
+    };
+  }
+
   private createAgentProgressSink(
     runId: string,
     progress: ProgressCallback | undefined,
@@ -15792,10 +15969,11 @@ export class ChatService {
     const THROTTLE_MS = 100;
     let finished = false;
     let cumulative = "";
-    let activity: string | undefined;
-    let activityEvents: ChatAgentActivityEvent[] = [];
-    let omittedActivityEventCount = 0;
-    let activitySequence = 0;
+    let activity: ChatActivityAccumulator = {
+      events: [],
+      sequence: 0,
+      omittedCount: 0
+    };
     let lastFlush = 0;
     let pendingTimer: NodeJS.Timeout | undefined;
     let dirty = false;
@@ -15821,8 +15999,8 @@ export class ChatService {
           participantLabel,
           state: "running",
           messageId,
-          activity,
-          activityEvents,
+          activity: activity.label,
+          activityEvents: activity.events,
           partialContent
         }
       });
@@ -15855,32 +16033,13 @@ export class ChatService {
         scheduleFlush();
         return;
       }
-      const label = event.text.trim();
-      if (!label) {
-        return;
-      }
-      const normalizedLabel = label.replace(/\s+/g, " ");
-      if (normalizedLabel === activity) {
-        return;
-      }
-      activity = normalizedLabel;
-      activitySequence += 1;
-      const nextEvent: ChatAgentActivityEvent = {
-        id: `${runId}:activity:${activitySequence}`,
-        sequence: activitySequence,
-        kind: event.activityKind ?? "tool",
-        label: normalizedLabel,
-        detail: event.activityDetail?.trim() || undefined,
-        createdAt: new Date().toISOString(),
-        status: event.activityStatus ?? "started",
+      const nextActivity = this.appendChatActivity(runId, activity, event, {
         afterContentLength: cumulative.length > 0 ? cumulative.length : undefined
-      };
-      activityEvents = [...activityEvents, nextEvent];
-      if (activityEvents.length > CHAT_ACTIVITY_EVENT_MAX_COUNT) {
-        const dropped = activityEvents.length - CHAT_ACTIVITY_EVENT_MAX_COUNT;
-        omittedActivityEventCount += dropped;
-        activityEvents = activityEvents.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT);
+      });
+      if (nextActivity.sequence === activity.sequence) {
+        return;
       }
+      activity = nextActivity;
       dirty = true;
       scheduleFlush();
     };
@@ -15890,10 +16049,11 @@ export class ChatService {
         return;
       }
       cumulative = "";
-      activity = undefined;
-      activityEvents = [];
-      omittedActivityEventCount = 0;
-      activitySequence = 0;
+      activity = {
+        events: [],
+        sequence: 0,
+        omittedCount: 0
+      };
       // Emit a snapshot so the renderer clears any prior partial content on retry.
       dirty = true;
       flush();
@@ -15926,9 +16086,9 @@ export class ChatService {
       emit: emitNow,
       beginAttempt,
       finish,
-      activityEvents: () => activityEvents,
+      activityEvents: () => activity.events,
       processingTranscript: (capturedAt: string) => this.processingTranscriptFromContent(cumulative, capturedAt, {
-        omittedActivityEventCount
+        omittedActivityEventCount: activity.omittedCount
       })
     };
   }

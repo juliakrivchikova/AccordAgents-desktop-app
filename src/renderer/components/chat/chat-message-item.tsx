@@ -7,7 +7,11 @@ import { canCompactParticipant } from "../../../shared/chatParticipantStatus";
 import type { AgentContextUsage, AgentRunProgress, ChatParticipant, ChatParticipantRequestBatch, Conversation } from "../../../shared/types";
 import { CHAT_REACTION_EMOJIS } from "../../../shared/chatReactions";
 import { chatProcessingTranscriptView, chatProcessingTranscriptViewHasHidden } from "../../../shared/processingTranscript";
-import { remoteRunStreamingContent, remoteRunStreamingStartedAt } from "../../../shared/remoteRunStreaming";
+import {
+  remoteRunStreamingActivityEvents,
+  remoteRunStreamingContent,
+  remoteRunStreamingStartedAt
+} from "../../../shared/remoteRunStreaming";
 import {
   chatDisplayContent,
   chatMessageImageAttachments,
@@ -85,7 +89,13 @@ export function ChatMessageItem(props: {
   });
   const streamingStartedAt = remoteRunStreamingStartedAt(message.createdAt, streamedRemoteRunStatus);
   const streamedActivity = props.liveProgress?.activity;
-  const streamedActivityEvents = props.liveProgress?.activityEvents ?? [];
+  const streamedActivityEvents = remoteRunStreamingActivityEvents({
+    isStreaming,
+    appMessageSource: message.metadata?.appMessageSource,
+    remoteRunStatus: streamedRemoteRunStatus,
+    liveActivityEvents: props.liveProgress?.activityEvents,
+    persistedActivityEvents: message.metadata?.activityEvents
+  });
   const participant = message.participantId
     ? props.participants?.find((item) => item.id === message.participantId)
     : message.role === "system"
