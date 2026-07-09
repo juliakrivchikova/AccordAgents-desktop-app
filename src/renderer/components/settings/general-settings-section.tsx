@@ -303,14 +303,14 @@ function CloudRunsControl(props: {
           <div className="gen-row-title">Remote Codex worker</div>
           <div className="gen-row-desc">Run Codex members marked remote on a worker instead of this machine.</div>
         </div>
-        <label className="toggle gen-cloud-runs-toggle">
+        <label className="toggle">
           <input
             type="checkbox"
             checked={draft.enabled}
             disabled={busy}
             onChange={(event) => {
               const enabled = event.target.checked;
-              void savePatch({ enabled }, enabled ? "Cloud Runs enabled." : "Cloud Runs disabled.");
+              void savePatch({ enabled });
             }}
           />
           <span />

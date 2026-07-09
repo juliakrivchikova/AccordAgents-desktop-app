@@ -907,6 +907,14 @@ ul.markdown-list {
   cursor: pointer;
 }
 
+.toggle input:not(:checked):not(:disabled) + span {
+  background: var(--app-muted);
+}
+
+.toggle input:disabled + span {
+  cursor: default;
+}
+
 .toggle span::before {
   content: "";
   position: absolute;

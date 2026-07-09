@@ -541,10 +541,6 @@
   pointer-events: none;
 }
 
-.settings-view .gen-cloud-runs-toggle input:not(:checked):not(:disabled) + span {
-  background: var(--app-muted);
-}
-
 .settings-view .gen-doctor-auth-code {
   font-family: var(--font-mono, monospace);
   font-weight: 650;

@@ -844,6 +844,11 @@
   transition: background 140ms ease, border-color 140ms ease;
 }
 
+.participants-editor-switch input:not(:checked):not(:disabled) + span {
+  border-color: var(--app-muted);
+  background: var(--app-muted);
+}
+
 .participants-editor-switch span::after {
   position: absolute;
   top: 2px;
