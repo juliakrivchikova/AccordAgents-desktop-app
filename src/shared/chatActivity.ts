@@ -55,9 +55,9 @@ export function buildChatActivityItems(
   const recentCutoffMs = nowMs - recentWindowDays * 24 * 60 * 60 * 1000;
   const lastViewedMs = timeValue(options.lastViewedAt);
 
-  items.push(...pendingApprovalItems(conversation, participants));
+  items.push(...pendingApprovalItems(conversation, participants, recentCutoffMs));
   for (const message of conversation.messages) {
-    items.push(...pendingMessageItems(conversation, message, participants));
+    items.push(...pendingMessageItems(conversation, message, participants, recentCutoffMs));
   }
 
   const runningRunIds = new Set<string>();
@@ -244,11 +244,12 @@ export function limitChatActivityItems(items: ChatActivityItem[], limit?: number
 
 function pendingApprovalItems(
   conversation: Conversation,
-  participants: Map<string, ChatActivityParticipantSummary>
+  participants: Map<string, ChatActivityParticipantSummary>,
+  recentCutoffMs: number
 ): ChatActivityItem[] {
   const approvals = chatAppToolApprovals(conversation.metadata.pendingAppToolApprovals);
   return approvals.flatMap((approval) => {
-    if (approval.status !== "pending") {
+    if (approval.status !== "pending" && approval.status !== "denied") {
       return [];
     }
     const triggerMessageId = cleanString(approval.resumeContext?.triggerMessageId);
@@ -256,12 +257,17 @@ function pendingApprovalItems(
     const participant = participantForMessage(targetMessage, participants)
       ?? participants.get(approval.requesterParticipantId);
     const messageId = targetMessage?.id ?? triggerMessageId;
+    const cancelled = approval.status === "denied";
+    if (cancelled && timeValue(approval.updatedAt) < recentCutoffMs) {
+      return [];
+    }
     return [{
       id: `approval:${conversation.id}:${approval.id}`,
       conversationId: conversation.id,
       conversationTitle: conversation.title,
       repoPath: conversation.repoPath,
-      status: "pending" as const,
+      status: cancelled ? "recent" as const : "pending" as const,
+      ...(cancelled ? { read: true } : {}),
       kind: "approval" as const,
       title: participant ? `@${participant.handle} needs approval` : "Approval required",
       preview: previewText(targetMessage?.content) || approval.summary || approval.toolName || "A tool request is waiting for approval.",
@@ -332,7 +338,8 @@ function isVisibleTimelineMessage(message: ChatMessage): boolean {
 function pendingMessageItems(
   conversation: Conversation,
   message: ChatMessage,
-  participants: Map<string, ChatActivityParticipantSummary>
+  participants: Map<string, ChatActivityParticipantSummary>,
+  recentCutoffMs: number
 ): ChatActivityItem[] {
   const items: ChatActivityItem[] = [];
   const targetMessage = isVisibleTimelineMessage(message)
@@ -370,9 +377,37 @@ function pendingMessageItems(
       }
     });
   }
+  if (message.metadata?.pendingChoice?.status === "cancelled") {
+    const terminalAt = message.metadata.pendingChoice.cancelledAt || updatedAt;
+    if (timeValue(terminalAt) < recentCutoffMs) {
+      return items;
+    }
+    items.push({
+      id: `choice:${conversation.id}:${message.id}:${message.metadata.pendingChoice.id}`,
+      conversationId: conversation.id,
+      conversationTitle: conversation.title,
+      repoPath: conversation.repoPath,
+      status: "recent",
+      read: true,
+      kind: "choice",
+      title: message.metadata.pendingChoice.title || "Choice cancelled",
+      preview: previewText(targetMessage.content) || message.metadata.pendingChoice.question || "A participant choice was cancelled.",
+      createdAt: message.createdAt,
+      updatedAt: terminalAt,
+      participant,
+      target: {
+        ...target,
+        sourceMessageId: message.id,
+        choiceId: message.metadata.pendingChoice.id
+      }
+    });
+  }
 
   const pendingMentions = Array.isArray(message.metadata?.pendingMentions)
     ? message.metadata.pendingMentions.filter((mention) => mention.status === "pending")
+    : [];
+  const rejectedMentions = Array.isArray(message.metadata?.pendingMentions)
+    ? message.metadata.pendingMentions.filter((mention) => mention.status === "rejected")
     : [];
   if (pendingMentions.length > 0) {
     items.push({
@@ -391,6 +426,31 @@ function pendingMessageItems(
         ...target,
         sourceMessageId: message.id,
         mentionTargetParticipantIds: pendingMentions.map((mention) => mention.targetParticipantId)
+      }
+    });
+  }
+  if (pendingMentions.length === 0 && rejectedMentions.length > 0) {
+    const terminalAt = newestMentionTimestamp(rejectedMentions) || conversation.updatedAt;
+    if (timeValue(terminalAt) < recentCutoffMs) {
+      return items;
+    }
+    items.push({
+      id: `mention:${conversation.id}:${message.id}`,
+      conversationId: conversation.id,
+      conversationTitle: conversation.title,
+      repoPath: conversation.repoPath,
+      status: "recent",
+      read: true,
+      kind: "mention",
+      title: "Mention approval cancelled",
+      preview: previewText(targetMessage.content) || rejectedMentions.map((mention) => `@${mention.targetHandle}`).join(", "),
+      createdAt: message.createdAt,
+      updatedAt: terminalAt,
+      participant,
+      target: {
+        ...target,
+        sourceMessageId: message.id,
+        mentionTargetParticipantIds: rejectedMentions.map((mention) => mention.targetParticipantId)
       }
     });
   }
@@ -451,7 +511,7 @@ function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] 
 
   return [...byId.values()].filter((item) => {
     const messageId = cleanString(item.target.messageId);
-    if (messageId && item.status === "recent" && strongestByMessage.get(messageId)?.id !== item.id) {
+    if (messageId && item.kind === "message" && item.status === "recent" && strongestByMessage.get(messageId)?.id !== item.id) {
       return false;
     }
     const runId = cleanString(item.target.runId);
@@ -468,7 +528,7 @@ function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] 
 }
 
 function recentParticipantGroupKey(item: ChatActivityItem): string | undefined {
-  if (item.status !== "recent") {
+  if (item.status !== "recent" || item.kind !== "message") {
     return undefined;
   }
   const conversationId = cleanString(item.conversationId);
@@ -611,6 +671,13 @@ function participantRequestPreview(message: ChatMessage): string {
     return "A participant request is waiting for approval.";
   }
   return requests.map((request) => `@${cleanHandle(request.targetHandle)}`).filter(Boolean).join(", ");
+}
+
+function newestMentionTimestamp(mentions: Array<{ approvedAt?: string; rejectedAt?: string; updatedAt?: string; createdAt?: string }>): string | undefined {
+  return mentions
+    .map((mention) => mention.rejectedAt || mention.approvedAt || mention.updatedAt || mention.createdAt)
+    .filter((value): value is string => Boolean(cleanString(value)))
+    .sort((left, right) => timeValue(right) - timeValue(left))[0];
 }
 
 function previewText(value: unknown): string {

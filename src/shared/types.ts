@@ -685,6 +685,7 @@ export interface ChatPendingMention {
   targetHandle: string;
   status: ChatMentionApprovalStatus;
   approvedAt?: string;
+  rejectedAt?: string;
 }
 
 export type ChatChoiceStatus = "pending" | "selected" | "cancelled";

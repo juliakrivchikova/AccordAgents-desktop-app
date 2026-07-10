@@ -203,6 +203,68 @@ test("buildChatActivityItems emits pending approval, choice, mentions, and parti
   assert.equal(items.find((item) => item.kind === "participant-request")?.preview, "request content");
 });
 
+test("buildChatActivityItems moves cancelled pending cards to read finished activity", () => {
+  const approval: ChatAppToolApproval = {
+    id: "approval-1",
+    conversationId: "conversation-1",
+    requesterParticipantId: participant.id,
+    requesterHandle: participant.handle,
+    requesterRoleConfigId: "engineer",
+    toolName: "shell",
+    capability: "permissions.request",
+    status: "denied",
+    request: { kind: "portable", permissions: ["webAccess"] },
+    summary: "Web access requested",
+    createdAt: "2026-01-08T09:00:00.000Z",
+    updatedAt: "2026-01-08T11:00:00.000Z"
+  };
+  const items = buildChatActivityItems(conversation({
+    updatedAt: "2026-01-08T11:30:00.000Z",
+    metadata: {
+      pendingAppToolApprovals: [approval]
+    },
+    messages: [
+      participantMessage("choice", {
+        createdAt: "2026-01-08T10:00:00.000Z",
+        metadata: {
+          pendingChoice: {
+            id: "choice-1",
+            title: "Choose scope",
+            question: "Phase 1 or full handoff?",
+            options: [{ id: "phase-1", label: "Phase 1" }],
+            status: "cancelled",
+            cancelledAt: "2026-01-08T11:10:00.000Z"
+          }
+        }
+      }),
+      participantMessage("mention", {
+        createdAt: "2026-01-08T09:00:00.000Z",
+        metadata: {
+          pendingMentions: [{
+            targetParticipantId: "p2",
+            targetHandle: "taylor",
+            status: "rejected",
+            rejectedAt: "2026-01-08T11:20:00.000Z"
+          }]
+        }
+      }),
+      participantMessage("finished", {
+        createdAt: "2026-01-08T11:25:00.000Z",
+        metadata: { runId: "finished-run" }
+      })
+    ]
+  }), { now: NOW });
+
+  const terminalKinds = items.filter((item) => item.kind !== "message").map((item) => item.kind).sort();
+  assert.deepEqual(terminalKinds, ["approval", "choice", "mention"]);
+  assert.ok(items.every((item) => item.status === "recent"));
+  assert.ok(items.filter((item) => item.kind !== "message").every((item) => item.read === true));
+  assert.equal(items.find((item) => item.kind === "approval")?.target.approvalId, "approval-1");
+  assert.equal(items.find((item) => item.kind === "choice")?.target.choiceId, "choice-1");
+  assert.deepEqual(items.find((item) => item.kind === "mention")?.target.mentionTargetParticipantIds, ["p2"]);
+  assert.equal(items.filter((item) => item.conversationId === "conversation-1").length, 4);
+});
+
 test("buildChatActivityItems falls back to pending metadata when a pending message has no body", () => {
   const items = buildChatActivityItems(conversation({
     messages: [

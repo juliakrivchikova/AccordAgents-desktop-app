@@ -13346,7 +13346,8 @@ export class ChatService {
           ? {
               ...mention,
               status,
-              approvedAt: status === "approved" ? now : mention.approvedAt
+              approvedAt: status === "approved" ? now : mention.approvedAt,
+              rejectedAt: status === "rejected" ? now : mention.rejectedAt
             }
           : mention
       )

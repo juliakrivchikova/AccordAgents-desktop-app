@@ -338,17 +338,19 @@ function ActivityRow({
             <CircleX aria-hidden />
           </Button>
         ) : null}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          className="activity-row-action"
-          title="Clear from activity"
-          aria-label="Clear from activity"
-          onClick={onClear}
-        >
-          <Eraser aria-hidden />
-        </Button>
+        {item.status !== "pending" ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="activity-row-action"
+            title="Clear from activity"
+            aria-label="Clear from activity"
+            onClick={onClear}
+          >
+            <Eraser aria-hidden />
+          </Button>
+        ) : null}
       </span>
     </div>
   );
