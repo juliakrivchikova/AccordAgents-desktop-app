@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  applyChatActivityItemPreferences,
   buildChatActivityItems,
   buildChatActivityItemsForConversationUpdate,
   preservedRecentChatActivityItems,
@@ -384,7 +385,7 @@ test("buildChatActivityItems never targets hidden internal messages", () => {
   assert.ok(items.every((item) => item.target.messageId !== "hidden-finished"));
 });
 
-test("buildChatActivityItems emits recent finished participant messages after last viewed", () => {
+test("buildChatActivityItems keeps viewed finished messages and marks them read", () => {
   const items = buildChatActivityItems(conversation({
     messages: [
       participantMessage("old", {
@@ -401,10 +402,13 @@ test("buildChatActivityItems emits recent finished participant messages after la
     lastViewedAt: "2026-01-08T10:00:00.000Z"
   });
 
-  assert.equal(items.length, 1);
+  assert.equal(items.length, 2);
   assert.equal(items[0].status, "recent");
   assert.equal(items[0].target.messageId, "new");
   assert.equal(items[0].target.threadRootId, "root");
+  assert.equal(items[0].read, undefined);
+  assert.equal(items[1].target.messageId, "old");
+  assert.equal(items[1].read, true);
 });
 
 test("buildChatActivityItems emits recent finished participant messages without a run id", () => {
@@ -446,7 +450,35 @@ test("buildChatActivityItemsForConversationUpdate treats active snapshots as vie
   });
 
   assert.deepEqual(unreadItems.map((item) => item.status), ["recent"]);
-  assert.deepEqual(viewedItems, []);
+  assert.deepEqual(viewedItems.map((item) => item.status), ["recent"]);
+  assert.equal(viewedItems[0]?.read, true);
+});
+
+test("applyChatActivityItemPreferences persists per-item read and clear state", () => {
+  const items = buildChatActivityItems(conversation({
+    messages: [
+      participantMessage("keep", {
+        createdAt: "2026-01-08T11:00:00.000Z",
+        metadata: { runId: "keep-run" }
+      }),
+      participantMessage("clear", {
+        createdAt: "2026-01-08T10:30:00.000Z",
+        metadata: { runId: "clear-run" }
+      })
+    ]
+  }), { now: NOW });
+  const keptItem = items.find((item) => item.target.messageId === "keep");
+  const clearedItem = items.find((item) => item.target.messageId === "clear");
+  assert.ok(keptItem);
+  assert.ok(clearedItem);
+
+  const preferred = applyChatActivityItemPreferences(items, {
+    readItemIds: new Set([keptItem.id]),
+    clearedItemIds: new Set([clearedItem.id])
+  });
+
+  assert.deepEqual(preferred.map((item) => item.id), [keptItem.id]);
+  assert.equal(preferred[0]?.read, true);
 });
 
 test("resolveSelectedChatActivityItem keeps a selected recent target after it is cleared from the list", () => {

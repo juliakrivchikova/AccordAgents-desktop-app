@@ -240,6 +240,41 @@ test("listChatActivity returns bounded sorted items with resolvable message targ
   assert.deepEqual(page.messages.map((item) => item.id), ["recent-reply"]);
 });
 
+test("listChatActivity excludes cleared items before applying the result limit", async () => {
+  const chat = conversation("chat-1", "Activity chat");
+  const newest = participantMessage("newest-reply", {
+    createdAt: "2026-01-08T11:00:00.000Z",
+    metadata: { runId: "newest-run" }
+  });
+  const older = participantMessage("older-reply", {
+    createdAt: "2026-01-08T10:00:00.000Z",
+    metadata: { runId: "older-run" }
+  });
+  const storage = fakeStorage(async (sql) => {
+    if (sql.includes("coalesce(nullif(body_json")) {
+      return [{ id: chat.id, bodyJson: JSON.stringify({ ...chat, messages: [] }) }];
+    }
+    if (sql.includes("$.metadata.pendingChoice.status")) return [];
+    if (sql.includes("$.role") && sql.includes("participant") && sql.includes("$.status') = 'pending'")) return [];
+    if (sql.includes("$.role") && sql.includes("participant") && sql.includes("$.status') = 'done'")) {
+      return [
+        { conversationId: chat.id, sequence: 2, payloadJson: JSON.stringify(newest) },
+        { conversationId: chat.id, sequence: 1, payloadJson: JSON.stringify(older) }
+      ];
+    }
+    throw new Error(`Unexpected query: ${sql}`);
+  });
+
+  const result = await storage.listChatActivity({
+    limit: 1,
+    recentWindowDays: 400,
+    excludedItemIds: ["recent:chat-1:newest-run"]
+  });
+
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0]?.target.messageId, "older-reply");
+});
+
 function conversation(id: string, title: string): Conversation {
   return {
     id,

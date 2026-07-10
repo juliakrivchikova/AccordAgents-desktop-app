@@ -1,4 +1,4 @@
-import { ArrowRight, MessageSquare, RefreshCw } from "lucide-react";
+import { ArrowRight, CheckCheck, Eraser, MessageSquare, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
 import type { ChatActivityItem, ChatActivityParticipantSummary } from "../../../shared/types";
@@ -32,6 +32,8 @@ export interface ActivityViewProps {
   detailError?: string;
   detail: React.ReactNode;
   onSelect: (item: ChatActivityItem) => void;
+  onMarkRead: (item: ChatActivityItem) => void;
+  onClear: (item: ChatActivityItem) => void;
   onOpenInChat: (item: ChatActivityItem) => void;
   onRetry: () => void;
 }
@@ -44,6 +46,8 @@ export function ActivityView({
   detailError,
   detail,
   onSelect,
+  onMarkRead,
+  onClear,
   onOpenInChat,
   onRetry
 }: ActivityViewProps): JSX.Element {
@@ -142,6 +146,8 @@ export function ActivityView({
                 item={item}
                 active={item.id === selectedItem?.id}
                 onSelect={() => onSelect(item)}
+                onMarkRead={() => onMarkRead(item)}
+                onClear={() => onClear(item)}
               />
             ))
           )}
@@ -200,45 +206,80 @@ export function ActivityView({
 function ActivityRow({
   item,
   active,
-  onSelect
+  onSelect,
+  onMarkRead,
+  onClear
 }: {
   item: ChatActivityItem;
   active: boolean;
   onSelect: () => void;
+  onMarkRead: () => void;
+  onClear: () => void;
 }): JSX.Element {
   return (
-    <button
-      type="button"
+    <div
       className="activity-row"
+      role="listitem"
+      data-activity-item-id={item.id}
       data-status={item.status}
       data-read={item.read ? "true" : undefined}
       data-active={active ? "true" : undefined}
-      aria-current={active ? "true" : undefined}
-      onClick={onSelect}
     >
-      <span className="activity-status-dot" aria-hidden="true" />
-      {item.participant ? (
-        <Avatar className="activity-avatar mini-avatar" spec={avatarForActivityParticipant(item.participant)} />
-      ) : (
-        <span className="activity-avatar-fallback" aria-hidden="true">
-          {initials(item.conversationTitle)}
-        </span>
-      )}
-      <span className="activity-row-main">
-        <span className="activity-row-topline">
-          <span
-            className="activity-row-title"
-            title={`${activityActorHandle(item)} post in ${item.conversationTitle}`}
-          >
-            <span className="activity-row-author">{activityActorHandle(item)}</span>
-            <span className="activity-row-context">post in</span>
-            <span className="activity-row-chat">{item.conversationTitle}</span>
+      <button
+        type="button"
+        className="activity-row-open"
+        aria-current={active ? "true" : undefined}
+        onClick={onSelect}
+      >
+        <span className="activity-status-dot" aria-hidden="true" />
+        {item.participant ? (
+          <Avatar className="activity-avatar mini-avatar" spec={avatarForActivityParticipant(item.participant)} />
+        ) : (
+          <span className="activity-avatar-fallback" aria-hidden="true">
+            {initials(item.conversationTitle)}
           </span>
-          <span className="activity-row-time">{relativeTime(item.updatedAt)}</span>
+        )}
+        <span className="activity-row-main">
+          <span className="activity-row-topline">
+            <span
+              className="activity-row-title"
+              title={`${activityActorHandle(item)} post in ${item.conversationTitle}`}
+            >
+              <span className="activity-row-author">{activityActorHandle(item)}</span>
+              <span className="activity-row-context">post in</span>
+              <span className="activity-row-chat">{item.conversationTitle}</span>
+            </span>
+            <span className="activity-row-time">{relativeTime(item.updatedAt)}</span>
+          </span>
+          <span className="activity-row-preview">{item.preview}</span>
         </span>
-        <span className="activity-row-preview">{item.preview}</span>
+      </button>
+      <span className="activity-row-actions">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          className="activity-row-action"
+          title={item.read ? "Already read" : "Mark read"}
+          aria-label={item.read ? "Already read" : "Mark read"}
+          disabled={item.read === true}
+          onClick={onMarkRead}
+        >
+          <CheckCheck aria-hidden />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          className="activity-row-action"
+          title="Clear from activity"
+          aria-label="Clear from activity"
+          onClick={onClear}
+        >
+          <Eraser aria-hidden />
+        </Button>
       </span>
-    </button>
+    </div>
   );
 }
 

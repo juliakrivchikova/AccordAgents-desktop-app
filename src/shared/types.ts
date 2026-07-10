@@ -1807,6 +1807,7 @@ export interface ListChatActivityRequest {
   recentConversationLimit?: number;
   recentWindowDays?: number;
   lastViewedAtByConversationId?: Record<string, string>;
+  excludedItemIds?: string[];
 }
 
 export interface ListChatActivityResult {

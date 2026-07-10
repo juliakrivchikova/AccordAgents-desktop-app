@@ -1,10 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import type { ChatSkillMention, PluginCatalogItem } from "../shared/types";
-import {
-  RefreshCw,
-  XCircle
-} from "lucide-react";
+import { RefreshCw, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
@@ -36,8 +33,8 @@ import { useSettingsActions } from "./app/use-settings-actions";
 import { useAppViewModel } from "./app/use-app-view-model";
 import { AppNotices } from "./app/app-notices";
 import { pluginNewChatDraft, pluginNewChatMentions } from "./app/plugin-new-chat";
+import { clearActivityItem, markActivityItemRead } from "./app/activity-item-state";
 import "./styles/app.css";
-
 function App(): JSX.Element {
   const state = useAppState();
   const conversationActions = useConversationActions(state);
@@ -327,15 +324,16 @@ function App(): JSX.Element {
           loading={state.activityLoading}
           error={state.activityError}
           detailError={state.activityFocusError}
-          detail={(
-            <div className="content-area result-layout activity-conversation-content">
-              {conversationPanel ?? <AppLoadingState title="Loading chat" description={openingConversationDescription} />}
-            </div>
-          )}
+          detail={<div className="content-area result-layout activity-conversation-content">
+            {conversationPanel ?? <AppLoadingState title="Loading chat" description={openingConversationDescription} />}
+          </div>}
           onSelect={(item) => {
-            state.setSelectedActivityItem(item);
+            markActivityItemRead(state, item.id);
+            state.setSelectedActivityItem({ ...item, read: true });
             void conversationActions.openConversationAndFocusActivityItem(item);
           }}
+          onMarkRead={(item) => markActivityItemRead(state, item.id)}
+          onClear={(item) => clearActivityItem(state, item.id)}
           onOpenInChat={(item) => {
             state.setRailView("chats");
             state.setSidebarCollapsed(false);

@@ -18,6 +18,7 @@ import { defaultChatParticipantDraft } from "../components/chat/chat-participant
 import type { AppState } from "./app-state";
 import { conversationTimeValue, normalizeProjectPath } from "./conversation-summaries";
 import { persistLastViewedAt } from "./storage";
+import { activityItemsWithStoredPreferences } from "./activity-item-state";
 
 export interface ConversationActions {
   refreshAll: () => Promise<void>;
@@ -55,13 +56,14 @@ export function useConversationActions(state: AppState): ConversationActions {
     state.setActivityError(undefined);
     try {
       const result = await window.consensus.listChatActivity({
-        lastViewedAtByConversationId: state.lastViewedAtRef.current
+        lastViewedAtByConversationId: state.lastViewedAtRef.current,
+        excludedItemIds: [...state.activityItemPreferencesRef.current.clearedItemIds]
       });
       if (requestId !== state.activityRefreshRequestRef.current) {
         return;
       }
       state.setActivityItems((current) => {
-        return reconcileChatActivityRefreshItems(current, result.items, {
+        return reconcileChatActivityRefreshItems(current, activityItemsWithStoredPreferences(state, result.items), {
           revisionsAtStart,
           revisionsNow: state.activityRevisionByConversationRef.current,
           archivedConversationIds: state.archivedConversationIdsRef.current

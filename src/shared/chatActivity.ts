@@ -35,6 +35,11 @@ export interface ReconcileChatActivityRefreshOptions {
   limit?: number;
 }
 
+export interface ApplyChatActivityItemPreferencesOptions {
+  readItemIds?: ReadonlySet<string>;
+  clearedItemIds?: ReadonlySet<string>;
+}
+
 export function buildChatActivityItems(
   conversation: Conversation | undefined,
   options: BuildChatActivityItemsOptions = {}
@@ -96,7 +101,7 @@ export function buildChatActivityItems(
     }
     const updatedAt = message.createdAt;
     const updatedMs = timeValue(updatedAt);
-    if (updatedMs <= 0 || updatedMs < recentCutoffMs || (lastViewedMs > 0 && updatedMs <= lastViewedMs)) {
+    if (updatedMs <= 0 || updatedMs < recentCutoffMs) {
       continue;
     }
     const participant = participantForMessage(message, participants);
@@ -106,6 +111,7 @@ export function buildChatActivityItems(
       conversationTitle: conversation.title,
       repoPath: conversation.repoPath,
       status: "recent",
+      ...(lastViewedMs > 0 && updatedMs <= lastViewedMs ? { read: true } : {}),
       kind: "message",
       title: participant ? `@${participant.handle} recently finished` : "Recent activity",
       preview: previewText(message.content) || "A participant posted an update.",
@@ -121,6 +127,17 @@ export function buildChatActivityItems(
   }
 
   return sortChatActivityItems(dedupeChatActivityItems(items));
+}
+
+export function applyChatActivityItemPreferences(
+  items: ChatActivityItem[],
+  options: ApplyChatActivityItemPreferencesOptions = {}
+): ChatActivityItem[] {
+  const readItemIds = options.readItemIds ?? new Set<string>();
+  const clearedItemIds = options.clearedItemIds ?? new Set<string>();
+  return items
+    .filter((item) => !clearedItemIds.has(item.id))
+    .map((item) => item.read === true || !readItemIds.has(item.id) ? item : { ...item, read: true });
 }
 
 export function buildChatActivityItemsForConversationUpdate(

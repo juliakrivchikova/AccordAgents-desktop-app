@@ -301,12 +301,17 @@ export class StorageService {
       });
     }
 
+    const excludedItemIds = new Set(
+      (request.excludedItemIds ?? [])
+        .filter((itemId): itemId is string => typeof itemId === "string" && itemId.trim().length > 0)
+        .slice(-1_000)
+    );
     const items = [...conversationsById.values()].flatMap((conversation) =>
       buildChatActivityItems(conversation, {
         recentWindowDays,
         lastViewedAt: request.lastViewedAtByConversationId?.[conversation.id]
       })
-    );
+    ).filter((item) => !excludedItemIds.has(item.id));
     return {
       items: limitChatActivityItems(sortChatActivityItems(items), limit),
       generatedAt: new Date().toISOString()
