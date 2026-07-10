@@ -23,6 +23,13 @@ import {
 const MIN_ACTIVITY_LIST_WIDTH = 320;
 const NARROW_ACTIVITY_LIST_MAX_WIDTH = 340;
 const MIN_ACTIVITY_DETAIL_WIDTH = 360;
+type ActivityStatusTab = "running" | "pending" | "rest";
+
+const ACTIVITY_STATUS_TABS: { id: ActivityStatusTab; label: string }[] = [
+  { id: "running", label: "Running" },
+  { id: "pending", label: "Pending" },
+  { id: "rest", label: "Rest" }
+];
 
 export interface ActivityViewProps {
   items: ChatActivityItem[];
@@ -56,6 +63,16 @@ export function ActivityView({
   const cleanupResizeRef = useRef<(() => void) | null>(null);
   const [listWidth, setListWidth] = useState(readInitialActivityListWidth);
   const [resizing, setResizing] = useState(false);
+  const [activeTab, setActiveTab] = useState<ActivityStatusTab>("rest");
+
+  const tabCounts: Record<ActivityStatusTab, number> = {
+    running: items.filter((item) => item.status === "running").length,
+    pending: items.filter((item) => item.status === "pending").length,
+    rest: items.filter((item) => item.status === "recent").length
+  };
+  const filteredItems = items.filter((item) => (
+    activeTab === "rest" ? item.status === "recent" : item.status === activeTab
+  ));
 
   useEffect(() => () => cleanupResizeRef.current?.(), []);
 
@@ -123,6 +140,25 @@ export function ActivityView({
       <aside id="activity-list-pane" className="activity-list-pane">
         <div className="activity-list-header">
           <h1>Activity</h1>
+          <div className="activity-status-tabs" role="tablist" aria-label="Activity status">
+            {ACTIVITY_STATUS_TABS.map((tab) => {
+              const active = tab.id === activeTab;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  className="activity-status-tab"
+                  role="tab"
+                  aria-selected={active}
+                  data-active={active ? "true" : undefined}
+                  onClick={() => setActiveTab(tab.id)}
+                >
+                  <span>{tab.label}</span>
+                  <span className="activity-status-tab-count">{tabCounts[tab.id]}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
         <div className="activity-list" role="list">
           {error ? (
@@ -139,8 +175,13 @@ export function ActivityView({
               <h2>{loading ? "Loading activity" : "No current activity"}</h2>
               <p>{loading ? "Checking recent chats." : "Running, pending, and recent runs will appear here."}</p>
             </div>
+          ) : filteredItems.length === 0 ? (
+            <div className="activity-empty">
+              <h2>No {activeTab === "rest" ? "finished" : activeTab} activity</h2>
+              <p>{emptyActivityTabDescription(activeTab)}</p>
+            </div>
           ) : (
-            items.map((item) => (
+            filteredItems.map((item) => (
               <ActivityRow
                 key={item.id}
                 item={item}
@@ -201,6 +242,16 @@ export function ActivityView({
       </div>
     </section>
   );
+}
+
+function emptyActivityTabDescription(tab: ActivityStatusTab): string {
+  if (tab === "running") {
+    return "Runs in progress will appear here.";
+  }
+  if (tab === "pending") {
+    return "Items waiting for input or approval will appear here.";
+  }
+  return "Finished member updates will appear here.";
 }
 
 function ActivityRow({
