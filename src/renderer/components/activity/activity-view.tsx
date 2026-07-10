@@ -255,19 +255,19 @@ function ActivityRow({
         </span>
       </button>
       <span className="activity-row-actions">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          className="activity-row-action"
-          title={item.read ? "Already read" : "Mark read"}
-          aria-label={item.read ? "Already read" : "Mark read"}
-          data-read={item.read ? "true" : undefined}
-          disabled={item.read === true}
-          onClick={onMarkRead}
-        >
-          <CheckCheck aria-hidden />
-        </Button>
+        {!item.read ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="activity-row-action"
+            title="Mark read"
+            aria-label="Mark read"
+            onClick={onMarkRead}
+          >
+            <CheckCheck aria-hidden />
+          </Button>
+        ) : null}
         <Button
           type="button"
           variant="ghost"
