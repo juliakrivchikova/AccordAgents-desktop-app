@@ -589,6 +589,7 @@ type RemoteRunParticipantTarget =
 
 interface RemoteRunCoordinatorControl {
   trackRun(handle: RemoteRunHandle): void;
+  stopTracking?(runId: string): void;
   drainRemoteSessionCleanup?(workerOverride?: CloudRunWorkerSettings): Promise<void>;
 }
 
@@ -2207,25 +2208,6 @@ export class ChatService {
     }
     this.queueParticipantRequestAutoResumes(conversationId, Array.from(autoResumeRequestMessageIds));
     return nextHandle;
-  }
-
-  private async markRemoteRunCancelFailed(handle: RemoteRunHandle, runId: string, error: unknown): Promise<void> {
-    const message = error instanceof Error ? error.message : String(error);
-    const reason = `Failed to cancel remote run: ${message}`;
-    await this.updateRemoteRunHandleState(handle.conversationId, runId, {
-      runId,
-      conversationId: handle.conversationId,
-      participantId: handle.participantId,
-      status: "failed",
-      completedAt: new Date().toISOString(),
-      error: reason
-    });
-    const conversation = await this.storage.getConversation(handle.conversationId);
-    if (!conversation || conversation.kind !== "chat") {
-      return;
-    }
-    const label = handle.participantHandle ? `@${handle.participantHandle}` : "Remote run";
-    await this.appendConversationWarnings(conversation, [`${label}: ${reason}`]);
   }
 
   private async recordRemoteRunHandle(
@@ -15757,32 +15739,19 @@ export class ChatService {
       cancelled = true;
     }
     const remoteHandle = this.remoteRunHandlesByRun.get(targetRunId);
-    const worker = remoteHandle && !this.isRemoteRunTerminal(remoteHandle.status)
-      ? cloudRunWorkerTargetFromSettings(remoteHandle.worker)
-      : undefined;
-    if (remoteHandle && worker && this.remoteRuns) {
+    if (remoteHandle && !this.isRemoteRunTerminal(remoteHandle.status)) {
       cancelled = true;
-      void this.remoteRuns.cancelDetachedRun({
-        conversationId: remoteHandle.conversationId,
-        runId: targetRunId,
-        worker,
-        reason: "user cancelled"
-      })
-        .then((state) => this.updateRemoteRunHandleState(remoteHandle.conversationId, targetRunId, state))
-        .catch((error) => {
-          void this.debugLogs.write("chat.remote-run.cancel.error", {
-            conversationId: remoteHandle.conversationId,
-            runId: targetRunId,
-            message: error instanceof Error ? error.message : String(error)
-          });
-          void this.markRemoteRunCancelFailed(remoteHandle, targetRunId, error).catch((failure) => {
-            void this.debugLogs.write("chat.remote-run.cancel-failure-state.error", {
-              conversationId: remoteHandle.conversationId,
-              runId: targetRunId,
-              message: failure instanceof Error ? failure.message : String(failure)
-            });
-          });
+      // Stop the run for the user immediately, independent of whether the
+      // worker is reachable: terminalize locally now and deliver the worker
+      // cancel best-effort in the background. Otherwise Stop blocks on a 30s
+      // SSH timeout to an unreachable worker and appears broken.
+      void this.stopRemoteRunLocallyFirst(remoteHandle, targetRunId).catch((error) => {
+        void this.debugLogs.write("chat.remote-run.cancel.error", {
+          conversationId: remoteHandle.conversationId,
+          runId: targetRunId,
+          message: error instanceof Error ? error.message : String(error)
         });
+      });
     }
     if (!cancelled) {
       void this.cancelStoredRun(targetRunId).catch((error) => {
@@ -15818,27 +15787,7 @@ export class ChatService {
       }
       if (handle && !this.isRemoteRunTerminal(handle.status)) {
         this.registerRemoteRunHandle(handle);
-        const worker = cloudRunWorkerTargetFromSettings(handle.worker);
-        if (worker && this.remoteRuns) {
-          try {
-            const state = await this.remoteRuns.cancelDetachedRun({
-              conversationId: handle.conversationId,
-              runId: targetRunId,
-              worker,
-              reason: "user cancelled"
-            });
-            await this.updateRemoteRunHandleState(handle.conversationId, targetRunId, state);
-          } catch (error) {
-            void this.debugLogs.write("chat.remote-run.cancel.error", {
-              conversationId: handle.conversationId,
-              runId: targetRunId,
-              message: error instanceof Error ? error.message : String(error)
-            });
-            await this.markRemoteRunCancelFailed(handle, targetRunId, error);
-          }
-          return true;
-        }
-        await this.cancelStoredRemoteRunWithoutDelivery(conversation, targetRunId);
+        await this.stopRemoteRunLocallyFirst(handle, targetRunId);
         return true;
       }
       await this.cancelStoredOrphanedRun(conversation, targetRunId);
@@ -15847,14 +15796,18 @@ export class ChatService {
     return false;
   }
 
-  private async cancelStoredRemoteRunWithoutDelivery(conversation: Conversation, runId: string): Promise<void> {
+  private async cancelStoredRemoteRunWithoutDelivery(
+    conversation: Conversation,
+    runId: string,
+    reason = "user cancelled before remote cancellation could be delivered"
+  ): Promise<void> {
     const autoResumeRequestMessageIds = new Set<string>();
     await this.withChatMutation(conversation, async () => {
       const terminal = this.applyRemoteTerminalStateToConversation(
         conversation,
         runId,
         "cancelled",
-        "user cancelled before remote cancellation could be delivered"
+        reason
       );
       for (const requestMessageId of terminal.autoResumeRequestMessageIds) {
         autoResumeRequestMessageIds.add(requestMessageId);
@@ -15867,6 +15820,32 @@ export class ChatService {
       this.scheduleAutoWatchEvaluation(conversation.id, "stored-remote-run-cancelled");
     }
     this.queueParticipantRequestAutoResumes(conversation.id, Array.from(autoResumeRequestMessageIds));
+  }
+
+  // User-initiated stop for a remote run: terminalize locally right away so the
+  // UI unblocks regardless of worker reachability, stop the coordinator from
+  // polling the now-dead run, then deliver the worker-side cancel best-effort in
+  // the background. A user Stop means "stop it now" — we never block the user on
+  // an unreachable worker (a 30s SSH timeout per click reads as broken), and we
+  // never resurrect a run the user cancelled.
+  private async stopRemoteRunLocallyFirst(handle: RemoteRunHandle, runId: string): Promise<void> {
+    this.remoteRunCoordinator?.stopTracking?.(runId);
+    const conversation = await this.storage.getConversation(handle.conversationId);
+    if (conversation && conversation.kind === "chat") {
+      await this.cancelStoredRemoteRunWithoutDelivery(conversation, runId, "Stopped by you.");
+    }
+    const worker = cloudRunWorkerTargetFromSettings(handle.worker);
+    if (worker && this.remoteRuns) {
+      void this.remoteRuns
+        .cancelDetachedRun({ conversationId: handle.conversationId, runId, worker, reason: "user cancelled" })
+        .catch((error) => {
+          void this.debugLogs.write("chat.remote-run.cancel.background.error", {
+            conversationId: handle.conversationId,
+            runId,
+            message: error instanceof Error ? error.message : String(error)
+          });
+        });
+    }
   }
 
   private async cancelStoredOrphanedRun(conversation: Conversation, runId: string): Promise<void> {

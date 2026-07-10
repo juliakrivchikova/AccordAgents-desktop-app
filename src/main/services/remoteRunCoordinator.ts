@@ -118,6 +118,13 @@ export class RemoteRunCoordinator {
     }
   }
 
+  // Stop polling a run the app has terminalized out-of-band (e.g. a user
+  // cancel that could not be delivered to an unreachable worker). Without this
+  // the coordinator keeps SSH-polling a dead run forever.
+  stopTracking(runId: string): void {
+    this.stopRun(runId);
+  }
+
   private stopRun(runId: string): void {
     const timer = this.timers.get(runId);
     if (timer) {

@@ -2480,7 +2480,7 @@ test("remote cancellation suppresses late output, result, and permission side ef
   assert.equal(storage.current.messages.some((item: ChatMessage) => item.content.includes("Permission approval needed")), false);
 });
 
-test("cancelRun marks remote run failed when remote cancel delivery fails", async () => {
+test("cancelRun stops a remote run immediately even when the worker is unreachable", async () => {
   const participant = chatParticipant("codex-cli");
   const now = "2026-06-27T22:00:00.000Z";
   const handle = {
@@ -2502,6 +2502,7 @@ test("cancelRun marks remote run failed when remote cancel delivery fails", asyn
     }
   });
   const { service, storage } = testService({ conversation });
+  let workerCancelAttempts = 0;
   service.setRemoteRunService({
     async startDetachedRun(): Promise<any> {
       throw new Error("not used");
@@ -2509,37 +2510,39 @@ test("cancelRun marks remote run failed when remote cancel delivery fails", asyn
     async pollDetachedRun(): Promise<any> {
       throw new Error("not used");
     },
-    async cancelDetachedRun(): Promise<any> {
-      throw new Error("ssh unavailable");
+    // Simulate an unreachable worker: the SSH cancel never returns. Stop must
+    // not wait on it.
+    cancelDetachedRun(): Promise<any> {
+      workerCancelAttempts += 1;
+      return new Promise(() => {});
     },
     registerDetachedRunContext(): void {}
+  });
+  const stopTrackingCalls: string[] = [];
+  service.setRemoteRunCoordinator({
+    trackRun(): void {},
+    stopTracking(runId: string): void {
+      stopTrackingCalls.push(runId);
+    }
   });
   (service as any).registerRemoteRunHandle(handle);
 
   assert.equal(service.cancelRun("remote-run"), true);
 
+  // Terminalized locally without awaiting the hung worker cancel.
   await waitFor(() => {
     const stored = (storage.current.metadata.remoteRunHandles as any)["remote-run"];
-    return stored.status === "failed" &&
+    return stored.status === "cancelled" &&
       storage.current.metadata.running === false &&
-      Array.isArray(storage.current.metadata.warnings);
+      storage.current.metadata.activeRunIds === undefined;
   });
   const stored = (storage.current.metadata.remoteRunHandles as any)["remote-run"];
-  assert.equal(stored.status, "failed");
-  assert.match(stored.error, /Failed to cancel remote run: ssh unavailable/);
+  assert.equal(stored.status, "cancelled");
   assert.equal(storage.current.metadata.activeRunIds, undefined);
-  assert.equal(storage.current.metadata.warnings.some((warning: string) =>
-    warning.includes("Failed to cancel remote run")
-  ), true);
-
-  await service.updateRemoteRunHandleState(conversation.id, "remote-run", {
-    runId: "remote-run",
-    conversationId: conversation.id,
-    participantId: participant.id,
-    status: "running"
-  });
-
-  assert.equal((storage.current.metadata.remoteRunHandles as any)["remote-run"].status, "failed");
+  // The coordinator is told to stop polling the now-dead run, and the worker
+  // cancel is still attempted best-effort.
+  assert.deepEqual(stopTrackingCalls, ["remote-run"]);
+  assert.equal(workerCancelAttempts, 1);
 });
 
 test("cancelRun cancels persisted remote runs without in-memory handles", async () => {
@@ -2600,7 +2603,7 @@ test("cancelRun cancels persisted remote runs without in-memory handles", async 
   assert.equal(service.cancelRun("remote-one"), true);
   assert.equal(service.cancelRun("remote-two"), true);
 
-  await waitFor(() => storage.current.metadata.activeRunIds === undefined);
+  await waitFor(() => storage.current.metadata.activeRunIds === undefined && cancelledRunIds.length === 2);
   assert.deepEqual(cancelledRunIds.sort(), ["remote-one", "remote-two"]);
   assert.equal(storage.current.metadata.running, false);
   assert.equal(storage.current.metadata.runId, undefined);
