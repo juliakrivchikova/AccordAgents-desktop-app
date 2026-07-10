@@ -6,7 +6,10 @@ import {
 } from "../../shared/chatParticipantRequests";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
-import { AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT } from "../../shared/cloudRuns";
+import {
+  AWS_WORKER_INSTANCE_TYPE_DEFAULT,
+  AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT
+} from "../../shared/cloudRuns";
 
 export const DEFAULT_SETTINGS: AppSettings = {
   roundLimitDefault: 2,
@@ -20,6 +23,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     mode: "ssh",
     worker: {},
     hasAwsCredentials: false,
+    awsInstanceType: AWS_WORKER_INSTANCE_TYPE_DEFAULT,
     awsRootVolumeSizeGb: AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT,
     maxRuntimeMs: 24 * 60 * 60_000,
     pollIntervalMs: 2_500
@@ -32,7 +36,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 export const SIDEBAR_COLLAPSED_STORAGE_KEY = "accordagents.sidebarCollapsed";
-export const SIDEBAR_WIDTH_STORAGE_KEY = "accordagents.sidebarWidth";
+export const LEGACY_SIDEBAR_WIDTH_STORAGE_KEY = "accordagents.sidebarWidth";
+export const CHAT_SIDEBAR_WIDTH_STORAGE_KEY = "accordagents.chatSidebarWidth.v2";
+export const SETTINGS_SIDEBAR_WIDTH_STORAGE_KEY = "accordagents.settingsSidebarWidth.v2";
+export const LEGACY_ACTIVITY_LIST_WIDTH_STORAGE_KEY = "accordagents-activity-list-width";
+export const ACTIVITY_LIST_WIDTH_STORAGE_KEY = "accordagents.activityListWidth.v2";
 export const LAST_VIEWED_AT_STORAGE_KEY = "accordagents.lastViewedAt";
 export const DISMISSED_WARNINGS_STORAGE_KEY = "accordagents.dismissedWarnings.v1";
 export const ACCORD_LAUNCHER_STORAGE_KEY = "accordagents.accordLauncher.v1";

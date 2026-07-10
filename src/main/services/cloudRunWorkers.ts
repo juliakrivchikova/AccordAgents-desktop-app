@@ -13,6 +13,7 @@ export function normalizeCloudRunWorkerSettings(value: unknown): CloudRunWorkerS
     user: trimOptionalString(record.user),
     port,
     identityFile: trimOptionalString(record.identityFile),
+    hostKeyAlias: normalizeHostKeyAlias(record.hostKeyAlias),
     workerRoot: trimOptionalString(record.workerRoot),
     remoteCwd: trimOptionalString(record.remoteCwd),
     codexPath: trimOptionalString(record.codexPath)
@@ -29,6 +30,7 @@ export function cloudRunWorkerTargetFromSettings(worker: CloudRunWorkerSettings)
     user: worker.user,
     port: worker.port,
     identityFile: worker.identityFile,
+    hostKeyAlias: worker.hostKeyAlias,
     workerRoot: worker.workerRoot,
     remoteCwd: worker.remoteCwd,
     codexPath: worker.codexPath
@@ -43,7 +45,7 @@ export function buildCloudRunSshTarget(worker: Pick<RemoteRunWorkerTarget, "host
 }
 
 export function cloudRunSshOptionArgs(
-  worker: Pick<RemoteRunWorkerTarget, "host" | "user" | "identityFile" | "port">
+  worker: Pick<RemoteRunWorkerTarget, "host" | "user" | "identityFile" | "hostKeyAlias" | "port">
 ): string[] {
   validateCloudRunSshWorkerFields(worker);
   const args = [
@@ -54,6 +56,9 @@ export function cloudRunSshOptionArgs(
   ];
   if (worker.identityFile?.trim()) {
     args.push("-i", worker.identityFile.trim());
+  }
+  if (worker.hostKeyAlias?.trim()) {
+    args.push("-o", `HostKeyAlias=${normalizeHostKeyAlias(worker.hostKeyAlias)}`);
   }
   if (typeof worker.port === "number" && Number.isFinite(worker.port) && worker.port > 0) {
     args.push("-p", String(Math.floor(worker.port)));
@@ -84,6 +89,15 @@ export function validateCloudRunSshWorkerFields(
 
 function trimOptionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value.trim() || undefined : undefined;
+}
+
+function normalizeHostKeyAlias(value: unknown): string | undefined {
+  const alias = trimOptionalString(value);
+  if (!alias) return undefined;
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(alias)) {
+    throw new Error("Worker host key alias contains unsupported characters.");
+  }
+  return alias;
 }
 
 function rejectLeadingDash(label: string, value: string): void {

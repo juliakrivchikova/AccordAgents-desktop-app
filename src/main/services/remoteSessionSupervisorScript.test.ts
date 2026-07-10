@@ -114,6 +114,57 @@ test("worker operation leases fail closed for automatic stop and expire safely",
   assert.equal(allowed.value.status, "allow");
 });
 
+test("worker-wide stop gate protects work and submissions across device roots", async () => {
+  const sharedRoot = await mkdtemp(path.join(tmpdir(), "accordagents-shared-worker-gate-"));
+  const deviceRoot = path.join(sharedRoot, "devices", "laptop-a");
+  const sessionDir = path.join(deviceRoot, "sessions", "session-a");
+  await mkdir(path.join(sessionDir, "inbox"), { recursive: true });
+  await writeFile(path.join(sharedRoot, "session-control.js"), remoteSessionControlScript(), "utf8");
+  await writeFile(path.join(deviceRoot, "session-control.js"), remoteSessionControlScript(), "utf8");
+  await writeFile(path.join(sessionDir, "session-state.json"), JSON.stringify({
+    status: "idle",
+    queuedRunIds: ["run-a"]
+  }), "utf8");
+  await writeFile(path.join(sessionDir, "inbox", "turn-run-a.json"), "{}", "utf8");
+
+  const queuedDenied = await runControl(sharedRoot, "authorize-stop", {
+    protocolVersion: REMOTE_SESSION_PROTOCOL_VERSION,
+    ownerId: "laptop-b",
+    ttlMs: 30_000
+  });
+  assert.equal(queuedDenied.code, 9);
+  assert.equal(queuedDenied.value.reason, "warm-session");
+
+  await rm(sessionDir, { recursive: true, force: true });
+  const operation = await runOperationLeaseShell(
+    deviceRoot,
+    "acquire",
+    "settings-op",
+    "laptop-a",
+    "worker-setup"
+  );
+  assert.equal(operation.code, 0);
+  const operationDenied = await runControl(sharedRoot, "authorize-stop", {
+    protocolVersion: REMOTE_SESSION_PROTOCOL_VERSION,
+    ownerId: "laptop-b",
+    ttlMs: 30_000
+  });
+  assert.equal(operationDenied.code, 9);
+  assert.equal(operationDenied.value.reason, "operation-lease");
+  await runOperationLeaseShell(deviceRoot, "release", "settings-op", "laptop-a", "worker-setup");
+
+  const allowed = await runControl(sharedRoot, "authorize-stop", {
+    protocolVersion: REMOTE_SESSION_PROTOCOL_VERSION,
+    ownerId: "laptop-b",
+    ttlMs: 30_000
+  });
+  assert.equal(allowed.code, 0);
+  assert.equal(allowed.value.status, "allow");
+  const submitDuringDrain = await runControl(deviceRoot, "submit", {});
+  assert.equal(submitDuringDrain.code, 4);
+  assert.equal(submitDuringDrain.value.status, "draining");
+});
+
 test("POSIX worker operation lease works before the Node session protocol is installed", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "accordagents-bootstrap-operation-"));
   const leaseId = "bootstrap-lease";

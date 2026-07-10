@@ -32,7 +32,7 @@
 .settings-view .settings-view-head-actions > button {
   border: 0 !important;
   box-shadow: none !important;
-  color: #878d9a;
+  color: var(--app-muted);
 }
 
 .settings-view .gen-section {
@@ -633,7 +633,7 @@
   padding: 0 10px;
   border-radius: 8px;
   border: 1px solid var(--app-border);
-  background: var(--app-panel);
+  background: var(--app-surface);
   color: var(--app-text);
   font-size: 12px;
   font-weight: 700;
@@ -656,6 +656,95 @@
 
 .settings-view .gen-aws-message {
   padding: 0 18px 12px;
+}
+
+.settings-view .gen-aws-specs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 18px 14px;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.settings-view .gen-aws-specs > * {
+  padding: 4px 7px;
+  border: 1px solid var(--app-border);
+  border-radius: 7px;
+  background: var(--app-surface);
+}
+
+.settings-view .gen-aws-specs strong {
+  color: var(--app-warning);
+}
+
+.settings-view .gen-aws-progress {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 18px 14px;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-view .gen-aws-progress li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--app-muted);
+  font-size: 11.5px;
+}
+
+.settings-view .gen-aws-progress li > span:first-child {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--app-border);
+  border-radius: 50%;
+  font-size: 10px;
+}
+
+.settings-view .gen-aws-progress li.is-current,
+.settings-view .gen-aws-progress li.is-done {
+  color: var(--app-text-strong);
+  font-weight: 650;
+}
+
+.settings-view .gen-aws-progress li.is-done > span:first-child,
+.settings-view .gen-aws-progress.is-ready li > span:first-child {
+  border-color: var(--app-success);
+  color: var(--app-success);
+}
+
+.settings-view .gen-aws-progress .gen-aws-auth {
+  grid-column: 1 / -1;
+}
+
+.settings-view .gen-aws-progress .gen-aws-auth code {
+  margin-left: 6px;
+  font-family: var(--font-mono, monospace);
+}
+
+.settings-view .gen-aws-decision,
+.settings-view .gen-aws-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 18px 14px;
+  padding: 12px;
+  border: 1px solid var(--app-warning);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--app-warning) 8%, var(--app-surface));
+  color: var(--app-text);
+  font-size: 12px;
+}
+
+.settings-view .gen-aws-confirm {
+  border-color: var(--app-danger-border);
+  background: color-mix(in srgb, var(--app-danger) 7%, var(--app-surface));
 }
 
 .settings-view .gen-pill-danger {

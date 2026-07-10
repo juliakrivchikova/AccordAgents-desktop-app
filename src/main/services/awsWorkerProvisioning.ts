@@ -27,39 +27,90 @@ export interface AwsWorkerCredentials {
 // worker instances in the chosen region, nothing else in the account.
 export function buildScopedWorkerPolicy(region: string): unknown {
   const regionCondition = { StringEquals: { "aws:RequestedRegion": region } };
+  const regionArn = `arn:aws:ec2:${region}:*`;
+  const requiredWorkerTags = {
+    StringEquals: {
+      "aws:RequestedRegion": region,
+      [`aws:RequestTag/${AWS_WORKER_TAG_KEY}`]: AWS_WORKER_TAG_VALUE
+    },
+    "ForAllValues:StringEquals": {
+      "aws:TagKeys": [AWS_WORKER_TAG_KEY, "Name"]
+    }
+  };
   return {
     Version: "2012-10-17",
     Statement: [
       {
-        Sid: "DescribeInRegion",
+        Sid: "DiscoverWorkers",
         Effect: "Allow",
         Action: [
+          "ec2:DescribeRegions",
           "ec2:DescribeInstances",
           "ec2:DescribeInstanceStatus",
+          "ec2:DescribeInstanceTypes",
           "ec2:DescribeImages",
+          "ec2:DescribeVolumes",
+          "ec2:DescribeVolumesModifications",
           "ec2:DescribeSecurityGroups",
           "ec2:DescribeSubnets",
           "ec2:DescribeVpcs",
           "ec2:DescribeKeyPairs"
         ],
+        Resource: "*"
+      },
+      {
+        Sid: "RunTaggedWorkerResources",
+        Effect: "Allow",
+        Action: ["ec2:RunInstances"],
+        Resource: [
+          `${regionArn}:instance/*`,
+          `${regionArn}:volume/*`
+        ],
+        Condition: requiredWorkerTags
+      },
+      {
+        Sid: "UseWorkerLaunchDependencies",
+        Effect: "Allow",
+        Action: ["ec2:RunInstances"],
+        Resource: [
+          `${regionArn}:image/*`,
+          `${regionArn}:subnet/*`,
+          `${regionArn}:security-group/*`,
+          `${regionArn}:key-pair/accordagents-worker-*`,
+          `${regionArn}:network-interface/*`
+        ],
+        Condition: regionCondition
+      },
+      {
+        Sid: "CreateTaggedWorkerInfra",
+        Effect: "Allow",
+        Action: ["ec2:ImportKeyPair", "ec2:CreateSecurityGroup"],
         Resource: "*",
         Condition: regionCondition
       },
       {
-        Sid: "CreateInfra",
+        Sid: "TagWorkerResourcesAtCreation",
         Effect: "Allow",
-        Action: [
-          "ec2:RunInstances",
-          "ec2:ImportKeyPair",
-          "ec2:CreateKeyPair",
-          "ec2:DeleteKeyPair",
-          "ec2:CreateSecurityGroup",
-          "ec2:DeleteSecurityGroup",
-          "ec2:AuthorizeSecurityGroupIngress",
-          "ec2:RevokeSecurityGroupIngress",
-          "ec2:CreateTags"
+        Action: ["ec2:CreateTags"],
+        Resource: [
+          `${regionArn}:instance/*`,
+          `${regionArn}:volume/*`,
+          `${regionArn}:security-group/*`,
+          `${regionArn}:key-pair/accordagents-worker-*`
         ],
-        Resource: "*",
+        Condition: {
+          ...requiredWorkerTags,
+          StringEquals: {
+            ...requiredWorkerTags.StringEquals,
+            "ec2:CreateAction": ["RunInstances", "CreateSecurityGroup", "ImportKeyPair"]
+          }
+        }
+      },
+      {
+        Sid: "DeleteAppKeyPairs",
+        Effect: "Allow",
+        Action: ["ec2:DeleteKeyPair"],
+        Resource: [`${regionArn}:key-pair/accordagents-worker-*`],
         Condition: regionCondition
       },
       {
@@ -73,8 +124,35 @@ export function buildScopedWorkerPolicy(region: string): unknown {
         Resource: "*",
         Condition: {
           StringEquals: {
-            "aws:RequestedRegion": region,
             [`ec2:ResourceTag/${AWS_WORKER_TAG_KEY}`]: AWS_WORKER_TAG_VALUE
+          }
+        }
+      },
+      {
+        Sid: "ManageTaggedWorkerStorageAndNetwork",
+        Effect: "Allow",
+        Action: [
+          "ec2:ModifyVolume",
+          "ec2:DeleteSecurityGroup",
+          "ec2:AuthorizeSecurityGroupIngress",
+          "ec2:RevokeSecurityGroupIngress"
+        ],
+        Resource: "*",
+        Condition: {
+          StringEquals: {
+            [`ec2:ResourceTag/${AWS_WORKER_TAG_KEY}`]: AWS_WORKER_TAG_VALUE
+          }
+        }
+      },
+      {
+        Sid: "ConnectToTaggedWorkers",
+        Effect: "Allow",
+        Action: ["ec2-instance-connect:SendSSHPublicKey"],
+        Resource: "*",
+        Condition: {
+          StringEquals: {
+            [`aws:ResourceTag/${AWS_WORKER_TAG_KEY}`]: AWS_WORKER_TAG_VALUE,
+            "ec2:osuser": "ubuntu"
           }
         }
       }
@@ -91,6 +169,9 @@ export function buildBootstrapCommand(region: string, userSuffix: string): strin
   const safeRegion = assertToken("region", region);
   const userName = `accordagents-worker-${assertToken("suffix", userSuffix)}`;
   const policy = JSON.stringify(buildScopedWorkerPolicy(safeRegion));
+  if (policy.length > 6_144) {
+    throw new Error("AWS worker policy exceeds the IAM customer-managed policy size limit.");
+  }
   // Single-quote the policy for the shell; escape embedded quotes.
   const policyLiteral = `'${policy.replace(/'/g, `'\\''`)}'`;
   return [
@@ -98,11 +179,23 @@ export function buildBootstrapCommand(region: string, userSuffix: string): strin
     `REGION=${safeRegion}`,
     `USER=${userName}`,
     `POLICY=${policyLiteral}`,
-    'aws iam create-user --user-name "$USER" >/dev/null',
-    'aws iam put-user-policy --user-name "$USER" --policy-name accordagents-worker --policy-document "$POLICY" >/dev/null',
+    "FOUND_WORKERS=",
+    `for R in $(aws ec2 describe-regions --query 'Regions[].RegionName' --output text); do for I in $(aws ec2 describe-instances --region \"$R\" --filters Name=tag:${AWS_WORKER_TAG_KEY},Values=${AWS_WORKER_TAG_VALUE} Name=instance-state-name,Values=pending,running,stopping,stopped,shutting-down --query 'Reservations[].Instances[].InstanceId' --output text); do FOUND_WORKERS=\"$FOUND_WORKERS $R $I\"; done; done`,
+    "set -- $FOUND_WORKERS",
+    "if [ $(( $# / 2 )) -gt 1 ]; then printf '%s\\n' 'Multiple tagged AccordAgents workers exist; resolve them before setup.' >&2; exit 1; fi",
+    "if [ $# -eq 2 ]; then WORKER_REGION=$1; WORKER_ID=$2; ROOT_DEVICE=$(aws ec2 describe-instances --region \"$WORKER_REGION\" --instance-ids \"$WORKER_ID\" --query 'Reservations[0].Instances[0].RootDeviceName' --output text); ROOT_VOLUME=$(aws ec2 describe-instances --region \"$WORKER_REGION\" --instance-ids \"$WORKER_ID\" --query \"Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName=='$ROOT_DEVICE'].Ebs.VolumeId | [0]\" --output text); if [ -n \"$ROOT_VOLUME\" ] && [ \"$ROOT_VOLUME\" != None ]; then aws ec2 create-tags --region \"$WORKER_REGION\" --resources \"$ROOT_VOLUME\" --tags Key=accordagents-worker,Value=1; fi; for SG in $(aws ec2 describe-instances --region \"$WORKER_REGION\" --instance-ids \"$WORKER_ID\" --query 'Reservations[0].Instances[0].SecurityGroups[].GroupId' --output text); do SG_NAME=$(aws ec2 describe-security-groups --region \"$WORKER_REGION\" --group-ids \"$SG\" --query 'SecurityGroups[0].GroupName' --output text); case \"$SG_NAME\" in accordagents-worker-*-sg) aws ec2 create-tags --region \"$WORKER_REGION\" --resources \"$SG\" --tags Key=accordagents-worker,Value=1 ;; esac; done; fi",
+    'if ! aws iam get-user --user-name "$USER" >/dev/null 2>&1; then aws iam create-user --user-name "$USER" >/dev/null; fi',
+    'POLICY_ARN=$(aws iam list-policies --scope Local --query "Policies[?PolicyName==\x27$USER\x27].Arn | [0]" --output text)',
+    'if [ -z "$POLICY_ARN" ] || [ "$POLICY_ARN" = None ]; then POLICY_ARN=$(aws iam create-policy --policy-name "$USER" --policy-document "$POLICY" --query "Policy.Arn" --output text); else for VERSION_ID in $(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query "Versions[?IsDefaultVersion==\x60false\x60].VersionId" --output text); do aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$VERSION_ID"; done; aws iam create-policy-version --policy-arn "$POLICY_ARN" --policy-document "$POLICY" --set-as-default >/dev/null; fi',
+    'aws iam attach-user-policy --user-name "$USER" --policy-arn "$POLICY_ARN"',
+    'aws iam delete-user-policy --user-name "$USER" --policy-name accordagents-worker >/dev/null 2>&1 || true',
+    'EXISTING_KEYS=$(aws iam list-access-keys --user-name "$USER" --query \'sort_by(AccessKeyMetadata,&CreateDate)[].AccessKeyId\' --output text)',
+    'set -- $EXISTING_KEYS',
+    'if [ "$#" -ge 2 ]; then aws iam delete-access-key --user-name "$USER" --access-key-id "$1"; shift; fi',
     'KEY=$(aws iam create-access-key --user-name "$USER" --output json)',
     'AKID=$(printf "%s" "$KEY" | python3 -c "import sys,json;print(json.load(sys.stdin)[\\"AccessKey\\"][\\"AccessKeyId\\"])")',
     'SAK=$(printf "%s" "$KEY" | python3 -c "import sys,json;print(json.load(sys.stdin)[\\"AccessKey\\"][\\"SecretAccessKey\\"])")',
+    'for OLD_AKID in "$@"; do aws iam delete-access-key --user-name "$USER" --access-key-id "$OLD_AKID"; done',
     `BLOB=$(printf '{"accessKeyId":"%s","secretAccessKey":"%s","region":"%s"}' "$AKID" "$SAK" "$REGION" | base64 | tr -d '\\n')`,
     `printf '\\nPaste this into AccordAgents:\\n${AWS_WORKER_BLOB_PREFIX}%s\\n' "$BLOB"`
   ].join("\n");
@@ -157,6 +250,8 @@ export function buildWorkerCloudInit(): string {
     "  - rsync",
     "  - build-essential",
     "  - curl",
+    "  - cloud-guest-utils",
+    "  - ec2-instance-connect",
     "runcmd:",
     "  - [ bash, -lc, \"curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs\" ]",
     "  - [ bash, -lc, \"npm install -g @openai/codex\" ]",
@@ -176,6 +271,7 @@ export interface WorkerInstanceSpec {
   tagKey: string;
   tagValue: string;
   rootVolumeSizeGb: number;
+  clientToken?: string;
 }
 
 export function buildWorkerInstanceSpec(options: {
@@ -185,6 +281,7 @@ export function buildWorkerInstanceSpec(options: {
   securityGroupId: string;
   instanceType?: string;
   rootVolumeSizeGb?: number;
+  clientToken?: string;
 }): WorkerInstanceSpec {
   return {
     imageId: options.imageId,
@@ -195,7 +292,8 @@ export function buildWorkerInstanceSpec(options: {
     userData: Buffer.from(buildWorkerCloudInit(), "utf8").toString("base64"),
     tagKey: AWS_WORKER_TAG_KEY,
     tagValue: AWS_WORKER_TAG_VALUE,
-    rootVolumeSizeGb: normalizeAwsRootVolumeSizeGb(options.rootVolumeSizeGb)
+    rootVolumeSizeGb: normalizeAwsRootVolumeSizeGb(options.rootVolumeSizeGb),
+    clientToken: options.clientToken?.trim() || undefined
   };
 }
 

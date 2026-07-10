@@ -8,12 +8,19 @@ import { avatarForChatParticipant } from "../chat/chat-avatars";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import { Button } from "@/components/ui/button";
 import { Notice } from "../primitives";
+import {
+  persistActivityListWidth,
+  readInitialActivityListWidth
+} from "../../app/storage";
+import {
+  DEFAULT_NAVIGATION_PANE_WIDTH
+} from "../../lib/sidebar-sizing";
+import {
+  MAX_STORED_ACTIVITY_LIST_WIDTH,
+  MIN_STORED_ACTIVITY_LIST_WIDTH
+} from "../../lib/sidebar-width-storage";
 
-const ACTIVITY_LIST_WIDTH_STORAGE_KEY = "accordagents-activity-list-width";
-const DEFAULT_ACTIVITY_LIST_WIDTH = 400;
 const MIN_ACTIVITY_LIST_WIDTH = 320;
-const MAX_ACTIVITY_LIST_WIDTH = 560;
-const NARROW_ACTIVITY_LIST_WIDTH = 260;
 const NARROW_ACTIVITY_LIST_MAX_WIDTH = 340;
 const MIN_ACTIVITY_DETAIL_WIDTH = 360;
 
@@ -43,20 +50,16 @@ export function ActivityView({
   const selectedItem = resolveSelectedChatActivityItem(items, selectedItemProp);
   const rootRef = useRef<HTMLElement>(null);
   const cleanupResizeRef = useRef<(() => void) | null>(null);
-  const [listWidth, setListWidth] = useState(readStoredActivityListWidth);
+  const [listWidth, setListWidth] = useState(readInitialActivityListWidth);
   const [resizing, setResizing] = useState(false);
 
   useEffect(() => () => cleanupResizeRef.current?.(), []);
 
-  useEffect(() => {
-    window.localStorage.setItem(ACTIVITY_LIST_WIDTH_STORAGE_KEY, String(listWidth));
-  }, [listWidth]);
-
   const resizeLimits = (): { min: number; max: number } => {
     const containerWidth = rootRef.current?.getBoundingClientRect().width ?? Number.POSITIVE_INFINITY;
     const narrow = containerWidth <= 900;
-    const min = narrow ? NARROW_ACTIVITY_LIST_WIDTH : MIN_ACTIVITY_LIST_WIDTH;
-    const designMax = narrow ? NARROW_ACTIVITY_LIST_MAX_WIDTH : MAX_ACTIVITY_LIST_WIDTH;
+    const min = narrow ? MIN_STORED_ACTIVITY_LIST_WIDTH : MIN_ACTIVITY_LIST_WIDTH;
+    const designMax = narrow ? NARROW_ACTIVITY_LIST_MAX_WIDTH : MAX_STORED_ACTIVITY_LIST_WIDTH;
     return {
       min,
       max: Math.max(min, Math.min(designMax, containerWidth - MIN_ACTIVITY_DETAIL_WIDTH))
@@ -65,7 +68,9 @@ export function ActivityView({
 
   const updateListWidth = (width: number): void => {
     const { min, max } = resizeLimits();
-    setListWidth(Math.round(Math.min(max, Math.max(min, width))));
+    const nextWidth = Math.round(Math.min(max, Math.max(min, width)));
+    setListWidth(nextWidth);
+    persistActivityListWidth(nextWidth);
   };
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>): void => {
@@ -155,7 +160,7 @@ export function ActivityView({
         title="Resize activity list"
         onPointerDown={startResize}
         onKeyDown={resizeWithKeyboard}
-        onDoubleClick={() => updateListWidth(DEFAULT_ACTIVITY_LIST_WIDTH)}
+        onDoubleClick={() => updateListWidth(DEFAULT_NAVIGATION_PANE_WIDTH)}
       />
       <div className="activity-detail-pane">
         <div className="activity-detail-header">
@@ -190,13 +195,6 @@ export function ActivityView({
       </div>
     </section>
   );
-}
-
-function readStoredActivityListWidth(): number {
-  const stored = Number.parseFloat(window.localStorage.getItem(ACTIVITY_LIST_WIDTH_STORAGE_KEY) ?? "");
-  return Number.isFinite(stored)
-    ? Math.min(MAX_ACTIVITY_LIST_WIDTH, Math.max(NARROW_ACTIVITY_LIST_WIDTH, stored))
-    : DEFAULT_ACTIVITY_LIST_WIDTH;
 }
 
 function ActivityRow({

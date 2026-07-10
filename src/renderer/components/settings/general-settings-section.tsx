@@ -4,7 +4,6 @@ import { Check, CheckCircle2, ChevronDown, Code2, Copy, ExternalLink, FolderOpen
 
 import type {
   AgentHealth,
-  AwsWorkerStatus,
   CloudRunsSettings,
   CloudRunsSettingsUpdate,
   CloudRunWorkerDoctorReport,
@@ -32,11 +31,8 @@ import {
   CHAT_PROMPT_CONTEXT_LIMIT_MAX,
   normalizeChatPromptContextSettings
 } from "../../../shared/chatPromptContext";
-import {
-  AWS_WORKER_ROOT_VOLUME_SIZE_GB_OPTIONS,
-  normalizeAwsRootVolumeSizeGb
-} from "../../../shared/cloudRuns";
 import { writeClipboardText, type ClipboardWriteResult } from "../../../shared/clipboard";
+import { AwsWorkerPanel as SharedAwsWorkerPanel } from "./aws-worker-panel";
 
 const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits transitive member-to-member request nesting, not repeated rounds by the same requester.";
 const PARTICIPANT_REQUEST_PROMPT_MAX_HELP = "Maximum characters accepted for each member request prompt. Longer prompts are rejected, not truncated.";
@@ -47,11 +43,6 @@ const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
   "codex-cli": new URL("../../assets/codex-cli.svg", import.meta.url).href,
   "claude-code": new URL("../../assets/claude-avatar.png", import.meta.url).href
 };
-
-function awsWorkerDiskOptions(value: number): number[] {
-  const options: number[] = [...AWS_WORKER_ROOT_VOLUME_SIZE_GB_OPTIONS];
-  return options.includes(value) ? options : [...options, value].sort((left, right) => left - right);
-}
 
 export function GeneralSettingsSection(props: {
   providers: ProviderSettings[];
@@ -251,8 +242,6 @@ function CloudRunsControl(props: {
       setBusy(false);
     }
   };
-  const diskOptions = awsWorkerDiskOptions(draft.awsRootVolumeSizeGb);
-
   const diagnose = async (): Promise<void> => {
     setBusy(true);
     setStatus("Checking worker...");
@@ -365,10 +354,11 @@ function CloudRunsControl(props: {
       </div>
       <div className="gen-card-divider" />
       {draft.mode === "aws" ? (
-        <AwsWorkerPanel
+        <SharedAwsWorkerPanel
           settings={draft}
-          diskOptions={diskOptions}
+          onInstanceTypeChange={(value) => patch({ awsInstanceType: value })}
           onDiskSizeChange={(value) => patch({ awsRootVolumeSizeGb: value })}
+          onDeleted={() => props.onSave({ mode: "ssh" })}
         />
       ) : null}
       <div className={draft.mode === "aws" ? "gen-collapsed" : ""} hidden={draft.mode === "aws"}>
@@ -417,7 +407,7 @@ function CloudRunsControl(props: {
           </div>
         </div>
       </div>
-      <div className="gen-card-divider" />
+      {draft.mode !== "aws" ? <><div className="gen-card-divider" />
       <div className="gen-row">
         <div className="gen-row-text">
           <div className="gen-row-title">{(busy && setupProgress?.message) || status || "Ready"}</div>
@@ -466,6 +456,7 @@ function CloudRunsControl(props: {
           </button>
         </div>
       </div>
+      </> : null}
       {report && (
         <>
           <div className="gen-card-divider" />
@@ -484,255 +475,6 @@ function CloudRunsControl(props: {
       )}
         </fieldset>
       ) : null}
-    </div>
-  );
-}
-
-function AwsWorkerDiskRow(props: {
-  value: number;
-  options: number[];
-  onChange: (value: number) => void;
-}): JSX.Element {
-  return (
-    <div className="gen-row gen-row-stack">
-      <div className="gen-row-text">
-        <div className="gen-row-title">AWS worker disk</div>
-        <div className="gen-row-desc">Root disk size for newly created app-managed AWS workers.</div>
-      </div>
-      <div className="gen-grid-form gen-grid-form-compact">
-        <label className="gen-select-wrap">
-          <select
-            className="gen-input"
-            aria-label="AWS worker disk size"
-            value={props.value}
-            onChange={(event) => props.onChange(normalizeAwsRootVolumeSizeGb(event.target.value))}
-          >
-            {props.options.map((sizeGb) => (
-              <option key={sizeGb} value={sizeGb}>{sizeGb} GB</option>
-            ))}
-          </select>
-          <ChevronDown size={16} aria-hidden />
-        </label>
-      </div>
-    </div>
-  );
-}
-
-function AwsWorkerPanel(props: {
-  settings: CloudRunsSettings;
-  diskOptions: number[];
-  onDiskSizeChange: (value: number) => void;
-}): JSX.Element {
-  const [region, setRegion] = useState(props.settings.awsRegion ?? "us-east-1");
-  const [command, setCommand] = useState<string>("");
-  const [blob, setBlob] = useState<string>("");
-  const [status, setStatus] = useState<AwsWorkerStatus | null>(null);
-  const [message, setMessage] = useState<string>("");
-  const [busy, setBusy] = useState(false);
-  const [commandCopyFeedback, setCommandCopyFeedback] = useState<ClipboardFeedback>("idle");
-
-  useEffect(() => {
-    void window.consensus.getAwsWorkerStatus().then(setStatus).catch(() => undefined);
-  }, []);
-
-  useEffect(() => {
-    setCommandCopyFeedback("idle");
-  }, [command]);
-
-  const loadCommand = async (): Promise<void> => {
-    setBusy(true);
-    try {
-      setCommand(await window.consensus.getAwsWorkerBootstrapCommand(region.trim() || "us-east-1"));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const connect = async (): Promise<void> => {
-    setBusy(true);
-    setMessage("Creating worker… this can take a minute.");
-    try {
-      const next = await window.consensus.connectAwsWorker({
-        blob: blob.trim(),
-        rootVolumeSizeGb: props.settings.awsRootVolumeSizeGb
-      });
-      setStatus(next);
-      setBlob("");
-      setMessage(next.configured ? "Worker created." : (next.message ?? "Done."));
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const refresh = async (): Promise<void> => {
-    setBusy(true);
-    try {
-      setStatus(await window.consensus.getAwsWorkerStatus());
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const stop = async (): Promise<void> => {
-    setBusy(true);
-    setMessage("Stopping worker...");
-    try {
-      const next = await window.consensus.stopAwsWorker();
-      setStatus(next);
-      setMessage(next.state === "stopped" ? "Worker stopped." : `Worker ${next.state ?? "stop requested"}.`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const copyCommand = async (): Promise<void> => {
-    if (!command) {
-      return;
-    }
-    const result = await writeClipboardText(command, (value) => navigator.clipboard.writeText(value));
-    setCommandCopyFeedback(result);
-    window.setTimeout(() => setCommandCopyFeedback("idle"), 1400);
-  };
-
-  const commandCopyLabel = commandCopyFeedback === "copied"
-    ? "Copied"
-    : commandCopyFeedback === "failed"
-      ? "Copy failed"
-      : "Copy";
-  const commandCopyAriaLabel = commandCopyFeedback === "copied"
-    ? "Copied AWS setup command"
-    : commandCopyFeedback === "failed"
-      ? "Copy AWS setup command failed"
-      : "Copy AWS setup command";
-
-  const remove = async (): Promise<void> => {
-    setBusy(true);
-    setMessage("Deleting worker…");
-    try {
-      const next = await window.consensus.deleteAwsWorker();
-      setStatus(next);
-      setMessage(next.message ?? "Worker deleted.");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const canStop = status?.state === "running" || status?.state === "pending";
-
-  if (status?.configured) {
-    return (
-      <div className="gen-aws">
-        <div className="gen-row">
-          <div className="gen-row-text">
-            <div className="gen-row-title">AWS worker</div>
-            <div className="gen-row-desc">
-              {status.handle?.instanceId} · {status.state ?? "unknown"}
-              {status.handle?.keyName ? ` · ${status.handle.keyName}` : ""}
-              {status.handle?.rootVolumeSizeGb ? ` · ${status.handle.rootVolumeSizeGb} GB disk` : ""}
-              {status.publicIp ? ` · ${status.publicIp}` : ""}
-              {status.message ? ` · ${status.message}` : ""}
-            </div>
-            <div className="gen-row-desc">Starts automatically for a remote run and stops when idle. Disk size changes apply to newly created workers.</div>
-          </div>
-          <div className="gen-actions">
-            <button type="button" className="gen-pill" disabled={busy} onClick={() => void refresh()}>
-              <span className="gen-pill-label">Refresh</span>
-            </button>
-            <button type="button" className="gen-pill" disabled={busy || !canStop} onClick={() => void stop()}>
-              <span className="gen-pill-label">Stop worker</span>
-            </button>
-            <button type="button" className="gen-pill gen-pill-danger" disabled={busy} onClick={() => void remove()}>
-              <span className="gen-pill-label">Delete worker</span>
-            </button>
-          </div>
-        </div>
-        {message ? <div className="gen-row-desc gen-aws-message">{message}</div> : null}
-        <div className="gen-card-divider" />
-        <AwsWorkerDiskRow
-          value={props.settings.awsRootVolumeSizeGb}
-          options={props.diskOptions}
-          onChange={props.onDiskSizeChange}
-        />
-      </div>
-    );
-  }
-
-  return (
-    <div className="gen-aws">
-      <div className="gen-row gen-row-stack">
-        <div className="gen-row-text">
-          <div className="gen-row-title">Create an AWS worker</div>
-          <div className="gen-row-desc">
-            Run the command below in a terminal that has AWS access. It creates a scoped key; paste the result here and the app
-            launches and manages the instance.
-          </div>
-        </div>
-        <div className="gen-grid-form gen-grid-form-compact">
-          <input
-            className="gen-input"
-            aria-label="AWS region"
-            placeholder="Region (us-east-1)"
-            value={region}
-            onChange={(event) => setRegion(event.target.value)}
-          />
-          <button type="button" className="gen-pill" disabled={busy} onClick={() => void loadCommand()}>
-            <span className="gen-pill-label">Show setup command</span>
-          </button>
-        </div>
-      </div>
-      {command ? (
-        <div className="gen-aws-command-box">
-          <button
-            type="button"
-            className="gen-aws-copy"
-            data-testid="aws-worker-command-copy"
-            aria-label={commandCopyAriaLabel}
-            onClick={() => void copyCommand()}
-          >
-            {commandCopyFeedback === "copied"
-              ? <CheckCircle2 size={14} aria-hidden />
-              : <Copy size={14} aria-hidden />}
-            <span aria-live="polite">{commandCopyLabel}</span>
-          </button>
-          <pre className="gen-aws-command" data-testid="aws-worker-command" aria-label="AWS setup command">{command}</pre>
-        </div>
-      ) : null}
-      <div className="gen-card-divider" />
-      <AwsWorkerDiskRow
-        value={props.settings.awsRootVolumeSizeGb}
-        options={props.diskOptions}
-        onChange={props.onDiskSizeChange}
-      />
-      <div className="gen-card-divider" />
-      <div className="gen-row gen-row-stack">
-        <div className="gen-row-text">
-          <div className="gen-row-title">Paste the result</div>
-          <div className="gen-row-desc">The command prints a line starting with <code>accord-aws-v1:</code></div>
-        </div>
-        <textarea
-          className="gen-input gen-aws-paste"
-          placeholder="accord-aws-v1:…"
-          value={blob}
-          onChange={(event) => setBlob(event.target.value)}
-        />
-      </div>
-      <div className="gen-row">
-        <div className="gen-row-text">
-          <div className="gen-row-title">{message || "Not connected"}</div>
-        </div>
-        <div className="gen-actions">
-          <button type="button" className="gen-pill" disabled={busy || !blob.trim()} onClick={() => void connect()}>
-            <span className="gen-pill-lead"><Server size={16} /></span>
-            <span className="gen-pill-label">Create worker</span>
-          </button>
-        </div>
-      </div>
     </div>
   );
 }

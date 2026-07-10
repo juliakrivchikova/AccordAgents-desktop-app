@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { CodexExecOptions } from "./codexExec";
 import type { ParticipantConfig } from "../../shared/types";
 
-export const REMOTE_SESSION_PROTOCOL_VERSION = 3;
+export const REMOTE_SESSION_PROTOCOL_VERSION = 4;
 export const REMOTE_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 export const REMOTE_STOP_DRAIN_LEASE_MS = 30_000;
 export const REMOTE_STOP_DRAIN_SHUTDOWN_LEASE_MS = 5 * 60_000;
@@ -17,6 +17,11 @@ lease_id=$3
 owner_id=$4
 kind=$5
 ttl_ms=$6
+
+root_parent=$(dirname "$root")
+if [ "$(basename "$root_parent")" = devices ]; then
+  root=$(dirname "$root_parent")
+fi
 
 case "$lease_id:$owner_id:$kind" in
   *[!A-Za-z0-9._:-]*) printf '%s' '{"ok":false,"status":"invalid-lease-identity"}'; exit 2 ;;
@@ -625,12 +630,14 @@ const os = require("node:os");
 const crypto = require("node:crypto");
 
 const root = path.resolve(process.argv[2]);
+const rootParent = path.dirname(root);
+const sharedRoot = path.basename(rootParent) === "devices" ? path.dirname(rootParent) : root;
 const action = process.argv[3];
 const payloadText = fs.readFileSync(0, "utf8").trim();
 const payload = payloadText ? JSON.parse(payloadText) : {};
-const lockDir = path.join(root, "lifecycle.lock");
-const drainPath = path.join(root, "drain.json");
-const operationsDir = path.join(root, "operations");
+const lockDir = path.join(sharedRoot, "lifecycle.lock");
+const drainPath = path.join(sharedRoot, "drain.json");
+const operationsDir = path.join(sharedRoot, "operations");
 
 ${recoverableLockHelpers()}
 
@@ -737,18 +744,18 @@ function liveOperationLeases() {
   }
   return live;
 }
-function sessionHasActiveWork(sessionDir, state) {
+function sessionHasActiveWork(sessionDir, state, registeredRoot = root) {
   if (!state) { return listFiles(sessionDir).length > 0; }
   if (state.activeRunId) {
-    const activeDir = path.join(root, String(state.activeRunId));
+    const activeDir = path.join(registeredRoot, String(state.activeRunId));
     if (runBusy(activeDir, readJson(path.join(activeDir, "state.json")))) { return true; }
   }
   if (Array.isArray(state.queuedRunIds) && state.queuedRunIds.length > 0) { return true; }
   if (listFiles(path.join(sessionDir, "inbox"), ".json").length > 0) { return true; }
   return false;
 }
-function sessionBusy(sessionDir, state) {
-  if (sessionHasActiveWork(sessionDir, state)) { return true; }
+function sessionBusy(sessionDir, state, registeredRoot = root) {
+  if (sessionHasActiveWork(sessionDir, state, registeredRoot)) { return true; }
   if (!state) { return false; }
   return processMatches(Number(state.supervisorPid), state.processCookie) && state.status !== "stopped";
 }
@@ -772,29 +779,43 @@ function runBusy(runDir, state) {
   return processMatches(wrapperPid, cookie) || processMatches(Number(state.pid), cookie) ||
     groupMatches(Number(state.pgid), cookie) || anyCookieProcess(cookie);
 }
-function anyRegisteredWork() {
-  const operations = liveOperationLeases();
-  if (operations.length > 0) { return { busy: true, reason: "operation-lease", id: operations[0].leaseId }; }
-  const sessionsRoot = path.join(root, "sessions");
+function registeredWorkAt(registeredRoot) {
+  const sessionsRoot = path.join(registeredRoot, "sessions");
   for (const name of listFiles(sessionsRoot)) {
     const dir = path.join(sessionsRoot, name);
-    if (sessionBusy(dir, readJson(path.join(dir, "session-state.json")))) { return { busy: true, reason: "warm-session", id: name }; }
+    if (sessionBusy(dir, readJson(path.join(dir, "session-state.json")), registeredRoot)) { return { busy: true, reason: "warm-session", id: name }; }
   }
-  for (const name of listFiles(root)) {
+  for (const name of listFiles(registeredRoot)) {
     if (
-      ["sessions", "mirrors", "operations", "lifecycle.lock", "protocol-install.lock"].includes(name) ||
+      ["devices", "sessions", "mirrors", "operations", "lifecycle.lock", "protocol-install.lock"].includes(name) ||
       name.startsWith("lifecycle.lock.reclaimed.") ||
       name.startsWith("protocol-install.lock.reclaimed.") ||
       name.startsWith("session-") ||
       name === "drain.json" ||
       name === "protocol.json"
     ) { continue; }
-    const dir = path.join(root, name);
+    const dir = path.join(registeredRoot, name);
     let stat;
     try { stat = fs.statSync(dir); } catch { continue; }
     if (!stat.isDirectory()) { continue; }
     const state = readJson(path.join(dir, "state.json"));
     if (runBusy(dir, state)) { return { busy: true, reason: state ? "active-run" : "malformed-run", id: name }; }
+  }
+  return { busy: false };
+}
+function anyRegisteredWork() {
+  const operations = liveOperationLeases();
+  if (operations.length > 0) { return { busy: true, reason: "operation-lease", id: operations[0].leaseId }; }
+  const shared = registeredWorkAt(sharedRoot);
+  if (shared.busy) { return shared; }
+  const devicesRoot = path.join(sharedRoot, "devices");
+  for (const name of listFiles(devicesRoot)) {
+    const deviceRoot = path.join(devicesRoot, name);
+    let stat;
+    try { stat = fs.statSync(deviceRoot); } catch { continue; }
+    if (!stat.isDirectory()) { continue; }
+    const device = registeredWorkAt(deviceRoot);
+    if (device.busy) { return device; }
   }
   return { busy: false };
 }

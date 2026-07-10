@@ -26,8 +26,17 @@ export interface AwsWorkerInstanceInfo {
   state: AwsWorkerInstanceState;
   publicIp?: string;
   rootDeviceName?: string;
-  rootVolumeId?: string;
   rootVolumeBackedByEbs?: boolean;
+  region?: string;
+  availabilityZone?: string;
+  instanceType?: string;
+  vCpu?: number;
+  memoryMiB?: number;
+  rootVolumeId?: string;
+  rootVolumeSizeGb?: number;
+  securityGroupId?: string;
+  keyName?: string;
+  launchedAt?: string;
 }
 
 export interface AwsWorkerImageInfo {
@@ -36,7 +45,10 @@ export interface AwsWorkerImageInfo {
 }
 
 export interface Ec2Client {
+  listEnabledRegions?(): Promise<string[]>;
+  findWorkerInstances?(): Promise<AwsWorkerInstanceInfo[]>;
   resolveUbuntuImage(namePattern: string, owner: string): Promise<AwsWorkerImageInfo>;
+  describeInstanceType?(instanceType: string): Promise<{ vCpu: number; memoryMiB: number } | undefined>;
   keyPairExists(name: string): Promise<boolean>;
   importKeyPair(name: string, publicKeyMaterial: string): Promise<void>;
   deleteKeyPair(name: string): Promise<void>;
@@ -44,8 +56,12 @@ export interface Ec2Client {
   deleteSecurityGroup(securityGroupId: string): Promise<void>;
   authorizeSshIngress(securityGroupId: string, cidr: string): Promise<void>;
   revokeAllSshIngress(securityGroupId: string): Promise<void>;
+  replaceDeviceSshIngress?(securityGroupId: string, cidr: string, deviceId: string): Promise<void>;
   runInstance(spec: ReturnType<typeof buildWorkerInstanceSpec>): Promise<string>;
   describeInstance(instanceId: string): Promise<AwsWorkerInstanceInfo | undefined>;
+  sendSshPublicKey?(instanceId: string, availabilityZone: string, osUser: string, publicKey: string): Promise<void>;
+  modifyVolumeSize?(volumeId: string, sizeGb: number): Promise<void>;
+  describeVolumeModification?(volumeId: string): Promise<"modifying" | "optimizing" | "completed" | "failed" | undefined>;
   startInstance(instanceId: string): Promise<void>;
   stopInstance(instanceId: string): Promise<void>;
   terminateInstance(instanceId: string): Promise<void>;
@@ -88,6 +104,7 @@ export interface AwsWorkerHandle {
 
 export interface AwsWorkerDeleteResult {
   terminateFailed?: string;
+  terminationConfirmed: boolean;
   cleanupFailures: Array<{ event: string; message: string }>;
 }
 
@@ -123,7 +140,7 @@ export class AwsWorkerLifecycle {
   // instance. Returns the handle the app persists.
   async createWorker(
     credentials: AwsWorkerCredentials,
-    options: { instanceType?: string; rootVolumeSizeGb?: number } = {}
+    options: { instanceType?: string; rootVolumeSizeGb?: number; clientToken?: string; deviceId?: string } = {}
   ): Promise<AwsWorkerHandle> {
     const client = this.options.createEc2Client(credentials);
     const [image, publicIp] = await Promise.all([
@@ -133,14 +150,20 @@ export class AwsWorkerLifecycle {
     const key = await this.ensureImportedKeyPair(client);
     const securityGroupName = securityGroupNameForKey(key.keyName);
     const securityGroupId = await client.ensureSecurityGroup(securityGroupName, "AccordAgents Cloud Runs worker");
-    await client.authorizeSshIngress(securityGroupId, ipToCidr(publicIp));
+    const cidr = ipToCidr(publicIp);
+    if (client.replaceDeviceSshIngress && options.deviceId) {
+      await client.replaceDeviceSshIngress(securityGroupId, cidr, options.deviceId);
+    } else {
+      await client.authorizeSshIngress(securityGroupId, cidr);
+    }
     const spec = buildWorkerInstanceSpec({
       imageId: image.imageId,
       rootDeviceName: image.rootDeviceName,
       keyName: key.keyName,
       securityGroupId,
       instanceType: options.instanceType,
-      rootVolumeSizeGb: options.rootVolumeSizeGb
+      rootVolumeSizeGb: options.rootVolumeSizeGb,
+      clientToken: options.clientToken
     });
     const instanceId = await client.runInstance(spec);
     this.log("aws-worker.created", { instanceId, securityGroupId });
@@ -156,7 +179,7 @@ export class AwsWorkerLifecycle {
   // Bring the worker up for a run: start it if stopped, wait for running, then
   // re-resolve its (changed-on-each-start) public IP and re-open SSH ingress
   // to the caller's current IP. Returns the reachable public IP.
-  async ensureRunning(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle): Promise<string> {
+  async ensureRunning(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle, deviceId = "legacy"): Promise<AwsWorkerInstanceInfo> {
     const client = this.options.createEc2Client(credentials);
     let info = await client.describeInstance(handle.instanceId);
     if (!info || info.state === "terminated") {
@@ -186,15 +209,18 @@ export class AwsWorkerLifecycle {
     }
     // Ingress is rebuilt from scratch: a laptop that changed networks would
     // otherwise be locked out, and stale allow rules from an old IP linger.
-    await client.revokeAllSshIngress(handle.securityGroupId);
-    await client.authorizeSshIngress(handle.securityGroupId, ipToCidr(await this.options.currentPublicIp()));
+    const cidr = ipToCidr(await this.options.currentPublicIp());
+    if (client.replaceDeviceSshIngress) {
+      await client.replaceDeviceSshIngress(handle.securityGroupId, cidr, deviceId);
+    } else {
+      await client.authorizeSshIngress(handle.securityGroupId, cidr);
+    }
     this.log("aws-worker.running", { instanceId: handle.instanceId, publicIp: info.publicIp });
-    return info.publicIp;
+    return info;
   }
 
-  // Ref-counted idle tracking: the app calls these around each remote run. When
-  // the last run ends, an idle timer stops the instance to save cost; a new run
-  // arriving first cancels it.
+  // Desktop refs only schedule an attempt. The worker-side authorization gate
+  // is authoritative across upgraded clients and must approve before EC2 stop.
   runStarted(): void {
     this.activeRuns += 1;
     this.clearIdleTimer();
@@ -282,25 +308,27 @@ export class AwsWorkerLifecycle {
     this.clearIdleTimer();
     this.activeRuns = 0;
     const client = this.options.createEc2Client(credentials);
-    const result: AwsWorkerDeleteResult = { cleanupFailures: [] };
+    const result: AwsWorkerDeleteResult = { terminationConfirmed: false, cleanupFailures: [] };
     const terminateFailed = await this.bestEffort("aws-worker.terminate", { instanceId: handle.instanceId }, async () => {
       await client.terminateInstance(handle.instanceId);
       this.log("aws-worker.terminated", { instanceId: handle.instanceId });
     });
     if (terminateFailed) {
       result.terminateFailed = terminateFailed;
-    } else {
-      const waitFailed = await this.bestEffort("aws-worker.wait-terminated", { instanceId: handle.instanceId }, async () => {
-        await this.options.waitForState(
-          () => client.describeInstance(handle.instanceId),
-          (current) => !current || current.state === "terminated" || current.state === "absent",
-          TERMINATED_WAIT_TIMEOUT_MS
-        );
-      });
-      if (waitFailed) {
-        result.cleanupFailures.push({ event: "wait-terminated", message: waitFailed });
-      }
+      return result;
     }
+    const waitFailed = await this.bestEffort("aws-worker.wait-terminated", { instanceId: handle.instanceId }, async () => {
+      await this.options.waitForState(
+        () => client.describeInstance(handle.instanceId),
+        (current) => !current || current.state === "terminated" || current.state === "absent",
+        TERMINATED_WAIT_TIMEOUT_MS
+      );
+    });
+    if (waitFailed) {
+      result.terminateFailed = waitFailed;
+      return result;
+    }
+    result.terminationConfirmed = true;
     const keyFailed = await this.bestEffort("aws-worker.delete-key-pair", { keyName: handle.keyName }, () => client.deleteKeyPair(handle.keyName));
     if (keyFailed) {
       result.cleanupFailures.push({ event: "delete-key-pair", message: keyFailed });

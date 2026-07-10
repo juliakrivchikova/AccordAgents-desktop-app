@@ -9,6 +9,8 @@ import type {
   CloudRunWorkerSettings,
   CloudRunWorkerSetupProgress,
   ConnectAwsWorkerRequest,
+  AwsWorkerOperationSnapshot,
+  AwsWorkerStartRequest,
   DeleteAgentEnvironmentVariableRequest,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
@@ -78,6 +80,12 @@ const bridge: AppBridge = {
   },
   getAwsWorkerBootstrapCommand: (region: string) => ipcRenderer.invoke("cloud-runs:aws-bootstrap-command", region),
   connectAwsWorker: (request: ConnectAwsWorkerRequest) => ipcRenderer.invoke("cloud-runs:aws-connect", request),
+  startAwsWorker: (request: AwsWorkerStartRequest) => ipcRenderer.invoke("cloud-runs:aws-start", request),
+  onAwsWorkerProgress: (callback: (progress: AwsWorkerOperationSnapshot) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: AwsWorkerOperationSnapshot) => callback(progress);
+    ipcRenderer.on("cloud-runs:aws-progress", listener);
+    return () => ipcRenderer.removeListener("cloud-runs:aws-progress", listener);
+  },
   getAwsWorkerStatus: () => ipcRenderer.invoke("cloud-runs:aws-status"),
   stopAwsWorker: () => ipcRenderer.invoke("cloud-runs:aws-stop"),
   deleteAwsWorker: () => ipcRenderer.invoke("cloud-runs:aws-delete"),

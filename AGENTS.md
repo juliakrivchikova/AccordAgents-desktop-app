@@ -21,6 +21,7 @@ Prefer the Makefile aliases when working locally:
 - `npm run signed:mac-arm64`: build the signed and notarized macOS arm64 DMG; follow `SIGN.md` when a user asks for a signed DMG.
 - `npm run test:permissions`: build the main process and run targeted service tests for chat permissions/cancellation, role archive behavior, repo file mentions, participant request threads, chat rename, git repo-file listing, CLI permission handling, and warnings.
 - `npm run test:app-skills`: build the main process and run app-skill service tests.
+- `npm run test:cloud-runs`: build the main process and renderer component harness, then run focused shared AWS worker lifecycle, discovery, access, setup, Settings UI, doctor, and remote-workspace tests.
 
 Equivalent npm scripts are in `package.json`, for example `npm run dev`, `npm run build`, and `npm run typecheck`.
 

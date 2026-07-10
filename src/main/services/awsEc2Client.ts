@@ -4,10 +4,14 @@
 // the local key/IP tooling.
 import { app } from "electron";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
-import type { Instance } from "@aws-sdk/client-ec2";
 import {
   EC2Client,
   DescribeImagesCommand,
+  DescribeRegionsCommand,
+  DescribeVolumesCommand,
+  DescribeVolumesModificationsCommand,
+  DescribeInstanceTypesCommand,
+  ModifyVolumeCommand,
   ImportKeyPairCommand,
   DescribeKeyPairsCommand,
   DeleteKeyPairCommand,
@@ -20,8 +24,14 @@ import {
   DescribeInstancesCommand,
   StartInstancesCommand,
   StopInstancesCommand,
-  TerminateInstancesCommand
+  TerminateInstancesCommand,
+  type Instance,
+  type DescribeVolumesCommandOutput
 } from "@aws-sdk/client-ec2";
+import {
+  EC2InstanceConnectClient,
+  SendSSHPublicKeyCommand
+} from "@aws-sdk/client-ec2-instance-connect";
 import {
   AWS_WORKER_TAG_KEY,
   AWS_WORKER_TAG_VALUE,
@@ -43,7 +53,7 @@ import type {
 } from "./awsWorkerLifecycle";
 
 export function createAwsEc2Client(credentials: AwsWorkerCredentials): Ec2Client {
-  const client = new EC2Client({
+  const config = {
     region: credentials.region,
     requestHandler: new NodeHttpHandler({
       connectionTimeout: 5_000,
@@ -53,12 +63,45 @@ export function createAwsEc2Client(credentials: AwsWorkerCredentials): Ec2Client
       accessKeyId: credentials.accessKeyId,
       secretAccessKey: credentials.secretAccessKey
     }
-  });
-  return new SdkEc2Client(client);
+  };
+  return new SdkEc2Client(new EC2Client(config), new EC2InstanceConnectClient(config), credentials.region);
 }
 
-class SdkEc2Client implements Ec2Client {
-  constructor(private readonly client: EC2Client) {}
+export class SdkEc2Client implements Ec2Client {
+  constructor(
+    private readonly client: EC2Client,
+    private readonly instanceConnect: EC2InstanceConnectClient,
+    private readonly region: string
+  ) {}
+
+  async listEnabledRegions(): Promise<string[]> {
+    const result = await this.client.send(new DescribeRegionsCommand({ AllRegions: false }));
+    return (result.Regions ?? [])
+      .map((entry) => entry.RegionName?.trim())
+      .filter((entry): entry is string => Boolean(entry));
+  }
+
+  async findWorkerInstances(): Promise<AwsWorkerInstanceInfo[]> {
+    const instances: AwsWorkerInstanceInfo[] = [];
+    let nextToken: string | undefined;
+    do {
+      const result = await this.client.send(new DescribeInstancesCommand({
+        Filters: [
+          { Name: `tag:${AWS_WORKER_TAG_KEY}`, Values: [AWS_WORKER_TAG_VALUE] },
+          { Name: "instance-state-name", Values: ["pending", "running", "stopping", "stopped", "shutting-down"] }
+        ],
+        NextToken: nextToken
+      }));
+      for (const reservation of result.Reservations ?? []) {
+        for (const instance of reservation.Instances ?? []) {
+          const mapped = await this.mapInstance(instance);
+          if (mapped) instances.push(mapped);
+        }
+      }
+      nextToken = result.NextToken;
+    } while (nextToken);
+    return instances;
+  }
 
   async resolveUbuntuImage(namePattern: string, owner: string): Promise<AwsWorkerImageInfo> {
     const result = await this.client.send(new DescribeImagesCommand({
@@ -81,6 +124,16 @@ class SdkEc2Client implements Ec2Client {
       throw new Error("Could not determine the Ubuntu AMI root device in this region.");
     }
     return { imageId, rootDeviceName };
+  }
+
+  async describeInstanceType(instanceType: string): Promise<{ vCpu: number; memoryMiB: number } | undefined> {
+    const result = await this.client.send(new DescribeInstanceTypesCommand({ InstanceTypes: [instanceType as never] }));
+    const info = result.InstanceTypes?.[0];
+    const vCpu = info?.VCpuInfo?.DefaultVCpus;
+    const memoryMiB = info?.MemoryInfo?.SizeInMiB;
+    return typeof vCpu === "number" && typeof memoryMiB === "number"
+      ? { vCpu, memoryMiB }
+      : undefined;
   }
 
   async keyPairExists(name: string): Promise<boolean> {
@@ -175,6 +228,36 @@ class SdkEc2Client implements Ec2Client {
     }));
   }
 
+  async replaceDeviceSshIngress(securityGroupId: string, cidr: string, deviceId: string): Promise<void> {
+    const description = deviceIngressDescription(deviceId);
+    const describe = await this.client.send(new DescribeSecurityGroupsCommand({ GroupIds: [securityGroupId] }));
+    const permissions = describe.SecurityGroups?.[0]?.IpPermissions ?? [];
+    const ownRanges = permissions
+      .filter((permission) => permission.FromPort === 22 && permission.ToPort === 22)
+      .flatMap((permission) => (permission.IpRanges ?? [])
+        .filter((range) => range.Description === description && range.CidrIp && range.CidrIp !== cidr)
+        .map((range) => ({ CidrIp: range.CidrIp, Description: range.Description })));
+    if (ownRanges.length > 0) {
+      await this.client.send(new RevokeSecurityGroupIngressCommand({
+        GroupId: securityGroupId,
+        IpPermissions: [{ IpProtocol: "tcp", FromPort: 22, ToPort: 22, IpRanges: ownRanges }]
+      }));
+    }
+    try {
+      await this.client.send(new AuthorizeSecurityGroupIngressCommand({
+        GroupId: securityGroupId,
+        IpPermissions: [{
+          IpProtocol: "tcp",
+          FromPort: 22,
+          ToPort: 22,
+          IpRanges: [{ CidrIp: cidr, Description: description }]
+        }]
+      }));
+    } catch (error) {
+      if (!isDuplicatePermission(error)) throw error;
+    }
+  }
+
   async runInstance(spec: ReturnType<typeof buildWorkerInstanceSpec>): Promise<string> {
     const result = await this.client.send(new RunInstancesCommand({
       ImageId: spec.imageId,
@@ -183,6 +266,7 @@ class SdkEc2Client implements Ec2Client {
       SecurityGroupIds: [spec.securityGroupId],
       MinCount: 1,
       MaxCount: 1,
+      ClientToken: spec.clientToken,
       UserData: spec.userData,
       BlockDeviceMappings: [{
         DeviceName: spec.rootDeviceName,
@@ -198,6 +282,9 @@ class SdkEc2Client implements Ec2Client {
           { Key: spec.tagKey, Value: spec.tagValue },
           { Key: "Name", Value: spec.keyName }
         ]
+      }, {
+        ResourceType: "volume",
+        Tags: workerTags(spec.keyName)
       }]
     }));
     const instanceId = result.Instances?.[0]?.InstanceId;
@@ -208,8 +295,38 @@ class SdkEc2Client implements Ec2Client {
   }
 
   async describeInstance(instanceId: string): Promise<AwsWorkerInstanceInfo | undefined> {
-    const result = await this.client.send(new DescribeInstancesCommand({ InstanceIds: [instanceId] }));
-    return awsWorkerInstanceInfoFromSdkInstance(result.Reservations?.[0]?.Instances?.[0]);
+    try {
+      const result = await this.client.send(new DescribeInstancesCommand({ InstanceIds: [instanceId] }));
+      const instance = result.Reservations?.[0]?.Instances?.[0];
+      return instance ? this.mapInstance(instance) : undefined;
+    } catch (error) {
+      if (isAwsError(error, "InvalidInstanceID.NotFound")) return undefined;
+      throw error;
+    }
+  }
+
+  async sendSshPublicKey(instanceId: string, availabilityZone: string, osUser: string, publicKey: string): Promise<void> {
+    const result = await this.instanceConnect.send(new SendSSHPublicKeyCommand({
+      InstanceId: instanceId,
+      AvailabilityZone: availabilityZone,
+      InstanceOSUser: osUser,
+      SSHPublicKey: publicKey
+    }));
+    if (!result.Success) {
+      throw new Error("EC2 Instance Connect did not accept this device key.");
+    }
+  }
+
+  async modifyVolumeSize(volumeId: string, sizeGb: number): Promise<void> {
+    await this.client.send(new ModifyVolumeCommand({ VolumeId: volumeId, Size: sizeGb }));
+  }
+
+  async describeVolumeModification(volumeId: string): Promise<"modifying" | "optimizing" | "completed" | "failed" | undefined> {
+    const result = await this.client.send(new DescribeVolumesModificationsCommand({ VolumeIds: [volumeId] }));
+    const state = result.VolumesModifications?.[0]?.ModificationState;
+    return state === "modifying" || state === "optimizing" || state === "completed" || state === "failed"
+      ? state
+      : undefined;
   }
 
   async startInstance(instanceId: string): Promise<void> {
@@ -222,6 +339,48 @@ class SdkEc2Client implements Ec2Client {
 
   async terminateInstance(instanceId: string): Promise<void> {
     await this.client.send(new TerminateInstancesCommand({ InstanceIds: [instanceId] }));
+  }
+
+  private async mapInstance(instance: Instance): Promise<AwsWorkerInstanceInfo | undefined> {
+    const base = awsWorkerInstanceInfoFromSdkInstance(instance);
+    if (!base) return undefined;
+    const rootVolumeId = base.rootVolumeId;
+    const groupIds = (instance.SecurityGroups ?? [])
+      .map((group) => group.GroupId)
+      .filter((groupId): groupId is string => Boolean(groupId));
+    const [volumeResult, typeInfo, groupResult] = await Promise.all([
+      rootVolumeId
+        ? this.describeVolume(rootVolumeId)
+        : Promise.resolve(undefined),
+      instance.InstanceType ? this.describeInstanceType(instance.InstanceType) : Promise.resolve(undefined),
+      groupIds.length > 0
+        ? this.client.send(new DescribeSecurityGroupsCommand({ GroupIds: groupIds }))
+        : Promise.resolve(undefined)
+    ]);
+    const securityGroupId = groupResult?.SecurityGroups?.find((group) =>
+      group.Tags?.some((tag) => tag.Key === AWS_WORKER_TAG_KEY && tag.Value === AWS_WORKER_TAG_VALUE))?.GroupId;
+    return {
+      ...base,
+      region: this.region,
+      availabilityZone: instance.Placement?.AvailabilityZone,
+      instanceType: instance.InstanceType,
+      vCpu: typeInfo?.vCpu,
+      memoryMiB: typeInfo?.memoryMiB,
+      rootVolumeId,
+      rootVolumeSizeGb: volumeResult?.Volumes?.[0]?.Size,
+      securityGroupId,
+      keyName: instance.KeyName,
+      launchedAt: instance.LaunchTime?.toISOString()
+    };
+  }
+
+  private async describeVolume(volumeId: string): Promise<DescribeVolumesCommandOutput | undefined> {
+    try {
+      return await this.client.send(new DescribeVolumesCommand({ VolumeIds: [volumeId] }));
+    } catch (error) {
+      if (isAwsError(error, "InvalidVolume.NotFound")) return undefined;
+      throw error;
+    }
   }
 }
 
@@ -276,6 +435,11 @@ function workerTags(name: string): Array<{ Key: string; Value: string }> {
     { Key: AWS_WORKER_TAG_KEY, Value: AWS_WORKER_TAG_VALUE },
     { Key: "Name", Value: name }
   ];
+}
+
+function deviceIngressDescription(deviceId: string): string {
+  const safe = deviceId.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64);
+  return `AccordAgents device ${safe}`;
 }
 
 function mapInstanceState(name: string | undefined): AwsWorkerInstanceState {
