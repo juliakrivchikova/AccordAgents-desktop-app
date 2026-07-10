@@ -1,4 +1,4 @@
-import { ArrowRight, MessageSquare, RefreshCw } from "lucide-react";
+import { ArrowRight, CheckCheck, CircleX, Eraser, MessageSquare, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
 import type { ChatActivityItem, ChatActivityParticipantSummary } from "../../../shared/types";
@@ -23,6 +23,13 @@ import {
 const MIN_ACTIVITY_LIST_WIDTH = 320;
 const NARROW_ACTIVITY_LIST_MAX_WIDTH = 340;
 const MIN_ACTIVITY_DETAIL_WIDTH = 360;
+type ActivityStatusTab = "running" | "pending" | "rest";
+
+const ACTIVITY_STATUS_TABS: { id: ActivityStatusTab; label: string }[] = [
+  { id: "running", label: "Running" },
+  { id: "pending", label: "Pending" },
+  { id: "rest", label: "Finished" }
+];
 
 export interface ActivityViewProps {
   items: ChatActivityItem[];
@@ -32,6 +39,9 @@ export interface ActivityViewProps {
   detailError?: string;
   detail: React.ReactNode;
   onSelect: (item: ChatActivityItem) => void;
+  onMarkRead: (item: ChatActivityItem) => void;
+  onCancelPending: (item: ChatActivityItem) => void;
+  onClear: (item: ChatActivityItem) => void;
   onOpenInChat: (item: ChatActivityItem) => void;
   onRetry: () => void;
 }
@@ -44,6 +54,9 @@ export function ActivityView({
   detailError,
   detail,
   onSelect,
+  onMarkRead,
+  onCancelPending,
+  onClear,
   onOpenInChat,
   onRetry
 }: ActivityViewProps): JSX.Element {
@@ -52,6 +65,16 @@ export function ActivityView({
   const cleanupResizeRef = useRef<(() => void) | null>(null);
   const [listWidth, setListWidth] = useState(readInitialActivityListWidth);
   const [resizing, setResizing] = useState(false);
+  const [activeTab, setActiveTab] = useState<ActivityStatusTab>("rest");
+
+  const tabCounts: Record<ActivityStatusTab, number> = {
+    running: items.filter((item) => item.status === "running").length,
+    pending: items.filter((item) => item.status === "pending").length,
+    rest: items.filter((item) => item.status === "recent").length
+  };
+  const filteredItems = items.filter((item) => (
+    activeTab === "rest" ? item.status === "recent" : item.status === activeTab
+  ));
 
   useEffect(() => () => cleanupResizeRef.current?.(), []);
 
@@ -119,6 +142,25 @@ export function ActivityView({
       <aside id="activity-list-pane" className="activity-list-pane">
         <div className="activity-list-header">
           <h1>Activity</h1>
+          <div className="activity-status-tabs" role="tablist" aria-label="Activity status">
+            {ACTIVITY_STATUS_TABS.map((tab) => {
+              const active = tab.id === activeTab;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  className="activity-status-tab"
+                  role="tab"
+                  aria-selected={active}
+                  data-active={active ? "true" : undefined}
+                  onClick={() => setActiveTab(tab.id)}
+                >
+                  <span>{tab.label}</span>
+                  <span className="activity-status-tab-count">{tabCounts[tab.id]}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
         <div className="activity-list" role="list">
           {error ? (
@@ -135,13 +177,21 @@ export function ActivityView({
               <h2>{loading ? "Loading activity" : "No current activity"}</h2>
               <p>{loading ? "Checking recent chats." : "Running, pending, and recent runs will appear here."}</p>
             </div>
+          ) : filteredItems.length === 0 ? (
+            <div className="activity-empty">
+              <h2>No {activeTab === "rest" ? "finished" : activeTab} activity</h2>
+              <p>{emptyActivityTabDescription(activeTab)}</p>
+            </div>
           ) : (
-            items.map((item) => (
+            filteredItems.map((item) => (
               <ActivityRow
                 key={item.id}
                 item={item}
                 active={item.id === selectedItem?.id}
                 onSelect={() => onSelect(item)}
+                onMarkRead={() => onMarkRead(item)}
+                onCancelPending={() => onCancelPending(item)}
+                onClear={() => onClear(item)}
               />
             ))
           )}
@@ -197,49 +247,130 @@ export function ActivityView({
   );
 }
 
+function emptyActivityTabDescription(tab: ActivityStatusTab): string {
+  if (tab === "running") {
+    return "Runs in progress will appear here.";
+  }
+  if (tab === "pending") {
+    return "Items waiting for input or approval will appear here.";
+  }
+  return "Finished member updates will appear here.";
+}
+
 function ActivityRow({
   item,
   active,
-  onSelect
+  onSelect,
+  onMarkRead,
+  onCancelPending,
+  onClear
 }: {
   item: ChatActivityItem;
   active: boolean;
   onSelect: () => void;
+  onMarkRead: () => void;
+  onCancelPending: () => void;
+  onClear: () => void;
 }): JSX.Element {
+  const canCancelPending = canCancelPendingActivityItem(item);
   return (
-    <button
-      type="button"
+    <div
       className="activity-row"
+      role="listitem"
+      data-activity-item-id={item.id}
       data-status={item.status}
       data-read={item.read ? "true" : undefined}
       data-active={active ? "true" : undefined}
-      aria-current={active ? "true" : undefined}
-      onClick={onSelect}
     >
-      <span className="activity-status-dot" aria-hidden="true" />
-      {item.participant ? (
-        <Avatar className="activity-avatar mini-avatar" spec={avatarForActivityParticipant(item.participant)} />
-      ) : (
-        <span className="activity-avatar-fallback" aria-hidden="true">
-          {initials(item.conversationTitle)}
-        </span>
-      )}
-      <span className="activity-row-main">
-        <span className="activity-row-topline">
-          <span
-            className="activity-row-title"
-            title={`${activityActorHandle(item)} post in ${item.conversationTitle}`}
-          >
-            <span className="activity-row-author">{activityActorHandle(item)}</span>
-            <span className="activity-row-context">post in</span>
-            <span className="activity-row-chat">{item.conversationTitle}</span>
+      <button
+        type="button"
+        className="activity-row-open"
+        aria-current={active ? "true" : undefined}
+        onClick={onSelect}
+      >
+        <span className="activity-status-dot" aria-hidden="true" />
+        {item.participant ? (
+          <Avatar className="activity-avatar mini-avatar" spec={avatarForActivityParticipant(item.participant)} />
+        ) : (
+          <span className="activity-avatar-fallback" aria-hidden="true">
+            {initials(item.conversationTitle)}
           </span>
-          <span className="activity-row-time">{relativeTime(item.updatedAt)}</span>
+        )}
+        <span className="activity-row-main">
+          <span className="activity-row-topline">
+            <span
+              className="activity-row-title"
+              title={`${activityActorHandle(item)} post in ${item.conversationTitle}`}
+            >
+              <span className="activity-row-author">{activityActorHandle(item)}</span>
+              <span className="activity-row-context">post in</span>
+              <span className="activity-row-chat">{item.conversationTitle}</span>
+            </span>
+            <span className="activity-row-time">{relativeTime(item.updatedAt)}</span>
+          </span>
+          <span className="activity-row-preview">{item.preview}</span>
         </span>
-        <span className="activity-row-preview">{item.preview}</span>
+      </button>
+      <span className="activity-row-actions">
+        {item.status === "recent" && !item.read ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="activity-row-action"
+            title="Mark read"
+            aria-label="Mark read"
+            onClick={onMarkRead}
+          >
+            <CheckCheck aria-hidden />
+          </Button>
+        ) : null}
+        {canCancelPending ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="activity-row-action"
+            title="Cancel pending card"
+            aria-label="Cancel pending card"
+            onClick={onCancelPending}
+          >
+            <CircleX aria-hidden />
+          </Button>
+        ) : null}
+        {item.status !== "pending" ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="activity-row-action"
+            title="Clear from activity"
+            aria-label="Clear from activity"
+            onClick={onClear}
+          >
+            <Eraser aria-hidden />
+          </Button>
+        ) : null}
       </span>
-    </button>
+    </div>
   );
+}
+
+function canCancelPendingActivityItem(item: ChatActivityItem): boolean {
+  if (item.status !== "pending") {
+    return false;
+  }
+  if (item.kind === "approval") {
+    return Boolean(item.target.approvalId?.trim());
+  }
+  const sourceMessageId = item.target.sourceMessageId ?? item.target.messageId;
+  if (item.kind === "choice") {
+    return Boolean(sourceMessageId?.trim() && item.target.choiceId?.trim());
+  }
+  if (item.kind === "mention") {
+    return Boolean(sourceMessageId?.trim() && item.target.mentionTargetParticipantIds?.length);
+  }
+  return false;
 }
 
 function activityActorHandle(item: ChatActivityItem): string {

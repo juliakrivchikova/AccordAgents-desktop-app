@@ -301,12 +301,17 @@ export class StorageService {
       });
     }
 
+    const excludedItemIds = new Set(
+      (request.excludedItemIds ?? [])
+        .filter((itemId): itemId is string => typeof itemId === "string" && itemId.trim().length > 0)
+        .slice(-1_000)
+    );
     const items = [...conversationsById.values()].flatMap((conversation) =>
       buildChatActivityItems(conversation, {
         recentWindowDays,
         lastViewedAt: request.lastViewedAtByConversationId?.[conversation.id]
       })
-    );
+    ).filter((item) => !excludedItemIds.has(item.id));
     return {
       items: limitChatActivityItems(sortChatActivityItems(items), limit),
       generatedAt: new Date().toISOString()
@@ -611,13 +616,31 @@ export class StorageService {
     );
     const participantRows = await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
       `
-        select conversation_id as conversationId, sequence, payload_json as payloadJson
-        from conversation_messages
-        where conversation_id in ${idList}
-          and json_extract(payload_json, '$.role') = 'participant'
-          and json_extract(payload_json, '$.status') = 'done'
-        order by created_at desc
-        limit ${Math.max(DEFAULT_CHAT_ACTIVITY_LIMIT, conversationLimit * 8)};
+        select conversationId, sequence, payloadJson
+        from (
+          select
+            conversation_id as conversationId,
+            sequence,
+            payload_json as payloadJson,
+            row_number() over (
+              partition by
+                conversation_id,
+                coalesce(
+                  nullif(json_extract(payload_json, '$.participantId'), ''),
+                  lower(nullif(json_extract(payload_json, '$.participantLabel'), '')),
+                  message_id
+                )
+              order by created_at desc
+            ) as rowNumber
+          from conversation_messages
+          where conversation_id in ${idList}
+            and json_extract(payload_json, '$.role') = 'participant'
+            and json_extract(payload_json, '$.status') = 'done'
+            and coalesce(json_extract(payload_json, '$.metadata.hiddenFromTimeline'), 0) not in (1, '1', 'true')
+        )
+        where rowNumber <= 8
+        order by json_extract(payloadJson, '$.createdAt') desc
+        limit ${Math.max(DEFAULT_CHAT_ACTIVITY_LIMIT * 4, conversationLimit * 16)};
       `
     );
     const approvalContextRows = approvalConversationIds.length > 0

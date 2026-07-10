@@ -18,13 +18,14 @@ import { defaultChatParticipantDraft } from "../components/chat/chat-participant
 import type { AppState } from "./app-state";
 import { conversationTimeValue, normalizeProjectPath } from "./conversation-summaries";
 import { persistLastViewedAt } from "./storage";
+import { activityItemsWithStoredPreferences } from "./activity-item-state";
 
 export interface ConversationActions {
   refreshAll: () => Promise<void>;
   refreshActivity: () => Promise<void>;
   refreshConversations: () => Promise<void>;
   openConversation: (id: string) => Promise<void>;
-  openConversationAndFocusActivityItem: (item: ChatActivityItem) => Promise<void>;
+  openConversationAndFocusActivityItem: (item: ChatActivityItem, options?: { timelineOnly?: boolean }) => Promise<void>;
   clearChatMessageFocus: () => void;
   loadOlderConversationMessages: () => Promise<void>;
   loadConversationMessagePageForMessage: (messageId: string) => Promise<boolean>;
@@ -55,13 +56,14 @@ export function useConversationActions(state: AppState): ConversationActions {
     state.setActivityError(undefined);
     try {
       const result = await window.consensus.listChatActivity({
-        lastViewedAtByConversationId: state.lastViewedAtRef.current
+        lastViewedAtByConversationId: state.lastViewedAtRef.current,
+        excludedItemIds: [...state.activityItemPreferencesRef.current.clearedItemIds]
       });
       if (requestId !== state.activityRefreshRequestRef.current) {
         return;
       }
       state.setActivityItems((current) => {
-        return reconcileChatActivityRefreshItems(current, result.items, {
+        return reconcileChatActivityRefreshItems(current, activityItemsWithStoredPreferences(state, result.items), {
           revisionsAtStart,
           revisionsNow: state.activityRevisionByConversationRef.current,
           archivedConversationIds: state.archivedConversationIdsRef.current
@@ -165,14 +167,15 @@ export function useConversationActions(state: AppState): ConversationActions {
     }
   }
 
-  async function openConversationAndFocusActivityItem(item: ChatActivityItem): Promise<void> {
+  async function openConversationAndFocusActivityItem(item: ChatActivityItem, options: { timelineOnly?: boolean } = {}): Promise<void> {
+    const initialTarget = activityFocusTarget(item, options);
     const pendingFocusNonce = state.chatMessageFocusNonceRef.current + 1;
     state.chatMessageFocusNonceRef.current = pendingFocusNonce;
     state.setActivityFocusError(undefined);
     state.setChatMessageFocusRequest({
       conversationId: item.conversationId,
-      messageId: item.target.messageId?.trim() ?? "",
-      threadRootId: item.target.threadRootId?.trim() || undefined,
+      messageId: initialTarget.messageId,
+      threadRootId: initialTarget.threadRootId,
       nonce: pendingFocusNonce,
       pending: true
     });
@@ -190,23 +193,23 @@ export function useConversationActions(state: AppState): ConversationActions {
       },
       resolveTarget: (conversation) => {
         const resolvedItem = resolveLoadedActivityItemTarget(item, conversation);
-        return resolvedItem.target.messageId?.trim() ? resolvedItem : undefined;
+        const target = activityFocusTarget(resolvedItem, options);
+        return target.messageId ? resolvedItem : undefined;
       },
       onTargetResolved: (resolvedItem) => {
         state.setSelectedActivityItem((current) => current?.id === item.id ? resolvedItem : current);
       },
-      ensureTargetLoaded: (conversation, resolvedItem) => ensureActivityTargetMessagesLoaded(
-        conversation,
-        resolvedItem.target.messageId?.trim() ?? "",
-        resolvedItem.target.threadRootId?.trim() || undefined,
-        isCurrent
-      ),
+      ensureTargetLoaded: (conversation, resolvedItem) => {
+        const target = activityFocusTarget(resolvedItem, options);
+        return ensureActivityTargetMessagesLoaded(conversation, target.messageId, target.threadRootId, isCurrent);
+      },
       beforeCommit: waitForNextFrame,
       commit: (resolvedItem) => {
+        const target = activityFocusTarget(resolvedItem, options);
         state.setChatMessageFocusRequest({
           conversationId: item.conversationId,
-          messageId: resolvedItem.target.messageId?.trim() ?? "",
-          threadRootId: resolvedItem.target.threadRootId?.trim() || undefined,
+          messageId: target.messageId,
+          threadRootId: target.threadRootId,
           nonce: pendingFocusNonce
         });
       },
@@ -215,6 +218,18 @@ export function useConversationActions(state: AppState): ConversationActions {
         state.setActivityFocusError(errorText(caught));
       }
     });
+  }
+
+  function activityFocusTarget(
+    item: ChatActivityItem,
+    options: { timelineOnly?: boolean }
+  ): { messageId: string; threadRootId?: string } {
+    const messageId = item.target.messageId?.trim() ?? "";
+    const threadRootId = item.target.threadRootId?.trim() || undefined;
+    if (options.timelineOnly && threadRootId) {
+      return { messageId: threadRootId };
+    }
+    return { messageId, threadRootId };
   }
 
   function clearChatMessageFocus(): void {

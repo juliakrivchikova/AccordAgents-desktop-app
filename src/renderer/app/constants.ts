@@ -42,6 +42,7 @@ export const SETTINGS_SIDEBAR_WIDTH_STORAGE_KEY = "accordagents.settingsSidebarW
 export const LEGACY_ACTIVITY_LIST_WIDTH_STORAGE_KEY = "accordagents-activity-list-width";
 export const ACTIVITY_LIST_WIDTH_STORAGE_KEY = "accordagents.activityListWidth.v2";
 export const LAST_VIEWED_AT_STORAGE_KEY = "accordagents.lastViewedAt";
+export const ACTIVITY_ITEM_PREFERENCES_STORAGE_KEY = "accordagents.activityItemPreferences.v1";
 export const DISMISSED_WARNINGS_STORAGE_KEY = "accordagents.dismissedWarnings.v1";
 export const ACCORD_LAUNCHER_STORAGE_KEY = "accordagents.accordLauncher.v1";
 export const GLOBAL_WARNING_DISMISS_SCOPE = "__global__";

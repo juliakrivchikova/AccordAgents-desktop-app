@@ -1,5 +1,6 @@
 import {
   ACCORD_LAUNCHER_STORAGE_KEY,
+  ACTIVITY_ITEM_PREFERENCES_STORAGE_KEY,
   CHAT_SIDEBAR_WIDTH_STORAGE_KEY,
   DISMISSED_WARNINGS_STORAGE_KEY,
   LAST_VIEWED_AT_STORAGE_KEY,
@@ -22,6 +23,42 @@ import {
 export type { AccordLauncherPreferences } from "../../shared/accordLauncherPreferences";
 
 export type DismissedWarningMap = Record<string, string[]>;
+
+export interface ActivityItemPreferences {
+  readItemIds: Set<string>;
+  clearedItemIds: Set<string>;
+}
+
+const MAX_STORED_ACTIVITY_ITEM_IDS = 1_000;
+
+export function readActivityItemPreferencesFromStorage(): ActivityItemPreferences {
+  try {
+    const raw = window.localStorage.getItem(ACTIVITY_ITEM_PREFERENCES_STORAGE_KEY);
+    if (!raw) return emptyActivityItemPreferences();
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return emptyActivityItemPreferences();
+    }
+    const record = parsed as Record<string, unknown>;
+    return {
+      readItemIds: storedActivityItemIds(record.readItemIds),
+      clearedItemIds: storedActivityItemIds(record.clearedItemIds)
+    };
+  } catch {
+    return emptyActivityItemPreferences();
+  }
+}
+
+export function persistActivityItemPreferences(preferences: ActivityItemPreferences): void {
+  try {
+    window.localStorage.setItem(ACTIVITY_ITEM_PREFERENCES_STORAGE_KEY, JSON.stringify({
+      readItemIds: [...preferences.readItemIds].slice(-MAX_STORED_ACTIVITY_ITEM_IDS),
+      clearedItemIds: [...preferences.clearedItemIds].slice(-MAX_STORED_ACTIVITY_ITEM_IDS)
+    }));
+  } catch {
+    // Local storage persistence is best-effort.
+  }
+}
 
 export function readLastViewedAtFromStorage(): Record<string, string> {
   try {
@@ -126,4 +163,17 @@ export function readInitialActivityListWidth(): number {
 
 export function persistActivityListWidth(width: number): void {
   persistActivityListWidthToStorage(window.localStorage, width);
+}
+
+function emptyActivityItemPreferences(): ActivityItemPreferences {
+  return { readItemIds: new Set(), clearedItemIds: new Set() };
+}
+
+function storedActivityItemIds(value: unknown): Set<string> {
+  if (!Array.isArray(value)) {
+    return new Set();
+  }
+  return new Set(value
+    .filter((itemId): itemId is string => typeof itemId === "string" && itemId.trim().length > 0)
+    .slice(-MAX_STORED_ACTIVITY_ITEM_IDS));
 }

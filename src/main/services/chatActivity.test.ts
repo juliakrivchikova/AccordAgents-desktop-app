@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  applyChatActivityItemPreferences,
   buildChatActivityItems,
   buildChatActivityItemsForConversationUpdate,
   preservedRecentChatActivityItems,
@@ -193,9 +194,75 @@ test("buildChatActivityItems emits pending approval, choice, mentions, and parti
   assert.deepEqual(items.map((item) => item.kind), ["approval", "choice", "mention", "participant-request"]);
   assert.ok(items.every((item) => item.status === "pending"));
   assert.equal(items[0].target.approvalId, "approval-1");
+  assert.equal(items.find((item) => item.kind === "choice")?.target.sourceMessageId, "choice");
+  assert.equal(items.find((item) => item.kind === "choice")?.target.choiceId, "choice-1");
+  assert.equal(items.find((item) => item.kind === "mention")?.target.sourceMessageId, "mention");
+  assert.deepEqual(items.find((item) => item.kind === "mention")?.target.mentionTargetParticipantIds, ["p2"]);
   assert.equal(items.find((item) => item.kind === "choice")?.preview, "choice content");
   assert.equal(items.find((item) => item.kind === "mention")?.preview, "mention content");
   assert.equal(items.find((item) => item.kind === "participant-request")?.preview, "request content");
+});
+
+test("buildChatActivityItems moves cancelled pending cards to read finished activity", () => {
+  const approval: ChatAppToolApproval = {
+    id: "approval-1",
+    conversationId: "conversation-1",
+    requesterParticipantId: participant.id,
+    requesterHandle: participant.handle,
+    requesterRoleConfigId: "engineer",
+    toolName: "shell",
+    capability: "permissions.request",
+    status: "denied",
+    request: { kind: "portable", permissions: ["webAccess"] },
+    summary: "Web access requested",
+    createdAt: "2026-01-08T09:00:00.000Z",
+    updatedAt: "2026-01-08T11:00:00.000Z"
+  };
+  const items = buildChatActivityItems(conversation({
+    updatedAt: "2026-01-08T11:30:00.000Z",
+    metadata: {
+      pendingAppToolApprovals: [approval]
+    },
+    messages: [
+      participantMessage("choice", {
+        createdAt: "2026-01-08T10:00:00.000Z",
+        metadata: {
+          pendingChoice: {
+            id: "choice-1",
+            title: "Choose scope",
+            question: "Phase 1 or full handoff?",
+            options: [{ id: "phase-1", label: "Phase 1" }],
+            status: "cancelled",
+            cancelledAt: "2026-01-08T11:10:00.000Z"
+          }
+        }
+      }),
+      participantMessage("mention", {
+        createdAt: "2026-01-08T09:00:00.000Z",
+        metadata: {
+          pendingMentions: [{
+            targetParticipantId: "p2",
+            targetHandle: "taylor",
+            status: "rejected",
+            rejectedAt: "2026-01-08T11:20:00.000Z"
+          }]
+        }
+      }),
+      participantMessage("finished", {
+        createdAt: "2026-01-08T11:25:00.000Z",
+        metadata: { runId: "finished-run" }
+      })
+    ]
+  }), { now: NOW });
+
+  const terminalKinds = items.filter((item) => item.kind !== "message").map((item) => item.kind).sort();
+  assert.deepEqual(terminalKinds, ["approval", "choice", "mention"]);
+  assert.ok(items.every((item) => item.status === "recent"));
+  assert.ok(items.filter((item) => item.kind !== "message").every((item) => item.read === true));
+  assert.equal(items.find((item) => item.kind === "approval")?.target.approvalId, "approval-1");
+  assert.equal(items.find((item) => item.kind === "choice")?.target.choiceId, "choice-1");
+  assert.deepEqual(items.find((item) => item.kind === "mention")?.target.mentionTargetParticipantIds, ["p2"]);
+  assert.equal(items.filter((item) => item.conversationId === "conversation-1").length, 4);
 });
 
 test("buildChatActivityItems falls back to pending metadata when a pending message has no body", () => {
@@ -384,7 +451,7 @@ test("buildChatActivityItems never targets hidden internal messages", () => {
   assert.ok(items.every((item) => item.target.messageId !== "hidden-finished"));
 });
 
-test("buildChatActivityItems emits recent finished participant messages after last viewed", () => {
+test("buildChatActivityItems keeps only newest finished item per participant in a chat", () => {
   const items = buildChatActivityItems(conversation({
     messages: [
       participantMessage("old", {
@@ -394,6 +461,43 @@ test("buildChatActivityItems emits recent finished participant messages after la
       participantMessage("new", {
         createdAt: "2026-01-08T11:00:00.000Z",
         metadata: { runId: "new-run", chatThreadRootId: "root" }
+      }),
+      participantMessage("remote-old", {
+        createdAt: "2026-01-08T09:30:00.000Z",
+        metadata: { runId: "remote-run" }
+      }, remoteParticipant),
+      participantMessage("remote-newer", {
+        createdAt: "2026-01-08T09:45:00.000Z",
+        metadata: { runId: "remote-newer-run" }
+      }, remoteParticipant)
+    ]
+  }), {
+    now: NOW,
+    lastViewedAt: "2026-01-08T10:00:00.000Z"
+  });
+
+  assert.deepEqual(items.map((item) => [
+    item.status,
+    item.target.messageId,
+    item.participant?.handle,
+    item.read
+  ]), [
+    ["recent", "new", "drew-codex-engineer", undefined],
+    ["recent", "remote-newer", "taylor-claude-engineer", true]
+  ]);
+  assert.equal(items[0].target.threadRootId, "root");
+});
+
+test("buildChatActivityItems keeps a newer same-participant turn unread when an older turn was read", () => {
+  const items = buildChatActivityItems(conversation({
+    messages: [
+      participantMessage("old", {
+        createdAt: "2026-01-08T09:00:00.000Z",
+        metadata: { runId: "old-run" }
+      }),
+      participantMessage("new", {
+        createdAt: "2026-01-08T11:00:00.000Z",
+        metadata: { runId: "new-run" }
       })
     ]
   }), {
@@ -402,9 +506,32 @@ test("buildChatActivityItems emits recent finished participant messages after la
   });
 
   assert.equal(items.length, 1);
-  assert.equal(items[0].status, "recent");
   assert.equal(items[0].target.messageId, "new");
-  assert.equal(items[0].target.threadRootId, "root");
+  assert.equal(items[0].read, undefined);
+});
+
+test("buildChatActivityItems uses completion time for finished run read state", () => {
+  const items = buildChatActivityItems(conversation({
+    messages: [
+      participantMessage("finished-after-view", {
+        createdAt: "2026-01-08T10:00:00.000Z",
+        metadata: {
+          runId: "finished-after-view-run",
+          workedMs: 60 * 60 * 1000
+        }
+      })
+    ]
+  }), {
+    now: NOW,
+    lastViewedAt: "2026-01-08T10:30:00.000Z"
+  });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].status, "recent");
+  assert.equal(items[0].target.messageId, "finished-after-view");
+  assert.equal(items[0].createdAt, "2026-01-08T10:00:00.000Z");
+  assert.equal(items[0].updatedAt, "2026-01-08T11:00:00.000Z");
+  assert.equal(items[0].read, undefined);
 });
 
 test("buildChatActivityItems emits recent finished participant messages without a run id", () => {
@@ -446,7 +573,57 @@ test("buildChatActivityItemsForConversationUpdate treats active snapshots as vie
   });
 
   assert.deepEqual(unreadItems.map((item) => item.status), ["recent"]);
-  assert.deepEqual(viewedItems, []);
+  assert.deepEqual(viewedItems.map((item) => item.status), ["recent"]);
+  assert.equal(viewedItems[0]?.read, true);
+});
+
+test("applyChatActivityItemPreferences persists per-item read and clear state", () => {
+  const items = buildChatActivityItems(conversation({
+    messages: [
+      participantMessage("keep", {
+        createdAt: "2026-01-08T11:00:00.000Z",
+        metadata: { runId: "keep-run" }
+      }),
+      participantMessage("clear", {
+        createdAt: "2026-01-08T10:30:00.000Z",
+        metadata: { runId: "clear-run" }
+      }, remoteParticipant)
+    ]
+  }), { now: NOW });
+  const keptItem = items.find((item) => item.target.messageId === "keep");
+  const clearedItem = items.find((item) => item.target.messageId === "clear");
+  assert.ok(keptItem);
+  assert.ok(clearedItem);
+
+  const preferred = applyChatActivityItemPreferences(items, {
+    readItemIds: new Set([keptItem.id]),
+    clearedItemIds: new Set([clearedItem.id])
+  });
+
+  assert.deepEqual(preferred.map((item) => item.id), [keptItem.id]);
+  assert.equal(preferred[0]?.read, true);
+});
+
+test("applyChatActivityItemPreferences does not backfill older finished rows after clearing a collapsed item", () => {
+  const items = buildChatActivityItems(conversation({
+    messages: [
+      participantMessage("old", {
+        createdAt: "2026-01-08T10:30:00.000Z",
+        metadata: { runId: "old-run" }
+      }),
+      participantMessage("new", {
+        createdAt: "2026-01-08T11:00:00.000Z",
+        metadata: { runId: "new-run" }
+      })
+    ]
+  }), { now: NOW });
+  assert.deepEqual(items.map((item) => item.target.messageId), ["new"]);
+
+  const preferred = applyChatActivityItemPreferences(items, {
+    clearedItemIds: new Set([items[0].id])
+  });
+
+  assert.deepEqual(preferred, []);
 });
 
 test("resolveSelectedChatActivityItem keeps a selected recent target after it is cleared from the list", () => {

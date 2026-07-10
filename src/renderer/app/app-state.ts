@@ -20,11 +20,12 @@ import {
   persistChatSidebarWidth,
   persistSettingsSidebarWidth,
   readDismissedWarningsFromStorage,
+  readActivityItemPreferencesFromStorage,
   readInitialAppSidebarWidths,
   readInitialSidebarCollapsed,
   readLastViewedAtFromStorage
 } from "./storage";
-import type { DismissedWarningMap } from "./storage";
+import type { ActivityItemPreferences, DismissedWarningMap } from "./storage";
 
 export type RailView = "chats" | "activity" | "settings";
 export type StateSetter<T> = React.Dispatch<React.SetStateAction<T>>;
@@ -119,6 +120,7 @@ export interface AppState {
   chatMessageFocusNonceRef: React.MutableRefObject<number>;
   activityRefreshRequestRef: React.MutableRefObject<number>;
   activityRevisionByConversationRef: React.MutableRefObject<Record<string, number>>;
+  activityItemPreferencesRef: React.MutableRefObject<ActivityItemPreferences>;
   archivedConversationIdsRef: React.MutableRefObject<Set<string>>;
   lastViewedAtRef: React.MutableRefObject<Record<string, string>>;
   startingChatRef: React.MutableRefObject<boolean>;
@@ -140,6 +142,7 @@ export function useAppState(): AppState {
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readInitialSidebarCollapsed);
   const [initialSidebarWidths] = useState(readInitialAppSidebarWidths);
+  const [initialActivityItemPreferences] = useState(readActivityItemPreferencesFromStorage);
   const [chatSidebarWidth, setChatSidebarWidth] = useState(initialSidebarWidths.chats);
   const [settingsSidebarWidth, setSettingsSidebarWidth] = useState(initialSidebarWidths.settings);
   const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>();
@@ -174,6 +177,7 @@ export function useAppState(): AppState {
   const chatMessageFocusNonceRef = useRef(0);
   const activityRefreshRequestRef = useRef(0);
   const activityRevisionByConversationRef = useRef<Record<string, number>>({});
+  const activityItemPreferencesRef = useRef<ActivityItemPreferences>(initialActivityItemPreferences);
   const archivedConversationIdsRef = useRef<Set<string>>(new Set());
   const lastViewedAtRef = useRef<Record<string, string>>(readLastViewedAtFromStorage());
   const startingChatRef = useRef(false);
@@ -209,7 +213,7 @@ export function useAppState(): AppState {
     chatMessageDraft, setChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
     setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef,
-    activityRefreshRequestRef, activityRevisionByConversationRef, archivedConversationIdsRef,
+    activityRefreshRequestRef, activityRevisionByConversationRef, activityItemPreferencesRef, archivedConversationIdsRef,
     lastViewedAtRef, startingChatRef
   };
 }

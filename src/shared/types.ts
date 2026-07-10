@@ -685,6 +685,7 @@ export interface ChatPendingMention {
   targetHandle: string;
   status: ChatMentionApprovalStatus;
   approvedAt?: string;
+  rejectedAt?: string;
 }
 
 export type ChatChoiceStatus = "pending" | "selected" | "cancelled";
@@ -1782,8 +1783,11 @@ export interface ChatActivityParticipantSummary {
 export interface ChatActivityTarget {
   runId?: string;
   messageId?: string;
+  sourceMessageId?: string;
   threadRootId?: string;
   approvalId?: string;
+  choiceId?: string;
+  mentionTargetParticipantIds?: string[];
 }
 
 export interface ChatActivityItem {
@@ -1807,6 +1811,7 @@ export interface ListChatActivityRequest {
   recentConversationLimit?: number;
   recentWindowDays?: number;
   lastViewedAtByConversationId?: Record<string, string>;
+  excludedItemIds?: string[];
 }
 
 export interface ListChatActivityResult {

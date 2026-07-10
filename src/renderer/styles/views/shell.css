@@ -171,6 +171,7 @@
 }
 
 .app-rail-icon {
+  position: relative;
   display: inline-flex;
   width: 40px;
   height: 40px;
@@ -179,6 +180,26 @@
   border-radius: 12px;
   background: transparent;
   transition: background 120ms ease;
+}
+
+.app-rail-badge {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  display: inline-flex;
+  min-width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--app-rail-bg);
+  border-radius: 999px;
+  padding: 0 5px;
+  color: var(--app-rail-badge-fg);
+  background: var(--app-rail-badge-bg);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
 }
 
 .app-rail-label {

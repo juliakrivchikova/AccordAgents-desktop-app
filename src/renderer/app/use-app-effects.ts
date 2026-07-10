@@ -8,6 +8,7 @@ import { SIDEBAR_COLLAPSED_STORAGE_KEY } from "./constants";
 import { conversationTimeValue, upsertConversationSummary } from "./conversation-summaries";
 import type { AppState } from "./app-state";
 import { persistLastViewedAt } from "./storage";
+import { activityItemsWithStoredPreferences } from "./activity-item-state";
 import {
   conversationMatchesSnapshot,
   conversationRelevantRunIds,
@@ -75,10 +76,13 @@ export function useAppEffects(
       state.setConversation((current) => {
         const isActive = current?.id === updated.id;
         const matchesCurrentSnapshot = conversationMatchesSnapshot(current, updated, state.currentRunId);
-        const activityItems = buildChatActivityItemsForConversationUpdate(updated, {
-          lastViewedAt: state.lastViewedAtRef.current[updated.id],
-          treatAsViewed: isActive && matchesCurrentSnapshot
-        });
+        const activityItems = activityItemsWithStoredPreferences(
+          state,
+          buildChatActivityItemsForConversationUpdate(updated, {
+            lastViewedAt: state.lastViewedAtRef.current[updated.id],
+            treatAsViewed: isActive && matchesCurrentSnapshot
+          })
+        );
         state.setActivityItems((activityCurrent) => {
           const preservedReadItems = preservedRecentChatActivityItems(activityCurrent, updated.id, {
             archived,

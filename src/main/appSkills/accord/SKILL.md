@@ -42,6 +42,49 @@ raise an objection/correction, but it is not required as a second approval step.
 Do not claim consensus from prose alone, and do not require any participant to
 type an exact phrase.
 
+## Scale the Accord to the Decision
+
+Match the ceremony to the decision. Do not spend a full multi-round,
+full-document accord on a small, concrete, likely-undisputed change.
+
+Classify the target first:
+
+- Open or architectural (several valid approaches, real trade-offs, or a plan to
+  design): run the full flow below — independent-first review, merge, full
+  resolution, separate approval round.
+- Concrete and bounded (a specific fix, a one-to-few-line correction, or a single
+  named decision where the proposal is the change): run the collapsed path.
+
+Use the collapsed path only when all are true:
+
+- the proposed artifact is complete and directly reviewable;
+- the change is low-risk;
+- it does not alter security, permissions, persistence, concurrency, deletion,
+  billing, or external side effects;
+- no User-owned decision or unresolved concern exists.
+
+If any condition is unclear, use the full flow.
+
+Collapsed path (single round). Select participants first per the Participant
+Selection rules (ask User to approve the set when they were not named), then:
+
+1. Publish the exact proposed change as the candidate resolution with
+   `app_chat_send_message`, and add your own `✅`.
+2. In the same round, ask each selected participant to review that specific change
+   and either react `✅` if correct or reply with the concrete concern. Skip the
+   separate independent-first review round: the proposal is the artifact under
+   review, so presenting it directly is not biasing here. This overrides the
+   Facilitator Initial Suggestion no-bias rule for concrete targets only.
+3. If every selected participant reacts `✅` with no concern, consensus is reached
+   — no further rounds and no expanded document.
+4. If any participant raises a concern, a real disagreement now exists: escalate
+   to the full flow — merge the concern, publish a revised resolution with
+   `Reasoning / Dispositions`, and run a fresh approval round.
+
+Resolution size scales too. A collapsed resolution is the change itself plus any
+one-line rationale, not a Decision / Locked-behavior / Regression / Dispositions
+template. Include a section only when it carries information.
+
 ## Participant Selection
 
 In this skill, "selected participants" means the other chat participants the
@@ -83,30 +126,34 @@ limits (do not issue more than 8 participant requests per minute).
 
 ## Workflow
 
-1. Understand User's original question, artifact, proposal, or review target.
-2. Formulate your own initial suggestion or findings as facilitator input.
-3. Select participants using the participant selection rules.
-4. Ask selected participants for independent skeptical review.
-5. Merge your facilitator suggestion and participant replies into a candidate
-   resolution.
-6. Include reasoning for any concern that was reframed, rejected, or resolved by
-   User choice.
-7. Review the candidate yourself skeptically.
-8. If corrections are needed, revise before publishing.
-9. Publish one agreed resolution message as a reply to User's original
-   request using `app_chat_send_message`. It returns the `messageId` and
-   `sequence`; the message is immediately visible to you for the rest of this
-   turn.
-10. Add your own `✅` reaction to the resolution message using `app_chat_react`.
-11. Ask selected participants to read and approve that exact resolution message by
-    `messageId`.
-12. If a participant objects, run one focused follow-up round for that disputed
-    item (see Disputed Dispositions). Revise and publish a new resolution message
-    when warranted, or ask User for any User-owned decision.
-13. Verify approval by reading the resolution message and checking its `✅`
-    reactor set.
-14. Report consensus only after verification, or clearly report that consensus
-    was not reached.
+1. Classify the decision.
+2. If eligible for the collapsed path, execute that path and skip the full-flow steps below.
+3. Otherwise run the full flow:
+
+   1. Understand User's original question, artifact, proposal, or review target.
+   2. Formulate your own initial suggestion or findings as facilitator input.
+   3. Select participants using the participant selection rules.
+   4. Ask selected participants for independent skeptical review.
+   5. Merge your facilitator suggestion and participant replies into a candidate
+      resolution.
+   6. Include reasoning for any concern that was reframed, rejected, or resolved by
+      User choice.
+   7. Review the candidate yourself skeptically.
+   8. If corrections are needed, revise before publishing.
+   9. Publish one agreed resolution message as a reply to User's original
+      request using `app_chat_send_message`. It returns the `messageId` and
+      `sequence`; the message is immediately visible to you for the rest of this
+      turn.
+   10. Add your own `✅` reaction to the resolution message using `app_chat_react`.
+   11. Ask selected participants to read and approve that exact resolution message by
+       `messageId`.
+   12. If a participant objects, run one focused follow-up round for that disputed
+       item (see Disputed Dispositions). Revise and publish a new resolution message
+       when warranted, or ask User for any User-owned decision.
+   13. Verify approval by reading the resolution message and checking its `✅`
+       reactor set.
+   14. Report consensus only after verification, or clearly report that consensus
+       was not reached.
 
 ## Facilitator Initial Suggestion
 
@@ -303,6 +350,25 @@ target.
 Immediately add your own `✅` reaction to that message. If reacting is ever denied
 because the message is not yet visible, re-read it by its id and retry once; if it
 still fails, stop and report that you could not attach your approval reaction.
+
+### Iterating resolutions as deltas
+
+When a full-flow accord goes through multiple revisions, do not re-narrate the
+whole plan each round:
+
+- Each superseding resolution states only the delta — changed, added, and removed
+  items — plus a one-line pointer to the unchanged base and its message id. Do not
+  restate unchanged sections. Each required approver reacts on the delta message.
+- When every required approver has reacted to the latest delta (accord reached),
+  run one final consolidation: publish the complete resolution (base with all
+  deltas applied, fully written out) as a single message, add your own `✅`, and
+  run one approval round on it. That fully-approved full resolution is the single
+  canonical artifact the reader relies on; the delta chain is the working history.
+- If consolidating surfaces an inconsistency, treat it as a concern and go back to
+  a delta before the final consolidation.
+
+The collapsed path does not use deltas or a consolidation round; it resolves in a
+single message.
 
 ### Referencing the resolution message
 
