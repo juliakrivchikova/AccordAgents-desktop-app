@@ -26,6 +26,21 @@ step yourself.
   timeline, not only inside a nested thread. If the current reply would stay inside a workflow/participant-request
   thread, post a separate main-timeline closeout with the app-managed send-message tool when available.
 
+## Plan Invalidation Handling
+
+If implementation, QA, review, or fixes reveal that the approved plan is wrong or incomplete, decide whether User input
+is actually needed:
+
+- If the correction requires more or different code but preserves all user-visible behavior, including existing behavior
+  outside the originally stated acceptance criteria, UX, data semantics, and external effects, do not pause for User.
+  Treat any reasonably affected existing user-visible workflow as a regression acceptance criterion that needs real PASS
+  evidence. Return to the implementation-plan accord stage so Drew and Taylor update the canonical plan, then continue
+  the workflow from the appropriate implementation or fix step.
+- Pause and ask User when the correction would affect any user-visible behavior, including existing behavior in adjacent
+  or unrelated flows, acceptance criteria, UX, product decisions, data semantics, destructive migration, irreversible
+  external action, or scope expansion that causes one of those effects. Larger internal implementation work alone is not
+  a User gate.
+
 ## Main-Timeline Idle Status
 
 Whenever all assigned participant work is complete and the workflow cannot make further progress without User input,
@@ -159,11 +174,23 @@ still in progress, wait. Ping @drew-codex-engineer and ask him to finish accord 
 To ask Drew to implement, respond as follows:
 
 ```text
-@drew-codex-engineer implement the plan you agreed with Taylor on in a separate worktree and do QA with /electron-desktop-qa
+@drew-codex-engineer implement the plan you agreed with Taylor on in a separate worktree and do QA with /electron-desktop-qa.
+
+Real acceptance QA and fix loop are mandatory before reporting approval-ready:
+- Verify every acceptance criterion through the live product using the real user-visible workflow, production code path, and actual integrations involved. Mocks, simulated events, fixtures, unit tests, typecheck, builds, source inspection, or merely launching/screenshotting the product are supporting checks, not acceptance evidence.
+- Treat any existing adjacent or unrelated user-visible workflow reasonably affected by the change as a regression acceptance criterion requiring real PASS evidence.
+- For every acceptance criterion, perform the real end-to-end workflow; capture actions, environment, observed result, screenshots/logs/timestamps; mark PASS or FAIL.
+- If any criterion fails, investigate root cause, implement the smallest correct fix within the agreed scope, add regression coverage, rebuild/relaunch as needed, and repeat the real acceptance workflow until it passes.
+- Do not merely report ordinary bugs or ask whether to fix them. If the approved plan appears invalid or incomplete, report the root cause, the required plan change, whether the correction changes any user-visible behavior, including existing behavior in adjacent or unrelated flows, acceptance criteria, UX, data semantics, or external effects, and which affected existing workflows need regression acceptance evidence.
+- Do not declare readiness until every acceptance criterion has directly observed PASS evidence.
+- Include the final evidence table: Criterion | Real workflow performed | Evidence | Result.
 ```
 
-Require focused tests while developing, then `make typecheck`, relevant targeted tests, `make build`, and
-`/electron-desktop-qa` for Electron UI changes.
+Manager gate after Drew reports implementation complete: before asking for review, verify Drew's report includes focused
+tests, `make typecheck`, relevant targeted tests, `make build`, and an acceptance-evidence table. The table must cover
+every locked acceptance criterion and every reasonably affected existing user-visible workflow, use real user-visible
+workflows and integrations, and contain only PASS results. If evidence is missing, simulated, stale, failed, or
+incomplete, do not start review; send the work back to Drew to complete the real acceptance QA and fix loop.
 
 ### 6. Ask Both To Review
 
@@ -191,20 +218,31 @@ Ping @drew-codex-engineer and ask him to finish accord only if he stopped or the
 To ask Drew to implement fixes, respond as follows:
 
 ```text
-@drew-codex-engineer implement all agreed required fixes in the same worktree, update regression tests, rerun relevant verification, and rerun Electron QA if UI changed
+@drew-codex-engineer implement all agreed required fixes in the same worktree, update regression tests, rerun relevant verification, rerun every affected real acceptance workflow including affected existing user-visible workflows, and update the acceptance-evidence table
 ```
+
+Manager gate after Drew reports fixes complete: verify the report includes updated regression coverage, relevant
+verification, and fresh PASS evidence for every real acceptance workflow and existing user-visible workflow that could be
+affected by the fixes. Do not skip this gate merely because UI files did not change. If evidence is missing, stale,
+failed, or incomplete, send the work back to Drew before asking Taylor for final review.
 
 ### 9. Ask Taylor To Review Again And Confirm Implementation Is Ready For Main
 
 To ask Taylor for final review, respond as follows:
 
 ```text
-@taylor-claude-engineer review the full implementation diff again, not only the agreed fixes: check the whole worktree diff against the locked scope and canonical plan, look for regressions introduced by the fix round, and confirm implementation is ready for main
+@taylor-claude-engineer review the full implementation diff again, not only the agreed fixes: check the whole worktree diff against the locked scope and canonical plan, audit the latest acceptance-evidence table, look for regressions introduced by the fix round, and confirm implementation is ready for main
 ```
 
-If Taylor does not approve, return to the required-fix accord stage.
+Manager gate after Taylor's final review: continue only if Taylor explicitly audited the latest acceptance-evidence table,
+including affected existing user-visible workflows, and approved readiness. If Taylor reports missing, simulated, stale,
+failed, or incomplete evidence, or otherwise does not approve, return to the required-fix accord stage.
 
 ### 10. Execute Final Step
+
+Manager gate before executing any final step: recheck the latest acceptance-evidence table yourself. Do not open the
+final app instance, merge, push, or release unless every locked acceptance criterion and every reasonably affected
+existing user-visible workflow has direct real-workflow PASS evidence.
 
 If the selected final step is `Open app instance`, ask Drew:
 
