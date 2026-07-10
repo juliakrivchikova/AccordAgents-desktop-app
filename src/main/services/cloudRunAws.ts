@@ -68,6 +68,7 @@ export class CloudRunAwsService {
   private readonly logger?: (event: string, payload: Record<string, unknown>) => void;
   private readonly wait: (delayMs: number) => Promise<void>;
   private readonly sshExec: (worker: CloudRunWorkerSettings, command: string, timeoutMs: number) => Promise<void>;
+  private prepareActive: Promise<PreparedAwsWorker> | undefined;
 
   constructor(
     private readonly settings: SettingsService,
@@ -106,6 +107,21 @@ export class CloudRunAwsService {
     instanceType?: string;
     rootVolumeSizeGb?: number;
     operationId: string;
+    clientToken?: string;
+  }): Promise<PreparedAwsWorker> {
+    if (this.prepareActive) return this.prepareActive;
+    this.prepareActive = this.prepareWorkerUnlocked(request).finally(() => {
+      this.prepareActive = undefined;
+    });
+    return this.prepareActive;
+  }
+
+  private async prepareWorkerUnlocked(request: {
+    blob?: string;
+    instanceType?: string;
+    rootVolumeSizeGb?: number;
+    operationId: string;
+    clientToken?: string;
   }): Promise<PreparedAwsWorker> {
     const credentials = request.blob?.trim()
       ? parseWorkerBlob(request.blob)
@@ -137,23 +153,23 @@ export class CloudRunAwsService {
     let info = matches[0];
     let handle: AwsWorkerHandleInfo;
     if (!info) {
+      const persistedToken = await (this.settings as SettingsService & {
+        getAwsWorkerProvisioningToken?: () => Promise<string | undefined>;
+        saveAwsWorkerProvisioningToken?: (token: string | undefined) => Promise<void>;
+      }).getAwsWorkerProvisioningToken?.();
+      const clientToken = persistedToken ?? request.clientToken ?? request.operationId;
+      await (this.settings as SettingsService & {
+        saveAwsWorkerProvisioningToken?: (token: string | undefined) => Promise<void>;
+      }).saveAwsWorkerProvisioningToken?.(clientToken);
       const deviceId = await (this.settings as SettingsService & { getCloudRunsDeviceId?: () => Promise<string> }).getCloudRunsDeviceId?.() ?? "legacy";
       const createdHandle = await this.lifecycle.createWorker(credentials, {
         instanceType: desiredType,
         rootVolumeSizeGb: desiredDisk,
-        clientToken: request.operationId.slice(0, 64),
+        clientToken: clientToken.slice(0, 64),
         deviceId
       });
       created = true;
-      info = await this.createEc2Client(credentials).describeInstance(createdHandle.instanceId) ?? {
-        instanceId: createdHandle.instanceId,
-        state: "pending",
-        region: credentials.region,
-        instanceType: desiredType,
-        rootVolumeSizeGb: desiredDisk,
-        securityGroupId: createdHandle.securityGroupId,
-        keyName: createdHandle.keyName
-      };
+      info = await this.reconcileCreatedWorker(credentials, createdHandle.instanceId);
       info = {
         ...info,
         region: info.region ?? credentials.region,
@@ -168,8 +184,6 @@ export class CloudRunAwsService {
         securityGroupId: createdHandle.securityGroupId,
         created: true
       });
-      matches = await this.discoverWorkers(credentials, true);
-      if (matches.length > 1) throw multipleWorkerError(matches);
     } else {
       const key = await this.generateKeyMaterial();
       handle = this.handleFromInfo(info, {
@@ -193,6 +207,9 @@ export class CloudRunAwsService {
       await this.settings.saveAwsWorkerHandle(handle);
       await this.settings.setCloudRunsMode("aws");
     }
+    await (this.settings as SettingsService & {
+      saveAwsWorkerProvisioningToken?: (token: string | undefined) => Promise<void>;
+    }).saveAwsWorkerProvisioningToken?.(undefined);
     const actualSpec = actualSpecFrom(info, handle);
     const desiredCapacity = await this.capacityFor(credentials, desiredType);
     const desiredSpec: AwsWorkerSpec = {
@@ -217,19 +234,50 @@ export class CloudRunAwsService {
   }
 
   async growDisk(prepared: PreparedAwsWorker): Promise<PreparedAwsWorker> {
-    const volumeId = prepared.info.rootVolumeId ?? prepared.handle.rootVolumeId;
+    return this.finishVolumeExpansion(prepared);
+  }
+
+  async resumePendingVolumeExpansion(prepared: PreparedAwsWorker): Promise<PreparedAwsWorker> {
+    const marker = await (this.settings as SettingsService & {
+      getAwsWorkerVolumeExpansion?: () => Promise<{ instanceId: string; volumeId: string; targetSizeGb: number } | undefined>;
+    }).getAwsWorkerVolumeExpansion?.();
+    if (!marker) return prepared;
+    if (marker.instanceId !== prepared.info.instanceId) {
+      await (this.settings as SettingsService & { saveAwsWorkerVolumeExpansion?: (value: undefined) => Promise<void> })
+        .saveAwsWorkerVolumeExpansion?.(undefined);
+      return prepared;
+    }
+    return this.finishVolumeExpansion(prepared, marker);
+  }
+
+  private async finishVolumeExpansion(
+    prepared: PreparedAwsWorker,
+    existingMarker?: { instanceId: string; volumeId: string; targetSizeGb: number }
+  ): Promise<PreparedAwsWorker> {
+    const volumeId = existingMarker?.volumeId ?? prepared.info.rootVolumeId ?? prepared.handle.rootVolumeId;
     if (!volumeId) throw new Error("Could not identify the AWS worker root volume.");
     const client = this.clientForRegion(prepared.credentials, prepared.handle.region);
-    if ((prepared.info.rootVolumeSizeGb ?? 0) < prepared.desiredSpec.rootVolumeSizeGb) {
+    const targetSizeGb = existingMarker?.targetSizeGb ?? prepared.desiredSpec.rootVolumeSizeGb;
+    await (this.settings as SettingsService & {
+      saveAwsWorkerVolumeExpansion?: (value: { instanceId: string; volumeId: string; targetSizeGb: number; updatedAt: string } | undefined) => Promise<void>;
+    }).saveAwsWorkerVolumeExpansion?.({
+      instanceId: prepared.info.instanceId,
+      volumeId,
+      targetSizeGb,
+      updatedAt: new Date().toISOString()
+    });
+    const before = await client.describeInstance(prepared.info.instanceId) ?? prepared.info;
+    const requestedModification = (before.rootVolumeSizeGb ?? 0) < targetSizeGb;
+    if (requestedModification) {
       if (!client.modifyVolumeSize) throw new Error("These AWS credentials cannot grow the worker disk. Re-run the AWS setup command.");
-      await client.modifyVolumeSize(volumeId, prepared.desiredSpec.rootVolumeSizeGb);
+      await client.modifyVolumeSize(volumeId, targetSizeGb);
     }
     if (client.describeVolumeModification) {
       const deadline = Date.now() + 10 * 60_000;
       let expandable = false;
       while (Date.now() < deadline) {
         const state = await client.describeVolumeModification(volumeId);
-        if (state === "optimizing" || state === "completed" || state === undefined) {
+        if (state === "optimizing" || state === "completed" || state === undefined && !requestedModification) {
           expandable = true;
           break;
         }
@@ -239,17 +287,21 @@ export class CloudRunAwsService {
       if (!expandable) throw new Error("Timed out waiting for the enlarged AWS volume to become usable.");
     }
     const worker = await this.ensurePreparedRunning(prepared);
-    await this.sshExec(worker, growRootFilesystemCommand(), 5 * 60_000);
+    await this.sshExec(worker, growRootFilesystemCommand(targetSizeGb), 5 * 60_000);
     const refreshed = await client.describeInstance(prepared.info.instanceId) ?? prepared.info;
+    const handle = this.handleFromInfo(refreshed, {
+      keyName: prepared.handle.accessKeyName ?? prepared.handle.keyName,
+      privateKeyPath: this.privateKeyPath(prepared.handle),
+      securityGroupId: prepared.handle.securityGroupId,
+      created: !prepared.handle.adopted
+    });
+    await this.settings.saveAwsWorkerHandle(handle);
+    await (this.settings as SettingsService & { saveAwsWorkerVolumeExpansion?: (value: undefined) => Promise<void> })
+      .saveAwsWorkerVolumeExpansion?.(undefined);
     return {
       ...prepared,
       info: refreshed,
-      handle: this.handleFromInfo(refreshed, {
-        keyName: prepared.handle.accessKeyName ?? prepared.handle.keyName,
-        privateKeyPath: this.privateKeyPath(prepared.handle),
-        securityGroupId: prepared.handle.securityGroupId,
-        created: !prepared.handle.adopted
-      }),
+      handle,
       actualSpec: actualSpecFrom(refreshed, prepared.handle),
       mismatch: specMismatch(actualSpecFrom(refreshed, prepared.handle), prepared.desiredSpec)
     };
@@ -259,8 +311,10 @@ export class CloudRunAwsService {
     if (prepared.info.instanceId !== expectedInstanceId) {
       throw new Error("The shared worker changed after confirmation. Refresh and choose again.");
     }
-    const result = await this.lifecycle.deleteWorker(prepared.credentials, this.toHandle(prepared.handle));
-    if (result.terminateFailed) throw new Error(`The existing shared worker could not be terminated: ${result.terminateFailed}`);
+    const result = await this.lifecycle.deleteWorker(this.credentialsForHandle(prepared.credentials, prepared.handle), this.toHandle(prepared.handle));
+    if (result.terminateFailed || !result.terminationConfirmed) {
+      throw new Error(`The existing shared worker could not be confirmed terminated: ${result.terminateFailed ?? "unknown termination state"}`);
+    }
     await this.settings.saveAwsWorkerHandle(undefined);
     return this.prepareWorker({
       operationId,
@@ -271,7 +325,7 @@ export class CloudRunAwsService {
 
   async ensurePreparedRunning(prepared: PreparedAwsWorker): Promise<CloudRunWorkerSettings> {
     const deviceId = await (this.settings as SettingsService & { getCloudRunsDeviceId?: () => Promise<string> }).getCloudRunsDeviceId?.() ?? "legacy";
-    const running = await this.lifecycle.ensureRunning(prepared.credentials, this.toHandle(prepared.handle), deviceId);
+    const running = await this.lifecycle.ensureRunning(this.credentialsForHandle(prepared.credentials, prepared.handle), this.toHandle(prepared.handle), deviceId);
     const key = await this.keyForHandle(prepared.handle);
     await this.workerAccess.ensureAccess(this.clientForRegion(prepared.credentials, prepared.handle.region), running, key);
     if (key.keyName !== prepared.handle.keyName) {
@@ -279,7 +333,7 @@ export class CloudRunAwsService {
       prepared.handle.accessKeyName = key.keyName;
       await this.settings.saveAwsWorkerHandle(prepared.handle);
     }
-    return workerSettings(running.publicIp as string, key.privateKeyPath, deviceId);
+    return workerSettings(running.publicIp as string, key.privateKeyPath, deviceId, running.instanceId);
   }
 
   async status(): Promise<AwsWorkerStatus> {
@@ -312,15 +366,15 @@ export class CloudRunAwsService {
     if (!credentials || !handle) return { configured: false };
     let result: AwsWorkerDeleteResult;
     try {
-      result = await this.lifecycle.deleteWorker(credentials, this.toHandle(handle));
+      result = await this.lifecycle.deleteWorker(this.credentialsForHandle(credentials, handle), this.toHandle(handle));
     } catch (error) {
       return { configured: true, handle, message: errorMessage(error) };
     }
-    if (result.terminateFailed) {
+    if (result.terminateFailed || !result.terminationConfirmed) {
       return {
         configured: true,
         handle,
-        message: `The shared worker was not deleted; settings were retained. ${result.terminateFailed}`
+        message: `The shared worker was not deleted; settings were retained. ${result.terminateFailed ?? "Termination was not confirmed."}`
       };
     }
     await this.settings.clearAwsWorker();
@@ -338,7 +392,7 @@ export class CloudRunAwsService {
     const settings = await this.settings.getPublicSettings();
     const handle = settings.cloudRuns.awsHandle;
     if (!credentials || !handle) return { configured: false };
-    await this.lifecycle.stopWorker(credentials, this.toHandle(handle));
+    await this.lifecycle.stopWorker(this.credentialsForHandle(credentials, handle), this.toHandle(handle));
     return this.status();
   }
 
@@ -351,7 +405,9 @@ export class CloudRunAwsService {
       ? await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId)
       : undefined;
     if (!handle || !info || info.state === "terminated") {
-      const prepared = await this.prepareWorker({ operationId: `run-${Date.now()}` });
+      const prepared = await this.resumePendingVolumeExpansion(
+        await this.prepareWorker({ operationId: `run-${Date.now()}` })
+      );
       handle = prepared.handle;
       info = prepared.info;
       if (prepared.mismatch && !await this.hasAcceptedMismatch(prepared)) {
@@ -373,10 +429,11 @@ export class CloudRunAwsService {
       created: false
     };
     prepared.mismatch = specMismatch(prepared.actualSpec, prepared.desiredSpec);
-    if (prepared.mismatch && !await this.hasAcceptedMismatch(prepared)) {
+    const resumed = await this.resumePendingVolumeExpansion(prepared);
+    if (resumed.mismatch && !await this.hasAcceptedMismatch(resumed)) {
       throw new Error("The shared AWS worker is smaller than the configured requirement. Open Settings and choose what to do.");
     }
-    return this.ensurePreparedRunning(prepared);
+    return this.ensurePreparedRunning(resumed);
   }
 
   noteRunStarted(): void {
@@ -401,6 +458,26 @@ export class CloudRunAwsService {
     return [...local, ...others.flat()];
   }
 
+  private async reconcileCreatedWorker(
+    credentials: AwsWorkerCredentials,
+    instanceId: string
+  ): Promise<AwsWorkerInstanceInfo> {
+    let stableMatches = 0;
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const matches = await this.discoverWorkers(credentials, true);
+      if (matches.length > 1) throw multipleWorkerError(matches);
+      const created = matches.find((worker) => worker.instanceId === instanceId);
+      if (created && matches.length === 1) {
+        stableMatches += 1;
+        if (stableMatches >= 2) return created;
+      } else {
+        stableMatches = 0;
+      }
+      await this.wait(5_000);
+    }
+    throw new Error("The new AWS worker was launched but could not be reconciled safely. Retry with the same operation.");
+  }
+
   private async capacityFor(credentials: AwsWorkerCredentials, instanceType: string): Promise<{ vCpu?: number; memoryMiB?: number }> {
     const described = await this.createEc2Client(credentials).describeInstanceType?.(instanceType);
     if (described) return described;
@@ -411,6 +488,10 @@ export class CloudRunAwsService {
     return this.createEc2Client({ ...credentials, region });
   }
 
+  private credentialsForHandle(credentials: AwsWorkerCredentials, handle: AwsWorkerHandleInfo): AwsWorkerCredentials {
+    return { ...credentials, region: handle.region };
+  }
+
   private handleFromInfo(info: AwsWorkerInstanceInfo, options: {
     keyName: string;
     privateKeyPath: string;
@@ -418,7 +499,9 @@ export class CloudRunAwsService {
     created: boolean;
   }): AwsWorkerHandleInfo {
     const securityGroupId = info.securityGroupId ?? options.securityGroupId;
-    if (!securityGroupId) throw new Error("The tagged worker has no manageable security group.");
+    if (!securityGroupId) {
+      throw new Error("The tagged worker has no app-managed security group. Re-run the AWS setup command to migrate it safely, then retry.");
+    }
     return {
       instanceId: info.instanceId,
       securityGroupId,
@@ -486,9 +569,15 @@ function specMismatch(actual: AwsWorkerActualSpec, desired: AwsWorkerSpec): AwsW
     : undefined;
 }
 
-function workerSettings(publicIp: string, identityFile: string, deviceId: string): CloudRunWorkerSettings {
+function workerSettings(publicIp: string, identityFile: string, deviceId: string, instanceId: string): CloudRunWorkerSettings {
   const safeDeviceId = deviceId.replace(/[^A-Za-z0-9._-]/g, "_");
-  return { host: publicIp, user: WORKER_SSH_USER, identityFile, workerRoot: `${WORKER_ROOT}/devices/${safeDeviceId}` };
+  return {
+    host: publicIp,
+    user: WORKER_SSH_USER,
+    identityFile,
+    hostKeyAlias: `accordagents-${instanceId}`,
+    workerRoot: `${WORKER_ROOT}/devices/${safeDeviceId}`
+  };
 }
 
 function knownInstanceCapacity(instanceType: string): { vCpu?: number; memoryMiB?: number } {
@@ -506,14 +595,16 @@ function multipleWorkerError(workers: AwsWorkerInstanceInfo[]): Error {
   return new Error(`Multiple tagged AccordAgents workers exist: ${ids}. Resolve the conflict in AWS before retrying; nothing was changed.`);
 }
 
-function growRootFilesystemCommand(): string {
+function growRootFilesystemCommand(targetSizeGb: number): string {
+  const minimumBytes = Math.floor(targetSizeGb * 1024 * 1024 * 1024 * 0.85);
   return [
     "set -eu",
     "root=$(findmnt -n -o SOURCE /)",
     "parent=$(lsblk -n -o PKNAME \"$root\" | head -1)",
     "if [ -n \"$parent\" ]; then part=$(lsblk -n -o PARTN \"$root\" | head -1); sudo -n env TMPDIR=/run growpart \"/dev/$parent\" \"$part\" || true; fi",
     "fstype=$(findmnt -n -o FSTYPE /)",
-    "if [ \"$fstype\" = ext4 ]; then sudo -n resize2fs \"$root\"; elif [ \"$fstype\" = xfs ]; then sudo -n xfs_growfs -d /; else echo \"Unsupported root filesystem: $fstype\" >&2; exit 2; fi"
+    "if [ \"$fstype\" = ext4 ]; then sudo -n resize2fs \"$root\"; elif [ \"$fstype\" = xfs ]; then sudo -n xfs_growfs -d /; else echo \"Unsupported root filesystem: $fstype\" >&2; exit 2; fi",
+    `size=$(df -B1 --output=size / | tail -1 | tr -d ' '); [ \"$size\" -ge ${minimumBytes} ] || { echo \"Root filesystem did not reach the requested size.\" >&2; exit 3; }`
   ].join("; ");
 }
 

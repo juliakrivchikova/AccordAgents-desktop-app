@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AppSettings, AwsWorkerHandleInfo } from "../../shared/types";
 import { CloudRunAwsService } from "./cloudRunAws";
+import type { CloudRunAwsServiceOptions } from "./cloudRunAws";
 import { encodeWorkerBlob } from "./awsWorkerProvisioning";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 import type { AwsWorkerInstanceInfo, Ec2Client } from "./awsWorkerLifecycle";
@@ -23,6 +24,9 @@ class FakeSettings {
   handle: AwsWorkerHandleInfo | undefined;
   mode: "ssh" | "aws" = "ssh";
   awsRootVolumeSizeGb = 8;
+  deviceId = "device-a";
+  volumeExpansion: { instanceId: string; volumeId: string; targetSizeGb: number; updatedAt: string } | undefined;
+  provisioningToken: string | undefined;
 
   async getAwsWorkerCredentials(): Promise<AwsWorkerCredentials | undefined> {
     return this.credentials;
@@ -65,6 +69,26 @@ class FakeSettings {
   async setCloudRunsMode(mode: "ssh" | "aws"): Promise<void> {
     this.mode = mode;
   }
+
+  async getCloudRunsDeviceId(): Promise<string> {
+    return this.deviceId;
+  }
+
+  async saveAwsWorkerVolumeExpansion(value: typeof this.volumeExpansion): Promise<void> {
+    this.volumeExpansion = value;
+  }
+
+  async getAwsWorkerVolumeExpansion(): Promise<typeof this.volumeExpansion> {
+    return this.volumeExpansion;
+  }
+
+  async saveAwsWorkerProvisioningToken(token: string | undefined): Promise<void> {
+    this.provisioningToken = token;
+  }
+
+  async getAwsWorkerProvisioningToken(): Promise<string | undefined> {
+    return this.provisioningToken;
+  }
 }
 
 class FakeEc2Client implements Ec2Client {
@@ -80,6 +104,11 @@ class FakeEc2Client implements Ec2Client {
   terminateError: Error | undefined;
   discovered: AwsWorkerInstanceInfo[] = [];
   runCount = 0;
+  describeCalls = 0;
+  stopCount = 0;
+  runTokens: Array<string | undefined> = [];
+  modifiedSizes: number[] = [];
+  enabledRegions = ["us-east-1"];
 
   constructor(public state: AwsWorkerInstanceInfo | undefined = { instanceId: "i-new", state: "running", publicIp: "198.51.100.5" }) {}
 
@@ -88,7 +117,7 @@ class FakeEc2Client implements Ec2Client {
   }
 
   async listEnabledRegions(): Promise<string[]> {
-    return ["us-east-1"];
+    return this.enabledRegions;
   }
 
   async findWorkerInstances(): Promise<AwsWorkerInstanceInfo[]> {
@@ -131,12 +160,24 @@ class FakeEc2Client implements Ec2Client {
     this.revokedSecurityGroups.push(securityGroupId);
   }
 
-  async runInstance(): Promise<string> {
+  async runInstance(spec: Parameters<Ec2Client["runInstance"]>[0]): Promise<string> {
     this.runCount += 1;
+    this.runTokens.push(spec.clientToken);
+    const info = this.state ?? { instanceId: "i-new", state: "pending" as const };
+    this.discovered = [{
+      ...info,
+      instanceId: "i-new",
+      region: "us-east-1",
+      securityGroupId: "sg-new",
+      keyName: "accordagents-worker-new",
+      instanceType: "t3.small",
+      rootVolumeSizeGb: 8
+    }];
     return "i-new";
   }
 
   async describeInstance(): Promise<AwsWorkerInstanceInfo | undefined> {
+    this.describeCalls += 1;
     if (this.describeError) {
       throw this.describeError;
     }
@@ -148,6 +189,7 @@ class FakeEc2Client implements Ec2Client {
   }
 
   async stopInstance(): Promise<void> {
+    this.stopCount += 1;
     this.state = { instanceId: this.state?.instanceId ?? "i-new", state: "stopped" };
   }
 
@@ -158,15 +200,25 @@ class FakeEc2Client implements Ec2Client {
     }
     this.state = { instanceId, state: "terminated" };
   }
+
+  async modifyVolumeSize(_volumeId: string, sizeGb: number): Promise<void> {
+    this.modifiedSizes.push(sizeGb);
+    if (this.state) this.state = { ...this.state, rootVolumeSizeGb: sizeGb };
+  }
+
+  async describeVolumeModification(): Promise<"completed"> {
+    return "completed";
+  }
 }
 
 function serviceWith(
   settings: FakeSettings,
-  clients: Map<string, FakeEc2Client>
+  clients: Map<string, FakeEc2Client>,
+  overrides: Partial<CloudRunAwsServiceOptions> = {}
 ): CloudRunAwsService {
   return new CloudRunAwsService(settings as unknown as SettingsService, {
     createEc2Client: (credentials) => {
-      const client = clients.get(credentials.accessKeyId);
+      const client = clients.get(`${credentials.accessKeyId}:${credentials.region}`) ?? clients.get(credentials.accessKeyId);
       if (!client) {
         throw new Error(`missing fake client for ${credentials.accessKeyId}`);
       }
@@ -180,7 +232,9 @@ function serviceWith(
     deleteKeyMaterial: async () => undefined,
     currentPublicIp: async () => "203.0.113.9",
     privateKeyPathForKeyName: (keyName) => `/keys/${keyName}.pem`
-    ,workerAccess: { ensureAccess: async () => undefined } as any
+    ,workerAccess: { ensureAccess: async () => undefined } as any,
+    wait: async () => undefined,
+    ...overrides
   });
 }
 
@@ -269,8 +323,28 @@ test("ensureWorkerForRun uses the current device SSH identity", async () => {
   const worker = await service.ensureWorkerForRun();
   assert.equal(worker.host, "198.51.100.10");
   assert.equal(worker.identityFile, "/keys/accordagents-worker-new.pem");
+  assert.equal(worker.workerRoot, "~/.accordagents/remote-runs/devices/device-a");
+  assert.equal(worker.hostKeyAlias, "accordagents-i-old");
   assert.deepEqual(oldClient.revokedSecurityGroups, []);
   assert.deepEqual(oldClient.authorizedCidrs, ["203.0.113.9/32"]);
+});
+
+test("two device IDs isolate identical local project paths under distinct worker roots", async () => {
+  const roots: string[] = [];
+  for (const deviceId of ["laptop-a", "laptop-b"]) {
+    const settings = new FakeSettings();
+    settings.deviceId = deviceId;
+    settings.credentials = OLD_CREDS;
+    settings.handle = OLD_HANDLE;
+    settings.mode = "aws";
+    const client = new FakeEc2Client({ instanceId: "i-old", state: "running", publicIp: "198.51.100.10" });
+    const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]));
+    roots.push((await service.ensureWorkerForRun()).workerRoot ?? "");
+  }
+  assert.deepEqual(roots, [
+    "~/.accordagents/remote-runs/devices/laptop-a",
+    "~/.accordagents/remote-runs/devices/laptop-b"
+  ]);
 });
 
 test("prepareWorker adopts the tagged account worker without creating a duplicate", async () => {
@@ -326,4 +400,143 @@ test("prepareWorker returns an explicit mismatch for an undersized tagged worker
   assert.equal(prepared.mismatch?.computeTooSmall, true);
   assert.equal(prepared.mismatch?.diskTooSmall, true);
   assert.equal(client.runCount, 0);
+});
+
+test("cross-region adopted workers use the handle region for start, stop, and delete", async () => {
+  const settings = new FakeSettings();
+  const east = new FakeEc2Client();
+  east.state = undefined;
+  east.enabledRegions = ["us-east-1", "eu-west-1"];
+  const westInfo: AwsWorkerInstanceInfo = {
+    instanceId: "i-eu",
+    state: "running",
+    publicIp: "198.51.100.30",
+    region: "eu-west-1",
+    availabilityZone: "eu-west-1a",
+    securityGroupId: "sg-eu",
+    keyName: "launch-eu",
+    instanceType: "t3.small",
+    vCpu: 2,
+    memoryMiB: 2048,
+    rootVolumeId: "vol-eu",
+    rootVolumeSizeGb: 8
+  };
+  const west = new FakeEc2Client(westInfo);
+  west.discovered = [westInfo];
+  const service = serviceWith(settings, new Map([
+    [`${NEW_CREDS.accessKeyId}:us-east-1`, east],
+    [`${NEW_CREDS.accessKeyId}:eu-west-1`, west]
+  ]));
+  const prepared = await service.prepareWorker({ operationId: "cross-region", blob: encodeWorkerBlob(NEW_CREDS) });
+  assert.equal(prepared.handle.region, "eu-west-1");
+  await service.ensurePreparedRunning(prepared);
+  await service.stopWorker();
+  await service.deleteWorker();
+  assert.equal(east.describeCalls, 0);
+  assert.ok(west.describeCalls > 0);
+  assert.equal(west.stopCount, 1);
+  assert.deepEqual(west.terminatedInstances, ["i-eu"]);
+});
+
+test("concurrent preparation shares one creation and one client token", async () => {
+  const settings = new FakeSettings();
+  const client = new FakeEc2Client();
+  client.discovered = [];
+  const service = serviceWith(settings, new Map([[NEW_CREDS.accessKeyId, client]]));
+  const request = { operationId: "same-operation", clientToken: "stable-token", blob: encodeWorkerBlob(NEW_CREDS) };
+  const [first, second] = await Promise.all([service.prepareWorker(request), service.prepareWorker(request)]);
+  assert.equal(first.info.instanceId, second.info.instanceId);
+  assert.equal(client.runCount, 1);
+  assert.deepEqual(client.runTokens, ["stable-token"]);
+});
+
+test("an ambiguous launch persists its token for a later runtime retry", async () => {
+  const settings = new FakeSettings();
+  const client = new FakeEc2Client();
+  const originalRun = client.runInstance.bind(client);
+  let ambiguous = true;
+  client.runInstance = async (spec) => {
+    if (ambiguous) {
+      ambiguous = false;
+      client.runCount += 1;
+      client.runTokens.push(spec.clientToken);
+      throw new Error("socket closed after launch");
+    }
+    return originalRun(spec);
+  };
+  const service = serviceWith(settings, new Map([[NEW_CREDS.accessKeyId, client]]));
+  await assert.rejects(
+    () => service.prepareWorker({ operationId: "first-runtime", clientToken: "persisted-token", blob: encodeWorkerBlob(NEW_CREDS) }),
+    /socket closed/
+  );
+  assert.equal(settings.provisioningToken, "persisted-token");
+  await service.prepareWorker({ operationId: "later-runtime", blob: encodeWorkerBlob(NEW_CREDS) });
+  assert.deepEqual(client.runTokens, ["persisted-token", "persisted-token"]);
+  assert.equal(settings.provisioningToken, undefined);
+});
+
+test("post-create reconciliation tolerates an initially invisible tagged instance", async () => {
+  const settings = new FakeSettings();
+  const client = new FakeEc2Client();
+  let afterCreateScans = 0;
+  const originalFind = client.findWorkerInstances.bind(client);
+  client.findWorkerInstances = async () => {
+    if (client.runCount === 0) return [];
+    afterCreateScans += 1;
+    if (afterCreateScans === 1) return [];
+    return originalFind();
+  };
+  const service = serviceWith(settings, new Map([[NEW_CREDS.accessKeyId, client]]));
+  await service.prepareWorker({ operationId: "reconcile", clientToken: "reconcile-token", blob: encodeWorkerBlob(NEW_CREDS) });
+  assert.equal(client.runCount, 1);
+  assert.ok(afterCreateScans >= 3);
+});
+
+test("disk expansion retry resumes only filesystem work after EBS already grew", async () => {
+  const settings = new FakeSettings();
+  settings.credentials = NEW_CREDS;
+  const info: AwsWorkerInstanceInfo = {
+    instanceId: "i-grow",
+    state: "running",
+    publicIp: "198.51.100.40",
+    region: "us-east-1",
+    availabilityZone: "us-east-1a",
+    securityGroupId: "sg-grow",
+    keyName: "launch-grow",
+    instanceType: "t3.small",
+    rootVolumeId: "vol-grow",
+    rootVolumeSizeGb: 8
+  };
+  const client = new FakeEc2Client(info);
+  let filesystemAttempts = 0;
+  const service = serviceWith(settings, new Map([[NEW_CREDS.accessKeyId, client]]), {
+    sshExec: async () => {
+      filesystemAttempts += 1;
+      if (filesystemAttempts === 1) throw new Error("resize failed");
+    }
+  });
+  const prepared = {
+    credentials: NEW_CREDS,
+    handle: { ...OLD_HANDLE, instanceId: "i-grow", securityGroupId: "sg-grow", rootVolumeId: "vol-grow" },
+    info,
+    actualSpec: { instanceId: "i-grow", region: "us-east-1", instanceType: "t3.small", rootVolumeSizeGb: 8 },
+    desiredSpec: { instanceType: "t3.small", rootVolumeSizeGb: 16 },
+    mismatch: {
+      instanceId: "i-grow",
+      actual: { instanceId: "i-grow", region: "us-east-1", instanceType: "t3.small", rootVolumeSizeGb: 8 },
+      desired: { instanceType: "t3.small", rootVolumeSizeGb: 16 },
+      diskTooSmall: true,
+      computeTooSmall: false
+    },
+    created: false
+  };
+  await assert.rejects(() => service.growDisk(prepared), /resize failed/);
+  assert.equal(settings.volumeExpansion?.targetSizeGb, 16);
+  assert.deepEqual(client.modifiedSizes, [16]);
+  settings.handle = prepared.handle;
+  settings.awsRootVolumeSizeGb = 16;
+  await service.ensureWorkerForRun();
+  assert.equal(settings.volumeExpansion, undefined);
+  assert.deepEqual(client.modifiedSizes, [16]);
+  assert.equal(filesystemAttempts, 2);
 });

@@ -357,6 +357,7 @@ function CloudRunsControl(props: {
           settings={draft}
           onInstanceTypeChange={(value) => patch({ awsInstanceType: value })}
           onDiskSizeChange={(value) => patch({ awsRootVolumeSizeGb: value })}
+          onDeleted={() => props.onSave({ mode: "ssh" })}
         />
       ) : null}
       <div className={draft.mode === "aws" ? "gen-collapsed" : ""} hidden={draft.mode === "aws"}>

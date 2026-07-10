@@ -26,6 +26,7 @@ export interface CloudRunWorkerSettings {
   user?: string;
   port?: number;
   identityFile?: string;
+  hostKeyAlias?: string;
   workerRoot?: string;
   remoteCwd?: string;
   codexPath?: string;
@@ -176,15 +177,18 @@ export type AwsWorkerSpecResolution = "keep" | "grow-disk" | "recreate";
 
 export interface AwsWorkerStartRequest {
   operationId: string;
+  clientToken?: string;
   blob?: string;
   instanceType?: string;
   rootVolumeSizeGb?: number;
   resolution?: AwsWorkerSpecResolution;
   expectedInstanceId?: string;
+  expectedDesiredSpec?: AwsWorkerSpec;
 }
 
 export interface AwsWorkerOperationSnapshot {
   operationId: string;
+  clientToken?: string;
   phase: AwsWorkerStartPhase;
   message: string;
   updatedAt: string;
@@ -194,6 +198,13 @@ export interface AwsWorkerOperationSnapshot {
   authCode?: string;
   status?: AwsWorkerStatus;
   specMismatch?: AwsWorkerSpecMismatch;
+}
+
+export interface AwsWorkerVolumeExpansion {
+  instanceId: string;
+  volumeId: string;
+  targetSizeGb: number;
+  updatedAt: string;
 }
 
 export interface AwsWorkerStartResult {

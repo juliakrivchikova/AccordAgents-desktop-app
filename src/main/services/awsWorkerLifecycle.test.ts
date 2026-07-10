@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import {
   AWS_WORKER_BLOB_PREFIX,
@@ -33,12 +34,18 @@ test("worker blob rejects malformed or incomplete input", () => {
 
 test("scoped policy limits state changes to tagged instances in-region", () => {
   const policy = buildScopedWorkerPolicy("eu-west-1") as {
-    Statement: Array<{ Sid: string; Action: string[]; Condition: Record<string, Record<string, string>> }>;
+    Statement: Array<{ Sid: string; Action: string[]; Resource: string | string[]; Condition: Record<string, Record<string, string | string[]>> }>;
   };
-  const create = policy.Statement.find((statement) => statement.Sid === "CreateInfra");
-  assert.ok(create);
-  assert.ok(create.Action.includes("ec2:DeleteKeyPair"));
-  assert.ok(create.Action.includes("ec2:RunInstances"));
+  const run = policy.Statement.find((statement) => statement.Sid === "RunTaggedWorkerResources");
+  assert.ok(run);
+  assert.deepEqual(run.Action, ["ec2:RunInstances"]);
+  assert.equal(run.Condition.StringEquals[`aws:RequestTag/${AWS_WORKER_TAG_KEY}`], "1");
+  assert.deepEqual(run.Condition["ForAllValues:StringEquals"]["aws:TagKeys"], [AWS_WORKER_TAG_KEY, "Name"]);
+  const tags = policy.Statement.find((statement) => statement.Sid === "TagWorkerResourcesAtCreation");
+  assert.ok(tags);
+  assert.deepEqual(tags.Condition.StringEquals["ec2:CreateAction"], ["RunInstances", "CreateSecurityGroup", "ImportKeyPair"]);
+  assert.ok(Array.isArray(tags.Resource));
+  assert.equal(policy.Statement.some((statement) => statement.Action.includes("ec2:CreateTags") && statement.Resource === "*"), false);
   const manage = policy.Statement.find((statement) => statement.Sid === "ManageTaggedInstances");
   assert.ok(manage);
   assert.deepEqual(manage.Action.sort(), ["ec2:StartInstances", "ec2:StopInstances", "ec2:TerminateInstances"]);
@@ -51,7 +58,11 @@ test("bootstrap command creates a scoped user and prints a paste blob", () => {
   assert.match(command, /aws iam put-user-policy/);
   assert.match(command, /aws iam create-access-key/);
   assert.match(command, /accordagents-worker-abc123/);
+  assert.match(command, /ROOT_VOLUME/);
+  assert.match(command, /Multiple tagged AccordAgents workers/);
   assert.match(command, new RegExp(AWS_WORKER_BLOB_PREFIX));
+  const syntax = spawnSync("bash", ["-n"], { input: command, encoding: "utf8" });
+  assert.equal(syntax.status, 0, syntax.stderr);
   assert.throws(() => buildBootstrapCommand("us-east-1", "bad;rm -rf"), /Invalid suffix/);
 });
 
@@ -291,14 +302,26 @@ test("deleteWorker terminates the instance and cleans up key material and securi
   assert.deepEqual(client.deletedSecurityGroups, ["sg-123"]);
 });
 
-test("deleteWorker reports terminate failure but still attempts cleanup", async () => {
+test("deleteWorker retains every access resource when termination fails", async () => {
   const client = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
   client.terminateError = new Error("AccessDenied");
   const result = await lifecycleWith(client).deleteWorker(CREDS, HANDLE);
   assert.equal(result.terminateFailed, "AccessDenied");
   assert.equal(client.state.state, "running");
-  assert.deepEqual(client.deletedKeyPairs, ["aa-key"]);
-  assert.deepEqual(client.deletedSecurityGroups, ["sg-123"]);
+  assert.equal(result.terminationConfirmed, false);
+  assert.deepEqual(client.deletedKeyPairs, []);
+  assert.deepEqual(client.deletedSecurityGroups, []);
+});
+
+test("deleteWorker treats an unverified termination wait as fatal and skips cleanup", async () => {
+  const client = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
+  const result = await lifecycleWith(client, {
+    waitForState: async () => { throw new Error("wait timed out"); }
+  }).deleteWorker(CREDS, HANDLE);
+  assert.equal(result.terminationConfirmed, false);
+  assert.equal(result.terminateFailed, "wait timed out");
+  assert.deepEqual(client.deletedKeyPairs, []);
+  assert.deepEqual(client.deletedSecurityGroups, []);
 });
 
 test("deleteWorker waits up to three minutes before first security group cleanup", async () => {

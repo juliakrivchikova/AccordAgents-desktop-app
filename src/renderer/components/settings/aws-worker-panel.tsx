@@ -21,6 +21,7 @@ export function AwsWorkerPanel(props: {
   settings: CloudRunsSettings;
   onInstanceTypeChange: (value: string) => void;
   onDiskSizeChange: (value: number) => void;
+  onDeleted: () => Promise<void>;
 }): JSX.Element {
   const [region, setRegion] = useState(props.settings.awsRegion ?? "us-east-1");
   const [command, setCommand] = useState("");
@@ -59,18 +60,24 @@ export function AwsWorkerPanel(props: {
   };
 
   const start = async (resolution?: AwsWorkerSpecResolution): Promise<void> => {
-    const operationId = crypto.randomUUID();
+    const continuation = operation?.phase === "error" || operation?.phase === "needs-decision"
+      ? operation
+      : undefined;
+    const operationId = continuation?.operationId ?? crypto.randomUUID();
+    const clientToken = continuation?.clientToken ?? operationId;
     setActiveOperationId(operationId);
     setBusy(true);
     setConfirm(null);
     try {
       const result = await window.consensus.startAwsWorker({
         operationId,
+        clientToken,
         blob: blob.trim() || undefined,
         instanceType: props.settings.awsInstanceType,
         rootVolumeSizeGb: props.settings.awsRootVolumeSizeGb,
         resolution,
-        expectedInstanceId: operation?.specMismatch?.instanceId
+        expectedInstanceId: operation?.specMismatch?.instanceId,
+        expectedDesiredSpec: resolution ? operation?.specMismatch?.desired : undefined
       });
       setOperation(result.operation);
       setStatus(result.status);
@@ -116,6 +123,7 @@ export function AwsWorkerPanel(props: {
       setStatus(next);
       setOperation(null);
       setConfirm(null);
+      if (!next.configured) await props.onDeleted();
     } finally {
       setBusy(false);
     }
@@ -177,13 +185,13 @@ export function AwsWorkerPanel(props: {
         </div>
         <div className="gen-grid-form gen-grid-form-compact">
           <label className="gen-select-wrap">
-            <select className="gen-input" aria-label="AWS worker instance type" value={props.settings.awsInstanceType} onChange={(event) => props.onInstanceTypeChange(event.target.value)}>
+            <select className="gen-input" aria-label="AWS worker instance type" disabled={busy || operation?.phase === "needs-decision"} value={props.settings.awsInstanceType} onChange={(event) => props.onInstanceTypeChange(event.target.value)}>
               {AWS_WORKER_INSTANCE_TYPE_OPTIONS.map((value) => <option key={value} value={value}>{value}</option>)}
             </select>
             <ChevronDown size={16} />
           </label>
           <label className="gen-select-wrap">
-            <select className="gen-input" aria-label="AWS worker disk size" value={props.settings.awsRootVolumeSizeGb} onChange={(event) => props.onDiskSizeChange(normalizeAwsRootVolumeSizeGb(event.target.value))}>
+            <select className="gen-input" aria-label="AWS worker disk size" disabled={busy || operation?.phase === "needs-decision"} value={props.settings.awsRootVolumeSizeGb} onChange={(event) => props.onDiskSizeChange(normalizeAwsRootVolumeSizeGb(event.target.value))}>
               {diskOptions.map((value) => <option key={value} value={value}>{value} GB</option>)}
             </select>
             <ChevronDown size={16} />

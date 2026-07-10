@@ -37,6 +37,7 @@ while (stack.length > 0) {
 
 const appFiles = sourceFiles.filter((filePath) =>
   appRoots.some((appRoot) => filePath.startsWith(`${appRoot}${path.sep}`))
+  && !/\.(?:test|spec)\.[^.]+$/.test(filePath)
 );
 const unreachable = appFiles.filter((filePath) => !reachable.has(filePath)).sort();
 

@@ -16,6 +16,7 @@ import type {
   AwsWorkerHandleInfo,
   AwsWorkerOperationSnapshot,
   AwsWorkerSpec,
+  AwsWorkerVolumeExpansion,
   CloudRunsSettings,
   CloudRunsSettingsUpdate,
   CloudRunRemoteExecutionMode,
@@ -108,10 +109,12 @@ interface StoredSettings {
   awsWorkerRegion?: string;
   cloudRunsDeviceId?: string;
   awsWorkerOperation?: AwsWorkerOperationSnapshot;
+  awsWorkerProvisioningToken?: string;
   awsWorkerSpecAcceptance?: {
     instanceId: string;
     desired: AwsWorkerSpec;
   };
+  awsWorkerVolumeExpansion?: AwsWorkerVolumeExpansion;
   agentEnvironment?: StoredAgentEnvironmentSettings;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
@@ -1708,6 +1711,9 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
 
 export class SettingsService {
   private readonly settingsPath: string;
+  private storedState: StoredSettings | undefined;
+  private storedLoad: Promise<StoredSettings> | undefined;
+  private storedWriteQueue: Promise<void> = Promise.resolve();
 
   constructor() {
     this.settingsPath = path.join(app.getPath("userData"), "settings.json");
@@ -2489,26 +2495,45 @@ export class SettingsService {
   }
 
   private async readStored(): Promise<StoredSettings> {
+    if (this.storedState) return this.storedState;
+    if (!this.storedLoad) {
+      this.storedLoad = (async () => {
+        try {
+          const raw = await readFile(this.settingsPath, "utf8");
+          const parsed = JSON.parse(raw) as StoredSettings;
+          const merged = this.mergeDefaults(parsed);
+          this.storedState = merged;
+          if (this.hasLegacyProviderData(parsed)) {
+            await this.writeStored(merged).catch((error) => {
+              console.warn(
+                `Failed to purge legacy provider data from settings: ${error instanceof Error ? error.message : String(error)}`
+              );
+            });
+          }
+          return merged;
+        } catch {
+          const fallback = this.mergeDefaults({ settingsVersion: 1, roundLimitDefault: 1, providers: DEFAULT_PROVIDERS });
+          this.storedState = fallback;
+          return fallback;
+        }
+      })();
+    }
     try {
-      const raw = await readFile(this.settingsPath, "utf8");
-      const parsed = JSON.parse(raw) as StoredSettings;
-      const merged = this.mergeDefaults(parsed);
-      if (this.hasLegacyProviderData(parsed)) {
-        await this.writeStored(merged).catch((error) => {
-          console.warn(
-            `Failed to purge legacy provider data from settings: ${error instanceof Error ? error.message : String(error)}`
-          );
-        });
-      }
-      return merged;
-    } catch {
-      return this.mergeDefaults({ settingsVersion: 1, roundLimitDefault: 1, providers: DEFAULT_PROVIDERS });
+      return await this.storedLoad;
+    } finally {
+      this.storedLoad = undefined;
     }
   }
 
   private async writeStored(settings: StoredSettings): Promise<void> {
-    await mkdir(path.dirname(this.settingsPath), { recursive: true });
-    await writeFile(this.settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+    this.storedState = settings;
+    const serialized = `${JSON.stringify(settings, null, 2)}\n`;
+    const write = this.storedWriteQueue.then(async () => {
+      await mkdir(path.dirname(this.settingsPath), { recursive: true });
+      await writeFile(this.settingsPath, serialized, "utf8");
+    });
+    this.storedWriteQueue = write.catch(() => undefined);
+    await write;
   }
 
   private mergeDefaults(settings: StoredSettings): StoredSettings {
@@ -2540,7 +2565,11 @@ export class SettingsService {
         ? settings.cloudRunsDeviceId.trim()
         : undefined,
       awsWorkerOperation: this.normalizeAwsWorkerOperation(settings.awsWorkerOperation),
+      awsWorkerProvisioningToken: typeof settings.awsWorkerProvisioningToken === "string" && settings.awsWorkerProvisioningToken.trim()
+        ? settings.awsWorkerProvisioningToken.trim().slice(0, 64)
+        : undefined,
       awsWorkerSpecAcceptance: this.normalizeAwsWorkerSpecAcceptance(settings.awsWorkerSpecAcceptance),
+      awsWorkerVolumeExpansion: this.normalizeAwsWorkerVolumeExpansion(settings.awsWorkerVolumeExpansion),
       agentEnvironment: {
         variables: this.normalizeAgentEnvironmentVariables(settings.agentEnvironment?.variables)
       },
@@ -2829,6 +2858,28 @@ export class SettingsService {
     return this.normalizeAwsWorkerOperation(stored.awsWorkerOperation);
   }
 
+  async saveAwsWorkerProvisioningToken(token: string | undefined): Promise<void> {
+    const stored = await this.readStored();
+    stored.awsWorkerProvisioningToken = token?.trim().slice(0, 64) || undefined;
+    await this.writeStored(stored);
+  }
+
+  async getAwsWorkerProvisioningToken(): Promise<string | undefined> {
+    const stored = await this.readStored();
+    return stored.awsWorkerProvisioningToken?.trim() || undefined;
+  }
+
+  async saveAwsWorkerVolumeExpansion(expansion: AwsWorkerVolumeExpansion | undefined): Promise<void> {
+    const stored = await this.readStored();
+    stored.awsWorkerVolumeExpansion = expansion;
+    await this.writeStored(stored);
+  }
+
+  async getAwsWorkerVolumeExpansion(): Promise<AwsWorkerVolumeExpansion | undefined> {
+    const stored = await this.readStored();
+    return this.normalizeAwsWorkerVolumeExpansion(stored.awsWorkerVolumeExpansion);
+  }
+
   async saveAwsWorkerSpecAcceptance(instanceId: string, desired: AwsWorkerSpec): Promise<void> {
     const stored = await this.readStored();
     stored.awsWorkerSpecAcceptance = { instanceId, desired };
@@ -2855,7 +2906,9 @@ export class SettingsService {
     stored.awsWorkerHandle = undefined;
     stored.awsWorkerRegion = undefined;
     stored.awsWorkerOperation = undefined;
+    stored.awsWorkerProvisioningToken = undefined;
     stored.awsWorkerSpecAcceptance = undefined;
+    stored.awsWorkerVolumeExpansion = undefined;
     await this.writeStored(stored);
   }
 
@@ -2905,7 +2958,30 @@ export class SettingsService {
       || typeof record.message !== "string" || typeof record.updatedAt !== "string") {
       return undefined;
     }
-    return record as AwsWorkerOperationSnapshot;
+    return {
+      ...record,
+      operationId: record.operationId.trim(),
+      ...(typeof record.clientToken === "string" && record.clientToken.trim()
+        ? { clientToken: record.clientToken.trim().slice(0, 64) }
+        : {})
+    } as AwsWorkerOperationSnapshot;
+  }
+
+  private normalizeAwsWorkerVolumeExpansion(value: unknown): AwsWorkerVolumeExpansion | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const record = value as Partial<AwsWorkerVolumeExpansion>;
+    if (typeof record.instanceId !== "string" || !record.instanceId.trim()
+      || typeof record.volumeId !== "string" || !record.volumeId.trim()
+      || typeof record.targetSizeGb !== "number" || !Number.isFinite(record.targetSizeGb)
+      || typeof record.updatedAt !== "string" || !record.updatedAt) {
+      return undefined;
+    }
+    return {
+      instanceId: record.instanceId.trim(),
+      volumeId: record.volumeId.trim(),
+      targetSizeGb: normalizeAwsRootVolumeSizeGb(record.targetSizeGb),
+      updatedAt: record.updatedAt
+    };
   }
 
   private normalizeAwsWorkerSpecAcceptance(value: unknown): { instanceId: string; desired: AwsWorkerSpec } | undefined {

@@ -46,6 +46,14 @@ export class AwsWorkerSetupService {
     request: AwsWorkerStartRequest,
     onProgress?: (progress: AwsWorkerOperationSnapshot) => void
   ): Promise<AwsWorkerStartResult> {
+    const previous = await this.settings.getAwsWorkerOperation();
+    const pendingToken = await (this.settings as SettingsService & {
+      getAwsWorkerProvisioningToken?: () => Promise<string | undefined>;
+    }).getAwsWorkerProvisioningToken?.();
+    const clientToken = pendingToken
+      || request.clientToken?.trim()
+      || (previous?.operationId === request.operationId ? previous.clientToken : undefined)
+      || request.operationId;
     const emit = async (
       phase: AwsWorkerOperationSnapshot["phase"],
       message: string,
@@ -53,6 +61,7 @@ export class AwsWorkerSetupService {
     ): Promise<AwsWorkerOperationSnapshot> => {
       const operation: AwsWorkerOperationSnapshot = {
         operationId: request.operationId,
+        clientToken,
         phase,
         message,
         updatedAt: new Date().toISOString(),
@@ -68,8 +77,10 @@ export class AwsWorkerSetupService {
         operationId: request.operationId,
         blob: request.blob,
         instanceType: request.instanceType,
-        rootVolumeSizeGb: request.rootVolumeSizeGb
+        rootVolumeSizeGb: request.rootVolumeSizeGb,
+        clientToken
       });
+      prepared = await this.aws.resumePendingVolumeExpansion(prepared);
       prepared = await this.resolveMismatch(request, prepared, emit);
       if (prepared.mismatch && !await this.aws.hasAcceptedMismatch(prepared)) {
         const operation = await emit("needs-decision", mismatchMessage(prepared), {
@@ -79,15 +90,18 @@ export class AwsWorkerSetupService {
       }
       await emit("waiting-running", "Waiting for the worker to be running and reachable…");
       const worker = await this.aws.ensurePreparedRunning(prepared);
+      let progressWrites: Promise<unknown> = Promise.resolve();
       const doctorProgress = (progress: CloudRunWorkerSetupProgress): void => {
-        void emit("setting-up", progress.message, {
+        progressWrites = progressWrites.then(() => emit("setting-up", progress.message, {
           authUrl: progress.authUrl,
           authCode: progress.authCode
-        });
+        }));
       };
       await emit("setting-up", "Setting up the worker…");
       await this.doctor.waitForCloudInit(worker, doctorProgress);
+      await progressWrites;
       const report = await this.doctor.setup(worker, doctorProgress);
+      await progressWrites;
       if (!report.ok) {
         const operation = await emit("error", report.message, {
           error: report.message,
@@ -110,8 +124,15 @@ export class AwsWorkerSetupService {
     emit: (phase: AwsWorkerOperationSnapshot["phase"], message: string, extra?: Partial<AwsWorkerOperationSnapshot>) => Promise<AwsWorkerOperationSnapshot>
   ): Promise<PreparedAwsWorker> {
     if (!prepared.mismatch || !request.resolution) return prepared;
-    if (request.expectedInstanceId && request.expectedInstanceId !== prepared.info.instanceId) {
+    if (!request.expectedInstanceId || !request.expectedDesiredSpec) {
+      throw new Error("The worker-size decision is stale. Refresh and choose again.");
+    }
+    if (request.expectedInstanceId !== prepared.info.instanceId) {
       throw new Error("The shared worker changed after the choice was shown. Refresh and choose again.");
+    }
+    if (request.expectedDesiredSpec.instanceType !== prepared.desiredSpec.instanceType
+      || request.expectedDesiredSpec.rootVolumeSizeGb !== prepared.desiredSpec.rootVolumeSizeGb) {
+      throw new Error("The required worker size changed after the choice was shown. Refresh and choose again.");
     }
     if (request.resolution === "keep") {
       await this.aws.acceptMismatch(prepared);

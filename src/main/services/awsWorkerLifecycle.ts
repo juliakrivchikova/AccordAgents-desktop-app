@@ -97,6 +97,7 @@ export interface AwsWorkerHandle {
 
 export interface AwsWorkerDeleteResult {
   terminateFailed?: string;
+  terminationConfirmed: boolean;
   cleanupFailures: Array<{ event: string; message: string }>;
 }
 
@@ -213,25 +214,27 @@ export class AwsWorkerLifecycle {
 
   async deleteWorker(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle): Promise<AwsWorkerDeleteResult> {
     const client = this.options.createEc2Client(credentials);
-    const result: AwsWorkerDeleteResult = { cleanupFailures: [] };
+    const result: AwsWorkerDeleteResult = { terminationConfirmed: false, cleanupFailures: [] };
     const terminateFailed = await this.bestEffort("aws-worker.terminate", { instanceId: handle.instanceId }, async () => {
       await client.terminateInstance(handle.instanceId);
       this.log("aws-worker.terminated", { instanceId: handle.instanceId });
     });
     if (terminateFailed) {
       result.terminateFailed = terminateFailed;
-    } else {
-      const waitFailed = await this.bestEffort("aws-worker.wait-terminated", { instanceId: handle.instanceId }, async () => {
-        await this.options.waitForState(
-          () => client.describeInstance(handle.instanceId),
-          (current) => !current || current.state === "terminated" || current.state === "absent",
-          TERMINATED_WAIT_TIMEOUT_MS
-        );
-      });
-      if (waitFailed) {
-        result.cleanupFailures.push({ event: "wait-terminated", message: waitFailed });
-      }
+      return result;
     }
+    const waitFailed = await this.bestEffort("aws-worker.wait-terminated", { instanceId: handle.instanceId }, async () => {
+      await this.options.waitForState(
+        () => client.describeInstance(handle.instanceId),
+        (current) => !current || current.state === "terminated" || current.state === "absent",
+        TERMINATED_WAIT_TIMEOUT_MS
+      );
+    });
+    if (waitFailed) {
+      result.terminateFailed = waitFailed;
+      return result;
+    }
+    result.terminationConfirmed = true;
     const keyFailed = await this.bestEffort("aws-worker.delete-key-pair", { keyName: handle.keyName }, () => client.deleteKeyPair(handle.keyName));
     if (keyFailed) {
       result.cleanupFailures.push({ event: "delete-key-pair", message: keyFailed });

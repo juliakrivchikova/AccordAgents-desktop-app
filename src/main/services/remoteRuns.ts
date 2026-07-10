@@ -219,6 +219,7 @@ export interface RemoteRunWorkerTarget {
   user?: string;
   port?: number;
   identityFile?: string;
+  hostKeyAlias?: string;
   sshPath?: string;
   codexPath?: string;
   remoteCwd?: string;

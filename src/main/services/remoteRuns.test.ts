@@ -23,7 +23,7 @@ import type {
 } from "../../shared/types";
 import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
 import { ChatService } from "./chat";
-import { buildCloudRunSshTarget, validateCloudRunSshWorkerFields } from "./cloudRunWorkers";
+import { buildCloudRunSshTarget, cloudRunSshOptionArgs, validateCloudRunSshWorkerFields } from "./cloudRunWorkers";
 import { CommandError } from "./command";
 import { normalizeMirrorSyncError, remoteMirrorPath, remoteMirrorSlug } from "./remoteMirrorSync";
 import type { RemoteMirrorSyncRequest, RemoteMirrorSyncRunner } from "./remoteMirrorSync";
@@ -793,6 +793,20 @@ test("cloud run SSH target validation rejects argv-sensitive values", () => {
     host: "worker.example",
     identityFile: "-oProxyCommand=touch /tmp/pwned"
   }), /Worker identity file/);
+});
+
+test("AWS host key aliases avoid recycled-IP conflicts without disabling verification", () => {
+  const args = cloudRunSshOptionArgs({
+    host: "198.51.100.10",
+    hostKeyAlias: "accordagents-i-123"
+  });
+  assert.ok(args.includes("StrictHostKeyChecking=accept-new"));
+  assert.ok(args.includes("HostKeyAlias=accordagents-i-123"));
+  assert.equal(args.some((arg) => arg.includes("UserKnownHostsFile=/dev/null")), false);
+  assert.throws(
+    () => cloudRunSshOptionArgs({ host: "198.51.100.10", hostKeyAlias: "bad alias" }),
+    /unsupported characters/
+  );
 });
 
 test("real remote codex run spools raw provider output and renders final output", async () => {

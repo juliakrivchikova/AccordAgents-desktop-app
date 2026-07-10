@@ -25,7 +25,8 @@ import {
   StartInstancesCommand,
   StopInstancesCommand,
   TerminateInstancesCommand,
-  type Instance
+  type Instance,
+  type DescribeVolumesCommandOutput
 } from "@aws-sdk/client-ec2";
 import {
   EC2InstanceConnectClient,
@@ -66,7 +67,7 @@ export function createAwsEc2Client(credentials: AwsWorkerCredentials): Ec2Client
   return new SdkEc2Client(new EC2Client(config), new EC2InstanceConnectClient(config), credentials.region);
 }
 
-class SdkEc2Client implements Ec2Client {
+export class SdkEc2Client implements Ec2Client {
   constructor(
     private readonly client: EC2Client,
     private readonly instanceConnect: EC2InstanceConnectClient,
@@ -87,7 +88,7 @@ class SdkEc2Client implements Ec2Client {
       const result = await this.client.send(new DescribeInstancesCommand({
         Filters: [
           { Name: `tag:${AWS_WORKER_TAG_KEY}`, Values: [AWS_WORKER_TAG_VALUE] },
-          { Name: "instance-state-name", Values: ["pending", "running", "stopping", "stopped"] }
+          { Name: "instance-state-name", Values: ["pending", "running", "stopping", "stopped", "shutting-down"] }
         ],
         NextToken: nextToken
       }));
@@ -294,9 +295,14 @@ class SdkEc2Client implements Ec2Client {
   }
 
   async describeInstance(instanceId: string): Promise<AwsWorkerInstanceInfo | undefined> {
-    const result = await this.client.send(new DescribeInstancesCommand({ InstanceIds: [instanceId] }));
-    const instance = result.Reservations?.[0]?.Instances?.[0];
-    return instance ? this.mapInstance(instance) : undefined;
+    try {
+      const result = await this.client.send(new DescribeInstancesCommand({ InstanceIds: [instanceId] }));
+      const instance = result.Reservations?.[0]?.Instances?.[0];
+      return instance ? this.mapInstance(instance) : undefined;
+    } catch (error) {
+      if (isAwsError(error, "InvalidInstanceID.NotFound")) return undefined;
+      throw error;
+    }
   }
 
   async sendSshPublicKey(instanceId: string, availabilityZone: string, osUser: string, publicKey: string): Promise<void> {
@@ -339,12 +345,20 @@ class SdkEc2Client implements Ec2Client {
     if (!instance.InstanceId) return undefined;
     const rootDevice = instance.RootDeviceName;
     const rootVolumeId = instance.BlockDeviceMappings?.find((mapping) => mapping.DeviceName === rootDevice)?.Ebs?.VolumeId;
-    const [volumeResult, typeInfo] = await Promise.all([
+    const groupIds = (instance.SecurityGroups ?? [])
+      .map((group) => group.GroupId)
+      .filter((groupId): groupId is string => Boolean(groupId));
+    const [volumeResult, typeInfo, groupResult] = await Promise.all([
       rootVolumeId
-        ? this.client.send(new DescribeVolumesCommand({ VolumeIds: [rootVolumeId] }))
+        ? this.describeVolume(rootVolumeId)
         : Promise.resolve(undefined),
-      instance.InstanceType ? this.describeInstanceType(instance.InstanceType) : Promise.resolve(undefined)
+      instance.InstanceType ? this.describeInstanceType(instance.InstanceType) : Promise.resolve(undefined),
+      groupIds.length > 0
+        ? this.client.send(new DescribeSecurityGroupsCommand({ GroupIds: groupIds }))
+        : Promise.resolve(undefined)
     ]);
+    const securityGroupId = groupResult?.SecurityGroups?.find((group) =>
+      group.Tags?.some((tag) => tag.Key === AWS_WORKER_TAG_KEY && tag.Value === AWS_WORKER_TAG_VALUE))?.GroupId;
     return {
       instanceId: instance.InstanceId,
       state: mapInstanceState(instance.State?.Name),
@@ -356,10 +370,19 @@ class SdkEc2Client implements Ec2Client {
       memoryMiB: typeInfo?.memoryMiB,
       rootVolumeId,
       rootVolumeSizeGb: volumeResult?.Volumes?.[0]?.Size,
-      securityGroupId: instance.SecurityGroups?.find((group) => group.GroupId)?.GroupId,
+      securityGroupId,
       keyName: instance.KeyName,
       launchedAt: instance.LaunchTime?.toISOString()
     };
+  }
+
+  private async describeVolume(volumeId: string): Promise<DescribeVolumesCommandOutput | undefined> {
+    try {
+      return await this.client.send(new DescribeVolumesCommand({ VolumeIds: [volumeId] }));
+    } catch (error) {
+      if (isAwsError(error, "InvalidVolume.NotFound")) return undefined;
+      throw error;
+    }
   }
 }
 

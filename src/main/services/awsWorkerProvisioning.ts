@@ -27,6 +27,16 @@ export interface AwsWorkerCredentials {
 // worker instances in the chosen region, nothing else in the account.
 export function buildScopedWorkerPolicy(region: string): unknown {
   const regionCondition = { StringEquals: { "aws:RequestedRegion": region } };
+  const regionArn = `arn:aws:ec2:${region}:*`;
+  const requiredWorkerTags = {
+    StringEquals: {
+      "aws:RequestedRegion": region,
+      [`aws:RequestTag/${AWS_WORKER_TAG_KEY}`]: AWS_WORKER_TAG_VALUE
+    },
+    "ForAllValues:StringEquals": {
+      "aws:TagKeys": [AWS_WORKER_TAG_KEY, "Name"]
+    }
+  };
   return {
     Version: "2012-10-17",
     Statement: [
@@ -49,17 +59,58 @@ export function buildScopedWorkerPolicy(region: string): unknown {
         Resource: "*"
       },
       {
-        Sid: "CreateInfra",
+        Sid: "RunTaggedWorkerResources",
         Effect: "Allow",
-        Action: [
-          "ec2:RunInstances",
-          "ec2:ImportKeyPair",
-          "ec2:CreateKeyPair",
-          "ec2:DeleteKeyPair",
-          "ec2:CreateSecurityGroup",
-          "ec2:CreateTags"
+        Action: ["ec2:RunInstances"],
+        Resource: [
+          `${regionArn}:instance/*`,
+          `${regionArn}:volume/*`
         ],
+        Condition: requiredWorkerTags
+      },
+      {
+        Sid: "UseWorkerLaunchDependencies",
+        Effect: "Allow",
+        Action: ["ec2:RunInstances"],
+        Resource: [
+          `${regionArn}:image/*`,
+          `${regionArn}:subnet/*`,
+          `${regionArn}:security-group/*`,
+          `${regionArn}:key-pair/accordagents-worker-*`,
+          `${regionArn}:network-interface/*`
+        ],
+        Condition: regionCondition
+      },
+      {
+        Sid: "CreateTaggedWorkerInfra",
+        Effect: "Allow",
+        Action: ["ec2:ImportKeyPair", "ec2:CreateSecurityGroup"],
         Resource: "*",
+        Condition: regionCondition
+      },
+      {
+        Sid: "TagWorkerResourcesAtCreation",
+        Effect: "Allow",
+        Action: ["ec2:CreateTags"],
+        Resource: [
+          `${regionArn}:instance/*`,
+          `${regionArn}:volume/*`,
+          `${regionArn}:security-group/*`,
+          `${regionArn}:key-pair/accordagents-worker-*`
+        ],
+        Condition: {
+          ...requiredWorkerTags,
+          StringEquals: {
+            ...requiredWorkerTags.StringEquals,
+            "ec2:CreateAction": ["RunInstances", "CreateSecurityGroup", "ImportKeyPair"]
+          }
+        }
+      },
+      {
+        Sid: "DeleteAppKeyPairs",
+        Effect: "Allow",
+        Action: ["ec2:DeleteKeyPair"],
+        Resource: [`${regionArn}:key-pair/accordagents-worker-*`],
         Condition: regionCondition
       },
       {
@@ -125,6 +176,11 @@ export function buildBootstrapCommand(region: string, userSuffix: string): strin
     `REGION=${safeRegion}`,
     `USER=${userName}`,
     `POLICY=${policyLiteral}`,
+    "FOUND_WORKERS=",
+    `for R in $(aws ec2 describe-regions --query 'Regions[].RegionName' --output text); do for I in $(aws ec2 describe-instances --region \"$R\" --filters Name=tag:${AWS_WORKER_TAG_KEY},Values=${AWS_WORKER_TAG_VALUE} Name=instance-state-name,Values=pending,running,stopping,stopped,shutting-down --query 'Reservations[].Instances[].InstanceId' --output text); do FOUND_WORKERS=\"$FOUND_WORKERS $R $I\"; done; done`,
+    "set -- $FOUND_WORKERS",
+    "if [ $(( $# / 2 )) -gt 1 ]; then printf '%s\\n' 'Multiple tagged AccordAgents workers exist; resolve them before setup.' >&2; exit 1; fi",
+    "if [ $# -eq 2 ]; then WORKER_REGION=$1; WORKER_ID=$2; ROOT_DEVICE=$(aws ec2 describe-instances --region \"$WORKER_REGION\" --instance-ids \"$WORKER_ID\" --query 'Reservations[0].Instances[0].RootDeviceName' --output text); ROOT_VOLUME=$(aws ec2 describe-instances --region \"$WORKER_REGION\" --instance-ids \"$WORKER_ID\" --query \"Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName=='$ROOT_DEVICE'].Ebs.VolumeId | [0]\" --output text); if [ -n \"$ROOT_VOLUME\" ] && [ \"$ROOT_VOLUME\" != None ]; then aws ec2 create-tags --region \"$WORKER_REGION\" --resources \"$ROOT_VOLUME\" --tags Key=accordagents-worker,Value=1; fi; for SG in $(aws ec2 describe-instances --region \"$WORKER_REGION\" --instance-ids \"$WORKER_ID\" --query 'Reservations[0].Instances[0].SecurityGroups[].GroupId' --output text); do SG_NAME=$(aws ec2 describe-security-groups --region \"$WORKER_REGION\" --group-ids \"$SG\" --query 'SecurityGroups[0].GroupName' --output text); case \"$SG_NAME\" in accordagents-worker-*-sg) aws ec2 create-tags --region \"$WORKER_REGION\" --resources \"$SG\" --tags Key=accordagents-worker,Value=1 ;; esac; done; fi",
     'aws iam create-user --user-name "$USER" >/dev/null',
     'aws iam put-user-policy --user-name "$USER" --policy-name accordagents-worker --policy-document "$POLICY" >/dev/null',
     'KEY=$(aws iam create-access-key --user-name "$USER" --output json)',
