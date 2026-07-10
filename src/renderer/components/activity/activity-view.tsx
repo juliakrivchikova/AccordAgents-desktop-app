@@ -255,7 +255,7 @@ function ActivityRow({
         </span>
       </button>
       <span className="activity-row-actions">
-        {!item.read ? (
+        {item.status === "recent" && !item.read ? (
           <Button
             type="button"
             variant="ghost"
