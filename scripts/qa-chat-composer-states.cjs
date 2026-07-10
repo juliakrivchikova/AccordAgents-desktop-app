@@ -14,6 +14,25 @@ function assertWithinTolerance(value, label) {
   }
 }
 
+async function waitForSelectorAbsence(app, selector, timeoutMs = 10000) {
+  await app.evaluate(`new Promise((resolve, reject) => {
+    const selector = ${JSON.stringify(selector)};
+    const deadline = Date.now() + ${timeoutMs};
+    const tick = () => {
+      if (!document.querySelector(selector)) {
+        resolve(true);
+        return;
+      }
+      if (Date.now() > deadline) {
+        reject(new Error("Selector still present: " + selector));
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+    tick();
+  })`, {}, { timeoutMs: timeoutMs + 1000 });
+}
+
 (async () => {
   const app = await attach({ port });
   const evidence = [];
@@ -94,24 +113,68 @@ function assertWithinTolerance(value, label) {
 
     await app.fill(mainSelector, "");
     await app.fill(threadSelector, "");
+    const initialTheme = (await app.evaluate(
+      `document.documentElement.getAttribute("data-theme") || document.documentElement.className`
+    )).result.value;
     await app.click("[data-testid=theme-toggle]");
+    const toggledTheme = (await app.evaluate(
+      `document.documentElement.getAttribute("data-theme") || document.documentElement.className`
+    )).result.value;
+    if (toggledTheme === initialTheme) {
+      throw new Error(`Theme toggle did not change theme from ${initialTheme}`);
+    }
     await assertParity("theme-toggled");
 
+    const threadRootId = (await app.evaluate(`(() => {
+      const root = document.querySelector(
+        '[data-testid="chat-thread-panel"] .chat-thread-body [data-message-id]'
+      );
+      if (!root) throw new Error("Open thread root message not found");
+      return root.getAttribute("data-message-id");
+    })()`)).result.value;
     await app.evaluate(`(() => {
       const button = [...document.querySelectorAll("button")]
         .find((candidate) => candidate.getAttribute("aria-label") === "Close thread");
       if (!button) throw new Error("Close thread button not found");
       button.click();
     })()`);
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await waitForSelectorAbsence(app, '[data-testid="chat-thread-panel"]');
+    evidence.push({
+      label: "thread-closed",
+      timestamp: new Date().toISOString(),
+      threadRootId,
+      panelPresent: false
+    });
     await app.evaluate(`(() => {
-      const button = [...document.querySelectorAll("button")]
+      const threadRootId = ${JSON.stringify(threadRootId)};
+      const root = [...document.querySelectorAll(".chat-main [data-message-id]")]
+        .find((candidate) => candidate.getAttribute("data-message-id") === threadRootId);
+      if (!root) throw new Error("Timeline thread root not found: " + threadRootId);
+      const button = [...root.querySelectorAll("button")]
         .find((candidate) => candidate.getAttribute("aria-label") === "Reply in thread");
-      if (!button) throw new Error("Reply in thread button not found");
+      if (!button) throw new Error("Reply in thread button not found for: " + threadRootId);
       button.click();
     })()`);
     await app.waitForSelector("[data-testid=chat-thread-panel]");
+    const reopenedThreadRootId = (await app.evaluate(`(() => {
+      const root = document.querySelector(
+        '[data-testid="chat-thread-panel"] .chat-thread-body [data-message-id]'
+      );
+      return root?.getAttribute("data-message-id") ?? null;
+    })()`)).result.value;
+    if (reopenedThreadRootId !== threadRootId) {
+      throw new Error(`Reopened thread ${reopenedThreadRootId} instead of ${threadRootId}`);
+    }
     await assertParity("thread-close-reopen");
+
+    await app.click("[data-testid=theme-toggle]");
+    const restoredTheme = (await app.evaluate(
+      `document.documentElement.getAttribute("data-theme") || document.documentElement.className`
+    )).result.value;
+    if (restoredTheme !== initialTheme) {
+      throw new Error(`Theme was not restored to ${initialTheme}`);
+    }
+    await assertParity("theme-restored");
 
     if (process.env.QA_SCREENSHOT) {
       const screenshot = await app.screenshot({ timeoutMs: 15000 });
