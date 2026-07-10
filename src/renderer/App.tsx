@@ -45,7 +45,7 @@ function App(): JSX.Element {
   useAppEffects(state, conversationActions.refreshAll, conversationActions.refreshActivity);
   const view = useAppViewModel(state);
   const activityUnreadCount = state.activityItems.reduce(
-    (count, item) => count + (item.read ? 0 : 1),
+    (count, item) => count + (item.read || item.status === "running" ? 0 : 1),
     0
   );
   const [appVersion, setAppVersion] = React.useState("");
