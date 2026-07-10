@@ -9,6 +9,7 @@ function read(path) {
 const conversationActions = read("src/renderer/app/use-conversation-actions.ts");
 const conversationViewport = read("src/renderer/components/chat/use-chat-conversation-viewport.ts");
 const focusNavigation = read("src/renderer/components/chat/use-chat-focus-navigation.ts");
+const app = read("src/renderer/App.tsx");
 const activityStyles = read("src/renderer/styles/views/activity.css");
 const chatStyles = read("src/renderer/styles/views/chat-conversation.css");
 
@@ -33,6 +34,16 @@ test("chat viewport has one focus scroll owner", () => {
   assert.match(
     conversationViewport,
     /setSelectedThreadRootId\(rootId\);\s*scheduleFocusRenderedMessage\(messageId\);/
+  );
+});
+
+test("Activity item clicks focus the regular timeline instead of opening thread detail", () => {
+  assert.match(conversationActions, /options\?: \{ timelineOnly\?: boolean \}/);
+  assert.match(conversationActions, /if \(options\.timelineOnly && threadRootId\) \{\s*return \{ messageId: threadRootId \};\s*\}/s);
+  assert.equal(
+    app.match(/openConversationAndFocusActivityItem\(item, \{ timelineOnly: true \}\)/g)?.length,
+    2,
+    "Activity row selection and Open in chat must both request regular timeline focus"
   );
 });
 

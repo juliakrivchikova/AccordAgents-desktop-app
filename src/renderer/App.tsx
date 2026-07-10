@@ -335,7 +335,7 @@ function App(): JSX.Element {
           onSelect={(item) => {
             markActivityItemRead(state, item.id);
             state.setSelectedActivityItem({ ...item, read: true });
-            void conversationActions.openConversationAndFocusActivityItem(item);
+            void conversationActions.openConversationAndFocusActivityItem(item, { timelineOnly: true });
           }}
           onMarkRead={(item) => markActivityItemRead(state, item.id)}
           onClear={(item) => clearActivityItem(state, item.id)}
@@ -343,7 +343,7 @@ function App(): JSX.Element {
             state.setRailView("chats");
             state.setSidebarCollapsed(false);
             state.setSelectedActivityItem(undefined);
-            void conversationActions.openConversationAndFocusActivityItem(item);
+            void conversationActions.openConversationAndFocusActivityItem(item, { timelineOnly: true });
           }}
           onRetry={() => void conversationActions.refreshActivity()}
         />
