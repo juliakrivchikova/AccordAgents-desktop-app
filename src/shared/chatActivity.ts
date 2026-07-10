@@ -99,7 +99,7 @@ export function buildChatActivityItems(
     if (runId && runningRunIds.has(runId)) {
       continue;
     }
-    const updatedAt = message.createdAt;
+    const updatedAt = finishedMessageActivityTime(message);
     const updatedMs = timeValue(updatedAt);
     if (updatedMs <= 0 || updatedMs < recentCutoffMs) {
       continue;
@@ -557,6 +557,20 @@ function newestMessageByCreatedAt(messages: ChatMessage[]): ChatMessage | undefi
     const timeDelta = timeValue(right.createdAt) - timeValue(left.createdAt);
     return timeDelta || right.id.localeCompare(left.id);
   })[0];
+}
+
+function finishedMessageActivityTime(message: ChatMessage): string {
+  const createdMs = timeValue(message.createdAt);
+  const workedMs = typeof message.metadata?.workedMs === "number" && Number.isFinite(message.metadata.workedMs)
+    ? Math.max(0, message.metadata.workedMs)
+    : undefined;
+  if (createdMs > 0 && workedMs !== undefined) {
+    return new Date(createdMs + workedMs).toISOString();
+  }
+  const remoteUpdatedAt = message.metadata?.remoteRunStatus?.phase === "terminal"
+    ? cleanString(message.metadata.remoteRunStatus.updatedAt)
+    : "";
+  return remoteUpdatedAt || message.createdAt;
 }
 
 function chatAppToolApprovals(value: unknown): ChatAppToolApproval[] {

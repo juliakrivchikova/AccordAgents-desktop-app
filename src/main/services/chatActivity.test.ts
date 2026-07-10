@@ -444,6 +444,30 @@ test("buildChatActivityItems keeps a newer same-participant turn unread when an 
   assert.equal(items[0].read, undefined);
 });
 
+test("buildChatActivityItems uses completion time for finished run read state", () => {
+  const items = buildChatActivityItems(conversation({
+    messages: [
+      participantMessage("finished-after-view", {
+        createdAt: "2026-01-08T10:00:00.000Z",
+        metadata: {
+          runId: "finished-after-view-run",
+          workedMs: 60 * 60 * 1000
+        }
+      })
+    ]
+  }), {
+    now: NOW,
+    lastViewedAt: "2026-01-08T10:30:00.000Z"
+  });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].status, "recent");
+  assert.equal(items[0].target.messageId, "finished-after-view");
+  assert.equal(items[0].createdAt, "2026-01-08T10:00:00.000Z");
+  assert.equal(items[0].updatedAt, "2026-01-08T11:00:00.000Z");
+  assert.equal(items[0].read, undefined);
+});
+
 test("buildChatActivityItems emits recent finished participant messages without a run id", () => {
   const items = buildChatActivityItems(conversation({
     messages: [participantMessage("runless-finished", {

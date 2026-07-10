@@ -28,7 +28,7 @@ type ActivityStatusTab = "running" | "pending" | "rest";
 const ACTIVITY_STATUS_TABS: { id: ActivityStatusTab; label: string }[] = [
   { id: "running", label: "Running" },
   { id: "pending", label: "Pending" },
-  { id: "rest", label: "Rest" }
+  { id: "rest", label: "Finished" }
 ];
 
 export interface ActivityViewProps {
