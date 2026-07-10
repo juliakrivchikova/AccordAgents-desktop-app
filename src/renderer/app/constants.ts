@@ -36,7 +36,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 export const SIDEBAR_COLLAPSED_STORAGE_KEY = "accordagents.sidebarCollapsed";
-export const SIDEBAR_WIDTH_STORAGE_KEY = "accordagents.sidebarWidth";
+export const LEGACY_SIDEBAR_WIDTH_STORAGE_KEY = "accordagents.sidebarWidth";
+export const CHAT_SIDEBAR_WIDTH_STORAGE_KEY = "accordagents.chatSidebarWidth.v2";
+export const SETTINGS_SIDEBAR_WIDTH_STORAGE_KEY = "accordagents.settingsSidebarWidth.v2";
+export const LEGACY_ACTIVITY_LIST_WIDTH_STORAGE_KEY = "accordagents-activity-list-width";
+export const ACTIVITY_LIST_WIDTH_STORAGE_KEY = "accordagents.activityListWidth.v2";
 export const LAST_VIEWED_AT_STORAGE_KEY = "accordagents.lastViewedAt";
 export const DISMISSED_WARNINGS_STORAGE_KEY = "accordagents.dismissedWarnings.v1";
 export const ACCORD_LAUNCHER_STORAGE_KEY = "accordagents.accordLauncher.v1";

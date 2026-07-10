@@ -22,6 +22,20 @@ export function prependMissingMessages(currentMessages: ChatMessage[], olderMess
   return [...missingOlderMessages, ...currentMessages];
 }
 
+export function mergeMissingMessagesByCreatedAt(currentMessages: ChatMessage[], incomingMessages: ChatMessage[]): ChatMessage[] {
+  const byId = new Map<string, ChatMessage>();
+  for (const message of currentMessages) {
+    byId.set(message.id, message);
+  }
+  for (const message of incomingMessages) {
+    byId.set(message.id, message);
+  }
+  return [...byId.values()].sort((left, right) => {
+    const timeDelta = Date.parse(left.createdAt) - Date.parse(right.createdAt);
+    return timeDelta || left.id.localeCompare(right.id);
+  });
+}
+
 export function mergeLoadedMessagePage(
   current: ConversationMessagePageInfo | undefined,
   page: ConversationMessagePage

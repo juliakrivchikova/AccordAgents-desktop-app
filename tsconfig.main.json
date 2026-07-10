@@ -12,5 +12,12 @@
     "skipLibCheck": true,
     "types": ["node", "electron"]
   },
-  "include": ["src/main/**/*.ts", "src/preload/**/*.ts", "src/shared/**/*.ts"]
+  "include": [
+    "src/main/**/*.ts",
+    "src/preload/**/*.ts",
+    "src/shared/**/*.ts",
+    "src/renderer/app/constants.ts",
+    "src/renderer/lib/sidebar-sizing.ts",
+    "src/renderer/lib/sidebar-width-storage.ts"
+  ]
 }

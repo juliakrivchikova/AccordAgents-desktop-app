@@ -22,6 +22,7 @@ import type {
   DismissConversationWarningsRequest,
   GitDiffRequest,
   InspectLocalFileRequest,
+  ListChatActivityRequest,
   OpenLocalFileRequest,
   PlanDecisionClarificationRequest,
   PlanItemReviewRequest,
@@ -194,6 +195,10 @@ function createWindow(): void {
     minHeight: 720,
     title: windowTitle,
     backgroundColor: "#f5f2ec",
+    ...(process.platform === "darwin" ? {
+      titleBarStyle: "hiddenInset" as const,
+      trafficLightPosition: { x: 16, y: 16 }
+    } : {}),
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,
@@ -450,6 +455,7 @@ function registerIpc(): void {
     return pluginService.refresh(resolved.request, resolved.skills);
   });
   ipcMain.handle("conversations:list", () => storageService.listConversations());
+  ipcMain.handle("conversations:list-activity", (_event, request?: ListChatActivityRequest) => storageService.listChatActivity(request));
   ipcMain.handle("conversations:get", async (_event, id: string) => {
     const conversation = await storageService.getConversation(id);
     return conversation ? chatService.hydrateContextUsage(conversation) : conversation;

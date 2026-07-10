@@ -14,9 +14,11 @@ import type { ChatChoiceResponse } from "./chat-message-item";
 import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 
 export interface ChatMessageFocusRequest {
+  conversationId?: string;
   messageId: string;
   threadRootId?: string;
   nonce: number;
+  pending?: boolean;
 }
 
 export interface ChatConversationViewProps {

@@ -24,6 +24,8 @@
     "test:settings": "npm run build:main && node --test dist/main/main/services/settings.behaviorRules.test.js dist/main/main/services/settings.roleArchive.test.js dist/main/main/services/settings.savedPrompts.test.js dist/main/main/services/settings.agentEnvironment.test.js dist/main/main/services/slashSuggestions.test.js",
     "test:agent-env": "npm run build:main && node --test dist/main/main/services/settings.agentEnvironment.test.js dist/main/main/services/toolchainRequirements.test.js dist/main/main/services/remoteRuns.test.js dist/main/main/services/cliAgents.permissions.test.js",
     "test:storage": "npm run build:main && node --test dist/main/main/services/storage.messages.test.js",
+    "test:activity": "npm run build:main && node --test dist/main/main/services/chatActivity.test.js dist/main/main/services/chatActivityFocus.test.js dist/main/main/services/storage.activity.test.js && node --test scripts/activity-focus-contract.test.mjs",
+    "test:sidebar-widths": "npm run build:main && node --test dist/main/main/services/sidebarWidths.test.js",
     "test:chat-compact": "npm run build:main && node --test dist/main/main/services/chat.compact.test.js dist/main/main/services/chatParticipantStatus.test.js dist/main/main/services/chatRosterStatus.test.js",
     "test:user-skills": "npm run build:main && node --test dist/main/main/services/userSkills.test.js dist/main/main/services/chat.userSkills.test.js",
     "test:plugins": "npm run build:main && node --test dist/main/main/services/plugins.test.js",

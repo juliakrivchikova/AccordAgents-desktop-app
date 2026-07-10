@@ -1727,6 +1727,59 @@ export interface ConversationOpenResult {
   messagePage: ConversationMessagePageInfo;
 }
 
+export type ChatActivityStatus = "pending" | "running" | "recent";
+
+export type ChatActivityKind =
+  | "approval"
+  | "choice"
+  | "mention"
+  | "participant-request"
+  | "run"
+  | "message";
+
+export interface ChatActivityParticipantSummary {
+  id: string;
+  handle: string;
+  kind: ChatProviderKind;
+  roleConfigId?: string;
+  avatarId?: string;
+}
+
+export interface ChatActivityTarget {
+  runId?: string;
+  messageId?: string;
+  threadRootId?: string;
+  approvalId?: string;
+}
+
+export interface ChatActivityItem {
+  id: string;
+  conversationId: string;
+  conversationTitle: string;
+  repoPath?: string;
+  status: ChatActivityStatus;
+  read?: boolean;
+  kind: ChatActivityKind;
+  title: string;
+  preview: string;
+  createdAt: string;
+  updatedAt: string;
+  participant?: ChatActivityParticipantSummary;
+  target: ChatActivityTarget;
+}
+
+export interface ListChatActivityRequest {
+  limit?: number;
+  recentConversationLimit?: number;
+  recentWindowDays?: number;
+  lastViewedAtByConversationId?: Record<string, string>;
+}
+
+export interface ListChatActivityResult {
+  items: ChatActivityItem[];
+  generatedAt: string;
+}
+
 export type RepoFileOpenAction = "open" | "reveal" | "intellij-idea";
 export type LocalFileOpenAction = RepoFileOpenAction;
 
@@ -1819,6 +1872,7 @@ export interface AppBridge {
   listPlugins(request?: PluginListRequest): Promise<PluginListResult>;
   refreshPlugins(request?: PluginListRequest): Promise<PluginListResult>;
   listConversations(): Promise<ConversationSummary[]>;
+  listChatActivity(request?: ListChatActivityRequest): Promise<ListChatActivityResult>;
   getConversation(id: string): Promise<Conversation | undefined>;
   openConversation(id: string, limit?: number): Promise<ConversationOpenResult | undefined>;
   listConversationMessages(request: ConversationMessagePageRequest): Promise<ConversationMessagePage>;
