@@ -44,6 +44,10 @@ function App(): JSX.Element {
   const settingsActions = useSettingsActions(state);
   useAppEffects(state, conversationActions.refreshAll, conversationActions.refreshActivity);
   const view = useAppViewModel(state);
+  const activityUnreadCount = state.activityItems.reduce(
+    (count, item) => count + (item.read ? 0 : 1),
+    0
+  );
   const [appVersion, setAppVersion] = React.useState("");
   const [accordDialogOpen, setAccordDialogOpen] = React.useState(false);
   const [newChatPrefill, setNewChatPrefill] = React.useState<{
@@ -218,6 +222,7 @@ function App(): JSX.Element {
       rail={
         <AppRail
           activeView={state.railView}
+          activityUnreadCount={activityUnreadCount}
           onSelect={(nextView) => {
             if (nextView !== "activity") {
               conversationActions.clearChatMessageFocus();

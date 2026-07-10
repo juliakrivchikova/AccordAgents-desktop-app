@@ -26,6 +26,8 @@
   --app-rail-fg-active: #ffffff;
   --app-rail-hover: rgba(255, 255, 255, 0.08);
   --app-rail-active: rgba(255, 255, 255, 0.16);
+  --app-rail-badge-bg: #f0d8ff;
+  --app-rail-badge-fg: var(--app-rail-bg);
   --app-header-bg: #ffffff;
   --app-surface: #ffffff;
   --app-surface-subtle: #f7f8fa;
@@ -191,6 +193,8 @@
   --app-rail-fg-active: #ffffff;
   --app-rail-hover: rgba(255, 255, 255, 0.08);
   --app-rail-active: rgba(255, 255, 255, 0.16);
+  --app-rail-badge-bg: #f0d8ff;
+  --app-rail-badge-fg: var(--app-rail-bg);
   --app-header-bg: #181b21;
   --app-surface: #181b21;
   --app-surface-subtle: #1d2128;
