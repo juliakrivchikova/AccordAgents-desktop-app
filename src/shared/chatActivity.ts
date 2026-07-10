@@ -363,7 +363,11 @@ function pendingMessageItems(
       createdAt: message.createdAt,
       updatedAt,
       participant,
-      target
+      target: {
+        ...target,
+        sourceMessageId: message.id,
+        choiceId: message.metadata.pendingChoice.id
+      }
     });
   }
 
@@ -383,7 +387,11 @@ function pendingMessageItems(
       createdAt: message.createdAt,
       updatedAt,
       participant,
-      target
+      target: {
+        ...target,
+        sourceMessageId: message.id,
+        mentionTargetParticipantIds: pendingMentions.map((mention) => mention.targetParticipantId)
+      }
     });
   }
 

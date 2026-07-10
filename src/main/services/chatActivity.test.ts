@@ -194,6 +194,10 @@ test("buildChatActivityItems emits pending approval, choice, mentions, and parti
   assert.deepEqual(items.map((item) => item.kind), ["approval", "choice", "mention", "participant-request"]);
   assert.ok(items.every((item) => item.status === "pending"));
   assert.equal(items[0].target.approvalId, "approval-1");
+  assert.equal(items.find((item) => item.kind === "choice")?.target.sourceMessageId, "choice");
+  assert.equal(items.find((item) => item.kind === "choice")?.target.choiceId, "choice-1");
+  assert.equal(items.find((item) => item.kind === "mention")?.target.sourceMessageId, "mention");
+  assert.deepEqual(items.find((item) => item.kind === "mention")?.target.mentionTargetParticipantIds, ["p2"]);
   assert.equal(items.find((item) => item.kind === "choice")?.preview, "choice content");
   assert.equal(items.find((item) => item.kind === "mention")?.preview, "mention content");
   assert.equal(items.find((item) => item.kind === "participant-request")?.preview, "request content");

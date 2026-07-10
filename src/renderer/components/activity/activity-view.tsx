@@ -1,4 +1,4 @@
-import { ArrowRight, CheckCheck, Eraser, MessageSquare, RefreshCw } from "lucide-react";
+import { ArrowRight, CheckCheck, CircleX, Eraser, MessageSquare, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
 import type { ChatActivityItem, ChatActivityParticipantSummary } from "../../../shared/types";
@@ -40,6 +40,7 @@ export interface ActivityViewProps {
   detail: React.ReactNode;
   onSelect: (item: ChatActivityItem) => void;
   onMarkRead: (item: ChatActivityItem) => void;
+  onCancelPending: (item: ChatActivityItem) => void;
   onClear: (item: ChatActivityItem) => void;
   onOpenInChat: (item: ChatActivityItem) => void;
   onRetry: () => void;
@@ -54,6 +55,7 @@ export function ActivityView({
   detail,
   onSelect,
   onMarkRead,
+  onCancelPending,
   onClear,
   onOpenInChat,
   onRetry
@@ -188,6 +190,7 @@ export function ActivityView({
                 active={item.id === selectedItem?.id}
                 onSelect={() => onSelect(item)}
                 onMarkRead={() => onMarkRead(item)}
+                onCancelPending={() => onCancelPending(item)}
                 onClear={() => onClear(item)}
               />
             ))
@@ -259,14 +262,17 @@ function ActivityRow({
   active,
   onSelect,
   onMarkRead,
+  onCancelPending,
   onClear
 }: {
   item: ChatActivityItem;
   active: boolean;
   onSelect: () => void;
   onMarkRead: () => void;
+  onCancelPending: () => void;
   onClear: () => void;
 }): JSX.Element {
+  const canCancelPending = canCancelPendingActivityItem(item);
   return (
     <div
       className="activity-row"
@@ -319,6 +325,19 @@ function ActivityRow({
             <CheckCheck aria-hidden />
           </Button>
         ) : null}
+        {canCancelPending ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="activity-row-action"
+            title="Cancel pending card"
+            aria-label="Cancel pending card"
+            onClick={onCancelPending}
+          >
+            <CircleX aria-hidden />
+          </Button>
+        ) : null}
         <Button
           type="button"
           variant="ghost"
@@ -333,6 +352,23 @@ function ActivityRow({
       </span>
     </div>
   );
+}
+
+function canCancelPendingActivityItem(item: ChatActivityItem): boolean {
+  if (item.status !== "pending") {
+    return false;
+  }
+  if (item.kind === "approval") {
+    return Boolean(item.target.approvalId?.trim());
+  }
+  const sourceMessageId = item.target.sourceMessageId ?? item.target.messageId;
+  if (item.kind === "choice") {
+    return Boolean(sourceMessageId?.trim() && item.target.choiceId?.trim());
+  }
+  if (item.kind === "mention") {
+    return Boolean(sourceMessageId?.trim() && item.target.mentionTargetParticipantIds?.length);
+  }
+  return false;
 }
 
 function activityActorHandle(item: ChatActivityItem): string {

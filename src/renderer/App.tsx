@@ -1,6 +1,12 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import type { ChatSkillMention, PluginCatalogItem } from "../shared/types";
+import type {
+  ChatActivityItem,
+  ChatSkillMention,
+  Conversation,
+  PluginCatalogItem,
+  StartReviewResult
+} from "../shared/types";
 import { RefreshCw, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -34,6 +40,7 @@ import { useAppViewModel } from "./app/use-app-view-model";
 import { AppNotices } from "./app/app-notices";
 import { pluginNewChatDraft, pluginNewChatMentions } from "./app/plugin-new-chat";
 import { clearActivityItem, markActivityItemRead } from "./app/activity-item-state";
+import { errorText } from "./components/review/review-conversation-data";
 import "./styles/app.css";
 function App(): JSX.Element {
   const state = useAppState();
@@ -102,6 +109,62 @@ function App(): JSX.Element {
       state.setRailView("chats");
       state.setSidebarCollapsed(false);
     });
+  };
+
+  const applyActivityCancelResult = async (item: ChatActivityItem, conversation?: Conversation, warnings?: string[]): Promise<void> => {
+    if (conversation && state.conversation?.id === conversation.id) {
+      state.setConversation(conversation);
+    }
+    if (warnings) {
+      state.setWarnings(warnings);
+    }
+    state.setSelectedActivityItem((current) => current?.id === item.id ? undefined : current);
+    await conversationActions.refreshConversations();
+    await conversationActions.refreshActivity();
+  };
+
+  const cancelPendingActivityItem = async (item: ChatActivityItem): Promise<void> => {
+    if (item.status !== "pending") {
+      return;
+    }
+    state.setError(undefined);
+    try {
+      if (item.kind === "approval" && item.target.approvalId) {
+        const conversation = await window.consensus.respondToChatAppToolApproval({
+          conversationId: item.conversationId,
+          approvalId: item.target.approvalId,
+          approve: false
+        });
+        await applyActivityCancelResult(item, conversation);
+        return;
+      }
+      const sourceMessageId = item.target.sourceMessageId ?? item.target.messageId;
+      if (item.kind === "choice" && sourceMessageId && item.target.choiceId) {
+        const result: StartReviewResult = await window.consensus.respondToChatChoice({
+          conversationId: item.conversationId,
+          sourceMessageId,
+          choiceId: item.target.choiceId,
+          cancel: true,
+          runId: crypto.randomUUID()
+        });
+        await applyActivityCancelResult(item, result.conversation, result.warnings);
+        return;
+      }
+      if (item.kind === "mention" && sourceMessageId && item.target.mentionTargetParticipantIds?.length) {
+        const result: StartReviewResult = await window.consensus.respondToChatMentions({
+          conversationId: item.conversationId,
+          sourceMessageId,
+          targetParticipantIds: item.target.mentionTargetParticipantIds,
+          approve: false,
+          runId: crypto.randomUUID()
+        });
+        await applyActivityCancelResult(item, result.conversation, result.warnings);
+        return;
+      }
+      throw new Error("This activity item cannot be cancelled from the Activity list.");
+    } catch (caught) {
+      state.setError(errorText(caught));
+    }
   };
 
   const openingConversationDescription = view.openingConversation
@@ -338,6 +401,7 @@ function App(): JSX.Element {
             void conversationActions.openConversationAndFocusActivityItem(item, { timelineOnly: true });
           }}
           onMarkRead={(item) => markActivityItemRead(state, item.id)}
+          onCancelPending={(item) => void cancelPendingActivityItem(item)}
           onClear={(item) => clearActivityItem(state, item.id)}
           onOpenInChat={(item) => {
             state.setRailView("chats");

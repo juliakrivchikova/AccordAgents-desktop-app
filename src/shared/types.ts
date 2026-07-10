@@ -1782,8 +1782,11 @@ export interface ChatActivityParticipantSummary {
 export interface ChatActivityTarget {
   runId?: string;
   messageId?: string;
+  sourceMessageId?: string;
   threadRootId?: string;
   approvalId?: string;
+  choiceId?: string;
+  mentionTargetParticipantIds?: string[];
 }
 
 export interface ChatActivityItem {
