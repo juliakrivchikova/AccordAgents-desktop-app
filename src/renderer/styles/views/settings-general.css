@@ -536,11 +536,6 @@
   border: 0;
 }
 
-.settings-view .gen-cloud-runs-settings:disabled {
-  opacity: 0.5;
-  pointer-events: none;
-}
-
 .settings-view .gen-doctor-auth-code {
   font-family: var(--font-mono, monospace);
   font-weight: 650;

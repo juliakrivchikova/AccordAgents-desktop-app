@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { copyFile, lstat, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { app } from "electron";
 import type {
   AgentContextUsage,
@@ -74,6 +75,7 @@ import type {
   CloudRunStatus,
   CloudRunWorkerSettings,
   CreateChatConversationRequest,
+  DeleteChatConversationRequest,
   DismissConversationWarningsRequest,
   ExportChatAttachmentRequest,
   ParticipantConfig,
@@ -94,6 +96,7 @@ import type {
   UpdateChatParticipantRuntimeRequest,
   RemoveChatParticipantRequest,
   RemoteRunHandle,
+  RemoteParticipantSessionHandle,
   RemoteRunSyncInfo
 } from "../../shared/types";
 import { isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
@@ -567,6 +570,17 @@ interface RemoteRunStarter {
   pollDetachedRun(request: RemoteRunDetachedPollRequest): Promise<RemoteDetachedRunState>;
   cancelDetachedRun(request: RemoteRunDetachedCancelRequest): Promise<RemoteDetachedRunState>;
   registerDetachedRunContext?(runId: string, worker: RemoteRunWorkerTarget, context: { conversationId: string; participantId: string; sync?: RemoteRunSyncInfo }): void;
+  inspectParticipantSession?(handle: RemoteParticipantSessionHandle): Promise<{
+    status: "live" | "stopped" | "unknown";
+    activeRunId?: string;
+    queuedRunIds?: string[];
+    providerSessionId?: string;
+  }>;
+  stopParticipantSessionIfIdle?(
+    handle: RemoteParticipantSessionHandle,
+    remove?: boolean,
+    cleanup?: { removeArtifacts?: boolean; runIds?: string[]; providerSessionIds?: string[] }
+  ): Promise<boolean>;
 }
 
 type RemoteRunParticipantTarget =
@@ -575,14 +589,15 @@ type RemoteRunParticipantTarget =
 
 interface RemoteRunCoordinatorControl {
   trackRun(handle: RemoteRunHandle): void;
+  drainRemoteSessionCleanup?(workerOverride?: CloudRunWorkerSettings): Promise<void>;
 }
 
 // AWS-managed worker hook: resolves a run-ready SSH target (starting the
 // instance if needed) and tracks activity for idle auto-stop.
 interface CloudRunAwsResolver {
   ensureWorkerForRun(): Promise<CloudRunWorkerSettings>;
-  noteRunStarted(): void;
-  noteRunEnded(): Promise<void>;
+  noteRunStarted(runId: string): void;
+  noteRunEnded(runId: string): Promise<void>;
 }
 
 export class ChatService {
@@ -593,6 +608,7 @@ export class ChatService {
   private readonly activeRunRefCounts = new Map<string, number>();
   private readonly activeConversationRunRefCounts = new Map<string, Map<string, number>>();
   private readonly backgroundRunnerCounts = new Map<string, number>();
+  private readonly deletedConversationIds = new Set<string>();
   private readonly appMcpTokens = new Map<string, string>();
   private readonly participantRequestRunners = new Map<string, Promise<ParticipantRequestRunResult>>();
   private readonly participantRequestAutoResumes = new Set<string>();
@@ -929,6 +945,9 @@ export class ChatService {
       if (request.archived === alreadyArchived) {
         return conversation;
       }
+      if (request.archived) {
+        await this.cleanupRemoteParticipantSessions(conversation, undefined, "chat-archived");
+      }
       const nextMetadata = { ...conversation.metadata };
       if (request.archived) {
         nextMetadata.archived = true;
@@ -945,6 +964,187 @@ export class ChatService {
       rejectIfQueued: true,
       queuedMessage: "Chat cannot be archived while members are running."
     });
+  }
+
+  async deleteConversation(request: DeleteChatConversationRequest): Promise<boolean> {
+    return this.withChatRunLock(request.conversationId, async () => {
+      await this.waitForQueuedSave(request.conversationId);
+      const conversation = await this.storage.getConversation(request.conversationId);
+      if (!conversation) {
+        return false;
+      }
+      if (conversation.kind !== "chat") {
+        throw new Error("Only chat conversations can be deleted.");
+      }
+      if (conversation.metadata.archived !== true) {
+        throw new Error("Archive the chat before deleting it permanently.");
+      }
+      if (conversation.metadata.running === true || this.chatHasLiveWork(conversation.id)) {
+        throw new Error("Chat cannot be deleted while members are running.");
+      }
+      this.deletedConversationIds.add(conversation.id);
+      try {
+        await (this.chatMutationQueues.get(conversation.id) ?? Promise.resolve()).catch(() => undefined);
+        await this.waitForQueuedSave(conversation.id);
+        await this.cleanupRemoteParticipantSessions(conversation, undefined, "chat-deleted");
+        const cleanupMarker = await this.enqueueDeletedConversationArtifactCleanup(conversation);
+        const deleted = await this.storage.deleteConversation(conversation.id);
+        if (!deleted) {
+          await rm(cleanupMarker, { force: true });
+          this.deletedConversationIds.delete(conversation.id);
+          return false;
+        }
+        await this.cleanupDeletedConversationArtifacts(conversation)
+          .then(() => rm(cleanupMarker, { force: true }))
+          .catch((error) => {
+            void this.debugLogs.write("chat.delete.artifacts.error", {
+              conversationId: conversation.id,
+              message: error instanceof Error ? error.message : String(error)
+            });
+          });
+        this.saveQueues.delete(conversation.id);
+        this.chatMutationQueues.delete(conversation.id);
+        return true;
+      } catch (error) {
+        if (await this.storage.getConversation(conversation.id)) {
+          this.deletedConversationIds.delete(conversation.id);
+        }
+        throw error;
+      }
+    }, {
+      rejectIfQueued: true,
+      queuedMessage: "Chat cannot be deleted while members are running."
+    });
+  }
+
+  private async cleanupRemoteParticipantSessions(
+    conversation: Conversation,
+    participantIds: ReadonlySet<string> | undefined,
+    reason: "participant-removed" | "chat-archived" | "chat-deleted" | "app-quit"
+  ): Promise<void> {
+    const sessions = this.chatSessions(conversation);
+    const targets = sessions.filter((session) =>
+      session.remoteSession && (!participantIds || participantIds.has(session.participantId))
+    );
+    if (targets.length === 0) {
+      return;
+    }
+    const removeArtifacts = reason === "participant-removed" || reason === "chat-deleted";
+    const runHandles = Object.values(this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles));
+    for (const session of targets) {
+      const handle = session.remoteSession as RemoteParticipantSessionHandle;
+      const runIds = runHandles
+        .filter((run) => run.participantId === session.participantId)
+        .map((run) => run.runId);
+      const providerSessionIds = session.sessionId?.trim() ? [session.sessionId.trim()] : [];
+      const tombstone = removeArtifacts
+        ? await this.settings.enqueueRemoteSessionCleanup(handle, reason, {
+            conversationId: conversation.id,
+            participantId: session.participantId,
+            runIds,
+            providerSessionIds,
+            removeArtifacts: true
+          })
+        : undefined;
+      try {
+        const cleaned = await this.remoteRuns?.stopParticipantSessionIfIdle?.(
+          handle,
+          removeArtifacts,
+          removeArtifacts ? { removeArtifacts: true, runIds, providerSessionIds } : undefined
+        );
+        if (cleaned && tombstone) {
+          await this.settings.removeRemoteSessionCleanupTombstone(tombstone.id);
+        }
+      } catch (error) {
+        void this.debugLogs.write("chat.remote-session.cleanup.deferred", {
+          conversationId: conversation.id,
+          participantId: session.participantId,
+          reason,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    if (removeArtifacts) {
+      conversation.metadata = {
+        ...conversation.metadata,
+        participantSessions: sessions.map((session) =>
+          targets.some((target) => target.participantId === session.participantId)
+            ? {
+                ...session,
+                sessionId: "",
+                remoteSession: undefined,
+                updatedAt: new Date().toISOString()
+              }
+            : session
+        )
+      };
+    }
+  }
+
+  private async cleanupDeletedConversationArtifacts(conversation: Conversation): Promise<void> {
+    const runIds = Object.keys(this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles));
+    await Promise.all([
+      rm(path.join(this.chatUserDataPath(), "chats", conversation.id), {
+        recursive: true,
+        force: true
+      }),
+      ...runIds.map((runId) => rm(path.join(this.chatUserDataPath(), "remote-runs", `${runId}.jsonl`), {
+        force: true
+      }))
+    ]);
+  }
+
+  private async enqueueDeletedConversationArtifactCleanup(conversation: Conversation): Promise<string> {
+    const root = path.join(this.chatUserDataPath(), "pending-chat-deletions");
+    await mkdir(root, { recursive: true });
+    const marker = path.join(root, `${conversation.id.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
+    const temp = `${marker}.${randomUUID()}.tmp`;
+    await writeFile(temp, JSON.stringify({
+      conversationId: conversation.id,
+      runIds: Object.keys(this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles)),
+      createdAt: new Date().toISOString()
+    }), { mode: 0o600 });
+    await rename(temp, marker);
+    return marker;
+  }
+
+  async reconcileDeletedConversationArtifacts(): Promise<void> {
+    const root = path.join(this.chatUserDataPath(), "pending-chat-deletions");
+    let entries: string[];
+    try {
+      entries = await readdir(root);
+    } catch {
+      return;
+    }
+    for (const entry of entries.filter((name) => name.endsWith(".json"))) {
+      const marker = path.join(root, entry);
+      try {
+        const record = JSON.parse(await readFile(marker, "utf8")) as {
+          conversationId?: unknown;
+          runIds?: unknown;
+        };
+        if (typeof record.conversationId !== "string") {
+          continue;
+        }
+        const runIds = Array.isArray(record.runIds)
+          ? record.runIds.filter((value): value is string => typeof value === "string")
+          : [];
+        await Promise.all([
+          rm(path.join(this.chatUserDataPath(), "chats", record.conversationId), { recursive: true, force: true }),
+          ...runIds.map((runId) => rm(path.join(this.chatUserDataPath(), "remote-runs", `${runId}.jsonl`), { force: true }))
+        ]);
+        await rm(marker, { force: true });
+      } catch (error) {
+        void this.debugLogs.write("chat.delete.artifacts.retry-error", {
+          marker,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+  }
+
+  private chatUserDataPath(): string {
+    return app?.getPath?.("userData") ?? path.join(tmpdir(), `accordagents-tests-${process.pid}`);
   }
 
   async dismissConversationWarnings(request: DismissConversationWarningsRequest): Promise<Conversation | undefined> {
@@ -1082,6 +1282,7 @@ export class ChatService {
         throw new Error("The last chat member cannot be removed.");
       }
       const now = new Date().toISOString();
+      await this.cleanupRemoteParticipantSessions(conversation, new Set([target.id]), "participant-removed");
       // Drop the participant plus its resumable CLI session so a future re-add starts clean.
       const sessions = Array.isArray(conversation.metadata.participantSessions)
         ? (conversation.metadata.participantSessions as ChatParticipantSession[]).filter(
@@ -1682,9 +1883,14 @@ export class ChatService {
           throw new Error("Remote run provider result references a participant that is no longer in this chat.");
         }
         this.applyRemoteProviderResultRecord(conversation, record, participant, state);
+        const resumeMiss = this.isConfirmedRemoteResumeMiss(record);
+        if (resumeMiss) {
+          this.clearRemoteParticipantSessionIdInConversation(conversation, record.participantId, record.sessionId);
+        }
         statePatch = {
           providerOutputLineBuffer: undefined,
-          providerOutputText: undefined
+          providerOutputText: undefined,
+          providerSessionId: resumeMiss ? undefined : record.sessionId ?? state.providerSessionId
         };
       } else if (!suppressPresentation && record.kind === "permission_pending") {
         const requester = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
@@ -1724,6 +1930,13 @@ export class ChatService {
       }
 
       const nextState = this.remoteRunReplayState(conversation, record.runId);
+      if (typeof statePatch.providerSessionId === "string" && "participantId" in record) {
+        this.persistRemoteParticipantSessionIdInConversation(
+          conversation,
+          record.participantId,
+          statePatch.providerSessionId
+        );
+      }
       const permissionRequestIdsByRecordId = { ...(nextState.permissionRequestIdsByRecordId ?? {}) };
       if (record.kind === "permission_pending" && permissionResult?.requestId) {
         permissionRequestIdsByRecordId[record.id] = permissionResult.requestId;
@@ -1792,6 +2005,71 @@ export class ChatService {
       }
     }
     return handles;
+  }
+
+  async listRemoteParticipantSessionHandles(): Promise<Array<{
+    conversationId: string;
+    participantId: string;
+    handle: RemoteParticipantSessionHandle;
+  }>> {
+    const summaries = await this.storage.listConversations();
+    const result: Array<{
+      conversationId: string;
+      participantId: string;
+      handle: RemoteParticipantSessionHandle;
+    }> = [];
+    for (const summary of summaries) {
+      if (summary.kind !== "chat") {
+        continue;
+      }
+      const conversation = await this.storage.getConversation(summary.id);
+      if (!conversation || conversation.kind !== "chat") {
+        continue;
+      }
+      for (const session of this.chatSessions(conversation)) {
+        if (session.remoteSession) {
+          result.push({
+            conversationId: conversation.id,
+            participantId: session.participantId,
+            handle: session.remoteSession
+          });
+        }
+      }
+    }
+    return result;
+  }
+
+  async backfillRemoteParticipantSessionId(
+    conversationId: string,
+    participantId: string,
+    sessionId: string,
+    providerSessionValid = true
+  ): Promise<void> {
+    if (!providerSessionValid) {
+      return;
+    }
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return;
+    }
+    await this.withChatMutation(conversation, async () => {
+      const current = this.chatSessions(conversation).find((session) => session.participantId === participantId);
+      if (current?.sessionId?.trim()) {
+        return;
+      }
+      if (current?.invalidatedRemoteSessionId === sessionId.trim()) {
+        return;
+      }
+      const before = current?.sessionId;
+      this.persistRemoteParticipantSessionIdInConversation(conversation, participantId, sessionId);
+      const after = this.chatSessions(conversation).find((session) => session.participantId === participantId)?.sessionId;
+      if (before === after) {
+        return;
+      }
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+    });
   }
 
   async reconcileTerminalRemoteRunState(): Promise<void> {
@@ -1876,6 +2154,7 @@ export class ChatService {
         return;
       }
       if (this.isRemoteRunTerminal(current.status)) {
+        void this.cloudRunAws?.noteRunEnded(runId);
         nextHandle = current;
         const beforeMetadata = this.stableJson(conversation.metadata);
         const terminal = this.finalizeRemoteRunPendingMessage(conversation, runId, current.status, current.error);
@@ -1911,7 +2190,7 @@ export class ChatService {
           beforeTerminalMetadata !== this.stableJson(conversation.metadata);
         // Transitioned live → terminal: release the AWS idle ref-count so the
         // instance can auto-stop once no runs remain.
-        void this.cloudRunAws?.noteRunEnded();
+        void this.cloudRunAws?.noteRunEnded(runId);
       } else {
         this.ensureRemoteRunRemembered(conversation.id, runId);
         conversation.metadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata, undefined, runId);
@@ -2031,6 +2310,7 @@ export class ChatService {
         ...conversation.metadata,
         remoteRunHandles: handles
       };
+      void this.cloudRunAws?.noteRunEnded(runId);
     }
     this.registerRemoteRunHandle(next);
     if (effectiveStatus === "completed") {
@@ -2538,7 +2818,11 @@ export class ChatService {
     const existing = existingId
       ? conversation.messages.find((message) => message.id === existingId && message.role === "participant")
       : undefined;
-    const content = record.content.trim() || (record.ok ? existing?.content ?? "" : `@${participant.handle} remote run failed.`);
+    const resumeMiss = this.isConfirmedRemoteResumeMiss(record);
+    const rawContent = record.content.trim() || (record.ok ? existing?.content ?? "" : `@${participant.handle} remote run failed.`);
+    const content = resumeMiss
+      ? `The previous Codex session could not be resumed, so this turn stopped to avoid silently losing context. Retry explicitly to start a fresh session.\n\n${rawContent}`
+      : rawContent;
     const metadata: ChatMessageMetadata = {
       ...(existing?.metadata ?? {}),
       runId: record.runId,
@@ -2574,6 +2858,17 @@ export class ChatService {
     );
     conversation.messages.push(message);
     this.recordLastMessageByParticipant(conversation, message);
+  }
+
+  private isConfirmedRemoteResumeMiss(
+    record: Extract<RemoteRunReplayRecord, { kind: "provider_result" }>
+  ): boolean {
+    if (record.ok || !record.sessionId) {
+      return false;
+    }
+    const diagnostic = `${record.error ?? ""}\n${record.content}`.toLowerCase();
+    return /resume|session|conversation|thread/.test(diagnostic) &&
+      /not found|missing|unknown|cannot|can't|unable|no .*session|no .*found|does not exist|unavailable/.test(diagnostic);
   }
 
   private remoteRunWorkedMs(
@@ -5340,6 +5635,7 @@ export class ChatService {
       this.persistParticipantSessionId(conversation, session, sessionId);
     };
     let remoteDetachedStarted = false;
+    let awsRemoteRunRefHeld = false;
     try {
       progressSink.beginAttempt();
       const participantRunsRemotely = this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution) === "remote";
@@ -5347,7 +5643,7 @@ export class ChatService {
         const preparingRemoteStatus = this.remoteRunStatus("preparing-worker", "Preparing remote worker");
         this.emitRemoteRunPhase(runId, progress, participant, pendingMessage.id, preparingRemoteStatus);
       }
-      const remoteRunTarget = await this.remoteRunTargetForParticipant(participant);
+      const remoteRunTarget = await this.remoteRunTargetForParticipant(participant, runId);
       if (remoteRunTarget) {
         if (!remoteRunTarget.ok) {
           pendingMessage.status = "error";
@@ -5364,6 +5660,7 @@ export class ChatService {
           return [pendingMessage];
         }
         {
+          awsRemoteRunRefHeld = remoteRunTarget.settings.mode === "aws";
           const now = new Date().toISOString();
           // Mirror-sync mode: no pre-provisioned remote cwd, and the run has a
           // readable local repo — the project dir is rsynced one-way to a
@@ -5388,51 +5685,86 @@ export class ChatService {
             promptContextPointerAdvance: preparedPromptContext.pointerAdvance
           };
           await this.recordRemoteRunHandle(conversation, handle, pendingMessage.id);
-          let detachedState: RemoteDetachedRunState;
+          let detachedState: RemoteDetachedRunState | undefined;
           let latestRemoteRunStatus: ChatRemoteRunStatus | undefined;
-          try {
-            detachedState = await remoteRuns.startDetachedRun({
-              conversationId: conversation.id,
-              runId,
-              participant: cliParticipant,
-              prompt,
-              worker: remoteRunTarget.worker,
-              kind: "chat",
-              repoPath: remoteRunTarget.worker.remoteCwd,
-              sync: remoteSyncLocalPath ? { localPath: remoteSyncLocalPath } : undefined,
-              toolchainPreflight: remoteToolchainLocalPath || participant.skipToolchainPreflight === true
+          const detachedRequest = (worker: RemoteRunWorkerTarget): RemoteRunDetachedStartRequest => ({
+            conversationId: conversation.id,
+            runId,
+            participant: cliParticipant,
+            prompt,
+            worker,
+            kind: "chat",
+            repoPath: worker.remoteCwd,
+            sync: remoteSyncLocalPath ? { localPath: remoteSyncLocalPath } : undefined,
+            toolchainPreflight: remoteToolchainLocalPath || participant.skipToolchainPreflight === true
+              ? {
+                  localRepoPath: remoteToolchainLocalPath,
+                  skip: participant.skipToolchainPreflight === true
+                }
+              : undefined,
+            onToolchainAdvisory: (message) => {
+              options.warnings.push(`@${participant.handle}: ${message}`);
+            },
+            options: {
+              persistSession: true,
+              sessionId: session.sessionId || undefined,
+              role,
+              appMcp: appMcp
                 ? {
-                    localRepoPath: remoteToolchainLocalPath,
-                    skip: participant.skipToolchainPreflight === true
+                    url: appMcp.url,
+                    token: appMcp.token
                   }
                 : undefined,
-              onToolchainAdvisory: (message) => {
-                options.warnings.push(`@${participant.handle}: ${message}`);
-              },
-              options: {
-                persistSession: true,
-                role,
-                appMcp: appMcp
-                  ? {
-                      url: appMcp.url,
-                      token: appMcp.token
-                    }
-                  : undefined,
-                agentMode,
-                permissions,
-                extraEnv: agentEnvironment.env
-              },
-              maxRuntimeMs: remoteRunTarget.settings.maxRuntimeMs,
-              sourceMessageId: triggerMessage.id,
-              threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
-              chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
-              contextSnapshot: this.remoteRunContextSnapshot(promptConversation, participant, triggerMessage),
-              signal,
-              onPhase: (status) => {
-                latestRemoteRunStatus = status;
-                this.emitRemoteRunPhase(runId, progress, participant, pendingMessage.id, status);
+              agentMode,
+              permissions,
+              extraEnv: agentEnvironment.env
+            },
+            maxRuntimeMs: remoteRunTarget.settings.maxRuntimeMs,
+            sourceMessageId: triggerMessage.id,
+            threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
+            chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
+            contextSnapshot: this.remoteRunContextSnapshot(promptConversation, participant, triggerMessage),
+            signal,
+            onPhase: (status) => {
+              latestRemoteRunStatus = status;
+              this.emitRemoteRunPhase(runId, progress, participant, pendingMessage.id, status);
+            }
+          });
+          try {
+            let launchWorker = remoteRunTarget.worker;
+            let lastLaunchError: unknown;
+            for (let attempt = 0; attempt < 10; attempt += 1) {
+              try {
+                detachedState = await remoteRuns.startDetachedRun(detachedRequest(launchWorker));
+                lastLaunchError = undefined;
+                break;
+              } catch (error) {
+                lastLaunchError = error;
+                if (
+                  remoteRunTarget.settings.mode !== "aws" ||
+                  !this.cloudRunAws ||
+                  !this.shouldRetryAwsRemoteLaunch(error) ||
+                  attempt === 9
+                ) {
+                  throw error;
+                }
+                await new Promise((resolve) => setTimeout(resolve, 1_000));
+                const refreshedSettings = await this.cloudRunAws.ensureWorkerForRun();
+                const refreshedWorker = cloudRunWorkerTargetFromSettings(refreshedSettings);
+                if (!refreshedWorker) {
+                  throw error;
+                }
+                launchWorker = refreshedWorker;
+                await this.recordRemoteRunHandle(conversation, {
+                  ...handle,
+                  worker: refreshedSettings,
+                  updatedAt: new Date().toISOString()
+                }, pendingMessage.id);
               }
-            });
+            }
+            if (lastLaunchError) {
+              throw lastLaunchError;
+            }
           } catch (error) {
             const failureMessage = this.remoteRunLaunchFailureMessage(participant, error);
             await this.updateRemoteRunHandleState(conversation.id, runId, {
@@ -5442,17 +5774,26 @@ export class ChatService {
               status: "failed",
               error: failureMessage
             });
+            awsRemoteRunRefHeld = false;
             pendingMessage.status = "error";
             pendingMessage.content = failureMessage;
             this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, failureMessage);
             return [pendingMessage];
           }
+          if (!detachedState) {
+            throw new Error("Remote run launch completed without a worker state.");
+          }
           const updated = await this.updateRemoteRunHandleState(conversation.id, runId, detachedState);
+          if (detachedState.remoteSession) {
+            await this.persistRemoteParticipantSessionHandle(
+              conversation.id,
+              session,
+              detachedState.remoteSession,
+              detachedState.providerSessionId
+            );
+          }
           if (updated) {
             this.remoteRunCoordinator?.trackRun(updated);
-          }
-          if (remoteRunTarget.settings.mode === "aws") {
-            this.cloudRunAws?.noteRunStarted();
           }
           if (latestRemoteRunStatus) {
             pendingMessage.metadata = {
@@ -5465,6 +5806,7 @@ export class ChatService {
             this.recordLastMessageByParticipant(conversation, pendingMessage);
           }
           remoteDetachedStarted = true;
+          awsRemoteRunRefHeld = false;
           this.emitProgress(runId, progress, "done", `@${participant.handle} is running remotely.`, {
             participantLabel: `@${participant.handle}`,
             agentProgress: {
@@ -5563,6 +5905,9 @@ export class ChatService {
       this.lockParticipantRoleVersion(conversation, participant, session.roleConfigVersion);
       return [pendingMessage];
     } finally {
+      if (awsRemoteRunRefHeld) {
+        void this.cloudRunAws?.noteRunEnded(runId);
+      }
       unregisterRunProgressCallback();
       if (!remoteDetachedStarted && pendingMessage.status === "pending") {
         if (signal?.aborted) {
@@ -6353,6 +6698,75 @@ export class ChatService {
     });
   }
 
+  private persistRemoteParticipantSessionIdInConversation(
+    conversation: Conversation,
+    participantId: string,
+    sessionId: string
+  ): void {
+    const nextSessionId = sessionId.trim();
+    if (!nextSessionId) {
+      return;
+    }
+    const current = this.chatSessions(conversation).find((session) => session.participantId === participantId);
+    if (!current || current.sessionId === nextSessionId) {
+      return;
+    }
+    this.upsertSession(conversation, {
+      ...current,
+      sessionId: nextSessionId,
+      invalidatedRemoteSessionId: undefined,
+      invalidatedRemoteSessionAt: undefined,
+      updatedAt: new Date().toISOString()
+    });
+  }
+
+  private clearRemoteParticipantSessionIdInConversation(
+    conversation: Conversation,
+    participantId: string,
+    expectedSessionId: string | undefined
+  ): void {
+    const current = this.chatSessions(conversation).find((session) => session.participantId === participantId);
+    if (!current || (expectedSessionId && current.sessionId !== expectedSessionId)) {
+      return;
+    }
+    this.upsertSession(conversation, {
+      ...current,
+      sessionId: "",
+      invalidatedRemoteSessionId: current.sessionId || expectedSessionId,
+      invalidatedRemoteSessionAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+  }
+
+  private async persistRemoteParticipantSessionHandle(
+    conversationId: string,
+    session: ChatParticipantSession,
+    remoteSession: NonNullable<ChatParticipantSession["remoteSession"]>,
+    providerSessionId?: string
+  ): Promise<void> {
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return;
+    }
+    await this.withChatMutation(conversation, async () => {
+      const now = new Date().toISOString();
+      const stored = this.chatSessions(conversation).find((item) => item.participantId === session.participantId);
+      this.upsertSession(conversation, {
+        ...(stored ?? session),
+        sessionId: providerSessionId?.trim() || stored?.sessionId || session.sessionId,
+        remoteSession,
+        updatedAt: now
+      });
+      const participant = this.chatParticipants(conversation).find((item) => item.id === session.participantId);
+      if (participant) {
+        this.lockParticipantRoleVersion(conversation, participant, session.roleConfigVersion);
+      }
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+    });
+  }
+
   private async sessionForParticipant(conversation: Conversation, participant: ChatParticipant): Promise<ChatParticipantSessionState> {
     const existing = this.chatSessions(conversation).find((session) => session.participantId === participant.id);
     const runtimeConfigVersion = this.runtimeConfigVersionFor(participant);
@@ -6712,7 +7126,8 @@ export class ChatService {
   }
 
   private async remoteRunTargetForParticipant(
-    participant: ChatParticipant
+    participant: ChatParticipant,
+    runId: string
   ): Promise<RemoteRunParticipantTarget | undefined> {
     const mode = this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution);
     if (mode !== "remote") {
@@ -6731,6 +7146,12 @@ export class ChatService {
         message: `@${participant.handle} requested remote execution, but Cloud Runs currently supports Codex members only.`
       };
     }
+    if (settings.mode === "aws" && !this.remoteRuns) {
+      return {
+        ok: false,
+        message: `@${participant.handle} requested remote execution, but Cloud Runs is not available in this app session.`
+      };
+    }
     let workerSettings: CloudRunWorkerSettings;
     if (settings.mode === "aws") {
       if (!this.cloudRunAws) {
@@ -6739,11 +7160,14 @@ export class ChatService {
           message: `@${participant.handle} requested remote execution, but the AWS worker is not available in this app session.`
         };
       }
+      this.cloudRunAws.noteRunStarted(runId);
       try {
         // May start a stopped instance and re-open SSH ingress; can take a
         // couple of minutes on a cold start.
         workerSettings = await this.cloudRunAws.ensureWorkerForRun();
+        await this.remoteRunCoordinator?.drainRemoteSessionCleanup?.(workerSettings);
       } catch (error) {
+        await this.cloudRunAws.noteRunEnded(runId);
         return {
           ok: false,
           message: `@${participant.handle} requested remote execution, but the AWS worker could not be started: ${error instanceof Error ? error.message : String(error)}`
@@ -6754,6 +7178,9 @@ export class ChatService {
     }
     const worker = cloudRunWorkerTargetFromSettings(workerSettings);
     if (!worker) {
+      if (settings.mode === "aws") {
+        await this.cloudRunAws?.noteRunEnded(runId);
+      }
       return {
         ok: false,
         message: `@${participant.handle} requested remote execution, but the Cloud Runs worker host is not configured.`
@@ -6773,6 +7200,11 @@ export class ChatService {
     return detail.trim()
       ? `@${participant.handle} remote run failed to start: ${detail}`
       : `@${participant.handle} remote run failed to start.`;
+  }
+
+  private shouldRetryAwsRemoteLaunch(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /drain|stale-session|connection|connect timed out|ssh|did not acknowledge launch/i.test(message);
   }
 
   private remoteRunContextSnapshot(
@@ -7196,7 +7628,7 @@ export class ChatService {
       storedMetadata.participantSessions,
       currentMetadata.participantSessions,
       "participantId",
-      (_stored, current) => current,
+      (stored, current) => this.mergeStoredParticipantSessionMetadata(stored, current),
       {
         shouldAppendCurrentMissing: (current) => {
           const participantId = this.metadataStringKey(current, "participantId");
@@ -7317,6 +7749,29 @@ export class ChatService {
         ...storedPermissions,
         requestParticipants: currentPermissions.requestParticipants
       };
+    }
+    return merged;
+  }
+
+  private mergeStoredParticipantSessionMetadata(
+    stored: Record<string, unknown>,
+    current: Record<string, unknown>
+  ): Record<string, unknown> {
+    const storedUpdatedAt = typeof stored.updatedAt === "string" ? stored.updatedAt : "";
+    const currentUpdatedAt = typeof current.updatedAt === "string" ? current.updatedAt : "";
+    if (storedUpdatedAt !== currentUpdatedAt) {
+      return currentUpdatedAt > storedUpdatedAt ? current : stored;
+    }
+    const merged = { ...stored, ...current };
+    for (const key of [
+      "sessionId",
+      "remoteSession",
+      "invalidatedRemoteSessionId",
+      "invalidatedRemoteSessionAt"
+    ]) {
+      if (!Object.prototype.hasOwnProperty.call(current, key) && Object.prototype.hasOwnProperty.call(stored, key)) {
+        merged[key] = stored[key];
+      }
     }
     return merged;
   }
@@ -15260,6 +15715,9 @@ export class ChatService {
   }
 
   private queueSnapshot(conversation: Conversation): void {
+    if (this.deletedConversationIds.has(conversation.id)) {
+      return;
+    }
     const snapshot = this.emitConversationSnapshot(conversation);
     const previous = this.saveQueues.get(conversation.id) ?? Promise.resolve();
     const next = previous
@@ -15493,6 +15951,9 @@ export class ChatService {
     this.chatMutationQueues.set(conversationId, chained);
     await previous.catch(() => undefined);
     try {
+      if (this.deletedConversationIds.has(conversationId)) {
+        throw new Error("Chat was permanently deleted.");
+      }
       if (!options.skipRefresh) {
         // Wait for any in-flight saves to flush, then merge the latest stored state
         // into this batch's in-memory conversation reference. Concurrent sends each hold
@@ -15885,6 +16346,9 @@ export class ChatService {
   }
 
   private async saveConversation(conversation: Conversation): Promise<void> {
+    if (this.deletedConversationIds.has(conversation.id)) {
+      throw new Error("Chat was permanently deleted.");
+    }
     const pending = this.saveQueues.get(conversation.id);
     if (pending) {
       await pending.catch(() => undefined);

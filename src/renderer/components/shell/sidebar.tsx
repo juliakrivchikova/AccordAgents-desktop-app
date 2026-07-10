@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Archive, ArchiveRestore, ChevronDown, ChevronRight, Loader2, Pencil, Plus } from "lucide-react";
+import { Archive, ArchiveRestore, ChevronDown, ChevronRight, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
@@ -12,6 +12,7 @@ import { HistoryLoadingState } from "@/renderer/components/loading-states";
 import { EmptyState } from "@/renderer/components/primitives";
 import { cn } from "@/lib/utils";
 import { SidebarPanelIcon } from "./sidebar-panel-icon";
+import { DeleteConfirmationDialog } from "../settings/delete-confirmation-dialog";
 import type { ConversationSummary } from "../../../shared/types";
 
 const INITIAL_PROJECT_SESSION_LIMIT = 5;
@@ -39,6 +40,7 @@ export interface SidebarProps {
   onNewProjectSession: (repoPath?: string) => void;
   onArchive?: (id: string) => void;
   onUnarchive?: (id: string) => void;
+  onDelete?: (id: string) => Promise<void>;
   onToggleSidebar?: () => void;
 }
 
@@ -55,11 +57,14 @@ export const Sidebar = ({
   onNewProjectSession,
   onArchive,
   onUnarchive,
+  onDelete,
   onToggleSidebar
 }: SidebarProps): JSX.Element => {
   const [collapsedProjectKeys, setCollapsedProjectKeys] = useState<Set<string>>(new Set());
   const [expandedProjectKeys, setExpandedProjectKeys] = useState<Set<string>>(new Set());
   const [archivedCollapsed, setArchivedCollapsed] = useState(true);
+  const [deleteTarget, setDeleteTarget] = useState<ConversationSummary>();
+  const [deletePending, setDeletePending] = useState(false);
 
   function toggleProject(key: string): void {
     setCollapsedProjectKeys((current) => {
@@ -205,6 +210,7 @@ export const Sidebar = ({
                             onSelect={onSelect}
                             onArchive={onArchive}
                             onUnarchive={onUnarchive}
+                            onDelete={setDeleteTarget}
                           />
                         );
                       })}
@@ -264,6 +270,7 @@ export const Sidebar = ({
                         onSelect={onSelect}
                         onArchive={onArchive}
                         onUnarchive={onUnarchive}
+                        onDelete={setDeleteTarget}
                       />
                     );
                   })}
@@ -273,6 +280,29 @@ export const Sidebar = ({
           )}
         </div>
       </ScrollArea>
+
+      <DeleteConfirmationDialog
+        open={Boolean(deleteTarget)}
+        title="Delete chat permanently?"
+        description={deleteTarget
+          ? `“${deleteTarget.title}” and its saved messages will be permanently deleted. This cannot be undone.`
+          : "This chat and its saved messages will be permanently deleted."}
+        confirmLabel="Delete permanently"
+        pending={deletePending}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(undefined);
+        }}
+        onConfirm={async () => {
+          if (!deleteTarget || !onDelete) return;
+          setDeletePending(true);
+          try {
+            await onDelete(deleteTarget.id);
+            setDeleteTarget(undefined);
+          } finally {
+            setDeletePending(false);
+          }
+        }}
+      />
 
     </aside>
   );
@@ -287,6 +317,7 @@ interface SidebarSessionRowProps {
   onSelect: (id: string) => void;
   onArchive?: (id: string) => void;
   onUnarchive?: (id: string) => void;
+  onDelete?: (summary: ConversationSummary) => void;
 }
 
 const SidebarSessionRow = ({
@@ -297,7 +328,8 @@ const SidebarSessionRow = ({
   unread,
   onSelect,
   onArchive,
-  onUnarchive
+  onUnarchive,
+  onDelete
 }: SidebarSessionRowProps): JSX.Element => {
   const relativeTime = formatCompactRelativeTime(summary.updatedAt);
   const archived = summary.archived === true;
@@ -331,10 +363,16 @@ const SidebarSessionRow = ({
       </ContextMenuTrigger>
       <ContextMenuContent>
         {archived ? (
-          <ContextMenuItem onSelect={() => onUnarchive?.(summary.id)}>
-            <ArchiveRestore aria-hidden />
-            Unarchive
-          </ContextMenuItem>
+          <>
+            <ContextMenuItem onSelect={() => onUnarchive?.(summary.id)}>
+              <ArchiveRestore aria-hidden />
+              Unarchive
+            </ContextMenuItem>
+            <ContextMenuItem variant="destructive" disabled={running} onSelect={() => onDelete?.(summary)}>
+              <Trash2 aria-hidden />
+              Delete permanently
+            </ContextMenuItem>
+          </>
         ) : (
           <ContextMenuItem disabled={running} onSelect={() => onArchive?.(summary.id)}>
             <Archive aria-hidden />

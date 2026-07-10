@@ -25,6 +25,9 @@ export interface AwsWorkerInstanceInfo {
   instanceId: string;
   state: AwsWorkerInstanceState;
   publicIp?: string;
+  rootDeviceName?: string;
+  rootVolumeId?: string;
+  rootVolumeBackedByEbs?: boolean;
 }
 
 export interface AwsWorkerImageInfo {
@@ -67,6 +70,11 @@ export interface AwsWorkerLifecycleOptions {
   ) => Promise<AwsWorkerInstanceInfo | undefined>;
   logger?: (event: string, payload: Record<string, unknown>) => void;
   idleStopMs?: number;
+  idleStopRetryMs?: number;
+  authorizeAutomaticStop?: (info: AwsWorkerInstanceInfo) => Promise<{
+    renew(): Promise<void>;
+    release(): Promise<void>;
+  } | undefined>;
   now?: () => number;
 }
 
@@ -84,12 +92,13 @@ export interface AwsWorkerDeleteResult {
 }
 
 const RUNNING_WAIT_TIMEOUT_MS = 3 * 60_000;
+const STOPPED_WAIT_TIMEOUT_MS = 3 * 60_000;
 const TERMINATED_WAIT_TIMEOUT_MS = 3 * 60_000;
 const DEFAULT_IDLE_STOP_MS = 20 * 60_000;
 
 export class AwsWorkerLifecycle {
   private readonly options: Required<Pick<AwsWorkerLifecycleOptions,
-    "createEc2Client" | "generateKeyMaterial" | "deleteKeyMaterial" | "currentPublicIp" | "waitForState" | "idleStopMs" | "now">>
+    "createEc2Client" | "generateKeyMaterial" | "deleteKeyMaterial" | "currentPublicIp" | "waitForState" | "idleStopMs" | "idleStopRetryMs" | "authorizeAutomaticStop" | "now">>
     & Pick<AwsWorkerLifecycleOptions, "logger">;
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
   private activeRuns = 0;
@@ -102,6 +111,8 @@ export class AwsWorkerLifecycle {
       currentPublicIp: options.currentPublicIp,
       waitForState: options.waitForState ?? defaultWaitForState,
       idleStopMs: options.idleStopMs ?? DEFAULT_IDLE_STOP_MS,
+      idleStopRetryMs: options.idleStopRetryMs ?? 60_000,
+      authorizeAutomaticStop: options.authorizeAutomaticStop ?? (async () => undefined),
       now: options.now ?? (() => Date.now()),
       logger: options.logger
     };
@@ -151,6 +162,9 @@ export class AwsWorkerLifecycle {
     if (!info || info.state === "terminated") {
       throw new Error("The AWS worker instance no longer exists. Create a new worker.");
     }
+    if (info.rootVolumeBackedByEbs === false) {
+      throw new Error("The AWS worker root device is not backed by persistent EBS storage.");
+    }
     if (info.state === "stopped" || info.state === "stopping") {
       this.log("aws-worker.starting", { instanceId: handle.instanceId });
       if (info.state === "stopping") {
@@ -191,29 +205,77 @@ export class AwsWorkerLifecycle {
     if (this.activeRuns > 0) {
       return;
     }
-    this.clearIdleTimer();
-    this.idleTimer = setTimeout(() => {
-      void this.stopIfIdle(credentials, handle);
-    }, this.options.idleStopMs);
+    this.scheduleIdleStop(credentials, handle, this.options.idleStopMs);
   }
 
   private async stopIfIdle(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle): Promise<void> {
     if (this.activeRuns > 0) {
       return;
     }
+    let authorization: { renew(): Promise<void>; release(): Promise<void> } | undefined;
+    let renewalTimer: ReturnType<typeof setInterval> | undefined;
+    let stopRequested = false;
     try {
       const client = this.options.createEc2Client(credentials);
       const info = await client.describeInstance(handle.instanceId);
       if (info?.state === "running") {
+        authorization = await this.options.authorizeAutomaticStop(info);
+        if (!authorization) {
+          this.log("aws-worker.idle-stop.denied", { instanceId: handle.instanceId });
+          this.scheduleIdleStop(credentials, handle, this.options.idleStopRetryMs);
+          return;
+        }
+        if (this.activeRuns > 0) {
+          await authorization.release().catch(() => undefined);
+          return;
+        }
+        renewalTimer = setInterval(() => {
+          void authorization?.renew().catch((error) => {
+            this.log("aws-worker.idle-stop.lease-renew.error", {
+              instanceId: handle.instanceId,
+              message: error instanceof Error ? error.message : String(error)
+            });
+          });
+        }, 10_000);
+        renewalTimer.unref?.();
         await client.stopInstance(handle.instanceId);
+        stopRequested = true;
+        await this.options.waitForState(
+          () => client.describeInstance(handle.instanceId),
+          (current) => !current || current.state === "stopped" || current.state === "terminated" || current.state === "absent",
+          STOPPED_WAIT_TIMEOUT_MS
+        );
         this.log("aws-worker.idle-stopped", { instanceId: handle.instanceId });
       }
     } catch (error) {
+      if (!stopRequested) {
+        await authorization?.release().catch(() => undefined);
+      }
       this.log("aws-worker.idle-stop.error", {
         instanceId: handle.instanceId,
         message: error instanceof Error ? error.message : String(error)
       });
+      if (!stopRequested) {
+        this.scheduleIdleStop(credentials, handle, this.options.idleStopRetryMs);
+      }
+    } finally {
+      if (renewalTimer) {
+        clearInterval(renewalTimer);
+      }
     }
+  }
+
+  private scheduleIdleStop(
+    credentials: AwsWorkerCredentials,
+    handle: AwsWorkerHandle,
+    delayMs: number
+  ): void {
+    this.clearIdleTimer();
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = undefined;
+      void this.stopIfIdle(credentials, handle);
+    }, Math.max(1, delayMs));
+    this.idleTimer.unref?.();
   }
 
   async deleteWorker(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle): Promise<AwsWorkerDeleteResult> {

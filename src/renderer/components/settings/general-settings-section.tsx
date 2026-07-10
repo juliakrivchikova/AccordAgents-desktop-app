@@ -322,6 +322,7 @@ function CloudRunsControl(props: {
             data-testid="remote-codex-worker-toggle"
             checked={draft.enabled}
             disabled={busy}
+            aria-expanded={draft.enabled}
             onChange={(event) => {
               const enabled = event.target.checked;
               void savePatch({ enabled });
@@ -330,11 +331,11 @@ function CloudRunsControl(props: {
           <span />
         </label>
       </div>
-      <fieldset
-        className="gen-cloud-runs-settings"
-        data-testid="remote-codex-worker-settings"
-        disabled={!draft.enabled}
-      >
+      {draft.enabled ? (
+        <fieldset
+          className="gen-cloud-runs-settings"
+          data-testid="remote-codex-worker-settings"
+        >
         <div className="gen-card-divider" />
         <div className="gen-row">
         <div className="gen-row-text">
@@ -481,7 +482,8 @@ function CloudRunsControl(props: {
           </ul>
         </>
       )}
-      </fieldset>
+        </fieldset>
+      ) : null}
     </div>
   );
 }

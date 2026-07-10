@@ -239,6 +239,30 @@ test("ensureRunning starts a stopped instance and rebuilds ingress to the curren
   assert.deepEqual([...client.ingressCidrs], ["203.0.113.9/32"]);
 });
 
+test("ensureRunning permits an EC2 root-volume state that is not known yet", async () => {
+  const client = new FakeEc2Client({
+    state: "running",
+    publicIp: "1.1.1.1",
+    rootVolumeBackedByEbs: undefined
+  });
+  const ip = await lifecycleWith(client).ensureRunning(CREDS, HANDLE);
+  assert.equal(ip, "1.1.1.1");
+  assert.equal(client.revokedCount, 1);
+});
+
+test("ensureRunning rejects an explicitly instance-store-backed root volume", async () => {
+  const client = new FakeEc2Client({
+    state: "running",
+    publicIp: "1.1.1.1",
+    rootVolumeBackedByEbs: false
+  });
+  await assert.rejects(
+    () => lifecycleWith(client).ensureRunning(CREDS, HANDLE),
+    /not backed by persistent EBS storage/
+  );
+  assert.equal(client.revokedCount, 0);
+});
+
 test("ensureRunning on a running instance does not start again but still refreshes ingress", async () => {
   const client = new FakeEc2Client({ state: "running", publicIp: "5.5.5.5" });
   const ip = await lifecycleWith(client).ensureRunning(CREDS, HANDLE);
@@ -260,6 +284,10 @@ test("idle auto-stop fires only after the last run ends and is cancelled by a ne
     generateKeyMaterial: async () => ({ keyName: "k", publicKeyOpenSsh: "x", privateKeyPath: "/tmp/k" }),
     currentPublicIp: async () => "203.0.113.9",
     idleStopMs: 15,
+    authorizeAutomaticStop: async () => ({
+      renew: async () => undefined,
+      release: async () => undefined
+    }),
     now: () => 0
   });
   // Two overlapping runs: the first ending must NOT stop the instance.
@@ -276,6 +304,109 @@ test("idle auto-stop fires only after the last run ends and is cancelled by a ne
   await new Promise((resolve) => setTimeout(resolve, 60));
   assert.equal(client.stopCount, 1);
   void timers;
+});
+
+test("automatic stop fails closed while worker work is registered, then retries once idle", async () => {
+  const client = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
+  let attempts = 0;
+  const lifecycle = new AwsWorkerLifecycle({
+    createEc2Client: () => client,
+    generateKeyMaterial: async () => ({ keyName: "k", publicKeyOpenSsh: "x", privateKeyPath: "/tmp/k" }),
+    currentPublicIp: async () => "203.0.113.9",
+    idleStopMs: 10,
+    idleStopRetryMs: 10,
+    authorizeAutomaticStop: async () => {
+      attempts += 1;
+      return attempts === 1
+        ? undefined
+        : { renew: async () => undefined, release: async () => undefined };
+    }
+  });
+
+  lifecycle.runStarted();
+  lifecycle.runEnded(CREDS, HANDLE);
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(client.stopCount, 0);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(client.stopCount, 1);
+  assert.equal(attempts, 2);
+});
+
+test("automatic stop releases its worker lease when a local run starts during authorization", async () => {
+  const client = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
+  let authorizationRequested = false;
+  let authorize!: (value: { renew(): Promise<void>; release(): Promise<void> }) => void;
+  const authorization = new Promise<{ renew(): Promise<void>; release(): Promise<void> }>((resolve) => {
+    authorize = resolve;
+  });
+  let releases = 0;
+  const lifecycle = lifecycleWith(client, {
+    idleStopMs: 5,
+    authorizeAutomaticStop: async () => {
+      authorizationRequested = true;
+      return authorization;
+    }
+  });
+
+  lifecycle.runStarted();
+  lifecycle.runEnded(CREDS, HANDLE);
+  for (let attempt = 0; attempt < 20 && !authorizationRequested; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  assert.equal(authorizationRequested, true);
+  lifecycle.runStarted();
+  authorize({
+    renew: async () => undefined,
+    release: async () => { releases += 1; }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(client.stopCount, 0);
+  assert.equal(releases, 1);
+});
+
+test("automatic stop retains its drain lease until AWS reports the instance stopped", async () => {
+  const client = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
+  let finishStopping!: () => void;
+  const stopping = new Promise<void>((resolve) => { finishStopping = resolve; });
+  client.stopInstance = async () => {
+    client.stopCount += 1;
+    client.state = { ...client.state, state: "stopping" };
+  };
+  let releases = 0;
+  const lifecycle = new AwsWorkerLifecycle({
+    createEc2Client: () => client,
+    generateKeyMaterial: async () => ({ keyName: "k", publicKeyOpenSsh: "x", privateKeyPath: "/tmp/k" }),
+    currentPublicIp: async () => "203.0.113.9",
+    idleStopMs: 5,
+    authorizeAutomaticStop: async () => ({
+      renew: async () => undefined,
+      release: async () => { releases += 1; }
+    }),
+    waitForState: async (poll, predicate) => {
+      let info = await poll();
+      if (!predicate(info)) {
+        await stopping;
+        client.state = { ...client.state, state: "stopped", publicIp: undefined };
+        info = await poll();
+      }
+      assert.equal(predicate(info), true);
+      return info;
+    }
+  });
+
+  lifecycle.runStarted();
+  lifecycle.runEnded(CREDS, HANDLE);
+  for (let attempt = 0; attempt < 50 && client.stopCount === 0; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  assert.equal(client.stopCount, 1);
+  assert.equal(client.state.state, "stopping");
+  assert.equal(releases, 0);
+  finishStopping();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(client.state.state, "stopped");
+  assert.equal(releases, 0, "successful automatic stop keeps the durable drain marker for next-boot clearing");
 });
 
 test("deleteWorker terminates the instance and cleans up key material and security group", async () => {

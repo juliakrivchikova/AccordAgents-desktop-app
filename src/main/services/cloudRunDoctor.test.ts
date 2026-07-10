@@ -8,7 +8,8 @@ const WORKER = { host: "worker.example", user: "ubuntu", identityFile: "/tmp/key
 const FULLY_PROVISIONED = [
   "rsync=ok", "git=ok", "gh=ok", "java=ok", "node=ok", "codex=ok",
   "build-essential=ok", "sudo=ok", "userns=0",
-  "git-name=Dev Example", "git-email=dev@example.com", "codex-auth=ok"
+  "git-name=Dev Example", "git-email=dev@example.com", "persistent-storage=ok",
+  "storage-detail=/dev/root ext4 | /dev/root ext4", "codex-auth=ok"
 ].join("\n");
 
 function doctorWith(handler: (request: CloudRunSshExecRequest) => Promise<string>, extra = {}): {
@@ -33,13 +34,39 @@ test("diagnose reports ready when every probe passes", async () => {
   assert.equal(report.ok, true);
   assert.equal(report.checks.find((check) => check.id === "codex-auth")?.status, "pass");
   assert.equal(report.checks.find((check) => check.id === "userns")?.status, "pass");
+  assert.match(report.checks.find((check) => check.id === "persistent-storage")?.detail ?? "", /ext4/);
+});
+
+test("diagnose fails closed when worker or Codex sessions use volatile storage", async () => {
+  const volatile = FULLY_PROVISIONED
+    .replace("persistent-storage=ok", "persistent-storage=missing")
+    .replace("/dev/root ext4 | /dev/root ext4", "tmpfs tmpfs | tmpfs tmpfs");
+  const { service, commands } = doctorWith(async () => volatile);
+  const report = await service.diagnose(
+    { ...WORKER, workerRoot: "~/.accordagents/remote-runs" },
+    { requirePersistentStorage: true }
+  );
+  assert.equal(report.ok, false);
+  assert.equal(report.checks.find((check) => check.id === "persistent-storage")?.status, "fail");
+  assert.match(commands[0], /findmnt/);
+  assert.match(commands[0], /lsblk/);
+  assert.match(commands[0], /vol\[0-9a-fA-F\]/);
+  assert.match(commands[0], /CODEX_HOME/);
+});
+
+test("diagnose warns instead of blocking a manually managed SSH worker on volatile storage", async () => {
+  const volatile = FULLY_PROVISIONED.replace("persistent-storage=ok", "persistent-storage=missing");
+  const { service } = doctorWith(async () => volatile);
+  const report = await service.diagnose(WORKER);
+  assert.equal(report.ok, true);
+  assert.equal(report.checks.find((check) => check.id === "persistent-storage")?.status, "warn");
 });
 
 test("diagnose fails on required gaps and warns on optional gaps", async () => {
   const probe = [
     "rsync=ok", "git=ok", "gh=missing", "java=missing", "node=ok", "codex=missing",
     "build-essential=missing", "sudo=ok", "userns=1",
-    "git-name=", "git-email=", "codex-auth=missing"
+    "git-name=", "git-email=", "persistent-storage=ok", "codex-auth=missing"
   ].join("\n");
   const { service } = doctorWith(async () => probe);
   const report = await service.diagnose(WORKER);
@@ -94,7 +121,7 @@ test("setup installs only the missing pieces and re-diagnoses", async () => {
         ? [
             "rsync=missing", "git=ok", "gh=missing", "java=missing", "node=ok", "codex=missing",
             "build-essential=ok", "sudo=ok", "userns=1",
-            "git-name=", "git-email=", "codex-auth=ok"
+            "git-name=", "git-email=", "persistent-storage=ok", "codex-auth=ok"
           ].join("\n")
         : FULLY_PROVISIONED;
     }
@@ -122,7 +149,7 @@ test("setup drives codex device-auth and surfaces url + code to the user", async
           ? [
               "rsync=ok", "git=ok", "gh=ok", "java=ok", "node=ok", "codex=ok",
               "build-essential=ok", "sudo=ok", "userns=0",
-              "git-name=Dev", "git-email=dev@example.com", "codex-auth=missing"
+              "git-name=Dev", "git-email=dev@example.com", "persistent-storage=ok", "codex-auth=missing"
             ].join("\n")
           : FULLY_PROVISIONED;
       }
@@ -151,7 +178,7 @@ test("setup without sudo skips installs and reports remaining gaps", async () =>
       return [
         "rsync=missing", "git=ok", "gh=ok", "java=ok", "node=ok", "codex=ok",
         "build-essential=ok", "sudo=missing", "userns=0",
-        "git-name=Dev", "git-email=dev@example.com", "codex-auth=ok"
+        "git-name=Dev", "git-email=dev@example.com", "persistent-storage=ok", "codex-auth=ok"
       ].join("\n");
     }
     return "";

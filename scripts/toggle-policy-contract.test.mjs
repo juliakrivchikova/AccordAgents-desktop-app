@@ -12,12 +12,11 @@ const toggleCss = read("src/renderer/styles/views/content-markdown.css");
 const approvalCss = read("src/renderer/styles/views/chat-conversation.css");
 const generalCss = read("src/renderer/styles/views/settings-general.css");
 
-test("Remote Codex worker keeps its toggle outside a disabled dependent fieldset", () => {
+test("Remote Codex worker hides dependent settings while the toggle is off", () => {
   assert.match(generalSettings, /data-testid="remote-codex-worker-toggle"/);
-  assert.match(
-    generalSettings,
-    /data-testid="remote-codex-worker-settings"\s+disabled=\{!draft\.enabled\}/
-  );
+  assert.match(generalSettings, /aria-expanded=\{draft\.enabled\}/);
+  assert.match(generalSettings, /\{draft\.enabled \? \(\s*<fieldset/);
+  assert.doesNotMatch(generalSettings, /disabled=\{!draft\.enabled\}/);
 });
 
 test("both worker copy buttons use guarded exact-payload clipboard writes", () => {

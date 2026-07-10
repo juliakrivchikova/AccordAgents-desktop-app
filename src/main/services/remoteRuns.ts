@@ -11,6 +11,7 @@ import type {
   ConversationKind,
   GitDiffMode,
   ParticipantConfig,
+  RemoteParticipantSessionHandle,
   RemoteRunSyncInfo
 } from "../../shared/types";
 import { filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
@@ -37,6 +38,19 @@ import {
   RemoteRunPreflightInfrastructureError
 } from "./toolchainRequirements";
 import type { ToolchainIssueCategory, ToolchainPreflightIssue, ToolchainRequirement } from "./toolchainRequirements";
+import {
+  REMOTE_SESSION_IDLE_TIMEOUT_MS,
+  REMOTE_OPERATION_LEASE_MS,
+  REMOTE_SESSION_PROTOCOL_VERSION,
+  REMOTE_STOP_DRAIN_LEASE_MS,
+  REMOTE_STOP_DRAIN_SHUTDOWN_LEASE_MS,
+  remoteParticipantRuntimeFingerprint,
+  remoteParticipantSessionKey,
+  remoteSessionControlScript,
+  remoteSessionInstallerScript,
+  remoteSessionSupervisorScript,
+  remoteWorkerOperationLeaseShellScript
+} from "./remoteSessionSupervisorScript";
 
 const DEFAULT_APPLY_LIMIT = 200;
 const DEFAULT_REMOTE_RUN_TIMEOUT_MS = 24 * 60 * 60_000;
@@ -202,6 +216,7 @@ export interface RemoteRunServiceOptions {
   mirrorSync?: RemoteMirrorSyncRunner;
   syncLogger?: (event: string, payload: Record<string, unknown>) => void;
   remoteGitDirProbe?: (worker: RemoteRunWorkerTarget, gitDirPath: string, signal?: AbortSignal) => Promise<boolean>;
+  sessionIdleTimeoutMs?: number;
 }
 
 export interface RemoteRunStartRequest {
@@ -317,7 +332,72 @@ export interface RemoteDetachedRunState {
   signal?: string;
   timedOut?: boolean;
   error?: string;
+  providerSessionId?: string;
+  providerSessionValid?: boolean;
+  acceptedAt?: string;
   sync?: RemoteRunSyncInfo;
+  remoteSession?: RemoteParticipantSessionHandle;
+}
+
+export interface RemoteParticipantSessionEnsureRequest {
+  conversationId: string;
+  participantId: string;
+  worker: RemoteRunWorkerTarget;
+  runtimeFingerprint: string;
+  idleTimeoutMs: number;
+  signal?: AbortSignal;
+}
+
+export interface RemoteParticipantSessionEnsureResult {
+  handle: RemoteParticipantSessionHandle;
+  launched: boolean;
+}
+
+export interface RemoteParticipantSessionInspectRequest {
+  handle: RemoteParticipantSessionHandle;
+  signal?: AbortSignal;
+}
+
+export interface RemoteParticipantSessionInspectResult {
+  status: "live" | "stopped" | "unknown";
+  activeRunId?: string;
+  queuedRunIds?: string[];
+  providerSessionId?: string;
+  providerSessionValid?: boolean;
+}
+
+export interface RemoteParticipantSessionDiscovery extends RemoteParticipantSessionInspectResult {
+  handle: RemoteParticipantSessionHandle;
+  conversationId?: string;
+  participantId?: string;
+  hasQueuedTurns?: boolean;
+}
+
+export interface RemoteParticipantSessionStopRequest {
+  handle: RemoteParticipantSessionHandle;
+  remove?: boolean;
+  removeArtifacts?: boolean;
+  runIds?: string[];
+  providerSessionIds?: string[];
+  signal?: AbortSignal;
+}
+
+export interface RemoteWorkerStopLease {
+  leaseId: string;
+  expiresAt: string;
+}
+
+export interface RemoteWorkerStopAuthorization {
+  allowed: boolean;
+  reason?: string;
+  lease?: RemoteWorkerStopLease;
+}
+
+export interface RemoteWorkerOperationLease {
+  leaseId: string;
+  ownerId: string;
+  kind: string;
+  expiresAt: string;
 }
 
 interface RemoteWorkerEventBase {
@@ -388,6 +468,7 @@ export interface RemoteDetachedWorkerLaunchRequest {
   chatThreadRootId?: string;
   contextSnapshot?: unknown;
   signal?: AbortSignal;
+  participantSession?: RemoteParticipantSessionHandle;
 }
 
 export interface RemoteToolchainPreflightProbeRequest {
@@ -429,6 +510,17 @@ export interface RemoteDetachedWorkerSnapshot {
 
 export interface RemoteDetachedWorkerTransport {
   preflight(request: RemoteToolchainPreflightProbeRequest): Promise<ToolchainPreflightIssue[]>;
+  ensureParticipantSession?(request: RemoteParticipantSessionEnsureRequest): Promise<RemoteParticipantSessionEnsureResult>;
+  submitTurn?(request: RemoteDetachedWorkerLaunchRequest): Promise<RemoteDetachedWorkerSnapshot>;
+  inspectParticipantSession?(request: RemoteParticipantSessionInspectRequest): Promise<RemoteParticipantSessionInspectResult>;
+  listParticipantSessions?(worker: RemoteRunWorkerTarget): Promise<RemoteParticipantSessionDiscovery[]>;
+  stopParticipantSessionIfIdle?(request: RemoteParticipantSessionStopRequest): Promise<boolean>;
+  authorizeAutomaticStop?(worker: RemoteRunWorkerTarget, ownerId: string): Promise<RemoteWorkerStopAuthorization>;
+  renewAutomaticStopLease?(worker: RemoteRunWorkerTarget, lease: RemoteWorkerStopLease): Promise<RemoteWorkerStopLease>;
+  releaseAutomaticStopLease?(worker: RemoteRunWorkerTarget, lease: RemoteWorkerStopLease): Promise<void>;
+  acquireOperationLease?(worker: RemoteRunWorkerTarget, ownerId: string, kind: string): Promise<RemoteWorkerOperationLease>;
+  renewOperationLease?(worker: RemoteRunWorkerTarget, lease: RemoteWorkerOperationLease): Promise<RemoteWorkerOperationLease>;
+  releaseOperationLease?(worker: RemoteRunWorkerTarget, lease: RemoteWorkerOperationLease): Promise<void>;
   launch(request: RemoteDetachedWorkerLaunchRequest): Promise<RemoteDetachedWorkerSnapshot>;
   poll(request: RemoteDetachedWorkerPollRequest): Promise<RemoteDetachedWorkerSnapshot>;
   cancel(request: RemoteDetachedWorkerCancelRequest): Promise<RemoteDetachedWorkerSnapshot>;
@@ -473,6 +565,8 @@ export class RemoteRunService {
   private readonly detachedSyncByRun = new Map<string, RemoteRunSyncInfo>();
   private readonly mirrorOpChainByPath = new Map<string, Promise<void>>();
   private readonly activeRunsByMirror = new Map<string, Set<string>>();
+  private readonly sessionIdleTimeoutMs: number;
+  private readonly toolchainPreflightCache = new Map<string, ToolchainPreflightIssue[]>();
 
   constructor(
     private readonly chat: Pick<ChatService, "applyRemoteRunReplayRecord" | "onAppToolApprovalDecision" | "getRemoteRunCursorSeq">,
@@ -485,6 +579,7 @@ export class RemoteRunService {
     this.mirrorSync = options.mirrorSync ?? defaultRemoteMirrorSync;
     this.syncLogger = options.syncLogger;
     this.remoteGitDirProbe = options.remoteGitDirProbe ?? defaultRemoteGitDirProbe;
+    this.sessionIdleTimeoutMs = Math.max(1, Math.floor(options.sessionIdleTimeoutMs ?? REMOTE_SESSION_IDLE_TIMEOUT_MS));
     this.chat.onAppToolApprovalDecision((event) => this.appendPermissionDecision(event));
   }
 
@@ -630,7 +725,30 @@ export class RemoteRunService {
       state: "started"
     });
 
-    await this.emitDetachedPhase(runId, request, "launching-session", "Checking remote environment");
+    const runtimeFingerprint = remoteParticipantRuntimeFingerprint({
+      participant: request.participant,
+      repoPath: request.repoPath ?? request.sync?.localPath,
+      kind: request.kind ?? "chat",
+      options: request.options,
+      codexPath: request.worker.codexPath
+    });
+    let participantSession: RemoteParticipantSessionEnsureResult | undefined;
+    if (this.detachedWorkerTransport.ensureParticipantSession) {
+      await this.emitDetachedPhase(runId, request, "preparing-worker", "Checking warm remote session");
+      participantSession = await this.detachedWorkerTransport.ensureParticipantSession({
+        conversationId: request.conversationId,
+        participantId: request.participant.id,
+        worker: request.worker,
+        runtimeFingerprint,
+        idleTimeoutMs: this.sessionIdleTimeoutMs,
+        signal: request.signal
+      });
+      if (participantSession.launched) {
+        await this.emitDetachedPhase(runId, request, "launching-session", "Launching remote session");
+      }
+    } else {
+      await this.emitDetachedPhase(runId, request, "launching-session", "Checking remote environment");
+    }
     const advisoryIssues = await this.ensureRemoteToolchainPreflight(
       request.worker,
       {
@@ -642,12 +760,23 @@ export class RemoteRunService {
     const advisoryMessage = formatToolchainAdvisoryIssues(advisoryIssues);
     if (advisoryMessage) {
       request.onToolchainAdvisory?.(advisoryMessage);
-      await this.emitDetachedPhase(runId, request, "launching-session", "Checking remote environment", advisoryMessage);
+      await this.emitDetachedPhase(
+        runId,
+        request,
+        participantSession ? "preparing-worker" : "launching-session",
+        "Checking remote environment",
+        advisoryMessage
+      );
     }
 
     const sync = await this.prepareMirrorForRun(runId, request);
     const effectiveRepoPath = sync?.remotePath ?? request.repoPath;
-    await this.emitDetachedPhase(runId, request, "launching-session", "Preparing remote sandbox");
+    await this.emitDetachedPhase(
+      runId,
+      request,
+      participantSession ? "preparing-worker" : "launching-session",
+      "Preparing remote sandbox"
+    );
     const remoteSandbox = await this.remoteSandboxOptionsForRun(request, sync, effectiveRepoPath);
 
     const invocation = buildCodexExecInvocation({
@@ -670,8 +799,10 @@ export class RemoteRunService {
 
     let snapshot: RemoteDetachedWorkerSnapshot;
     try {
-      await this.emitDetachedPhase(runId, request, "launching-session", "Launching remote session");
-      snapshot = await this.detachedWorkerTransport.launch({
+      if (!participantSession) {
+        await this.emitDetachedPhase(runId, request, "launching-session", "Launching remote session");
+      }
+      const launchRequest: RemoteDetachedWorkerLaunchRequest = {
         conversationId: request.conversationId,
         runId,
         participant: request.participant,
@@ -685,8 +816,36 @@ export class RemoteRunService {
         threadId: request.threadId,
         chatThreadRootId: request.chatThreadRootId,
         contextSnapshot: request.contextSnapshot,
-        signal: request.signal
-      });
+        signal: request.signal,
+        participantSession: participantSession?.handle
+      };
+      if (participantSession && this.detachedWorkerTransport.submitTurn) {
+        try {
+          snapshot = await this.detachedWorkerTransport.submitTurn(launchRequest);
+        } catch {
+          const relaunched = await this.detachedWorkerTransport.ensureParticipantSession?.({
+            conversationId: request.conversationId,
+            participantId: request.participant.id,
+            worker: request.worker,
+            runtimeFingerprint,
+            idleTimeoutMs: this.sessionIdleTimeoutMs,
+            signal: request.signal
+          });
+          if (!relaunched) {
+            throw new Error("Remote participant session became unavailable.");
+          }
+          participantSession = relaunched;
+          if (relaunched.launched) {
+            await this.emitDetachedPhase(runId, request, "launching-session", "Relaunching stale remote session");
+          }
+          snapshot = await this.detachedWorkerTransport.submitTurn({
+            ...launchRequest,
+            participantSession: relaunched.handle
+          });
+        }
+      } else {
+        snapshot = await this.detachedWorkerTransport.launch(launchRequest);
+      }
     } catch (error) {
       this.forgetRunSync(runId);
       throw error;
@@ -694,7 +853,78 @@ export class RemoteRunService {
     await this.projectWorkerSnapshot(request.conversationId, runId, request.participant.id, snapshot);
     await this.projectSnapshotTerminalFallback(request.conversationId, runId, request.participant.id, snapshot);
     await this.emitDetachedPhase(runId, request, "waiting-for-response", "Waiting for response");
-    return sync ? { ...snapshot.state, sync } : snapshot.state;
+    const state = participantSession
+      ? { ...snapshot.state, remoteSession: participantSession.handle }
+      : snapshot.state;
+    return sync ? { ...state, sync } : state;
+  }
+
+  async inspectParticipantSession(handle: RemoteParticipantSessionHandle): Promise<RemoteParticipantSessionInspectResult> {
+    if (!this.detachedWorkerTransport.inspectParticipantSession) {
+      return { status: "unknown" };
+    }
+    return this.detachedWorkerTransport.inspectParticipantSession({ handle });
+  }
+
+  async listParticipantSessions(worker: RemoteRunWorkerTarget): Promise<RemoteParticipantSessionDiscovery[]> {
+    return this.detachedWorkerTransport.listParticipantSessions?.(worker) ?? [];
+  }
+
+  async stopParticipantSessionIfIdle(
+    handle: RemoteParticipantSessionHandle,
+    remove = false,
+    cleanup: Pick<RemoteParticipantSessionStopRequest, "removeArtifacts" | "runIds" | "providerSessionIds"> = {}
+  ): Promise<boolean> {
+    if (!this.detachedWorkerTransport.stopParticipantSessionIfIdle) {
+      return false;
+    }
+    return this.detachedWorkerTransport.stopParticipantSessionIfIdle({ handle, remove, ...cleanup });
+  }
+
+  async authorizeAutomaticWorkerStop(worker: RemoteRunWorkerTarget, ownerId: string): Promise<RemoteWorkerStopAuthorization> {
+    if (!this.detachedWorkerTransport.authorizeAutomaticStop) {
+      return { allowed: false, reason: "worker lifecycle protocol is unavailable" };
+    }
+    return this.detachedWorkerTransport.authorizeAutomaticStop(worker, ownerId);
+  }
+
+  async renewAutomaticWorkerStopLease(
+    worker: RemoteRunWorkerTarget,
+    lease: RemoteWorkerStopLease
+  ): Promise<RemoteWorkerStopLease> {
+    if (!this.detachedWorkerTransport.renewAutomaticStopLease) {
+      throw new Error("Worker lifecycle lease renewal is unavailable.");
+    }
+    return this.detachedWorkerTransport.renewAutomaticStopLease(worker, lease);
+  }
+
+  async releaseAutomaticWorkerStopLease(worker: RemoteRunWorkerTarget, lease: RemoteWorkerStopLease): Promise<void> {
+    await this.detachedWorkerTransport.releaseAutomaticStopLease?.(worker, lease);
+  }
+
+  async acquireWorkerOperationLease(
+    worker: RemoteRunWorkerTarget,
+    ownerId: string,
+    kind: string
+  ): Promise<RemoteWorkerOperationLease> {
+    if (!this.detachedWorkerTransport.acquireOperationLease) {
+      throw new Error("Worker operation lease protocol is unavailable.");
+    }
+    return this.detachedWorkerTransport.acquireOperationLease(worker, ownerId, kind);
+  }
+
+  async renewWorkerOperationLease(
+    worker: RemoteRunWorkerTarget,
+    lease: RemoteWorkerOperationLease
+  ): Promise<RemoteWorkerOperationLease> {
+    if (!this.detachedWorkerTransport.renewOperationLease) {
+      throw new Error("Worker operation lease renewal is unavailable.");
+    }
+    return this.detachedWorkerTransport.renewOperationLease(worker, lease);
+  }
+
+  async releaseWorkerOperationLease(worker: RemoteRunWorkerTarget, lease: RemoteWorkerOperationLease): Promise<void> {
+    await this.detachedWorkerTransport.releaseOperationLease?.(worker, lease);
   }
 
   registerDetachedRunContext(
@@ -1232,10 +1462,20 @@ export class RemoteRunService {
     const probeRequirements = requirements.filter((requirement) => !requirement.unsupportedOnLinux);
     let remoteIssues: ToolchainPreflightIssue[] = [];
     if (probeRequirements.length > 0) {
-      try {
-        remoteIssues = await this.detachedWorkerTransport.preflight({ worker, requirements: probeRequirements, signal });
-      } catch (error) {
-        throw new RemoteRunPreflightInfrastructureError(error instanceof Error ? error.message : String(error));
+      const cacheKey = JSON.stringify({
+        worker: [worker.host, worker.user, worker.port, worker.codexPath],
+        requirements: probeRequirements
+      });
+      const cached = this.toolchainPreflightCache.get(cacheKey);
+      if (cached) {
+        remoteIssues = cached;
+      } else {
+        try {
+          remoteIssues = await this.detachedWorkerTransport.preflight({ worker, requirements: probeRequirements, signal });
+          this.toolchainPreflightCache.set(cacheKey, remoteIssues);
+        } catch (error) {
+          throw new RemoteRunPreflightInfrastructureError(error instanceof Error ? error.message : String(error));
+        }
       }
     }
     const blocking = [...localIssues, ...remoteIssues].filter((issue) => issue.severity === "required");
@@ -1588,6 +1828,270 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
     return parseToolchainProbeOutput(request.requirements, result.stdout);
   }
 
+  async ensureParticipantSession(
+    request: RemoteParticipantSessionEnsureRequest
+  ): Promise<RemoteParticipantSessionEnsureResult> {
+    const root = await this.ensureSessionProtocol(request.worker, request.signal);
+    const sessionKey = remoteParticipantSessionKey(request.conversationId, request.participantId);
+    const sessionDir = `${root}/sessions/${sessionKey}`;
+    const result = await this.runSessionControl(request.worker, root, "ensure", {
+      protocolVersion: REMOTE_SESSION_PROTOCOL_VERSION,
+      sessionKey,
+      sessionDir,
+      conversationId: request.conversationId,
+      participantId: request.participantId,
+      runtimeFingerprint: request.runtimeFingerprint,
+      idleTimeoutMs: request.idleTimeoutMs
+    }, request.signal);
+    if (result.ok !== true || (result.status !== "warm" && result.status !== "launched")) {
+      throw new Error(`Remote participant session could not be prepared (${String(result.status ?? "unknown")}).`);
+    }
+    return {
+      launched: result.status === "launched",
+      handle: {
+        sessionKey,
+        sessionDir,
+        worker: workerSettingsFromTarget(request.worker),
+        protocolVersion: REMOTE_SESSION_PROTOCOL_VERSION,
+        runtimeFingerprint: request.runtimeFingerprint,
+        updatedAt: new Date().toISOString()
+      }
+    };
+  }
+
+  async submitTurn(request: RemoteDetachedWorkerLaunchRequest): Promise<RemoteDetachedWorkerSnapshot> {
+    const session = request.participantSession;
+    if (!session) {
+      throw new Error("Remote participant session handle is missing.");
+    }
+    const root = await resolveRemoteRunDir(
+      request.worker.sshPath?.trim() || "ssh",
+      remoteSshBaseArgs(request.worker, remoteSshTarget(request.worker)),
+      remoteWorkerRootForTarget(request.worker),
+      request.signal
+    );
+    const resolvedRunDir = await resolveRemoteRunDir(
+      request.worker.sshPath?.trim() || "ssh",
+      remoteSshBaseArgs(request.worker, remoteSshTarget(request.worker)),
+      request.remoteRunDir,
+      request.signal
+    );
+    const resolvedFinalPath = `${resolvedRunDir}/final.txt`;
+    const invocationArgs = replaceArgValue(request.invocation.args, request.remoteFinalPath, resolvedFinalPath);
+    const invocation = {
+      runId: request.runId,
+      conversationId: request.conversationId,
+      participantId: request.participant.id,
+      args: invocationArgs,
+      input: request.invocation.input,
+      env: request.invocation.env ?? {},
+      codexPath: request.worker.codexPath?.trim() || "codex",
+      remoteCwd: request.worker.remoteCwd?.trim(),
+      finalPath: resolvedFinalPath,
+      maxRuntimeMs: request.maxRuntimeMs,
+      resumeSessionId: resumeSessionIdFromArgs(invocationArgs),
+      sourceMessageId: request.sourceMessageId,
+      threadId: request.threadId,
+      chatThreadRootId: request.chatThreadRootId
+    };
+    const result = await this.runSessionControl(request.worker, root, "submit", {
+      sessionDir: session.sessionDir,
+      runId: request.runId,
+      runDir: resolvedRunDir,
+      prompt: request.invocation.input,
+      invocation,
+      contextSnapshot: request.contextSnapshot ?? null
+    }, request.signal);
+    if (result.ok !== true) {
+      throw new Error(`Remote participant session rejected the turn (${String(result.status ?? "unknown")}).`);
+    }
+    const runStatus = typeof result.runStatus === "string" ? result.runStatus : "accepted";
+    if (runStatus === "completed" || runStatus === "failed" || runStatus === "cancelled") {
+      return this.poll({
+        runId: request.runId,
+        worker: request.worker,
+        afterWorkerSeq: 0,
+        signal: request.signal
+      });
+    }
+    return {
+      state: {
+        runId: request.runId,
+        conversationId: request.conversationId,
+        participantId: request.participant.id,
+        status: "running",
+        acceptedAt: new Date().toISOString()
+      },
+      events: []
+    };
+  }
+
+  async inspectParticipantSession(
+    request: RemoteParticipantSessionInspectRequest
+  ): Promise<RemoteParticipantSessionInspectResult> {
+    const worker = targetFromSessionHandle(request.handle);
+    const root = await this.ensureSessionProtocol(worker, request.signal);
+    const result = await this.runSessionControl(worker, root, "inspect", {
+      sessionDir: request.handle.sessionDir
+    }, request.signal);
+    const state = result.state && typeof result.state === "object"
+      ? result.state as Record<string, unknown>
+      : {};
+    return {
+      status: result.status === "live" ? "live" : result.status === "stopped" ? "stopped" : "unknown",
+      activeRunId: typeof state.activeRunId === "string" ? state.activeRunId : undefined,
+      queuedRunIds: Array.isArray(state.queuedRunIds)
+        ? state.queuedRunIds.filter((value): value is string => typeof value === "string")
+        : undefined,
+      providerSessionId: state.providerSessionValid === false
+        ? undefined
+        : typeof state.providerSessionId === "string" ? state.providerSessionId : undefined,
+      providerSessionValid: typeof state.providerSessionValid === "boolean" ? state.providerSessionValid : undefined
+    };
+  }
+
+  async listParticipantSessions(worker: RemoteRunWorkerTarget): Promise<RemoteParticipantSessionDiscovery[]> {
+    const root = await this.ensureSessionProtocol(worker, undefined);
+    const result = await this.runSessionControl(worker, root, "list-sessions", {}, undefined);
+    const sessions = Array.isArray(result.sessions) ? result.sessions : [];
+    const now = new Date().toISOString();
+    return sessions.flatMap((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return [];
+      }
+      const record = value as Record<string, unknown>;
+      const sessionDir = typeof record.sessionDir === "string" ? record.sessionDir : undefined;
+      const sessionKey = typeof record.sessionKey === "string" ? record.sessionKey : undefined;
+      if (!sessionDir || !sessionKey) {
+        return [];
+      }
+      const queuedRunIds = Array.isArray(record.queuedRunIds)
+        ? record.queuedRunIds.filter((item): item is string => typeof item === "string")
+        : undefined;
+      return [{
+        handle: {
+          sessionKey,
+          sessionDir,
+          worker: workerSettingsFromTarget(worker),
+          protocolVersion: typeof record.protocolVersion === "number"
+            ? record.protocolVersion
+            : REMOTE_SESSION_PROTOCOL_VERSION,
+          runtimeFingerprint: typeof record.runtimeFingerprint === "string"
+            ? record.runtimeFingerprint
+            : "unknown",
+          updatedAt: now
+        },
+        conversationId: typeof record.conversationId === "string" ? record.conversationId : undefined,
+        participantId: typeof record.participantId === "string" ? record.participantId : undefined,
+        status: record.status === "live" ? "live" as const : record.status === "stopped" ? "stopped" as const : "unknown" as const,
+        activeRunId: typeof record.activeRunId === "string" ? record.activeRunId : undefined,
+        queuedRunIds,
+        hasQueuedTurns: record.hasQueuedTurns === true,
+        providerSessionId: record.providerSessionValid === false
+          ? undefined
+          : typeof record.providerSessionId === "string" ? record.providerSessionId : undefined,
+        providerSessionValid: typeof record.providerSessionValid === "boolean" ? record.providerSessionValid : undefined
+      }];
+    });
+  }
+
+  async stopParticipantSessionIfIdle(request: RemoteParticipantSessionStopRequest): Promise<boolean> {
+    const worker = targetFromSessionHandle(request.handle);
+    const root = await this.ensureSessionProtocol(worker, request.signal);
+    try {
+      const result = await this.runSessionControl(worker, root, "stop-session", {
+        sessionDir: request.handle.sessionDir,
+        remove: request.remove === true,
+        removeArtifacts: request.removeArtifacts === true,
+        runIds: request.runIds ?? [],
+        providerSessionIds: request.providerSessionIds ?? []
+      }, request.signal);
+      return result.ok === true && result.status === "stopped";
+    } catch (error) {
+      if (error instanceof RemoteSessionControlError && error.status === "busy") {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  async authorizeAutomaticStop(
+    worker: RemoteRunWorkerTarget,
+    ownerId: string
+  ): Promise<RemoteWorkerStopAuthorization> {
+    const root = await this.ensureSessionProtocol(worker, undefined);
+    try {
+      const result = await this.runSessionControl(worker, root, "authorize-stop", {
+        protocolVersion: REMOTE_SESSION_PROTOCOL_VERSION,
+        ownerId,
+        ttlMs: REMOTE_STOP_DRAIN_LEASE_MS
+      }, undefined);
+      const lease = result.lease && typeof result.lease === "object"
+        ? result.lease as Record<string, unknown>
+        : undefined;
+      if (result.ok === true && lease && typeof lease.leaseId === "string" && typeof lease.expiresAt === "string") {
+        return { allowed: true, lease: { leaseId: lease.leaseId, expiresAt: lease.expiresAt } };
+      }
+      return { allowed: false, reason: String(result.status ?? "worker denied stop") };
+    } catch (error) {
+      if (error instanceof RemoteSessionControlError) {
+        return { allowed: false, reason: error.status };
+      }
+      throw error;
+    }
+  }
+
+  async renewAutomaticStopLease(
+    worker: RemoteRunWorkerTarget,
+    lease: RemoteWorkerStopLease
+  ): Promise<RemoteWorkerStopLease> {
+    const root = await this.ensureSessionProtocol(worker, undefined);
+    const result = await this.runSessionControl(worker, root, "renew-stop", {
+      leaseId: lease.leaseId,
+      ttlMs: REMOTE_STOP_DRAIN_SHUTDOWN_LEASE_MS
+    }, undefined);
+    const renewed = result.lease && typeof result.lease === "object"
+      ? result.lease as Record<string, unknown>
+      : undefined;
+    if (result.ok !== true || !renewed || typeof renewed.expiresAt !== "string") {
+      throw new Error("Remote automatic-stop lease could not be renewed.");
+    }
+    return { leaseId: lease.leaseId, expiresAt: renewed.expiresAt };
+  }
+
+  async releaseAutomaticStopLease(worker: RemoteRunWorkerTarget, lease: RemoteWorkerStopLease): Promise<void> {
+    const root = await this.ensureSessionProtocol(worker, undefined);
+    await this.runSessionControl(worker, root, "release-stop", { leaseId: lease.leaseId }, undefined);
+  }
+
+  async acquireOperationLease(
+    worker: RemoteRunWorkerTarget,
+    ownerId: string,
+    kind: string
+  ): Promise<RemoteWorkerOperationLease> {
+    const leaseId = randomUUID();
+    const result = await this.runOperationLeaseShell(worker, "acquire", leaseId, ownerId, kind);
+    return this.parseOperationLease(result, ownerId, kind);
+  }
+
+  async renewOperationLease(
+    worker: RemoteRunWorkerTarget,
+    lease: RemoteWorkerOperationLease
+  ): Promise<RemoteWorkerOperationLease> {
+    const result = await this.runOperationLeaseShell(
+      worker,
+      "renew",
+      lease.leaseId,
+      lease.ownerId,
+      lease.kind
+    );
+    return this.parseOperationLease(result, lease.ownerId, lease.kind);
+  }
+
+  async releaseOperationLease(worker: RemoteRunWorkerTarget, lease: RemoteWorkerOperationLease): Promise<void> {
+    await this.runOperationLeaseShell(worker, "release", lease.leaseId, lease.ownerId, lease.kind);
+  }
+
   async launch(request: RemoteDetachedWorkerLaunchRequest): Promise<RemoteDetachedWorkerSnapshot> {
     const sshPath = request.worker.sshPath?.trim() || "ssh";
     const target = remoteSshTarget(request.worker);
@@ -1606,6 +2110,7 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
       remoteCwd: request.worker.remoteCwd?.trim(),
       finalPath: resolvedFinalPath,
       maxRuntimeMs: request.maxRuntimeMs,
+      resumeSessionId: resumeSessionIdFromArgs(invocationArgs),
       sourceMessageId: request.sourceMessageId,
       threadId: request.threadId,
       chatThreadRootId: request.chatThreadRootId
@@ -1646,13 +2151,24 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
       readRemoteWorkerEvents(sshPath, sshBaseArgs, `${runDir}/events.jsonl`, request.afterWorkerSeq, request.signal),
       readRemoteJson<RemoteDetachedRunState>(sshPath, sshBaseArgs, `${runDir}/exit.json`, request.signal)
     ]);
-    if (state?.status === "running" && state.pgid && !exit) {
-      const pgidAlive = await remotePidAlive(sshPath, sshBaseArgs, Math.floor(state.pgid), true, request.signal);
-      const wrapperPid = await readRemotePid(sshPath, sshBaseArgs, `${runDir}/wrapper.pid`, request.signal);
-      const wrapperAlive = wrapperPid
-        ? await remotePidAlive(sshPath, sshBaseArgs, wrapperPid, false, request.signal)
-        : false;
-      if (!pgidAlive && !wrapperAlive) {
+    if (state?.status === "running" && !exit) {
+      let workerStopped = false;
+      try {
+        const root = await resolveRemoteRunDir(
+          sshPath,
+          sshBaseArgs,
+          remoteWorkerRootForTarget(request.worker),
+          request.signal
+        );
+        const identity = await this.runSessionControl(request.worker, root, "inspect-run", {
+          runDir
+        }, request.signal);
+        workerStopped = identity.status === "stopped";
+      } catch {
+        // A failed identity probe is not evidence that detached work died.
+        workerStopped = false;
+      }
+      if (workerStopped) {
         // The worker's last acts are: append the terminal events, write
         // exit.json, write terminal state.json, exit. A completion racing this
         // poll therefore looks exactly like a crash until exit.json is
@@ -1694,26 +2210,19 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
 
   async cancel(request: RemoteDetachedWorkerCancelRequest): Promise<RemoteDetachedWorkerSnapshot> {
     const sshPath = request.worker.sshPath?.trim() || "ssh";
-    const target = remoteSshTarget(request.worker);
-    const sshBaseArgs = remoteSshBaseArgs(request.worker, target);
+    const sshBaseArgs = remoteSshBaseArgs(request.worker, remoteSshTarget(request.worker));
+    const root = await this.ensureSessionProtocol(request.worker, request.signal);
     const runDir = await resolveRemoteRunDir(
       sshPath,
       sshBaseArgs,
       remoteWorkerRunDirForTarget(request.worker, request.runId),
       request.signal
     );
-    const wrapperPid = await readRemotePid(sshPath, sshBaseArgs, `${runDir}/wrapper.pid`, request.signal);
-    if (wrapperPid) {
-      const kill = [
-        `kill -TERM ${wrapperPid} 2>/dev/null || true`,
-        "sleep 2",
-        `kill -0 ${wrapperPid} 2>/dev/null && kill -KILL ${wrapperPid} 2>/dev/null || true`
-      ].join("; ");
-      await runCommand(sshPath, [...sshBaseArgs, kill], {
-        timeoutMs: 10_000,
-        signal: request.signal
-      }).catch(() => undefined);
-    }
+    await this.runSessionControl(request.worker, root, "cancel-run", {
+      runId: request.runId,
+      runDir,
+      reason: request.reason ?? "cancelled"
+    }, request.signal);
     const snapshot = await this.poll({
       runId: request.runId,
       worker: request.worker,
@@ -1721,11 +2230,10 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
       signal: request.signal
     });
     const hasTerminal = snapshot.events.some((event) => event.kind === "terminal_state");
-    if (hasTerminal || !wrapperPid) {
+    if (hasTerminal) {
       return snapshot;
     }
-    const wrapperAlive = await remotePidAlive(sshPath, sshBaseArgs, wrapperPid, false, request.signal);
-    if (wrapperAlive) {
+    if (snapshot.state.status !== "running") {
       return snapshot;
     }
     const completedAt = new Date().toISOString();
@@ -1822,6 +2330,170 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
     const status = latest?.state.status ?? "unknown";
     throw new Error(`Remote detached worker did not acknowledge launch; last status was ${status}.`);
   }
+
+  private async ensureSessionProtocol(worker: RemoteRunWorkerTarget, signal: AbortSignal | undefined): Promise<string> {
+    const sshPath = worker.sshPath?.trim() || "ssh";
+    const target = remoteSshTarget(worker);
+    const sshBaseArgs = remoteSshBaseArgs(worker, target);
+    const root = await resolveRemoteRunDir(sshPath, sshBaseArgs, remoteWorkerRootForTarget(worker), signal);
+    let currentVersion = 0;
+    try {
+      const result = await runCommand(sshPath, [...sshBaseArgs, `cat ${shellQuote(`${root}/protocol.json`)}`], {
+        timeoutMs: 30_000,
+        signal
+      });
+      const parsed = JSON.parse(result.stdout) as { version?: unknown };
+      currentVersion = typeof parsed.version === "number" ? parsed.version : 0;
+    } catch {
+      currentVersion = 0;
+    }
+    if (currentVersion !== REMOTE_SESSION_PROTOCOL_VERSION) {
+      await runCommand(sshPath, [...sshBaseArgs, `mkdir -p ${shellQuote(root)}`], {
+        timeoutMs: 30_000,
+        signal
+      });
+      const installerPath = `${root}/session-installer-${randomUUID()}.js`;
+      await writeRemoteFile(sshPath, sshBaseArgs, installerPath, remoteSessionInstallerScript(), signal);
+      try {
+        const result = await runCommand(sshPath, [
+          ...sshBaseArgs,
+          `node ${shellQuote(installerPath)} ${shellQuote(root)}`
+        ], {
+          input: JSON.stringify({
+            version: REMOTE_SESSION_PROTOCOL_VERSION,
+            files: {
+              "session-control.js": remoteSessionControlScript(),
+              "session-supervisor.js": remoteSessionSupervisorScript(),
+              "run-worker.js": detachedWorkerScript()
+            }
+          }),
+          timeoutMs: 60_000,
+          signal
+        });
+        const installed = JSON.parse(result.stdout || "{}") as { ok?: unknown; status?: unknown };
+        if (installed.ok !== true) {
+          throw new Error(`Remote session protocol installation failed (${String(installed.status ?? "unknown")}).`);
+        }
+      } finally {
+        await runCommand(sshPath, [...sshBaseArgs, `rm -f ${shellQuote(installerPath)}`], {
+          timeoutMs: 30_000,
+          signal
+        }).catch(() => undefined);
+      }
+    }
+    return root;
+  }
+
+  private parseOperationLease(
+    result: Record<string, unknown>,
+    ownerId: string,
+    kind: string
+  ): RemoteWorkerOperationLease {
+    const lease = result.lease && typeof result.lease === "object"
+      ? result.lease as Record<string, unknown>
+      : undefined;
+    if (
+      result.ok !== true ||
+      !lease ||
+      typeof lease.leaseId !== "string" ||
+      typeof lease.expiresAt !== "string"
+    ) {
+      throw new Error(`Worker operation lease failed (${String(result.status ?? "unknown")}).`);
+    }
+    return {
+      leaseId: lease.leaseId,
+      ownerId,
+      kind,
+      expiresAt: lease.expiresAt
+    };
+  }
+
+  private async runOperationLeaseShell(
+    worker: RemoteRunWorkerTarget,
+    action: "acquire" | "renew" | "release",
+    leaseId: string,
+    ownerId: string,
+    kind: string
+  ): Promise<Record<string, unknown>> {
+    const sshPath = worker.sshPath?.trim() || "ssh";
+    const sshBaseArgs = remoteSshBaseArgs(worker, remoteSshTarget(worker));
+    const root = await resolveRemoteRunDir(
+      sshPath,
+      sshBaseArgs,
+      remoteWorkerRootForTarget(worker),
+      undefined
+    );
+    const command = [
+      "sh -s --",
+      shellQuote(root),
+      shellQuote(action),
+      shellQuote(leaseId),
+      shellQuote(ownerId),
+      shellQuote(kind),
+      shellQuote(String(REMOTE_OPERATION_LEASE_MS))
+    ].join(" ");
+    try {
+      const result = await runCommand(sshPath, [...sshBaseArgs, command], {
+        input: remoteWorkerOperationLeaseShellScript(),
+        timeoutMs: 30_000
+      });
+      return JSON.parse(result.stdout || "{}") as Record<string, unknown>;
+    } catch (error) {
+      if (error instanceof CommandError) {
+        let parsed: Record<string, unknown> = {};
+        try {
+          parsed = JSON.parse(error.result.stdout || "{}") as Record<string, unknown>;
+        } catch {
+          parsed = {};
+        }
+        throw new RemoteSessionControlError(
+          typeof parsed.status === "string" ? parsed.status : error.message,
+          parsed
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async runSessionControl(
+    worker: RemoteRunWorkerTarget,
+    root: string,
+    action: string,
+    payload: Record<string, unknown>,
+    signal: AbortSignal | undefined
+  ): Promise<Record<string, unknown>> {
+    const sshPath = worker.sshPath?.trim() || "ssh";
+    const sshBaseArgs = remoteSshBaseArgs(worker, remoteSshTarget(worker));
+    const command = `node ${shellQuote(`${root}/session-control.js`)} ${shellQuote(root)} ${shellQuote(action)}`;
+    try {
+      const result = await runCommand(sshPath, [...sshBaseArgs, command], {
+        input: JSON.stringify(payload),
+        timeoutMs: 30_000,
+        signal
+      });
+      return JSON.parse(result.stdout || "{}") as Record<string, unknown>;
+    } catch (error) {
+      if (error instanceof CommandError) {
+        let parsed: Record<string, unknown> = {};
+        try {
+          parsed = JSON.parse(error.result.stdout || "{}") as Record<string, unknown>;
+        } catch {
+          parsed = {};
+        }
+        throw new RemoteSessionControlError(
+          typeof parsed.status === "string" ? parsed.status : error.message,
+          parsed
+        );
+      }
+      throw error;
+    }
+  }
+}
+
+class RemoteSessionControlError extends Error {
+  constructor(readonly status: string, readonly result: Record<string, unknown>) {
+    super(`Remote session control failed: ${status}`);
+  }
 }
 
 async function defaultRemoteCodexExecutor(
@@ -1852,6 +2524,26 @@ async function defaultRemoteCodexExecutor(
 
 function remoteSshTarget(worker: RemoteRunWorkerTarget): string {
   return buildCloudRunSshTarget(worker);
+}
+
+function workerSettingsFromTarget(worker: RemoteRunWorkerTarget): RemoteParticipantSessionHandle["worker"] {
+  return {
+    host: worker.host,
+    user: worker.user,
+    port: worker.port,
+    identityFile: worker.identityFile,
+    workerRoot: worker.workerRoot,
+    remoteCwd: worker.remoteCwd,
+    codexPath: worker.codexPath
+  };
+}
+
+function targetFromSessionHandle(handle: RemoteParticipantSessionHandle): RemoteRunWorkerTarget {
+  const host = handle.worker.host?.trim();
+  if (!host) {
+    throw new Error("Remote participant session has no worker host.");
+  }
+  return { ...handle.worker, host };
 }
 
 function toolchainProbeScript(requirements: ToolchainRequirement[]): string {
@@ -1895,6 +2587,15 @@ function parseToolchainProbeOutput(
 
 function replaceArgValue(args: string[], from: string, to: string): string[] {
   return args.map((arg) => arg === from ? to : arg);
+}
+
+function resumeSessionIdFromArgs(args: string[]): string | undefined {
+  const resumeIndex = args.indexOf("resume");
+  if (resumeIndex < 0 || args.at(-1) !== "-") {
+    return undefined;
+  }
+  const candidate = args.at(-2)?.trim();
+  return candidate && !candidate.startsWith("-") ? candidate : undefined;
 }
 
 async function resolveRemoteRunDir(
@@ -2224,7 +2925,9 @@ let stderr = "";
 let timedOut = false;
 let cancelled = false;
 let activeChild;
+const attemptedSessionId = config.resumeSessionId;
 let sessionId;
+let providerSessionValid;
 let terminalWritten = false;
 let resumeInFlight = false;
 const pendingPermissionRequests = new Map();
@@ -2244,6 +2947,7 @@ let state = {
   runId: config.runId,
   conversationId: config.conversationId,
   participantId: config.participantId,
+  processCookie: config.processCookie,
   status: "running",
   startedAt: now(),
   lastHeartbeat: now()
@@ -2343,6 +3047,8 @@ function rememberSessionIdFromChunk(chunk) {
       const found = findSessionId(JSON.parse(line));
       if (found) {
         sessionId = found;
+        providerSessionValid = true;
+        writeState({ providerSessionId: sessionId, providerSessionValid: true });
       }
     } catch {
       // Ignore non-JSON output.
@@ -2664,6 +3370,57 @@ function killGroup(signal) {
   }
 }
 
+function groupAlive(pgid) {
+  if (!Number.isFinite(Number(pgid)) || Number(pgid) <= 0) {
+    return false;
+  }
+  try {
+    process.kill(-Number(pgid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function waitSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function ownedCookiePids() {
+  if (!config.processCookie || process.platform !== "linux") {
+    return [];
+  }
+  let entries = [];
+  try { entries = fs.readdirSync("/proc"); } catch { return []; }
+  return entries.flatMap((entry) => {
+    if (!/^\d+$/.test(entry) || Number(entry) === process.pid) {
+      return [];
+    }
+    try {
+      const matches = fs.readFileSync("/proc/" + entry + "/environ", "utf8")
+        .split("\0").includes("ACCORD_AGENTS_PROCESS_COOKIE=" + config.processCookie);
+      return matches ? [Number(entry)] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function cleanupOwnedGroup(pgid) {
+  if (!groupAlive(pgid) && ownedCookiePids().length === 0) {
+    return true;
+  }
+  try { process.kill(-Number(pgid), "SIGTERM"); } catch {}
+  for (const pid of ownedCookiePids()) { try { process.kill(pid, "SIGTERM"); } catch {} }
+  for (let index = 0; index < 20 && (groupAlive(pgid) || ownedCookiePids().length > 0); index += 1) { waitSync(50); }
+  if (groupAlive(pgid) || ownedCookiePids().length > 0) {
+    try { process.kill(-Number(pgid), "SIGKILL"); } catch {}
+    for (const pid of ownedCookiePids()) { try { process.kill(pid, "SIGKILL"); } catch {} }
+    for (let index = 0; index < 20 && (groupAlive(pgid) || ownedCookiePids().length > 0); index += 1) { waitSync(50); }
+  }
+  return !groupAlive(pgid) && ownedCookiePids().length === 0;
+}
+
 function extractedStdoutText() {
   const messages = [];
   const deltas = [];
@@ -2750,13 +3507,19 @@ function finishRun(exitCode, signal, forcedOk, forcedError) {
         : stderr.trim() || (signal ? "Remote Codex exited from signal " + signal + "." : "Remote Codex exited with code " + exitCode + ".");
   const startedAtMs = Date.parse(state.startedAt);
   const workerDurationMs = Number.isFinite(startedAtMs) ? Math.max(0, Date.now() - startedAtMs) : undefined;
+  const effectiveSessionId = sessionId || attemptedSessionId;
+  const resumeDiagnostic = (String(error || "") + "\n" + String(stderr || "")).toLowerCase();
+  const resumeMiss = Boolean(attemptedSessionId && !ok &&
+    /resume|session|conversation|thread/.test(resumeDiagnostic) &&
+    /not found|missing|unknown|cannot|can't|unable|no .*session|no .*found|does not exist|unavailable/.test(resumeDiagnostic));
+  providerSessionValid = resumeMiss ? false : Boolean(effectiveSessionId);
   appendEvent({
     kind: "provider_result",
     ok,
     content: finalMessage || extractedStdoutText() || stderr.trim() || error || "",
     exitCode,
     error,
-    sessionId,
+    sessionId: effectiveSessionId,
     // Real on-box run time, measured by the worker. Without this the desktop
     // can only fall back to wall-clock-to-sync, which inflates the "Worked
     // for ..." chip by however long the laptop lid was closed before reconnect.
@@ -2768,9 +3531,22 @@ function finishRun(exitCode, signal, forcedOk, forcedError) {
   const status = ok ? "completed" : cancelled ? "cancelled" : "failed";
   appendEvent({ kind: "terminal_state", status, reason: error });
   const completedAt = now();
+  const ownedPgid = state.pgid;
+  const groupClean = cleanupOwnedGroup(ownedPgid);
   const exit = { runId: config.runId, status, exitCode, signal, timedOut, error, completedAt };
   writeJsonAtomic("exit.json", exit);
-  writeState({ status, pid: undefined, pgid: undefined, exitCode, signal, timedOut, error, completedAt });
+  writeState({
+    status,
+    pid: undefined,
+    pgid: groupClean ? undefined : ownedPgid,
+    providerSessionId: providerSessionValid ? effectiveSessionId : undefined,
+    providerSessionValid,
+    exitCode,
+    signal,
+    timedOut,
+    error,
+    completedAt
+  });
   process.exit(0);
 }
 
@@ -2811,7 +3587,7 @@ child.on("close", (exitCode, signal) => {
   if (activeChild === child) {
     activeChild = undefined;
   }
-  writeState({ pid: undefined, pgid: undefined });
+  writeState({ pid: undefined });
   if (!cancelled && !timedOut && hasOutstandingPermission()) {
     appendEvent({
       kind: "lifecycle",

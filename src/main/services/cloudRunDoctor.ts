@@ -22,7 +22,7 @@ const DEVICE_AUTH_TIMEOUT_MS = 5 * 60_000;
 // specific capability (gh → no PR flow, build-essential → no native builds,
 // sudo → no auto-fix, git identity → commits fail) and surface as warnings.
 const REQUIRED_CHECKS: ReadonlySet<CloudRunWorkerCheckId> = new Set([
-  "connect", "rsync", "git", "node", "codex", "codex-auth", "userns"
+  "connect", "rsync", "git", "node", "codex", "codex-auth", "persistent-storage", "userns"
 ]);
 
 const CHECK_LABELS: Record<CloudRunWorkerCheckId, string> = {
@@ -37,6 +37,7 @@ const CHECK_LABELS: Record<CloudRunWorkerCheckId, string> = {
   "codex": "Codex CLI",
   "codex-auth": "Codex signed in",
   "git-identity": "Git identity",
+  "persistent-storage": "Persistent session storage",
   "userns": "Sandbox kernel setting"
 };
 
@@ -68,7 +69,10 @@ export class CloudRunDoctorService {
     this.logger = options.logger;
   }
 
-  async diagnose(settings: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport> {
+  async diagnose(
+    settings: CloudRunWorkerSettings,
+    options: { requirePersistentStorage?: boolean } = {}
+  ): Promise<CloudRunWorkerDoctorReport> {
     const worker = workerTarget(settings);
     if (!worker) {
       return failedReport("connect", "Worker host is not configured.");
@@ -79,7 +83,7 @@ export class CloudRunDoctorService {
     } catch (error) {
       return failedReport("connect", sshConnectionFailureDetail(errorMessage(error)));
     }
-    const checks = parseProbeOutput(output);
+    const checks = parseProbeOutput(output, options.requirePersistentStorage === true);
     const failing = checks.filter((check) => check.status === "fail");
     const warning = checks.filter((check) => check.status === "warn");
     const ok = failing.length === 0;
@@ -93,7 +97,8 @@ export class CloudRunDoctorService {
 
   async setup(
     settings: CloudRunWorkerSettings,
-    onProgress?: (progress: CloudRunWorkerSetupProgress) => void
+    onProgress?: (progress: CloudRunWorkerSetupProgress) => void,
+    options: { requirePersistentStorage?: boolean } = {}
   ): Promise<CloudRunWorkerDoctorReport> {
     const worker = workerTarget(settings);
     if (!worker) {
@@ -105,7 +110,7 @@ export class CloudRunDoctorService {
     };
 
     progress("diagnose", "Checking the worker…");
-    const before = await this.diagnose(settings);
+    const before = await this.diagnose(settings, options);
     if (!before.checks.some((check) => check.status !== "pass")) {
       return before;
     }
@@ -161,7 +166,7 @@ export class CloudRunDoctorService {
     }
 
     progress("diagnose", "Re-checking the worker…");
-    return this.diagnose(settings);
+    return this.diagnose(settings, options);
   }
 
   private async fix(worker: RemoteRunWorkerTarget, command: string): Promise<void> {
@@ -227,6 +232,12 @@ function workerTarget(settings: CloudRunWorkerSettings): RemoteRunWorkerTarget |
 // One SSH round-trip probing everything; each line is `key=value`.
 function probeScript(worker: RemoteRunWorkerTarget): string {
   const codexPath = worker.codexPath?.trim() || "codex";
+  const workerRoot = worker.workerRoot?.trim() || "~/.accordagents/remote-runs";
+  const workerRootExpression = workerRoot.startsWith("/")
+    ? shellQuotePosix(workerRoot)
+    : workerRoot === "~"
+      ? '"$HOME"'
+      : `"$HOME"/${shellQuotePosix(workerRoot.replace(/^~\//, ""))}`;
   return [
     "have() { command -v \"$2\" >/dev/null 2>&1 && printf '%s=ok\\n' \"$1\" || printf '%s=missing\\n' \"$1\"; }",
     "have rsync rsync",
@@ -240,11 +251,12 @@ function probeScript(worker: RemoteRunWorkerTarget): string {
     "printf 'userns=%s\\n' \"$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || printf unknown)\"",
     "printf 'git-name=%s\\n' \"$(git config --global user.name 2>/dev/null | head -c 80)\"",
     "printf 'git-email=%s\\n' \"$(git config --global user.email 2>/dev/null | head -c 80)\"",
+    `is_ebs_path() { source="$(findmnt -n -o SOURCE -T "$1" 2>/dev/null)"; [ -n "$source" ] || return 1; device="$(readlink -f "$source" 2>/dev/null || printf '%s' "$source")"; lsblk -s -n -o SERIAL "$device" 2>/dev/null | tr -d '-' | grep -Eq '^vol[0-9a-fA-F]+'; }; worker_root=${workerRootExpression}; codex_home="\${CODEX_HOME:-$HOME/.codex}"; mkdir -p "$worker_root" "$codex_home"; worker_mount="$(findmnt -n -o SOURCE,FSTYPE -T "$worker_root" 2>/dev/null | head -c 200)"; codex_mount="$(findmnt -n -o SOURCE,FSTYPE -T "$codex_home" 2>/dev/null | head -c 200)"; if is_ebs_path "$worker_root" && is_ebs_path "$codex_home"; then printf 'persistent-storage=ok\\n'; else printf 'persistent-storage=missing\\n'; fi; printf 'storage-detail=%s | %s\\n' "$worker_mount" "$codex_mount"`,
     `${shellQuotePosix(codexPath)} login status >/dev/null 2>&1 && printf 'codex-auth=ok\\n' || printf 'codex-auth=missing\\n'`
   ].join("; ");
 }
 
-function parseProbeOutput(output: string): CloudRunWorkerCheck[] {
+function parseProbeOutput(output: string, requirePersistentStorage: boolean): CloudRunWorkerCheck[] {
   const values = new Map<string, string>();
   for (const line of output.split("\n")) {
     const separator = line.indexOf("=");
@@ -271,6 +283,15 @@ function parseProbeOutput(output: string): CloudRunWorkerCheck[] {
   checks.push(tool("node", true, "Needed to run the detached worker."));
   checks.push(tool("build-essential", true, "Needed to build native npm dependencies."));
   checks.push(tool("codex", true, "The remote agent runtime."));
+  checks.push({
+    id: "persistent-storage",
+    label: CHECK_LABELS["persistent-storage"],
+    status: values.get("persistent-storage") === "ok" ? "pass" : requirePersistentStorage ? "fail" : "warn",
+    detail: values.get("persistent-storage") === "ok"
+      ? values.get("storage-detail") || "Worker and Codex session paths use persistent storage."
+      : "workerRoot and the Codex session store must not use tmpfs, overlay, instance-store, or another volatile filesystem.",
+    fixable: false
+  });
 
   const userns = values.get("userns");
   checks.push({

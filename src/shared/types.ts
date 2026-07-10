@@ -120,6 +120,11 @@ export interface AwsWorkerStatus {
   state?: AwsWorkerLifecycleState;
   publicIp?: string;
   message?: string;
+  persistentStorage?: {
+    rootVolumeBackedByEbs: boolean;
+    rootDeviceName?: string;
+    rootVolumeId?: string;
+  };
 }
 
 export interface ConnectAwsWorkerRequest {
@@ -145,6 +150,7 @@ export type CloudRunWorkerCheckId =
   | "codex"
   | "codex-auth"
   | "git-identity"
+  | "persistent-storage"
   | "userns";
 
 export type CloudRunWorkerCheckStatus = "pass" | "warn" | "fail";
@@ -194,6 +200,27 @@ export interface RemoteRunHandle {
   error?: string;
   sync?: RemoteRunSyncInfo;
   promptContextPointerAdvance?: ChatPromptContextPointerAdvance;
+}
+
+export interface RemoteParticipantSessionHandle {
+  sessionKey: string;
+  sessionDir: string;
+  worker: CloudRunWorkerSettings;
+  protocolVersion: number;
+  runtimeFingerprint: string;
+  updatedAt: string;
+}
+
+export interface RemoteSessionCleanupTombstone {
+  id: string;
+  handle: RemoteParticipantSessionHandle;
+  reason: "participant-removed" | "chat-archived" | "chat-deleted" | "app-quit";
+  createdAt: string;
+  conversationId?: string;
+  participantId?: string;
+  runIds?: string[];
+  providerSessionIds?: string[];
+  removeArtifacts?: boolean;
 }
 
 export type ChatPromptContextMode = "off" | "all_unseen" | "latest_unseen";
@@ -560,6 +587,9 @@ export interface ChatParticipantSession {
   roleLabel: string;
   roleInstructions: string;
   lastSyncedMessageId?: string;
+  remoteSession?: RemoteParticipantSessionHandle;
+  invalidatedRemoteSessionId?: string;
+  invalidatedRemoteSessionAt?: string;
   updatedAt: string;
 }
 
@@ -1182,6 +1212,10 @@ export interface SetChatArchivedRequest {
   archived: boolean;
 }
 
+export interface DeleteChatConversationRequest {
+  conversationId: string;
+}
+
 export interface StartChatAccordRequest {
   conversationId: string;
   facilitatorParticipantId: string;
@@ -1795,6 +1829,7 @@ export interface AppBridge {
   createChatConversation(request: CreateChatConversationRequest): Promise<StartReviewResult>;
   renameChatConversation(request: RenameChatConversationRequest): Promise<Conversation | undefined>;
   setChatArchived(request: SetChatArchivedRequest): Promise<Conversation | undefined>;
+  deleteChatConversation(request: DeleteChatConversationRequest): Promise<boolean>;
   startChatAccord(request: StartChatAccordRequest): Promise<StartChatAccordResult>;
   dismissConversationWarnings(request: DismissConversationWarningsRequest): Promise<Conversation | undefined>;
   addChatParticipant(request: AddChatParticipantRequest): Promise<Conversation | undefined>;

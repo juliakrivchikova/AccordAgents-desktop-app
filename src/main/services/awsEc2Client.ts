@@ -4,6 +4,7 @@
 // the local key/IP tooling.
 import { app } from "electron";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
+import type { Instance } from "@aws-sdk/client-ec2";
 import {
   EC2Client,
   DescribeImagesCommand,
@@ -208,15 +209,7 @@ class SdkEc2Client implements Ec2Client {
 
   async describeInstance(instanceId: string): Promise<AwsWorkerInstanceInfo | undefined> {
     const result = await this.client.send(new DescribeInstancesCommand({ InstanceIds: [instanceId] }));
-    const instance = result.Reservations?.[0]?.Instances?.[0];
-    if (!instance?.InstanceId) {
-      return undefined;
-    }
-    return {
-      instanceId: instance.InstanceId,
-      state: mapInstanceState(instance.State?.Name),
-      publicIp: instance.PublicIpAddress
-    };
+    return awsWorkerInstanceInfoFromSdkInstance(result.Reservations?.[0]?.Instances?.[0]);
   }
 
   async startInstance(instanceId: string): Promise<void> {
@@ -230,6 +223,29 @@ class SdkEc2Client implements Ec2Client {
   async terminateInstance(instanceId: string): Promise<void> {
     await this.client.send(new TerminateInstancesCommand({ InstanceIds: [instanceId] }));
   }
+}
+
+export function awsWorkerInstanceInfoFromSdkInstance(instance: Instance | undefined): AwsWorkerInstanceInfo | undefined {
+  if (!instance?.InstanceId) {
+    return undefined;
+  }
+  const rootDeviceName = instance.RootDeviceName;
+  const rootMapping = instance.BlockDeviceMappings?.find((mapping) =>
+    mapping.DeviceName === rootDeviceName
+  );
+  const rootVolumeBackedByEbs = instance.RootDeviceType === "ebs"
+    ? true
+    : instance.RootDeviceType === "instance-store"
+      ? false
+      : undefined;
+  return {
+    instanceId: instance.InstanceId,
+    state: mapInstanceState(instance.State?.Name),
+    publicIp: instance.PublicIpAddress,
+    rootDeviceName,
+    rootVolumeId: rootMapping?.Ebs?.VolumeId,
+    rootVolumeBackedByEbs
+  };
 }
 
 function sshPermission(cidr: string): {

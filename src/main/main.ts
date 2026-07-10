@@ -18,6 +18,7 @@ import type {
   ContinueReviewRequest,
   ConversationMessagePageRequest,
   CreateChatConversationRequest,
+  DeleteChatConversationRequest,
   DismissConversationWarningsRequest,
   GitDiffRequest,
   InspectLocalFileRequest,
@@ -59,7 +60,7 @@ import { AppSkillsService } from "./services/appSkills";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { bootstrapAppUpdater } from "./services/appUpdater";
 import { ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
-import { buildCloudRunSshTarget, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
+import { buildCloudRunSshTarget, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { CloudRunDoctorService } from "./services/cloudRunDoctor";
 import { CloudRunAwsService } from "./services/cloudRunAws";
 import { DebugLogService } from "./services/debugLogs";
@@ -74,6 +75,8 @@ import { PluginService } from "./services/plugins";
 import { UserSkillsService } from "./services/userSkills";
 
 let mainWindow: BrowserWindow | undefined;
+let quitCleanupStarted = false;
+let quitCleanupFinished = false;
 
 const userDataDirOverride = process.env.ACCORDAGENTS_USER_DATA_DIR?.trim();
 if (userDataDirOverride) {
@@ -128,6 +131,7 @@ const cloudRunDoctorService = new CloudRunDoctorService({
   }
 });
 const cloudRunAwsService = new CloudRunAwsService(settingsService, {
+  automaticStopGate: remoteRunService,
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
   }
@@ -265,12 +269,39 @@ async function withCloudRunWorker<T>(
   if (settings.cloudRuns.mode !== "aws") {
     return action(settings.cloudRuns.worker);
   }
-  cloudRunAwsService.noteRunStarted();
-  try {
-    return await action(await cloudRunAwsService.ensureWorkerForRun());
-  } finally {
-    await cloudRunAwsService.noteRunEnded();
-  }
+  const operationId = randomUUID();
+  return cloudRunAwsService.withRunReference(operationId, async () => {
+    const workerSettings = await cloudRunAwsService.ensureWorkerForRun();
+    const worker = cloudRunWorkerTargetFromSettings(workerSettings);
+    if (!worker) {
+      throw new Error("The AWS worker did not provide a valid SSH target.");
+    }
+    const lease = await remoteRunService.acquireWorkerOperationLease(
+      worker,
+      operationId,
+      "settings-worker-operation"
+    );
+    const renewalTimer = setInterval(() => {
+      void remoteRunService.renewWorkerOperationLease(worker, lease).then((renewed) => {
+        lease.expiresAt = renewed.expiresAt;
+      }).catch((error) => {
+        void debugLogService.write("cloud-runs.operation-lease.renew-error", {
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
+    }, 10_000);
+    renewalTimer.unref?.();
+    try {
+      return await action(workerSettings);
+    } finally {
+      clearInterval(renewalTimer);
+      await remoteRunService.releaseWorkerOperationLease(worker, lease).catch((error) => {
+        void debugLogService.write("cloud-runs.operation-lease.release-error", {
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
+    }
+  });
 }
 
 function registerIpc(): void {
@@ -302,12 +333,16 @@ function registerIpc(): void {
     return withCloudRunWorker(request, testCloudRunWorker);
   });
   ipcMain.handle("cloud-runs:diagnose-worker", async (_event, request?: CloudRunWorkerSettings) => {
-    return withCloudRunWorker(request, (worker) => cloudRunDoctorService.diagnose(worker));
+    const managedAws = !request && (await settingsService.getPublicSettings()).cloudRuns.mode === "aws";
+    return withCloudRunWorker(request, (worker) => cloudRunDoctorService.diagnose(worker, {
+      requirePersistentStorage: managedAws
+    }));
   });
   ipcMain.handle("cloud-runs:setup-worker", async (_event, request?: CloudRunWorkerSettings) => {
+    const managedAws = !request && (await settingsService.getPublicSettings()).cloudRuns.mode === "aws";
     return withCloudRunWorker(request, (worker) => cloudRunDoctorService.setup(worker, (progress) => {
       mainWindow?.webContents.send("cloud-runs:setup-progress", progress);
-    }));
+    }, { requirePersistentStorage: managedAws }));
   });
   ipcMain.handle("cloud-runs:aws-bootstrap-command", (_event, region: string) =>
     cloudRunAwsService.bootstrapCommand(String(region ?? "").trim() || "us-east-1"));
@@ -514,6 +549,9 @@ function registerIpc(): void {
   });
   ipcMain.handle("chat:set-archived", async (_event, request: SetChatArchivedRequest) => {
     return chatService.setArchived(request);
+  });
+  ipcMain.handle("chat:delete", async (_event, request: DeleteChatConversationRequest) => {
+    return chatService.deleteConversation(request);
   });
   ipcMain.handle("chat:dismiss-warnings", async (_event, request: DismissConversationWarningsRequest) => {
     return chatService.dismissConversationWarnings(request);
@@ -893,6 +931,11 @@ void app.whenReady().then(async () => {
   bootstrapAppUpdater(debugLogService);
   await appMcpService.start();
   await storageService.init();
+  await chatService.reconcileDeletedConversationArtifacts().catch((error) => {
+    void debugLogService.write("chat.delete.artifacts.reconcile-error", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+  });
   await chatService.reconcileTerminalRemoteRunState().catch((error) => {
     void debugLogService.write("chat.remote-run.reconcile-terminal-state.error", {
       message: error instanceof Error ? error.message : String(error)
@@ -929,7 +972,23 @@ app.on("window-all-closed", () => {
   }
 });
 
-app.on("before-quit", () => {
-  void cliAgentRunner.shutdownWarmAgents();
-  void appMcpService.stop();
+app.on("before-quit", (event) => {
+  if (quitCleanupFinished) {
+    return;
+  }
+  event.preventDefault();
+  if (quitCleanupStarted) {
+    return;
+  }
+  quitCleanupStarted = true;
+  const cleanup = Promise.allSettled([
+    remoteRunCoordinator.shutdownIdleSessions(),
+    cliAgentRunner.shutdownWarmAgents(),
+    appMcpService.stop()
+  ]);
+  const timeout = new Promise<void>((resolve) => setTimeout(resolve, 5_000));
+  void Promise.race([cleanup.then(() => undefined), timeout]).finally(() => {
+    quitCleanupFinished = true;
+    app.quit();
+  });
 });

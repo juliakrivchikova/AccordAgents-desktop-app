@@ -263,6 +263,7 @@ function App(): JSX.Element {
             onNewProjectSession={(projectRepoPath) => void conversationActions.newProjectSession(projectRepoPath)}
             onArchive={(id) => void chatActions.setChatArchived(id, true)}
             onUnarchive={(id) => void chatActions.setChatArchived(id, false)}
+            onDelete={(id) => chatActions.deleteChatConversation(id)}
             onToggleSidebar={() => state.setSidebarCollapsed(true)}
           />
         )

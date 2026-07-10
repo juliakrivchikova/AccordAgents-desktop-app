@@ -2,6 +2,7 @@
 // the lifecycle, and turning "run a remote participant" into a reachable SSH
 // worker target. The chat run path calls ensureWorkerForRun(); the coordinator
 // calls noteRunStarted/noteRunEnded for idle auto-stop.
+import { randomUUID } from "node:crypto";
 import type {
   AwsWorkerHandleInfo,
   AwsWorkerStatus,
@@ -23,6 +24,11 @@ import {
   resolveCurrentPublicIp
 } from "./awsEc2Client";
 import type { SettingsService } from "./settings";
+import type {
+  RemoteRunWorkerTarget,
+  RemoteWorkerStopAuthorization,
+  RemoteWorkerStopLease
+} from "./remoteRuns";
 
 const WORKER_SSH_USER = "ubuntu";
 const WORKER_ROOT = "~/.accordagents/remote-runs";
@@ -35,6 +41,13 @@ export interface CloudRunAwsServiceOptions {
   currentPublicIp?: () => Promise<string>;
   logger?: (event: string, payload: Record<string, unknown>) => void;
   randomSuffix?: () => string;
+  idleStopMs?: number;
+  idleStopRetryMs?: number;
+  automaticStopGate?: {
+    authorizeAutomaticWorkerStop(worker: RemoteRunWorkerTarget, ownerId: string): Promise<RemoteWorkerStopAuthorization>;
+    renewAutomaticWorkerStopLease(worker: RemoteRunWorkerTarget, lease: RemoteWorkerStopLease): Promise<RemoteWorkerStopLease>;
+    releaseAutomaticWorkerStopLease(worker: RemoteRunWorkerTarget, lease: RemoteWorkerStopLease): Promise<void>;
+  };
 }
 
 export class CloudRunAwsService {
@@ -42,6 +55,8 @@ export class CloudRunAwsService {
   private readonly randomSuffix: () => string;
   private readonly privateKeyPathForKeyName: (keyName: string) => string;
   private readonly logger?: (event: string, payload: Record<string, unknown>) => void;
+  private readonly automaticStopOwnerId = randomUUID();
+  private readonly activeRunIds = new Set<string>();
 
   constructor(
     private readonly settings: SettingsService,
@@ -53,6 +68,38 @@ export class CloudRunAwsService {
       generateKeyMaterial: options.generateKeyMaterial ?? generateAwsWorkerKeyMaterial,
       deleteKeyMaterial: async (keyName) => (options.deleteKeyMaterial ?? deleteGeneratedAwsWorkerKeyMaterial)(keyName),
       currentPublicIp: options.currentPublicIp ?? resolveCurrentPublicIp,
+      authorizeAutomaticStop: async (info) => {
+        const gate = options.automaticStopGate;
+        if (!gate || !info.publicIp) {
+          return undefined;
+        }
+        const publicSettings = await this.settings.getPublicSettings();
+        const handle = publicSettings.cloudRuns.awsHandle;
+        if (!handle) {
+          return undefined;
+        }
+        const worker: RemoteRunWorkerTarget = {
+          host: info.publicIp,
+          user: WORKER_SSH_USER,
+          identityFile: this.privateKeyPath(handle),
+          workerRoot: WORKER_ROOT
+        };
+        const authorization = await gate.authorizeAutomaticWorkerStop(worker, this.automaticStopOwnerId);
+        if (!authorization.allowed || !authorization.lease) {
+          return undefined;
+        }
+        let lease = authorization.lease;
+        return {
+          renew: async () => {
+            lease = await gate.renewAutomaticWorkerStopLease(worker, lease);
+          },
+          release: async () => {
+            await gate.releaseAutomaticWorkerStopLease(worker, lease);
+          }
+        };
+      },
+      idleStopMs: options.idleStopMs,
+      idleStopRetryMs: options.idleStopRetryMs,
       logger: options.logger
     });
     this.randomSuffix = options.randomSuffix ?? (() => Math.random().toString(36).slice(2, 10));
@@ -104,7 +151,17 @@ export class CloudRunAwsService {
         configured: true,
         handle,
         state: info?.state ?? "absent",
-        publicIp: info?.publicIp
+        publicIp: info?.publicIp,
+        persistentStorage: info
+          ? {
+              rootVolumeBackedByEbs: info.rootVolumeBackedByEbs === true,
+              rootDeviceName: info.rootDeviceName,
+              rootVolumeId: info.rootVolumeId
+            }
+          : undefined,
+        message: info?.rootVolumeBackedByEbs === false
+          ? "Worker root storage is not backed by EBS; remote session continuity is unsafe."
+          : undefined
       };
     } catch (error) {
       return {
@@ -169,16 +226,32 @@ export class CloudRunAwsService {
     };
   }
 
-  noteRunStarted(): void {
+  noteRunStarted(runId: string): void {
+    if (!runId || this.activeRunIds.has(runId)) {
+      return;
+    }
+    this.activeRunIds.add(runId);
     this.lifecycle.runStarted();
   }
 
-  async noteRunEnded(): Promise<void> {
+  async noteRunEnded(runId: string): Promise<void> {
+    if (!this.activeRunIds.delete(runId)) {
+      return;
+    }
     const credentials = await this.settings.getAwsWorkerCredentials();
     const settings = await this.settings.getPublicSettings();
     const handle = settings.cloudRuns.awsHandle;
     if (credentials && handle) {
       this.lifecycle.runEnded(credentials, this.toHandle(handle));
+    }
+  }
+
+  async withRunReference<T>(runId: string, action: () => Promise<T>): Promise<T> {
+    this.noteRunStarted(runId);
+    try {
+      return await action();
+    } finally {
+      await this.noteRunEnded(runId);
     }
   }
 

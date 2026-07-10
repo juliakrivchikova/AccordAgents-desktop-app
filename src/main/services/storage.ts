@@ -443,6 +443,23 @@ export class StorageService {
     `);
   }
 
+  async deleteConversation(id: string): Promise<boolean> {
+    await this.init();
+    const exists = await this.queryText(
+      `select id from conversations where id = ${sqlString(id)} limit 1;`
+    );
+    if (!exists) {
+      return false;
+    }
+    await this.runSql(`
+      begin;
+      delete from conversation_messages where conversation_id = ${sqlString(id)};
+      delete from conversations where id = ${sqlString(id)};
+      commit;
+    `);
+    return true;
+  }
+
   private async ensureColumn(table: string, column: string, definition: string): Promise<void> {
     const rows = await this.queryJson<{ name: string }>(`pragma table_info(${table});`);
     if (rows.some((row) => row.name === column)) {

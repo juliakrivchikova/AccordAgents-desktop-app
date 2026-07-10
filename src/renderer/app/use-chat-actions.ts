@@ -32,11 +32,13 @@ import type { AppState } from "./app-state";
 import type { ConversationActions } from "./use-conversation-actions";
 import { upsertConversationSummary } from "./conversation-summaries";
 import { normalizeAutoChatTitle, normalizeManualChatTitle } from "../../shared/chatTitles";
+import { persistLastViewedAt } from "./storage";
 
 export interface ChatActions {
   startChat: (options?: StartChatOptions) => Promise<boolean>;
   renameChatConversation: (title: string) => Promise<boolean>;
   setChatArchived: (conversationId: string, archived: boolean) => Promise<void>;
+  deleteChatConversation: (conversationId: string) => Promise<void>;
   sendChatMessage: (options?: SendChatMessageOptions) => Promise<boolean>;
   respondToChatMentions: (sourceMessageId: string, targetParticipantIds: string[], approve: boolean, continueRequester?: boolean) => Promise<void>;
   toggleChatReaction: (messageId: string, emoji: string) => Promise<void>;
@@ -197,6 +199,36 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setSummaries((current) => upsertConversationSummary(current, saved));
     } catch (caught) {
       state.setError(errorText(caught));
+    }
+  }
+
+  async function deleteChatConversation(conversationId: string): Promise<void> {
+    state.setError(undefined);
+    try {
+      const deleted = await window.consensus.deleteChatConversation({ conversationId });
+      if (!deleted) {
+        throw new Error("Chat was not found.");
+      }
+      const wasActive = state.conversation?.id === conversationId;
+      state.archivedConversationIdsRef.current.delete(conversationId);
+      state.setUnreadConversationIds((current) => {
+        const next = new Set(current);
+        next.delete(conversationId);
+        return next;
+      });
+      const { [conversationId]: _removedRevision, ...remainingRevisions } = state.activityRevisionByConversationRef.current;
+      state.activityRevisionByConversationRef.current = remainingRevisions;
+      const { [conversationId]: _removedLastViewed, ...remainingLastViewed } = state.lastViewedAtRef.current;
+      state.lastViewedAtRef.current = remainingLastViewed;
+      persistLastViewedAt(remainingLastViewed);
+      state.setSummaries((current) => current.filter((summary) => summary.id !== conversationId));
+      state.setActivityItems((current) => current.filter((item) => item.conversationId !== conversationId));
+      if (wasActive) {
+        await conversationActions.newChatSession();
+      }
+    } catch (caught) {
+      state.setError(errorText(caught));
+      throw caught;
     }
   }
 
@@ -463,7 +495,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
   }
 
   return {
-    startChat, renameChatConversation, setChatArchived, sendChatMessage, respondToChatMentions,
+    startChat, renameChatConversation, setChatArchived, deleteChatConversation, sendChatMessage, respondToChatMentions,
     toggleChatReaction, respondToChatChoice, addChatParticipant, addSavedChatParticipant,
     updateChatParticipantRuntime, removeChatParticipant, compactChatParticipant, startChatAccord, respondToChatAppToolApproval
   };

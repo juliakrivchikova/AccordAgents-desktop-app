@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AppSettings, AwsWorkerHandleInfo } from "../../shared/types";
 import { CloudRunAwsService } from "./cloudRunAws";
+import type { CloudRunAwsServiceOptions } from "./cloudRunAws";
 import { encodeWorkerBlob } from "./awsWorkerProvisioning";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 import type { AwsWorkerInstanceInfo, Ec2Client } from "./awsWorkerLifecycle";
@@ -146,7 +147,8 @@ class FakeEc2Client implements Ec2Client {
 
 function serviceWith(
   settings: FakeSettings,
-  clients: Map<string, FakeEc2Client>
+  clients: Map<string, FakeEc2Client>,
+  options: Pick<CloudRunAwsServiceOptions, "automaticStopGate" | "idleStopMs" | "idleStopRetryMs"> = {}
 ): CloudRunAwsService {
   return new CloudRunAwsService(settings as unknown as SettingsService, {
     createEc2Client: (credentials) => {
@@ -163,7 +165,8 @@ function serviceWith(
     }),
     deleteKeyMaterial: async () => undefined,
     currentPublicIp: async () => "203.0.113.9",
-    privateKeyPathForKeyName: (keyName) => `/keys/${keyName}.pem`
+    privateKeyPathForKeyName: (keyName) => `/keys/${keyName}.pem`,
+    ...options
   });
 }
 
@@ -257,3 +260,55 @@ test("ensureWorkerForRun resolves the SSH identity file from the persisted key n
   assert.deepEqual(oldClient.revokedSecurityGroups, ["sg-old"]);
   assert.deepEqual(oldClient.authorizedCidrs, ["203.0.113.9/32"]);
 });
+
+test("AWS run references are acquired and released exactly once per run id", async () => {
+  const settings = new FakeSettings();
+  settings.credentials = OLD_CREDS;
+  settings.handle = OLD_HANDLE;
+  settings.mode = "aws";
+  const client = new FakeEc2Client({ instanceId: "i-old", state: "running", publicIp: "198.51.100.10" });
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]));
+
+  service.noteRunStarted("run-1");
+  service.noteRunStarted("run-1");
+  assert.equal((service as any).lifecycle.activeRuns, 1);
+  await service.noteRunEnded("run-1");
+  await service.noteRunEnded("run-1");
+  assert.equal((service as any).lifecycle.activeRuns, 0);
+});
+
+test("a Settings-only AWS operation rearms automatic idle stop", async () => {
+  const settings = new FakeSettings();
+  settings.credentials = OLD_CREDS;
+  settings.handle = OLD_HANDLE;
+  settings.mode = "aws";
+  const client = new FakeEc2Client({ instanceId: "i-old", state: "running", publicIp: "198.51.100.10" });
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), {
+    idleStopMs: 5,
+    idleStopRetryMs: 5,
+    automaticStopGate: {
+      authorizeAutomaticWorkerStop: async () => ({
+        allowed: true,
+        lease: { leaseId: "stop-lease", expiresAt: new Date(Date.now() + 30_000).toISOString() }
+      }),
+      renewAutomaticWorkerStopLease: async (_worker, lease) => lease,
+      releaseAutomaticWorkerStopLease: async () => undefined
+    }
+  });
+
+  await service.withRunReference("settings-operation", async () => {
+    await service.ensureWorkerForRun();
+    assert.equal((service as any).lifecycle.activeRuns, 1);
+  });
+  assert.equal((service as any).lifecycle.activeRuns, 0);
+  await waitFor(() => client.state?.state === "stopped");
+});
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Timed out waiting for AWS lifecycle state.");
+}

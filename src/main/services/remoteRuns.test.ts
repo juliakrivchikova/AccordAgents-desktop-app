@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -16,6 +16,7 @@ import type {
   ChatAppToolApproval,
   ChatMessage,
   ChatParticipant,
+  ChatParticipantSession,
   ChatRoleConfig,
   Conversation,
   ParticipantConfig,
@@ -38,9 +39,16 @@ import type {
   RemoteDetachedWorkerSnapshot,
   RemoteDetachedWorkerTransport,
   RemoteDetachedWorkerDecisionRequest,
+  RemoteParticipantSessionEnsureRequest,
+  RemoteParticipantSessionEnsureResult,
   RemoteToolchainPreflightProbeRequest,
   RemoteWorkerEvent
 } from "./remoteRuns";
+import {
+  REMOTE_SESSION_PROTOCOL_VERSION,
+  remoteParticipantRuntimeFingerprint,
+  remoteParticipantSessionKey
+} from "./remoteSessionSupervisorScript";
 import { issueFromRequirement } from "./toolchainRequirements";
 import type { ToolchainPreflightIssue } from "./toolchainRequirements";
 
@@ -785,6 +793,61 @@ test("remote run coordinator marks expired runs failed instead of polling foreve
   assert.match(chat.current.error ?? "", /exceeded max runtime/);
 });
 
+test("startup reconciliation preserves unknown sessions owned by other upgraded desktops", async () => {
+  const handle = remoteRunHandle({ runId: "known-active-run" });
+  const chat = new FakeCoordinatorChat(handle);
+  const stopped: string[] = [];
+  const logged: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const remoteRuns = {
+    registerDetachedRunContext(): void {},
+    async pollDetachedRun(): Promise<any> {
+      return { runId: handle.runId, status: "running" };
+    },
+    async listParticipantSessions(): Promise<any[]> {
+      const session = (sessionKey: string) => ({
+        handle: {
+          sessionKey,
+          sessionDir: `/worker/sessions/${sessionKey}`,
+          worker: { host: "worker.example" },
+          protocolVersion: 1,
+          runtimeFingerprint: "fingerprint",
+          updatedAt: new Date().toISOString()
+        },
+        status: "live"
+      });
+      return [
+        session("idle-orphan"),
+        { ...session("active-orphan"), activeRunId: "unknown-active-run" }
+      ];
+    },
+    async stopParticipantSessionIfIdle(session: { sessionKey: string }): Promise<boolean> {
+      stopped.push(session.sessionKey);
+      return true;
+    }
+  };
+  const coordinator = new RemoteRunCoordinator(
+    remoteRuns as never,
+    chat as never,
+    coordinatorSettings({ maxRuntimeMs: 60_000, pollIntervalMs: 60_000 }) as never,
+    {
+      async write(event: string, payload: Record<string, unknown>): Promise<void> {
+        logged.push({ event, payload });
+      }
+    } as never
+  );
+
+  await coordinator.start();
+  await coordinator.shutdownIdleSessions();
+
+  assert.deepEqual(stopped, []);
+  assert.equal(logged.some((entry) =>
+    entry.event === "remote-session.reconcile.unknown-idle-preserved" && entry.payload.sessionDir === "/worker/sessions/idle-orphan"
+  ), true);
+  assert.equal(logged.some((entry) =>
+    entry.event === "remote-session.reconcile.unknown-active" && entry.payload.runId === "unknown-active-run"
+  ), true);
+});
+
 test("cloud run SSH target validation rejects argv-sensitive values", () => {
   assert.equal(buildCloudRunSshTarget({ host: "worker.example", user: "ubuntu" }), "ubuntu@worker.example");
   assert.throws(() => buildCloudRunSshTarget({ host: "-oProxyCommand=touch /tmp/pwned" }), /Worker host/);
@@ -949,6 +1012,270 @@ test("mirror-sync detached run up-syncs before launch and runs codex in the mirr
   assert.equal(args[cdIndex + 1], expectedMirror);
   assert.ok(args.includes("sandbox_workspace_write.network_access=true"));
   assert.ok(args.some((arg) => arg === `sandbox_workspace_write.writable_roots=["${expectedMirror}/.git"]`));
+});
+
+test("warm participant session launches once, reuses the supervisor, and resumes the provider session", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const worker = new FakeWarmSessionTransport();
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+  const firstPhases: string[] = [];
+  const secondPhases: string[] = [];
+  const target = { host: "worker.example", workerRoot: "/srv/worker" };
+
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "warm-one",
+    participant: participantConfig(participant),
+    prompt: "First turn.",
+    worker: target,
+    onPhase: (status) => firstPhases.push(status.phase)
+  });
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "warm-two",
+    participant: participantConfig(participant),
+    prompt: "Second turn.",
+    worker: target,
+    options: { sessionId: "01900000-0000-7000-8000-000000000001", persistSession: true },
+    onPhase: (status) => secondPhases.push(status.phase)
+  });
+
+  assert.equal(worker.ensureCalls, 2);
+  assert.equal(worker.sessionLaunches, 1);
+  assert.equal(worker.submissions.length, 2);
+  assert.ok(firstPhases.includes("launching-session"));
+  assert.equal(secondPhases.includes("launching-session"), false);
+  assert.ok(worker.submissions[1].invocation.args.includes("resume"));
+  assert.ok(worker.submissions[1].invocation.args.includes("01900000-0000-7000-8000-000000000001"));
+  assert.equal(worker.submissions[0].participantSession?.sessionKey, worker.submissions[1].participantSession?.sessionKey);
+});
+
+test("stale warm participant session relaunches transparently and submits the same run once", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const worker = new FakeWarmSessionTransport();
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+  const target = { host: "worker.example", workerRoot: "/srv/worker" };
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "stale-first",
+    participant: participantConfig(participant),
+    prompt: "First.",
+    worker: target
+  });
+  worker.failNextSubmissionAsStale = true;
+  const phases: string[] = [];
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "stale-second",
+    participant: participantConfig(participant),
+    prompt: "Second.",
+    worker: target,
+    onPhase: (status) => phases.push(status.label)
+  });
+
+  assert.equal(worker.sessionLaunches, 2);
+  assert.equal(worker.submissions.filter((request) => request.runId === "stale-second").length, 1);
+  assert.ok(phases.includes("Relaunching stale remote session"));
+});
+
+test("remote provider session id is persisted into ChatParticipantSession during replay", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  conversation.metadata.participantSessions = [{
+    participantId: participant.id,
+    sessionId: "",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    updatedAt: NOW
+  }];
+  const worker = new FakeDetachedWorkerTransport();
+  const { remote, storage } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+  const target = { host: "worker.example" };
+
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "session-persist",
+    participant: participantConfig(participant),
+    prompt: "Remember this session.",
+    worker: target
+  });
+  worker.push("session-persist", {
+    kind: "provider_result",
+    workerSeq: 2,
+    ok: true,
+    content: "Done.",
+    sessionId: "01900000-0000-7000-8000-000000000002"
+  });
+  await remote.pollDetachedRun({ runId: "session-persist", worker: target });
+
+  const sessions = storage.current.metadata.participantSessions as Array<{ participantId: string; sessionId: string }>;
+  assert.equal(sessions.find((session) => session.participantId === participant.id)?.sessionId, "01900000-0000-7000-8000-000000000002");
+});
+
+test("remote resume-miss vocabulary clears a dead session id and startup backfill cannot re-poison it", async () => {
+  const participant = chatParticipant();
+  const deadSessionId = "01900000-0000-7000-8000-000000000099";
+  const conversation = chatConversation([participant]);
+  conversation.metadata.participantSessions = [{
+    participantId: participant.id,
+    sessionId: deadSessionId,
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    updatedAt: NOW
+  }];
+  const worker = new FakeDetachedWorkerTransport();
+  const { remote, storage, service } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+  const target = { host: "worker.example" };
+
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "resume-miss",
+    participant: participantConfig(participant),
+    prompt: "Continue.",
+    worker: target,
+    options: { persistSession: true, sessionId: deadSessionId }
+  });
+  worker.push("resume-miss", {
+    kind: "provider_result",
+    workerSeq: 2,
+    ok: false,
+    content: `Conversation ${deadSessionId} not found; cannot resume session.`,
+    error: "cannot resume conversation",
+    sessionId: deadSessionId
+  });
+  await remote.pollDetachedRun({ runId: "resume-miss", worker: target });
+
+  let session = (storage.current.metadata.participantSessions as ChatParticipantSession[])[0];
+  assert.equal(session.sessionId, "");
+  assert.equal(session.invalidatedRemoteSessionId, deadSessionId);
+  await service.backfillRemoteParticipantSessionId(conversation.id, participant.id, deadSessionId, true);
+  session = (storage.current.metadata.participantSessions as ChatParticipantSession[])[0];
+  assert.equal(session.sessionId, "");
+});
+
+test("startup session backfill never overwrites a newer nonempty desktop session id", async () => {
+  const participant = chatParticipant();
+  const desktopSessionId = "01900000-0000-7000-8000-000000000111";
+  const workerSessionId = "01900000-0000-7000-8000-000000000222";
+  const conversation = chatConversation([participant]);
+  conversation.metadata.participantSessions = [{
+    participantId: participant.id,
+    sessionId: desktopSessionId,
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    updatedAt: NOW
+  }];
+  const { service, storage } = await testRemoteRun({
+    conversation,
+    detachedWorkerTransport: new FakeDetachedWorkerTransport()
+  });
+
+  await service.backfillRemoteParticipantSessionId(
+    conversation.id,
+    participant.id,
+    workerSessionId,
+    true
+  );
+
+  const session = (storage.current.metadata.participantSessions as ChatParticipantSession[])[0];
+  assert.equal(session.sessionId, desktopSessionId);
+});
+
+test("default SSH transport acquires and renews an operation lease without a Node protocol", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-posix-lease-transport-"));
+  const fakeSsh = path.join(root, "ssh");
+  await writeFile(fakeSsh, [
+    "#!/bin/sh",
+    "while [ \"$#\" -gt 1 ]; do shift; done",
+    "exec sh -c \"$1\""
+  ].join("\n"), "utf8");
+  await chmod(fakeSsh, 0o755);
+  const { remote } = await testRemoteRun();
+  const worker = { host: "worker.example", sshPath: fakeSsh, workerRoot: root };
+
+  const lease = await remote.acquireWorkerOperationLease(worker, "desktop-a", "settings-worker-operation");
+  const persisted = JSON.parse(await readFile(path.join(root, "operations", `${lease.leaseId}.json`), "utf8")) as {
+    ownerId?: string;
+  };
+  assert.equal(persisted.ownerId, "desktop-a");
+  const renewed = await remote.renewWorkerOperationLease(worker, lease);
+  assert.equal(renewed.leaseId, lease.leaseId);
+  await remote.releaseWorkerOperationLease(worker, renewed);
+  await assert.rejects(() => readFile(path.join(root, "operations", `${lease.leaseId}.json`), "utf8"));
+});
+
+test("cold supervisor launch after worker stop resumes the persisted Codex session", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  conversation.metadata.participantSessions = [{
+    participantId: participant.id,
+    sessionId: "",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    updatedAt: NOW
+  }];
+  const firstWorker = new FakeWarmSessionTransport();
+  const first = await testRemoteRun({ conversation, detachedWorkerTransport: firstWorker });
+  const target = { host: "worker-before-stop.example", workerRoot: "/srv/worker" };
+  await first.remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "before-stop",
+    participant: participantConfig(participant),
+    prompt: "Remember the launch code.",
+    worker: target
+  });
+  firstWorker.push("before-stop", {
+    kind: "provider_result",
+    workerSeq: 2,
+    ok: true,
+    content: "Remembered.",
+    sessionId: "01900000-0000-7000-8000-000000000003"
+  });
+  await first.remote.pollDetachedRun({ runId: "before-stop", worker: target });
+
+  const persisted = (first.storage.current.metadata.participantSessions as ChatParticipantSession[])[0]?.sessionId;
+  const coldWorker = new FakeWarmSessionTransport();
+  const afterRestart = new RemoteRunService(first.service, {
+    spoolRoot: first.root,
+    detachedWorkerTransport: coldWorker
+  });
+  await afterRestart.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "after-stop",
+    participant: participantConfig(participant),
+    prompt: "What was the launch code?",
+    worker: { host: "worker-after-start.example", workerRoot: "/srv/worker" },
+    options: { persistSession: true, sessionId: persisted }
+  });
+
+  assert.equal(coldWorker.sessionLaunches, 1);
+  assert.ok(coldWorker.submissions[0].invocation.args.includes("resume"));
+  assert.ok(coldWorker.submissions[0].invocation.args.includes("01900000-0000-7000-8000-000000000003"));
+});
+
+test("participant session keys and runtime fingerprints are stable but runtime-sensitive", () => {
+  const participant = participantConfig(chatParticipant());
+  assert.equal(
+    remoteParticipantSessionKey("conversation", "participant"),
+    remoteParticipantSessionKey("conversation", "participant")
+  );
+  assert.notEqual(
+    remoteParticipantSessionKey("conversation", "participant"),
+    remoteParticipantSessionKey("conversation", "other")
+  );
+  const base = remoteParticipantRuntimeFingerprint({ participant, repoPath: "/repo", options: { agentMode: "auto" } });
+  const changed = remoteParticipantRuntimeFingerprint({ participant, repoPath: "/repo", options: { agentMode: "plan" } });
+  assert.notEqual(base, changed);
 });
 
 test("terminal state releases the mirror without ever writing back automatically", async () => {
@@ -1981,6 +2308,65 @@ class FakeDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
   }
 }
 
+class FakeWarmSessionTransport extends FakeDetachedWorkerTransport {
+  ensureCalls = 0;
+  sessionLaunches = 0;
+  readonly submissions: RemoteDetachedWorkerLaunchRequest[] = [];
+  readonly sessions = new Set<string>();
+  failNextSubmissionAsStale = false;
+
+  async ensureParticipantSession(
+    request: RemoteParticipantSessionEnsureRequest
+  ): Promise<RemoteParticipantSessionEnsureResult> {
+    this.ensureCalls += 1;
+    const sessionKey = remoteParticipantSessionKey(request.conversationId, request.participantId);
+    const launched = !this.sessions.has(sessionKey);
+    if (launched) {
+      this.sessions.add(sessionKey);
+      this.sessionLaunches += 1;
+    }
+    return {
+      launched,
+      handle: {
+        sessionKey,
+        sessionDir: `/srv/worker/sessions/${sessionKey}`,
+        worker: request.worker,
+        protocolVersion: REMOTE_SESSION_PROTOCOL_VERSION,
+        runtimeFingerprint: request.runtimeFingerprint,
+        updatedAt: NOW
+      }
+    };
+  }
+
+  async submitTurn(request: RemoteDetachedWorkerLaunchRequest): Promise<RemoteDetachedWorkerSnapshot> {
+    if (this.failNextSubmissionAsStale) {
+      this.failNextSubmissionAsStale = false;
+      this.sessions.clear();
+      throw new Error("stale-session");
+    }
+    this.submissions.push(request);
+    if (!this.eventsByRun.has(request.runId)) {
+      this.eventsByRun.set(request.runId, [{
+        kind: "lifecycle",
+        workerSeq: 1,
+        state: "detached_started"
+      }]);
+    }
+    return {
+      state: {
+        runId: request.runId,
+        conversationId: request.conversationId,
+        participantId: request.participant.id,
+        status: "running",
+        pid: 100,
+        pgid: 100,
+        workerCursorSeq: 1
+      },
+      events: this.eventsByRun.get(request.runId) ?? []
+    };
+  }
+}
+
 class FakeCoordinatorChat {
   current: RemoteRunHandle;
 
@@ -1990,6 +2376,14 @@ class FakeCoordinatorChat {
 
   async listActiveRemoteRunHandles(): Promise<RemoteRunHandle[]> {
     return [clone(this.current)];
+  }
+
+  async listRemoteParticipantSessionHandles(): Promise<[]> {
+    return [];
+  }
+
+  async backfillRemoteParticipantSessionId(): Promise<void> {
+    return undefined;
   }
 
   async updateRemoteRunHandleState(_conversationId: string, _runId: string, state: any): Promise<RemoteRunHandle> {
@@ -2045,8 +2439,14 @@ function coordinatorSettings(patch: { maxRuntimeMs: number; pollIntervalMs: numb
         chatSavedPrompts: [],
         chatParticipantConfigs: []
       };
+    },
+    async listRemoteSessionCleanupTombstones(): Promise<[]> {
+      return [];
+    },
+    async removeRemoteSessionCleanupTombstone(): Promise<void> {
+      return undefined;
     }
-  };
+  } as never;
 }
 
 function coordinatorDebugLogs(): { write(): Promise<void> } {

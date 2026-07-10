@@ -1,8 +1,8 @@
-import type { CloudRunStatus, RemoteRunHandle } from "../../shared/types";
+import type { CloudRunStatus, CloudRunWorkerSettings, RemoteRunHandle } from "../../shared/types";
 import type { ChatService } from "./chat";
 import { cloudRunWorkerTargetFromSettings } from "./cloudRunWorkers";
 import type { DebugLogService } from "./debugLogs";
-import type { RemoteDetachedRunState, RemoteRunService } from "./remoteRuns";
+import type { RemoteDetachedRunState, RemoteRunService, RemoteRunWorkerTarget } from "./remoteRuns";
 import type { SettingsService } from "./settings";
 
 export class RemoteRunCoordinator {
@@ -27,6 +27,19 @@ export class RemoteRunCoordinator {
     for (const handle of handles) {
       this.trackRun(handle);
     }
+    await this.reconcileParticipantSessions(handles);
+  }
+
+  async shutdownIdleSessions(): Promise<void> {
+    this.started = false;
+    for (const timer of this.timers.values()) {
+      clearTimeout(timer);
+    }
+    this.timers.clear();
+    const sessions = await this.chat.listRemoteParticipantSessionHandles();
+    await Promise.allSettled(sessions.map(async ({ handle }) => {
+      await this.remoteRuns.stopParticipantSessionIfIdle(handle, false);
+    }));
   }
 
   trackRun(handle: RemoteRunHandle): void {
@@ -118,6 +131,137 @@ export class RemoteRunCoordinator {
   private async pollIntervalMs(): Promise<number> {
     const settings = await this.settings.getPublicSettings();
     return settings.cloudRuns.pollIntervalMs;
+  }
+
+  private async reconcileParticipantSessions(activeRunHandles: readonly RemoteRunHandle[]): Promise<void> {
+    const activeRunIds = new Set(activeRunHandles.map((handle) => handle.runId));
+    const sessions = await this.chat.listRemoteParticipantSessionHandles();
+    const persistedSessionDirs = new Set(sessions.map((session) => session.handle.sessionDir));
+    for (const session of sessions) {
+      try {
+        const state = await this.remoteRuns.inspectParticipantSession(session.handle);
+        if (state.providerSessionId) {
+          await this.chat.backfillRemoteParticipantSessionId(
+            session.conversationId,
+            session.participantId,
+            state.providerSessionId,
+            state.providerSessionValid !== false
+          );
+        }
+        if (state.activeRunId) {
+          if (!activeRunIds.has(state.activeRunId)) {
+            await this.debugLogs.write("remote-session.reconcile.unknown-active", {
+              conversationId: session.conversationId,
+              participantId: session.participantId,
+              runId: state.activeRunId
+            });
+          }
+          continue;
+        }
+        if (state.status === "live") {
+          await this.remoteRuns.stopParticipantSessionIfIdle(session.handle, false);
+        }
+      } catch (error) {
+        await this.debugLogs.write("remote-session.reconcile.error", {
+          conversationId: session.conversationId,
+          participantId: session.participantId,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    const workers = new Map<string, RemoteRunWorkerTarget>();
+    const rememberWorker = (settings: CloudRunWorkerSettings): void => {
+      const worker = cloudRunWorkerTargetFromSettings(settings);
+      if (!worker) {
+        return;
+      }
+      const key = JSON.stringify([
+        worker.host,
+        worker.user,
+        worker.port,
+        worker.identityFile,
+        worker.workerRoot
+      ]);
+      workers.set(key, worker);
+    };
+    for (const handle of activeRunHandles) {
+      rememberWorker(handle.worker);
+    }
+    for (const session of sessions) {
+      rememberWorker(session.handle.worker);
+    }
+    for (const tombstone of await this.settings.listRemoteSessionCleanupTombstones()) {
+      rememberWorker(tombstone.handle.worker);
+    }
+    for (const worker of workers.values()) {
+      try {
+        const discovered = await this.remoteRuns.listParticipantSessions(worker);
+        for (const session of discovered) {
+          if (persistedSessionDirs.has(session.handle.sessionDir)) {
+            continue;
+          }
+          if (session.activeRunId || session.hasQueuedTurns || (session.queuedRunIds?.length ?? 0) > 0) {
+            await this.debugLogs.write("remote-session.reconcile.unknown-active", {
+              conversationId: session.conversationId,
+              participantId: session.participantId,
+              runId: session.activeRunId,
+              sessionDir: session.handle.sessionDir
+            });
+            continue;
+          }
+          await this.debugLogs.write("remote-session.reconcile.unknown-idle-preserved", {
+            conversationId: session.conversationId,
+            participantId: session.participantId,
+            sessionDir: session.handle.sessionDir
+          });
+        }
+      } catch (error) {
+        await this.debugLogs.write("remote-session.reconcile.list.error", {
+          workerHost: worker.host,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    await this.drainRemoteSessionCleanup();
+  }
+
+  async drainRemoteSessionCleanup(workerOverride?: CloudRunWorkerSettings): Promise<void> {
+    const tombstones = await this.settings.listRemoteSessionCleanupTombstones();
+    for (const tombstone of tombstones) {
+      try {
+        const handle = workerOverride && this.isSameWorkerIdentity(tombstone.handle.worker, workerOverride)
+          ? { ...tombstone.handle, worker: workerOverride, updatedAt: new Date().toISOString() }
+          : tombstone.handle;
+        const state = await this.remoteRuns.inspectParticipantSession(handle);
+        if (state.activeRunId || (state.queuedRunIds?.length ?? 0) > 0) {
+          continue;
+        }
+        if (await this.remoteRuns.stopParticipantSessionIfIdle(handle, true, {
+          removeArtifacts: tombstone.removeArtifacts === true,
+          runIds: tombstone.runIds,
+          providerSessionIds: tombstone.providerSessionIds
+        })) {
+          await this.settings.removeRemoteSessionCleanupTombstone(tombstone.id);
+        }
+      } catch (error) {
+        await this.debugLogs.write("remote-session.tombstone.retry.error", {
+          tombstoneId: tombstone.id,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+  }
+
+  private isSameWorkerIdentity(left: CloudRunWorkerSettings, right: CloudRunWorkerSettings): boolean {
+    const leftIdentity = left.identityFile?.trim() || "";
+    const rightIdentity = right.identityFile?.trim() || "";
+    if (!leftIdentity || !rightIdentity || leftIdentity !== rightIdentity) {
+      return false;
+    }
+    return (left.user?.trim() || "") === (right.user?.trim() || "") &&
+      (left.workerRoot?.trim() || "") === (right.workerRoot?.trim() || "");
   }
 
   private async markExpiredIfNeeded(handle: RemoteRunHandle): Promise<boolean> {

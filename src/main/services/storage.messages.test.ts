@@ -241,6 +241,23 @@ test("clearInterruptedRuns reads payloads by id and preserves local run state", 
   assert.doesNotMatch(queryJsonSql[0], /payload_json as payloadJson/);
 });
 
+test("deleteConversation removes messages and conversation in one transaction", async () => {
+  const statements: string[] = [];
+  const storage = Object.create(StorageService.prototype) as any;
+  storage.initialized = true;
+  storage.queryText = async () => "conversation-1";
+  storage.runSql = async (sql: string) => {
+    statements.push(sql);
+  };
+
+  assert.equal(await (storage as StorageService).deleteConversation("conversation-1"), true);
+  assert.equal(statements.length, 1);
+  assert.match(statements[0], /^\s*begin;/);
+  assert.match(statements[0], /delete from conversation_messages where conversation_id = 'conversation-1'/);
+  assert.match(statements[0], /delete from conversations where id = 'conversation-1'/);
+  assert.match(statements[0], /commit;/);
+});
+
 function maintenanceStorage(options: {
   ids?: string[];
   payloads?: Map<string, string>;

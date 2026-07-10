@@ -9,7 +9,8 @@ import type {
   ChatParticipantSession,
   ChatRoleConfig,
   Conversation,
-  ConversationSummary
+  ConversationSummary,
+  RemoteSessionCleanupTombstone
 } from "../../shared/types";
 
 const NOW = "2026-05-19T12:00:00.000Z";
@@ -415,6 +416,126 @@ test("setArchived rejects when a chat run already owns the run queue", async () 
   }
 });
 
+test("setArchived stops an idle warm remote session without discarding its durable handle", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation({
+    metadata: {
+      participants: [participant],
+      participantSessions: [{
+        participantId: participant.id,
+        sessionId: "session-1",
+        roleConfigId: ROLE.id,
+        roleConfigVersion: ROLE.version,
+        roleLabel: ROLE.label,
+        roleInstructions: ROLE.instructions,
+        remoteSession: {
+          sessionKey: "remote-session",
+          sessionDir: "/srv/worker/sessions/remote-session",
+          worker: { host: "worker.example", workerRoot: "/srv/worker" },
+          protocolVersion: 1,
+          runtimeFingerprint: "fingerprint",
+          updatedAt: NOW
+        },
+        updatedAt: NOW
+      } satisfies ChatParticipantSession]
+    }
+  });
+  const { service, storage, cleanupTombstones } = testService([conversation]);
+  service.setRemoteRunService({
+    async startDetachedRun(): Promise<never> { throw new Error("not used"); },
+    async pollDetachedRun(): Promise<never> { throw new Error("not used"); },
+    async cancelDetachedRun(): Promise<never> { throw new Error("not used"); },
+    async stopParticipantSessionIfIdle(): Promise<boolean> { return true; }
+  });
+
+  await service.setArchived({ conversationId: conversation.id, archived: true });
+  const saved = await storage.getConversation(conversation.id);
+  const sessions = saved?.metadata.participantSessions as ChatParticipantSession[];
+  assert.equal(saved?.metadata.archived, true);
+  assert.equal(sessions[0]?.remoteSession?.sessionKey, "remote-session");
+  assert.deepEqual(cleanupTombstones, []);
+});
+
+test("deleteConversation requires archive, records remote cleanup before deleting, and removes storage", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation({
+    metadata: {
+      archived: true,
+      participants: [participant],
+      participantSessions: [{
+        participantId: participant.id,
+        sessionId: "session-1",
+        roleConfigId: ROLE.id,
+        roleConfigVersion: ROLE.version,
+        roleLabel: ROLE.label,
+        roleInstructions: ROLE.instructions,
+        remoteSession: {
+          sessionKey: "remote-session",
+          sessionDir: "/srv/worker/sessions/remote-session",
+          worker: { host: "worker.example", workerRoot: "/srv/worker" },
+          protocolVersion: 1,
+          runtimeFingerprint: "fingerprint",
+          updatedAt: NOW
+        },
+        updatedAt: NOW
+      } satisfies ChatParticipantSession]
+    }
+  });
+  const { service, storage, cleanupTombstones } = testService([conversation]);
+  let cleanupCalls = 0;
+  service.setRemoteRunService({
+    async startDetachedRun(): Promise<never> { throw new Error("not used"); },
+    async pollDetachedRun(): Promise<never> { throw new Error("not used"); },
+    async cancelDetachedRun(): Promise<never> { throw new Error("not used"); },
+    async stopParticipantSessionIfIdle(): Promise<boolean> {
+      cleanupCalls += 1;
+      return false;
+    }
+  });
+
+  assert.equal(await service.deleteConversation({ conversationId: conversation.id }), true);
+  assert.equal(await storage.getConversation(conversation.id), undefined);
+  assert.equal(cleanupCalls, 1);
+  assert.equal(cleanupTombstones.length, 1);
+  assert.equal(cleanupTombstones[0].reason, "chat-deleted");
+});
+
+test("deleteConversation rejects an unarchived chat", async () => {
+  const conversation = chatConversation();
+  const { service, storage } = testService([conversation]);
+  await assert.rejects(
+    () => service.deleteConversation({ conversationId: conversation.id }),
+    /Archive the chat before deleting it permanently/
+  );
+  assert.ok(await storage.getConversation(conversation.id));
+});
+
+test("permanent deletion cannot be resurrected by an already queued stale mutation", async () => {
+  const conversation = chatConversation({ metadata: { archived: true } });
+  const { service, storage } = testService([conversation]);
+  const stale = structuredClone(conversation);
+  let release!: () => void;
+  let entered!: () => void;
+  const blocker = new Promise<void>((resolve) => { release = resolve; });
+  const mutationEntered = new Promise<void>((resolve) => { entered = resolve; });
+  const staleMutation = (service as any).withChatMutation(stale, async () => {
+    entered();
+    await blocker;
+    stale.title = "resurrected";
+    await (service as any).saveConversation(stale);
+  }) as Promise<void>;
+  await mutationEntered;
+
+  const deletion = service.deleteConversation({ conversationId: conversation.id });
+  for (let attempt = 0; attempt < 100 && !(service as any).deletedConversationIds.has(conversation.id); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  release();
+  await assert.rejects(staleMutation, /permanently deleted/);
+  assert.equal(await deletion, true);
+  assert.equal(await storage.getConversation(conversation.id), undefined);
+});
+
 test("addParticipant serializes concurrent roster additions without dropping a participant", async () => {
   const conversation = chatConversation({ title: "Roster chat" });
   const { service, storage } = testService([conversation]);
@@ -720,6 +841,46 @@ test("hydrateContextUsage preserves newer stored messages when syncing participa
   assert.equal(((saved?.metadata.participants ?? []) as ChatParticipant[])[0]?.avatarId, "codex-logo");
 });
 
+test("participant-session metadata merge preserves newer handles and respects newer intentional clears", () => {
+  const { service } = testService([]);
+  const merge = (service as any).mergeStoredChatMetadata.bind(service) as (
+    stored: Record<string, unknown>,
+    current: Record<string, unknown>
+  ) => Record<string, unknown>;
+  const remoteSession = {
+    sessionKey: "warm",
+    sessionDir: "/worker/sessions/warm",
+    worker: { host: "worker.example" },
+    protocolVersion: 2,
+    runtimeFingerprint: "fingerprint",
+    updatedAt: "2026-07-10T00:00:02.000Z"
+  };
+  const stored = {
+    participantId: "participant",
+    sessionId: "session-id",
+    remoteSession,
+    updatedAt: "2026-07-10T00:00:02.000Z"
+  };
+  const stale = {
+    participantId: "participant",
+    sessionId: "",
+    updatedAt: "2026-07-10T00:00:01.000Z"
+  };
+  const preserved = merge(
+    { participantSessions: [stored] },
+    { participantSessions: [stale] }
+  ).participantSessions as Array<Record<string, unknown>>;
+  assert.equal((preserved[0].remoteSession as { sessionKey: string }).sessionKey, "warm");
+  assert.equal(preserved[0].sessionId, "session-id");
+
+  const cleared = merge(
+    { participantSessions: [stored] },
+    { participantSessions: [{ ...stale, updatedAt: "2026-07-10T00:00:03.000Z", remoteSession: undefined }] }
+  ).participantSessions as Array<Record<string, unknown>>;
+  assert.equal(cleared[0].remoteSession, undefined);
+  assert.equal(cleared[0].sessionId, "");
+});
+
 function testService(conversationList: Conversation[], options: {
   participantConfigs?: ChatParticipantConfig[];
   contextUsageBySession?: Record<string, AgentContextUsage | undefined>;
@@ -729,13 +890,16 @@ function testService(conversationList: Conversation[], options: {
     listConversations(): Promise<ConversationSummary[]>;
     getConversation(id: string): Promise<Conversation | undefined>;
     saveConversation(conversation: Conversation): Promise<void>;
+    deleteConversation(id: string): Promise<boolean>;
   };
   snapshots: Conversation[];
   historyWrites: string[];
+  cleanupTombstones: RemoteSessionCleanupTombstone[];
 } {
   const conversations = new Map(conversationList.map((conversation) => [conversation.id, cloneConversation(conversation)]));
   const snapshots: Conversation[] = [];
   const historyWrites: string[] = [];
+  const cleanupTombstones: RemoteSessionCleanupTombstone[] = [];
   const storage = {
     async listConversations(): Promise<ConversationSummary[]> {
       return Array.from(conversations.values()).map((conversation) => ({
@@ -754,11 +918,26 @@ function testService(conversationList: Conversation[], options: {
     },
     async saveConversation(conversation: Conversation): Promise<void> {
       conversations.set(conversation.id, cloneConversation(conversation));
+    },
+    async deleteConversation(id: string): Promise<boolean> {
+      return conversations.delete(id);
     }
   };
   const settings = {
     async getPublicSettings(): Promise<{ chatRoleConfigs: ChatRoleConfig[]; chatParticipantConfigs: ChatParticipantConfig[] }> {
       return { chatRoleConfigs: [ROLE], chatParticipantConfigs: options.participantConfigs ?? [] };
+    },
+    async enqueueRemoteSessionCleanup(
+      handle: RemoteSessionCleanupTombstone["handle"],
+      reason: RemoteSessionCleanupTombstone["reason"]
+    ): Promise<RemoteSessionCleanupTombstone> {
+      const tombstone = { id: `cleanup-${cleanupTombstones.length + 1}`, handle, reason, createdAt: NOW };
+      cleanupTombstones.push(tombstone);
+      return tombstone;
+    },
+    async removeRemoteSessionCleanupTombstone(id: string): Promise<void> {
+      const index = cleanupTombstones.findIndex((item) => item.id === id);
+      if (index >= 0) cleanupTombstones.splice(index, 1);
     }
   };
   const cliRunner = {
@@ -786,7 +965,9 @@ function testService(conversationList: Conversation[], options: {
     historyWrites.push(conversation.title);
     return "/mock/history";
   };
-  return { service, storage, snapshots, historyWrites };
+  (service as unknown as { cleanupDeletedConversationArtifacts(conversation: Conversation): Promise<void> })
+    .cleanupDeletedConversationArtifacts = async () => undefined;
+  return { service, storage, snapshots, historyWrites, cleanupTombstones };
 }
 
 function chatConversation(patch: Partial<Conversation> = {}): Conversation {
