@@ -307,7 +307,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
                   props.onStopRun?.(runId);
                 }
               } : undefined}
-              placeholder="Mention members with @name, prompts or skills with /name, or repo files with #path"
+              placeholder="Message @name, /name, or #path..."
               status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
               testId="chat-main-composer"
               renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}

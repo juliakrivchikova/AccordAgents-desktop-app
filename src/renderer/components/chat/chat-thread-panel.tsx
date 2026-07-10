@@ -128,9 +128,7 @@ export function ChatThreadPanel(props: {
         onDraftChange={props.onDraftChange}
         onSend={props.onSend}
         isRunning={props.busy}
-        placeholder="Reply with @name, /prompt, /skill, or #path..."
-        rows={3}
-        maxHeight={180}
+        placeholder="Reply @name, /name, or #path..."
         testId="chat-thread-composer"
         renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}
         participantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}

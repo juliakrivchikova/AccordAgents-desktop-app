@@ -4069,7 +4069,7 @@
 }
 
 .chat-thread-composer {
-  padding: var(--space-3) var(--app-gutter) var(--app-gutter);
+  padding: 10px var(--app-gutter) 18px;
   box-shadow: none;
 }
 
