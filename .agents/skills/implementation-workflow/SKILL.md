@@ -178,6 +178,7 @@ To ask Drew to implement, respond as follows:
 
 Real acceptance QA and fix loop are mandatory before reporting approval-ready:
 - Verify every acceptance criterion through the live product using the real user-visible workflow, production code path, and actual integrations involved. Mocks, simulated events, fixtures, unit tests, typecheck, builds, source inspection, or merely launching/screenshotting the product are supporting checks, not acceptance evidence.
+- Controllable failures — including network disconnect and worker/instance stop — must be forced live; they are not eligible for the simulation exception even if the state has already recovered, because it can be induced again. Deterministic simulation of a failure path is acceptance evidence only when live reproduction is technically unavailable (a genuine external outage you cannot induce, a hardware fault, or a race you cannot reliably trigger), not merely inconvenient or transiently recovered. Record why live reproduction was technically unavailable. Evidence recorded under this exception counts as acceptance evidence for that criterion at every manager gate.
 - Treat any existing adjacent or unrelated user-visible workflow reasonably affected by the change as a regression acceptance criterion requiring real PASS evidence.
 - For every acceptance criterion, perform the real end-to-end workflow; capture actions, environment, observed result, screenshots/logs/timestamps; mark PASS or FAIL.
 - If any criterion fails, investigate root cause, implement the smallest correct fix within the agreed scope, add regression coverage, rebuild/relaunch as needed, and repeat the real acceptance workflow until it passes.
@@ -189,8 +190,9 @@ Real acceptance QA and fix loop are mandatory before reporting approval-ready:
 Manager gate after Drew reports implementation complete: before asking for review, verify Drew's report includes focused
 tests, `make typecheck`, relevant targeted tests, `make build`, and an acceptance-evidence table. The table must cover
 every locked acceptance criterion and every reasonably affected existing user-visible workflow, use real user-visible
-workflows and integrations, and contain only PASS results. If evidence is missing, simulated, stale, failed, or
-incomplete, do not start review; send the work back to Drew to complete the real acceptance QA and fix loop.
+workflows and integrations, and contain only PASS results. If evidence is missing, stale, failed, incomplete, or
+simulated outside the explicitly documented unforceable-failure exception, do not start review; send the work back to
+Drew to complete the real acceptance QA and fix loop.
 
 ### 6. Ask Both To Review
 
@@ -235,14 +237,16 @@ To ask Taylor for final review, respond as follows:
 ```
 
 Manager gate after Taylor's final review: continue only if Taylor explicitly audited the latest acceptance-evidence table,
-including affected existing user-visible workflows, and approved readiness. If Taylor reports missing, simulated, stale,
-failed, or incomplete evidence, or otherwise does not approve, return to the required-fix accord stage.
+including affected existing user-visible workflows, and approved readiness. If Taylor reports missing, stale, failed, or
+incomplete evidence, or simulated evidence other than the allowed unforceable-failure-path fault injection, or otherwise
+does not approve, return to the required-fix accord stage.
 
 ### 10. Execute Final Step
 
 Manager gate before executing any final step: recheck the latest acceptance-evidence table yourself. Do not open the
 final app instance, merge, push, or release unless every locked acceptance criterion and every reasonably affected
-existing user-visible workflow has direct real-workflow PASS evidence.
+existing user-visible workflow has direct real-workflow PASS evidence, or, for a criterion whose failure cannot be forced
+live, the recorded unforceable-failure-path evidence.
 
 If the selected final step is `Open app instance`, ask Drew:
 
