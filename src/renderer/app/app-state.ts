@@ -16,7 +16,14 @@ import type { SettingsSection } from "../components/settings/settings-view";
 import type { ChatMessageFocusRequest } from "../components/chat/chat-conversation-view";
 import type { ChatParticipantDraft } from "../components/chat/chat-participant-drafts";
 import { DEFAULT_SETTINGS } from "./constants";
-import { readDismissedWarningsFromStorage, readInitialSidebarCollapsed, readInitialSidebarWidth, readLastViewedAtFromStorage } from "./storage";
+import {
+  persistChatSidebarWidth,
+  persistSettingsSidebarWidth,
+  readDismissedWarningsFromStorage,
+  readInitialAppSidebarWidths,
+  readInitialSidebarCollapsed,
+  readLastViewedAtFromStorage
+} from "./storage";
 import type { DismissedWarningMap } from "./storage";
 
 export type RailView = "chats" | "activity" | "settings";
@@ -52,7 +59,7 @@ export interface AppState {
   sidebarCollapsed: boolean;
   setSidebarCollapsed: StateSetter<boolean>;
   sidebarWidth: number;
-  setSidebarWidth: StateSetter<number>;
+  setSidebarWidth: (width: number) => void;
   selectedThreadId: string | undefined;
   setSelectedThreadId: StateSetter<string | undefined>;
   focusedThreadId: string | undefined;
@@ -132,7 +139,9 @@ export function useAppState(): AppState {
   const [selectedActivityItem, setSelectedActivityItem] = useState<ChatActivityItem | undefined>();
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readInitialSidebarCollapsed);
-  const [sidebarWidth, setSidebarWidth] = useState(readInitialSidebarWidth);
+  const [initialSidebarWidths] = useState(readInitialAppSidebarWidths);
+  const [chatSidebarWidth, setChatSidebarWidth] = useState(initialSidebarWidths.chats);
+  const [settingsSidebarWidth, setSettingsSidebarWidth] = useState(initialSidebarWidths.settings);
   const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>();
   const [focusedThreadId, setFocusedThreadId] = useState<string | undefined>();
   const [kind, setKind] = useState<ConversationKind>("chat");
@@ -168,6 +177,18 @@ export function useAppState(): AppState {
   const archivedConversationIdsRef = useRef<Set<string>>(new Set());
   const lastViewedAtRef = useRef<Record<string, string>>(readLastViewedAtFromStorage());
   const startingChatRef = useRef(false);
+  const sidebarWidth = railView === "settings" ? settingsSidebarWidth : chatSidebarWidth;
+  const setSidebarWidth = (width: number): void => {
+    if (railView === "settings") {
+      setSettingsSidebarWidth(width);
+      persistSettingsSidebarWidth(width);
+      return;
+    }
+    if (railView === "chats") {
+      setChatSidebarWidth(width);
+      persistChatSidebarWidth(width);
+    }
+  };
 
   return {
     settings, setSettings, agents, setAgents, summaries, setSummaries, conversation, setConversation,

@@ -1,16 +1,23 @@
 import {
   ACCORD_LAUNCHER_STORAGE_KEY,
+  CHAT_SIDEBAR_WIDTH_STORAGE_KEY,
   DISMISSED_WARNINGS_STORAGE_KEY,
   LAST_VIEWED_AT_STORAGE_KEY,
-  SIDEBAR_COLLAPSED_STORAGE_KEY,
-  SIDEBAR_WIDTH_STORAGE_KEY
+  SETTINGS_SIDEBAR_WIDTH_STORAGE_KEY,
+  SIDEBAR_COLLAPSED_STORAGE_KEY
 } from "./constants";
 import {
   type AccordLauncherPreferences,
   normalizeAccordLauncherPreferences,
   parseAccordLauncherPreferencesJson
 } from "../../shared/accordLauncherPreferences";
-import { DEFAULT_APP_SIDEBAR_WIDTH, normalizeAppSidebarWidth } from "../lib/sidebar-sizing";
+import {
+  type InitialAppSidebarWidths,
+  persistActivityListWidth as persistActivityListWidthToStorage,
+  persistAppSidebarWidth,
+  readInitialActivityListWidth as readInitialActivityListWidthFromStorage,
+  readInitialAppSidebarWidths as readInitialAppSidebarWidthsFromStorage
+} from "../lib/sidebar-width-storage";
 
 export type { AccordLauncherPreferences } from "../../shared/accordLauncherPreferences";
 
@@ -101,19 +108,22 @@ export function readInitialSidebarCollapsed(): boolean {
   }
 }
 
-export function readInitialSidebarWidth(): number {
-  try {
-    const raw = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
-    return raw ? normalizeAppSidebarWidth(raw) : DEFAULT_APP_SIDEBAR_WIDTH;
-  } catch {
-    return DEFAULT_APP_SIDEBAR_WIDTH;
-  }
+export function readInitialAppSidebarWidths(): InitialAppSidebarWidths {
+  return readInitialAppSidebarWidthsFromStorage(window.localStorage);
 }
 
-export function persistSidebarWidth(width: number): void {
-  try {
-    window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(normalizeAppSidebarWidth(width)));
-  } catch {
-    // Local storage persistence is best-effort.
-  }
+export function persistChatSidebarWidth(width: number): void {
+  persistAppSidebarWidth(window.localStorage, CHAT_SIDEBAR_WIDTH_STORAGE_KEY, width);
+}
+
+export function persistSettingsSidebarWidth(width: number): void {
+  persistAppSidebarWidth(window.localStorage, SETTINGS_SIDEBAR_WIDTH_STORAGE_KEY, width);
+}
+
+export function readInitialActivityListWidth(): number {
+  return readInitialActivityListWidthFromStorage(window.localStorage);
+}
+
+export function persistActivityListWidth(width: number): void {
+  persistActivityListWidthToStorage(window.localStorage, width);
 }
