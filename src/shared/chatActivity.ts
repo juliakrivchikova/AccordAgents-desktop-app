@@ -411,6 +411,7 @@ function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] 
   const byId = new Map<string, ChatActivityItem>();
   const strongestByRun = new Map<string, ChatActivityItem>();
   const strongestByMessage = new Map<string, ChatActivityItem>();
+  const newestRecentByParticipant = new Map<string, ChatActivityItem>();
   for (const item of items) {
     byId.set(item.id, item);
     const messageId = cleanString(item.target.messageId);
@@ -429,6 +430,16 @@ function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] 
       strongestByRun.set(runId, item);
     }
   }
+  for (const item of byId.values()) {
+    const groupKey = recentParticipantGroupKey(item);
+    if (!groupKey) {
+      continue;
+    }
+    const existing = newestRecentByParticipant.get(groupKey);
+    if (!existing || isNewerActivityItem(item, existing)) {
+      newestRecentByParticipant.set(groupKey, item);
+    }
+  }
 
   return [...byId.values()].filter((item) => {
     const messageId = cleanString(item.target.messageId);
@@ -437,10 +448,35 @@ function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] 
     }
     const runId = cleanString(item.target.runId);
     if (!runId || item.status !== "recent") {
-      return true;
+      const groupKey = recentParticipantGroupKey(item);
+      return !groupKey || newestRecentByParticipant.get(groupKey)?.id === item.id;
     }
-    return strongestByRun.get(runId)?.id === item.id;
+    if (strongestByRun.get(runId)?.id !== item.id) {
+      return false;
+    }
+    const groupKey = recentParticipantGroupKey(item);
+    return !groupKey || newestRecentByParticipant.get(groupKey)?.id === item.id;
   });
+}
+
+function recentParticipantGroupKey(item: ChatActivityItem): string | undefined {
+  if (item.status !== "recent") {
+    return undefined;
+  }
+  const conversationId = cleanString(item.conversationId);
+  const participantId = cleanString(item.participant?.id);
+  const participantHandle = cleanHandle(item.participant?.handle).toLowerCase();
+  const participantKey = participantId
+    ? `id:${participantId.toLowerCase()}`
+    : participantHandle
+      ? `handle:${participantHandle}`
+      : "";
+  return conversationId && participantKey ? `${conversationId}:${participantKey}` : undefined;
+}
+
+function isNewerActivityItem(candidate: ChatActivityItem, existing: ChatActivityItem): boolean {
+  const timeDelta = timeValue(candidate.updatedAt) - timeValue(existing.updatedAt);
+  return timeDelta > 0 || (timeDelta === 0 && candidate.id.localeCompare(existing.id) > 0);
 }
 
 function participantSummaries(conversation: Conversation): Map<string, ChatActivityParticipantSummary> {

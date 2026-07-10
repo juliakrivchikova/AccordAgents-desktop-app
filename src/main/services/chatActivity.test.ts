@@ -385,7 +385,7 @@ test("buildChatActivityItems never targets hidden internal messages", () => {
   assert.ok(items.every((item) => item.target.messageId !== "hidden-finished"));
 });
 
-test("buildChatActivityItems keeps viewed finished messages and marks them read", () => {
+test("buildChatActivityItems keeps only newest finished item per participant in a chat", () => {
   const items = buildChatActivityItems(conversation({
     messages: [
       participantMessage("old", {
@@ -395,6 +395,43 @@ test("buildChatActivityItems keeps viewed finished messages and marks them read"
       participantMessage("new", {
         createdAt: "2026-01-08T11:00:00.000Z",
         metadata: { runId: "new-run", chatThreadRootId: "root" }
+      }),
+      participantMessage("remote-old", {
+        createdAt: "2026-01-08T09:30:00.000Z",
+        metadata: { runId: "remote-run" }
+      }, remoteParticipant),
+      participantMessage("remote-newer", {
+        createdAt: "2026-01-08T09:45:00.000Z",
+        metadata: { runId: "remote-newer-run" }
+      }, remoteParticipant)
+    ]
+  }), {
+    now: NOW,
+    lastViewedAt: "2026-01-08T10:00:00.000Z"
+  });
+
+  assert.deepEqual(items.map((item) => [
+    item.status,
+    item.target.messageId,
+    item.participant?.handle,
+    item.read
+  ]), [
+    ["recent", "new", "drew-codex-engineer", undefined],
+    ["recent", "remote-newer", "taylor-claude-engineer", true]
+  ]);
+  assert.equal(items[0].target.threadRootId, "root");
+});
+
+test("buildChatActivityItems keeps a newer same-participant turn unread when an older turn was read", () => {
+  const items = buildChatActivityItems(conversation({
+    messages: [
+      participantMessage("old", {
+        createdAt: "2026-01-08T09:00:00.000Z",
+        metadata: { runId: "old-run" }
+      }),
+      participantMessage("new", {
+        createdAt: "2026-01-08T11:00:00.000Z",
+        metadata: { runId: "new-run" }
       })
     ]
   }), {
@@ -402,13 +439,9 @@ test("buildChatActivityItems keeps viewed finished messages and marks them read"
     lastViewedAt: "2026-01-08T10:00:00.000Z"
   });
 
-  assert.equal(items.length, 2);
-  assert.equal(items[0].status, "recent");
+  assert.equal(items.length, 1);
   assert.equal(items[0].target.messageId, "new");
-  assert.equal(items[0].target.threadRootId, "root");
   assert.equal(items[0].read, undefined);
-  assert.equal(items[1].target.messageId, "old");
-  assert.equal(items[1].read, true);
 });
 
 test("buildChatActivityItems emits recent finished participant messages without a run id", () => {
@@ -464,7 +497,7 @@ test("applyChatActivityItemPreferences persists per-item read and clear state", 
       participantMessage("clear", {
         createdAt: "2026-01-08T10:30:00.000Z",
         metadata: { runId: "clear-run" }
-      })
+      }, remoteParticipant)
     ]
   }), { now: NOW });
   const keptItem = items.find((item) => item.target.messageId === "keep");
@@ -479,6 +512,28 @@ test("applyChatActivityItemPreferences persists per-item read and clear state", 
 
   assert.deepEqual(preferred.map((item) => item.id), [keptItem.id]);
   assert.equal(preferred[0]?.read, true);
+});
+
+test("applyChatActivityItemPreferences does not backfill older finished rows after clearing a collapsed item", () => {
+  const items = buildChatActivityItems(conversation({
+    messages: [
+      participantMessage("old", {
+        createdAt: "2026-01-08T10:30:00.000Z",
+        metadata: { runId: "old-run" }
+      }),
+      participantMessage("new", {
+        createdAt: "2026-01-08T11:00:00.000Z",
+        metadata: { runId: "new-run" }
+      })
+    ]
+  }), { now: NOW });
+  assert.deepEqual(items.map((item) => item.target.messageId), ["new"]);
+
+  const preferred = applyChatActivityItemPreferences(items, {
+    clearedItemIds: new Set([items[0].id])
+  });
+
+  assert.deepEqual(preferred, []);
 });
 
 test("resolveSelectedChatActivityItem keeps a selected recent target after it is cleared from the list", () => {
