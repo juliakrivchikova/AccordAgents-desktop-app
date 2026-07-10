@@ -262,6 +262,7 @@ function ActivityRow({
           className="activity-row-action"
           title={item.read ? "Already read" : "Mark read"}
           aria-label={item.read ? "Already read" : "Mark read"}
+          data-read={item.read ? "true" : undefined}
           disabled={item.read === true}
           onClick={onMarkRead}
         >

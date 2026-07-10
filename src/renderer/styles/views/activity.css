@@ -181,6 +181,13 @@
   opacity: 0.4;
 }
 
+.activity-row-action[data-read="true"] {
+  color: var(--app-accent);
+  border-color: var(--app-accent-border) !important;
+  background: var(--app-accent-soft) !important;
+  opacity: 1 !important;
+}
+
 .activity-status-dot {
   position: absolute;
   top: 50%;
