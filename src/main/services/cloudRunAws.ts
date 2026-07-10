@@ -43,7 +43,6 @@ export interface CloudRunAwsServiceOptions {
   currentPublicIp?: () => Promise<string>;
   workerAccess?: AwsWorkerAccess;
   logger?: (event: string, payload: Record<string, unknown>) => void;
-  randomSuffix?: () => string;
   wait?: (delayMs: number) => Promise<void>;
   sshExec?: (worker: CloudRunWorkerSettings, command: string, timeoutMs: number) => Promise<void>;
 }
@@ -63,7 +62,6 @@ export class CloudRunAwsService {
   private readonly createEc2Client: (credentials: AwsWorkerCredentials) => Ec2Client;
   private readonly generateKeyMaterial: typeof generateAwsWorkerKeyMaterial;
   private readonly workerAccess: AwsWorkerAccess;
-  private readonly randomSuffix: () => string;
   private readonly privateKeyPathForKeyName: (keyName: string) => string;
   private readonly logger?: (event: string, payload: Record<string, unknown>) => void;
   private readonly wait: (delayMs: number) => Promise<void>;
@@ -85,14 +83,14 @@ export class CloudRunAwsService {
       logger: options.logger
     });
     this.workerAccess = options.workerAccess ?? new AwsWorkerAccess();
-    this.randomSuffix = options.randomSuffix ?? (() => Math.random().toString(36).slice(2, 10));
     this.privateKeyPathForKeyName = options.privateKeyPathForKeyName ?? resolveAwsWorkerPrivateKeyPath;
     this.wait = options.wait ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
     this.sshExec = options.sshExec ?? defaultSshExec;
   }
 
-  bootstrapCommand(region: string): string {
-    return buildBootstrapCommand(region, this.randomSuffix());
+  async bootstrapCommand(region: string): Promise<string> {
+    const deviceId = await this.settings.getCloudRunsDeviceId();
+    return buildBootstrapCommand(region, deviceId);
   }
 
   // Compatibility entry point for older renderer callers. The new UI calls

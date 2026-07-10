@@ -169,6 +169,9 @@ export function buildBootstrapCommand(region: string, userSuffix: string): strin
   const safeRegion = assertToken("region", region);
   const userName = `accordagents-worker-${assertToken("suffix", userSuffix)}`;
   const policy = JSON.stringify(buildScopedWorkerPolicy(safeRegion));
+  if (policy.length > 6_144) {
+    throw new Error("AWS worker policy exceeds the IAM customer-managed policy size limit.");
+  }
   // Single-quote the policy for the shell; escape embedded quotes.
   const policyLiteral = `'${policy.replace(/'/g, `'\\''`)}'`;
   return [
@@ -182,7 +185,10 @@ export function buildBootstrapCommand(region: string, userSuffix: string): strin
     "if [ $(( $# / 2 )) -gt 1 ]; then printf '%s\\n' 'Multiple tagged AccordAgents workers exist; resolve them before setup.' >&2; exit 1; fi",
     "if [ $# -eq 2 ]; then WORKER_REGION=$1; WORKER_ID=$2; ROOT_DEVICE=$(aws ec2 describe-instances --region \"$WORKER_REGION\" --instance-ids \"$WORKER_ID\" --query 'Reservations[0].Instances[0].RootDeviceName' --output text); ROOT_VOLUME=$(aws ec2 describe-instances --region \"$WORKER_REGION\" --instance-ids \"$WORKER_ID\" --query \"Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName=='$ROOT_DEVICE'].Ebs.VolumeId | [0]\" --output text); if [ -n \"$ROOT_VOLUME\" ] && [ \"$ROOT_VOLUME\" != None ]; then aws ec2 create-tags --region \"$WORKER_REGION\" --resources \"$ROOT_VOLUME\" --tags Key=accordagents-worker,Value=1; fi; for SG in $(aws ec2 describe-instances --region \"$WORKER_REGION\" --instance-ids \"$WORKER_ID\" --query 'Reservations[0].Instances[0].SecurityGroups[].GroupId' --output text); do SG_NAME=$(aws ec2 describe-security-groups --region \"$WORKER_REGION\" --group-ids \"$SG\" --query 'SecurityGroups[0].GroupName' --output text); case \"$SG_NAME\" in accordagents-worker-*-sg) aws ec2 create-tags --region \"$WORKER_REGION\" --resources \"$SG\" --tags Key=accordagents-worker,Value=1 ;; esac; done; fi",
     'if ! aws iam get-user --user-name "$USER" >/dev/null 2>&1; then aws iam create-user --user-name "$USER" >/dev/null; fi',
-    'aws iam put-user-policy --user-name "$USER" --policy-name accordagents-worker --policy-document "$POLICY" >/dev/null',
+    'POLICY_ARN=$(aws iam list-policies --scope Local --query "Policies[?PolicyName==\x27$USER\x27].Arn | [0]" --output text)',
+    'if [ -z "$POLICY_ARN" ] || [ "$POLICY_ARN" = None ]; then POLICY_ARN=$(aws iam create-policy --policy-name "$USER" --policy-document "$POLICY" --query "Policy.Arn" --output text); else for VERSION_ID in $(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query "Versions[?IsDefaultVersion==\x60false\x60].VersionId" --output text); do aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$VERSION_ID"; done; aws iam create-policy-version --policy-arn "$POLICY_ARN" --policy-document "$POLICY" --set-as-default >/dev/null; fi',
+    'aws iam attach-user-policy --user-name "$USER" --policy-arn "$POLICY_ARN"',
+    'aws iam delete-user-policy --user-name "$USER" --policy-name accordagents-worker >/dev/null 2>&1 || true',
     'EXISTING_KEYS=$(aws iam list-access-keys --user-name "$USER" --query \'sort_by(AccessKeyMetadata,&CreateDate)[].AccessKeyId\' --output text)',
     'set -- $EXISTING_KEYS',
     'if [ "$#" -ge 2 ]; then aws iam delete-access-key --user-name "$USER" --access-key-id "$1"; shift; fi',

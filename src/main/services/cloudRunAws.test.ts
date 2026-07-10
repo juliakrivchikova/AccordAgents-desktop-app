@@ -238,6 +238,19 @@ function serviceWith(
   });
 }
 
+test("bootstrap command reuses a stable device-scoped IAM identity", async () => {
+  const settings = new FakeSettings();
+  const service = serviceWith(settings, new Map());
+
+  const first = await service.bootstrapCommand("us-east-1");
+  const second = await service.bootstrapCommand("eu-west-1");
+
+  assert.match(first, /USER=accordagents-worker-device-a/);
+  assert.match(second, /USER=accordagents-worker-device-a/);
+  assert.match(first, /REGION=us-east-1/);
+  assert.match(second, /REGION=eu-west-1/);
+});
+
 test("connectWorker refuses to overwrite an active existing worker", async () => {
   const settings = new FakeSettings();
   settings.credentials = OLD_CREDS;

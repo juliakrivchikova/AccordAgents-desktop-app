@@ -59,7 +59,10 @@ test("bootstrap command creates a scoped user and prints a paste blob", () => {
   const command = buildBootstrapCommand("us-east-1", "abc123");
   assert.match(command, /aws iam get-user --user-name "\$USER"/);
   assert.match(command, /aws iam create-user --user-name "\$USER"/);
-  assert.match(command, /aws iam put-user-policy/);
+  assert.match(command, /aws iam create-policy --policy-name "\$USER"/);
+  assert.match(command, /aws iam create-policy-version/);
+  assert.match(command, /aws iam attach-user-policy/);
+  assert.doesNotMatch(command, /aws iam put-user-policy/);
   assert.match(command, /aws iam list-access-keys/);
   assert.match(command, /aws iam delete-access-key/);
   assert.match(command, /aws iam create-access-key/);
@@ -72,7 +75,7 @@ test("bootstrap command creates a scoped user and prints a paste blob", () => {
   assert.throws(() => buildBootstrapCommand("us-east-1", "bad;rm -rf"), /Invalid suffix/);
 });
 
-test("bootstrap command reuses its IAM user and rotates keys at the IAM quota", () => {
+test("bootstrap command reuses IAM resources and rotates policy versions and keys at their quotas", () => {
   const directory = mkdtempSync(join(tmpdir(), "accordagents-aws-bootstrap-"));
   const awsPath = join(directory, "aws");
   const statePath = join(directory, "state.json");
@@ -81,7 +84,17 @@ const fs = require("node:fs");
 const statePath = process.env.AWS_MOCK_STATE;
 const state = fs.existsSync(statePath)
   ? JSON.parse(fs.readFileSync(statePath, "utf8"))
-  : { userExists: false, keys: [], nextKey: 1, createUserCalls: 0, policyUpdates: 0 };
+  : {
+      userExists: false,
+      keys: [],
+      nextKey: 1,
+      createUserCalls: 0,
+      policyArn: null,
+      policyVersions: [],
+      nextPolicyVersion: 1,
+      policyUpdates: 0,
+      policyAttachments: 0
+    };
 const args = process.argv.slice(2);
 const command = args.slice(0, 2).join(" ");
 const valueAfter = (name) => args[args.indexOf(name) + 1];
@@ -102,10 +115,58 @@ if (command === "iam create-user") {
   save();
   process.exit(0);
 }
-if (command === "iam put-user-policy") {
+if (command === "iam list-policies") {
+  process.stdout.write(state.policyArn ?? "None");
+  process.exit(0);
+}
+if (command === "iam create-policy") {
+  if (state.policyArn) {
+    process.stderr.write("EntityAlreadyExists");
+    process.exit(254);
+  }
+  state.policyArn = "arn:aws:iam::123456789012:policy/accordagents-worker-rerun";
+  state.policyVersions = [{ id: "v1", isDefault: true }];
+  state.nextPolicyVersion = 2;
+  state.policyUpdates += 1;
+  save();
+  process.stdout.write(state.policyArn);
+  process.exit(0);
+}
+if (command === "iam list-policy-versions") {
+  process.stdout.write(state.policyVersions
+    .filter((version) => !version.isDefault)
+    .map((version) => version.id)
+    .join("\\t"));
+  process.exit(0);
+}
+if (command === "iam delete-policy-version") {
+  const versionId = valueAfter("--version-id");
+  state.policyVersions = state.policyVersions.filter((version) => version.id !== versionId);
+  save();
+  process.exit(0);
+}
+if (command === "iam create-policy-version") {
+  if (state.policyVersions.length >= 5) {
+    process.stderr.write("LimitExceeded");
+    process.exit(254);
+  }
+  state.policyVersions = state.policyVersions.map((version) => ({ ...version, isDefault: false }));
+  state.policyVersions.push({ id: "v" + state.nextPolicyVersion++, isDefault: true });
   state.policyUpdates += 1;
   save();
   process.exit(0);
+}
+if (command === "iam attach-user-policy") {
+  state.policyAttachments += 1;
+  save();
+  process.exit(0);
+}
+if (command === "iam delete-user-policy") {
+  process.exit(254);
+}
+if (command === "iam put-user-policy") {
+  process.stderr.write("Inline policy API must not be used");
+  process.exit(2);
 }
 if (command === "iam list-access-keys") {
   process.stdout.write(state.keys.join("\\t"));
@@ -155,17 +216,31 @@ process.exit(2);
       keys: string[];
       nextKey: number;
       createUserCalls: number;
+      policyArn: string;
+      policyVersions: Array<{ id: string; isDefault: boolean }>;
+      nextPolicyVersion: number;
       policyUpdates: number;
+      policyAttachments: number;
     };
     assert.equal(firstState.userExists, true);
     assert.equal(firstState.createUserCalls, 1);
     assert.equal(firstState.policyUpdates, 1);
+    assert.equal(firstState.policyAttachments, 1);
+    assert.deepEqual(firstState.policyVersions, [{ id: "v1", isDefault: true }]);
     assert.equal(firstState.keys.length, 1);
 
     writeFileSync(statePath, JSON.stringify({
       ...firstState,
       keys: [...firstState.keys, "AKIAOLD000000000002"],
-      nextKey: 3
+      nextKey: 3,
+      policyVersions: [
+        { id: "v1", isDefault: true },
+        { id: "v2", isDefault: false },
+        { id: "v3", isDefault: false },
+        { id: "v4", isDefault: false },
+        { id: "v5", isDefault: false }
+      ],
+      nextPolicyVersion: 6
     }));
     const second = run();
     assert.equal(second.status, 0, second.stderr);
@@ -173,6 +248,11 @@ process.exit(2);
     const secondState = JSON.parse(readFileSync(statePath, "utf8")) as typeof firstState;
     assert.equal(secondState.createUserCalls, 1);
     assert.equal(secondState.policyUpdates, 2);
+    assert.equal(secondState.policyAttachments, 2);
+    assert.deepEqual(secondState.policyVersions, [
+      { id: "v1", isDefault: false },
+      { id: "v6", isDefault: true }
+    ]);
     assert.deepEqual(secondState.keys, ["AKIA0000000000000003"]);
   } finally {
     rmSync(directory, { recursive: true, force: true });
