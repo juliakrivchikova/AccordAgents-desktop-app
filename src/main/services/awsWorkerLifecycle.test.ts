@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   AWS_WORKER_BLOB_PREFIX,
@@ -54,8 +57,11 @@ test("scoped policy limits state changes to tagged instances in-region", () => {
 
 test("bootstrap command creates a scoped user and prints a paste blob", () => {
   const command = buildBootstrapCommand("us-east-1", "abc123");
+  assert.match(command, /aws iam get-user --user-name "\$USER"/);
   assert.match(command, /aws iam create-user --user-name "\$USER"/);
   assert.match(command, /aws iam put-user-policy/);
+  assert.match(command, /aws iam list-access-keys/);
+  assert.match(command, /aws iam delete-access-key/);
   assert.match(command, /aws iam create-access-key/);
   assert.match(command, /accordagents-worker-abc123/);
   assert.match(command, /ROOT_VOLUME/);
@@ -64,6 +70,113 @@ test("bootstrap command creates a scoped user and prints a paste blob", () => {
   const syntax = spawnSync("bash", ["-n"], { input: command, encoding: "utf8" });
   assert.equal(syntax.status, 0, syntax.stderr);
   assert.throws(() => buildBootstrapCommand("us-east-1", "bad;rm -rf"), /Invalid suffix/);
+});
+
+test("bootstrap command reuses its IAM user and rotates keys at the IAM quota", () => {
+  const directory = mkdtempSync(join(tmpdir(), "accordagents-aws-bootstrap-"));
+  const awsPath = join(directory, "aws");
+  const statePath = join(directory, "state.json");
+  const mockAws = `#!/usr/bin/env node
+const fs = require("node:fs");
+const statePath = process.env.AWS_MOCK_STATE;
+const state = fs.existsSync(statePath)
+  ? JSON.parse(fs.readFileSync(statePath, "utf8"))
+  : { userExists: false, keys: [], nextKey: 1, createUserCalls: 0, policyUpdates: 0 };
+const args = process.argv.slice(2);
+const command = args.slice(0, 2).join(" ");
+const valueAfter = (name) => args[args.indexOf(name) + 1];
+const save = () => fs.writeFileSync(statePath, JSON.stringify(state));
+if (command === "ec2 describe-regions") process.exit(0);
+if (command === "iam get-user") {
+  if (!state.userExists) process.exit(254);
+  process.stdout.write("{}");
+  process.exit(0);
+}
+if (command === "iam create-user") {
+  if (state.userExists) {
+    process.stderr.write("EntityAlreadyExists");
+    process.exit(254);
+  }
+  state.userExists = true;
+  state.createUserCalls += 1;
+  save();
+  process.exit(0);
+}
+if (command === "iam put-user-policy") {
+  state.policyUpdates += 1;
+  save();
+  process.exit(0);
+}
+if (command === "iam list-access-keys") {
+  process.stdout.write(state.keys.join("\\t"));
+  process.exit(0);
+}
+if (command === "iam delete-access-key") {
+  const keyId = valueAfter("--access-key-id");
+  state.keys = state.keys.filter((candidate) => candidate !== keyId);
+  save();
+  process.exit(0);
+}
+if (command === "iam create-access-key") {
+  if (state.keys.length >= 2) {
+    process.stderr.write("LimitExceeded");
+    process.exit(254);
+  }
+  const accessKeyId = "AKIA" + String(state.nextKey++).padStart(16, "0");
+  state.keys.push(accessKeyId);
+  save();
+  process.stdout.write(JSON.stringify({
+    AccessKey: { AccessKeyId: accessKeyId, SecretAccessKey: "secret-" + accessKeyId }
+  }));
+  process.exit(0);
+}
+process.stderr.write("Unexpected mock AWS command: " + args.join(" "));
+process.exit(2);
+`;
+
+  try {
+    writeFileSync(awsPath, mockAws, { mode: 0o755 });
+    chmodSync(awsPath, 0o755);
+    const command = buildBootstrapCommand("us-east-1", "rerun");
+    const run = () => spawnSync("bash", ["-c", command], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        AWS_MOCK_STATE: statePath,
+        PATH: `${directory}:${process.env.PATH ?? ""}`
+      }
+    });
+
+    const first = run();
+    assert.equal(first.status, 0, first.stderr);
+    assert.match(first.stdout, new RegExp(AWS_WORKER_BLOB_PREFIX));
+    const firstState = JSON.parse(readFileSync(statePath, "utf8")) as {
+      userExists: boolean;
+      keys: string[];
+      nextKey: number;
+      createUserCalls: number;
+      policyUpdates: number;
+    };
+    assert.equal(firstState.userExists, true);
+    assert.equal(firstState.createUserCalls, 1);
+    assert.equal(firstState.policyUpdates, 1);
+    assert.equal(firstState.keys.length, 1);
+
+    writeFileSync(statePath, JSON.stringify({
+      ...firstState,
+      keys: [...firstState.keys, "AKIAOLD000000000002"],
+      nextKey: 3
+    }));
+    const second = run();
+    assert.equal(second.status, 0, second.stderr);
+    assert.match(second.stdout, new RegExp(AWS_WORKER_BLOB_PREFIX));
+    const secondState = JSON.parse(readFileSync(statePath, "utf8")) as typeof firstState;
+    assert.equal(secondState.createUserCalls, 1);
+    assert.equal(secondState.policyUpdates, 2);
+    assert.deepEqual(secondState.keys, ["AKIA0000000000000003"]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("cloud-init and instance spec carry the toolchain and tag", () => {
