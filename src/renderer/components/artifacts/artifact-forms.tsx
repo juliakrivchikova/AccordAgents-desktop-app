@@ -1,6 +1,9 @@
 import { useState } from "react";
+import { Eye, Pencil } from "lucide-react";
 
 import type { ArtifactSummary } from "../../../shared/types";
+import { MarkdownText } from "../content/markdown-text";
+import { ResizableTextarea } from "../primitives";
 
 export interface ArtifactCreateValues {
   name: string;
@@ -21,6 +24,48 @@ export function splitMemberList(value: string): string[] {
   return value.split(",").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
 }
 
+function ArtifactMarkdownEditor(props: {
+  id: string;
+  label: string;
+  value: string;
+  rows: number;
+  placeholder?: string;
+  onChange: (value: string) => void;
+}): JSX.Element {
+  const [preview, setPreview] = useState(false);
+  const trimmedValue = props.value.trim();
+  return (
+    <div className="artifact-content-editor">
+      <div className="artifact-content-editor-head">
+        <label className="artifact-content-editor-label" htmlFor={props.id}>{props.label}</label>
+        <span className="artifact-content-preview-toggle" aria-label="Artifact content editor mode">
+          <button type="button" className={preview ? "is-selected" : ""} onClick={() => setPreview(true)}>
+            <Eye size={14} aria-hidden /> Preview
+          </button>
+          <button type="button" className={!preview ? "is-selected" : ""} onClick={() => setPreview(false)}>
+            <Pencil size={14} aria-hidden /> Edit
+          </button>
+        </span>
+      </div>
+      {preview ? (
+        <div className="artifact-content-preview">
+          {trimmedValue ? <MarkdownText content={trimmedValue} /> : <span>Nothing to preview yet.</span>}
+        </div>
+      ) : (
+        <ResizableTextarea
+          id={props.id}
+          className="artifact-content-editor-textarea"
+          value={props.value}
+          rows={props.rows}
+          maxHeight={420}
+          placeholder={props.placeholder}
+          onChange={(event) => props.onChange(event.target.value)}
+        />
+      )}
+    </div>
+  );
+}
+
 export function CreateArtifactForm(props: {
   busy: boolean;
   onCancel: () => void;
@@ -34,7 +79,14 @@ export function CreateArtifactForm(props: {
   return (
     <div className="artifacts-panel-body artifact-form">
       <label>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Release plan, QA cases, Todo list — any name" /></label>
-      <label>Content<textarea rows={12} value={content} onChange={(event) => setContent(event.target.value)} placeholder="Free-form text" /></label>
+      <ArtifactMarkdownEditor
+        id="artifact-create-content"
+        label="Content"
+        value={content}
+        rows={12}
+        placeholder="Free-form Markdown"
+        onChange={setContent}
+      />
       <label>Contributors <span className="artifact-hint">comma-separated members; you own it either way</span>
         <input value={contributors} onChange={(event) => setContributors(event.target.value)} placeholder="gera, codex" />
       </label>
@@ -76,9 +128,13 @@ export function ReviseArtifactForm(props: {
   const [note, setNote] = useState("");
   return (
     <div className="artifact-form">
-      <label>Content (v{props.baseVersion} → v{props.baseVersion + 1})
-        <textarea rows={14} value={content} onChange={(event) => setContent(event.target.value)} />
-      </label>
+      <ArtifactMarkdownEditor
+        id="artifact-revise-content"
+        label={`Content (v${props.baseVersion} → v${props.baseVersion + 1})`}
+        value={content}
+        rows={14}
+        onChange={setContent}
+      />
       <label>Revision note <span className="artifact-hint">optional, shown in history and the chat note</span>
         <input value={note} onChange={(event) => setNote(event.target.value)} />
       </label>
