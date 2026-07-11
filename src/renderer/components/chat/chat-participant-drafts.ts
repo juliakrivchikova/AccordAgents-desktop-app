@@ -250,6 +250,8 @@ export function chatParticipantPermissionSummary(participant: Pick<ChatParticipa
     permissions.webAccess ? "web" : "",
     permissions.requestParticipants === "allow" ? "request allow" : "",
     permissions.requestParticipants === "deny" ? "request deny" : "",
+    permissions.requestCompaction === "allow" ? "compaction allow" : "",
+    permissions.requestCompaction === "deny" ? "compaction deny" : "",
     permissions.manageRolesParticipants === "allow" ? "manage allow" : "",
     permissions.manageRolesParticipants === "ask" ? "manage ask" : "",
     permissions.manageRolesParticipants === "deny" ? "manage deny" : "",
@@ -326,6 +328,12 @@ export function updateChatParticipantDraft(
     if (nextDefaults.requestParticipants) {
       permissions = { ...permissions, requestParticipants: nextDefaults.requestParticipants };
     }
+    if (previousDefaults.requestCompaction && permissions.requestCompaction === previousDefaults.requestCompaction) {
+      permissions = { ...permissions, requestCompaction: defaultChatAgentPermissions().requestCompaction };
+    }
+    if (nextDefaults.requestCompaction) {
+      permissions = { ...permissions, requestCompaction: nextDefaults.requestCompaction };
+    }
     const previousManage = normalizeChatRoleManagementPermission(previousDefaults.manageRolesParticipants);
     if (
       normalizeChatRoleManagementPermission(permissions.manageRolesParticipants) === previousManage ||
@@ -381,6 +389,7 @@ function defaultChatParticipantPermissionsForRole(
   return {
     ...normalized,
     ...(defaults.requestParticipants ? { requestParticipants: defaults.requestParticipants } : {}),
+    ...(defaults.requestCompaction ? { requestCompaction: defaults.requestCompaction } : {}),
     manageRolesParticipants: normalizeChatRoleManagementPermission(defaults.manageRolesParticipants)
   };
 }

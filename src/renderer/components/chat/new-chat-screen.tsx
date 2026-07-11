@@ -759,6 +759,7 @@ function newChatAssistantParticipant(settings: AppSettings, agents: AgentHealth[
       workspaceWrite: false,
       webAccess: false,
       requestParticipants: "ask",
+      requestCompaction: "ask",
       shell: {
         enabled: false,
         rules: []

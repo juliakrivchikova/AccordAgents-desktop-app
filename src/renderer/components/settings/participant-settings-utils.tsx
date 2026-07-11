@@ -110,6 +110,8 @@ export function participantPermissionChips(participant: ChatParticipantConfig): 
     permissions.webAccess ? { key: "web", label: "web access" } : undefined,
     permissions.requestParticipants === "allow" ? { key: "request-allow", label: "request members" } : undefined,
     permissions.requestParticipants === "deny" ? { key: "request-deny", label: "requests denied" } : undefined,
+    permissions.requestCompaction === "allow" ? { key: "compact-allow", label: "compaction allowed" } : undefined,
+    permissions.requestCompaction === "deny" ? { key: "compact-deny", label: "compaction denied" } : undefined,
     permissions.manageRolesParticipants === "allow" ? { key: "manage-allow", label: "manage members" } : undefined,
     permissions.manageRolesParticipants === "ask" ? { key: "manage-ask", label: "manage asks" } : undefined,
     permissions.manageRolesParticipants === "deny" ? { key: "manage-deny", label: "management denied" } : undefined,

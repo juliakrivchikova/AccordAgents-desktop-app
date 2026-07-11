@@ -163,6 +163,7 @@ const WORKFLOW_MANAGER_ROLE_ID = "workflow-manager";
 const DEFAULT_ROLE_PARTICIPANT_DEFAULTS: ChatRoleParticipantDefaults = {
   autoWatch: false,
   requestParticipants: "ask",
+  requestCompaction: "ask",
   manageRolesParticipants: "deny"
 };
 const SEEDABLE_CHAT_PROVIDER_KINDS: ChatProviderKind[] = ["codex-cli", "claude-code", "gemini-cli"];
@@ -2698,15 +2699,18 @@ export class SettingsService {
       return {
         autoWatch: false,
         requestParticipants: "ask",
+        requestCompaction: "ask",
         manageRolesParticipants: "deny"
       };
     }
     const record = value as Partial<ChatRoleParticipantDefaults>;
     const requestParticipants = normalizeChatParticipantRequestPermission(record.requestParticipants);
+    const requestCompaction = normalizeChatParticipantRequestPermission(record.requestCompaction);
     const manageRolesParticipants = normalizeChatRoleManagementPermission(record.manageRolesParticipants);
     return {
       autoWatch: record.autoWatch === true,
       requestParticipants,
+      requestCompaction,
       manageRolesParticipants
     };
   }

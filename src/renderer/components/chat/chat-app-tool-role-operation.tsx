@@ -229,6 +229,7 @@ function roleParticipantDefaultsForOperation(
 function RoleParticipantDefaultsReview(props: { defaults?: ChatRoleParticipantDefaults }): JSX.Element {
   const autoWatch = props.defaults?.autoWatch === true;
   const requestParticipants = normalizeChatParticipantRequestPermission(props.defaults?.requestParticipants);
+  const requestCompaction = normalizeChatParticipantRequestPermission(props.defaults?.requestCompaction);
   const manageRolesParticipants = normalizeChatRoleManagementPermission(props.defaults?.manageRolesParticipants);
   return (
     <div className="chat-app-tool-review-spec">
@@ -240,6 +241,9 @@ function RoleParticipantDefaultsReview(props: { defaults?: ChatRoleParticipantDe
       />
       <ChatParticipantSpecRow label="Request members">
         <strong>{requestParticipantsLabel(requestParticipants)}</strong>
+      </ChatParticipantSpecRow>
+      <ChatParticipantSpecRow label="Request compaction">
+        <strong>{requestParticipantsLabel(requestCompaction)}</strong>
       </ChatParticipantSpecRow>
       <ChatParticipantSpecRow label="Manage roles & members">
         <strong>{requestParticipantsLabel(manageRolesParticipants)}</strong>

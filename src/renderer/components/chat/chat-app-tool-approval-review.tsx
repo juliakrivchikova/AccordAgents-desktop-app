@@ -11,6 +11,7 @@ import type {
   ChatRoleChangeRequest,
   ChatRoleConfig,
   ChatRoleParticipantChangeRequest,
+  ChatSelfCompactionRequest,
   ChatRosterChangeOperation,
   ChatToolPermissionRequest
 } from "../../../shared/types";
@@ -260,6 +261,7 @@ export function approvalOptions(
   roleRequest: ChatRoleChangeRequest | undefined,
   participantChange: ChatParticipantChangeRequest | undefined,
   participantRequest: ChatParticipantRequestApprovalRequest | undefined,
+  selfCompactionRequest: ChatSelfCompactionRequest | undefined,
   toolPermissionRequest: ChatToolPermissionRequest | undefined,
   added: ChatRosterChangeOperation[],
   inferredParticipantRequest: boolean
@@ -291,6 +293,8 @@ export function approvalOptions(
       ? `Yes, allow ${chatParticipantReference(approval.requesterHandle)} to use ${toolPermissionRequest.toolName} in this chat`
     : participantRequest
       ? `Yes, allow ${chatParticipantReference(approval.requesterHandle)} to ask ${participantRequest.requests.length === 1 ? chatParticipantReference(participantRequest.requests[0].target) : "these members"}`
+      : selfCompactionRequest
+        ? `Yes, always allow ${chatParticipantReference(approval.requesterHandle)} to compact its context`
       : "Yes, allow for this chat";
   return [
     { key: "once", label: "Yes, allow once", approve: true, scope: "once" },
@@ -305,6 +309,7 @@ export function approvalQuestion(
   roleRequest: ChatRoleChangeRequest | undefined,
   participantChange: ChatParticipantChangeRequest | undefined,
   participantRequest: ChatParticipantRequestApprovalRequest | undefined,
+  selfCompactionRequest: ChatSelfCompactionRequest | undefined,
   toolPermissionRequest: ChatToolPermissionRequest | undefined
 ): string {
   const requester = chatParticipantReference(approval.requesterHandle);
@@ -329,6 +334,9 @@ export function approvalQuestion(
       return `Do you want to allow ${requester} to ask ${chatParticipantReference(participantRequest.requests[0].target)}?`;
     }
     return `Do you want to allow ${requester} to ask these members?`;
+  }
+  if (selfCompactionRequest) {
+    return `Do you want to allow ${requester} to compact its context?`;
   }
   if (roleRequest) {
     if (roleRequest.operations.length === 1) {

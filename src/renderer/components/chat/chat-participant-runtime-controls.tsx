@@ -6,6 +6,7 @@ import {
   effectiveChatAgentPermissionsForProvider,
   normalizeChatAgentMode,
   normalizeChatAgentPermissions,
+  normalizeChatParticipantRequestPermission,
   normalizeChatRoleManagementPermission,
   normalizeOptionalChatParticipantRequestPermission
 } from "../../../shared/agentPermissions";
@@ -87,6 +88,9 @@ export function ParticipantRuntimeControls(props: {
   const requestPermission = normalizedPermissions.requestParticipants;
   const requestPermissionLabel = PARTICIPANT_REQUEST_PERMISSION_OPTIONS
     .find((option) => option.value === requestPermission)?.label ?? "Always ask approval";
+  const compactionPermission = normalizeChatParticipantRequestPermission(normalizedPermissions.requestCompaction);
+  const compactionPermissionLabel = PARTICIPANT_REQUEST_PERMISSION_OPTIONS
+    .find((option) => option.value === compactionPermission)?.label ?? "Always ask approval";
   const roleManageDefault = normalizeChatRoleManagementPermission(props.roleParticipantDefaults?.manageRolesParticipants);
   const explicitManagePermission = normalizeOptionalChatParticipantRequestPermission(normalizedPermissions.manageRolesParticipants);
   const managePermission = explicitManagePermission ?? roleManageDefault;
@@ -158,6 +162,19 @@ export function ParticipantRuntimeControls(props: {
           options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
           onChange={(value) => update({
             permissions: { ...normalizedPermissions, requestParticipants: value as ChatParticipantRequestPermission }
+          })}
+        />
+        <span className="chat-rt-dot" aria-hidden>·</span>
+        <GhostSelect
+          ariaLabel="Request compaction permission"
+          value={compactionPermission}
+          displayLabel={`Compaction: ${compactionPermissionLabel}`}
+          tooltip="Controls whether this member can request compaction of its own context."
+          muted={compactionPermission === "ask"}
+          disabled={props.disabled}
+          options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
+          onChange={(value) => update({
+            permissions: { ...normalizedPermissions, requestCompaction: value as ChatParticipantRequestPermission }
           })}
         />
         <span className="chat-rt-dot" aria-hidden>·</span>

@@ -16,6 +16,7 @@ export const DEFAULT_CHAT_AGENT_PERMISSIONS: ChatAgentPermissions = {
   workspaceWrite: false,
   webAccess: false,
   requestParticipants: "ask",
+  requestCompaction: "ask",
   shell: {
     enabled: false,
     rules: []
@@ -36,6 +37,7 @@ export function cloneChatAgentPermissions(permissions: ChatAgentPermissions): Ch
     workspaceWrite: permissions.workspaceWrite,
     webAccess: permissions.webAccess,
     requestParticipants: normalizeChatParticipantRequestPermission(permissions.requestParticipants),
+    requestCompaction: normalizeChatParticipantRequestPermission(permissions.requestCompaction),
     ...(manageRolesParticipants ? { manageRolesParticipants } : {}),
     shell: {
       enabled: permissions.shell.enabled,
@@ -63,6 +65,7 @@ export function normalizeChatAgentPermissions(value: unknown): ChatAgentPermissi
     workspaceWrite: typeof record.workspaceWrite === "boolean" ? record.workspaceWrite : DEFAULT_CHAT_AGENT_PERMISSIONS.workspaceWrite,
     webAccess: typeof record.webAccess === "boolean" ? record.webAccess : DEFAULT_CHAT_AGENT_PERMISSIONS.webAccess,
     requestParticipants: normalizeChatParticipantRequestPermission(record.requestParticipants),
+    requestCompaction: normalizeChatParticipantRequestPermission(record.requestCompaction),
     ...(manageRolesParticipants ? { manageRolesParticipants } : {}),
     shell: {
       enabled: typeof shell.enabled === "boolean" ? shell.enabled : DEFAULT_CHAT_AGENT_PERMISSIONS.shell.enabled,

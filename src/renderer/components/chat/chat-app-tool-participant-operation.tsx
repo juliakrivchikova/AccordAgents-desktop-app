@@ -17,6 +17,7 @@ import {
   ChatParticipantInlineManageRolesParticipantsRow as ChatAppToolInlineManageRolesParticipantsRow,
   ChatParticipantInlineModelRow as ChatAppToolInlineModelRow,
   ChatParticipantInlinePermissionsRow as ChatAppToolInlinePermissionsRow,
+  ChatParticipantInlineRequestCompactionRow as ChatAppToolInlineRequestCompactionRow,
   ChatParticipantInlineRequestParticipantsRow as ChatAppToolInlineRequestParticipantsRow,
   ChatParticipantInlineSelectRow as ChatAppToolInlineSelectRow,
   participantRequestPermissionLabel,
@@ -205,6 +206,10 @@ export function ChatAppToolParticipantChangeOperation(props: {
                 participant={participant}
                 onChange={(permissions) => patchParticipant({ permissions })}
               />
+              <ChatAppToolInlineRequestCompactionRow
+                participant={participant}
+                onChange={(permissions) => patchParticipant({ permissions })}
+              />
               <ChatAppToolInlineManageRolesParticipantsRow
                 participant={participant}
                 roleDefaults={role?.participantDefaults}
@@ -307,6 +312,10 @@ export function ChatAppToolExistingParticipantSpec(props: {
         onChange={(next) => props.onOverride({ autoWatch: next })}
       />
       <ChatAppToolInlineRequestParticipantsRow
+        participant={permissionParticipant}
+        onChange={(next) => props.onOverride({ permissions: next })}
+      />
+      <ChatAppToolInlineRequestCompactionRow
         participant={permissionParticipant}
         onChange={(next) => props.onOverride({ permissions: next })}
       />

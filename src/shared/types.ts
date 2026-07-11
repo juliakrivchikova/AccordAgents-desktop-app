@@ -355,6 +355,7 @@ export interface ChatRoleConfig {
 export interface ChatRoleParticipantDefaults {
   autoWatch?: boolean;
   requestParticipants?: ChatParticipantRequestPermission;
+  requestCompaction?: ChatParticipantRequestPermission;
   manageRolesParticipants?: ChatParticipantRequestPermission;
 }
 
@@ -573,7 +574,7 @@ export interface PluginListResult {
 
 export type ChatRoleRuntime = "claude-agent" | "codex-developer-instructions" | "prompt-fallback";
 
-export type ChatAppToolCapability = "participants.manage" | "participants.request" | "permissions.request";
+export type ChatAppToolCapability = "participants.manage" | "participants.request" | "compaction.request" | "permissions.request";
 
 export type ChatReactionActorKind = "user" | "participant";
 
@@ -623,6 +624,7 @@ export interface ChatAgentPermissions {
   workspaceWrite: boolean;
   webAccess: boolean;
   requestParticipants: ChatParticipantRequestPermission;
+  requestCompaction?: ChatParticipantRequestPermission;
   manageRolesParticipants?: ChatParticipantRequestPermission;
   shell: {
     enabled: boolean;
@@ -1017,7 +1019,13 @@ export type ChatAppToolApprovalRequest =
   | ChatRoleParticipantChangeRequest
   | ChatPermissionChangeRequest
   | ChatToolPermissionRequest
-  | ChatParticipantRequestApprovalRequest;
+  | ChatParticipantRequestApprovalRequest
+  | ChatSelfCompactionRequest;
+
+export interface ChatSelfCompactionRequest {
+  type: "self_compaction";
+  instructions?: string;
+}
 
 export interface ChatAppToolApproval {
   id: string;
@@ -1728,6 +1736,7 @@ export type ConversationMetadata = Record<string, unknown> & {
   activeRunParticipantIdsByRunId?: Record<string, string>;
   lastMessageByParticipant?: ChatLastMessageByParticipant;
   participantCompactionsByParticipantId?: Record<string, ChatParticipantCompactionState>;
+  participantSelfCompactionRequestedAtByParticipantId?: Record<string, string>;
   promptContextPointers?: ChatPromptContextPointers;
   participantWatchers?: Record<string, ChatParticipantWatcherState>;
 };

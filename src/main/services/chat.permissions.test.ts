@@ -9,6 +9,7 @@ import {
   APP_CHAT_LIST_ATTACHMENTS_TOOL,
   APP_CHAT_READ_ATTACHMENT_TOOL,
   APP_CHAT_REACT_TOOL,
+  APP_CHAT_REQUEST_COMPACTION_TOOL,
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_CHAT_SET_TITLE_TOOL,
   APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
@@ -125,6 +126,7 @@ test("permission normalization is idempotent and dedupes structured grants", () 
     "Read"
   ]);
   assert.equal(normalized.manageRolesParticipants, "allow");
+  assert.equal(normalized.requestCompaction, "ask");
   assert.equal(chatAgentPermissionsEqual(normalized, raw as never), true);
 });
 
@@ -2775,7 +2777,8 @@ test("custom role participant defaults apply to new chat participants", async ()
     label: "Custom Manager",
     participantDefaults: {
       autoWatch: true,
-      requestParticipants: "deny"
+      requestParticipants: "deny",
+      requestCompaction: "allow"
     }
   };
   const { service, storage, tempRoot } = testService({
@@ -2793,6 +2796,7 @@ test("custom role participant defaults apply to new chat participants", async ()
   let participant = (created.conversation.metadata.participants as ChatParticipant[]).find((item) => item.handle === "manager");
   assert.equal(participant?.autoWatch, true);
   assert.equal(participant?.permissions?.requestParticipants, "deny");
+  assert.equal(participant?.permissions?.requestCompaction, "allow");
 
   const conversation = chatConversation([]);
   storage.current = conversation;
@@ -2803,13 +2807,18 @@ test("custom role participant defaults apply to new chat participants", async ()
       roleConfigId: managerRole.id,
       kind: "codex-cli",
       autoWatch: false,
-      permissions: { ...defaultChatAgentPermissions(), requestParticipants: "allow" }
+      permissions: {
+        ...defaultChatAgentPermissions(),
+        requestParticipants: "allow",
+        requestCompaction: "deny"
+      }
     }
   });
 
   participant = (storage.current.metadata.participants as ChatParticipant[]).find((item) => item.handle === "manager2");
   assert.equal(participant?.autoWatch, false);
   assert.equal(participant?.permissions?.requestParticipants, "allow");
+  assert.equal(participant?.permissions?.requestCompaction, "deny");
 });
 
 test("auto-watch evaluation dispatches watcher from new participant output", async () => {
@@ -7921,18 +7930,41 @@ test("app MCP advertises attachment and reaction tools to chat participants", ()
   assert.ok(tools.find((tool) => tool.name === APP_TOOL_PERMISSION_TOOL));
 });
 
-test("appMcpToolNames exposes participant request only with participants.request capability", () => {
+test("appMcpToolNames exposes request tools only with their capabilities", () => {
   const { service } = testService();
   const defaultTools = (service as any).appMcpToolNames([]);
   const requestTools = (service as any).appMcpToolNames(["participants.request"]);
+  const compactionTools = (service as any).appMcpToolNames(["compaction.request"]);
 
   assert.equal(defaultTools.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL), false);
+  assert.equal(defaultTools.includes(APP_CHAT_REQUEST_COMPACTION_TOOL), false);
   assert.ok(defaultTools.includes(APP_CHAT_LIST_ATTACHMENTS_TOOL));
   assert.ok(defaultTools.includes(APP_CHAT_READ_ATTACHMENT_TOOL));
   assert.ok(defaultTools.includes(APP_CHAT_SET_TITLE_TOOL));
   assert.ok(defaultTools.includes(APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL));
   assert.ok(requestTools.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL));
+  assert.ok(compactionTools.includes(APP_CHAT_REQUEST_COMPACTION_TOOL));
   assert.ok(requestTools.includes(APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL));
+});
+
+test("app MCP advertises self-compaction only with compaction permission", () => {
+  const appMcp = new AppMcpService();
+  const actor = {
+    conversationId: "conversation-1",
+    participantId: "participant-1",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version
+  };
+  const without = (appMcp as any).toolsForActor({ ...actor, capabilities: [] }) as Array<{ name: string }>;
+  const withCapability = (appMcp as any).toolsForActor({
+    ...actor,
+    capabilities: ["compaction.request"]
+  }) as Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> } }>;
+
+  assert.equal(without.some((tool) => tool.name === APP_CHAT_REQUEST_COMPACTION_TOOL), false);
+  const tool = withCapability.find((item) => item.name === APP_CHAT_REQUEST_COMPACTION_TOOL);
+  assert.ok(tool);
+  assert.ok(tool.inputSchema?.properties?.instructions);
 });
 
 test("app MCP tracks client generation setup and required tools", async () => {

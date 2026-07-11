@@ -61,6 +61,7 @@ import type {
   ChatRoleConfig,
   ChatRoleParticipantDefaults,
   ChatRoleParticipantChangeRequest,
+  ChatSelfCompactionRequest,
   ChatRosterAvailableOptions,
   ChatRosterAvailableProvider,
   ChatRosterCurrentParticipant,
@@ -159,6 +160,7 @@ import {
   APP_CHAT_SET_TITLE_TOOL,
   APP_CHAT_READ_ATTACHMENT_TOOL,
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
+  APP_CHAT_REQUEST_COMPACTION_TOOL,
   APP_CHAT_READ_MESSAGES_TOOL,
   APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
   APP_PARTICIPANTS_DESCRIBE_OPTIONS_TOOL,
@@ -180,6 +182,7 @@ import {
   clearChatRunMetadata,
   readActiveRunIds,
   readActiveRunParticipants,
+  readParticipantCompactions,
   withParticipantCompactionStarted,
   withParticipantCompactionsForRunRemoved
 } from "../../shared/chatRunState";
@@ -290,7 +293,7 @@ interface CompactChatCommand {
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 19;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 20;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const CHAT_ADMINISTRATOR_ROLE_ID = "administrator";
@@ -307,6 +310,7 @@ const CHAT_LEGACY_ADMINISTRATOR_HANDLE = "admin";
 const CHAT_ROLE_LABEL_MAX_CHARS = 80;
 const CHAT_ROLE_INSTRUCTIONS_MAX_CHARS = 40_000;
 const CHAT_COMPACT_INSTRUCTIONS_MAX_CHARS = 20_000;
+const CHAT_SELF_COMPACTION_COOLDOWN_MS = 5 * 60_000;
 const CHAT_ROSTER_CHANGE_MAX_OPERATIONS = 12;
 const CHAT_PARTICIPANT_REQUEST_MAX_ITEMS = 4;
 const CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN = 4;
@@ -339,6 +343,7 @@ const CHAT_CONTEXT_MCP_TOOL_NAMES = [
 const CHAT_APP_MCP_TOOL_NAMES = [
   ...CHAT_CONTEXT_MCP_TOOL_NAMES,
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
+  APP_CHAT_REQUEST_COMPACTION_TOOL,
   APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
   APP_ROLES_DESCRIBE_OPTIONS_TOOL,
   APP_ROLES_REQUEST_CHANGE_TOOL,
@@ -3199,6 +3204,65 @@ export class ChatService {
     return this.participantRequestToolResult(latest, prepared.requestMessage.id, { status, approvalRequired });
   }
 
+  async requestSelfCompactionFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+    await this.waitForQueuedSave(actor.conversationId);
+    const conversation = await this.requireChat(actor.conversationId);
+    const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+    if (!requester) {
+      return { ok: false, status: "rejected", error: "The requesting participant is no longer in this chat." };
+    }
+    if (!hasChatAppToolCapability(actor.capabilities, "compaction.request")) {
+      return { ok: false, status: "rejected", error: "This participant is not allowed to request context compaction." };
+    }
+    const permission = normalizeChatParticipantRequestPermission(
+      normalizeChatAgentPermissions(requester.permissions).requestCompaction
+    );
+    if (permission === "deny") {
+      return { ok: false, status: "rejected", error: `Context compaction requests are disabled for @${requester.handle}.` };
+    }
+    const request = this.normalizeSelfCompactionRequest(rawRequest);
+    const guard = this.selfCompactionRequestGuard(conversation, requester);
+    if (guard) {
+      return { ok: false, ...guard };
+    }
+
+    const summary = `Compact @${requester.handle} context`;
+    if (permission === "ask") {
+      const approval = this.newAppToolApproval(
+        conversation,
+        requester,
+        APP_CHAT_REQUEST_COMPACTION_TOOL,
+        "compaction.request",
+        request,
+        summary,
+        "pending"
+      );
+      this.upsertAppToolApproval(conversation, approval);
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      this.emitConversationSnapshot(conversation);
+      return {
+        ok: true,
+        status: "pending_user_approval",
+        approvalId: approval.id,
+        summary
+      };
+    }
+
+    const runId = randomUUID();
+    this.recordSelfCompactionRequested(conversation, requester.id, new Date().toISOString());
+    conversation.updatedAt = new Date().toISOString();
+    await this.saveConversation(conversation);
+    this.emitConversationSnapshot(conversation);
+    this.startQueuedSelfCompaction(conversation.id, requester, request, runId);
+    return {
+      ok: true,
+      status: "queued",
+      runId,
+      summary
+    };
+  }
+
   async participantRequestStatusForTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
     await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
@@ -4282,6 +4346,40 @@ export class ChatService {
           });
         });
       }
+      return conversation;
+    }
+
+    if (approval.toolName === APP_CHAT_REQUEST_COMPACTION_TOOL && this.isSelfCompactionRequest(approval.request)) {
+      const requester = this.chatParticipants(conversation).find((participant) => participant.id === approval.requesterParticipantId);
+      const guard = requester
+        ? this.selfCompactionRequestGuard(conversation, requester, approval.id)
+        : { status: "rejected", error: "The requesting participant is no longer in this chat." };
+      if (!requester || guard) {
+        this.upsertAppToolApproval(conversation, {
+          ...approval,
+          status: "denied",
+          updatedAt: now,
+          error: guard?.error ?? "The requesting participant is no longer in this chat."
+        });
+        conversation.updatedAt = now;
+        await this.saveConversation(conversation);
+        return conversation;
+      }
+      if (scope === "chat") {
+        this.setParticipantCompactionPermission(conversation, requester.id, "allow");
+      }
+      const runId = randomUUID();
+      this.recordSelfCompactionRequested(conversation, requester.id, now);
+      this.upsertAppToolApproval(conversation, {
+        ...approval,
+        status: "approved",
+        approvalScope: scope,
+        appliedParticipantIds: [requester.id],
+        updatedAt: now
+      });
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      this.startQueuedSelfCompaction(conversation.id, requester, approval.request, runId);
       return conversation;
     }
 
@@ -6487,6 +6585,9 @@ export class ChatService {
   private appToolPromptPolicy(session: ChatParticipantSession): string {
     const agentMode = normalizeChatAgentMode(session.participantAgentMode);
     const canRequestPermissions = this.canRequestPermissionChanges(session);
+    const canRequestCompaction = normalizeChatParticipantRequestPermission(
+      session.participantPermissions?.requestCompaction
+    ) !== "deny";
     const manageRolesParticipantsPermission = this.manageRolesParticipantsPermissionForSession(session);
     const permissionPolicyLines = canRequestPermissions
       ? this.isAdministratorSession(session)
@@ -6516,6 +6617,9 @@ export class ChatService {
       "Participant request MCP tools: use `app_chat_request_participants` to ask participants; `app_chat_get_participant_request_status` recovers replies. JSON: `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
       "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
       "With the default `resumeRequester: true`, participant replies return through a fresh auto-resumed requester turn even if targets finish before timeout; stop when the tool returns `pending_approval` or `running`. Use `resumeRequester: false` only when you explicitly need completed target replies inline in the same turn.",
+      ...(canRequestCompaction
+        ? ["Compaction MCP tool: `app_chat_request_compaction` requests compaction of this participant's own provider session after the current turn. Call it only when context pressure would materially benefit the ongoing workflow; stop after a queued or pending-approval result."]
+        : []),
       ...permissionPolicyLines
     ];
     if (manageRolesParticipantsPermission === "deny") {
@@ -6578,16 +6682,18 @@ export class ChatService {
     permissions: ChatAgentPermissions
   ): ChatAppToolCapability[] {
     const requestParticipantsPermission = normalizeChatParticipantRequestPermission(permissions.requestParticipants);
+    const requestCompactionPermission = normalizeChatParticipantRequestPermission(permissions.requestCompaction);
     const manageRolesParticipantsPermission = resolveChatManageRolesParticipantsPermission(
       roleParticipantDefaults?.manageRolesParticipants,
       permissions.manageRolesParticipants
     ).effective;
     const staticRoleAppToolCapabilities = normalizeChatAppToolCapabilities(roleAppToolCapabilities)
-      .filter((capability) => capability !== "participants.request" && capability !== "participants.manage");
+      .filter((capability) => capability !== "participants.request" && capability !== "compaction.request" && capability !== "participants.manage");
     return normalizeChatAppToolCapabilities([
       ...staticRoleAppToolCapabilities,
       "permissions.request",
       ...(requestParticipantsPermission === "deny" ? [] : ["participants.request" as const]),
+      ...(requestCompactionPermission === "deny" ? [] : ["compaction.request" as const]),
       ...(manageRolesParticipantsPermission === "deny" ? [] : ["participants.manage" as const])
     ]);
   }
@@ -6599,6 +6705,9 @@ export class ChatService {
       }
       if (toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL) {
         return hasChatAppToolCapability(capabilities, "participants.request");
+      }
+      if (toolName === APP_CHAT_REQUEST_COMPACTION_TOOL) {
+        return hasChatAppToolCapability(capabilities, "compaction.request");
       }
       if (toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL) {
         return hasChatAppToolCapability(capabilities, "permissions.request");
@@ -8710,8 +8819,17 @@ export class ChatService {
     // Undefined means "inherit" so role edits affect inheriting participants;
     // an explicit participant value is preserved and resolved at runtime.
     return useRoleDefault && role.participantDefaults?.requestParticipants
-      ? { ...normalized, requestParticipants: role.participantDefaults.requestParticipants }
-      : normalized;
+      ? {
+          ...normalized,
+          requestParticipants: role.participantDefaults.requestParticipants,
+          requestCompaction: normalizeChatParticipantRequestPermission(role.participantDefaults.requestCompaction)
+        }
+      : useRoleDefault
+        ? {
+            ...normalized,
+            requestCompaction: normalizeChatParticipantRequestPermission(role.participantDefaults?.requestCompaction)
+          }
+        : normalized;
   }
 
   private normalizeRoleParticipantDefaults(value: unknown): ChatRoleParticipantDefaults | undefined {
@@ -8720,6 +8838,7 @@ export class ChatService {
     }
     const record = value as Partial<ChatRoleParticipantDefaults>;
     const requestParticipants = normalizeChatParticipantRequestPermission(record.requestParticipants);
+    const requestCompaction = normalizeChatParticipantRequestPermission(record.requestCompaction);
     const manageRolesParticipants = normalizeOptionalChatParticipantRequestPermission(record.manageRolesParticipants);
     const defaults: ChatRoleParticipantDefaults = {};
     if (typeof record.autoWatch === "boolean") {
@@ -8727,6 +8846,9 @@ export class ChatService {
     }
     if (requestParticipants !== "ask") {
       defaults.requestParticipants = requestParticipants;
+    }
+    if (requestCompaction !== "ask") {
+      defaults.requestCompaction = requestCompaction;
     }
     if (manageRolesParticipants) {
       defaults.manageRolesParticipants = manageRolesParticipants;
@@ -8758,6 +8880,7 @@ export class ChatService {
           workspaceWrite: false,
           webAccess: false,
           requestParticipants: "ask",
+          requestCompaction: "ask",
           shell: {
             enabled: false,
             rules: []
@@ -13345,6 +13468,132 @@ export class ChatService {
     return instructions;
   }
 
+  private normalizeSelfCompactionRequest(value: unknown): ChatSelfCompactionRequest {
+    const record = value && typeof value === "object" && !Array.isArray(value)
+      ? value as { instructions?: unknown }
+      : {};
+    return {
+      type: "self_compaction",
+      instructions: this.normalizeCompactInstructions(
+        typeof record.instructions === "string" ? record.instructions : undefined
+      )
+    };
+  }
+
+  private isSelfCompactionRequest(value: unknown): value is ChatSelfCompactionRequest {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return false;
+    }
+    const request = value as Partial<ChatSelfCompactionRequest>;
+    return request.type === "self_compaction" &&
+      (request.instructions === undefined || typeof request.instructions === "string");
+  }
+
+  private selfCompactionRequestGuard(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    ignoredApprovalId?: string
+  ): { status: string; error: string; retryAfterMs?: number } | undefined {
+    const sessions = Array.isArray(conversation.metadata.participantSessions)
+      ? conversation.metadata.participantSessions as ChatParticipantSession[]
+      : [];
+    if (!sessions.some((session) => session.participantId === participant.id && Boolean(session.sessionId?.trim()))) {
+      return {
+        status: "no_active_session",
+        error: `@${participant.handle} does not have an active session to compact yet.`
+      };
+    }
+    if (readParticipantCompactions(conversation.metadata)[participant.id]) {
+      return {
+        status: "already_queued",
+        error: `Context compaction is already queued or running for @${participant.handle}.`
+      };
+    }
+    const pendingApproval = this.chatAppToolApprovals(conversation).find((approval) =>
+      approval.id !== ignoredApprovalId &&
+      approval.status === "pending" &&
+      approval.toolName === APP_CHAT_REQUEST_COMPACTION_TOOL &&
+      approval.requesterParticipantId === participant.id
+    );
+    if (pendingApproval) {
+      return {
+        status: "pending_user_approval",
+        error: `A context compaction request from @${participant.handle} is already awaiting approval.`
+      };
+    }
+    const requestedAtByParticipant = conversation.metadata.participantSelfCompactionRequestedAtByParticipantId;
+    const requestedAt = requestedAtByParticipant && typeof requestedAtByParticipant === "object" && !Array.isArray(requestedAtByParticipant)
+      ? (requestedAtByParticipant as Record<string, unknown>)[participant.id]
+      : undefined;
+    const requestedAtMs = typeof requestedAt === "string" ? Date.parse(requestedAt) : Number.NaN;
+    if (Number.isFinite(requestedAtMs)) {
+      const retryAfterMs = Math.max(0, CHAT_SELF_COMPACTION_COOLDOWN_MS - (Date.now() - requestedAtMs));
+      if (retryAfterMs > 0) {
+        return {
+          status: "cooldown",
+          error: `Context compaction for @${participant.handle} is cooling down.`,
+          retryAfterMs
+        };
+      }
+    }
+    return undefined;
+  }
+
+  private recordSelfCompactionRequested(conversation: Conversation, participantId: string, requestedAt: string): void {
+    const current = conversation.metadata.participantSelfCompactionRequestedAtByParticipantId;
+    const records = current && typeof current === "object" && !Array.isArray(current)
+      ? current as Record<string, string>
+      : {};
+    conversation.metadata = {
+      ...conversation.metadata,
+      participantSelfCompactionRequestedAtByParticipantId: {
+        ...records,
+        [participantId]: requestedAt
+      }
+    };
+  }
+
+  private startQueuedSelfCompaction(
+    conversationId: string,
+    participant: ChatParticipant,
+    request: ChatSelfCompactionRequest,
+    runId: string
+  ): void {
+    const backgroundController = this.registerBackgroundRunController(runId, undefined);
+    void this.compactParticipant({
+      conversationId,
+      participantId: participant.id,
+      instructions: request.instructions,
+      runId
+    }, backgroundController.signal, this.onReviewProgress).catch(async (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.debugLogs.write("chat.self-compaction.run.error", {
+        conversationId,
+        participantId: participant.id,
+        runId,
+        message
+      });
+      if (backgroundController.signal.aborted) {
+        return;
+      }
+      const latest = await this.requireChat(conversationId).catch(() => undefined);
+      if (!latest) {
+        return;
+      }
+      await this.withChatMutation(latest, async () => {
+        latest.messages.push(this.message(
+          "system",
+          `Could not compact @${participant.handle} context: ${message}.`,
+          undefined,
+          { threadId: "system", runId }
+        ));
+        latest.updatedAt = new Date().toISOString();
+        await this.saveConversation(latest);
+        this.queueSnapshot(latest);
+      });
+    }).finally(() => backgroundController.cleanup());
+  }
+
   private compactSuccessMessage(handle: string, instructions: string | undefined): string {
     if (!instructions) {
       return `Compacted @${handle} context.`;
@@ -14975,6 +15224,41 @@ export class ChatService {
     return updated;
   }
 
+  private setParticipantCompactionPermission(
+    conversation: Conversation,
+    participantId: string,
+    permission: ChatAgentPermissions["requestCompaction"]
+  ): ChatParticipant | undefined {
+    const participants = this.chatParticipants(conversation);
+    let updated: ChatParticipant | undefined;
+    const nextParticipants = participants.map((participant) => {
+      if (participant.id !== participantId) {
+        return participant;
+      }
+      const permissions = normalizeChatAgentPermissions(participant.permissions);
+      const requestCompaction = normalizeChatParticipantRequestPermission(permission);
+      if (permissions.requestCompaction === requestCompaction) {
+        updated = participant;
+        return participant;
+      }
+      updated = {
+        ...participant,
+        permissions: {
+          ...permissions,
+          requestCompaction
+        }
+      };
+      return updated;
+    });
+    if (updated) {
+      conversation.metadata = {
+        ...conversation.metadata,
+        participants: nextParticipants
+      };
+    }
+    return updated;
+  }
+
   private chatParticipantHasRun(conversation: Conversation, participantId: string): boolean {
     if (Array.isArray(conversation.metadata.participantSessions)) {
       if (conversation.metadata.participantSessions.some((session) => session.participantId === participantId)) {
@@ -15177,13 +15461,17 @@ export class ChatService {
       approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL &&
       approval.capability === "participants.request" &&
       this.isParticipantRequestApprovalRequest(approval.request);
+    const isSelfCompactionApproval =
+      approval.toolName === APP_CHAT_REQUEST_COMPACTION_TOOL &&
+      approval.capability === "compaction.request" &&
+      this.isSelfCompactionRequest(approval.request);
     return (
       typeof approval.id === "string" &&
       typeof approval.conversationId === "string" &&
       typeof approval.requesterParticipantId === "string" &&
       typeof approval.requesterHandle === "string" &&
       typeof approval.requesterRoleConfigId === "string" &&
-      (isRosterApproval || isRoleApproval || isParticipantChangeApproval || isPermissionApproval || isToolPermissionApproval || isParticipantRequestApproval) &&
+      (isRosterApproval || isRoleApproval || isParticipantChangeApproval || isPermissionApproval || isToolPermissionApproval || isParticipantRequestApproval || isSelfCompactionApproval) &&
       (approval.status === "pending" || approval.status === "approved" || approval.status === "denied" || approval.status === "auto-applied") &&
       typeof approval.summary === "string" &&
       typeof approval.createdAt === "string" &&

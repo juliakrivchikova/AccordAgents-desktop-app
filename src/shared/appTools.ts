@@ -1,6 +1,6 @@
 import type { ChatAppToolCapability } from "./types";
 
-export const CHAT_APP_TOOL_CAPABILITIES: ChatAppToolCapability[] = ["participants.manage", "participants.request", "permissions.request"];
+export const CHAT_APP_TOOL_CAPABILITIES: ChatAppToolCapability[] = ["participants.manage", "participants.request", "compaction.request", "permissions.request"];
 
 export function normalizeChatAppToolCapabilities(value: unknown): ChatAppToolCapability[] {
   if (!Array.isArray(value)) {
@@ -8,7 +8,7 @@ export function normalizeChatAppToolCapabilities(value: unknown): ChatAppToolCap
   }
   const capabilities = new Set<ChatAppToolCapability>();
   for (const item of value) {
-    if (item === "participants.manage" || item === "participants.request" || item === "permissions.request") {
+    if (item === "participants.manage" || item === "participants.request" || item === "compaction.request" || item === "permissions.request") {
       capabilities.add(item);
     }
   }

@@ -38,12 +38,14 @@ function roleParticipantDefaultsForDisplay(
     return {
       autoWatch: true,
       requestParticipants: "allow",
+      requestCompaction: defaults?.requestCompaction ?? "ask",
       manageRolesParticipants: defaults?.manageRolesParticipants ?? "deny"
     };
   }
   return {
     autoWatch: defaults?.autoWatch === true,
     requestParticipants: defaults?.requestParticipants ?? "ask",
+    requestCompaction: defaults?.requestCompaction ?? "ask",
     manageRolesParticipants: defaults?.manageRolesParticipants ?? "deny"
   };
 }
@@ -52,6 +54,7 @@ function roleParticipantDefaultsForSave(defaults: ChatRoleParticipantDefaults): 
   return {
     autoWatch: defaults.autoWatch === true,
     requestParticipants: defaults.requestParticipants ?? "ask",
+    requestCompaction: defaults.requestCompaction ?? "ask",
     manageRolesParticipants: defaults.manageRolesParticipants ?? "deny"
   };
 }
@@ -59,6 +62,7 @@ function roleParticipantDefaultsForSave(defaults: ChatRoleParticipantDefaults): 
 function roleParticipantDefaultsEqual(left: ChatRoleParticipantDefaults, right: ChatRoleParticipantDefaults): boolean {
   return left.autoWatch === right.autoWatch &&
     left.requestParticipants === right.requestParticipants &&
+    left.requestCompaction === right.requestCompaction &&
     left.manageRolesParticipants === right.manageRolesParticipants;
 }
 
@@ -117,6 +121,7 @@ export function ChatRoleEditorDialog(props: {
     initialLabel,
     initialParticipantDefaults.autoWatch,
     initialParticipantDefaults.manageRolesParticipants,
+    initialParticipantDefaults.requestCompaction,
     initialParticipantDefaults.requestParticipants,
     initialPreview,
     open
@@ -264,6 +269,9 @@ export function ChatRoleEditorDialog(props: {
                   <ChatParticipantSpecRow label="Request members">
                     <strong>{requestParticipantsLabel(readOnlyDefaults.requestParticipants)}</strong>
                   </ChatParticipantSpecRow>
+                  <ChatParticipantSpecRow label="Request compaction">
+                    <strong>{requestParticipantsLabel(readOnlyDefaults.requestCompaction)}</strong>
+                  </ChatParticipantSpecRow>
                   <ChatParticipantSpecRow label="Manage roles & members">
                     <strong>{requestParticipantsLabel(readOnlyDefaults.manageRolesParticipants)}</strong>
                   </ChatParticipantSpecRow>
@@ -290,6 +298,21 @@ export function ChatRoleEditorDialog(props: {
                       onValueChange={(value) => setParticipantDefaults((current) => ({
                         ...current,
                         requestParticipants: value as ChatParticipantRequestPermission
+                      }))}
+                    />
+                  </div>
+                </ChatParticipantSpecRow>
+                <ChatParticipantSpecRow label="Request compaction">
+                  <div className="roles-default-settings-select">
+                    <AppSelect
+                      value={participantDefaults.requestCompaction ?? "ask"}
+                      options={ROLE_REQUEST_PARTICIPANTS_OPTIONS}
+                      placeholder="Request compaction"
+                      ariaLabel="Default request compaction permission"
+                      testId="settings-role-default-request-compaction"
+                      onValueChange={(value) => setParticipantDefaults((current) => ({
+                        ...current,
+                        requestCompaction: value as ChatParticipantRequestPermission
                       }))}
                     />
                   </div>

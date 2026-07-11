@@ -479,6 +479,200 @@ test("compactParticipant records a clear note when the participant has no active
   assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
 });
 
+test("requestSelfCompactionFromTool asks for approval by default", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+  let compactCalls = 0;
+  const { service, storage } = testService({
+    conversation,
+    compactSession: async (runParticipant) => {
+      compactCalls += 1;
+      return { participant: runParticipant, ok: true, sessionId: "session-1" };
+    }
+  });
+
+  const result = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), {});
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "pending_user_approval");
+  assert.equal(compactCalls, 0);
+  const approvals = storage.current.metadata.pendingAppToolApprovals as Array<Record<string, unknown>>;
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].toolName, "app_chat_request_compaction");
+  assert.equal(approvals[0].capability, "compaction.request");
+  assert.deepEqual(approvals[0].request, { type: "self_compaction" });
+});
+
+test("requestSelfCompactionFromTool queues behind the current participant turn and resumes the same session", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-self-compact-queue-"));
+  try {
+    const participant = chatParticipant({
+      permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "allow" })
+    });
+    const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+    let compactCalls = 0;
+    const { service, storage } = testService({
+      conversation,
+      compactSession: async (runParticipant, _repoPath, _diffMode, _kind, _signal, options) => {
+        compactCalls += 1;
+        assert.equal(options.sessionId, "session-1");
+        assert.equal(options.persistSession, true);
+        assert.equal(options.compactInstructions, "Preserve the implementation decisions.");
+        return { participant: runParticipant, ok: true, sessionId: "session-1" };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    const activeTurn = (service as any).reserveParticipantTurn(conversation.id, participant.id);
+
+    const result = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), {
+      instructions: "Preserve the implementation decisions."
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.status, "queued");
+    await delay(25);
+    assert.equal(compactCalls, 0);
+
+    activeTurn.release();
+    await waitFor(() => compactCalls === 1);
+    await waitFor(() => storage.current.messages.at(-1)?.content === "Compacted @admin context with focus instructions.");
+    assert.equal((storage.current.metadata.participantSelfCompactionRequestedAtByParticipantId as Record<string, string>)[participant.id] !== undefined, true);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("queued self-compaction can be cancelled through the chat run controller", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-self-compact-cancel-"));
+  try {
+    const participant = chatParticipant({
+      permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "allow" })
+    });
+    const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+    let compactSignal: AbortSignal | undefined;
+    const { service, storage } = testService({
+      conversation,
+      compactSession: async (runParticipant, _repoPath, _diffMode, _kind, signal) => {
+        compactSignal = signal;
+        await new Promise<void>((_resolve, reject) => {
+          if (signal?.aborted) {
+            reject(Object.assign(new Error("Cancelled"), { name: "AbortError" }));
+            return;
+          }
+          signal?.addEventListener("abort", () => {
+            reject(Object.assign(new Error("Cancelled"), { name: "AbortError" }));
+          }, { once: true });
+        });
+        return { participant: runParticipant, ok: true, sessionId: "session-1" };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+
+    const result = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), {});
+    assert.equal(result.status, "queued");
+    const runId = String(result.runId);
+    await waitFor(() => compactSignal !== undefined);
+
+    assert.equal(service.cancelRun(runId), true);
+    await waitFor(() => compactSignal?.aborted === true);
+    await waitFor(() => storage.current.metadata.running === false);
+    assert.equal(storage.current.messages.some((message: any) => message.content.startsWith("Could not compact @admin context:")), false);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("approving self-compaction for chat updates the roster override and queues compaction", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-self-compact-approval-"));
+  try {
+    const participant = chatParticipant();
+    const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+    let compactCalls = 0;
+    const { service, storage } = testService({
+      conversation,
+      compactSession: async (runParticipant) => {
+        compactCalls += 1;
+        return { participant: runParticipant, ok: true, sessionId: "session-1" };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    const request = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), {});
+
+    await service.respondToAppToolApproval({
+      conversationId: conversation.id,
+      approvalId: String(request.approvalId),
+      approve: true,
+      scope: "chat"
+    });
+
+    await waitFor(() => compactCalls === 1);
+    const storedParticipant = (storage.current.metadata.participants as ChatParticipant[])[0];
+    assert.equal(normalizeChatAgentPermissions(storedParticipant.permissions).requestCompaction, "allow");
+    const approval = (storage.current.metadata.pendingAppToolApprovals as Array<Record<string, unknown>>)[0];
+    assert.equal(approval.status, "approved");
+    assert.equal(approval.approvalScope, "chat");
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("requestSelfCompactionFromTool guards missing sessions, duplicate approvals, and cooldown", async () => {
+  const participant = chatParticipant();
+  const noSession = chatConversation([participant], []);
+  const missing = testService({
+    conversation: noSession,
+    compactSession: async (runParticipant) => ({ participant: runParticipant, ok: true })
+  });
+  const missingResult = await missing.service.requestSelfCompactionFromTool(selfCompactionActor(participant), {});
+  assert.equal(missingResult.status, "no_active_session");
+
+  const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+  const pending = testService({
+    conversation,
+    compactSession: async (runParticipant) => ({ participant: runParticipant, ok: true, sessionId: "session-1" })
+  });
+  await pending.service.requestSelfCompactionFromTool(selfCompactionActor(participant), {});
+  const duplicate = await pending.service.requestSelfCompactionFromTool(selfCompactionActor(participant), {});
+  assert.equal(duplicate.status, "pending_user_approval");
+  assert.equal(duplicate.ok, false);
+
+  const cooldownParticipant = chatParticipant({
+    permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "allow" })
+  });
+  const cooldownConversation = chatConversation([cooldownParticipant], [chatSession(cooldownParticipant, "session-1")]);
+  cooldownConversation.metadata.participantSelfCompactionRequestedAtByParticipantId = {
+    [cooldownParticipant.id]: new Date().toISOString()
+  };
+  const cooldown = testService({
+    conversation: cooldownConversation,
+    compactSession: async (runParticipant) => ({ participant: runParticipant, ok: true, sessionId: "session-1" })
+  });
+  const cooldownResult = await cooldown.service.requestSelfCompactionFromTool(selfCompactionActor(cooldownParticipant), {});
+  assert.equal(cooldownResult.status, "cooldown");
+  assert.equal(typeof cooldownResult.retryAfterMs, "number");
+});
+
+test("requestSelfCompactionFromTool enforces a deny override even with a stale capability", async () => {
+  const participant = chatParticipant({
+    permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "deny" })
+  });
+  const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+  let compactCalls = 0;
+  const { service } = testService({
+    conversation,
+    compactSession: async (runParticipant) => {
+      compactCalls += 1;
+      return { participant: runParticipant, ok: true, sessionId: "session-1" };
+    }
+  });
+
+  const result = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), {});
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "rejected");
+  assert.match(String(result.error), /disabled/);
+  assert.equal(compactCalls, 0);
+});
+
 function testService(options: {
   conversation: Conversation;
   compactSession: (participant: ParticipantConfig, repoPath: string | undefined, diffMode: undefined, kind: "chat", signal: AbortSignal | undefined, options: Record<string, unknown>) => Promise<Record<string, unknown>>;
@@ -526,6 +720,17 @@ function chatParticipant(patch: Partial<ChatParticipant> = {}): ChatParticipant 
     agentMode: "default",
     permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions()),
     ...patch
+  };
+}
+
+function selfCompactionActor(participant: ChatParticipant): any {
+  return {
+    conversationId: "chat-compact",
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: ROLE.version,
+    capabilities: ["compaction.request"],
+    runId: "active-turn"
   };
 }
 

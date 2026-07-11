@@ -183,6 +183,7 @@ appMcpService.setChatAttachmentListHandler((actor, request) => chatService.listC
 appMcpService.setChatAttachmentReadHandler((actor, request) => chatService.readChatAttachmentForTool(actor, request));
 appMcpService.setChatAttachmentExportHandler((actor, request) => chatService.exportChatAttachmentForTool(actor, request));
 appMcpService.setChatParticipantRequestHandler((actor, request) => chatService.requestParticipantsFromTool(actor, request));
+appMcpService.setChatCompactionRequestHandler((actor, request) => chatService.requestSelfCompactionFromTool(actor, request));
 appMcpService.setChatParticipantRequestStatusHandler((actor, request) => chatService.participantRequestStatusForTool(actor, request));
 appMcpService.setChatReactHandler((actor, request) => chatService.reactToMessageFromTool(actor, request));
 appMcpService.setChatSendMessageHandler((actor, request) => chatService.sendChatMessageFromTool(actor, request));

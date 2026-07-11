@@ -8,6 +8,7 @@ import {
   effectiveChatAgentPermissionsForProvider,
   normalizeChatAgentMode,
   normalizeChatAgentPermissions,
+  normalizeChatParticipantRequestPermission,
   normalizeChatRoleManagementPermission,
   normalizeOptionalChatParticipantRequestPermission,
   resolveChatManageRolesParticipantsPermission
@@ -353,6 +354,26 @@ export function ChatParticipantInlineRequestParticipantsRow(props: {
   );
 }
 
+export function ChatParticipantInlineRequestCompactionRow(props: {
+  participant: Pick<ChatRosterChangeParticipantInput, "permissions">;
+  onChange: (permissions: ChatAgentPermissions) => void;
+}): JSX.Element {
+  const permissions = normalizeChatAgentPermissions(props.participant.permissions);
+  const current = normalizeChatParticipantRequestPermission(permissions.requestCompaction);
+  return (
+    <ChatParticipantInlineSelectRow
+      label="Request compaction"
+      value={participantRequestPermissionLabel(current)}
+      current={current}
+      options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}
+      onSelect={(requestCompaction) => props.onChange({
+        ...permissions,
+        requestCompaction: requestCompaction as ChatParticipantRequestPermission
+      })}
+    />
+  );
+}
+
 export function ChatParticipantInlineManageRolesParticipantsRow(props: {
   participant: Pick<ChatRosterChangeParticipantInput, "permissions">;
   roleDefaults?: ChatRoleParticipantDefaults;
@@ -429,6 +450,11 @@ export function rosterPermissionGrantLabels(participant: ChatRosterChangePartici
     labels.push("request members");
   } else if (permissions.requestParticipants === "deny") {
     labels.push("member requests denied");
+  }
+  if (permissions.requestCompaction === "allow") {
+    labels.push("compact without approval");
+  } else if (permissions.requestCompaction === "deny") {
+    labels.push("compaction requests denied");
   }
   if (permissions.manageRolesParticipants === "allow") {
     labels.push("manage members");

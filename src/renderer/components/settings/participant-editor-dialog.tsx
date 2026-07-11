@@ -13,6 +13,7 @@ import {
   ChatParticipantInlineManageRolesParticipantsRow,
   ChatParticipantInlineModelRow,
   ChatParticipantInlinePermissionsRow,
+  ChatParticipantInlineRequestCompactionRow,
   ChatParticipantInlineRequestParticipantsRow,
   ChatParticipantInlineSelectRow,
   ChatParticipantSpecRow
@@ -258,6 +259,10 @@ export function ParticipantEditorDialog(props: {
               />
             </ChatParticipantSpecRow>
             <ChatParticipantInlineRequestParticipantsRow
+              participant={draftParticipant}
+              onChange={(permissions) => patchDraft({ permissions })}
+            />
+            <ChatParticipantInlineRequestCompactionRow
               participant={draftParticipant}
               onChange={(permissions) => patchDraft({ permissions })}
             />

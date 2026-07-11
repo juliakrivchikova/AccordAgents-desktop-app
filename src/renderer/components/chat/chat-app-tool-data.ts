@@ -7,6 +7,7 @@ import type {
   ChatPermissionGrant,
   ChatRoleChangeRequest,
   ChatRoleParticipantChangeRequest,
+  ChatSelfCompactionRequest,
   ChatShellPermissionRule,
   ChatToolPermissionRequest,
   Conversation
@@ -19,6 +20,7 @@ export const APP_ROSTER_REQUEST_CHANGE_TOOL = "app_roster_request_change";
 export const APP_ROLES_REQUEST_CHANGE_TOOL = "app_roles_request_change";
 export const APP_PARTICIPANTS_REQUEST_CHANGE_TOOL = "app_participants_request_change";
 export const APP_CHAT_REQUEST_PARTICIPANTS_TOOL = "app_chat_request_participants";
+export const APP_CHAT_REQUEST_COMPACTION_TOOL = "app_chat_request_compaction";
 export const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 
 export function chatAppToolApprovals(conversation: Conversation | undefined): ChatAppToolApproval[] {
@@ -51,14 +53,31 @@ export function chatAppToolApprovals(conversation: Conversation | undefined): Ch
     const isParticipantRequest =
       approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL &&
       Boolean(chatParticipantRequestApprovalRequest(approval as ChatAppToolApproval));
+    const isSelfCompactionRequest =
+      approval.toolName === APP_CHAT_REQUEST_COMPACTION_TOOL &&
+      Boolean(chatSelfCompactionRequest(approval as ChatAppToolApproval));
     return (
       typeof approval.id === "string" &&
       typeof approval.requesterHandle === "string" &&
       typeof approval.summary === "string" &&
       (approval.status === "pending" || approval.status === "approved" || approval.status === "denied" || approval.status === "auto-applied") &&
-      (isRosterRequest || isRoleRequest || isParticipantChangeRequest || isPermissionRequest || isToolPermissionRequest || isParticipantRequest)
+      (isRosterRequest || isRoleRequest || isParticipantChangeRequest || isPermissionRequest || isToolPermissionRequest || isParticipantRequest || isSelfCompactionRequest)
     );
   });
+}
+
+export function chatSelfCompactionRequest(approval: ChatAppToolApproval): ChatSelfCompactionRequest | undefined {
+  if (approval.toolName !== APP_CHAT_REQUEST_COMPACTION_TOOL) {
+    return undefined;
+  }
+  const request = approval.request as Partial<ChatSelfCompactionRequest>;
+  return request.type === "self_compaction" &&
+    (request.instructions === undefined || typeof request.instructions === "string")
+    ? {
+        type: "self_compaction",
+        instructions: request.instructions?.trim() || undefined
+      }
+    : undefined;
 }
 
 export function chatRoleChangeRequest(approval: ChatAppToolApproval): ChatRoleChangeRequest | undefined {

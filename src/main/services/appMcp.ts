@@ -15,6 +15,7 @@ export const APP_PARTICIPANTS_DESCRIBE_OPTIONS_TOOL = "app_participants_describe
 export const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 export const APP_TOOL_PERMISSION_TOOL = "app_tool_permission";
 export const APP_CHAT_REQUEST_PARTICIPANTS_TOOL = "app_chat_request_participants";
+export const APP_CHAT_REQUEST_COMPACTION_TOOL = "app_chat_request_compaction";
 export const APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL = "app_chat_get_participant_request_status";
 export const APP_CHAT_GET_CONTEXT_TOOL = "app_chat_get_context";
 export const APP_CHAT_GET_PARTICIPANTS_TOOL = "app_chat_get_participants";
@@ -66,6 +67,10 @@ const CHAT_AGENT_PERMISSION_INPUT_SCHEMA = {
     workspaceWrite: { type: "boolean" },
     webAccess: { type: "boolean" },
     requestParticipants: {
+      type: "string",
+      enum: ["ask", "allow", "deny"]
+    },
+    requestCompaction: {
       type: "string",
       enum: ["ask", "allow", "deny"]
     },
@@ -298,6 +303,7 @@ type AppChatAttachmentListHandler = (actor: AppMcpActor, request: unknown) => Pr
 type AppChatAttachmentReadHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatAttachmentExportHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatParticipantRequestHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+type AppChatCompactionRequestHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatParticipantRequestStatusHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatReactHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatSendMessageHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
@@ -344,6 +350,7 @@ export class AppMcpService {
   private chatAttachmentReadHandler?: AppChatAttachmentReadHandler;
   private chatAttachmentExportHandler?: AppChatAttachmentExportHandler;
   private chatParticipantRequestHandler?: AppChatParticipantRequestHandler;
+  private chatCompactionRequestHandler?: AppChatCompactionRequestHandler;
   private chatParticipantRequestStatusHandler?: AppChatParticipantRequestStatusHandler;
   private chatReactHandler?: AppChatReactHandler;
   private chatSendMessageHandler?: AppChatSendMessageHandler;
@@ -408,6 +415,10 @@ export class AppMcpService {
 
   setChatParticipantRequestHandler(handler: AppChatParticipantRequestHandler): void {
     this.chatParticipantRequestHandler = handler;
+  }
+
+  setChatCompactionRequestHandler(handler: AppChatCompactionRequestHandler): void {
+    this.chatCompactionRequestHandler = handler;
   }
 
   setChatParticipantRequestStatusHandler(handler: AppChatParticipantRequestStatusHandler): void {
@@ -1104,6 +1115,30 @@ export class AppMcpService {
         }
       });
     }
+    if (hasChatAppToolCapability(actor.capabilities, "compaction.request")) {
+      tools.push({
+        name: APP_CHAT_REQUEST_COMPACTION_TOOL,
+        title: "Request Context Compaction",
+        description:
+          "Request compaction of your own provider session after the current turn finishes. The app validates permission, active-session status, duplicate requests, and cooldown. Optional instructions may preserve a specific focus during compaction.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            instructions: {
+              type: "string",
+              description: "Optional focus instructions for the compacted context."
+            }
+          }
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false
+        }
+      });
+    }
     if (hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
       tools.push({
         name: APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
@@ -1241,6 +1276,10 @@ export class AppMcpService {
                           properties: {
                             autoWatch: { type: "boolean" },
                             requestParticipants: {
+                              type: "string",
+                              enum: ["ask", "allow", "deny"]
+                            },
+                            requestCompaction: {
                               type: "string",
                               enum: ["ask", "allow", "deny"]
                             },
@@ -1445,6 +1484,7 @@ export class AppMcpService {
       record.name !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
       record.name !== APP_TOOL_PERMISSION_TOOL &&
       record.name !== APP_CHAT_REQUEST_PARTICIPANTS_TOOL &&
+      record.name !== APP_CHAT_REQUEST_COMPACTION_TOOL &&
       record.name !== APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL &&
       record.name !== APP_CHAT_GET_CONTEXT_TOOL &&
       record.name !== APP_CHAT_GET_PARTICIPANTS_TOOL &&
@@ -1529,6 +1569,15 @@ export class AppMcpService {
         throw new Error("Chat participant request handling is not available.");
       }
       return this.toolTextResult(await this.chatParticipantRequestHandler(actor, record.arguments));
+    }
+    if (record.name === APP_CHAT_REQUEST_COMPACTION_TOOL) {
+      if (!hasChatAppToolCapability(actor.capabilities, "compaction.request")) {
+        throw new Error("This participant is not allowed to request context compaction.");
+      }
+      if (!this.chatCompactionRequestHandler) {
+        throw new Error("Chat compaction request handling is not available.");
+      }
+      return this.toolTextResult(await this.chatCompactionRequestHandler(actor, record.arguments));
     }
     if (record.name === APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL) {
       if (!this.chatParticipantRequestStatusHandler) {

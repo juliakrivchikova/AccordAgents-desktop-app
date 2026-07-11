@@ -18,7 +18,7 @@ import { chatParticipantDisplayName, chatParticipantReference } from "../convers
 import { MarkdownText } from "../content/markdown-text";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { formatChatTime } from "./chat-format";
-import { APP_ROSTER_REQUEST_CHANGE_TOOL, chatParticipantChangeRequest, chatParticipantRequestApprovalRequest, chatPermissionChangeRequest, chatRoleChangeRequest, chatRoleParticipantChangeRequest, chatToolPermissionRequest, participantProviderLabel } from "./chat-conversation-data";
+import { APP_ROSTER_REQUEST_CHANGE_TOOL, chatParticipantChangeRequest, chatParticipantRequestApprovalRequest, chatPermissionChangeRequest, chatRoleChangeRequest, chatRoleParticipantChangeRequest, chatSelfCompactionRequest, chatToolPermissionRequest, participantProviderLabel } from "./chat-conversation-data";
 import { approvalOptions, approvalQuestion, approvalReason, ChatAppToolReviewFooter, ChatAppToolReviewResult, ChatAppToolReviewStatus, participantReviewChipLabel, reviewPrimaryLabel, roleReviewChipLabel, temporaryRolesForReview } from "./chat-app-tool-approval-review";
 import { ChatAppToolPermissionOperation, ChatAppToolParticipantRequestOperation, ChatAppToolPermissionPromptOperation } from "./chat-app-tool-permission-operations";
 import { ChatAppToolRosterOperation, ChatAppToolRosterPermissionEnvelope, RosterApprovalTitle, rosterApprovalQuestion } from "./chat-app-tool-roster";
@@ -44,12 +44,13 @@ export function ChatAppToolApprovalCard(props: {
   const roleRequest = chatRoleChangeRequest(props.approval);
   const participantChange = chatParticipantChangeRequest(props.approval);
   const participantRequest = chatParticipantRequestApprovalRequest(props.approval);
+  const selfCompactionRequest = chatSelfCompactionRequest(props.approval);
   const inferredParticipantRequest = participantRequest?.source === "inferred";
   const preferOnceApproval = Boolean(permissionRequest && permissionRequest.kind !== "portable");
   const added = props.approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL && "operations" in props.approval.request
     ? props.approval.request.operations.filter((operation) => operation.type === "add")
     : [];
-  const rosterApproval = !permissionRequest && !combinedRequest && !roleRequest && !participantChange && !participantRequest && added.length > 0;
+  const rosterApproval = !permissionRequest && !combinedRequest && !roleRequest && !participantChange && !participantRequest && !selfCompactionRequest && added.length > 0;
   const [combinedDraft, setCombinedDraft] = useState<ChatRoleParticipantChangeRequest | undefined>(combinedRequest);
   const [roleDraft, setRoleDraft] = useState<ChatRoleChangeRequest | undefined>(combinedRequest?.roleRequest ?? roleRequest);
   const [participantDraft, setParticipantDraft] = useState<ChatParticipantChangeRequest | undefined>(combinedRequest?.participantRequest ?? participantChange);
@@ -70,6 +71,7 @@ export function ChatAppToolApprovalCard(props: {
     effectiveRoleRequest,
     effectiveParticipantChange,
     participantRequest,
+    selfCompactionRequest,
     toolPermissionRequest,
     added,
     inferredParticipantRequest
@@ -83,7 +85,7 @@ export function ChatAppToolApprovalCard(props: {
     : avatarForParticipant(requesterLabel, props.approval.requesterParticipantId);
   const approvalPrompt = effectiveCombinedRequest
     ? `${chatParticipantReference(props.approval.requesterHandle)} wants to create a role and add a member`
-    : approvalQuestion(props.approval, permissionRequest, effectiveRoleRequest, effectiveParticipantChange, participantRequest, toolPermissionRequest);
+    : approvalQuestion(props.approval, permissionRequest, effectiveRoleRequest, effectiveParticipantChange, participantRequest, selfCompactionRequest, toolPermissionRequest);
   const displayPrompt = rosterApproval ? rosterApprovalQuestion(props.approval, added) : approvalPrompt;
 
   if (reviewChange && readOnly) {
@@ -229,6 +231,13 @@ export function ChatAppToolApprovalCard(props: {
             />
           ) : participantRequest ? (
             <ChatAppToolParticipantRequestOperation request={participantRequest} requesterHandle={props.approval.requesterHandle} />
+          ) : selfCompactionRequest ? (
+            <div className="chat-app-tool-roster-list">
+              <div className="chat-app-tool-approval-reason">
+                Compact this member&apos;s current provider session after its active turn finishes.
+                {selfCompactionRequest.instructions ? ` Focus: ${selfCompactionRequest.instructions}` : ""}
+              </div>
+            </div>
           ) : (
             <div className="chat-app-tool-roster-list">
               {added.map((operation, index) => (
@@ -256,6 +265,11 @@ export function ChatAppToolApprovalCard(props: {
           {participantRequest && (
             <p className="chat-app-tool-scope-note">
               Approval runs the requested member{participantRequest.requests.length === 1 ? "" : "s"} and then returns to {requesterLabel} after replies or errors. {inferredParticipantRequest ? "Inferred requests are approved one time." : "Chat grants apply only to this requester and target set."}
+            </p>
+          )}
+          {selfCompactionRequest && (
+            <p className="chat-app-tool-scope-note">
+              Allow once queues this compaction only. Chat approval allows future compaction requests from {requesterLabel} without another approval.
             </p>
           )}
           {reviewChange && readOnly ? null : reviewChange ? (
