@@ -11,7 +11,7 @@ import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, norma
 // Antigravity CLI (`agy`) discovers MCP servers from the global
 // `~/.gemini/config/mcp_config.json` file only — there is no per-invocation MCP
 // flag. The app therefore syncs one static `accord_agents` entry that launches
-// the bundled stdio proxy (geminiMcpProxy.js), and passes the per-run bridge
+// the app's dedicated stdio-proxy launch mode, and passes the per-run bridge
 // URL/token through the agy process environment. agy spawns MCP stdio servers
 // with the parent environment inherited (verified empirically), so concurrent
 // runs keep distinct tokens without racing on the shared config file.
@@ -275,6 +275,11 @@ function geminiPrompt(
   const lines = [`You are running for AccordAgents Chat in ${mode} mode.`];
   if (repoPath) {
     lines.push(`The selected repository workspace is ${repoPath}.`);
+  }
+  if (repoPath && (mode === "auto" || permissions.workspaceWrite)) {
+    lines.push(
+      `File modifications are limited to the selected repository workspace (${repoPath}). Do not create, modify, move, or delete files outside that workspace.`
+    );
   }
   if (mode !== "auto" && !permissions.workspaceWrite) {
     lines.push(

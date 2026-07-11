@@ -786,7 +786,7 @@ export class ChatService {
         .filter((agent) => agent.installed && (agent.kind === "codex-cli" || agent.kind === "claude-code" || agent.kind === "gemini-cli"))
         .map((agent) => agent.kind);
       if (installedCliKinds.length === 0) {
-        throw new Error("Install Codex CLI or Claude Code before creating a chat.");
+        throw new Error("Install Codex CLI, Claude Code, or Gemini CLI before creating a chat.");
       }
       const settings = await this.settings.ensureGenericChatParticipantSeeds(agents);
       const hasRequestedParticipants = request.participants.length > 0;
@@ -1398,6 +1398,12 @@ export class ChatService {
         }
       }
       this.updateParticipantContextUsage(conversation, participant.id, usage);
+      if (result.ok && session.roleRuntime === "prompt-fallback") {
+        // Emulated Gemini compaction swaps to a fresh seeded conversation. Force
+        // the existing instruction-refresh path to redeliver the prompt-fallback
+        // role once on the next participant turn.
+        session.runtimeConfigVersion = undefined;
+      }
       this.upsertSession(conversation, session);
       await this.withChatMutation(conversation, async () => {
         const content = result.ok
@@ -8790,7 +8796,13 @@ export class ChatService {
     if (geminiInstalled) {
       return "gemini-cli";
     }
-    return claudeEnabled ? "claude-code" : "codex-cli";
+    if (codexEnabled) {
+      return "codex-cli";
+    }
+    if (claudeEnabled) {
+      return "claude-code";
+    }
+    return geminiEnabled ? "gemini-cli" : "codex-cli";
   }
 
   private uniqueHandle(base: string, existingHandles: Set<string>): string {

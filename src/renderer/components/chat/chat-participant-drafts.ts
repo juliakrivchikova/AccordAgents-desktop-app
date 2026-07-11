@@ -26,6 +26,7 @@ import {
   normalizeChatRoleManagementPermission
 } from "../../../shared/agentPermissions";
 import { normalizeChatReasoningEffort } from "../../../shared/reasoningEffort";
+import { chatProviderKind, preferredChatProviderSetting } from "../../../shared/chatProviders";
 import {
   defaultChatAvatarId,
   isChatAvatarIdForKind,
@@ -127,9 +128,9 @@ export function activeChatRoleConfigs(settings: Pick<AppSettings, "chatRoleConfi
 }
 
 export function defaultChatParticipantDraft(settings: AppSettings, existingHandles: Set<string> = new Set()): ChatParticipantDraft {
-  const provider = settings.providers.find((item) => item.kind === "codex-cli") ?? settings.providers.find((item) => item.kind === "claude-code");
+  const provider = preferredChatProviderSetting(settings.providers);
   const roleConfigId = activeChatRoleConfigs(settings)[0]?.id ?? "";
-  const kind = provider?.kind === "claude-code" ? "claude-code" : "codex-cli";
+  const kind = chatProviderKind(provider?.kind);
   const handle = roleConfigId ? generatedChatHandle(settings, kind, roleConfigId, existingHandles) : "";
   const roleDefaults = participantDefaultsForRole(settings, roleConfigId);
   return {
@@ -264,7 +265,7 @@ export function normalizeChatParticipantDraftForSettings(draft: ChatParticipantD
     ? draft.roleConfigId
     : fallback.roleConfigId;
   const provider = settings.providers.find((item) => item.kind === draft.kind) ?? settings.providers.find((item) => item.kind === fallback.kind);
-  const kind = provider?.kind === "claude-code" ? "claude-code" : "codex-cli";
+  const kind = chatProviderKind(provider?.kind, fallback.kind);
   const handle = draft.handle.trim() || (roleConfigId ? generatedChatHandle(settings, kind, roleConfigId) : "");
   const selectedRuleIds = new Set(normalizeBehaviorRuleIds(draft.behaviorRuleIds));
   return {
@@ -467,7 +468,7 @@ export function validateChatStartupDrafts(
       return "Chat Assistant role is required to start an empty chat.";
     }
     if (!agents.some((agent) => agent.installed)) {
-      return "Codex CLI or Claude Code is required to start a chat.";
+      return "Codex CLI, Claude Code, or Gemini CLI is required to start a chat.";
     }
     return undefined;
   }
