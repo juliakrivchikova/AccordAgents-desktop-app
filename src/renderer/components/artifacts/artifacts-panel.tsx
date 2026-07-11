@@ -44,6 +44,25 @@ export function ArtifactsPanel(props: {
     setStaleCurrent(undefined);
   }, []);
 
+  useEffect(() => {
+    const handlePointerDown = (event: PointerEvent): void => {
+      const { target } = event;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (panelResize.panelRef.current?.contains(target)) {
+        return;
+      }
+      if (target instanceof Element && target.closest(".chat-artifacts-toggle")) {
+        return;
+      }
+      props.onClose();
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () => document.removeEventListener("pointerdown", handlePointerDown, true);
+  }, [panelResize.panelRef, props.onClose]);
+
   const loadDetail = useCallback(async (artifactId: string, version?: number) => {
     const result = await window.consensus.readArtifact({
       conversationId: props.conversationId,
