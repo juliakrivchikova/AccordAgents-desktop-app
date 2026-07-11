@@ -141,7 +141,9 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
       <div className="chat-composer-shell">
         <div className={["chat-input-wrap", mentions.showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")}>
         <ChatComposerMenus
+          artifactOptions={mentions.visibleArtifactOptions}
           fileIndex={mentions.fileIndex}
+          insertArtifactMention={mentions.insertArtifactMention}
           insertCompactCommand={mentions.insertCompactCommand}
           insertFileMention={mentions.insertFileMention}
           insertMention={mentions.insertMention}
@@ -193,19 +195,19 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
           }}
           style={CHAT_COMPOSER_TEXTAREA_STYLE}
           onKeyDown={(event) => {
-            if (mentions.visibleFileOptions.length > 0 && event.key === "ArrowDown") {
+            if (mentions.visibleHashOptionCount > 0 && event.key === "ArrowDown") {
               event.preventDefault();
-              mentions.setFileIndex((current) => (current + 1) % mentions.visibleFileOptions.length);
+              mentions.setFileIndex((current) => (current + 1) % mentions.visibleHashOptionCount);
               return;
             }
-            if (mentions.visibleFileOptions.length > 0 && event.key === "ArrowUp") {
+            if (mentions.visibleHashOptionCount > 0 && event.key === "ArrowUp") {
               event.preventDefault();
-              mentions.setFileIndex((current) => (current - 1 + mentions.visibleFileOptions.length) % mentions.visibleFileOptions.length);
+              mentions.setFileIndex((current) => (current - 1 + mentions.visibleHashOptionCount) % mentions.visibleHashOptionCount);
               return;
             }
-            if (mentions.visibleFileOptions.length > 0 && (event.key === "Enter" || event.key === "Tab")) {
+            if (mentions.visibleHashOptionCount > 0 && (event.key === "Enter" || event.key === "Tab")) {
               event.preventDefault();
-              mentions.insertFileMention(mentions.visibleFileOptions[mentions.fileIndex] ?? mentions.visibleFileOptions[0]);
+              mentions.insertHashOptionAtIndex(mentions.fileIndex);
               return;
             }
             if (mentions.visibleSlashOptionCount > 0 && event.key === "ArrowDown") {

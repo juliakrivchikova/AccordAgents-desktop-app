@@ -2,6 +2,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { Puzzle } from "lucide-react";
 
 import type {
+  ArtifactSummary,
   ChatParticipant,
   ChatSkillMention,
   UserSkillTargetSummary
@@ -84,6 +85,39 @@ export function removeFileMentionToken(value: string, filePath: string): string 
     .replace(/[ \t]{2,}/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trimEnd();
+}
+
+export function matchArtifactMentions(artifacts: ArtifactSummary[], query: string, limit = 8): ArtifactSummary[] {
+  const needle = query.trim().toLowerCase();
+  return artifacts
+    .filter((artifact) => artifact.name.toLowerCase().includes(needle))
+    .sort((left, right) => {
+      const leftStarts = left.name.toLowerCase().startsWith(needle) ? 0 : 1;
+      const rightStarts = right.name.toLowerCase().startsWith(needle) ? 0 : 1;
+      if (leftStarts !== rightStarts) {
+        return leftStarts - rightStarts;
+      }
+      return right.updatedAt.localeCompare(left.updatedAt);
+    })
+    .slice(0, limit);
+}
+
+export function artifactMentionToken(artifact: Pick<ArtifactSummary, "id" | "name">): string {
+  // The markdown link label cannot contain "]"; fall back to the bare token,
+  // which still renders as a chip with the artifact's current name.
+  const label = artifact.name.replace(/[[\]]/g, "").trim();
+  return label ? `[${label}](#artifact:${artifact.id})` : `#artifact:${artifact.id}`;
+}
+
+export function replaceActiveArtifactMention(value: string, artifact: Pick<ArtifactSummary, "id" | "name">): string {
+  const token = artifactMentionToken(artifact);
+  const match = value.match(/(?:^|\s)#([^\s#]*)$/);
+  if (!match || match.index === undefined) {
+    return `${value}${value.endsWith(" ") || !value ? "" : " "}${token} `;
+  }
+  const prefix = value.slice(0, match.index);
+  const leadingSpace = match[0].startsWith(" ") ? " " : "";
+  return `${prefix}${leadingSpace}${token} `;
 }
 
 export function replaceActiveSkillMention(value: string, skillName: string): string {
