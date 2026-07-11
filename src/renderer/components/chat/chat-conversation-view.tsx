@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
-import { ArrowDown } from "lucide-react";
+import { ArrowDown, FileStack } from "lucide-react";
 
 import type {
   ChatAppToolApprovalRequest,
@@ -32,6 +32,9 @@ import {
   chatTopLevelMessages,
   liveMessageProgressById
 } from "./chat-conversation-data";
+import { ArtifactsContext } from "../artifacts/artifacts-context";
+import { ArtifactsPanel } from "../artifacts/artifacts-panel";
+import { useArtifacts } from "../artifacts/use-artifacts";
 import { ChatConversationTimeline } from "./chat-conversation-timeline";
 import type { ChatConversationViewProps } from "./chat-conversation-types";
 import { ChatThreadPanel } from "./chat-thread-panel";
@@ -78,6 +81,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     () => chatMentionDirectory(participants, props.settings.chatRoleConfigs, sessionsByParticipant, contextUsageByParticipant),
     [participants, props.settings.chatRoleConfigs, sessionsByParticipant, contextUsageByParticipant]
   );
+  const artifacts = useArtifacts(props.conversation.id);
   const [selectedThreadRootId, setSelectedThreadRootId] = useState<string | undefined>();
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
   const [threadWidth, setThreadWidth] = useState(430);
@@ -231,6 +235,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   return (
     <MentionDirectoryContext.Provider value={mentionDirectory}>
     <MessageLinkContext.Provider value={viewport.focusChatMessage}>
+      <ArtifactsContext.Provider value={artifacts.context}>
       <LocalFileLinkContext.Provider value={localFileOpen.localFileLinkContext}>
         <div
           className={`chat-view ${hasThread ? "thread-open" : ""} ${isResizingThread ? "resizing-thread" : ""}`}
@@ -239,6 +244,16 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
           style={{ "--chat-thread-width": `${threadWidth}px` } as CSSProperties}
         >
           <div className="chat-main">
+            <button
+              type="button"
+              className={`chat-artifacts-toggle${artifacts.panelOpen ? " active" : ""}`}
+              aria-label="Artifacts"
+              title="Artifacts — durable shared documents (plans, QA cases, decisions) with versions and sign-off"
+              onClick={() => (artifacts.panelOpen ? artifacts.closePanel() : artifacts.openPanel())}
+            >
+              <FileStack size={15} aria-hidden />
+              <span>Artifacts{artifacts.artifacts.length > 0 ? ` (${artifacts.artifacts.length})` : ""}</span>
+            </button>
             <ChatConversationTimeline
               conversationId={props.conversation.id}
               contextUsageByParticipant={contextUsageByParticipant}
@@ -343,6 +358,15 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               inferredParticipantRequestsByTrigger={inferredParticipantRequestsByTrigger}
             />
           )}
+          {artifacts.panelOpen && (
+            <ArtifactsPanel
+              conversationId={props.conversation.id}
+              artifacts={artifacts.artifacts}
+              selectedId={artifacts.selectedId}
+              onSelect={artifacts.selectArtifact}
+              onClose={artifacts.closePanel}
+            />
+          )}
           <LocalFileOpenChooser
             fileRef={localFileOpen.chooserFileRef}
             open={localFileOpen.chooserOpen}
@@ -351,6 +375,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
           />
         </div>
       </LocalFileLinkContext.Provider>
+      </ArtifactsContext.Provider>
     </MessageLinkContext.Provider>
     </MentionDirectoryContext.Provider>
   );

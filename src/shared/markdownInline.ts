@@ -4,6 +4,7 @@ export type MarkdownInlineNode =
   | { type: "code"; text: string }
   | { type: "mention"; handle: string }
   | { type: "messageLink"; messageId: string; label?: string }
+  | { type: "artifactLink"; artifactId: string; label?: string }
   | { type: "fileLink"; path: string; label: string; line?: number; column?: number }
   | { type: "externalLink"; url: string; label: string };
 
@@ -16,6 +17,11 @@ export interface FileLinkTarget {
 const MESSAGE_ID_RE_SOURCE = "[A-Za-z0-9][A-Za-z0-9_-]*";
 const MESSAGE_LINK_RE = new RegExp(`^\\[([^\\]\\n]+)\\]\\(#msg:(${MESSAGE_ID_RE_SOURCE})\\)`);
 const BARE_MESSAGE_RE = new RegExp(`^#msg:(${MESSAGE_ID_RE_SOURCE})`);
+// Artifact references: `[label](#artifact:<id>)` or bare `#artifact:<id>`. The id
+// is the artifact's stable identity; the renderer shows the artifact's CURRENT
+// name, so renames never break or redirect existing references.
+const ARTIFACT_LINK_RE = new RegExp(`^\\[([^\\]\\n]+)\\]\\(#artifact:(${MESSAGE_ID_RE_SOURCE})\\)`);
+const BARE_ARTIFACT_RE = new RegExp(`^#artifact:(${MESSAGE_ID_RE_SOURCE})`);
 const MARKDOWN_EXTERNAL_LINK_RE = /^\[([^\]\n]+)\]\((https?:\/\/[^\s<>)]+)\)/i;
 const MARKDOWN_FILE_LINK_RE = /^\[([^\]\n]+)\]\((<[^>\n]+>|[^)\s]+)\)/;
 const BARE_EXTERNAL_URL_RE = /^https?:\/\/[^\s<>]+/i;
@@ -107,6 +113,12 @@ export function parseMarkdownInline(text: string): MarkdownInlineNode[] {
         index += link[0].length;
         continue;
       }
+      const artifactLink = text.slice(index).match(ARTIFACT_LINK_RE);
+      if (artifactLink) {
+        nodes.push({ type: "artifactLink", artifactId: artifactLink[2], label: artifactLink[1] });
+        index += artifactLink[0].length;
+        continue;
+      }
       const fileLink = text.slice(index).match(MARKDOWN_FILE_LINK_RE);
       if (fileLink) {
         const target = parseFileLinkTarget(fileLink[2]);
@@ -140,6 +152,12 @@ export function parseMarkdownInline(text: string): MarkdownInlineNode[] {
         index += bare[0].length;
         continue;
       }
+      const bareArtifact = text.slice(index).match(BARE_ARTIFACT_RE);
+      if (bareArtifact) {
+        nodes.push({ type: "artifactLink", artifactId: bareArtifact[1] });
+        index += bareArtifact[0].length;
+        continue;
+      }
     }
 
     const bareExternal = text.slice(index).match(BARE_EXTERNAL_URL_RE);
@@ -159,9 +177,10 @@ export function parseMarkdownInline(text: string): MarkdownInlineNode[] {
     const nextCode = text.indexOf("`", index + 1);
     const nextLink = text.indexOf("[", index + 1);
     const nextBare = text.indexOf("#msg:", index + 1);
+    const nextBareArtifact = text.indexOf("#artifact:", index + 1);
     const nextMention = text.indexOf("@", index + 1);
     const nextExternal = nextExternalUrlStart(text, index + 1);
-    const nextCandidates = [nextBold, nextCode, nextLink, nextBare, nextMention, nextExternal].filter((candidate) => candidate > -1);
+    const nextCandidates = [nextBold, nextCode, nextLink, nextBare, nextBareArtifact, nextMention, nextExternal].filter((candidate) => candidate > -1);
     const next = nextCandidates.length ? Math.min(...nextCandidates) : text.length;
     nodes.push({ type: "text", text: text.slice(index, next) });
     index = next;

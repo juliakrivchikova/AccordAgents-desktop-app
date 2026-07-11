@@ -1,3 +1,4 @@
+import { ARTIFACT_NOTE_MESSAGE_SOURCE } from "./artifacts";
 import type { ChatMessage } from "./types";
 
 export function isParticipantRequestWaitingStatus(content: string): boolean {
@@ -18,6 +19,11 @@ export function isChatMessageHiddenFromTimeline(
     return isParticipantRequestWaitingStatus(message.content);
   }
   if (message.role !== "system") {
+    return false;
+  }
+  // Artifact notes are user-facing awareness messages ("@gera revised [Plan] · v3"),
+  // not internal system context; keep them on the timeline.
+  if (message.metadata?.appMessageSource === ARTIFACT_NOTE_MESSAGE_SOURCE) {
     return false;
   }
   return options.showSystemMessages !== true;
