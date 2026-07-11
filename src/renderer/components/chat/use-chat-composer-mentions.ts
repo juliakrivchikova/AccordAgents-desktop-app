@@ -29,9 +29,11 @@ import {
   activeMentionQuery,
   activeSkillQuery,
   compactCommandOption,
+  draftHasArtifactMention,
   draftHasFileMention,
   draftHasSkillMention,
   matchArtifactMentions,
+  normalizeArtifactDraft,
   removeFileMentionToken,
   removeSkillMentionToken,
   replaceActiveArtifactMention,
@@ -161,7 +163,8 @@ export function useChatComposerMentions(props: {
     skills: visibleSkillOptions,
     plugins: visiblePluginOptions
   });
-  const showSkillHighlights = selectedSkillMentions.some((mention) => draftHasSkillMention(props.draft, mention.frontmatterName)) ||
+  const showSkillHighlights = draftHasArtifactMention(props.draft) ||
+    selectedSkillMentions.some((mention) => draftHasSkillMention(props.draft, mention.frontmatterName)) ||
     selectedPluginMentions.some((mention) => draftHasSkillMention(props.draft, mention.name));
 
   useEffect(() => {
@@ -277,10 +280,11 @@ export function useChatComposerMentions(props: {
   }, [skillQuery, skillSearchAvailable, props.draft, props.searchSource]);
 
   function updateDraft(value: string): void {
-    props.onDraftChange(value);
-    const nextFileQuery = hashTriggerAvailable ? activeFileQuery(value) : undefined;
-    const nextMentionQuery = nextFileQuery === undefined ? activeMentionQuery(value) : undefined;
-    const nextSkillQuery = nextFileQuery === undefined && nextMentionQuery === undefined && skillSearchAvailable ? activeSkillQuery(value) : undefined;
+    const normalized = normalizeArtifactDraft(value);
+    props.onDraftChange(normalized);
+    const nextFileQuery = hashTriggerAvailable ? activeFileQuery(normalized) : undefined;
+    const nextMentionQuery = nextFileQuery === undefined ? activeMentionQuery(normalized) : undefined;
+    const nextSkillQuery = nextFileQuery === undefined && nextMentionQuery === undefined && skillSearchAvailable ? activeSkillQuery(normalized) : undefined;
     setFileQuery(nextFileQuery);
     setMentionQuery(nextMentionQuery);
     setSkillQuery(nextSkillQuery);
@@ -290,8 +294,9 @@ export function useChatComposerMentions(props: {
   }
 
   function updateDraftWithCaret(value: string, position = value.length): void {
-    pendingCaretRef.current = { value, position };
-    props.onDraftChange(value);
+    const normalized = normalizeArtifactDraft(value);
+    pendingCaretRef.current = { value: normalized, position: Math.min(position, normalized.length) };
+    props.onDraftChange(normalized);
   }
 
   function insertMention(participant: ChatParticipant): void {

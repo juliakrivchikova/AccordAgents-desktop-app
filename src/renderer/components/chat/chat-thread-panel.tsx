@@ -41,7 +41,12 @@ export function ChatThreadPanel(props: {
   submittingChoiceIds?: ReadonlySet<string>;
   liveProgressById: Map<string, AgentRunProgress>;
   onDraftChange: (value: string) => void;
-  onSend: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => boolean | void | Promise<boolean | void>;
+  onSend: (
+    repoFileMentions?: RepoFileMention[],
+    imageAttachments?: ChatImageInput[],
+    skillMentions?: ChatSkillMention[],
+    content?: string
+  ) => boolean | void | Promise<boolean | void>;
   onClose: () => void;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;

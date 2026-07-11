@@ -366,7 +366,8 @@
   overflow-wrap: break-word;
 }
 
-.chat-draft-skill-token {
+.chat-draft-skill-token,
+.chat-draft-artifact-token {
   border-radius: 6px;
   color: var(--app-accent);
   font-weight: inherit;

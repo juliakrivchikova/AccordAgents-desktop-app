@@ -34,7 +34,12 @@ export interface ChatConversationViewProps {
   onLoadOlderMessages: () => void;
   onLoadMessagePageForMessage: (messageId: string) => Promise<boolean>;
   messageFocusRequest?: ChatMessageFocusRequest;
-  onSend: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => Promise<boolean>;
+  onSend: (
+    repoFileMentions?: RepoFileMention[],
+    imageAttachments?: ChatImageInput[],
+    skillMentions?: ChatSkillMention[],
+    content?: string
+  ) => Promise<boolean>;
   accordDisabledReason?: string;
   onOpenAccord?: () => void;
   onSendThread: (

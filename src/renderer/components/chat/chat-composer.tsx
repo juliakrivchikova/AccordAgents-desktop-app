@@ -14,7 +14,8 @@ import { ChatComposerAttachmentChips } from "./chat-composer-attachment-chips";
 import {
   CHAT_COMPOSER_TEXTAREA_STYLE,
   draftStartsWithPluginMention,
-  renderSlashHighlightedDraft
+  renderSlashHighlightedDraft,
+  serializeArtifactDraft
 } from "./chat-composer-draft-utils";
 import { ChatActiveRunPopover, type ChatActiveRunParticipantRow } from "./chat-active-run-popover";
 import { ChatComposerMenus } from "./chat-composer-menus";
@@ -44,7 +45,12 @@ export interface ChatComposerProps {
   renderParticipantAvatar: (participant: ChatParticipant) => React.ReactNode;
   participantRoleLabel: (participant: ChatParticipant) => string;
   onDraftChange: (value: string) => void;
-  onSend: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => boolean | void | Promise<boolean | void>;
+  onSend: (
+    repoFileMentions?: RepoFileMention[],
+    imageAttachments?: ChatImageInput[],
+    skillMentions?: ChatSkillMention[],
+    content?: string
+  ) => boolean | void | Promise<boolean | void>;
   accordDisabledReason?: string;
   onOpenAccord?: () => void;
 }
@@ -117,7 +123,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     mentions.setSelectedFileMentions([]);
     mentions.setSelectedSkillMentions([]);
     images.setPendingImages([]);
-    const sent = await props.onSend(fileMentionsToSend, imageInputs, skillMentionsToSend);
+    const sent = await props.onSend(fileMentionsToSend, imageInputs, skillMentionsToSend, serializeArtifactDraft(props.draft));
     if (sent === false) {
       mentions.setSelectedFileMentions(fileMentionsToSend);
       mentions.setSelectedSkillMentions(skillMentionsToSend);

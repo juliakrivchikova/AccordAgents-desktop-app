@@ -145,8 +145,13 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     onLoadMessagePageForMessage: props.onLoadMessagePageForMessage
   });
 
-  async function sendDraft(repoFileMentions: RepoFileMention[] = [], imageAttachments: ChatImageInput[] = [], skillMentions: ChatSkillMention[] = []): Promise<boolean> {
-    const sent = await props.onSend(repoFileMentions, imageAttachments, skillMentions);
+  async function sendDraft(
+    repoFileMentions: RepoFileMention[] = [],
+    imageAttachments: ChatImageInput[] = [],
+    skillMentions: ChatSkillMention[] = [],
+    content?: string
+  ): Promise<boolean> {
+    const sent = await props.onSend(repoFileMentions, imageAttachments, skillMentions, content);
     if (sent) {
       viewport.scrollToChatBottom();
     }
@@ -157,9 +162,10 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     rootMessage: Conversation["messages"][number],
     repoFileMentions: RepoFileMention[] = [],
     imageAttachments: ChatImageInput[] = [],
-    skillMentions: ChatSkillMention[] = []
+    skillMentions: ChatSkillMention[] = [],
+    contentOverride?: string
   ): Promise<boolean> {
-    const content = (threadDrafts[rootMessage.id] ?? "").trim();
+    const content = (contentOverride ?? threadDrafts[rootMessage.id] ?? "").trim();
     if (!content && imageAttachments.length === 0 && skillMentions.length === 0) {
       return false;
     }
@@ -356,7 +362,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               submittingChoiceIds={choiceSubmission.submittingIds}
               liveProgressById={liveProgressById}
               onDraftChange={(value) => setThreadDrafts((current) => ({ ...current, [selectedThreadRoot.id]: value }))}
-              onSend={(repoFileMentions, imageAttachments, skillMentions) => sendThreadDraft(selectedThreadRoot, repoFileMentions, imageAttachments, skillMentions)}
+              onSend={(repoFileMentions, imageAttachments, skillMentions, content) =>
+                sendThreadDraft(selectedThreadRoot, repoFileMentions, imageAttachments, skillMentions, content)}
               onClose={() => setSelectedThreadRootId(undefined)}
               onApproveMentions={props.onApproveMentions}
               onRejectMentions={props.onRejectMentions}
