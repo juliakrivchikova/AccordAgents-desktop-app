@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
-import { ArrowDown, FileStack } from "lucide-react";
+import { ArrowDown, FileBox } from "lucide-react";
 
 import type {
   ChatAppToolApprovalRequest,
@@ -267,7 +267,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               title="Artifacts — durable shared documents (plans, QA cases, decisions) with versions and sign-off"
               onClick={() => (artifacts.panelOpen ? artifacts.closePanel() : artifacts.openPanel())}
             >
-              <FileStack size={15} aria-hidden />
+              <FileBox size={15} aria-hidden />
               <span>Artifacts{artifacts.artifacts.length > 0 ? ` (${artifacts.artifacts.length})` : ""}</span>
             </button>
             <ChatConversationTimeline

@@ -1,5 +1,5 @@
 import { useEffect, useRef, type MutableRefObject, type ReactNode } from "react";
-import { FileStack, FileText, ListChecks, Minimize2, Plug } from "lucide-react";
+import { FileBox, FileText, ListChecks, Minimize2, Plug } from "lucide-react";
 
 import type {
   ArtifactSummary,
@@ -97,7 +97,7 @@ export function ChatComposerMenus(props: {
               aria-selected={index === props.fileIndex}
               key={artifact.id}
             >
-              <span className="file-mention-icon"><FileStack size={18} /></span>
+              <span className="file-mention-icon"><FileBox size={18} /></span>
               <strong>{artifact.name}</strong>
               <span>{`v${artifact.headVersion} · ${artifactApprovalShortLabel(artifact.approval)}`}</span>
               {index === 0 && <kbd>Enter</kbd>}
