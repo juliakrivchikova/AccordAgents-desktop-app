@@ -219,6 +219,7 @@ const GEMINI_TRANSCRIPT_TYPE_ACTIVITY: Record<string, GeminiTranscriptActivity> 
   REPLACE_FILE_CONTENT: { label: "Updating files", kind: "file-edit" },
   MULTI_REPLACE_FILE_CONTENT: { label: "Updating files", kind: "file-edit" },
   ERROR_MESSAGE: { label: "Handling a tool error", kind: "tool" },
+  MCP_TOOL: { label: "Using app tool", kind: "tool" },
   GENERIC: { label: "Using tool", kind: "tool" }
 };
 

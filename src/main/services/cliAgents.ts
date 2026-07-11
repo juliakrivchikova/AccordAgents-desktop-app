@@ -1001,6 +1001,10 @@ export class CliAgentRunner {
           agentEnv: options.agentEnv,
           agentEnvKey: options.agentEnvKey,
           onSessionId: options.onSessionId,
+          // Keep live output and the caller's deadline on the restarted run;
+          // dropping them left restarts silent in the chat UI.
+          onOutput: options.onOutput,
+          timeoutMs: options.timeoutMs,
           allowEmptyContent: options.allowEmptyContent
         });
         return { ...restarted, sessionRestarted: true };

@@ -160,6 +160,7 @@ test("parseGeminiTranscriptActivity: maps executed steps and skips narration", (
   assert.deepEqual(parseGeminiTranscriptActivity(runCommand), { label: "Running command", kind: "command" });
   assert.deepEqual(parseGeminiTranscriptActivity(viewFile), { label: "Reading file", kind: "tool" });
   assert.deepEqual(parseGeminiTranscriptActivity(searchWeb), { label: "Using web search", kind: "web" });
+  assert.deepEqual(parseGeminiTranscriptActivity("{\"step_index\":11,\"type\":\"MCP_TOOL\",\"status\":\"DONE\"}"), { label: "Using app tool", kind: "tool" });
   assert.equal(parseGeminiTranscriptActivity(planner), undefined);
   assert.equal(parseGeminiTranscriptActivity("{\"type\":\"USER_INPUT\"}"), undefined);
   assert.equal(parseGeminiTranscriptActivity("not json"), undefined);
