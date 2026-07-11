@@ -247,5 +247,5 @@ export function ChatParticipantDraftRow(props: {
 }
 
 function isCliProviderKind(kind: ProviderKind): kind is ChatProviderKind {
-  return kind === "codex-cli" || kind === "claude-code";
+  return kind === "codex-cli" || kind === "claude-code" || kind === "gemini-cli";
 }

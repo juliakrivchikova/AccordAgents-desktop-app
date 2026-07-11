@@ -154,9 +154,9 @@ export function ChatAppToolParticipantChangeOperation(props: {
                 label="Provider / CLI"
                 value={participantProviderLabel(participant.kind)}
                 current={participant.kind}
-                options={[{ value: "codex-cli", label: "Codex CLI" }, { value: "claude-code", label: "Claude Code" }]}
+                options={[{ value: "codex-cli", label: "Codex CLI" }, { value: "claude-code", label: "Claude Code" }, { value: "gemini-cli", label: "Gemini CLI" }]}
                 onSelect={(value) => {
-                  const nextKind: ChatProviderKind = value === "claude-code" ? "claude-code" : "codex-cli";
+                  const nextKind: ChatProviderKind = value === "claude-code" ? "claude-code" : value === "gemini-cli" ? "gemini-cli" : "codex-cli";
                   if (nextKind === participant.kind) {
                     return;
                   }

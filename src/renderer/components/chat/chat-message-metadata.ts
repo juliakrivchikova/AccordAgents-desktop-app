@@ -20,7 +20,7 @@ export function chatParticipants(conversation: Conversation | undefined): ChatPa
       typeof participant.id === "string" &&
       typeof participant.handle === "string" &&
       typeof participant.roleConfigId === "string" &&
-      (participant.kind === "codex-cli" || participant.kind === "claude-code")
+      (participant.kind === "codex-cli" || participant.kind === "claude-code" || participant.kind === "gemini-cli")
     );
   });
 }
@@ -117,7 +117,7 @@ export function chatMessageSkillMentions(message: Conversation["messages"][numbe
       variants: mention.variants.filter((variant) =>
         variant &&
         typeof variant === "object" &&
-        (variant.providerKind === "codex-cli" || variant.providerKind === "claude-code") &&
+        (variant.providerKind === "codex-cli" || variant.providerKind === "claude-code" || variant.providerKind === "gemini-cli") &&
         (variant.scope === "personal" || variant.scope === "repo") &&
         typeof variant.sourceKey === "string" &&
         typeof variant.frontmatterName === "string" &&

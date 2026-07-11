@@ -1671,7 +1671,7 @@ export class ConsensusService {
       prompt
     });
     let result: ParticipantRunResult;
-    if (participant.kind === "codex-cli" || participant.kind === "claude-code") {
+    if (participant.kind === "codex-cli" || participant.kind === "claude-code" || participant.kind === "gemini-cli") {
       result = await this.cliRunner.run(
         participant,
         prompt,
@@ -3175,7 +3175,7 @@ export class ConsensusService {
   }
 
   private isCliParticipant(participant: ParticipantConfig): boolean {
-    return participant.kind === "codex-cli" || participant.kind === "claude-code";
+    return participant.kind === "codex-cli" || participant.kind === "claude-code" || participant.kind === "gemini-cli";
   }
 
   private clarificationTargets(request: ReviewRequest, decision: PlanDecisionRequest): ParticipantConfig[] {

@@ -117,8 +117,8 @@ test("readStored purges legacy hosted providers and encrypted API keys from sett
   const stored = await service.readStored();
   const persisted = JSON.parse(await readFile(settingsPath, "utf8")) as { providers: Array<Record<string, unknown>> };
 
-  assert.deepEqual(stored.providers.map((provider: { kind: string }) => provider.kind), ["codex-cli", "claude-code"]);
-  assert.deepEqual(persisted.providers.map((provider) => provider.kind), ["codex-cli", "claude-code"]);
+  assert.deepEqual(stored.providers.map((provider: { kind: string }) => provider.kind), ["codex-cli", "claude-code", "gemini-cli"]);
+  assert.deepEqual(persisted.providers.map((provider) => provider.kind), ["codex-cli", "claude-code", "gemini-cli"]);
   assert.equal(JSON.stringify(persisted).includes("encryptedApiKey"), false);
   assert.equal(stored.providers.find((provider: { kind: string }) => provider.kind === "codex-cli")?.enabled, false);
 });

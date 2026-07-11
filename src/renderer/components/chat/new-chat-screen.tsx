@@ -779,14 +779,19 @@ function isNewChatAssistantOption(participant: Pick<ChatParticipantConfig, "id" 
 function preferredAssistantProviderKind(settings: AppSettings, agents: AgentHealth[]): ChatProviderKind {
   const codexInstalled = agents.some((agent) => agent.kind === "codex-cli" && agent.installed);
   const claudeInstalled = agents.some((agent) => agent.kind === "claude-code" && agent.installed);
+  const geminiInstalled = agents.some((agent) => agent.kind === "gemini-cli" && agent.installed);
   const codexEnabled = settings.providers.some((provider) => provider.kind === "codex-cli" && provider.enabled);
   const claudeEnabled = settings.providers.some((provider) => provider.kind === "claude-code" && provider.enabled);
+  const geminiEnabled = settings.providers.some((provider) => provider.kind === "gemini-cli" && provider.enabled);
   if (codexInstalled && codexEnabled) return "codex-cli";
   if (claudeInstalled && claudeEnabled) return "claude-code";
+  if (geminiInstalled && geminiEnabled) return "gemini-cli";
   if (codexInstalled) return "codex-cli";
   if (claudeInstalled) return "claude-code";
+  if (geminiInstalled) return "gemini-cli";
   if (codexEnabled) return "codex-cli";
   if (claudeEnabled) return "claude-code";
+  if (geminiEnabled) return "gemini-cli";
   return "codex-cli";
 }
 

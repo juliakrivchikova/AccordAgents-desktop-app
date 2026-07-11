@@ -799,7 +799,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function providerLabel(providerKind: ChatProviderKind): string {
-  return providerKind === "codex-cli" ? "Codex" : "Claude";
+  return providerKind === "codex-cli" ? "Codex" : providerKind === "gemini-cli" ? "Gemini" : "Claude";
 }
 
 function cacheSourceLabel(cacheRoot: string, pluginPath: string): string {

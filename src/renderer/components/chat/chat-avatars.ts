@@ -11,6 +11,7 @@ const CHAT_AVATAR_URLS = {
   "codex-frog": new URL("../../assets/participant-codex-frog.png", import.meta.url).href,
   "codex-hamster": new URL("../../assets/participant-codex-hamster.png", import.meta.url).href,
   "claude-logo": new URL("../../assets/claude-avatar.png", import.meta.url).href,
+  "gemini-logo": new URL("../../assets/gemini-cli.svg", import.meta.url).href,
   "claude-human": new URL("../../assets/participant-claude-human.png", import.meta.url).href,
   "claude-bunny": new URL("../../assets/participant-claude-bunny.png", import.meta.url).href,
   "claude-cat": new URL("../../assets/participant-claude-cat.png", import.meta.url).href,
@@ -106,7 +107,8 @@ const CHAT_AVATAR_OPTIONS: ChatAvatarOption[] = [
   { id: "claude-cat", kind: "claude-code", label: "Claude cat", imageUrl: CHAT_AVATAR_URLS["claude-cat"], mediaMode: "photo" },
   { id: "claude-dog", kind: "claude-code", label: "Claude dog", imageUrl: CHAT_AVATAR_URLS["claude-dog"], mediaMode: "photo" },
   { id: "claude-frog", kind: "claude-code", label: "Claude frog", imageUrl: CHAT_AVATAR_URLS["claude-frog"], mediaMode: "photo" },
-  { id: "claude-hamster", kind: "claude-code", label: "Claude hamster", imageUrl: CHAT_AVATAR_URLS["claude-hamster"], mediaMode: "photo" }
+  { id: "claude-hamster", kind: "claude-code", label: "Claude hamster", imageUrl: CHAT_AVATAR_URLS["claude-hamster"], mediaMode: "photo" },
+  { id: "gemini-logo", kind: "gemini-cli", label: "Gemini logo", imageUrl: CHAT_AVATAR_URLS["gemini-logo"], avatarKind: "gemini", mediaMode: "glyph" }
 ];
 
 export function chatAvatarOptionsForKind(kind: ChatProviderKind): ChatAvatarOption[] {
@@ -123,7 +125,7 @@ export function isChatAvatarIdForKind(avatarId: string | undefined, kind: ChatPr
 
 export function defaultChatAvatarId(kind: ChatProviderKind, seed = ""): ChatAvatarId {
   const options = chatAvatarOptionsForKind(kind).filter((option) => option.defaultEligible !== false);
-  const fallback = kind === "claude-code" ? "claude-human" : "codex-human";
+  const fallback = kind === "claude-code" ? "claude-human" : kind === "gemini-cli" ? "gemini-logo" : "codex-human";
   if (options.length === 0) {
     return fallback;
   }

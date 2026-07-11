@@ -438,6 +438,7 @@ export class AppSkillsService {
   }
 
   private renderSkill(skill: CanonicalSkill, provider: AppSkillProvider): RenderedSkill {
+    // claude-code and gemini-cli share the plain SKILL.md layout; codex adds agents/openai.yaml.
     const files = provider === "codex-cli"
       ? this.renderCodexSkill(skill)
       : this.renderClaudeSkill(skill);
@@ -679,9 +680,14 @@ export class AppSkillsService {
   }
 
   private providerSkillRoot(provider: AppSkillProvider): string {
-    return provider === "codex-cli"
-      ? path.join(this.homeDir, ".codex", "skills")
-      : path.join(this.homeDir, ".claude", "skills");
+    if (provider === "codex-cli") {
+      return path.join(this.homeDir, ".codex", "skills");
+    }
+    if (provider === "gemini-cli") {
+      // Antigravity's personal skill root (`agy` discovers SKILL.md dirs here).
+      return path.join(this.homeDir, ".gemini", "config", "skills");
+    }
+    return path.join(this.homeDir, ".claude", "skills");
   }
 
   private generatedSkillName(id: string): string {
@@ -689,7 +695,7 @@ export class AppSkillsService {
   }
 
   private providers(): AppSkillProvider[] {
-    return ["codex-cli", "claude-code"];
+    return ["codex-cli", "claude-code", "gemini-cli"];
   }
 
   private isValidSkillId(value: string): boolean {

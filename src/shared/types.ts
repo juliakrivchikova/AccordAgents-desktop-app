@@ -1,4 +1,4 @@
-export type ProviderKind = "openai" | "anthropic" | "gemini" | "codex-cli" | "claude-code";
+export type ProviderKind = "openai" | "anthropic" | "gemini" | "codex-cli" | "claude-code" | "gemini-cli";
 
 export type ConversationKind = "general" | "code-review" | "implementation-plan" | "chat";
 
@@ -389,7 +389,7 @@ export interface ChatBehaviorRuleSnapshot {
   version: number;
 }
 
-export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code">;
+export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code" | "gemini-cli">;
 
 export interface ChatParticipantSeedRecord {
   participantConfigId: string;
@@ -591,7 +591,7 @@ export interface ChatStaleRunRecovery {
   at: string;
 }
 
-export type AgentContextUsageSource = Extract<ProviderKind, "codex-cli" | "claude-code">;
+export type AgentContextUsageSource = Extract<ProviderKind, "codex-cli" | "claude-code" | "gemini-cli">;
 
 export interface AgentContextUsage {
   usedTokens: number;
@@ -1460,7 +1460,7 @@ export interface AppSkillSyncHealth {
 }
 
 export interface AgentHealth {
-  kind: Extract<ProviderKind, "codex-cli" | "claude-code">;
+  kind: Extract<ProviderKind, "codex-cli" | "claude-code" | "gemini-cli">;
   label: string;
   installed: boolean;
   path?: string;

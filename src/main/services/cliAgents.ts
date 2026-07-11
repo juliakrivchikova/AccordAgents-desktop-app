@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Dirent } from "node:fs";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import type {
@@ -38,6 +38,14 @@ import {
   extractCodexSessionId as extractCodexExecSessionId,
   extractCodexText as extractCodexExecText
 } from "./codexExec";
+import {
+  buildGeminiExecInvocation,
+  extractGeminiLogConversationId,
+  geminiTranscriptPathForConversation,
+  isGeminiResumeMissText,
+  parseGeminiExecResult,
+  parseGeminiTranscriptActivity
+} from "./geminiExec";
 import type { ParticipantRunResult } from "./providers";
 
 const MAX_CLI_ERROR_CHARS = 500;
@@ -62,6 +70,9 @@ const CLAUDE_CODE_COMMAND_ENV_OPTIONS: CommandEnvironmentOptions = {
   dropProcessEnvKeysAbsentFromLoginShell: CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS
 };
 const CODEX_AUTO_APPROVALS_REVIEWER = "guardian_subagent";
+// Gemini 3.x models served through Antigravity share a 1M-token context window;
+// used when no model is configured so the context indicator still renders.
+const GEMINI_DEFAULT_CONTEXT_WINDOW_TOKENS = 1_048_576;
 const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 const APP_TOOL_PERMISSION_TOOL = "app_tool_permission";
 const APP_TOOL_PERMISSION_MCP_TOOL = `mcp__accord_agents__${APP_TOOL_PERMISSION_TOOL}`;
@@ -261,6 +272,13 @@ interface ClaudeToolConfig {
   askTools: string[];
 }
 
+class CliGeminiResumeMissError extends Error {
+  constructor(status: string, response: string | undefined) {
+    super(`Antigravity CLI could not resume the conversation (status ${status})${response ? `: ${response.slice(0, 200)}` : "."}`);
+    this.name = "CliGeminiResumeMissError";
+  }
+}
+
 function stripAnsi(value: string): string {
   return value
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
@@ -341,6 +359,11 @@ export class CliAgentRunner {
   private readonly warmUnsupportedLogged = new Set<ParticipantConfig["kind"]>();
   private readonly modelCatalogs = new Map<ChatProviderKind, CachedModelCatalog>();
   private readonly modelCatalogRequests = new Map<ChatProviderKind, Promise<ProviderModelCatalog>>();
+  // Last-known context usage per Antigravity conversation id. agy reports usage
+  // in the print-mode result JSON only, so post-run refreshes read this cache
+  // instead of a provider session log.
+  private readonly geminiSessionUsage = new Map<string, AgentContextUsage>();
+  private geminiMcpConfigSyncing?: Promise<string | undefined>;
   private runTimeoutMs = CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS;
 
   constructor(private readonly debugLogs?: CliAgentDebugLogger) {}
@@ -350,8 +373,8 @@ export class CliAgentRunner {
   }
 
   async detectAgents(): Promise<AgentHealth[]> {
-    const [codex, claude] = await Promise.all([this.detectCodex(), this.detectClaude()]);
-    return [codex, claude];
+    const [codex, claude, gemini] = await Promise.all([this.detectCodex(), this.detectClaude(), this.detectGemini()]);
+    return [codex, claude, gemini];
   }
 
   async listModelCatalog(kind: ChatProviderKind, configuredModel?: string): Promise<ProviderModelCatalog> {
@@ -365,7 +388,9 @@ export class CliAgentRunner {
     const request = currentRequest ?? (async (): Promise<ProviderModelCatalog> => {
       const catalog = kind === "codex-cli"
         ? await this.listCodexModelCatalog(fetchedAt)
-        : await this.listClaudeModelCatalog(fetchedAt);
+        : kind === "gemini-cli"
+          ? await this.listGeminiModelCatalog(fetchedAt)
+          : await this.listClaudeModelCatalog(fetchedAt);
       const normalized = {
         ...catalog,
         models: this.dedupeModels(catalog.models)
@@ -416,6 +441,9 @@ export class CliAgentRunner {
     if (participant.kind === "claude-code") {
       return this.runClaude(participant, prompt, effectiveRepoPath, kind, signal, options);
     }
+    if (participant.kind === "gemini-cli") {
+      return this.runGemini(participant, prompt, effectiveRepoPath, kind, signal, options);
+    }
     return { participant, ok: false, content: "", error: `${participant.label} is not a CLI agent.` };
   }
 
@@ -436,6 +464,9 @@ export class CliAgentRunner {
     }
     if (participant.kind === "claude-code") {
       return this.compactClaudeSession(participant, effectiveRepoPath, kind, signal, options);
+    }
+    if (participant.kind === "gemini-cli") {
+      return this.compactGeminiSession(participant, effectiveRepoPath, kind, signal, options);
     }
     return { participant, ok: false, error: `${participant.label} is not a CLI agent.` };
   }
@@ -458,6 +489,9 @@ export class CliAgentRunner {
     }
     if (participant.kind === "claude-code") {
       return this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant);
+    }
+    if (participant.kind === "gemini-cli") {
+      return this.geminiSessionUsage.get(sessionId);
     }
     return undefined;
   }
@@ -733,14 +767,23 @@ export class CliAgentRunner {
   }
 
   private fallbackModelsForKind(kind: ChatProviderKind): ProviderModel[] {
-    if (kind !== "claude-code") {
-      return [];
+    if (kind === "claude-code") {
+      return [
+        { id: "opus", label: "Opus", source: "builtin" },
+        { id: "sonnet", label: "Sonnet", source: "builtin" },
+        { id: "haiku", label: "Haiku", source: "builtin" }
+      ];
     }
-    return [
-      { id: "opus", label: "Opus", source: "builtin" },
-      { id: "sonnet", label: "Sonnet", source: "builtin" },
-      { id: "haiku", label: "Haiku", source: "builtin" }
-    ];
+    if (kind === "gemini-cli") {
+      return [
+        { id: "Gemini 3.5 Flash (Medium)", label: "Gemini 3.5 Flash (Medium)", source: "builtin", recommended: true },
+        { id: "Gemini 3.5 Flash (High)", label: "Gemini 3.5 Flash (High)", source: "builtin" },
+        { id: "Gemini 3.5 Flash (Low)", label: "Gemini 3.5 Flash (Low)", source: "builtin" },
+        { id: "Gemini 3.1 Pro (Low)", label: "Gemini 3.1 Pro (Low)", source: "builtin" },
+        { id: "Gemini 3.1 Pro (High)", label: "Gemini 3.1 Pro (High)", source: "builtin" }
+      ];
+    }
+    return [];
   }
 
   private withConfiguredModel(catalog: ProviderModelCatalog, configuredModel?: string): ProviderModelCatalog {
@@ -789,6 +832,406 @@ export class CliAgentRunner {
       return { kind: "claude-code", label: "Claude Code", installed: true, path: command.path, version: version.stdout.trim() };
     } catch (error) {
       return { kind: "claude-code", label: "Claude Code", installed: true, path: command.path, error: this.errorText(error) };
+    }
+  }
+
+  private async detectGemini(): Promise<AgentHealth> {
+    const command = await commandExists("agy");
+    if (!command.path) {
+      return { kind: "gemini-cli", label: "Gemini CLI (Antigravity)", installed: false, error: command.error };
+    }
+    // Keep the App-MCP bridge entry in the global agy config current whenever the
+    // CLI is present; failures surface on the run instead of blocking detection.
+    void this.ensureGeminiMcpConfig().catch(() => undefined);
+    try {
+      const version = await runCommand("agy", ["--version"], { timeoutMs: 10_000 });
+      return { kind: "gemini-cli", label: "Gemini CLI (Antigravity)", installed: true, path: command.path, version: version.stdout.trim() };
+    } catch (error) {
+      return { kind: "gemini-cli", label: "Gemini CLI (Antigravity)", installed: true, path: command.path, error: this.errorText(error) };
+    }
+  }
+
+  private async listGeminiModelCatalog(fetchedAt: string): Promise<ProviderModelCatalog> {
+    await ensureLoginShellEnvPrimed();
+    const result = await runCommand("agy", ["models"], { timeoutMs: MODEL_CATALOG_TIMEOUT_MS, env: commandEnvironment() });
+    const models: ProviderModel[] = result.stdout
+      .split(/\r?\n/)
+      .map((line) => stripAnsi(line).trim())
+      .filter((line) => line && !/^(available|usage|error)\b/i.test(line))
+      .map((label, index) => ({
+        id: label,
+        label,
+        source: "cli" as const,
+        // `agy models` lists the currently selected default first.
+        recommended: index === 0
+      }));
+    if (models.length === 0) {
+      throw new Error("`agy models` returned no models.");
+    }
+    return { kind: "gemini-cli", models, authoritative: true, fetchedAt };
+  }
+
+  private async runGemini(
+    participant: ParticipantConfig,
+    prompt: string,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    signal?: AbortSignal,
+    options: CliAgentRunOptions = {}
+  ): Promise<ParticipantRunResult> {
+    // Antigravity has no warm stdio protocol; print-mode one-shots with
+    // `--conversation <id>` resume carry the session across turns.
+    return this.runGeminiOneShot(participant, prompt, repoPath, kind, signal, this.withoutWarm(options));
+  }
+
+  private async runGeminiOneShot(
+    participant: ParticipantConfig,
+    prompt: string,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    signal?: AbortSignal,
+    options: CliAgentRunOptions = {}
+  ): Promise<ParticipantRunResult> {
+    const startedAt = Date.now();
+    const warnings: string[] = [];
+    if (options.appMcp) {
+      const mcpConfigError = await this.ensureGeminiMcpConfig();
+      if (mcpConfigError) {
+        warnings.push(
+          `${participant.label}: app tools may be unavailable; failed to update the Antigravity MCP config (${mcpConfigError}).`
+        );
+      }
+    }
+    // agy has no native role/agent registration for print mode, so role
+    // delivery always uses the prompt fallback on the session's first turn.
+    const usesRolePromptFallback = Boolean(options.role && !options.sessionId);
+    const effectivePrompt = usesRolePromptFallback ? (options.role as CliAgentRoleOptions).promptFallbackPrompt : prompt;
+    let logDir: string | undefined;
+    try {
+      logDir = await mkdtemp(path.join(tmpdir(), "accordagents-gemini-"));
+      const logFilePath = path.join(logDir, "run.log");
+      const invocation = buildGeminiExecInvocation({
+        participant,
+        prompt: effectivePrompt,
+        repoPath,
+        kind,
+        logFilePath,
+        options: {
+          sessionId: options.sessionId,
+          extraReadableDirs: options.extraReadableDirs,
+          appMcp: options.appMcp,
+          agentMode: options.agentMode,
+          permissions: options.permissions,
+          timeoutMs: options.timeoutMs ?? this.runTimeoutMs,
+          extraEnv: this.agentRunEnv(options)
+        }
+      });
+      if (options.sessionId) {
+        this.reportSessionId(options.onSessionId, options.sessionId);
+      }
+      // Tail the glog file for an early conversation id (so Stop/crash cannot
+      // lose the session) and the brain transcript for live activity events.
+      const tail = options.onSessionId || options.onOutput
+        ? this.startGeminiRunTail(logFilePath, options.sessionId, options)
+        : undefined;
+      let result: Awaited<ReturnType<typeof runCommand>>;
+      try {
+        result = await runCommand("agy", invocation.args, {
+          cwd: repoPath,
+          timeoutMs: options.timeoutMs ?? this.runTimeoutMs,
+          env: invocation.env,
+          signal
+        });
+      } finally {
+        tail?.stop();
+      }
+      const parsed = parseGeminiExecResult(result.stdout);
+      if (!parsed) {
+        throw new Error("Antigravity CLI completed without a parseable JSON result.");
+      }
+      const nonSuccess = Boolean(parsed.status && parsed.status !== "SUCCESS");
+      const content = (parsed.response ?? "").trim();
+      // A resume that lost its conversation only counts as a miss when agy also
+      // failed to produce a response; otherwise agy recovered and answered.
+      if (options.sessionId && nonSuccess && !content && isGeminiResumeMissText(`${parsed.status} ${parsed.error ?? ""} ${parsed.response ?? ""}`)) {
+        throw new CliGeminiResumeMissError(parsed.status ?? "ERROR", parsed.error ?? parsed.response);
+      }
+      // agy commonly reports status ERROR for a recoverable mid-turn issue (e.g.
+      // "The model produced an invalid tool call") while still returning a valid
+      // final response. Treat a non-SUCCESS status that carries a response as a
+      // completed run with a warning, not a hard failure that discards the answer.
+      if (nonSuccess && !content && !options.allowEmptyContent) {
+        throw new Error(`Antigravity CLI run ended with status ${parsed.status}${parsed.error ? `: ${this.truncateText(parsed.error, MAX_CLI_ERROR_CHARS)}` : "."}`);
+      }
+      if (nonSuccess) {
+        warnings.push(
+          `${participant.label}: Antigravity reported a non-fatal run issue (${this.truncateText(parsed.error || parsed.status || "ERROR", 160)}) but returned a response.`
+        );
+      }
+      if (!content && !options.allowEmptyContent) {
+        throw new Error("Antigravity CLI completed without response content.");
+      }
+      const sessionId = parsed.conversationId ?? options.sessionId;
+      this.reportSessionId(options.onSessionId, sessionId);
+      const contextUsage = this.geminiContextUsage(parsed.usage?.totalTokens, participant);
+      if (sessionId && contextUsage) {
+        this.geminiSessionUsage.set(sessionId, contextUsage);
+      }
+      const runResult = this.withAppMcpClientStatus({
+        participant,
+        ok: true,
+        content,
+        durationMs: Date.now() - startedAt,
+        sessionId,
+        roleRuntime: usesRolePromptFallback ? "prompt-fallback" : undefined,
+        contextUsage
+      }, participant, options);
+      return warnings.length > 0
+        ? { ...runResult, warnings: [...(runResult.warnings ?? []), ...warnings] }
+        : runResult;
+    } catch (error) {
+      if (options.sessionId && (error instanceof CliGeminiResumeMissError || this.isResumeMiss(error) || isGeminiResumeMissText(this.errorText(error)))) {
+        const restarted = await this.runGeminiOneShot(participant, options.resumeFallbackPrompt ?? prompt, repoPath, kind, signal, {
+          persistSession: options.persistSession,
+          extraReadableDirs: options.extraReadableDirs,
+          role: options.role,
+          agentMode: options.agentMode,
+          permissions: options.permissions,
+          appMcp: options.appMcp,
+          agentEnv: options.agentEnv,
+          agentEnvKey: options.agentEnvKey,
+          onSessionId: options.onSessionId,
+          // Keep live output and the caller's deadline on the restarted run;
+          // dropping them left restarts silent in the chat UI.
+          onOutput: options.onOutput,
+          timeoutMs: options.timeoutMs,
+          allowEmptyContent: options.allowEmptyContent
+        });
+        return { ...restarted, sessionRestarted: true };
+      }
+      const failed = this.failed(participant, error, Date.now() - startedAt);
+      return warnings.length > 0 ? { ...failed, warnings: [...(failed.warnings ?? []), ...warnings] } : failed;
+    } finally {
+      if (logDir) {
+        await rm(logDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
+  }
+
+  // Polls the per-run glog file until the conversation id appears, then tails
+  // the conversation's brain transcript (executed tool steps) and emits coarse
+  // activity events. Resumed sessions prime past pre-existing transcript lines
+  // so only this turn's steps surface.
+  private startGeminiRunTail(
+    logFilePath: string,
+    initialSessionId: string | undefined,
+    options: CliAgentRunOptions
+  ): { stop: () => void } {
+    let sessionId: string | undefined;
+    let transcriptPath: string | undefined;
+    let transcriptPrimed = false;
+    let transcriptLinesSeen = 0;
+    let scanning = false;
+
+    const adoptSessionId = (id: string): void => {
+      if (sessionId === id) {
+        return;
+      }
+      sessionId = id;
+      transcriptPath = geminiTranscriptPathForConversation(homedir(), id);
+      transcriptPrimed = false;
+      transcriptLinesSeen = 0;
+      this.reportSessionId(options.onSessionId, id);
+    };
+    if (initialSessionId) {
+      adoptSessionId(initialSessionId);
+    }
+
+    const scan = async (): Promise<void> => {
+      if (scanning) {
+        return;
+      }
+      scanning = true;
+      try {
+        // Keep watching the log even after an id is known: a resume miss can
+        // restart the run under a fresh conversation id.
+        const found = extractGeminiLogConversationId(await this.readOptionalFile(logFilePath));
+        if (found && found !== sessionId) {
+          adoptSessionId(found);
+        }
+        if (!transcriptPath || !options.onOutput) {
+          return;
+        }
+        const content = await this.readOptionalFile(transcriptPath);
+        if (!content) {
+          return;
+        }
+        const lines = content.split("\n");
+        // The trailing segment is either "" (file ends with \n) or a partial
+        // line still being written; both are excluded from the complete count.
+        const completeCount = Math.max(lines.length - 1, 0);
+        if (!transcriptPrimed) {
+          transcriptPrimed = true;
+          transcriptLinesSeen = initialSessionId && sessionId === initialSessionId ? completeCount : 0;
+        }
+        for (let index = transcriptLinesSeen; index < completeCount; index += 1) {
+          const activity = parseGeminiTranscriptActivity(lines[index] ?? "");
+          if (activity) {
+            this.emitLiveOutput(options.onOutput, "tool", `${activity.label}\n`, undefined, {
+              activityKind: activity.kind,
+              activityStatus: "started"
+            });
+          }
+        }
+        transcriptLinesSeen = Math.max(transcriptLinesSeen, completeCount);
+      } finally {
+        scanning = false;
+      }
+    };
+
+    const interval = setInterval(() => {
+      void scan();
+    }, 300);
+    interval.unref();
+    void scan();
+    return {
+      stop: (): void => {
+        clearInterval(interval);
+      }
+    };
+  }
+
+  private async compactGeminiSession(
+    participant: ParticipantConfig,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    signal: AbortSignal | undefined,
+    options: CliAgentRunOptions
+  ): Promise<CliAgentCompactResult> {
+    // Antigravity print mode has no native /compact. Emulate it: ask the
+    // existing conversation for a handoff summary, then seed a fresh
+    // conversation with that summary so the participant continues with a new
+    // (small) context and session id.
+    const timeoutMs = options.timeoutMs ?? CLI_AGENT_COMPACT_TIMEOUT_MS;
+    const instructions = options.compactInstructions?.trim();
+    const summaryPrompt = [
+      "Summarize this conversation as a handoff for a fresh session that must seamlessly continue the work.",
+      "Cover: the goals, key decisions, current state, unresolved tasks, important file paths, and hard constraints.",
+      instructions ? `Extra focus requested by the user: ${instructions}` : "",
+      "Reply with only the summary."
+    ].filter(Boolean).join("\n");
+    const summaryRun = await this.runGeminiOneShot(participant, summaryPrompt, repoPath, kind, signal, {
+      sessionId: options.sessionId,
+      extraReadableDirs: options.extraReadableDirs,
+      agentMode: options.agentMode,
+      permissions: options.permissions,
+      agentEnv: options.agentEnv,
+      agentEnvKey: options.agentEnvKey,
+      timeoutMs
+    });
+    if (!summaryRun.ok || !summaryRun.content.trim()) {
+      return {
+        participant,
+        ok: false,
+        sessionId: summaryRun.sessionId ?? options.sessionId,
+        providerNative: false,
+        error: summaryRun.error ?? "Antigravity CLI compaction summary returned no content."
+      };
+    }
+    const summary = summaryRun.content.trim();
+    const seedPrompt = [
+      "This conversation was compacted to free context space. The summary of the previous session is below; treat it as established context and keep continuing the same work.",
+      summary,
+      "Reply with a single short sentence confirming you are ready to continue."
+    ].join("\n\n");
+    const seeded = await this.runGeminiOneShot(participant, seedPrompt, repoPath, kind, signal, {
+      extraReadableDirs: options.extraReadableDirs,
+      agentMode: options.agentMode,
+      permissions: options.permissions,
+      agentEnv: options.agentEnv,
+      agentEnvKey: options.agentEnvKey,
+      onSessionId: options.onSessionId,
+      timeoutMs,
+      allowEmptyContent: true
+    });
+    if (!seeded.ok || !seeded.sessionId) {
+      return {
+        participant,
+        ok: false,
+        sessionId: options.sessionId,
+        providerNative: false,
+        error: seeded.error ?? "Antigravity CLI compaction could not start the follow-up conversation."
+      };
+    }
+    return {
+      participant,
+      ok: true,
+      sessionId: seeded.sessionId,
+      contextUsage: seeded.contextUsage,
+      providerNative: false,
+      content: summary
+    };
+  }
+
+  private geminiContextUsage(totalTokens: number | undefined, participant: ParticipantConfig): AgentContextUsage | undefined {
+    return buildAgentContextUsage({
+      usedTokens: totalTokens,
+      contextWindowTokens:
+        contextWindowForModel(participant.kind, participant.model) ?? GEMINI_DEFAULT_CONTEXT_WINDOW_TOKENS,
+      source: "gemini-cli",
+      model: participant.model
+    });
+  }
+
+  // agy discovers MCP servers only from the global config file, so the app owns
+  // exactly one entry (`accord_agents`) that launches the bundled stdio proxy.
+  // The proxy resolves the per-run bridge URL/token from the environment agy
+  // inherits, keeping the file content static across runs and participants.
+  private async ensureGeminiMcpConfig(): Promise<string | undefined> {
+    if (this.geminiMcpConfigSyncing) {
+      return this.geminiMcpConfigSyncing;
+    }
+    const sync = (async (): Promise<string | undefined> => {
+      try {
+        const configDir = path.join(homedir(), ".gemini", "config");
+        const configPath = path.join(configDir, "mcp_config.json");
+        const desiredEntry = {
+          command: process.execPath,
+          args: [path.join(__dirname, "geminiMcpProxy.js")],
+          env: { ELECTRON_RUN_AS_NODE: "1" }
+        };
+        let config: Record<string, unknown> = {};
+        try {
+          const existing = (await readFile(configPath, "utf8")).trim();
+          if (existing) {
+            const parsed = JSON.parse(existing) as unknown;
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              config = parsed as Record<string, unknown>;
+            }
+          }
+        } catch {
+          // Missing or unreadable config: start from an empty object.
+        }
+        const servers =
+          config.mcpServers && typeof config.mcpServers === "object" && !Array.isArray(config.mcpServers)
+            ? (config.mcpServers as Record<string, unknown>)
+            : {};
+        if (JSON.stringify(servers.accord_agents) === JSON.stringify(desiredEntry)) {
+          return undefined;
+        }
+        config.mcpServers = { ...servers, accord_agents: desiredEntry };
+        await mkdir(configDir, { recursive: true });
+        await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+        return undefined;
+      } catch (error) {
+        return this.errorText(error);
+      }
+    })();
+    this.geminiMcpConfigSyncing = sync;
+    try {
+      return await sync;
+    } finally {
+      this.geminiMcpConfigSyncing = undefined;
     }
   }
 

@@ -118,7 +118,7 @@ function summarizePlainCliFailureDiagnostic(warning: string): string | undefined
 function looksLikePlainCliFailure(diagnostic: string): boolean {
   return (
     /AuthRequired|www_authenticate|oauth-protected-resource/i.test(diagnostic) ||
-    /\b(?:codex|claude)(?:\s+\S+){0,4}\s+timed out after \d+ms\b/i.test(diagnostic) ||
+    /\b(?:codex|claude|gemini|agy|antigravity)(?:\s+\S+){0,4}\s+timed out after \d+ms\b/i.test(diagnostic) ||
     /transport channel closed|stdin is closed|process exited|process is not running|worker quit with fatal/i.test(diagnostic) ||
     /session limit|rate limit|quota/i.test(diagnostic) ||
     /ENOENT|command not found|no such file or directory/i.test(diagnostic)

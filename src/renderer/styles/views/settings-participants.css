@@ -348,6 +348,10 @@
   color: var(--brand-anthropic);
 }
 
+.participant-provider-value.is-gemini {
+  color: var(--brand-gemini);
+}
+
 .participant-provider-dot {
   width: 8px;
   height: 8px;

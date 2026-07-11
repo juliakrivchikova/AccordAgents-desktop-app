@@ -46,6 +46,19 @@ const CLAUDE_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "claude-3-haiku": 200_000
 };
 
+// Antigravity CLI (`agy`) model ids are the display labels from `agy models`,
+// e.g. "Gemini 3.5 Flash (Medium)" — effort is baked into the label.
+const GEMINI_CLI_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  "gemini 3.5 flash (low)": 1_048_576,
+  "gemini 3.5 flash (medium)": 1_048_576,
+  "gemini 3.5 flash (high)": 1_048_576,
+  "gemini 3.1 pro (low)": 1_048_576,
+  "gemini 3.1 pro (high)": 1_048_576,
+  "claude sonnet 4.6 (thinking)": 1_000_000,
+  "claude opus 4.6 (thinking)": 1_000_000,
+  "gpt-oss 120b (medium)": 131_072
+};
+
 export function contextWindowForModel(kind: ProviderKind, model: string | undefined): number | undefined {
   const normalized = normalizeModelId(model);
   if (!normalized) {
@@ -56,6 +69,22 @@ export function contextWindowForModel(kind: ProviderKind, model: string | undefi
   }
   if (kind === "claude-code" || kind === "anthropic") {
     return contextWindowFromMap(CLAUDE_MODEL_CONTEXT_WINDOWS, normalized) ?? claudeFamilyContextWindow(normalized);
+  }
+  if (kind === "gemini-cli" || kind === "gemini") {
+    return contextWindowFromMap(GEMINI_CLI_MODEL_CONTEXT_WINDOWS, normalized) ?? geminiFamilyContextWindow(normalized);
+  }
+  return undefined;
+}
+
+function geminiFamilyContextWindow(normalizedModel: string): number | undefined {
+  if (/^gemini[\s-]*[3-9]/.test(normalizedModel)) {
+    return 1_048_576;
+  }
+  if (/^claude[\s-]*(?:opus|sonnet)[\s-]*4\.?6/.test(normalizedModel)) {
+    return 1_000_000;
+  }
+  if (normalizedModel.startsWith("gpt-oss")) {
+    return 131_072;
   }
   return undefined;
 }
@@ -135,7 +164,10 @@ export function normalizeAgentContextUsage(value: unknown): AgentContextUsage | 
     return undefined;
   }
   const record = value as Partial<AgentContextUsage>;
-  const source = record.source === "codex-cli" || record.source === "claude-code" ? record.source : undefined;
+  const source =
+    record.source === "codex-cli" || record.source === "claude-code" || record.source === "gemini-cli"
+      ? record.source
+      : undefined;
   if (!source || typeof record.updatedAt !== "string") {
     return undefined;
   }

@@ -173,7 +173,8 @@ function ProviderFilterSwitch(props: {
   const options: Array<{ value: ProviderFilter; label: string }> = [
     { value: "all", label: "All" },
     { value: "codex-cli", label: "Codex" },
-    { value: "claude-code", label: "Claude" }
+    { value: "claude-code", label: "Claude" },
+    { value: "gemini-cli", label: "Gemini" }
   ];
   return (
     <div className="plugins-provider-switch" aria-label="Provider filter">
@@ -443,9 +444,9 @@ function pluginAction(plugin: PluginCatalogItem): { button: string; label: strin
 }
 
 function providerLabel(providerKind: ChatProviderKind): string {
-  return providerKind === "codex-cli" ? "Codex" : "Claude";
+  return providerKind === "codex-cli" ? "Codex" : providerKind === "gemini-cli" ? "Gemini" : "Claude";
 }
 
 function providerClass(providerKind: ChatProviderKind): string {
-  return providerKind === "codex-cli" ? "is-codex" : "is-claude";
+  return providerKind === "codex-cli" ? "is-codex" : providerKind === "gemini-cli" ? "is-gemini" : "is-claude";
 }

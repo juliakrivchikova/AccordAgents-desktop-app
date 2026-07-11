@@ -606,7 +606,7 @@ function participantSummaries(conversation: Conversation): Map<string, ChatActiv
     const id = cleanString(participant.id);
     const handle = cleanHandle(participant.handle);
     const kind = participant.kind;
-    if (!id || !handle || (kind !== "codex-cli" && kind !== "claude-code")) {
+    if (!id || !handle || (kind !== "codex-cli" && kind !== "claude-code" && kind !== "gemini-cli")) {
       continue;
     }
     map.set(id, {

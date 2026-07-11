@@ -8,7 +8,7 @@ export const ACCORDAGENTS_SKILL_PROOF_NAME = "accordagents-skill-proof";
 export const ACCORDAGENTS_SKILL_PROOF_OK = "ACCORDAGENTS_BODY_TOKEN_6B37D91E";
 
 export function appOwnedSkillProofMarkdown(providerKind: ChatProviderKind): string {
-  const provider = providerKind === "codex-cli" ? "Codex" : "Claude";
+  const provider = providerKind === "codex-cli" ? "Codex" : providerKind === "gemini-cli" ? "Gemini" : "Claude";
   return [
     "---",
     `name: ${ACCORDAGENTS_SKILL_PROOF_NAME}`,

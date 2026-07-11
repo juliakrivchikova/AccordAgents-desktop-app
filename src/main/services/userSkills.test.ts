@@ -98,7 +98,8 @@ test("listAll returns context-free Settings skill summaries with provider availa
     assert.deepEqual(result.skills.map((skill) => skill.frontmatterName), ["qa"]);
     assert.deepEqual(result.skills[0].providerKinds, ["claude-code", "codex-cli"]);
     assert.equal(result.skills[0].capabilityState, "invocable");
-    assert.equal(result.diagnostics.visibleCount, 3);
+    // repo/.agents/skills now also surfaces a gemini-cli variant for repo-only.
+    assert.equal(result.diagnostics.visibleCount, 4);
   });
 });
 
