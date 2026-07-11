@@ -10,6 +10,7 @@ const conversationActions = read("src/renderer/app/use-conversation-actions.ts")
 const conversationViewport = read("src/renderer/components/chat/use-chat-conversation-viewport.ts");
 const focusNavigation = read("src/renderer/components/chat/use-chat-focus-navigation.ts");
 const app = read("src/renderer/App.tsx");
+const conversationPanel = read("src/renderer/components/conversation/conversation-panel.tsx");
 const activityStyles = read("src/renderer/styles/views/activity.css");
 const chatStyles = read("src/renderer/styles/views/chat-conversation.css");
 
@@ -38,7 +39,7 @@ test("chat viewport has one focus scroll owner", () => {
 });
 
 test("Activity selection focuses the exact message while Open in chat uses the regular timeline", () => {
-  assert.match(conversationActions, /options\?: \{ timelineOnly\?: boolean \}/);
+  assert.match(conversationActions, /options\?: \{ timelineOnly\?: boolean; markViewed\?: boolean \}/);
   assert.match(conversationActions, /if \(options\.timelineOnly && threadRootId\) \{\s*return \{ messageId: threadRootId \};\s*\}/s);
   assert.equal(
     app.match(/openConversationAndFocusActivityItem\(item, \{ timelineOnly: true \}\)/g)?.length,
@@ -47,8 +48,27 @@ test("Activity selection focuses the exact message while Open in chat uses the r
   );
   assert.match(
     app,
-    /onSelect=\{\(item\) => \{[\s\S]*?openConversationAndFocusActivityItem\(item\);[\s\S]*?\}\}/,
-    "Activity row selection must preserve the selected participant message id"
+    /onSelect=\{\(item\) => \{[\s\S]*?openConversationAndFocusActivityItem\(item, \{ markViewed: false \}\);[\s\S]*?\}\}/,
+    "Activity row selection must preserve the selected participant message id without marking the conversation viewed"
+  );
+  const onSelectBlock = app.match(/onSelect=\{\(item\) => \{([\s\S]*?)\}\}\s*onMarkRead=/)?.[1] ?? "";
+  assert.ok(onSelectBlock.length > 0, "expected Activity onSelect handler before onMarkRead");
+  assert.doesNotMatch(
+    onSelectBlock,
+    /markActivityItemRead|read: true/,
+    "Activity row selection must not mark items read; only the explicit Mark read action may"
+  );
+});
+
+test("clicking outside the focused message dismisses the highlight and reads the finished item", () => {
+  assert.match(conversationViewport, /function dismissMessageFocus/);
+  assert.match(conversationViewport, /focusAttemptGenerationRef\.current \+= 1;/, "dismissal must invalidate in-flight focus retries");
+  assert.match(conversationViewport, /classList\.remove\("message-focused", "message-flash"\)/);
+  assert.match(conversationPanel, /onDismissMessageFocus=/);
+  assert.match(
+    conversationPanel,
+    /selected\?\.status === "recent"[\s\S]*?markActivityItemRead\(state, selected\.id\)/,
+    "dismissal marks only the selected finished item read"
   );
 });
 

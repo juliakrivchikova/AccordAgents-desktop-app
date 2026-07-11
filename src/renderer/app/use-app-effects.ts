@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import type { Conversation } from "../../shared/types";
 import {
   buildChatActivityItemsForConversationUpdate,
   mergeChatActivityItems,
@@ -26,7 +27,8 @@ import {
 export function useAppEffects(
   state: AppState,
   refreshAll: () => Promise<void>,
-  refreshActivity: () => Promise<void>
+  refreshActivity: () => Promise<void>,
+  markConversationViewed: (conversation: Conversation) => void
 ): void {
   useEffect(() => {
     void refreshAll();
@@ -76,17 +78,24 @@ export function useAppEffects(
       state.setConversation((current) => {
         const isActive = current?.id === updated.id;
         const matchesCurrentSnapshot = conversationMatchesSnapshot(current, updated, state.currentRunId);
+        // The loaded conversation counts as "being viewed" only while the chats view is
+        // on screen. A chat left open behind the activity or settings views must not
+        // silently mark new finished runs as read, or the rail badge never appears.
+        // The activity view (including an open detail pane) never auto-reads items:
+        // there, unread state clears only through the explicit "Mark read" action.
+        const timelineVisible = conversationTimelineVisibleNow(state);
+        const viewedLive = isActive && matchesCurrentSnapshot && timelineVisible;
         const activityItems = activityItemsWithStoredPreferences(
           state,
           buildChatActivityItemsForConversationUpdate(updated, {
             lastViewedAt: state.lastViewedAtRef.current[updated.id],
-            treatAsViewed: isActive && matchesCurrentSnapshot
+            treatAsViewed: viewedLive
           })
         );
         state.setActivityItems((activityCurrent) => {
           const preservedReadItems = preservedRecentChatActivityItems(activityCurrent, updated.id, {
             archived,
-            treatAsRead: isActive
+            treatAsRead: isActive && timelineVisible
           });
           return mergeChatActivityItems(activityCurrent, [...activityItems, ...preservedReadItems], {
             replaceConversationId: updated.id
@@ -111,7 +120,7 @@ export function useAppEffects(
         const relevantRunIds = conversationRelevantRunIds(updated);
         const merged = mergeProgressIntoConversation(updated, state.progressLogRef.current.filter((item) => relevantRunIds.has(item.runId)));
         state.setMessagePage(fullConversationMessagePageInfo(merged));
-        if (isActive) {
+        if (isActive && timelineVisible) {
           state.lastViewedAtRef.current = { ...state.lastViewedAtRef.current, [updated.id]: merged.updatedAt };
           persistLastViewedAt(state.lastViewedAtRef.current);
         }
@@ -119,6 +128,14 @@ export function useAppEffects(
       });
     });
   }, [state.currentRunId]);
+
+  // Returning to the chats view puts the still-loaded conversation back on screen, so
+  // catch up on the viewed-marking that was suppressed while it was hidden.
+  useEffect(() => {
+    if (state.railView === "chats" && state.conversation) {
+      markConversationViewed(state.conversation);
+    }
+  }, [state.railView]);
 
   useEffect(() => {
     if (!state.conversation || !state.messagePage?.hasMoreBefore || state.conversation.messages.length < state.messagePage.totalMessages) {
@@ -137,4 +154,8 @@ export function useAppEffects(
     const availableIds = new Set(state.settings.chatParticipantConfigs.map((participant) => participant.id));
     state.setSelectedChatParticipantConfigIds((current) => new Set([...current].filter((id) => availableIds.has(id))));
   }, [state.settings.chatParticipantConfigs]);
+}
+
+function conversationTimelineVisibleNow(state: AppState): boolean {
+  return state.railViewRef.current === "chats";
 }

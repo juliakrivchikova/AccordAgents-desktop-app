@@ -526,7 +526,7 @@ function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] 
     const messageId = cleanString(item.target.messageId);
     if (messageId) {
       const existingMessageItem = strongestByMessage.get(messageId);
-      if (!existingMessageItem || STATUS_RANK[item.status] < STATUS_RANK[existingMessageItem.status]) {
+      if (!existingMessageItem || strongerActivityItem(item, existingMessageItem)) {
         strongestByMessage.set(messageId, item);
       }
     }
@@ -535,7 +535,7 @@ function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] 
       continue;
     }
     const existing = strongestByRun.get(runId);
-    if (!existing || STATUS_RANK[item.status] < STATUS_RANK[existing.status]) {
+    if (!existing || strongerActivityItem(item, existing)) {
       strongestByRun.set(runId, item);
     }
   }
@@ -581,6 +581,17 @@ function recentParticipantGroupKey(item: ChatActivityItem): string | undefined {
       ? `handle:${participantHandle}`
       : "";
   return conversationId && participantKey ? `${conversationId}:${participantKey}` : undefined;
+}
+
+function strongerActivityItem(candidate: ChatActivityItem, existing: ChatActivityItem): boolean {
+  const rankDelta = STATUS_RANK[candidate.status] - STATUS_RANK[existing.status];
+  if (rankDelta !== 0) {
+    return rankDelta < 0;
+  }
+  // Equal status rank: prefer the newer event. Emission order must not decide, or a
+  // stale read card (e.g. a denied approval) permanently hides the unread finished
+  // message that shares its run or target message.
+  return isNewerActivityItem(candidate, existing);
 }
 
 function isNewerActivityItem(candidate: ChatActivityItem, existing: ChatActivityItem): boolean {

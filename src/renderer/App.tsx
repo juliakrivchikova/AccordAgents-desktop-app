@@ -49,7 +49,7 @@ function App(): JSX.Element {
   const reviewDecisionActions = useReviewDecisionActions(state, conversationActions);
   const reviewPlanActions = useReviewPlanActions(state, conversationActions);
   const settingsActions = useSettingsActions(state);
-  useAppEffects(state, conversationActions.refreshAll, conversationActions.refreshActivity);
+  useAppEffects(state, conversationActions.refreshAll, conversationActions.refreshActivity, conversationActions.markConversationViewed);
   const view = useAppViewModel(state);
   const activityUnreadCount = state.activityItems.reduce(
     (count, item) => count + (item.read || item.status === "running" ? 0 : 1),
@@ -396,9 +396,12 @@ function App(): JSX.Element {
             {conversationPanel ?? <AppLoadingState title="Loading chat" description={openingConversationDescription} />}
           </div>}
           onSelect={(item) => {
-            markActivityItemRead(state, item.id);
-            state.setSelectedActivityItem({ ...item, read: true });
-            void conversationActions.openConversationAndFocusActivityItem(item);
+            // Selecting an activity item never marks anything read: unread state only
+            // clears through the explicit "Mark read" action (or by opening the chat
+            // itself in the chats view). markViewed: false keeps the detail open from
+            // blanket-marking the conversation's items as viewed.
+            state.setSelectedActivityItem(item);
+            void conversationActions.openConversationAndFocusActivityItem(item, { markViewed: false });
           }}
           onMarkRead={(item) => markActivityItemRead(state, item.id)}
           onCancelPending={(item) => void cancelPendingActivityItem(item)}

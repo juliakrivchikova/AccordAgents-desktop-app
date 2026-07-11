@@ -25,7 +25,8 @@ export interface ConversationActions {
   refreshActivity: () => Promise<void>;
   refreshConversations: () => Promise<void>;
   openConversation: (id: string) => Promise<void>;
-  openConversationAndFocusActivityItem: (item: ChatActivityItem, options?: { timelineOnly?: boolean }) => Promise<void>;
+  openConversationAndFocusActivityItem: (item: ChatActivityItem, options?: { timelineOnly?: boolean; markViewed?: boolean }) => Promise<void>;
+  markConversationViewed: (conversation: Conversation) => void;
   clearChatMessageFocus: () => void;
   loadOlderConversationMessages: () => Promise<void>;
   loadConversationMessagePageForMessage: (messageId: string) => Promise<boolean>;
@@ -118,7 +119,8 @@ export function useConversationActions(state: AppState): ConversationActions {
     await openConversationForSelection(id);
   }
 
-  async function openConversationForSelection(id: string): Promise<Conversation | undefined> {
+  async function openConversationForSelection(id: string, options: { markViewed?: boolean } = {}): Promise<Conversation | undefined> {
+    const markViewed = options.markViewed !== false;
     const requestId = state.openConversationRequestRef.current + 1;
     state.openConversationRequestRef.current = requestId;
     state.setError(undefined);
@@ -127,7 +129,9 @@ export function useConversationActions(state: AppState): ConversationActions {
     }
     if (state.conversation?.id === id) {
       state.setOpeningConversationId(undefined);
-      markConversationViewed(state.conversation);
+      if (markViewed) {
+        markConversationViewed(state.conversation);
+      }
       return state.conversation;
     }
     state.setOpeningConversationId(id);
@@ -144,7 +148,9 @@ export function useConversationActions(state: AppState): ConversationActions {
       state.setMessagePage(result?.messagePage);
       if (next) {
         state.setKind(next.kind);
-        markConversationViewed(next);
+        if (markViewed) {
+          markConversationViewed(next);
+        }
       }
       state.setSelectedThreadId(nextPendingDecisions[0]?.id ?? nextPendingItem?.id);
       state.setFocusedThreadId(undefined);
@@ -167,7 +173,7 @@ export function useConversationActions(state: AppState): ConversationActions {
     }
   }
 
-  async function openConversationAndFocusActivityItem(item: ChatActivityItem, options: { timelineOnly?: boolean } = {}): Promise<void> {
+  async function openConversationAndFocusActivityItem(item: ChatActivityItem, options: { timelineOnly?: boolean; markViewed?: boolean } = {}): Promise<void> {
     const initialTarget = activityFocusTarget(item, options);
     const pendingFocusNonce = state.chatMessageFocusNonceRef.current + 1;
     state.chatMessageFocusNonceRef.current = pendingFocusNonce;
@@ -187,7 +193,7 @@ export function useConversationActions(state: AppState): ConversationActions {
     await executeChatActivityFocus<Conversation, ChatActivityItem>({
       isCurrent,
       openConversation: async () => {
-        const conversation = await openConversationForSelection(item.conversationId);
+        const conversation = await openConversationForSelection(item.conversationId, { markViewed: options.markViewed });
         conversationRequestId = state.openConversationRequestRef.current;
         return conversation;
       },
@@ -540,7 +546,7 @@ export function useConversationActions(state: AppState): ConversationActions {
   }
 
   return {
-    refreshAll, refreshActivity, refreshConversations, openConversation, openConversationAndFocusActivityItem, clearChatMessageFocus, loadOlderConversationMessages,
+    refreshAll, refreshActivity, refreshConversations, openConversation, openConversationAndFocusActivityItem, markConversationViewed, clearChatMessageFocus, loadOlderConversationMessages,
     loadConversationMessagePageForMessage, jumpToParticipantLastMessage, selectRepo,
     inspectRepo, rememberRepoPath, cancelReview, newChatSession, newProjectSession,
     updateSelectedChatParticipantConfigIds: state.setSelectedChatParticipantConfigIds

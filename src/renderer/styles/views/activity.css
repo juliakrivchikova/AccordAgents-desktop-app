@@ -418,7 +418,10 @@
 .activity-detail-body .chat-timeline {
   padding-top: 30px;
   padding-left: 40px;
-  padding-bottom: max(240px, 42vh);
+  /* Keep this modest: a large scroll runway here leaves a permanent blank gap
+     after the newest message whenever the focused activity target is the last
+     message in the timeline. Focus alignment clamps gracefully without it. */
+  padding-bottom: 24px;
   scroll-padding-top: 30px;
 }
 
