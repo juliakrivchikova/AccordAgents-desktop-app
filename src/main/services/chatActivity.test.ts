@@ -265,6 +265,39 @@ test("buildChatActivityItems moves cancelled pending cards to read finished acti
   assert.equal(items.filter((item) => item.conversationId === "conversation-1").length, 4);
 });
 
+test("buildChatActivityItems surfaces an unread finished run over an older denied approval on the same run", () => {
+  const approval: ChatAppToolApproval = {
+    id: "approval-denied-run",
+    conversationId: "conversation-1",
+    requesterParticipantId: participant.id,
+    requesterHandle: participant.handle,
+    requesterRoleConfigId: "engineer",
+    toolName: "shell",
+    capability: "permissions.request",
+    status: "denied",
+    request: { kind: "portable", permissions: ["webAccess"] },
+    summary: "Web access requested",
+    createdAt: "2026-01-08T09:00:00.000Z",
+    updatedAt: "2026-01-08T10:30:00.000Z",
+    resumeContext: { runId: "shared-run", triggerMessageId: "finished-after-denial" }
+  };
+  const items = buildChatActivityItems(conversation({
+    metadata: { pendingAppToolApprovals: [approval] },
+    messages: [
+      participantMessage("finished-after-denial", {
+        createdAt: "2026-01-08T11:00:00.000Z",
+        metadata: { runId: "shared-run" }
+      })
+    ]
+  }), { now: NOW, lastViewedAt: "2026-01-08T10:00:00.000Z" });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].kind, "message");
+  assert.equal(items[0].status, "recent");
+  assert.equal(items[0].target.messageId, "finished-after-denial");
+  assert.equal(items[0].read, undefined);
+});
+
 test("buildChatActivityItems falls back to pending metadata when a pending message has no body", () => {
   const items = buildChatActivityItems(conversation({
     messages: [

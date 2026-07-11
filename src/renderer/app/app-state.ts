@@ -124,6 +124,8 @@ export interface AppState {
   archivedConversationIdsRef: React.MutableRefObject<Set<string>>;
   lastViewedAtRef: React.MutableRefObject<Record<string, string>>;
   startingChatRef: React.MutableRefObject<boolean>;
+  railViewRef: React.MutableRefObject<RailView>;
+  selectedActivityConversationIdRef: React.MutableRefObject<string | undefined>;
 }
 
 export function useAppState(): AppState {
@@ -181,6 +183,12 @@ export function useAppState(): AppState {
   const archivedConversationIdsRef = useRef<Set<string>>(new Set());
   const lastViewedAtRef = useRef<Record<string, string>>(readLastViewedAtFromStorage());
   const startingChatRef = useRef(false);
+  // Latest-value refs so long-lived IPC subscriptions (which only re-subscribe on
+  // currentRunId changes) can read the current view state without stale closures.
+  const railViewRef = useRef<RailView>(railView);
+  railViewRef.current = railView;
+  const selectedActivityConversationIdRef = useRef<string | undefined>(selectedActivityItem?.conversationId);
+  selectedActivityConversationIdRef.current = selectedActivityItem?.conversationId;
   const sidebarWidth = railView === "settings" ? settingsSidebarWidth : chatSidebarWidth;
   const setSidebarWidth = (width: number): void => {
     if (railView === "settings") {
@@ -214,6 +222,6 @@ export function useAppState(): AppState {
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
     setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef,
     activityRefreshRequestRef, activityRevisionByConversationRef, activityItemPreferencesRef, archivedConversationIdsRef,
-    lastViewedAtRef, startingChatRef
+    lastViewedAtRef, startingChatRef, railViewRef, selectedActivityConversationIdRef
   };
 }

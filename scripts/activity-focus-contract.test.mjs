@@ -38,7 +38,7 @@ test("chat viewport has one focus scroll owner", () => {
 });
 
 test("Activity selection focuses the exact message while Open in chat uses the regular timeline", () => {
-  assert.match(conversationActions, /options\?: \{ timelineOnly\?: boolean \}/);
+  assert.match(conversationActions, /options\?: \{ timelineOnly\?: boolean; markViewed\?: boolean \}/);
   assert.match(conversationActions, /if \(options\.timelineOnly && threadRootId\) \{\s*return \{ messageId: threadRootId \};\s*\}/s);
   assert.equal(
     app.match(/openConversationAndFocusActivityItem\(item, \{ timelineOnly: true \}\)/g)?.length,
@@ -47,8 +47,8 @@ test("Activity selection focuses the exact message while Open in chat uses the r
   );
   assert.match(
     app,
-    /onSelect=\{\(item\) => \{[\s\S]*?openConversationAndFocusActivityItem\(item\);[\s\S]*?\}\}/,
-    "Activity row selection must preserve the selected participant message id"
+    /onSelect=\{\(item\) => \{[\s\S]*?openConversationAndFocusActivityItem\(item, \{ markViewed: false \}\);[\s\S]*?\}\}/,
+    "Activity row selection must preserve the selected participant message id and read only that item"
   );
 });
 
