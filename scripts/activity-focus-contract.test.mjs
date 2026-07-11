@@ -48,7 +48,14 @@ test("Activity selection focuses the exact message while Open in chat uses the r
   assert.match(
     app,
     /onSelect=\{\(item\) => \{[\s\S]*?openConversationAndFocusActivityItem\(item, \{ markViewed: false \}\);[\s\S]*?\}\}/,
-    "Activity row selection must preserve the selected participant message id and read only that item"
+    "Activity row selection must preserve the selected participant message id without marking the conversation viewed"
+  );
+  const onSelectBlock = app.match(/onSelect=\{\(item\) => \{([\s\S]*?)\}\}\s*onMarkRead=/)?.[1] ?? "";
+  assert.ok(onSelectBlock.length > 0, "expected Activity onSelect handler before onMarkRead");
+  assert.doesNotMatch(
+    onSelectBlock,
+    /markActivityItemRead|read: true/,
+    "Activity row selection must not mark items read; only the explicit Mark read action may"
   );
 });
 

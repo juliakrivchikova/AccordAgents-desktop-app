@@ -396,10 +396,11 @@ function App(): JSX.Element {
             {conversationPanel ?? <AppLoadingState title="Loading chat" description={openingConversationDescription} />}
           </div>}
           onSelect={(item) => {
-            markActivityItemRead(state, item.id);
-            state.setSelectedActivityItem({ ...item, read: true });
-            // Selecting an activity item reads that item only; opening the detail must
-            // not mark every other unread item of the same conversation as viewed.
+            // Selecting an activity item never marks anything read: unread state only
+            // clears through the explicit "Mark read" action (or by opening the chat
+            // itself in the chats view). markViewed: false keeps the detail open from
+            // blanket-marking the conversation's items as viewed.
+            state.setSelectedActivityItem(item);
             void conversationActions.openConversationAndFocusActivityItem(item, { markViewed: false });
           }}
           onMarkRead={(item) => markActivityItemRead(state, item.id)}

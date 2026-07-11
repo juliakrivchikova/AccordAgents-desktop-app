@@ -78,11 +78,12 @@ export function useAppEffects(
       state.setConversation((current) => {
         const isActive = current?.id === updated.id;
         const matchesCurrentSnapshot = conversationMatchesSnapshot(current, updated, state.currentRunId);
-        // The loaded conversation counts as "being viewed" only while its timeline is
-        // actually on screen: the chats view, or the activity detail pane showing this
-        // conversation. A chat left open behind the activity or settings views must not
+        // The loaded conversation counts as "being viewed" only while the chats view is
+        // on screen. A chat left open behind the activity or settings views must not
         // silently mark new finished runs as read, or the rail badge never appears.
-        const timelineVisible = conversationTimelineVisibleNow(state, updated.id);
+        // The activity view (including an open detail pane) never auto-reads items:
+        // there, unread state clears only through the explicit "Mark read" action.
+        const timelineVisible = conversationTimelineVisibleNow(state);
         const viewedLive = isActive && matchesCurrentSnapshot && timelineVisible;
         const activityItems = activityItemsWithStoredPreferences(
           state,
@@ -155,10 +156,6 @@ export function useAppEffects(
   }, [state.settings.chatParticipantConfigs]);
 }
 
-function conversationTimelineVisibleNow(state: AppState, conversationId: string): boolean {
-  const railView = state.railViewRef.current;
-  if (railView === "chats") {
-    return true;
-  }
-  return railView === "activity" && state.selectedActivityConversationIdRef.current === conversationId;
+function conversationTimelineVisibleNow(state: AppState): boolean {
+  return state.railViewRef.current === "chats";
 }
