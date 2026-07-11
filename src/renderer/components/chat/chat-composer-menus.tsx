@@ -1,13 +1,15 @@
 import { useEffect, useRef, type MutableRefObject, type ReactNode } from "react";
-import { FileText, ListChecks, Minimize2, Plug } from "lucide-react";
+import { FileStack, FileText, ListChecks, Minimize2, Plug } from "lucide-react";
 
 import type {
+  ArtifactSummary,
   ChatParticipant,
   ChatSavedPromptConfig,
   PluginCatalogItem,
   RepoFileSearchResult,
   UserSkillSummary
 } from "../../../shared/types";
+import { artifactApprovalShortLabel } from "../../../shared/artifacts";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import { providerLabel } from "./chat-conversation-data";
 import {
@@ -17,7 +19,9 @@ import {
 import { pluginSlashProviderLabels } from "./chat-plugin-options";
 
 export function ChatComposerMenus(props: {
+  artifactOptions?: ArtifactSummary[];
   fileIndex: number;
+  insertArtifactMention?: (artifact: ArtifactSummary) => void;
   insertCompactCommand: () => void;
   insertFileMention: (file: RepoFileSearchResult) => void;
   insertMention: (participant: ChatParticipant) => void;
@@ -39,7 +43,10 @@ export function ChatComposerMenus(props: {
   visiblePluginOptions: PluginCatalogItem[];
 }): JSX.Element {
   const mentionRefs = useActiveOptionScroll(props.mentionIndex, props.mentionOptions.length);
-  const fileRefs = useActiveOptionScroll(props.fileIndex, props.visibleFileOptions.length);
+  // Artifacts and repository files share the "#" popover and one index space.
+  const artifactOptions = props.artifactOptions ?? [];
+  const hashOptionCount = artifactOptions.length + props.visibleFileOptions.length;
+  const fileRefs = useActiveOptionScroll(props.fileIndex, hashOptionCount);
   const slashOptionCount = props.visibleCommandOptions.length +
     props.visiblePromptOptions.length +
     props.visibleSkillOptions.length +
@@ -76,27 +83,55 @@ export function ChatComposerMenus(props: {
           ))}
         </div>
       )}
-      {props.visibleFileOptions.length > 0 && (
-        <div className="mention-menu file-mention-menu" role="listbox" aria-label="Repository files">
-          <div className="chat-popover-section-title">Repository files</div>
-          {props.visibleFileOptions.map((file, index) => (
+      {hashOptionCount > 0 && (
+        <div
+          className="mention-menu file-mention-menu"
+          role="listbox"
+          aria-label={artifactOptions.length > 0
+            ? (props.visibleFileOptions.length > 0 ? "Artifacts and repository files" : "Artifacts")
+            : "Repository files"}
+        >
+          {artifactOptions.length > 0 && <div className="chat-popover-section-title">Artifacts</div>}
+          {artifactOptions.map((artifact, index) => (
             <button
               ref={setOptionRef(fileRefs, index)}
               className={index === props.fileIndex ? "selected" : ""}
               onMouseDown={(event) => {
                 event.preventDefault();
-                props.insertFileMention(file);
+                props.insertArtifactMention?.(artifact);
               }}
               role="option"
               aria-selected={index === props.fileIndex}
-              key={file.path}
+              key={artifact.id}
             >
-              <span className="file-mention-icon"><FileText size={18} /></span>
-              <strong>{repoFileBasename(file.path)}</strong>
-              <span>{file.path}</span>
+              <span className="file-mention-icon"><FileStack size={18} /></span>
+              <strong>{artifact.name}</strong>
+              <span>{`v${artifact.headVersion} · ${artifactApprovalShortLabel(artifact.approval)}`}</span>
               {index === 0 && <kbd>Enter</kbd>}
             </button>
           ))}
+          {props.visibleFileOptions.length > 0 && <div className="chat-popover-section-title">Repository files</div>}
+          {props.visibleFileOptions.map((file, index) => {
+            const optionIndex = artifactOptions.length + index;
+            return (
+              <button
+                ref={setOptionRef(fileRefs, optionIndex)}
+                className={optionIndex === props.fileIndex ? "selected" : ""}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  props.insertFileMention(file);
+                }}
+                role="option"
+                aria-selected={optionIndex === props.fileIndex}
+                key={file.path}
+              >
+                <span className="file-mention-icon"><FileText size={18} /></span>
+                <strong>{repoFileBasename(file.path)}</strong>
+                <span>{file.path}</span>
+                {optionIndex === 0 && <kbd>Enter</kbd>}
+              </button>
+            );
+          })}
         </div>
       )}
       {props.skillQuery !== undefined && (

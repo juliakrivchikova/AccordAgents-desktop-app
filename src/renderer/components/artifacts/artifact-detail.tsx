@@ -1,7 +1,8 @@
+import { useEffect, useRef, useState } from "react";
 import { Pencil } from "lucide-react";
 
 import type { ArtifactReadResult } from "../../../shared/types";
-import { artifactMemberLabel } from "../../../shared/artifacts";
+import { artifactMemberLabel, artifactReference } from "../../../shared/artifacts";
 import { MarkdownText } from "../content/markdown-text";
 import { IconButton } from "../primitives";
 import { ArtifactApprovalBadge } from "./artifact-approval-badge";
@@ -48,6 +49,19 @@ export function ArtifactDetailView(props: {
   onCompare: (fromVersion: number, toVersion: number) => void;
 }): JSX.Element {
   const { detail } = props;
+  const [referenceCopied, setReferenceCopied] = useState(false);
+  const copiedResetRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => () => window.clearTimeout(copiedResetRef.current), []);
+
+  function copyReference(): void {
+    void navigator.clipboard.writeText(artifactReference(detail.summary.id, detail.summary.name)).then(() => {
+      setReferenceCopied(true);
+      window.clearTimeout(copiedResetRef.current);
+      copiedResetRef.current = window.setTimeout(() => setReferenceCopied(false), 1600);
+    });
+  }
+
   return (
     <div className="artifacts-panel-body artifact-detail">
       <div className="artifact-detail-head">
@@ -120,6 +134,14 @@ export function ArtifactDetailView(props: {
                 {props.alreadySigned ? "Signed ✓" : `Sign v${detail.version.version}`}
               </button>
             )}
+            <button
+              type="button"
+              className="artifact-secondary-action"
+              title="Copy a chat reference; it keeps pointing at this artifact even after renames"
+              onClick={copyReference}
+            >
+              {referenceCopied ? "Copied ✓" : "Copy reference"}
+            </button>
             {props.isOwner && <button type="button" className="artifact-secondary-action" disabled={props.busy} onClick={props.onStartAccess}>Access…</button>}
           </div>
           {detail.version.note && <div className="artifact-version-note">Note: {detail.version.note}</div>}

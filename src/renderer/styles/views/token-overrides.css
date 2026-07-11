@@ -366,7 +366,8 @@
   overflow-wrap: break-word;
 }
 
-.chat-draft-skill-token {
+.chat-draft-skill-token,
+.chat-draft-artifact-token {
   border-radius: 6px;
   color: var(--app-accent);
   font-weight: inherit;
@@ -376,6 +377,16 @@
       color-mix(in srgb, var(--app-accent) 12%, transparent),
       color-mix(in srgb, var(--app-accent) 12%, transparent)
     );
+}
+
+.chat-draft-artifact-token {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.chat-draft-artifact-token svg {
+  flex: 0 0 auto;
 }
 
 .chat-draft-plugin-token {

@@ -59,7 +59,8 @@ export function ConversationPanel({
           onLoadOlderMessages={() => void conversationActions.loadOlderConversationMessages()}
           onLoadMessagePageForMessage={conversationActions.loadConversationMessagePageForMessage}
           messageFocusRequest={state.chatMessageFocusRequest}
-          onSend={(repoFileMentions, imageAttachments, skillMentions) => chatActions.sendChatMessage({ repoFileMentions, imageAttachments, skillMentions })}
+          onSend={(repoFileMentions, imageAttachments, skillMentions, content) =>
+            chatActions.sendChatMessage({ content, repoFileMentions, imageAttachments, skillMentions })}
           accordDisabledReason={accordDisabledReason}
           onOpenAccord={onOpenAccord}
           onSendThread={(rootMessage, content, repoFileMentions, imageAttachments, skillMentions) => chatActions.sendChatMessage({

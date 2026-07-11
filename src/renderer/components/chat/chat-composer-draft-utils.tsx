@@ -1,11 +1,13 @@
 import type { CSSProperties, ReactNode } from "react";
-import { Puzzle } from "lucide-react";
+import { FileBox, Puzzle } from "lucide-react";
 
 import type {
+  ArtifactSummary,
   ChatParticipant,
   ChatSkillMention,
   UserSkillTargetSummary
 } from "../../../shared/types";
+import { artifactReference } from "../../../shared/artifacts";
 import { providerLabel } from "./chat-conversation-data";
 
 export const CHAT_COMPOSER_TEXTAREA_STYLE: CSSProperties = {
@@ -27,6 +29,29 @@ export interface DraftPluginMention {
   displayName: string;
   iconUrl?: string;
 }
+
+interface DraftArtifactMention {
+  id: string;
+  label: string;
+  start: number;
+  end: number;
+}
+
+interface DraftHighlight {
+  start: number;
+  end: number;
+  key: string;
+  className: string;
+  content: ReactNode;
+}
+
+const ARTIFACT_MARKER_START = "\u2063";
+const ARTIFACT_MARKER_END = "\u2064";
+const ARTIFACT_MARKER_DIGITS = ["\u200B", "\u200C", "\u200D", "\u2060"] as const;
+const ARTIFACT_MARKER_DIGIT_INDEX: ReadonlyMap<string, number> = new Map(ARTIFACT_MARKER_DIGITS.map((digit, index) => [digit, index]));
+// The transparent textarea needs to reserve the icon's width so its caret lines
+// up with the rendered FileBox in the highlight layer.
+const ARTIFACT_ICON_SPACER = "\u2003\u2004";
 
 export function activeMentionQuery(value: string): string | undefined {
   const match = value.match(/(?:^|\s)@([A-Za-z0-9_-]*)$/);
@@ -86,6 +111,52 @@ export function removeFileMentionToken(value: string, filePath: string): string 
     .trimEnd();
 }
 
+export function matchArtifactMentions(artifacts: ArtifactSummary[], query: string, limit = 8): ArtifactSummary[] {
+  const needle = query.trim().toLowerCase();
+  return artifacts
+    .filter((artifact) => artifact.name.toLowerCase().includes(needle))
+    .sort((left, right) => {
+      const leftStarts = left.name.toLowerCase().startsWith(needle) ? 0 : 1;
+      const rightStarts = right.name.toLowerCase().startsWith(needle) ? 0 : 1;
+      if (leftStarts !== rightStarts) {
+        return leftStarts - rightStarts;
+      }
+      return right.updatedAt.localeCompare(left.updatedAt);
+    })
+    .slice(0, limit);
+}
+
+export function artifactMentionToken(artifact: Pick<ArtifactSummary, "id" | "name">): string {
+  return artifactReference(artifact.id, artifactDisplayLabel(artifact.name));
+}
+
+export function serializeArtifactDraft(value: string): string {
+  const mentions = draftArtifactMentions(value);
+  if (mentions.length === 0) {
+    return stripInvalidArtifactMarkers(value);
+  }
+  let cursor = 0;
+  let serialized = "";
+  for (const mention of mentions) {
+    serialized += value.slice(cursor, mention.start);
+    serialized += artifactReference(mention.id, mention.label);
+    cursor = mention.end;
+  }
+  return serialized + stripInvalidArtifactMarkers(value.slice(cursor));
+}
+
+export function replaceActiveArtifactMention(value: string, artifact: Pick<ArtifactSummary, "id" | "name">): string {
+  const label = artifactDisplayLabel(artifact.name);
+  const token = `${ARTIFACT_ICON_SPACER}${label}${artifactMarker(artifact.id, label)}`;
+  const match = value.match(/(?:^|\s)#([^\s#]*)$/);
+  if (!match || match.index === undefined) {
+    return `${value}${value.endsWith(" ") || !value ? "" : " "}${token} `;
+  }
+  const prefix = value.slice(0, match.index);
+  const leadingSpace = match[0].startsWith(" ") ? " " : "";
+  return `${prefix}${leadingSpace}${token} `;
+}
+
 export function replaceActiveSkillMention(value: string, skillName: string): string {
   const match = value.match(/(?:^|\s)\/([A-Za-z0-9_-]*)$/);
   if (!match || match.index === undefined) {
@@ -142,30 +213,47 @@ export function renderSlashHighlightedDraft(
     byName.set(mention.frontmatterName, { className: "chat-draft-skill-token" });
   }
   const names = Array.from(byName.keys()).sort((left, right) => right.length - left.length);
-  if (names.length === 0 || !value) {
+  const highlights: DraftHighlight[] = draftArtifactMentions(value).map((mention, index) => ({
+    start: mention.start,
+    end: mention.end,
+    key: `artifact-${mention.id}-${index}`,
+    className: "chat-draft-artifact-token",
+    content: <><FileBox size={15} strokeWidth={2.2} aria-hidden /><span>{mention.label}</span></>
+  }));
+  if (names.length > 0) {
+    const pattern = new RegExp(`(^|\\s)/(${names.map(escapeRegExp).join("|")})(?=\\s|$)`, "g");
+    let index = 0;
+    for (const match of value.matchAll(pattern)) {
+      const leading = match[1] ?? "";
+      const name = match[2] ?? "";
+      const start = (match.index ?? 0) + leading.length;
+      const end = start + name.length + 1;
+      const token = byName.get(name);
+      highlights.push({
+        start,
+        end,
+        key: `slash-${name}-${index}`,
+        className: token?.className ?? "chat-draft-skill-token",
+        content: <>{token?.icon}{value.slice(start, end)}</>
+      });
+      index += 1;
+    }
+  }
+  if (highlights.length === 0 || !value) {
     return [value || "\u00a0"];
   }
-  const pattern = new RegExp(`(^|\\s)/(${names.map(escapeRegExp).join("|")})(?=\\s|$)`, "g");
+  highlights.sort((left, right) => left.start - right.start || left.end - right.end);
   const nodes: ReactNode[] = [];
   let cursor = 0;
-  let index = 0;
-  for (const match of value.matchAll(pattern)) {
-    const leading = match[1] ?? "";
-    const name = match[2] ?? "";
-    const start = (match.index ?? 0) + leading.length;
-    const end = start + name.length + 1;
-    if (start > cursor) {
-      nodes.push(value.slice(cursor, start));
+  for (const highlight of highlights) {
+    if (highlight.start < cursor) {
+      continue;
     }
-    const token = byName.get(name);
-    nodes.push(
-      <span className={token?.className ?? "chat-draft-skill-token"} key={`${name}-${index}`}>
-        {token?.icon}
-        {value.slice(start, end)}
-      </span>
-    );
-    cursor = end;
-    index += 1;
+    if (highlight.start > cursor) {
+      nodes.push(value.slice(cursor, highlight.start));
+    }
+    nodes.push(<span className={highlight.className} key={highlight.key}>{highlight.content}</span>);
+    cursor = highlight.end;
   }
   if (cursor < value.length) {
     nodes.push(value.slice(cursor));
@@ -175,6 +263,14 @@ export function renderSlashHighlightedDraft(
 
 export function draftHasFileMention(value: string, filePath: string): boolean {
   return new RegExp(`(^|\\s)#${escapeRegExp(filePath)}(?=\\s|$)`).test(value);
+}
+
+export function draftHasArtifactMention(value: string): boolean {
+  return draftArtifactMentions(value).length > 0;
+}
+
+export function normalizeArtifactDraft(value: string): string {
+  return stripInvalidArtifactMarkers(value, true);
 }
 
 export function repoFileBasename(filePath: string): string {
@@ -195,4 +291,97 @@ export function skillPickerTargetLabel(target: UserSkillTargetSummary, participa
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function artifactDisplayLabel(name: string): string {
+  return name.replace(/[\[\]\n\r]/g, " ").replace(/\s+/g, " ").trim() || "artifact";
+}
+
+function artifactMarker(id: string, label: string): string {
+  const bytes = new TextEncoder().encode(JSON.stringify({ id, label }));
+  let encoded = ARTIFACT_MARKER_START;
+  for (const byte of bytes) {
+    encoded += ARTIFACT_MARKER_DIGITS[(byte >> 6) & 3];
+    encoded += ARTIFACT_MARKER_DIGITS[(byte >> 4) & 3];
+    encoded += ARTIFACT_MARKER_DIGITS[(byte >> 2) & 3];
+    encoded += ARTIFACT_MARKER_DIGITS[byte & 3];
+  }
+  return `${encoded}${ARTIFACT_MARKER_END}`;
+}
+
+function draftArtifactMentions(value: string): DraftArtifactMention[] {
+  const mentions: DraftArtifactMention[] = [];
+  let searchFrom = 0;
+  while (searchFrom < value.length) {
+    const markerStart = value.indexOf(ARTIFACT_MARKER_START, searchFrom);
+    if (markerStart < 0) {
+      break;
+    }
+    const markerEnd = value.indexOf(ARTIFACT_MARKER_END, markerStart + ARTIFACT_MARKER_START.length);
+    if (markerEnd < 0) {
+      break;
+    }
+    const metadata = decodeArtifactMarker(value.slice(markerStart + ARTIFACT_MARKER_START.length, markerEnd));
+    const labelStart = metadata ? markerStart - metadata.label.length : markerStart;
+    const hasIconSpacer = labelStart >= ARTIFACT_ICON_SPACER.length &&
+      value.slice(labelStart - ARTIFACT_ICON_SPACER.length, labelStart) === ARTIFACT_ICON_SPACER;
+    const start = hasIconSpacer ? labelStart - ARTIFACT_ICON_SPACER.length : labelStart;
+    if (metadata && labelStart >= 0 && value.slice(labelStart, markerStart) === metadata.label) {
+      mentions.push({ id: metadata.id, label: metadata.label, start, end: markerEnd + ARTIFACT_MARKER_END.length });
+    }
+    searchFrom = markerEnd + ARTIFACT_MARKER_END.length;
+  }
+  return mentions;
+}
+
+function decodeArtifactMarker(value: string): { id: string; label: string } | undefined {
+  if (!value || value.length % 4 !== 0) {
+    return undefined;
+  }
+  const bytes = new Uint8Array(value.length / 4);
+  for (let index = 0; index < value.length; index += 4) {
+    const digits = [
+      ARTIFACT_MARKER_DIGIT_INDEX.get(value[index]),
+      ARTIFACT_MARKER_DIGIT_INDEX.get(value[index + 1]),
+      ARTIFACT_MARKER_DIGIT_INDEX.get(value[index + 2]),
+      ARTIFACT_MARKER_DIGIT_INDEX.get(value[index + 3])
+    ];
+    if (digits.some((digit) => digit === undefined)) {
+      return undefined;
+    }
+    bytes[index / 4] = (digits[0]! << 6) | (digits[1]! << 4) | (digits[2]! << 2) | digits[3]!;
+  }
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as { id?: unknown; label?: unknown };
+    if (typeof parsed.id !== "string" || typeof parsed.label !== "string" || !parsed.id || !parsed.label) {
+      return undefined;
+    }
+    return { id: parsed.id, label: parsed.label };
+  } catch {
+    return undefined;
+  }
+}
+
+function stripInvalidArtifactMarkers(value: string, keepValid = false): string {
+  let normalized = "";
+  let cursor = 0;
+  while (cursor < value.length) {
+    const markerStart = value.indexOf(ARTIFACT_MARKER_START, cursor);
+    if (markerStart < 0) {
+      return `${normalized}${value.slice(cursor)}`;
+    }
+    normalized += value.slice(cursor, markerStart);
+    const markerEnd = value.indexOf(ARTIFACT_MARKER_END, markerStart + ARTIFACT_MARKER_START.length);
+    if (markerEnd < 0) {
+      return normalized;
+    }
+    const metadata = decodeArtifactMarker(value.slice(markerStart + ARTIFACT_MARKER_START.length, markerEnd));
+    const start = metadata ? markerStart - metadata.label.length : markerStart;
+    const valid = Boolean(metadata && start >= 0 && value.slice(start, markerStart) === metadata.label);
+    if (valid && keepValid) {
+      normalized += value.slice(markerStart, markerEnd + ARTIFACT_MARKER_END.length);
+    }
+    cursor = markerEnd + ARTIFACT_MARKER_END.length;
+  }
+  return normalized;
 }

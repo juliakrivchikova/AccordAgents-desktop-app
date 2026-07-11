@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 
 import type {
+  ArtifactSummary,
   ChatParticipant,
   ChatParticipantInput,
   ChatSavedPromptConfig,
@@ -22,15 +23,20 @@ import {
   chatParticipantDisplayName,
   chatParticipantMentionHandle
 } from "../conversation/conversation-display";
+import { ArtifactsContext } from "../artifacts/artifacts-context";
 import {
   activeFileQuery,
   activeMentionQuery,
   activeSkillQuery,
   compactCommandOption,
+  draftHasArtifactMention,
   draftHasFileMention,
   draftHasSkillMention,
+  matchArtifactMentions,
+  normalizeArtifactDraft,
   removeFileMentionToken,
   removeSkillMentionToken,
+  replaceActiveArtifactMention,
   replaceActiveFileMention,
   replaceActiveMention,
   replaceActiveSkillMention,
@@ -65,8 +71,10 @@ export function useChatComposerMentions(props: {
 }): {
   fileIndex: number;
   fileOptions: RepoFileSearchResult[];
+  insertArtifactMention: (artifact: ArtifactSummary) => void;
   insertCompactCommand: () => void;
   insertFileMention: (file: RepoFileSearchResult) => void;
+  insertHashOptionAtIndex: (index: number) => void;
   insertMention: (participant: ChatParticipant) => void;
   insertSavedPrompt: (prompt: ChatSavedPromptConfig) => void;
   insertSkillMention: (skill: UserSkillSummary) => void;
@@ -94,8 +102,10 @@ export function useChatComposerMentions(props: {
   skillQuery: string | undefined;
   skillTargetLabel?: string;
   updateDraft: (value: string) => void;
+  visibleArtifactOptions: ArtifactSummary[];
   visibleCommandOptions: NonNullable<ReturnType<typeof compactCommandOption>>[];
   visibleFileOptions: RepoFileSearchResult[];
+  visibleHashOptionCount: number;
   visiblePromptOptions: ChatSavedPromptConfig[];
   visibleSkillOptions: UserSkillSummary[];
   visiblePluginOptions: PluginCatalogItem[];
@@ -121,6 +131,11 @@ export function useChatComposerMentions(props: {
     props.searchSource.type === "pre-chat" || Boolean(props.searchSource.conversationId)
   );
   const skillSearchAvailable = props.searchSource.type === "pre-chat" || Boolean(props.searchSource.conversationId);
+  // Artifacts come from the conversation-level provider; outside it (pre-chat)
+  // the context is undefined and the "#" popover keeps its file-only behavior.
+  const artifactsContext = useContext(ArtifactsContext);
+  const artifactPool = artifactsContext ? Array.from(artifactsContext.byId.values()) : [];
+  const hashTriggerAvailable = fileSearchAvailable || artifactPool.length > 0;
   const searchResetKey = props.searchSource.type === "conversation"
     ? `conversation:${props.searchSource.conversationId ?? ""}`
     : `pre-chat:${props.searchSource.repoPath ?? ""}`;
@@ -132,6 +147,8 @@ export function useChatComposerMentions(props: {
         chatParticipantDisplayName(participant).toLowerCase().includes(query);
     });
   const visibleFileOptions = fileQuery === undefined ? [] : fileOptions;
+  const visibleArtifactOptions = fileQuery === undefined ? [] : matchArtifactMentions(artifactPool, fileQuery);
+  const visibleHashOptionCount = visibleArtifactOptions.length + visibleFileOptions.length;
   const visiblePromptOptions = skillQuery === undefined
     ? []
     : matchingChatSavedPrompts(props.savedPrompts, skillQuery, { includeBody: false });
@@ -146,7 +163,8 @@ export function useChatComposerMentions(props: {
     skills: visibleSkillOptions,
     plugins: visiblePluginOptions
   });
-  const showSkillHighlights = selectedSkillMentions.some((mention) => draftHasSkillMention(props.draft, mention.frontmatterName)) ||
+  const showSkillHighlights = draftHasArtifactMention(props.draft) ||
+    selectedSkillMentions.some((mention) => draftHasSkillMention(props.draft, mention.frontmatterName)) ||
     selectedPluginMentions.some((mention) => draftHasSkillMention(props.draft, mention.name));
 
   useEffect(() => {
@@ -262,10 +280,11 @@ export function useChatComposerMentions(props: {
   }, [skillQuery, skillSearchAvailable, props.draft, props.searchSource]);
 
   function updateDraft(value: string): void {
-    props.onDraftChange(value);
-    const nextFileQuery = fileSearchAvailable ? activeFileQuery(value) : undefined;
-    const nextMentionQuery = nextFileQuery === undefined ? activeMentionQuery(value) : undefined;
-    const nextSkillQuery = nextFileQuery === undefined && nextMentionQuery === undefined && skillSearchAvailable ? activeSkillQuery(value) : undefined;
+    const normalized = normalizeArtifactDraft(value);
+    props.onDraftChange(normalized);
+    const nextFileQuery = hashTriggerAvailable ? activeFileQuery(normalized) : undefined;
+    const nextMentionQuery = nextFileQuery === undefined ? activeMentionQuery(normalized) : undefined;
+    const nextSkillQuery = nextFileQuery === undefined && nextMentionQuery === undefined && skillSearchAvailable ? activeSkillQuery(normalized) : undefined;
     setFileQuery(nextFileQuery);
     setMentionQuery(nextMentionQuery);
     setSkillQuery(nextSkillQuery);
@@ -275,8 +294,9 @@ export function useChatComposerMentions(props: {
   }
 
   function updateDraftWithCaret(value: string, position = value.length): void {
-    pendingCaretRef.current = { value, position };
-    props.onDraftChange(value);
+    const normalized = normalizeArtifactDraft(value);
+    pendingCaretRef.current = { value: normalized, position: Math.min(position, normalized.length) };
+    props.onDraftChange(normalized);
   }
 
   function insertMention(participant: ChatParticipant): void {
@@ -292,6 +312,25 @@ export function useChatComposerMentions(props: {
     setFileQuery(undefined);
     setFileOptions([]);
     setFileIndex(0);
+  }
+
+  function insertArtifactMention(artifact: ArtifactSummary): void {
+    updateDraftWithCaret(replaceActiveArtifactMention(props.draft, artifact));
+    setFileQuery(undefined);
+    setFileOptions([]);
+    setFileIndex(0);
+  }
+
+  function insertHashOptionAtIndex(index: number): void {
+    const artifact = visibleArtifactOptions[index];
+    if (artifact) {
+      insertArtifactMention(artifact);
+      return;
+    }
+    const file = visibleFileOptions[index - visibleArtifactOptions.length] ?? visibleFileOptions[0];
+    if (file) {
+      insertFileMention(file);
+    }
   }
 
   function insertSkillMention(skill: UserSkillSummary): void {
@@ -393,8 +432,10 @@ export function useChatComposerMentions(props: {
   return {
     fileIndex,
     fileOptions,
+    insertArtifactMention,
     insertCompactCommand,
     insertFileMention,
+    insertHashOptionAtIndex,
     insertMention,
     insertSavedPrompt,
     insertSkillMention,
@@ -422,8 +463,10 @@ export function useChatComposerMentions(props: {
     skillQuery,
     skillTargetLabel,
     updateDraft,
+    visibleArtifactOptions,
     visibleCommandOptions,
     visibleFileOptions,
+    visibleHashOptionCount,
     visiblePromptOptions,
     visibleSkillOptions,
     visiblePluginOptions,

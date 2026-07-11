@@ -1,4 +1,5 @@
 import { createContext, useContext, type ReactNode } from "react";
+import { FileBox } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   parseInlineCodeFileLinkTarget,
@@ -9,7 +10,7 @@ import { markdownBlocks, type MarkdownBlock } from "./markdown-blocks";
 import { FileLink } from "./local-file-link";
 import { MentionDirectoryContext, ParticipantHoverCard, profileHandleLabel, useHoverCard } from "./participant-hover-card";
 import { ArtifactsContext } from "../artifacts/artifacts-context";
-import { ArtifactApprovalBadge } from "../artifacts/artifact-approval-badge";
+import type { ArtifactApproval } from "../../../shared/types";
 
 // A clickable reference to another chat message. Authors write `[label](#msg:<id>)` (or a bare
 // `#msg:<id>`); we render a link that scrolls the referenced message into view and flashes it.
@@ -111,29 +112,45 @@ function MessageLink({ messageId, label }: { messageId: string; label: string })
 }
 
 // A reference to a chat artifact: `[label](#artifact:<id>)` or bare `#artifact:<id>`.
-// The chip always shows the artifact's CURRENT name (falling back to the authored
-// label if the artifact is unknown) plus an at-a-glance approval indicator, and it
+// The link always shows the artifact's CURRENT name (falling back to the authored
+// label if the artifact is unknown), while approval stays in the hover text. It
 // never embeds the artifact body. Activating it opens the artifact in the panel.
 function ArtifactLink({ artifactId, label }: { artifactId: string; label?: string }): JSX.Element {
   const artifacts = useContext(ArtifactsContext);
   const summary = artifacts?.byId.get(artifactId);
   const name = summary?.name ?? label ?? "artifact";
+  const title = summary
+    ? `Open artifact "${summary.name}" (v${summary.headVersion}) · ${artifactApprovalTooltip(summary.approval)}`
+    : "Artifact reference";
   const activate = (): void => {
     artifacts?.openArtifact(artifactId);
   };
   return (
     <a
-      className={`artifact-link${summary ? "" : " artifact-link-unknown"}`}
+      className={`artifact-link chat-draft-artifact-token${summary ? "" : " artifact-link-unknown"}`}
       role="button"
       tabIndex={0}
-      title={summary ? `Open artifact "${summary.name}" (v${summary.headVersion})` : "Artifact reference"}
+      title={title}
       onClick={(event) => { event.preventDefault(); activate(); }}
       onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); } }}
     >
-      <span className="artifact-link-name">{name}</span>
-      {summary && <ArtifactApprovalBadge approval={summary.approval} compact />}
+      <FileBox size={15} strokeWidth={2.2} aria-hidden /><span className="artifact-link-name">{name}</span>
     </a>
   );
+}
+
+function artifactApprovalTooltip(approval: ArtifactApproval): string {
+  if (approval.state === "none-required") {
+    return "No signers required";
+  }
+  if (approval.state === "approved") {
+    return "Approved: every required signer signed the current version";
+  }
+  const signed = `${approval.signedCurrent.length}/${approval.requiredSigners.length} signed`;
+  const required = approval.requiredSigners.join(", ");
+  return approval.state === "unsigned"
+    ? `Unsigned: ${signed} · required signers: ${required}`
+    : `${signed} · required signers: ${required}`;
 }
 
 function openExternalLink(url: string): void {
