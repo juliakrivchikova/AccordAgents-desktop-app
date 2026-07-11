@@ -935,13 +935,25 @@ export class CliAgentRunner {
       if (!parsed) {
         throw new Error("Antigravity CLI completed without a parseable JSON result.");
       }
-      if (options.sessionId && parsed.status && parsed.status !== "SUCCESS" && isGeminiResumeMissText(`${parsed.status} ${parsed.response ?? ""}`)) {
-        throw new CliGeminiResumeMissError(parsed.status, parsed.response);
-      }
-      if (parsed.status && parsed.status !== "SUCCESS") {
-        throw new Error(`Antigravity CLI run ended with status ${parsed.status}${parsed.response ? `: ${this.truncateText(parsed.response, MAX_CLI_ERROR_CHARS)}` : "."}`);
-      }
+      const nonSuccess = Boolean(parsed.status && parsed.status !== "SUCCESS");
       const content = (parsed.response ?? "").trim();
+      // A resume that lost its conversation only counts as a miss when agy also
+      // failed to produce a response; otherwise agy recovered and answered.
+      if (options.sessionId && nonSuccess && !content && isGeminiResumeMissText(`${parsed.status} ${parsed.error ?? ""} ${parsed.response ?? ""}`)) {
+        throw new CliGeminiResumeMissError(parsed.status ?? "ERROR", parsed.error ?? parsed.response);
+      }
+      // agy commonly reports status ERROR for a recoverable mid-turn issue (e.g.
+      // "The model produced an invalid tool call") while still returning a valid
+      // final response. Treat a non-SUCCESS status that carries a response as a
+      // completed run with a warning, not a hard failure that discards the answer.
+      if (nonSuccess && !content && !options.allowEmptyContent) {
+        throw new Error(`Antigravity CLI run ended with status ${parsed.status}${parsed.error ? `: ${this.truncateText(parsed.error, MAX_CLI_ERROR_CHARS)}` : "."}`);
+      }
+      if (nonSuccess) {
+        warnings.push(
+          `${participant.label}: Antigravity reported a non-fatal run issue (${this.truncateText(parsed.error || parsed.status || "ERROR", 160)}) but returned a response.`
+        );
+      }
       if (!content && !options.allowEmptyContent) {
         throw new Error("Antigravity CLI completed without response content.");
       }

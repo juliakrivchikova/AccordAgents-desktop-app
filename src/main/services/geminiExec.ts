@@ -59,6 +59,7 @@ export interface GeminiExecResult {
   conversationId?: string;
   status?: string;
   response?: string;
+  error?: string;
   usage?: GeminiExecUsage;
 }
 
@@ -144,6 +145,7 @@ export function parseGeminiExecResult(stdout: string): GeminiExecResult | undefi
         conversationId: stringField(parsed, "conversation_id"),
         status: stringField(parsed, "status"),
         response: stringField(parsed, "response"),
+        error: stringField(parsed, "error"),
         usage: parseGeminiUsage(parsed.usage)
       };
     } catch {
