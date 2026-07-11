@@ -37,6 +37,7 @@ export function useChatConversationViewport(props: {
 }): {
   chatVirtualItems: VirtualItem[];
   chatVirtualizer: Virtualizer<HTMLDivElement, Element>;
+  dismissMessageFocus: (target?: EventTarget | null) => boolean;
   focusChatMessage: (messageId: string, threadRootId?: string) => boolean;
   isStuckToBottom: boolean;
   markUserScrollIntent: () => void;
@@ -56,6 +57,7 @@ export function useChatConversationViewport(props: {
   const scrollScheduleIdRef = useRef(0);
   const handledFocusNonceRef = useRef(0);
   const userScrollIntentUntilRef = useRef(0);
+  const focusAttemptGenerationRef = useRef(0);
   const chatVirtualizer = useVirtualizer({
     count: props.chatTimelineRows.length,
     getScrollElement: () => timelineRef.current,
@@ -178,8 +180,13 @@ export function useChatConversationViewport(props: {
   }
 
   function scheduleFocusRenderedMessage(messageId: string): void {
+    const generation = focusAttemptGenerationRef.current;
     let focused = false;
     const focus = (): boolean => {
+      if (focusAttemptGenerationRef.current !== generation) {
+        // The focus was dismissed; stop retrying so the highlight is not re-applied.
+        return true;
+      }
       if (!focused) {
         focused = alignRenderedMessageToTimelineStart(messageId);
       }
@@ -241,9 +248,10 @@ export function useChatConversationViewport(props: {
   }
 
   function scheduleScrollToRowAndFocus(messageId: string, rowIndex: number): void {
+    const generation = focusAttemptGenerationRef.current;
     let focused = false;
     const attempt = (): boolean => {
-      if (focused) {
+      if (focused || focusAttemptGenerationRef.current !== generation) {
         return true;
       }
       detachFromBottom();
@@ -343,6 +351,32 @@ export function useChatConversationViewport(props: {
     return false;
   }
 
+  function dismissMessageFocus(target?: EventTarget | null): boolean {
+    const view = viewRef.current;
+    const focused = view?.querySelector<HTMLElement>(".message-focused");
+    if (!view || !focused) {
+      return false;
+    }
+    if (target instanceof Node && focused.contains(target)) {
+      return false;
+    }
+    // Invalidate in-flight focus retries so none re-applies the highlight, stop the
+    // reveal loop, and record the request as handled so auto-scroll suppression ends.
+    focusAttemptGenerationRef.current += 1;
+    pendingFocusMessageIdRef.current = undefined;
+    pendingFocusThreadRootIdRef.current = undefined;
+    pendingFocusDeadlineRef.current = 0;
+    focusNavigation.cancel();
+    const request = matchingFocusRequest();
+    if (request) {
+      handledFocusNonceRef.current = request.nonce;
+    }
+    view.querySelectorAll<HTMLElement>(".message-focused").forEach((element) => {
+      element.classList.remove("message-focused", "message-flash");
+    });
+    return true;
+  }
+
   useEffect(() => {
     pendingFocusMessageIdRef.current = undefined;
     pendingFocusThreadRootIdRef.current = undefined;
@@ -428,6 +462,7 @@ export function useChatConversationViewport(props: {
   return {
     chatVirtualItems,
     chatVirtualizer,
+    dismissMessageFocus,
     focusChatMessage,
     isStuckToBottom,
     markUserScrollIntent,

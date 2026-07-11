@@ -10,6 +10,7 @@ const conversationActions = read("src/renderer/app/use-conversation-actions.ts")
 const conversationViewport = read("src/renderer/components/chat/use-chat-conversation-viewport.ts");
 const focusNavigation = read("src/renderer/components/chat/use-chat-focus-navigation.ts");
 const app = read("src/renderer/App.tsx");
+const conversationPanel = read("src/renderer/components/conversation/conversation-panel.tsx");
 const activityStyles = read("src/renderer/styles/views/activity.css");
 const chatStyles = read("src/renderer/styles/views/chat-conversation.css");
 
@@ -56,6 +57,18 @@ test("Activity selection focuses the exact message while Open in chat uses the r
     onSelectBlock,
     /markActivityItemRead|read: true/,
     "Activity row selection must not mark items read; only the explicit Mark read action may"
+  );
+});
+
+test("clicking outside the focused message dismisses the highlight and reads the finished item", () => {
+  assert.match(conversationViewport, /function dismissMessageFocus/);
+  assert.match(conversationViewport, /focusAttemptGenerationRef\.current \+= 1;/, "dismissal must invalidate in-flight focus retries");
+  assert.match(conversationViewport, /classList\.remove\("message-focused", "message-flash"\)/);
+  assert.match(conversationPanel, /onDismissMessageFocus=/);
+  assert.match(
+    conversationPanel,
+    /selected\?\.status === "recent"[\s\S]*?markActivityItemRead\(state, selected\.id\)/,
+    "dismissal marks only the selected finished item read"
   );
 });
 

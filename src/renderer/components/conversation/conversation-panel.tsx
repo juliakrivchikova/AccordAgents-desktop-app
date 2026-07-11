@@ -2,6 +2,7 @@ import { ChatConversationView } from "../chat/chat-conversation-view";
 import { SlackView } from "../review/review-view";
 import { AppLoadingState } from "../loading-states";
 import { planDecisionReplies } from "../review/review-conversation-data";
+import { markActivityItemRead } from "../../app/activity-item-state";
 import type { AppState } from "../../app/app-state";
 import type { ConversationActions } from "../../app/use-conversation-actions";
 import type { ChatActions } from "../../app/use-chat-actions";
@@ -82,6 +83,15 @@ export function ConversationPanel({
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
           onCompactParticipant={(participantId) => chatActions.compactChatParticipant(participantId)}
           onStopRun={(runId) => void window.consensus.cancelReview(runId)}
+          onDismissMessageFocus={() => {
+            // Dismissing the highlight by clicking outside it is the acknowledgment
+            // gesture in the activity view: mark the selected finished item read.
+            // Pending items keep their badge until actually resolved.
+            const selected = state.selectedActivityItem;
+            if (state.railView === "activity" && selected?.status === "recent" && selected.conversationId === state.conversation?.id) {
+              markActivityItemRead(state, selected.id);
+            }
+          }}
         />
       ) : (
         <SlackView

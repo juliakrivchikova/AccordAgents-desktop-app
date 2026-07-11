@@ -242,6 +242,16 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
           data-testid="chat-view"
           ref={viewport.viewRef}
           style={{ "--chat-thread-width": `${threadWidth}px` } as CSSProperties}
+          onClick={(event) => {
+            // Message links (event.preventDefault) move the highlight; everything else
+            // clicked outside the highlighted message dismisses it.
+            if (event.defaultPrevented) {
+              return;
+            }
+            if (viewport.dismissMessageFocus(event.target)) {
+              props.onDismissMessageFocus?.();
+            }
+          }}
         >
           <div className="chat-main">
             <button
