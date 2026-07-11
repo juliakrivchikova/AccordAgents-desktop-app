@@ -4971,6 +4971,47 @@ test("thread prompt context includes all unseen thread messages and advances per
   assert.doesNotMatch(secondContext, /Thread second question\./);
 });
 
+test("resumed prompt context omits the participant's own replies but preserves them for resume fallback", async () => {
+  const codex = chatParticipant("codex-cli");
+  const conversation = chatConversation([codex]);
+  const prompts: string[] = [];
+  const runOptions: any[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      prompts.push(prompt);
+      runOptions.push(options);
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: prompts.length === 1 ? "First resumed answer." : "Second resumed answer.",
+        durationMs: 1,
+        sessionId: "provider-session-1"
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "resumed-context-run-1",
+    content: "@codex First resumed question."
+  });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "First resumed answer."));
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "resumed-context-run-2",
+    content: "@codex Second resumed question."
+  });
+  await waitFor(() => prompts.length === 2);
+
+  const resumedContext = promptContextBlockFromPrompt(prompts[1]);
+  const fallbackContext = promptContextBlockFromPrompt(runOptions[1]?.resumeFallbackPrompt ?? "");
+  assert.doesNotMatch(resumedContext, /First resumed answer\./);
+  assert.match(fallbackContext, /First resumed answer\./);
+});
+
 test("timeline prompt context defaults to latest three unseen messages", async () => {
   const codex = chatParticipant("codex-cli");
   const conversation = chatConversation([codex]);

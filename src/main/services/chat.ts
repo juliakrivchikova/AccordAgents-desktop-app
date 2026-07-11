@@ -227,6 +227,7 @@ type ChatPromptContextScope = ChatPromptContextPointerScope;
 
 interface PreparedPromptContext {
   block: string;
+  resumeFallbackBlock: string;
   pointerAdvance?: ChatPromptContextPointerAdvance;
 }
 
@@ -5485,14 +5486,15 @@ export class ChatService {
     const session = sessionState.session;
     const promptConversation = options.promptConversation ?? conversation;
     const workspacePath = options.workspacePath ?? await this.ensureHistoryFiles(promptConversation);
+    const isResumingSession = Boolean(session.sessionId);
     const preparedPromptContext = await this.preparePromptContextForRun(
       conversation,
       promptConversation,
       participant,
       triggerMessage,
-      options.promptContextScope ?? this.promptContextScopeForTrigger(triggerMessage)
+      options.promptContextScope ?? this.promptContextScopeForTrigger(triggerMessage),
+      isResumingSession
     );
-    const isResumingSession = Boolean(session.sessionId);
     const agentMode = this.agentModeForSession(session, participant);
     const oneTimePermissionApprovals = this.oneTimePermissionApprovalsForParticipant(conversation, participant);
     const appliedOneTimePermissionApprovalIds: string[] = [];
@@ -5524,7 +5526,7 @@ export class ChatService {
           includeRoleInstructions: usePromptRole || includeRefreshedRoleInstructions,
           agentMode,
           permissions,
-          promptContextBlock: preparedPromptContext.block
+          promptContextBlock: preparedPromptContext.resumeFallbackBlock
         })
       : undefined;
     const role = usePromptRole ? undefined : this.cliRoleOptions(participant, session, promptFallbackPrompt);
@@ -11440,13 +11442,15 @@ export class ChatService {
     promptConversation: Conversation,
     participant: ChatParticipant,
     triggerMessage: ChatMessage,
-    scope: ChatPromptContextScope
+    scope: ChatPromptContextScope,
+    isResumingSession: boolean
   ): Promise<PreparedPromptContext> {
     const settings = await this.settings.getPublicSettings();
     const policy = scope.type === "thread"
       ? settings.chatPromptContext.thread
       : settings.chatPromptContext.timeline;
     let block = "";
+    let resumeFallbackBlock = "";
     let pointerAdvance: ChatPromptContextPointerAdvance | undefined;
     await this.withChatMutation(conversation, async () => {
       const pointers = this.normalizedPromptContextPointers(conversation.metadata.promptContextPointers);
@@ -11454,9 +11458,21 @@ export class ChatService {
       const pointer = this.promptContextPointerForScope(participantPointers, scope);
       const records = this.promptContextRecordsAfterPointer(promptConversation.messages, scope, pointer, triggerMessage.id);
       const renderCandidates = records.filter((record) => record.message.id !== triggerMessage.id);
+      const resumedRenderCandidates = isResumingSession
+        ? renderCandidates.filter((record) => !this.isParticipantOwnPromptContextMessage(record.message, participant.id))
+        : renderCandidates;
       const advanceTo = records[records.length - 1];
-      const selection = this.selectPromptContextRecords(renderCandidates, policy);
+      const selection = this.selectPromptContextRecords(resumedRenderCandidates, policy);
+      const fallbackSelection = resumedRenderCandidates === renderCandidates
+        ? selection
+        : this.selectPromptContextRecords(renderCandidates, policy);
       block = this.promptContextBlock(scope, policy, selection.included, selection.omittedCount);
+      resumeFallbackBlock = this.promptContextBlock(
+        scope,
+        policy,
+        fallbackSelection.included,
+        fallbackSelection.omittedCount
+      );
       if (advanceTo) {
         pointerAdvance = {
           scope,
@@ -11470,7 +11486,11 @@ export class ChatService {
         };
       }
     });
-    return { block, pointerAdvance };
+    return { block, resumeFallbackBlock, pointerAdvance };
+  }
+
+  private isParticipantOwnPromptContextMessage(message: ChatMessage, participantId: string): boolean {
+    return message.role === "participant" && message.participantId === participantId;
   }
 
   private selectPromptContextRecords(
