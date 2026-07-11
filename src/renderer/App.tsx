@@ -398,7 +398,7 @@ function App(): JSX.Element {
           onSelect={(item) => {
             markActivityItemRead(state, item.id);
             state.setSelectedActivityItem({ ...item, read: true });
-            void conversationActions.openConversationAndFocusActivityItem(item, { timelineOnly: true });
+            void conversationActions.openConversationAndFocusActivityItem(item);
           }}
           onMarkRead={(item) => markActivityItemRead(state, item.id)}
           onCancelPending={(item) => void cancelPendingActivityItem(item)}

@@ -38,6 +38,13 @@ export interface ReconcileChatActivityRefreshOptions {
 export interface ApplyChatActivityItemPreferencesOptions {
   readItemIds?: ReadonlySet<string>;
   clearedItemIds?: ReadonlySet<string>;
+  clearedRecentThrough?: string;
+}
+
+export interface ChatActivityItemPreferences {
+  readItemIds: Set<string>;
+  clearedItemIds: Set<string>;
+  clearedRecentThrough?: string;
 }
 
 export function buildChatActivityItems(
@@ -135,9 +142,43 @@ export function applyChatActivityItemPreferences(
 ): ChatActivityItem[] {
   const readItemIds = options.readItemIds ?? new Set<string>();
   const clearedItemIds = options.clearedItemIds ?? new Set<string>();
+  const clearedRecentThroughMs = timeValue(options.clearedRecentThrough);
   return items
-    .filter((item) => !clearedItemIds.has(item.id))
+    .filter((item) => {
+      if (clearedItemIds.has(item.id)) {
+        return false;
+      }
+      const updatedMs = timeValue(item.updatedAt);
+      return item.status !== "recent"
+        || clearedRecentThroughMs <= 0
+        || updatedMs <= 0
+        || updatedMs > clearedRecentThroughMs;
+    })
     .map((item) => item.read === true || !readItemIds.has(item.id) ? item : { ...item, read: true });
+}
+
+export function chatActivityItemPreferencesAfterClear(
+  current: ChatActivityItemPreferences,
+  items: ChatActivityItem[],
+  itemId: string
+): ChatActivityItemPreferences {
+  const normalizedId = itemId.trim();
+  const readItemIds = new Set(current.readItemIds);
+  const clearedItemIds = new Set(current.clearedItemIds);
+  readItemIds.delete(normalizedId);
+  clearedItemIds.delete(normalizedId);
+  clearedItemIds.add(normalizedId);
+  const clearedItem = items.find((item) => item.id === normalizedId);
+  const clearsFinishedList = clearedItem?.status === "recent"
+    && !items.some((item) => item.status === "recent" && item.id !== normalizedId);
+  const clearedRecentThrough = clearsFinishedList
+    ? newerTimestamp(current.clearedRecentThrough, clearedItem.updatedAt)
+    : current.clearedRecentThrough;
+  return {
+    readItemIds,
+    clearedItemIds,
+    ...(clearedRecentThrough ? { clearedRecentThrough } : {})
+  };
 }
 
 export function buildChatActivityItemsForConversationUpdate(
@@ -545,6 +586,14 @@ function recentParticipantGroupKey(item: ChatActivityItem): string | undefined {
 function isNewerActivityItem(candidate: ChatActivityItem, existing: ChatActivityItem): boolean {
   const timeDelta = timeValue(candidate.updatedAt) - timeValue(existing.updatedAt);
   return timeDelta > 0 || (timeDelta === 0 && candidate.id.localeCompare(existing.id) > 0);
+}
+
+function newerTimestamp(left: string | undefined, right: string | undefined): string | undefined {
+  const leftMs = timeValue(left);
+  const rightMs = timeValue(right);
+  if (leftMs <= 0) return rightMs > 0 ? right : undefined;
+  if (rightMs <= 0) return left;
+  return rightMs > leftMs ? right : left;
 }
 
 function participantSummaries(conversation: Conversation): Map<string, ChatActivityParticipantSummary> {

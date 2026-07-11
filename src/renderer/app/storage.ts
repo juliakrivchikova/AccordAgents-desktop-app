@@ -12,6 +12,7 @@ import {
   normalizeAccordLauncherPreferences,
   parseAccordLauncherPreferencesJson
 } from "../../shared/accordLauncherPreferences";
+import type { ChatActivityItemPreferences } from "../../shared/chatActivity";
 import {
   type InitialAppSidebarWidths,
   persistActivityListWidth as persistActivityListWidthToStorage,
@@ -24,10 +25,7 @@ export type { AccordLauncherPreferences } from "../../shared/accordLauncherPrefe
 
 export type DismissedWarningMap = Record<string, string[]>;
 
-export interface ActivityItemPreferences {
-  readItemIds: Set<string>;
-  clearedItemIds: Set<string>;
-}
+export type ActivityItemPreferences = ChatActivityItemPreferences;
 
 const MAX_STORED_ACTIVITY_ITEM_IDS = 1_000;
 
@@ -40,9 +38,11 @@ export function readActivityItemPreferencesFromStorage(): ActivityItemPreference
       return emptyActivityItemPreferences();
     }
     const record = parsed as Record<string, unknown>;
+    const clearedRecentThrough = storedTimestamp(record.clearedRecentThrough);
     return {
       readItemIds: storedActivityItemIds(record.readItemIds),
-      clearedItemIds: storedActivityItemIds(record.clearedItemIds)
+      clearedItemIds: storedActivityItemIds(record.clearedItemIds),
+      ...(clearedRecentThrough ? { clearedRecentThrough } : {})
     };
   } catch {
     return emptyActivityItemPreferences();
@@ -53,7 +53,8 @@ export function persistActivityItemPreferences(preferences: ActivityItemPreferen
   try {
     window.localStorage.setItem(ACTIVITY_ITEM_PREFERENCES_STORAGE_KEY, JSON.stringify({
       readItemIds: [...preferences.readItemIds].slice(-MAX_STORED_ACTIVITY_ITEM_IDS),
-      clearedItemIds: [...preferences.clearedItemIds].slice(-MAX_STORED_ACTIVITY_ITEM_IDS)
+      clearedItemIds: [...preferences.clearedItemIds].slice(-MAX_STORED_ACTIVITY_ITEM_IDS),
+      clearedRecentThrough: preferences.clearedRecentThrough
     }));
   } catch {
     // Local storage persistence is best-effort.
@@ -176,4 +177,8 @@ function storedActivityItemIds(value: unknown): Set<string> {
   return new Set(value
     .filter((itemId): itemId is string => typeof itemId === "string" && itemId.trim().length > 0)
     .slice(-MAX_STORED_ACTIVITY_ITEM_IDS));
+}
+
+function storedTimestamp(value: unknown): string | undefined {
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : undefined;
 }

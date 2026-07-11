@@ -1,5 +1,8 @@
 import type { ChatActivityItem } from "../../shared/types";
-import { applyChatActivityItemPreferences } from "../../shared/chatActivity";
+import {
+  applyChatActivityItemPreferences,
+  chatActivityItemPreferencesAfterClear
+} from "../../shared/chatActivity";
 import type { AppState } from "./app-state";
 import { persistActivityItemPreferences } from "./storage";
 
@@ -33,12 +36,11 @@ export function clearActivityItem(state: AppState, itemId: string): void {
   const normalizedId = itemId.trim();
   if (!normalizedId) return;
   const current = state.activityItemPreferencesRef.current;
-  const readItemIds = new Set(current.readItemIds);
-  const clearedItemIds = new Set(current.clearedItemIds);
-  readItemIds.delete(normalizedId);
-  clearedItemIds.delete(normalizedId);
-  clearedItemIds.add(normalizedId);
-  const next = { readItemIds, clearedItemIds };
+  const next = chatActivityItemPreferencesAfterClear(
+    current,
+    state.activityItems,
+    normalizedId
+  );
   state.activityItemPreferencesRef.current = next;
   persistActivityItemPreferences(next);
   state.setActivityItems((items) => items.filter((item) => item.id !== normalizedId));
