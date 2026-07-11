@@ -2,6 +2,7 @@ import { Pencil } from "lucide-react";
 
 import type { ArtifactReadResult } from "../../../shared/types";
 import { artifactMemberLabel } from "../../../shared/artifacts";
+import { MarkdownText } from "../content/markdown-text";
 import { IconButton } from "../primitives";
 import { ArtifactApprovalBadge } from "./artifact-approval-badge";
 import { AccessArtifactForm, ReviseArtifactForm } from "./artifact-forms";
@@ -122,7 +123,9 @@ export function ArtifactDetailView(props: {
             {props.isOwner && <button type="button" className="artifact-secondary-action" disabled={props.busy} onClick={props.onStartAccess}>Access…</button>}
           </div>
           {detail.version.note && <div className="artifact-version-note">Note: {detail.version.note}</div>}
-          <pre className="artifact-content-pre">{detail.version.content}</pre>
+          <div className="artifact-content-markdown">
+            <MarkdownText content={detail.version.content} />
+          </div>
           <div className="artifact-history">
             <h5>History</h5>
             <ul>

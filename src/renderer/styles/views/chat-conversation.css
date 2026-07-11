@@ -1,6 +1,7 @@
 /* chat conversation styles. Keep token-driven; migrate rules into components as views are extracted. */
 
 .chat-view {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);

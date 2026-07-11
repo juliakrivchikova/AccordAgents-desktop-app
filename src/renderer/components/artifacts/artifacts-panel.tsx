@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useState } from "react";
 import { ArrowLeft, FilePlus2, X } from "lucide-react";
 
 import { ARTIFACT_USER_MEMBER } from "../../../shared/types";
@@ -13,6 +13,8 @@ import { ArtifactApprovalBadge } from "./artifact-approval-badge";
 import { ArtifactDetailView, formatArtifactTimestamp } from "./artifact-detail";
 import type { ArtifactCompareState } from "./artifact-detail";
 import { CreateArtifactForm } from "./artifact-forms";
+import { useArtifactsPanelResize } from "./use-artifacts-panel-resize";
+import { MarkdownText } from "../content/markdown-text";
 
 type PanelMode = "view" | "create" | "revise" | "access";
 
@@ -24,6 +26,7 @@ export function ArtifactsPanel(props: {
   onClose: () => void;
 }): JSX.Element {
   const selectedSummary = props.artifacts.find((artifact) => artifact.id === props.selectedId);
+  const panelResize = useArtifactsPanelResize();
   const [mode, setMode] = useState<PanelMode>("view");
   const [detail, setDetail] = useState<ArtifactReadResult | undefined>(undefined);
   const [viewVersion, setViewVersion] = useState<number | undefined>(undefined);
@@ -34,6 +37,7 @@ export function ArtifactsPanel(props: {
   const [compare, setCompare] = useState<ArtifactCompareState | undefined>(undefined);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const resizeLimits = panelResize.getLimits();
 
   const clearTransient = useCallback(() => {
     setError(undefined);
@@ -162,7 +166,27 @@ export function ArtifactsPanel(props: {
   const canEdit = detail ? detail.summary.owner === me || detail.summary.contributors.includes(me) : false;
 
   return (
-    <div className="artifacts-panel" data-testid="artifacts-panel">
+    <div
+      ref={panelResize.panelRef}
+      className="artifacts-panel"
+      data-resizing={panelResize.resizing ? "true" : undefined}
+      data-testid="artifacts-panel"
+      style={{ width: `${panelResize.panelWidth}px`, maxWidth: "88%" } as CSSProperties}
+    >
+      <div
+        className="artifacts-panel-resizer"
+        role="separator"
+        tabIndex={0}
+        aria-label="Resize artifacts panel"
+        aria-orientation="vertical"
+        aria-valuemin={resizeLimits.min}
+        aria-valuemax={resizeLimits.max}
+        aria-valuenow={panelResize.panelWidth}
+        title="Resize artifacts panel"
+        onPointerDown={panelResize.startResize}
+        onKeyDown={panelResize.resizeWithKeyboard}
+        onDoubleClick={panelResize.resetWidth}
+      />
       <div className="artifacts-panel-header">
         {props.selectedId || mode === "create" ? (
           <IconButton
@@ -203,7 +227,9 @@ export function ArtifactsPanel(props: {
               </button>
               <details>
                 <summary>Show current v{staleCurrent.version}</summary>
-                <pre className="artifact-content-pre">{staleCurrent.content}</pre>
+                <div className="artifact-content-markdown">
+                  <MarkdownText content={staleCurrent.content} />
+                </div>
               </details>
             </div>
           )}
