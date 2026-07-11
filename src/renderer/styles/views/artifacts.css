@@ -38,7 +38,7 @@
   flex-direction: column;
   background: var(--app-surface);
   border-left: 1px solid var(--app-border);
-  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-lg);
   z-index: 20;
 }
 
@@ -310,11 +310,11 @@
 }
 
 .artifact-diff-add {
-  color: var(--app-success, #257a46);
+  color: var(--app-success);
 }
 
 .artifact-diff-del {
-  color: var(--app-danger, #b3372f);
+  color: var(--app-danger);
 }
 
 .artifact-diff-hunk {
