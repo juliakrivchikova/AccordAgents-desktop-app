@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { ParticipantConfig } from "../../shared/types";
+import { CliAgentRunner, geminiMcpProxyLaunchArgs, syncGeminiMcpConfig } from "./cliAgents";
 import {
   buildGeminiExecInvocation,
   extractGeminiLogConversationId,
@@ -97,6 +100,8 @@ test("buildGeminiExecInvocation: auto mode and granted write skip tool confirmat
     }
   });
   assert.equal(write.args.includes("--dangerously-skip-permissions"), true);
+  assert.match(flagValue(auto.args, "--print") ?? "", /File modifications are limited to the selected repository workspace/);
+  assert.match(flagValue(write.args, "--print") ?? "", /Do not create, modify, move, or delete files outside that workspace/);
 });
 
 test("buildGeminiExecInvocation: app MCP url/token travel through the process environment", () => {
@@ -140,6 +145,81 @@ test("isGeminiResumeMissText: matches lost-conversation phrasing only", () => {
   assert.equal(isGeminiResumeMissText("No such conversation exists"), true);
   assert.equal(isGeminiResumeMissText("unknown conversation id"), true);
   assert.equal(isGeminiResumeMissText("Individual quota reached. Please upgrade your subscription."), false);
+  assert.equal(isGeminiResumeMissText("cannot load conversation state: disk I/O error"), false);
+  assert.equal(isGeminiResumeMissText("Failed to refresh session: cannot reach accounts.google.com"), false);
+  assert.equal(isGeminiResumeMissText("Cannot continue this conversation: quota exceeded"), false);
+});
+
+test("syncGeminiMcpConfig: malformed existing config remains byte-for-byte unchanged", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accordagents-gemini-config-malformed-"));
+  const configPath = path.join(dir, "mcp_config.json");
+  const original = "{\n  \"mcpServers\": {\n    \"foreign\": {}\n  },\n}\n";
+  try {
+    await writeFile(configPath, original, "utf8");
+    await assert.rejects(
+      () => syncGeminiMcpConfig(configPath, { command: "/Applications/AccordAgents", args: ["--accordagents-gemini-mcp-proxy"] }),
+      SyntaxError
+    );
+    assert.equal(await readFile(configPath, "utf8"), original);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("syncGeminiMcpConfig: preserves foreign keys and servers while installing the packaged launcher", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accordagents-gemini-config-merge-"));
+  const configPath = path.join(dir, "mcp_config.json");
+  try {
+    await writeFile(configPath, JSON.stringify({
+      theme: "dark",
+      mcpServers: { foreign: { command: "foreign-server" } }
+    }), "utf8");
+    await syncGeminiMcpConfig(configPath, {
+      command: "/Applications/AccordAgents.app/Contents/MacOS/AccordAgents",
+      args: ["--accordagents-gemini-mcp-proxy"]
+    });
+    const config = JSON.parse(await readFile(configPath, "utf8"));
+    assert.equal(config.theme, "dark");
+    assert.deepEqual(config.mcpServers.foreign, { command: "foreign-server" });
+    assert.deepEqual(config.mcpServers.accord_agents, {
+      command: "/Applications/AccordAgents.app/Contents/MacOS/AccordAgents",
+      args: ["--accordagents-gemini-mcp-proxy"]
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("geminiMcpProxyLaunchArgs: packaged and default-app launches use the dedicated proxy mode", () => {
+  assert.deepEqual(geminiMcpProxyLaunchArgs(false, "/repo"), ["--accordagents-gemini-mcp-proxy"]);
+  assert.deepEqual(geminiMcpProxyLaunchArgs(true, "/repo"), ["/repo", "--accordagents-gemini-mcp-proxy"]);
+  assert.deepEqual(geminiMcpProxyLaunchArgs(true, "."), [path.resolve("."), "--accordagents-gemini-mcp-proxy"]);
+});
+
+test("compactGeminiSession: aborts when resume recovery started a fresh conversation", async () => {
+  const runner = new CliAgentRunner();
+  let calls = 0;
+  (runner as any).runGeminiOneShot = async () => {
+    calls += 1;
+    return {
+      participant,
+      ok: true,
+      content: "This is not a summary of the lost conversation.",
+      sessionId: "new-session",
+      sessionRestarted: true
+    };
+  };
+  const result = await (runner as any).compactGeminiSession(
+    participant,
+    undefined,
+    "chat",
+    undefined,
+    { sessionId: "lost-session" }
+  );
+  assert.equal(calls, 1);
+  assert.equal(result.ok, false);
+  assert.equal(result.sessionId, "lost-session");
+  assert.match(result.error, /conversation is unavailable; compaction was aborted/);
 });
 
 test("extractGeminiLogConversationId: reads real glog print-mode lines", () => {

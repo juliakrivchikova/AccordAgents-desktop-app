@@ -148,6 +148,43 @@ test("compactParticipant refreshes stored context usage from the session after c
   }
 });
 
+test("compactParticipant schedules prompt-fallback role redelivery after Gemini session swap", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-gemini-role-"));
+  try {
+    const participant = chatParticipant({ kind: "gemini-cli" });
+    const session = {
+      ...chatSession(participant, "gemini-before"),
+      roleRuntime: "prompt-fallback" as const
+    };
+    const conversation = chatConversation([participant], [session]);
+    const { service, storage } = testService({
+      conversation,
+      compactSession: async (runParticipant) => ({
+        participant: runParticipant,
+        ok: true,
+        sessionId: "gemini-after"
+      })
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+
+    await service.compactParticipant({
+      conversationId: conversation.id,
+      participantId: participant.id,
+      runId: "compact-gemini-role"
+    });
+
+    const storedSession = storage.current.metadata.participantSessions[0] as ChatParticipantSession;
+    assert.equal(storedSession.sessionId, "gemini-after");
+    assert.equal(storedSession.runtimeConfigVersion, undefined);
+    const next = await (service as any).sessionForParticipant(storage.current, participant);
+    assert.equal(next.instructionsRefreshed, true);
+    assert.equal(typeof next.session.runtimeConfigVersion, "number");
+    assert.ok(next.session.runtimeConfigVersion > 0);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("compactParticipant preserves sibling active runs while compacting an idle participant", async () => {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-sibling-run-"));
   try {

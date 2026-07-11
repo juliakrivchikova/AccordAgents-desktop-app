@@ -73,6 +73,7 @@ const CODEX_AUTO_APPROVALS_REVIEWER = "guardian_subagent";
 // Gemini 3.x models served through Antigravity share a 1M-token context window;
 // used when no model is configured so the context indicator still renders.
 const GEMINI_DEFAULT_CONTEXT_WINDOW_TOKENS = 1_048_576;
+const GEMINI_MCP_PROXY_ARG = "--accordagents-gemini-mcp-proxy";
 const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 const APP_TOOL_PERMISSION_TOOL = "app_tool_permission";
 const APP_TOOL_PERMISSION_MCP_TOOL = `mcp__accord_agents__${APP_TOOL_PERMISSION_TOOL}`;
@@ -352,6 +353,56 @@ function dedupeProviderModels(models: ProviderModel[]): ProviderModel[] {
     deduped.push({ ...model, id });
   }
   return deduped;
+}
+
+export interface GeminiMcpConfigEntry {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+}
+
+export async function syncGeminiMcpConfig(
+  configPath: string,
+  desiredEntry: GeminiMcpConfigEntry
+): Promise<void> {
+  let config: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(await readFile(configPath, "utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Antigravity MCP config must contain a JSON object.");
+    }
+    config = parsed as Record<string, unknown>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      throw error;
+    }
+    config = {};
+  }
+  if (
+    config.mcpServers !== undefined &&
+    (!config.mcpServers || typeof config.mcpServers !== "object" || Array.isArray(config.mcpServers))
+  ) {
+    throw new Error("Antigravity MCP config field mcpServers must contain a JSON object.");
+  }
+  const servers = (config.mcpServers ?? {}) as Record<string, unknown>;
+  if (JSON.stringify(servers.accord_agents) === JSON.stringify(desiredEntry)) {
+    return;
+  }
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, `${JSON.stringify({
+    ...config,
+    mcpServers: { ...servers, accord_agents: desiredEntry }
+  }, null, 2)}\n`, "utf8");
+}
+
+export function geminiMcpProxyLaunchArgs(
+  defaultApp = Boolean(process.defaultApp),
+  defaultAppPath = process.argv[1]
+): string[] {
+  const appPath = defaultApp && defaultAppPath?.trim()
+    ? path.resolve(defaultAppPath.trim())
+    : undefined;
+  return [...(appPath ? [appPath] : []), GEMINI_MCP_PROXY_ARG];
 }
 
 export class CliAgentRunner {
@@ -963,7 +1014,7 @@ export class CliAgentRunner {
       if (nonSuccess && !content && !options.allowEmptyContent) {
         throw new Error(`Antigravity CLI run ended with status ${parsed.status}${parsed.error ? `: ${this.truncateText(parsed.error, MAX_CLI_ERROR_CHARS)}` : "."}`);
       }
-      if (nonSuccess) {
+      if (nonSuccess && content) {
         warnings.push(
           `${participant.label}: Antigravity reported a non-fatal run issue (${this.truncateText(parsed.error || parsed.status || "ERROR", 160)}) but returned a response.`
         );
@@ -990,7 +1041,7 @@ export class CliAgentRunner {
         ? { ...runResult, warnings: [...(runResult.warnings ?? []), ...warnings] }
         : runResult;
     } catch (error) {
-      if (options.sessionId && (error instanceof CliGeminiResumeMissError || this.isResumeMiss(error) || isGeminiResumeMissText(this.errorText(error)))) {
+      if (options.sessionId && (error instanceof CliGeminiResumeMissError || isGeminiResumeMissText(this.errorText(error)))) {
         const restarted = await this.runGeminiOneShot(participant, options.resumeFallbackPrompt ?? prompt, repoPath, kind, signal, {
           persistSession: options.persistSession,
           extraReadableDirs: options.extraReadableDirs,
@@ -1129,6 +1180,15 @@ export class CliAgentRunner {
       agentEnvKey: options.agentEnvKey,
       timeoutMs
     });
+    if (summaryRun.sessionRestarted) {
+      return {
+        participant,
+        ok: false,
+        sessionId: options.sessionId,
+        providerNative: false,
+        error: "The previous Antigravity conversation is unavailable; compaction was aborted."
+      };
+    }
     if (!summaryRun.ok || !summaryRun.content.trim()) {
       return {
         participant,
@@ -1195,33 +1255,10 @@ export class CliAgentRunner {
       try {
         const configDir = path.join(homedir(), ".gemini", "config");
         const configPath = path.join(configDir, "mcp_config.json");
-        const desiredEntry = {
+        await syncGeminiMcpConfig(configPath, {
           command: process.execPath,
-          args: [path.join(__dirname, "geminiMcpProxy.js")],
-          env: { ELECTRON_RUN_AS_NODE: "1" }
-        };
-        let config: Record<string, unknown> = {};
-        try {
-          const existing = (await readFile(configPath, "utf8")).trim();
-          if (existing) {
-            const parsed = JSON.parse(existing) as unknown;
-            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-              config = parsed as Record<string, unknown>;
-            }
-          }
-        } catch {
-          // Missing or unreadable config: start from an empty object.
-        }
-        const servers =
-          config.mcpServers && typeof config.mcpServers === "object" && !Array.isArray(config.mcpServers)
-            ? (config.mcpServers as Record<string, unknown>)
-            : {};
-        if (JSON.stringify(servers.accord_agents) === JSON.stringify(desiredEntry)) {
-          return undefined;
-        }
-        config.mcpServers = { ...servers, accord_agents: desiredEntry };
-        await mkdir(configDir, { recursive: true });
-        await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+          args: geminiMcpProxyLaunchArgs()
+        });
         return undefined;
       } catch (error) {
         return this.errorText(error);

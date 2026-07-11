@@ -4532,7 +4532,19 @@ test("chat creation is blocked when no local CLI is installed", async () => {
 
   await assert.rejects(
     () => service.createConversation({ title: "Fresh chat", participants: [] }),
-    /Install Codex CLI or Claude Code/
+    /Install Codex CLI, Claude Code, or Gemini CLI/
+  );
+});
+
+test("preferred chat provider falls back to enabled Gemini when other providers are unavailable", () => {
+  const { service } = testService();
+  assert.equal(
+    (service as any).preferredChatProviderKind([
+      { kind: "codex-cli", enabled: false },
+      { kind: "claude-code", enabled: false },
+      { kind: "gemini-cli", enabled: true }
+    ], []),
+    "gemini-cli"
   );
 });
 

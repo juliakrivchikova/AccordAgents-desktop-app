@@ -8,15 +8,16 @@
 //   ACCORD_AGENTS_MCP_URL   e.g. http://127.0.0.1:<port>/mcp
 //   ACCORD_AGENTS_MCP_TOKEN per-run bearer token
 //
-// The script is executed by the Electron binary with ELECTRON_RUN_AS_NODE=1
-// (or by plain node in tests). It must stay dependency-free: node builtins
-// only, no imports from app modules.
+// In packaged builds the Electron binary starts the app with the dedicated
+// proxy argv flag. The main entrypoint dispatches here before initializing the
+// desktop app. The module can also be executed directly by plain Node in tests.
+// Keep it dependency-free: node builtins only, no imports from app modules.
 
 import http from "node:http";
 
 const REQUEST_TIMEOUT_MS = 10 * 60_000;
 
-function main(): void {
+export function runGeminiMcpProxy(): void {
   const url = process.env.ACCORD_AGENTS_MCP_URL;
   const token = process.env.ACCORD_AGENTS_MCP_TOKEN;
   if (!url || !token) {
@@ -126,4 +127,6 @@ function messageId(message: unknown): unknown {
   return undefined;
 }
 
-main();
+if (require.main === module) {
+  runGeminiMcpProxy();
+}
