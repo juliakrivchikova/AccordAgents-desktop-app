@@ -173,7 +173,8 @@ function ProviderFilterSwitch(props: {
   const options: Array<{ value: ProviderFilter; label: string }> = [
     { value: "all", label: "All" },
     { value: "codex-cli", label: "Codex" },
-    { value: "claude-code", label: "Claude" }
+    { value: "claude-code", label: "Claude" },
+    { value: "gemini-cli", label: "Gemini" }
   ];
   return (
     <div className="plugins-provider-switch" aria-label="Provider filter">

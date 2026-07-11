@@ -34,6 +34,12 @@ function chatShellPermissionLine({ agentMode, providerKind, permissions, canRequ
   if (agentMode === "auto" && providerKind === "codex-cli") {
     return "Codex Auto-review mode enables native command execution inside the workspace-write sandbox; eligible provider approvals are handled by Codex Auto-review.";
   }
+  if (agentMode === "auto" && providerKind === "gemini-cli") {
+    const denyNote = permissions.shell.rules.some((rule) => rule.action === "deny")
+      ? " Configured deny rules are hard stops: never run a matching command."
+      : "";
+    return `Auto-review runs Antigravity with tool confirmations skipped (print mode cannot prompt), so only run commands that are safe and reversible.${denyNote}`;
+  }
   if (agentMode === "auto") {
     const denyNote = permissions.shell.rules.some((rule) => rule.action === "deny")
       ? " Configured deny rules remain hard stops for matching commands."
@@ -52,7 +58,10 @@ function chatShellPermissionLine({ agentMode, providerKind, permissions, canRequ
   const denyGuidance = permissions.shell.rules.some((rule) => rule.action === "deny")
     ? "Deny rules are strict hard stops for matching commands; do not request escalation for commands that match a deny rule."
     : "Deny rules are strict if configured.";
-  return `Shell command rules: ${chatShellRulesText(permissions.shell.rules)}. ${denyGuidance} Ask rules require native CLI approval; allow rules may run without extra confirmation when supported. If the current task requires a shell command outside these rules, ${requestGuidance}`;
+  const askGuidance = providerKind === "gemini-cli"
+    ? "Antigravity print mode cannot prompt for approval, so treat ask rules as blocked for this turn."
+    : "Ask rules require native CLI approval; allow rules may run without extra confirmation when supported.";
+  return `Shell command rules: ${chatShellRulesText(permissions.shell.rules)}. ${denyGuidance} ${askGuidance} If the current task requires a shell command outside these rules, ${requestGuidance}`;
 }
 
 function chatWorkspacePermissionLine(options: ChatPermissionPromptLinesOptions): string {

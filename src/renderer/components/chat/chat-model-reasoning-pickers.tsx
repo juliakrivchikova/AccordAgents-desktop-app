@@ -103,7 +103,7 @@ export function ChatModelPicker(props: {
           className="chat-model-picker-manual"
           value={model ?? ""}
           onChange={(event) => props.onChange(event.target.value)}
-          placeholder={props.kind === "claude-code" ? "opus, sonnet, haiku..." : "gpt-5.5..."}
+          placeholder={props.kind === "claude-code" ? "opus, sonnet, haiku..." : props.kind === "gemini-cli" ? "Gemini 3.5 Flash (Medium)..." : "gpt-5.5..."}
         />
       )}
       {status && <small className="chat-model-picker-status">{status}</small>}

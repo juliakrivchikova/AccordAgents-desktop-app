@@ -1,3 +1,4 @@
+import path from "node:path";
 import type {
   ChatAgentMode,
   ChatAgentPermissions,
@@ -157,6 +158,89 @@ export function parseGeminiExecResult(stdout: string): GeminiExecResult | undefi
 
 export function isGeminiResumeMissText(text: string): boolean {
   return /(?:conversation|trajectory)\s+[\w-]*\s*(?:not found|does not exist)|no such conversation|unknown conversation/i.test(text);
+}
+
+// --- Live-run tailing -------------------------------------------------------
+//
+// agy print mode writes nothing useful to stdout until the final result JSON,
+// but two on-disk artifacts update while the run progresses:
+//   1. the glog file passed via `--log-file`, which names the conversation id
+//      within the first seconds ("Print mode: conversation=<uuid>, sending
+//      message" / "Print mode: resuming conversation <uuid>"), and
+//   2. `~/.gemini/antigravity-cli/brain/<conversationId>/.system_generated/
+//      logs/transcript.jsonl`, a step-indexed JSONL of executed tool steps
+//      (RUN_COMMAND, VIEW_FILE, SEARCH_WEB, ...).
+// The runner tails both: the log for an early session id (so Stop/crash does
+// not lose the conversation), the transcript for coarse live activity events.
+
+const GEMINI_UUID_PATTERN = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
+const GEMINI_LOG_CONVERSATION_PATTERNS: RegExp[] = [
+  new RegExp(`Print mode: conversation=(${GEMINI_UUID_PATTERN})`),
+  new RegExp(`Print mode: resuming conversation (${GEMINI_UUID_PATTERN})`),
+  new RegExp(`Stream goroutine exited for (${GEMINI_UUID_PATTERN})`)
+];
+
+export function extractGeminiLogConversationId(logText: string): string | undefined {
+  for (const pattern of GEMINI_LOG_CONVERSATION_PATTERNS) {
+    const match = logText.match(pattern);
+    if (match?.[1]) {
+      return match[1].toLowerCase();
+    }
+  }
+  return undefined;
+}
+
+export function geminiTranscriptPathForConversation(homeDir: string, conversationId: string): string {
+  return path.join(homeDir, ".gemini", "antigravity-cli", "brain", conversationId, ".system_generated", "logs", "transcript.jsonl");
+}
+
+export type GeminiActivityKind = "command" | "tool" | "web" | "file-edit";
+
+export interface GeminiTranscriptActivity {
+  label: string;
+  kind: GeminiActivityKind;
+}
+
+// Executed-step types observed in real transcripts. PLANNER_RESPONSE lines are
+// intentionally ignored: they narrate intent (and repeat the tool call the
+// executed step will log again), so emitting them would duplicate activity.
+const GEMINI_TRANSCRIPT_TYPE_ACTIVITY: Record<string, GeminiTranscriptActivity> = {
+  RUN_COMMAND: { label: "Running command", kind: "command" },
+  VIEW_FILE: { label: "Reading file", kind: "tool" },
+  VIEW_FILE_OUTLINE: { label: "Reading file outline", kind: "tool" },
+  VIEW_CODE_ITEM: { label: "Reading code", kind: "tool" },
+  LIST_DIR: { label: "Listing files", kind: "tool" },
+  FIND_BY_NAME: { label: "Scanning files", kind: "tool" },
+  GREP_SEARCH: { label: "Searching files", kind: "tool" },
+  CODEBASE_SEARCH: { label: "Searching code", kind: "tool" },
+  SEARCH_WEB: { label: "Using web search", kind: "web" },
+  READ_URL_CONTENT: { label: "Fetching URL", kind: "web" },
+  WRITE_TO_FILE: { label: "Updating files", kind: "file-edit" },
+  REPLACE_FILE_CONTENT: { label: "Updating files", kind: "file-edit" },
+  MULTI_REPLACE_FILE_CONTENT: { label: "Updating files", kind: "file-edit" },
+  ERROR_MESSAGE: { label: "Handling a tool error", kind: "tool" },
+  GENERIC: { label: "Using tool", kind: "tool" }
+};
+
+export function parseGeminiTranscriptActivity(line: string): GeminiTranscriptActivity | undefined {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{")) {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const type = (parsed as Record<string, unknown>).type;
+  if (typeof type !== "string") {
+    return undefined;
+  }
+  return GEMINI_TRANSCRIPT_TYPE_ACTIVITY[type];
 }
 
 function parseGeminiUsage(value: unknown): GeminiExecUsage | undefined {

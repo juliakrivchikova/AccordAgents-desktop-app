@@ -40,8 +40,11 @@ import {
 } from "./codexExec";
 import {
   buildGeminiExecInvocation,
+  extractGeminiLogConversationId,
+  geminiTranscriptPathForConversation,
   isGeminiResumeMissText,
-  parseGeminiExecResult
+  parseGeminiExecResult,
+  parseGeminiTranscriptActivity
 } from "./geminiExec";
 import type { ParticipantRunResult } from "./providers";
 
@@ -906,12 +909,13 @@ export class CliAgentRunner {
     let logDir: string | undefined;
     try {
       logDir = await mkdtemp(path.join(tmpdir(), "accordagents-gemini-"));
+      const logFilePath = path.join(logDir, "run.log");
       const invocation = buildGeminiExecInvocation({
         participant,
         prompt: effectivePrompt,
         repoPath,
         kind,
-        logFilePath: path.join(logDir, "run.log"),
+        logFilePath,
         options: {
           sessionId: options.sessionId,
           extraReadableDirs: options.extraReadableDirs,
@@ -925,12 +929,22 @@ export class CliAgentRunner {
       if (options.sessionId) {
         this.reportSessionId(options.onSessionId, options.sessionId);
       }
-      const result = await runCommand("agy", invocation.args, {
-        cwd: repoPath,
-        timeoutMs: options.timeoutMs ?? this.runTimeoutMs,
-        env: invocation.env,
-        signal
-      });
+      // Tail the glog file for an early conversation id (so Stop/crash cannot
+      // lose the session) and the brain transcript for live activity events.
+      const tail = options.onSessionId || options.onOutput
+        ? this.startGeminiRunTail(logFilePath, options.sessionId, options)
+        : undefined;
+      let result: Awaited<ReturnType<typeof runCommand>>;
+      try {
+        result = await runCommand("agy", invocation.args, {
+          cwd: repoPath,
+          timeoutMs: options.timeoutMs ?? this.runTimeoutMs,
+          env: invocation.env,
+          signal
+        });
+      } finally {
+        tail?.stop();
+      }
       const parsed = parseGeminiExecResult(result.stdout);
       if (!parsed) {
         throw new Error("Antigravity CLI completed without a parseable JSON result.");
@@ -998,6 +1012,89 @@ export class CliAgentRunner {
         await rm(logDir, { recursive: true, force: true }).catch(() => undefined);
       }
     }
+  }
+
+  // Polls the per-run glog file until the conversation id appears, then tails
+  // the conversation's brain transcript (executed tool steps) and emits coarse
+  // activity events. Resumed sessions prime past pre-existing transcript lines
+  // so only this turn's steps surface.
+  private startGeminiRunTail(
+    logFilePath: string,
+    initialSessionId: string | undefined,
+    options: CliAgentRunOptions
+  ): { stop: () => void } {
+    let sessionId: string | undefined;
+    let transcriptPath: string | undefined;
+    let transcriptPrimed = false;
+    let transcriptLinesSeen = 0;
+    let scanning = false;
+
+    const adoptSessionId = (id: string): void => {
+      if (sessionId === id) {
+        return;
+      }
+      sessionId = id;
+      transcriptPath = geminiTranscriptPathForConversation(homedir(), id);
+      transcriptPrimed = false;
+      transcriptLinesSeen = 0;
+      this.reportSessionId(options.onSessionId, id);
+    };
+    if (initialSessionId) {
+      adoptSessionId(initialSessionId);
+    }
+
+    const scan = async (): Promise<void> => {
+      if (scanning) {
+        return;
+      }
+      scanning = true;
+      try {
+        // Keep watching the log even after an id is known: a resume miss can
+        // restart the run under a fresh conversation id.
+        const found = extractGeminiLogConversationId(await this.readOptionalFile(logFilePath));
+        if (found && found !== sessionId) {
+          adoptSessionId(found);
+        }
+        if (!transcriptPath || !options.onOutput) {
+          return;
+        }
+        const content = await this.readOptionalFile(transcriptPath);
+        if (!content) {
+          return;
+        }
+        const lines = content.split("\n");
+        // The trailing segment is either "" (file ends with \n) or a partial
+        // line still being written; both are excluded from the complete count.
+        const completeCount = Math.max(lines.length - 1, 0);
+        if (!transcriptPrimed) {
+          transcriptPrimed = true;
+          transcriptLinesSeen = initialSessionId && sessionId === initialSessionId ? completeCount : 0;
+        }
+        for (let index = transcriptLinesSeen; index < completeCount; index += 1) {
+          const activity = parseGeminiTranscriptActivity(lines[index] ?? "");
+          if (activity) {
+            this.emitLiveOutput(options.onOutput, "tool", `${activity.label}\n`, undefined, {
+              activityKind: activity.kind,
+              activityStatus: "started"
+            });
+          }
+        }
+        transcriptLinesSeen = Math.max(transcriptLinesSeen, completeCount);
+      } finally {
+        scanning = false;
+      }
+    };
+
+    const interval = setInterval(() => {
+      void scan();
+    }, 300);
+    interval.unref();
+    void scan();
+    return {
+      stop: (): void => {
+        clearInterval(interval);
+      }
+    };
   }
 
   private async compactGeminiSession(

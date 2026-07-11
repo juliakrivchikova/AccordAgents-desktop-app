@@ -1144,7 +1144,7 @@ export class AppMcpService {
                       properties: {
                         handle: { type: "string" },
                         roleConfigId: { type: "string" },
-                        kind: { type: "string", enum: ["codex-cli", "claude-code"] },
+                        kind: { type: "string", enum: ["codex-cli", "claude-code", "gemini-cli"] },
                         model: { type: "string" },
                         reasoningEffort: {
                           type: "string",
@@ -1218,7 +1218,7 @@ export class AppMcpService {
                       properties: {
                         handle: { type: "string" },
                         roleConfigId: { type: "string" },
-                        kind: { type: "string", enum: ["codex-cli", "claude-code"] },
+                        kind: { type: "string", enum: ["codex-cli", "claude-code", "gemini-cli"] },
                         model: { type: "string" },
                         reasoningEffort: {
                           type: "string",
