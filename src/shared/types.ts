@@ -1862,6 +1862,153 @@ export interface StartReviewResult {
   pendingDecisions?: PlanDecisionRequest[];
 }
 
+// --- Artifacts -------------------------------------------------------------
+// Named, versioned, signable work products scoped to one chat. Artifacts live
+// in their own SQLite tables (not in conversation payloads) so they survive
+// context compaction, agent session resets, and app restarts. Members are
+// addressed by normalized handle ("gera") or the reserved "user" for the human.
+
+export const ARTIFACT_USER_MEMBER = "user";
+
+export interface ArtifactSignature {
+  signer: string;
+  signedAt: string;
+}
+
+export interface ArtifactVersionMeta {
+  version: number;
+  author: string;
+  note?: string;
+  createdAt: string;
+  signatures: ArtifactSignature[];
+}
+
+export interface ArtifactVersionContent extends ArtifactVersionMeta {
+  content: string;
+}
+
+export type ArtifactApprovalState = "none-required" | "unsigned" | "partially-signed" | "approved";
+
+export interface ArtifactApproval {
+  state: ArtifactApprovalState;
+  requiredSigners: string[];
+  // Required signers who have signed the CURRENT (head) version.
+  signedCurrent: string[];
+}
+
+export interface ArtifactSummary {
+  id: string;
+  conversationId: string;
+  name: string;
+  owner: string;
+  contributors: string[];
+  labels: string[];
+  headVersion: number;
+  createdAt: string;
+  updatedAt: string;
+  approval: ArtifactApproval;
+}
+
+export interface ArtifactReadResult {
+  summary: ArtifactSummary;
+  version: ArtifactVersionContent;
+  history?: ArtifactVersionMeta[];
+}
+
+export interface ArtifactDiffResult {
+  summary: ArtifactSummary;
+  fromVersion: number;
+  toVersion: number;
+  diff: string;
+}
+
+export type ArtifactErrorCode =
+  | "not_found"
+  | "access_denied"
+  | "stale_version"
+  | "name_taken"
+  | "invalid_request";
+
+export interface ArtifactError {
+  code: ArtifactErrorCode;
+  message: string;
+  // For stale_version: the version the artifact is actually at, plus its content
+  // so the editor can redo the change on top of it.
+  currentVersion?: number;
+  current?: ArtifactVersionContent;
+}
+
+export type ArtifactResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: ArtifactError };
+
+export interface ListArtifactsRequest {
+  conversationId: string;
+}
+
+export interface ReadArtifactRequest {
+  conversationId: string;
+  artifactId?: string;
+  name?: string;
+  version?: number;
+  includeHistory?: boolean;
+}
+
+export interface DiffArtifactRequest {
+  conversationId: string;
+  artifactId?: string;
+  name?: string;
+  fromVersion: number;
+  toVersion: number;
+}
+
+export interface CreateArtifactRequest {
+  conversationId: string;
+  name: string;
+  content: string;
+  note?: string;
+  contributors?: string[];
+  requiredSigners?: string[];
+  labels?: string[];
+}
+
+export interface ReviseArtifactRequest {
+  conversationId: string;
+  artifactId?: string;
+  name?: string;
+  baseVersion: number;
+  content: string;
+  note?: string;
+}
+
+export interface RenameArtifactRequest {
+  conversationId: string;
+  artifactId?: string;
+  name?: string;
+  newName: string;
+}
+
+export interface SignArtifactRequest {
+  conversationId: string;
+  artifactId?: string;
+  name?: string;
+  version?: number;
+}
+
+export interface UpdateArtifactAccessRequest {
+  conversationId: string;
+  artifactId?: string;
+  name?: string;
+  owner?: string;
+  contributors?: string[];
+  requiredSigners?: string[];
+  labels?: string[];
+}
+
+export interface ArtifactsUpdatedEvent {
+  conversationId: string;
+}
+
 export interface AppBridge {
   getAppVersion(): Promise<string>;
   openExternal(url: string): Promise<void>;
@@ -1942,6 +2089,15 @@ export interface AppBridge {
   recoverImplementationPlan(request: RecoverImplementationPlanRequest): Promise<StartReviewResult>;
   reviseImplementationPlan(request: ReviseImplementationPlanRequest): Promise<StartReviewResult>;
   cancelReview(runId: string): Promise<void>;
+  listArtifacts(request: ListArtifactsRequest): Promise<ArtifactResult<ArtifactSummary[]>>;
+  readArtifact(request: ReadArtifactRequest): Promise<ArtifactResult<ArtifactReadResult>>;
+  diffArtifactVersions(request: DiffArtifactRequest): Promise<ArtifactResult<ArtifactDiffResult>>;
+  createArtifact(request: CreateArtifactRequest): Promise<ArtifactResult<ArtifactReadResult>>;
+  reviseArtifact(request: ReviseArtifactRequest): Promise<ArtifactResult<ArtifactReadResult>>;
+  renameArtifact(request: RenameArtifactRequest): Promise<ArtifactResult<ArtifactSummary>>;
+  signArtifact(request: SignArtifactRequest): Promise<ArtifactResult<ArtifactSummary>>;
+  updateArtifactAccess(request: UpdateArtifactAccessRequest): Promise<ArtifactResult<ArtifactSummary>>;
+  onArtifactsUpdated(callback: (event: ArtifactsUpdatedEvent) => void): () => void;
   onReviewProgress(callback: (progress: ReviewProgress) => void): () => void;
   onConversationUpdated(callback: (conversation: Conversation) => void): () => void;
 }

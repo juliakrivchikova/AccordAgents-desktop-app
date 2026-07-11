@@ -52,11 +52,35 @@ import type {
   UserSkillSearchRequest,
   UserSkillSummary
 } from "../shared/types";
+import type {
+  CreateArtifactRequest,
+  DiffArtifactRequest,
+  ListArtifactsRequest,
+  ReadArtifactRequest,
+  RenameArtifactRequest,
+  ReviseArtifactRequest,
+  SignArtifactRequest,
+  UpdateArtifactAccessRequest
+} from "../shared/types";
+import { ARTIFACT_USER_MEMBER } from "../shared/types";
+import { artifactMembersForConversation } from "../shared/artifacts";
 import { normalizeExternalUrlForOpen } from "../shared/externalLinks";
+import { ArtifactService } from "./services/artifacts";
+import { ArtifactStore } from "./services/artifactStore";
 import { ChatService } from "./services/chat";
 import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
+import {
+  APP_ARTIFACT_CREATE_TOOL,
+  APP_ARTIFACT_DIFF_TOOL,
+  APP_ARTIFACT_LIST_TOOL,
+  APP_ARTIFACT_READ_TOOL,
+  APP_ARTIFACT_RENAME_TOOL,
+  APP_ARTIFACT_REVISE_TOOL,
+  APP_ARTIFACT_SET_ACCESS_TOOL,
+  APP_ARTIFACT_SIGN_TOOL
+} from "./services/appMcp";
 import { AppSkillsService } from "./services/appSkills";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { bootstrapAppUpdater } from "./services/appUpdater";
@@ -163,7 +187,138 @@ appMcpService.setChatParticipantRequestStatusHandler((actor, request) => chatSer
 appMcpService.setChatReactHandler((actor, request) => chatService.reactToMessageFromTool(actor, request));
 appMcpService.setChatSendMessageHandler((actor, request) => chatService.sendChatMessageFromTool(actor, request));
 appMcpService.setChatSetTitleHandler((actor, request) => chatService.setChatTitleFromTool(actor, request));
+// Artifacts persist in their own tables of the same SQLite database as
+// conversations, but independently of conversation payloads.
+const artifactStore = new ArtifactStore(path.join(app.getPath("userData"), "accordagents.sqlite3"));
+const artifactService = new ArtifactService({
+  store: artifactStore,
+  getMembers: async (conversationId) => {
+    const conversation = await storageService.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return undefined;
+    }
+    return artifactMembersForConversation(conversation);
+  },
+  postNote: (conversationId, content) => chatService.postArtifactChatNote(conversationId, content),
+  onChanged: (conversationId) => {
+    mainWindow?.webContents.send("artifacts:updated", { conversationId });
+  },
+  logger: (event, payload) => {
+    void debugLogService.write(event, payload);
+  }
+});
+appMcpService.setArtifactToolHandler(async (actor, toolName, request) => {
+  let member: string;
+  try {
+    member = await chatService.artifactActorMember(actor);
+  } catch (error) {
+    return {
+      ok: false,
+      error: { code: "access_denied", message: error instanceof Error ? error.message : String(error) }
+    };
+  }
+  return dispatchArtifactTool(member, actor.conversationId, toolName, request);
+});
 const activeReviews = new Map<string, AbortController>();
+
+function artifactToolNumber(value: unknown): number {
+  if (typeof value === "number") {
+    return value;
+  }
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    return Number(value.trim());
+  }
+  return Number.NaN;
+}
+
+function artifactToolOptionalNumber(value: unknown): number | undefined {
+  return value === undefined || value === null ? undefined : artifactToolNumber(value);
+}
+
+function artifactToolString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function artifactToolStringArray(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+async function dispatchArtifactTool(
+  member: string,
+  conversationId: string,
+  toolName: string,
+  rawRequest: unknown
+): Promise<unknown> {
+  const args = rawRequest && typeof rawRequest === "object" && !Array.isArray(rawRequest)
+    ? rawRequest as Record<string, unknown>
+    : {};
+  const ref = {
+    artifactId: artifactToolString(args.artifactId),
+    name: artifactToolString(args.name)
+  };
+  switch (toolName) {
+    case APP_ARTIFACT_LIST_TOOL:
+      return artifactService.list(member, conversationId);
+    case APP_ARTIFACT_READ_TOOL:
+      return artifactService.read(member, {
+        conversationId,
+        ...ref,
+        version: artifactToolOptionalNumber(args.version),
+        includeHistory: args.includeHistory === true
+      });
+    case APP_ARTIFACT_DIFF_TOOL:
+      return artifactService.diff(member, {
+        conversationId,
+        ...ref,
+        fromVersion: artifactToolNumber(args.fromVersion),
+        toVersion: artifactToolNumber(args.toVersion)
+      });
+    case APP_ARTIFACT_CREATE_TOOL:
+      return artifactService.create(member, {
+        conversationId,
+        name: typeof args.name === "string" ? args.name : "",
+        content: typeof args.content === "string" ? args.content : "",
+        note: artifactToolString(args.note),
+        contributors: artifactToolStringArray(args.contributors),
+        requiredSigners: artifactToolStringArray(args.requiredSigners),
+        labels: artifactToolStringArray(args.labels)
+      });
+    case APP_ARTIFACT_REVISE_TOOL:
+      return artifactService.revise(member, {
+        conversationId,
+        ...ref,
+        baseVersion: artifactToolNumber(args.baseVersion),
+        content: typeof args.content === "string" ? args.content : "",
+        note: artifactToolString(args.note)
+      });
+    case APP_ARTIFACT_RENAME_TOOL:
+      return artifactService.rename(member, {
+        conversationId,
+        ...ref,
+        newName: typeof args.newName === "string" ? args.newName : ""
+      });
+    case APP_ARTIFACT_SIGN_TOOL:
+      return artifactService.sign(member, {
+        conversationId,
+        ...ref,
+        version: artifactToolOptionalNumber(args.version)
+      });
+    case APP_ARTIFACT_SET_ACCESS_TOOL:
+      return artifactService.updateAccess(member, {
+        conversationId,
+        ...ref,
+        owner: artifactToolString(args.owner),
+        contributors: artifactToolStringArray(args.contributors),
+        requiredSigners: artifactToolStringArray(args.requiredSigners),
+        labels: artifactToolStringArray(args.labels)
+      });
+    default:
+      throw new Error(`Unknown artifact tool: ${toolName}.`);
+  }
+}
 
 function appSkillsSourceRoot(): string {
   return app.isPackaged
@@ -882,6 +1037,23 @@ function registerIpc(): void {
     }
     chatService.cancelRun(runId);
   });
+  // Artifact operations from the renderer act as the human chat member ("user").
+  ipcMain.handle("artifacts:list", (_event, request: ListArtifactsRequest) =>
+    artifactService.list(ARTIFACT_USER_MEMBER, request?.conversationId ?? ""));
+  ipcMain.handle("artifacts:read", (_event, request: ReadArtifactRequest) =>
+    artifactService.read(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:diff", (_event, request: DiffArtifactRequest) =>
+    artifactService.diff(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:create", (_event, request: CreateArtifactRequest) =>
+    artifactService.create(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:revise", (_event, request: ReviseArtifactRequest) =>
+    artifactService.revise(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:rename", (_event, request: RenameArtifactRequest) =>
+    artifactService.rename(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:sign", (_event, request: SignArtifactRequest) =>
+    artifactService.sign(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:set-access", (_event, request: UpdateArtifactAccessRequest) =>
+    artifactService.updateAccess(ARTIFACT_USER_MEMBER, request));
   ipcMain.handle("dialog:select-repo", async () => {
     const options: Electron.OpenDialogOptions = {
       title: "Select repository",

@@ -107,6 +107,7 @@ import {
   CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT
 } from "../../shared/chatParticipantRequests";
 import { normalizeChatReactionEmoji } from "../../shared/chatReactions";
+import { ARTIFACT_NOTE_MESSAGE_SOURCE, normalizeArtifactMember } from "../../shared/artifacts";
 import {
   CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS,
   CHAT_BEHAVIOR_RULE_LABEL_MAX_CHARS,
@@ -147,6 +148,7 @@ import type {
 } from "./remoteRuns";
 import { emitCodexLiveOutput } from "./codexExec";
 import {
+  APP_ARTIFACT_TOOL_NAMES,
   APP_CHAT_EXPORT_ATTACHMENT_TOOL,
   APP_CHAT_GET_CONTEXT_TOOL,
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
@@ -330,7 +332,8 @@ const CHAT_CONTEXT_MCP_TOOL_NAMES = [
   APP_CHAT_REACT_TOOL,
   APP_CHAT_SEND_MESSAGE_TOOL,
   APP_CHAT_SET_TITLE_TOOL,
-  APP_TOOL_PERMISSION_TOOL
+  APP_TOOL_PERMISSION_TOOL,
+  ...APP_ARTIFACT_TOOL_NAMES
 ];
 const CHAT_APP_MCP_TOOL_NAMES = [
   ...CHAT_CONTEXT_MCP_TOOL_NAMES,
@@ -3959,6 +3962,39 @@ export class ChatService {
       threadId: created.threadId,
       ...(preparedImages.summaries.length > 0 ? { imageAttachments: preparedImages.summaries } : {})
     };
+  }
+
+  // Resolve the artifact-system member identity ("user" | participant handle)
+  // for an app MCP actor. Rejects actors that are no longer chat participants.
+  async artifactActorMember(actor: ChatAppMcpActor): Promise<string> {
+    const conversation = await this.requireChat(actor.conversationId);
+    const participant = this.chatParticipants(conversation).find((candidate) => candidate.id === actor.participantId);
+    if (!participant) {
+      throw new Error("The requesting participant is no longer in this chat.");
+    }
+    return normalizeArtifactMember(participant.handle);
+  }
+
+  // Append a brief artifact note ("@gera revised [Plan](#artifact:id) · v3") to
+  // the chat timeline. Notes are system messages flagged with
+  // ARTIFACT_NOTE_MESSAGE_SOURCE so the timeline keeps them visible; they carry
+  // a link token, never artifact bodies.
+  async postArtifactChatNote(conversationId: string, content: string): Promise<void> {
+    const conversation = await this.requireChat(conversationId);
+    await this.withChatMutation(conversation, async () => {
+      conversation.messages.push({
+        id: randomUUID(),
+        role: "system",
+        content,
+        createdAt: new Date().toISOString(),
+        status: "done",
+        metadata: {
+          appMessageSource: ARTIFACT_NOTE_MESSAGE_SOURCE
+        }
+      });
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
   }
 
   async setChatTitleFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {

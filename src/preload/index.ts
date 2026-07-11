@@ -2,7 +2,16 @@ import { contextBridge, ipcRenderer } from "electron";
 import type {
   AppBridge,
   AddChatParticipantRequest,
+  ArtifactsUpdatedEvent,
   ChatBehaviorRuleConfigUpdate,
+  CreateArtifactRequest,
+  DiffArtifactRequest,
+  ListArtifactsRequest,
+  ReadArtifactRequest,
+  RenameArtifactRequest,
+  ReviseArtifactRequest,
+  SignArtifactRequest,
+  UpdateArtifactAccessRequest,
   ChatPromptContextSettings,
   ChatSavedPromptConfigUpdate,
   CloudRunsSettingsUpdate,
@@ -153,6 +162,19 @@ const bridge: AppBridge = {
   reviseImplementationPlan: (request: ReviseImplementationPlanRequest) =>
     ipcRenderer.invoke("conversations:revise-implementation-plan", request),
   cancelReview: (runId: string) => ipcRenderer.invoke("conversations:cancel-review", runId),
+  listArtifacts: (request: ListArtifactsRequest) => ipcRenderer.invoke("artifacts:list", request),
+  readArtifact: (request: ReadArtifactRequest) => ipcRenderer.invoke("artifacts:read", request),
+  diffArtifactVersions: (request: DiffArtifactRequest) => ipcRenderer.invoke("artifacts:diff", request),
+  createArtifact: (request: CreateArtifactRequest) => ipcRenderer.invoke("artifacts:create", request),
+  reviseArtifact: (request: ReviseArtifactRequest) => ipcRenderer.invoke("artifacts:revise", request),
+  renameArtifact: (request: RenameArtifactRequest) => ipcRenderer.invoke("artifacts:rename", request),
+  signArtifact: (request: SignArtifactRequest) => ipcRenderer.invoke("artifacts:sign", request),
+  updateArtifactAccess: (request: UpdateArtifactAccessRequest) => ipcRenderer.invoke("artifacts:set-access", request),
+  onArtifactsUpdated: (callback: (event: ArtifactsUpdatedEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: ArtifactsUpdatedEvent) => callback(payload);
+    ipcRenderer.on("artifacts:updated", listener);
+    return () => ipcRenderer.removeListener("artifacts:updated", listener);
+  },
   onReviewProgress: (callback: (progress: ReviewProgress) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, progress: ReviewProgress) => callback(progress);
     ipcRenderer.on("conversations:review-progress", listener);

@@ -1,0 +1,412 @@
+/* Artifacts: durable, versioned, signable chat work products. */
+
+.chat-artifacts-toggle {
+  position: absolute;
+  top: 10px;
+  right: 16px;
+  z-index: 12;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: var(--app-surface);
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.chat-artifacts-toggle:hover {
+  background: var(--app-surface-hover);
+  color: var(--app-text);
+}
+
+.chat-artifacts-toggle.active {
+  color: var(--app-text-strong);
+  border-color: var(--app-border-strong);
+}
+
+.artifacts-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(460px, 88%);
+  display: flex;
+  flex-direction: column;
+  background: var(--app-surface);
+  border-left: 1px solid var(--app-border);
+  box-shadow: var(--shadow-lg);
+  z-index: 20;
+}
+
+.artifacts-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.artifacts-panel-title {
+  flex: 1;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
+.artifacts-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.artifacts-empty {
+  color: var(--app-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  padding: 12px 4px;
+}
+
+.artifact-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.artifact-list-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-surface-subtle);
+  cursor: pointer;
+}
+
+.artifact-list-item:hover {
+  background: var(--app-surface-hover);
+}
+
+.artifact-list-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
+.artifact-list-meta,
+.artifact-detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--app-muted);
+}
+
+.artifact-updated {
+  margin-left: auto;
+}
+
+.artifact-version-chip {
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--app-border);
+  background: var(--app-surface);
+  font-size: 11px;
+  color: var(--app-muted);
+  white-space: nowrap;
+}
+
+.artifact-approval {
+  font-size: 11px;
+  white-space: nowrap;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--app-status-neutral-border, var(--app-border));
+  background: var(--app-status-neutral-bg, transparent);
+  color: var(--app-status-neutral-text, var(--app-muted));
+}
+
+.artifact-approval-approved {
+  border-color: var(--app-success-border, var(--app-border));
+  background: var(--app-success-soft, transparent);
+  color: var(--app-success, inherit);
+}
+
+.artifact-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.artifact-label {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--app-surface-muted);
+  color: var(--app-muted);
+}
+
+.artifact-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.artifact-detail-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.artifact-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--app-text-strong);
+  overflow-wrap: anywhere;
+}
+
+.artifact-people {
+  font-size: 11.5px;
+  color: var(--app-muted);
+}
+
+.artifact-rename-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.artifact-rename-row input {
+  flex: 1;
+}
+
+.artifact-actions-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.artifact-primary-action,
+.artifact-secondary-action,
+.artifact-diff-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.artifact-primary-action {
+  background: var(--app-primary);
+  border-color: var(--app-primary);
+  color: var(--app-primary-fg);
+}
+
+.artifact-primary-action:hover:not(:disabled) {
+  background: var(--app-primary-hover);
+}
+
+.artifact-secondary-action:hover:not(:disabled) {
+  background: var(--app-surface-hover);
+}
+
+.artifact-primary-action:disabled,
+.artifact-secondary-action:disabled,
+.artifact-diff-action:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.artifact-diff-action {
+  padding: 2px 7px;
+  font-size: 11px;
+  color: var(--app-muted);
+}
+
+.artifact-version-note {
+  font-size: 12px;
+  color: var(--app-muted);
+}
+
+.artifact-content-pre,
+.artifact-diff-pre {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-surface-subtle);
+  font-family: var(--font-code);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.artifact-history h5,
+.artifact-compare h5 {
+  margin: 4px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
+.artifact-history ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.artifact-history li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--app-muted);
+}
+
+.artifact-history-current .artifact-history-version {
+  font-weight: 700;
+  color: var(--app-text-strong);
+}
+
+.artifact-history-version {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 11.5px;
+  color: var(--app-text);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.artifact-history-meta {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.artifact-diff-add {
+  color: var(--app-success);
+}
+
+.artifact-diff-del {
+  color: var(--app-danger);
+}
+
+.artifact-diff-hunk {
+  color: var(--app-muted);
+}
+
+.artifact-error {
+  margin: 8px 12px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 8px;
+  background: var(--app-surface-muted);
+  color: var(--app-text);
+  font-size: 12px;
+}
+
+.artifact-stale-actions {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.artifact-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.artifact-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
+.artifact-form input,
+.artifact-form textarea,
+.artifact-rename-row input {
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 12.5px;
+  font-family: inherit;
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.artifact-form textarea {
+  font-family: var(--font-code);
+  resize: vertical;
+}
+
+.artifact-hint {
+  font-weight: 400;
+  color: var(--app-muted);
+  font-size: 11px;
+}
+
+.artifact-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Inline artifact reference chip in chat messages. */
+.artifact-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--app-border);
+  background: var(--app-surface-subtle);
+  color: var(--app-text-strong);
+  font-size: 0.92em;
+  cursor: pointer;
+  text-decoration: none;
+  vertical-align: baseline;
+}
+
+.artifact-link:hover {
+  background: var(--app-surface-hover);
+}
+
+.artifact-link-unknown {
+  color: var(--app-muted);
+}
+
+.artifact-link-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}

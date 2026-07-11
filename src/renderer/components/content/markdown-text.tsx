@@ -8,6 +8,8 @@ import {
 import { markdownBlocks, type MarkdownBlock } from "./markdown-blocks";
 import { FileLink } from "./local-file-link";
 import { MentionDirectoryContext, ParticipantHoverCard, profileHandleLabel, useHoverCard } from "./participant-hover-card";
+import { ArtifactsContext } from "../artifacts/artifacts-context";
+import { ArtifactApprovalBadge } from "../artifacts/artifact-approval-badge";
 
 // A clickable reference to another chat message. Authors write `[label](#msg:<id>)` (or a bare
 // `#msg:<id>`); we render a link that scrolls the referenced message into view and flashes it.
@@ -104,6 +106,32 @@ function MessageLink({ messageId, label }: { messageId: string; label: string })
       onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); } }}
     >
       {label}
+    </a>
+  );
+}
+
+// A reference to a chat artifact: `[label](#artifact:<id>)` or bare `#artifact:<id>`.
+// The chip always shows the artifact's CURRENT name (falling back to the authored
+// label if the artifact is unknown) plus an at-a-glance approval indicator, and it
+// never embeds the artifact body. Activating it opens the artifact in the panel.
+function ArtifactLink({ artifactId, label }: { artifactId: string; label?: string }): JSX.Element {
+  const artifacts = useContext(ArtifactsContext);
+  const summary = artifacts?.byId.get(artifactId);
+  const name = summary?.name ?? label ?? "artifact";
+  const activate = (): void => {
+    artifacts?.openArtifact(artifactId);
+  };
+  return (
+    <a
+      className={`artifact-link${summary ? "" : " artifact-link-unknown"}`}
+      role="button"
+      tabIndex={0}
+      title={summary ? `Open artifact "${summary.name}" (v${summary.headVersion})` : "Artifact reference"}
+      onClick={(event) => { event.preventDefault(); activate(); }}
+      onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); } }}
+    >
+      <span className="artifact-link-name">{name}</span>
+      {summary && <ArtifactApprovalBadge approval={summary.approval} compact />}
     </a>
   );
 }
@@ -250,6 +278,9 @@ function renderInlineNode(node: MarkdownInlineNode, key: string): ReactNode {
   }
   if (node.type === "messageLink") {
     return <MessageLink key={key} messageId={node.messageId} label={node.label ?? "↳ message"} />;
+  }
+  if (node.type === "artifactLink") {
+    return <ArtifactLink key={key} artifactId={node.artifactId} label={node.label} />;
   }
   if (node.type === "fileLink") {
     return <FileLink key={key} path={node.path} label={node.label} line={node.line} column={node.column} />;

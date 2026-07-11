@@ -25,6 +25,38 @@ export const APP_CHAT_EXPORT_ATTACHMENT_TOOL = "app_chat_export_attachment";
 export const APP_CHAT_REACT_TOOL = "app_chat_react";
 export const APP_CHAT_SEND_MESSAGE_TOOL = "app_chat_send_message";
 export const APP_CHAT_SET_TITLE_TOOL = "app_chat_set_title";
+export const APP_ARTIFACT_LIST_TOOL = "app_artifact_list";
+export const APP_ARTIFACT_READ_TOOL = "app_artifact_read";
+export const APP_ARTIFACT_DIFF_TOOL = "app_artifact_diff";
+export const APP_ARTIFACT_CREATE_TOOL = "app_artifact_create";
+export const APP_ARTIFACT_REVISE_TOOL = "app_artifact_revise";
+export const APP_ARTIFACT_RENAME_TOOL = "app_artifact_rename";
+export const APP_ARTIFACT_SIGN_TOOL = "app_artifact_sign";
+export const APP_ARTIFACT_SET_ACCESS_TOOL = "app_artifact_set_access";
+
+export const APP_ARTIFACT_TOOL_NAMES = [
+  APP_ARTIFACT_LIST_TOOL,
+  APP_ARTIFACT_READ_TOOL,
+  APP_ARTIFACT_DIFF_TOOL,
+  APP_ARTIFACT_CREATE_TOOL,
+  APP_ARTIFACT_REVISE_TOOL,
+  APP_ARTIFACT_RENAME_TOOL,
+  APP_ARTIFACT_SIGN_TOOL,
+  APP_ARTIFACT_SET_ACCESS_TOOL
+] as const;
+
+// Shared schema fragment: every artifact-targeting tool accepts the stable
+// artifactId (preferred) or the current name (resolved once, then id-bound).
+const ARTIFACT_REF_PROPERTIES = {
+  artifactId: {
+    type: "string",
+    description: "Stable artifact id. Preferred: it survives renames."
+  },
+  name: {
+    type: "string",
+    description: "Current artifact name (case-insensitive) as an alternative to artifactId."
+  }
+} as const;
 
 const CHAT_AGENT_PERMISSION_INPUT_SCHEMA = {
   type: "object",
@@ -68,6 +100,142 @@ const CHAT_AGENT_PERMISSION_INPUT_SCHEMA = {
     }
   }
 } as const;
+
+// Definitions for the artifact tools every chat participant gets. Artifacts are
+// durable, versioned, signable work products shared by all chat members; the
+// tools return structured JSON results ({ok: true, value} | {ok: false, error}).
+function artifactToolDefinitions(): unknown[] {
+  return [
+    {
+      name: APP_ARTIFACT_LIST_TOOL,
+      title: "List Artifacts",
+      description:
+        "List this chat's artifacts as lightweight summaries (id, name, current version, approval state, owner/contributors, last-updated) WITHOUT contents. Artifacts are durable shared work products (plans, QA checklists, specs, todo lists — any name works). Reference one in chat as [name](#artifact:<id>); the link always shows the artifact's current name and never embeds its body.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_READ_TOOL,
+      title: "Read Artifact",
+      description:
+        "Read one artifact: the current version by default, or one named earlier version. Set includeHistory to also get version metadata (authors, notes, signatures — no contents). Keep reads lean: request only the version you need; use app_artifact_diff to compare versions.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ...ARTIFACT_REF_PROPERTIES,
+          version: { type: "integer", minimum: 1, description: "Specific version to read. Defaults to the current version." },
+          includeHistory: { type: "boolean", description: "Also return version history metadata (no contents)." }
+        }
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_DIFF_TOOL,
+      title: "Compare Artifact Versions",
+      description:
+        "Return a unified line diff between two versions of an artifact instead of both full bodies.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ...ARTIFACT_REF_PROPERTIES,
+          fromVersion: { type: "integer", minimum: 1 },
+          toVersion: { type: "integer", minimum: 1 }
+        },
+        required: ["fromVersion", "toVersion"]
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_CREATE_TOOL,
+      title: "Create Artifact",
+      description:
+        "Create a durable, versioned artifact in this chat under any unique name (no fixed categories). You become the owner. Optionally set contributors (members who may revise/rename), requiredSigners (members whose signatures on the current version mean fully approved), and free-form labels. Members are \"user\" (the human) and participant handles. Posts a brief linked note to the chat; do NOT paste the artifact body into chat messages — reference it as [name](#artifact:<id>).",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          name: { type: "string", description: "Unique human-readable name within this chat (renameable later)." },
+          content: { type: "string", description: "Free-form text content of version 1." },
+          note: { type: "string", description: "Optional short note describing version 1." },
+          contributors: { type: "array", items: { type: "string" }, description: "Members allowed to revise/rename (owner always can)." },
+          requiredSigners: { type: "array", items: { type: "string" }, description: "Members whose signatures approve a version. Only they can sign." },
+          labels: { type: "array", items: { type: "string" }, description: "Optional free-form labels; never required, never a fixed set." }
+        },
+        required: ["name", "content"]
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_REVISE_TOOL,
+      title: "Revise Artifact",
+      description:
+        "Create the next version of an artifact with new full content. You MUST pass baseVersion = the version your edit is based on; if someone else already revised it you get a stale_version error carrying the current version and its content — redo your edit on top of that and retry. Nothing is ever silently overwritten. Only the owner and contributors can revise. New versions start unsigned.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ...ARTIFACT_REF_PROPERTIES,
+          baseVersion: { type: "integer", minimum: 1, description: "The version this edit was based on (optimistic concurrency guard)." },
+          content: { type: "string", description: "Complete new content for the next version." },
+          note: { type: "string", description: "Optional short note describing the change." }
+        },
+        required: ["baseVersion", "content"]
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_RENAME_TOOL,
+      title: "Rename Artifact",
+      description:
+        "Change an artifact's display name. Label-only: no new version, signatures intact, and existing [..](#artifact:<id>) references keep working and show the new name. The freed name may be reused by a different artifact without redirecting old references. Owner and contributors only.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ...ARTIFACT_REF_PROPERTIES,
+          newName: { type: "string", description: "New unique name within this chat." }
+        },
+        required: ["newName"]
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_SIGN_TOOL,
+      title: "Sign Artifact Version",
+      description:
+        "Sign a specific version (defaults to current) to record your approval. Only members of the artifact's required-signer set can sign. A signature sticks to the version it was made on; later revisions start unsigned while earlier signatures stay in history. The artifact is fully approved when every required signer has signed the current version.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ...ARTIFACT_REF_PROPERTIES,
+          version: { type: "integer", minimum: 1, description: "Version to sign. Defaults to the current version." }
+        }
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_SET_ACCESS_TOOL,
+      title: "Manage Artifact Access",
+      description:
+        "Owner-only: transfer ownership, or replace the contributor set, required-signer set, or labels. Omitted fields stay unchanged; provided arrays replace the existing set.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ...ARTIFACT_REF_PROPERTIES,
+          owner: { type: "string", description: "New owner (must be a chat member)." },
+          contributors: { type: "array", items: { type: "string" }, description: "Replacement contributor set." },
+          requiredSigners: { type: "array", items: { type: "string" }, description: "Replacement required-signer set." },
+          labels: { type: "array", items: { type: "string" }, description: "Replacement label list." }
+        }
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+    }
+  ];
+}
 
 export interface AppMcpActor {
   conversationId: string;
@@ -134,6 +302,7 @@ type AppChatParticipantRequestStatusHandler = (actor: AppMcpActor, request: unkn
 type AppChatReactHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatSendMessageHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatSetTitleHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+type AppArtifactToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
 
 interface JsonRpcRequest {
   jsonrpc?: unknown;
@@ -179,6 +348,7 @@ export class AppMcpService {
   private chatReactHandler?: AppChatReactHandler;
   private chatSendMessageHandler?: AppChatSendMessageHandler;
   private chatSetTitleHandler?: AppChatSetTitleHandler;
+  private artifactToolHandler?: AppArtifactToolHandler;
 
   setRosterChangeHandler(handler: AppRosterChangeHandler): void {
     this.rosterChangeHandler = handler;
@@ -254,6 +424,10 @@ export class AppMcpService {
 
   setChatSetTitleHandler(handler: AppChatSetTitleHandler): void {
     this.chatSetTitleHandler = handler;
+  }
+
+  setArtifactToolHandler(handler: AppArtifactToolHandler): void {
+    this.artifactToolHandler = handler;
   }
 
   async start(): Promise<void> {
@@ -872,7 +1046,8 @@ export class AppMcpService {
           idempotentHint: false,
           openWorldHint: false
         }
-      }
+      },
+      ...artifactToolDefinitions()
     ];
     if (hasChatAppToolCapability(actor.capabilities, "participants.request")) {
       tools.push({
@@ -1254,6 +1429,12 @@ export class AppMcpService {
       throw new Error("Tool call params are required.");
     }
     const record = params as { name?: unknown; arguments?: unknown };
+    if (typeof record.name === "string" && (APP_ARTIFACT_TOOL_NAMES as readonly string[]).includes(record.name)) {
+      if (!this.artifactToolHandler) {
+        throw new Error("Artifact tools are not available.");
+      }
+      return this.toolTextResult(await this.artifactToolHandler(actor, record.name, record.arguments));
+    }
     if (
       record.name !== APP_ROSTER_DESCRIBE_OPTIONS_TOOL &&
       record.name !== APP_ROSTER_REQUEST_CHANGE_TOOL &&
