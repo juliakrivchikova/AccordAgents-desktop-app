@@ -41,7 +41,8 @@ type ClipboardFeedback = "idle" | ClipboardWriteResult;
 
 const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
   "codex-cli": new URL("../../assets/codex-cli.svg", import.meta.url).href,
-  "claude-code": new URL("../../assets/claude-avatar.png", import.meta.url).href
+  "claude-code": new URL("../../assets/claude-avatar.png", import.meta.url).href,
+  "gemini-cli": new URL("../../assets/gemini-cli.svg", import.meta.url).href
 };
 
 export function GeneralSettingsSection(props: {

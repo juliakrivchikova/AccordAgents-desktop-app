@@ -54,9 +54,9 @@ export function chatMentionDirectory(
 }
 
 export function providerLabel(providerKind: ChatProviderKind): string {
-  return providerKind === "codex-cli" ? "Codex" : "Claude";
+  return providerKind === "codex-cli" ? "Codex" : providerKind === "gemini-cli" ? "Gemini" : "Claude";
 }
 
 export function participantProviderLabel(providerKind: ChatProviderKind): string {
-  return providerKind === "codex-cli" ? "Codex CLI" : "Claude Code";
+  return providerKind === "codex-cli" ? "Codex CLI" : providerKind === "gemini-cli" ? "Gemini CLI" : "Claude Code";
 }

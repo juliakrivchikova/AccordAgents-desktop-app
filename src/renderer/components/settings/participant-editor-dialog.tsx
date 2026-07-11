@@ -80,7 +80,7 @@ export function ParticipantEditorDialog(props: {
   const roleOptions = props.settings.chatRoleConfigs
     .filter((role) => !role.archivedAt || role.id === draft.roleConfigId)
     .map((role) => ({ value: role.id, label: role.archivedAt ? `${displayChatRoleLabel(role)} (deleted)` : displayChatRoleLabel(role) }));
-  const providerOptions = (["codex-cli", "claude-code"] as ChatProviderKind[]).map((kind) => ({
+  const providerOptions = (["codex-cli", "claude-code", "gemini-cli"] as ChatProviderKind[]).map((kind) => ({
     value: kind,
     label: chatCliProviderLabel(kind)
   }));

@@ -12,7 +12,7 @@ export function normalizeConversationSummaryChatParticipants(value: unknown): Co
     }
     const record = item as Record<string, unknown>;
     const handle = typeof record.handle === "string" ? record.handle.trim().replace(/^@/, "") : "";
-    const kind = record.kind === "codex-cli" || record.kind === "claude-code" ? record.kind : undefined;
+    const kind = record.kind === "codex-cli" || record.kind === "claude-code" || record.kind === "gemini-cli" ? record.kind : undefined;
     if (!handle || !kind) {
       continue;
     }

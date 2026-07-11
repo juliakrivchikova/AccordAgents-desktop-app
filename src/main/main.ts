@@ -400,7 +400,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:update-last-repo-path", (_event, repoPath: string) => settingsService.updateLastRepoPath(repoPath));
   ipcMain.handle("settings:list-provider-models", async (_event, kind: ProviderKind) => {
-    if (kind === "codex-cli" || kind === "claude-code") {
+    if (kind === "codex-cli" || kind === "claude-code" || kind === "gemini-cli") {
       const settings = await settingsService.getPublicSettings();
       const configuredModel = settings.providers.find((provider) => provider.kind === kind)?.model;
       return cliAgentRunner.listModelCatalog(kind, configuredModel);

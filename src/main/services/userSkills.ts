@@ -498,7 +498,7 @@ export class UserSkillsService {
     // selectable when it exists for the target provider and (for repo-local skills) the repo is the
     // effective run root/cwd. Whether the provider natively invokes it is not asserted here — the
     // UI labels these as selected skills, not "proven invoked".
-    if (variant.providerKind !== "codex-cli" && variant.providerKind !== "claude-code") {
+    if (variant.providerKind !== "codex-cli" && variant.providerKind !== "claude-code" && variant.providerKind !== "gemini-cli") {
       return "unsupported";
     }
     if (!context.target.hasClearTargets) {
@@ -533,7 +533,7 @@ export class UserSkillsService {
   private capabilityDiagnostics(context: UserSkillRunContext): UserSkillDiagnostics["providerCapabilities"] {
     const providerKinds = context.target.providerKinds.length > 0
       ? uniqueProviderKinds(context.target.providerKinds)
-      : uniqueProviderKinds(["codex-cli", "claude-code"]);
+      : uniqueProviderKinds(["codex-cli", "claude-code", "gemini-cli"]);
     return providerKinds.map((providerKind) => {
       const runRoot = Object.prototype.hasOwnProperty.call(context.runRootByProvider ?? {}, providerKind)
         ? context.runRootByProvider?.[providerKind]
@@ -553,13 +553,14 @@ export class UserSkillsService {
   private defaultDiagnosticsContext(repoPath?: string): UserSkillRunContext {
     const runRootByProvider: Partial<Record<ChatProviderKind, string | undefined>> = {
       "codex-cli": repoPath,
-      "claude-code": repoPath
+      "claude-code": repoPath,
+      "gemini-cli": repoPath
     };
     return {
       repoPath,
       target: {
         participantIds: [],
-        providerKinds: ["codex-cli", "claude-code"],
+        providerKinds: ["codex-cli", "claude-code", "gemini-cli"],
         hasClearTargets: true
       },
       runRootByProvider
@@ -569,7 +570,8 @@ export class UserSkillsService {
   private defaultListContext(repoPath?: string): UserSkillRunContext {
     const runRootByProvider: Partial<Record<ChatProviderKind, string | undefined>> = {
       "codex-cli": repoPath,
-      "claude-code": repoPath
+      "claude-code": repoPath,
+      "gemini-cli": repoPath
     };
     return {
       repoPath,
@@ -607,6 +609,13 @@ export class UserSkillsService {
         rootKind: "personal",
         rootPath: path.join(this.homeDir, ".claude", "skills"),
         label: "~/.claude/skills"
+      },
+      {
+        providerKind: "gemini-cli",
+        scope: "personal",
+        rootKind: "personal",
+        rootPath: path.join(this.homeDir, ".gemini", "config", "skills"),
+        label: "~/.gemini/config/skills"
       }
     ];
     if (repoPath) {
@@ -627,6 +636,14 @@ export class UserSkillsService {
             rootKind: "repo",
             rootPath: path.join(repoRealPath, ".claude", "skills"),
             label: "repo/.claude/skills",
+            repoRealPath
+          },
+          {
+            providerKind: "gemini-cli",
+            scope: "repo",
+            rootKind: "repo",
+            rootPath: path.join(repoRealPath, ".agents", "skills"),
+            label: "repo/.agents/skills",
             repoRealPath
           }
         );
@@ -758,7 +775,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isChatProviderKind(value: unknown): value is ChatProviderKind {
-  return value === "codex-cli" || value === "claude-code";
+  return value === "codex-cli" || value === "claude-code" || value === "gemini-cli";
 }
 
 function isUserSkillScope(value: unknown): value is UserSkillScope {
@@ -770,7 +787,7 @@ function isCapabilityState(value: unknown): value is UserSkillCapabilityState {
 }
 
 function providerLabel(providerKind: ChatProviderKind): string {
-  return providerKind === "codex-cli" ? "Codex" : "Claude";
+  return providerKind === "codex-cli" ? "Codex" : providerKind === "gemini-cli" ? "Gemini" : "Claude";
 }
 
 function errorText(error: unknown): string {

@@ -362,6 +362,10 @@
   color: var(--brand-anthropic);
 }
 
+.plugins-provider-mark.is-gemini {
+  color: var(--brand-gemini);
+}
+
 .plugins-provider-dot {
   width: 8px;
   height: 8px;

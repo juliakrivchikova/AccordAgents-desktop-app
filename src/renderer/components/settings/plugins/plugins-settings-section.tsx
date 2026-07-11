@@ -443,9 +443,9 @@ function pluginAction(plugin: PluginCatalogItem): { button: string; label: strin
 }
 
 function providerLabel(providerKind: ChatProviderKind): string {
-  return providerKind === "codex-cli" ? "Codex" : "Claude";
+  return providerKind === "codex-cli" ? "Codex" : providerKind === "gemini-cli" ? "Gemini" : "Claude";
 }
 
 function providerClass(providerKind: ChatProviderKind): string {
-  return providerKind === "codex-cli" ? "is-codex" : "is-claude";
+  return providerKind === "codex-cli" ? "is-codex" : providerKind === "gemini-cli" ? "is-gemini" : "is-claude";
 }

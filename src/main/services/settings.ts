@@ -138,7 +138,8 @@ function isRemoteSessionCleanupReason(value: unknown): value is RemoteSessionCle
 
 const DEFAULT_PROVIDERS: ProviderSettings[] = [
   { kind: "codex-cli", label: "Codex CLI", enabled: true },
-  { kind: "claude-code", label: "Claude Code", enabled: true }
+  { kind: "claude-code", label: "Claude Code", enabled: true },
+  { kind: "gemini-cli", label: "Gemini CLI (Antigravity)", enabled: true }
 ];
 
 const DEFAULT_PROVIDER_KINDS = new Set<ProviderSettings["kind"]>(DEFAULT_PROVIDERS.map((provider) => provider.kind));
@@ -164,7 +165,7 @@ const DEFAULT_ROLE_PARTICIPANT_DEFAULTS: ChatRoleParticipantDefaults = {
   requestParticipants: "ask",
   manageRolesParticipants: "deny"
 };
-const SEEDABLE_CHAT_PROVIDER_KINDS: ChatProviderKind[] = ["codex-cli", "claude-code"];
+const SEEDABLE_CHAT_PROVIDER_KINDS: ChatProviderKind[] = ["codex-cli", "claude-code", "gemini-cli"];
 
 const DEFAULT_ADMINISTRATOR_INSTRUCTIONS = [
   "---",
@@ -2053,7 +2054,7 @@ export class SettingsService {
       if (duplicate) {
         throw new Error(`Duplicate member name: @${handle}.`);
       }
-      if (update.kind !== "codex-cli" && update.kind !== "claude-code") {
+      if (update.kind !== "codex-cli" && update.kind !== "claude-code" && update.kind !== "gemini-cli") {
         throw new Error("Chat supports local CLI members only.");
       }
       const requestedRuleIds = new Set(this.normalizeBehaviorRuleIds(update.behaviorRuleIds));
@@ -2249,7 +2250,7 @@ export class SettingsService {
     }
     const requestedRuleIds = new Set(this.normalizeBehaviorRuleIds(update.behaviorRuleIds));
     const behaviorRuleIds = (stored.chatBehaviorRules ?? []).map((rule) => rule.id).filter((id) => requestedRuleIds.has(id));
-    if (update.kind !== "codex-cli" && update.kind !== "claude-code") {
+    if (update.kind !== "codex-cli" && update.kind !== "claude-code" && update.kind !== "gemini-cli") {
       throw new Error("Chat supports local CLI members only.");
     }
 
@@ -3243,7 +3244,7 @@ export class SettingsService {
         const handle = typeof participant.handle === "string" ? participant.handle.trim().replace(/^@/, "") : "";
         const normalized = handle.toLowerCase();
         const kind = participant.kind as ChatProviderKind;
-        if (!CHAT_HANDLE_PATTERN.test(handle) || seenHandles.has(normalized) || (kind !== "codex-cli" && kind !== "claude-code")) {
+        if (!CHAT_HANDLE_PATTERN.test(handle) || seenHandles.has(normalized) || (kind !== "codex-cli" && kind !== "claude-code" && kind !== "gemini-cli")) {
           return false;
         }
         seenHandles.add(normalized);
@@ -3310,14 +3311,14 @@ export class SettingsService {
   }
 
   private genericSeedParticipant(kind: ChatProviderKind, participants: ChatParticipantConfig[], now: string): ChatParticipantConfig {
-    const baseHandle = kind === "codex-cli" ? "codex" : "claude";
+    const baseHandle = kind === "codex-cli" ? "codex" : kind === "gemini-cli" ? "gemini" : "claude";
     return {
       id: randomUUID(),
       handle: this.uniqueParticipantConfigHandle(baseHandle, participants),
       roleConfigId: GENERIC_PARTICIPANT_ROLE_ID,
       behaviorRuleIds: [],
       kind,
-      avatarId: kind === "codex-cli" ? "codex-logo" : "claude-logo",
+      avatarId: kind === "codex-cli" ? "codex-logo" : kind === "gemini-cli" ? "gemini-logo" : "claude-logo",
       agentMode: "default",
       permissions: normalizeChatAgentPermissions({
         repoRead: false,

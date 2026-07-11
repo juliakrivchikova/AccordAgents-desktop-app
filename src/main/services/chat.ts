@@ -780,7 +780,7 @@ export class ChatService {
     try {
       const agents = await this.cliRunner.detectAgents().catch((): AgentHealth[] => []);
       const installedCliKinds = agents
-        .filter((agent) => agent.installed && (agent.kind === "codex-cli" || agent.kind === "claude-code"))
+        .filter((agent) => agent.installed && (agent.kind === "codex-cli" || agent.kind === "claude-code" || agent.kind === "gemini-cli"))
         .map((agent) => agent.kind);
       if (installedCliKinds.length === 0) {
         throw new Error("Install Codex CLI or Claude Code before creating a chat.");
@@ -3236,13 +3236,13 @@ export class ChatService {
     const roleById = new Map(settings.chatRoleConfigs.map((role) => [role.id, role]));
     const agents = await this.cliRunner.detectAgents().catch((): AgentHealth[] => []);
     const defaultKind = this.preferredChatProviderKind(settings.providers, agents);
-    const providers: ChatRosterAvailableProvider[] = await Promise.all((["codex-cli", "claude-code"] as ChatProviderKind[]).map(async (kind) => {
+    const providers: ChatRosterAvailableProvider[] = await Promise.all((["codex-cli", "claude-code", "gemini-cli"] as ChatProviderKind[]).map(async (kind) => {
       const provider = settings.providers.find((item) => item.kind === kind);
       const health = agents.find((item) => item.kind === kind);
       const configuredModel = provider?.model?.trim() || undefined;
       return {
         kind,
-        label: provider?.label ?? health?.label ?? (kind === "codex-cli" ? "Codex CLI" : "Claude Code"),
+        label: provider?.label ?? health?.label ?? (kind === "codex-cli" ? "Codex CLI" : kind === "gemini-cli" ? "Gemini CLI (Antigravity)" : "Claude Code"),
         enabled: Boolean(provider?.enabled),
         installed: Boolean(health?.installed),
         selectedByDefault: kind === defaultKind,
@@ -3657,12 +3657,12 @@ export class ChatService {
 
     const settings = await this.settings.getPublicSettings();
     const agents = await this.cliRunner.detectAgents().catch((): AgentHealth[] => []);
-    const providers = (["codex-cli", "claude-code"] as ChatProviderKind[]).map((kind) => {
+    const providers = (["codex-cli", "claude-code", "gemini-cli"] as ChatProviderKind[]).map((kind) => {
       const provider = settings.providers.find((item) => item.kind === kind);
       const health = agents.find((item) => item.kind === kind);
       return {
         kind,
-        label: provider?.label ?? health?.label ?? (kind === "codex-cli" ? "Codex CLI" : "Claude Code"),
+        label: provider?.label ?? health?.label ?? (kind === "codex-cli" ? "Codex CLI" : kind === "gemini-cli" ? "Gemini CLI (Antigravity)" : "Claude Code"),
         enabled: Boolean(provider?.enabled),
         installed: Boolean(health?.installed),
         configuredModel: provider?.model?.trim() || undefined,
@@ -6328,6 +6328,9 @@ export class ChatService {
     if (providerKind === "codex-cli") {
       lines.push("Codex may inspect selected/global skill files directly with read-only shell commands under `~/.codex/skills` or `~/.agents/skills`; do not call `app_permissions_request_change` just to read selected skill files.");
     }
+    if (providerKind === "gemini-cli") {
+      lines.push("Antigravity discovers skills natively from `.agents/skills` in the repository workspace and `~/.gemini/config/skills`; selected skill files may also be read directly with read-only file access.");
+    }
     lines.push("Do not treat hashes or metadata as skill instructions, and do not assume any unlisted skill was selected.");
     return lines.join("\n");
   }
@@ -6856,7 +6859,15 @@ export class ChatService {
   }
 
   private preferredRoleRuntimeForKind(kind: ChatProviderKind): ChatRoleRuntime {
-    return kind === "claude-code" ? "claude-agent" : "codex-developer-instructions";
+    if (kind === "claude-code") {
+      return "claude-agent";
+    }
+    // Antigravity print mode has no native role/agent registration; roles are
+    // delivered through the prompt on the session's first turn.
+    if (kind === "gemini-cli") {
+      return "prompt-fallback";
+    }
+    return "codex-developer-instructions";
   }
 
   private isKnownRoleRuntime(value: ChatRoleRuntime | undefined): value is ChatRoleRuntime {
@@ -8608,7 +8619,7 @@ export class ChatService {
         throw new Error(`Duplicate member name: @${handle}.`);
       }
       handles.add(normalized);
-      if (item.kind !== "codex-cli" && item.kind !== "claude-code") {
+      if (item.kind !== "codex-cli" && item.kind !== "claude-code" && item.kind !== "gemini-cli") {
         throw new Error("Chat supports local CLI members only.");
       }
       const role = roles.find((candidate) => candidate.id === item.roleConfigId);
@@ -8721,19 +8732,27 @@ export class ChatService {
   private preferredChatProviderKind(providers: Array<{ kind: string; enabled: boolean }>, agents: AgentHealth[]): ChatProviderKind {
     const codexInstalled = agents.some((agent) => agent.kind === "codex-cli" && agent.installed);
     const claudeInstalled = agents.some((agent) => agent.kind === "claude-code" && agent.installed);
+    const geminiInstalled = agents.some((agent) => agent.kind === "gemini-cli" && agent.installed);
     const codexEnabled = providers.some((provider) => provider.kind === "codex-cli" && provider.enabled);
     const claudeEnabled = providers.some((provider) => provider.kind === "claude-code" && provider.enabled);
+    const geminiEnabled = providers.some((provider) => provider.kind === "gemini-cli" && provider.enabled);
     if (codexInstalled && codexEnabled) {
       return "codex-cli";
     }
     if (claudeInstalled && claudeEnabled) {
       return "claude-code";
     }
+    if (geminiInstalled && geminiEnabled) {
+      return "gemini-cli";
+    }
     if (codexInstalled) {
       return "codex-cli";
     }
     if (claudeInstalled) {
       return "claude-code";
+    }
+    if (geminiInstalled) {
+      return "gemini-cli";
     }
     return claudeEnabled ? "claude-code" : "codex-cli";
   }
@@ -8901,7 +8920,7 @@ export class ChatService {
         const handle = typeof participantRecord.handle === "string" ? participantRecord.handle.trim() : "";
         const roleConfigId = typeof participantRecord.roleConfigId === "string" ? participantRecord.roleConfigId.trim() : "";
         const kind = participantRecord.kind;
-        if (kind !== "codex-cli" && kind !== "claude-code") {
+        if (kind !== "codex-cli" && kind !== "claude-code" && kind !== "gemini-cli") {
           throw new Error(`Roster operation ${index + 1} has an unsupported CLI kind.`);
         }
         return {
@@ -9360,7 +9379,7 @@ export class ChatService {
         }
         const participantRecord = participant as Record<string, unknown>;
         const kind = participantRecord.kind;
-        if (kind !== "codex-cli" && kind !== "claude-code") {
+        if (kind !== "codex-cli" && kind !== "claude-code" && kind !== "gemini-cli") {
           throw new Error(`Participant operation ${index + 1} has an unsupported CLI kind.`);
         }
         const roleConfigId = typeof participantRecord.roleConfigId === "string" ? participantRecord.roleConfigId.trim() : "";
@@ -15060,7 +15079,7 @@ export class ChatService {
       typeof participant.id === "string" &&
       typeof participant.handle === "string" &&
       typeof participant.roleConfigId === "string" &&
-      (participant.kind === "codex-cli" || participant.kind === "claude-code")
+      (participant.kind === "codex-cli" || participant.kind === "claude-code" || participant.kind === "gemini-cli")
     );
   }
 

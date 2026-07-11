@@ -168,5 +168,5 @@ export function ParticipantEditorSwitch(props: {
 }
 
 export function providerClass(kind: ChatProviderKind): string {
-  return kind === "codex-cli" ? "is-codex" : "is-claude";
+  return kind === "codex-cli" ? "is-codex" : kind === "gemini-cli" ? "is-gemini" : "is-claude";
 }

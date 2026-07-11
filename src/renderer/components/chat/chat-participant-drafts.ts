@@ -80,6 +80,9 @@ export function chatCliProviderLabel(kind: ChatProviderKind | undefined): string
   if (kind === "codex-cli") {
     return "Codex CLI";
   }
+  if (kind === "gemini-cli") {
+    return "Gemini CLI";
+  }
   return "CLI";
 }
 
@@ -425,7 +428,7 @@ export function validateChatParticipantDrafts(
     if (draft.behaviorRuleIds.some((id) => !availableRuleIds.has(id))) {
       return "Select valid behavior rules for every member.";
     }
-    if (draft.kind !== "codex-cli" && draft.kind !== "claude-code") {
+    if (draft.kind !== "codex-cli" && draft.kind !== "claude-code" && draft.kind !== "gemini-cli") {
       return "Chat supports local CLI members only.";
     }
     if (draft.avatarId && !isChatAvatarIdForKind(draft.avatarId, draft.kind)) {
@@ -475,7 +478,7 @@ export function validateChatCliAgents(drafts: ChatParticipantDraft[], agents: Ag
   for (const draft of drafts) {
     const health = agents.find((agent) => agent.kind === draft.kind);
     if (!health?.installed) {
-      return `${draft.kind === "codex-cli" ? "Codex CLI" : "Claude Code"} is not installed.`;
+      return `${chatCliProviderLabel(draft.kind)} is not installed.`;
     }
   }
   return undefined;

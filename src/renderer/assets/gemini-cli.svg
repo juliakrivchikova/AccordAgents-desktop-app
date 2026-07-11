@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img">
+  <title>Gemini</title>
+  <defs>
+    <linearGradient id="gemini-gradient" x1="12" x2="12" y1="0" y2="24" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8BA2F6" />
+      <stop offset=".5" stop-color="#6E8BF0" />
+      <stop offset="1" stop-color="#4E6EE6" />
+    </linearGradient>
+  </defs>
+  <path
+    fill="url(#gemini-gradient)"
+    d="M12 1.5c.53 5.62 4.88 9.97 10.5 10.5-5.62.53-9.97 4.88-10.5 10.5C11.47 16.88 7.12 12.53 1.5 12 7.12 11.47 11.47 7.12 12 1.5z"
+  />
+</svg>
