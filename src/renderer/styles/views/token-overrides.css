@@ -379,6 +379,16 @@
     );
 }
 
+.chat-draft-artifact-token {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.chat-draft-artifact-token svg {
+  flex: 0 0 auto;
+}
+
 .chat-draft-plugin-token {
   display: inline-flex;
   align-items: baseline;

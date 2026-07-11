@@ -1,5 +1,5 @@
 import type { CSSProperties, ReactNode } from "react";
-import { Puzzle } from "lucide-react";
+import { FileBox, Puzzle } from "lucide-react";
 
 import type {
   ArtifactSummary,
@@ -49,6 +49,9 @@ const ARTIFACT_MARKER_START = "\u2063";
 const ARTIFACT_MARKER_END = "\u2064";
 const ARTIFACT_MARKER_DIGITS = ["\u200B", "\u200C", "\u200D", "\u2060"] as const;
 const ARTIFACT_MARKER_DIGIT_INDEX: ReadonlyMap<string, number> = new Map(ARTIFACT_MARKER_DIGITS.map((digit, index) => [digit, index]));
+// The transparent textarea needs to reserve the icon's width so its caret lines
+// up with the rendered FileBox in the highlight layer.
+const ARTIFACT_ICON_SPACER = "\u2003\u2004";
 
 export function activeMentionQuery(value: string): string | undefined {
   const match = value.match(/(?:^|\s)@([A-Za-z0-9_-]*)$/);
@@ -144,7 +147,7 @@ export function serializeArtifactDraft(value: string): string {
 
 export function replaceActiveArtifactMention(value: string, artifact: Pick<ArtifactSummary, "id" | "name">): string {
   const label = artifactDisplayLabel(artifact.name);
-  const token = `${label}${artifactMarker(artifact.id, label)}`;
+  const token = `${ARTIFACT_ICON_SPACER}${label}${artifactMarker(artifact.id, label)}`;
   const match = value.match(/(?:^|\s)#([^\s#]*)$/);
   if (!match || match.index === undefined) {
     return `${value}${value.endsWith(" ") || !value ? "" : " "}${token} `;
@@ -215,7 +218,7 @@ export function renderSlashHighlightedDraft(
     end: mention.end,
     key: `artifact-${mention.id}-${index}`,
     className: "chat-draft-artifact-token",
-    content: mention.label
+    content: <><FileBox size={15} strokeWidth={2.2} aria-hidden /><span>{mention.label}</span></>
   }));
   if (names.length > 0) {
     const pattern = new RegExp(`(^|\\s)/(${names.map(escapeRegExp).join("|")})(?=\\s|$)`, "g");
@@ -319,8 +322,11 @@ function draftArtifactMentions(value: string): DraftArtifactMention[] {
       break;
     }
     const metadata = decodeArtifactMarker(value.slice(markerStart + ARTIFACT_MARKER_START.length, markerEnd));
-    const start = metadata ? markerStart - metadata.label.length : markerStart;
-    if (metadata && start >= 0 && value.slice(start, markerStart) === metadata.label) {
+    const labelStart = metadata ? markerStart - metadata.label.length : markerStart;
+    const hasIconSpacer = labelStart >= ARTIFACT_ICON_SPACER.length &&
+      value.slice(labelStart - ARTIFACT_ICON_SPACER.length, labelStart) === ARTIFACT_ICON_SPACER;
+    const start = hasIconSpacer ? labelStart - ARTIFACT_ICON_SPACER.length : labelStart;
+    if (metadata && labelStart >= 0 && value.slice(labelStart, markerStart) === metadata.label) {
       mentions.push({ id: metadata.id, label: metadata.label, start, end: markerEnd + ARTIFACT_MARKER_END.length });
     }
     searchFrom = markerEnd + ARTIFACT_MARKER_END.length;
