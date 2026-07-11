@@ -97,6 +97,7 @@
 
 .artifacts-panel-body {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 12px;
 }
@@ -197,6 +198,7 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  overflow: hidden;
 }
 
 .artifact-detail-head {
@@ -302,6 +304,28 @@
   line-height: 1.5;
 }
 
+.artifact-detail > .artifact-content-markdown {
+  flex: 1 1 auto;
+  min-height: 180px;
+  max-height: none;
+}
+
+.artifact-history,
+.artifact-compare {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.artifact-history {
+  max-height: min(240px, 28vh);
+}
+
+.artifact-compare {
+  max-height: min(260px, 30vh);
+}
+
 .artifact-diff-pre {
   font-family: var(--font-code);
   font-size: 12px;
@@ -324,6 +348,14 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.artifact-compare > .artifact-diff-pre {
+  min-height: 0;
+  max-height: none;
 }
 
 .artifact-history li {
