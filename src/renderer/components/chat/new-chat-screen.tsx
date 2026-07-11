@@ -51,9 +51,9 @@ import { ChatComposerAttachmentChips } from "./chat-composer-attachment-chips";
 import { ChatComposerMenus } from "./chat-composer-menus";
 import {
   type DraftPluginMention,
-  draftStartsWithPluginMention,
-  renderSlashHighlightedDraft
+  draftStartsWithPluginMention
 } from "./chat-composer-draft-utils";
+import { renderSlashHighlightedDraft } from "./chat-composer-draft-highlights";
 import {
   revokePendingImageUrls,
   useChatComposerImages
@@ -300,11 +300,8 @@ export function NewChatScreen(props: {
             skillIndex={mentions.skillIndex}
             skillQuery={mentions.skillQuery}
             skillTargetLabel={mentions.skillTargetLabel}
-            visibleCommandOptions={mentions.visibleCommandOptions}
             visibleFileOptions={mentions.visibleFileOptions}
-            visiblePromptOptions={mentions.visiblePromptOptions}
-            visibleSkillOptions={mentions.visibleSkillOptions}
-            visiblePluginOptions={mentions.visiblePluginOptions}
+            visibleSlashOptions={mentions.visibleSlashOptions}
           />
           <textarea
             ref={promptRef}

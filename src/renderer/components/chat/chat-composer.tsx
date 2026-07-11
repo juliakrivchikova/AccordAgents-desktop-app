@@ -14,9 +14,9 @@ import { ChatComposerAttachmentChips } from "./chat-composer-attachment-chips";
 import {
   CHAT_COMPOSER_TEXTAREA_STYLE,
   draftStartsWithPluginMention,
-  renderSlashHighlightedDraft,
-  serializeArtifactDraft
+  serializeComposerDraft
 } from "./chat-composer-draft-utils";
+import { renderSlashHighlightedDraft } from "./chat-composer-draft-highlights";
 import { ChatActiveRunPopover, type ChatActiveRunParticipantRow } from "./chat-active-run-popover";
 import { ChatComposerMenus } from "./chat-composer-menus";
 import {
@@ -123,7 +123,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     mentions.setSelectedFileMentions([]);
     mentions.setSelectedSkillMentions([]);
     images.setPendingImages([]);
-    const sent = await props.onSend(fileMentionsToSend, imageInputs, skillMentionsToSend, serializeArtifactDraft(props.draft));
+    const sent = await props.onSend(fileMentionsToSend, imageInputs, skillMentionsToSend, serializeComposerDraft(props.draft));
     if (sent === false) {
       mentions.setSelectedFileMentions(fileMentionsToSend);
       mentions.setSelectedSkillMentions(skillMentionsToSend);
@@ -163,11 +163,8 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
           skillIndex={mentions.skillIndex}
           skillQuery={mentions.skillQuery}
           skillTargetLabel={mentions.skillTargetLabel}
-          visibleCommandOptions={mentions.visibleCommandOptions}
           visibleFileOptions={mentions.visibleFileOptions}
-          visiblePromptOptions={mentions.visiblePromptOptions}
-          visibleSkillOptions={mentions.visibleSkillOptions}
-          visiblePluginOptions={mentions.visiblePluginOptions}
+          visibleSlashOptions={mentions.visibleSlashOptions}
         />
         <ResizableTextarea
           ref={textareaRef}

@@ -368,9 +368,21 @@
 
 .chat-draft-skill-token,
 .chat-draft-artifact-token {
-  border-radius: 6px;
   color: var(--app-accent);
   font-weight: inherit;
+}
+
+.chat-draft-skill-token {
+  background: transparent;
+}
+
+.chat-draft-member-token {
+  color: var(--app-warning);
+  background: transparent;
+}
+
+.chat-draft-artifact-token {
+  border-radius: 6px;
   background:
     linear-gradient(
       0deg,

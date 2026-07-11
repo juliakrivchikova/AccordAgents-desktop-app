@@ -33,6 +33,7 @@ import type { ConversationActions } from "./use-conversation-actions";
 import { upsertConversationSummary } from "./conversation-summaries";
 import { normalizeAutoChatTitle, normalizeManualChatTitle } from "../../shared/chatTitles";
 import { persistLastViewedAt } from "./storage";
+import { serializeComposerDraft } from "../components/chat/chat-composer-draft-utils";
 
 export interface ChatActions {
   startChat: (options?: StartChatOptions) => Promise<boolean>;
@@ -88,7 +89,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
   async function startChat(options: StartChatOptions = {}): Promise<boolean> {
     state.setError(undefined);
     state.setWarnings([]);
-    const initialMessage = state.question.trim();
+    const draftMessage = state.question.trim();
+    const initialMessage = serializeComposerDraft(draftMessage).trim();
     const imageAttachments = options.imageAttachments ?? [];
     const repoFileMentions = options.repoFileMentions ?? [];
     const skillMentions = options.skillMentions ?? [];
@@ -147,7 +149,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         // conversation is empty. Soft-delete it and return to the new-chat screen
         // with the text restored instead of stranding an empty conversation.
         state.setConversation(undefined);
-        state.setQuestion(initialMessage);
+        state.setQuestion(draftMessage);
         try {
           await window.consensus.setChatArchived({ conversationId: createdConversationId, archived: true });
           await conversationActions.refreshConversations();

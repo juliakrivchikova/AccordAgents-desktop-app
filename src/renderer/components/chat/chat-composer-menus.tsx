@@ -14,7 +14,7 @@ import { chatParticipantDisplayName } from "../conversation/conversation-display
 import { providerLabel } from "./chat-conversation-data";
 import {
   repoFileBasename,
-  type SlashCommandOption
+  type ChatSlashSuggestion
 } from "./chat-composer-draft-utils";
 import { pluginSlashProviderLabels } from "./chat-plugin-options";
 
@@ -36,22 +36,15 @@ export function ChatComposerMenus(props: {
   skillIndex: number;
   skillQuery: string | undefined;
   skillTargetLabel?: string;
-  visibleCommandOptions: SlashCommandOption[];
   visibleFileOptions: RepoFileSearchResult[];
-  visiblePromptOptions: ChatSavedPromptConfig[];
-  visibleSkillOptions: UserSkillSummary[];
-  visiblePluginOptions: PluginCatalogItem[];
+  visibleSlashOptions: ChatSlashSuggestion[];
 }): JSX.Element {
   const mentionRefs = useActiveOptionScroll(props.mentionIndex, props.mentionOptions.length);
   // Artifacts and repository files share the "#" popover and one index space.
   const artifactOptions = props.artifactOptions ?? [];
   const hashOptionCount = artifactOptions.length + props.visibleFileOptions.length;
   const fileRefs = useActiveOptionScroll(props.fileIndex, hashOptionCount);
-  const slashOptionCount = props.visibleCommandOptions.length +
-    props.visiblePromptOptions.length +
-    props.visibleSkillOptions.length +
-    props.visiblePluginOptions.length;
-  const slashRefs = useActiveOptionScroll(props.skillIndex, slashOptionCount);
+  const slashRefs = useActiveOptionScroll(props.skillIndex, props.visibleSlashOptions.length);
   const slashMenuClassName = [
     "mention-menu",
     "skill-mention-menu",
@@ -135,109 +128,96 @@ export function ChatComposerMenus(props: {
         </div>
       )}
       {props.skillQuery !== undefined && (
-        props.visibleCommandOptions.length > 0 ||
-        props.visiblePromptOptions.length > 0 ||
-        props.visibleSkillOptions.length > 0 ||
-        props.visiblePluginOptions.length > 0 ||
+        props.visibleSlashOptions.length > 0 ||
         props.skillTargetLabel
       ) && (
         <div className={slashMenuClassName} role="listbox" aria-label="Slash commands, prompts, skills, and plugins">
           <div className="chat-popover-section-title">Slash</div>
           {props.skillTargetLabel && <div className="skill-mention-menu-context">{props.skillTargetLabel}</div>}
-          {props.visibleCommandOptions.map((command, index) => (
-            <button
-              ref={setOptionRef(slashRefs, index)}
-              className={index === props.skillIndex ? "selected" : ""}
-              onMouseDown={(event) => {
-                event.preventDefault();
-                props.insertCompactCommand();
-              }}
-              role="option"
-              aria-selected={index === props.skillIndex}
-              key={command.id}
-            >
-              <span className="file-mention-icon"><Minimize2 size={18} /></span>
-              <strong>{command.label}</strong>
-              <span>{command.description}</span>
-              <small>Command</small>
-              {index === 0 && <kbd>Enter</kbd>}
-            </button>
-          ))}
-          {props.visiblePromptOptions.map((prompt, index) => {
-            const optionIndex = props.visibleCommandOptions.length + index;
-            return (
-              <button
-                ref={setOptionRef(slashRefs, optionIndex)}
-                className={optionIndex === props.skillIndex ? "selected" : ""}
+          {props.visibleSlashOptions.map((option, index) => {
+            if (option.kind === "command") {
+              return <button
+                ref={setOptionRef(slashRefs, index)}
+                className={index === props.skillIndex ? "selected" : ""}
                 onMouseDown={(event) => {
                   event.preventDefault();
-                  props.insertSavedPrompt(prompt);
+                  props.insertCompactCommand();
                 }}
                 role="option"
-                aria-selected={optionIndex === props.skillIndex}
-                key={prompt.id}
+                aria-selected={index === props.skillIndex}
+                key={`command:${option.item.id}`}
+              >
+                <span className="file-mention-icon"><Minimize2 size={18} /></span>
+                <strong>{option.item.label}</strong>
+                <span>{option.item.description}</span>
+                <small>Command</small>
+                {index === 0 && <kbd>Enter</kbd>}
+              </button>
+            }
+            if (option.kind === "prompt") {
+              return <button
+                ref={setOptionRef(slashRefs, index)}
+                className={index === props.skillIndex ? "selected" : ""}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  props.insertSavedPrompt(option.item);
+                }}
+                role="option"
+                aria-selected={index === props.skillIndex}
+                key={`prompt:${option.item.id}`}
               >
                 <span className="file-mention-icon"><FileText size={18} /></span>
-                <strong>/{prompt.trigger}</strong>
-                <span>{prompt.label}</span>
+                <strong>/{option.item.trigger}</strong>
+                <span>{option.item.label}</span>
                 <small>Prompt</small>
-                {optionIndex === 0 && <kbd>Enter</kbd>}
+                {index === 0 && <kbd>Enter</kbd>}
               </button>
-            );
-          })}
-          {props.visibleSkillOptions.map((skill, index) => {
-            const optionIndex = props.visibleCommandOptions.length + props.visiblePromptOptions.length + index;
-            const disabled = skill.capabilityState !== "invocable" || skill.ambiguous;
-            return (
-              <button
-                ref={setOptionRef(slashRefs, optionIndex)}
-                className={optionIndex === props.skillIndex ? "selected" : ""}
+            }
+            if (option.kind === "skill") {
+              const disabled = option.item.capabilityState !== "invocable" || option.item.ambiguous;
+              return <button
+                ref={setOptionRef(slashRefs, index)}
+                className={index === props.skillIndex ? "selected" : ""}
                 disabled={disabled}
                 onMouseDown={(event) => {
                   event.preventDefault();
-                  props.insertSkillMention(skill);
+                  props.insertSkillMention(option.item);
                 }}
                 role="option"
-                aria-selected={optionIndex === props.skillIndex}
-                key={skill.skillId}
+                aria-selected={index === props.skillIndex}
+                key={`skill:${option.item.skillId}`}
               >
                 <span className="file-mention-icon"><ListChecks size={18} /></span>
-                <strong>{skill.displayName}</strong>
+                <strong>{option.item.displayName}</strong>
                 <span className="slash-item-copy">
-                  <span>{skill.description ?? "User skill"}</span>
-                  {disabled && <span className="slash-disabled-reason">{skillDisabledReason(skill)}</span>}
+                  <span>{option.item.description ?? "User skill"}</span>
+                  {disabled && <span className="slash-disabled-reason">{skillDisabledReason(option.item)}</span>}
                 </span>
-                <ProviderChips labels={skill.providerKinds.map(providerLabel)} />
+                <ProviderChips labels={option.item.providerKinds.map(providerLabel)} />
                 <small>Skill</small>
-                {!disabled && optionIndex === 0 && <kbd>Enter</kbd>}
+                {!disabled && index === 0 && <kbd>Enter</kbd>}
               </button>
-            );
-          })}
-          {props.visiblePluginOptions.map((plugin, index) => {
-            const optionIndex = props.visibleCommandOptions.length +
-              props.visiblePromptOptions.length +
-              props.visibleSkillOptions.length +
-              index;
+            }
             return (
               <button
-                ref={setOptionRef(slashRefs, optionIndex)}
-                className={optionIndex === props.skillIndex ? "selected" : ""}
+                ref={setOptionRef(slashRefs, index)}
+                className={index === props.skillIndex ? "selected" : ""}
                 onMouseDown={(event) => {
                   event.preventDefault();
-                  props.insertPluginMention(plugin);
+                  props.insertPluginMention(option.item);
                 }}
                 role="option"
-                aria-selected={optionIndex === props.skillIndex}
-                key={plugin.id}
+                aria-selected={index === props.skillIndex}
+                key={`plugin:${option.item.id}`}
               >
-                <PluginMenuIcon plugin={plugin} />
-                <strong>{plugin.displayName}</strong>
+                <PluginMenuIcon plugin={option.item} />
+                <strong>{option.item.displayName}</strong>
                 <span className="slash-item-copy">
-                  <span>{plugin.description ?? plugin.statusMessage ?? "Local plugin"}</span>
+                  <span>{option.item.description ?? option.item.statusMessage ?? "Local plugin"}</span>
                 </span>
-                <ProviderChips labels={pluginProviderLabels(plugin)} />
+                <ProviderChips labels={pluginProviderLabels(option.item)} />
                 <small>Plugin</small>
-                {optionIndex === 0 && <kbd>Enter</kbd>}
+                {index === 0 && <kbd>Enter</kbd>}
               </button>
             );
           })}

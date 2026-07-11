@@ -26,7 +26,7 @@ function Mention({ handle }: { handle: string }): JSX.Element {
   const { open, setOpen, openCard, scheduleClose } = useHoverCard();
 
   if (!profile) {
-    return <>{`@${handle}`}</>;
+    return <span className="chat-mention">{`@${handle}`}</span>;
   }
 
   return (

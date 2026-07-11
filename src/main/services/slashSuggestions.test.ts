@@ -1,31 +1,34 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { matchingChatSavedPrompts } from "../../shared/chatSavedPrompts";
-import {
-  slashSuggestionAtIndex,
-  slashSuggestionCount
-} from "../../shared/slashSuggestions";
+import { rankSlashSuggestions } from "../../shared/slashSuggestions";
 import type { ChatSavedPromptConfig } from "../../shared/types";
 
-test("slashSuggestionAtIndex uses command, prompt, skill, plugin ordering", () => {
-  const command = { id: "compact", label: "Compact", description: "Summarize context" };
-  const prompt = { id: "prompt-1", trigger: "bug", label: "Bug report" };
-  const skill = { skillId: "skill-1", displayName: "Office hours" };
-  const plugin = { id: "plugin-1", displayName: "GitHub" };
+test("rankSlashSuggestions promotes primary plugin matches above skill description matches", () => {
   const groups = {
-    commands: [command],
-    prompts: [prompt],
-    skills: [skill],
-    plugins: [plugin]
+    commands: [],
+    prompts: [],
+    skills: [
+      { name: "design-html", description: "Design and build production HTML" },
+      { name: "document-release", description: "Build release documentation" }
+    ],
+    plugins: [
+      { name: "build-macos-apps", displayName: "Build macOS Apps", description: "Build native apps" },
+      { name: "build-web-apps", displayName: "Build Web Apps", description: "Build frontend apps" }
+    ]
   };
 
-  assert.equal(slashSuggestionCount(groups), 4);
-  assert.deepEqual(slashSuggestionAtIndex(groups, 0), { kind: "command", item: command });
-  assert.deepEqual(slashSuggestionAtIndex(groups, 1), { kind: "prompt", item: prompt });
-  assert.deepEqual(slashSuggestionAtIndex(groups, 2), { kind: "skill", item: skill });
-  assert.deepEqual(slashSuggestionAtIndex(groups, 3), { kind: "plugin", item: plugin });
-  assert.equal(slashSuggestionAtIndex(groups, -1), undefined);
-  assert.equal(slashSuggestionAtIndex(groups, 4), undefined);
+  const ranked = rankSlashSuggestions(groups, "build", (selection) => ({
+    primary: [selection.item.name, "displayName" in selection.item ? selection.item.displayName : ""],
+    secondary: [selection.item.description]
+  }));
+
+  assert.deepEqual(ranked.map((selection) => selection.item.name), [
+    "build-macos-apps",
+    "build-web-apps",
+    "design-html",
+    "document-release"
+  ]);
 });
 
 test("matchingChatSavedPrompts ranks exact and prefix trigger matches before broad trigger or label matches", () => {

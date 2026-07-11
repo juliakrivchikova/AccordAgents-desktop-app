@@ -11,6 +11,8 @@
     "types": ["node"]
   },
   "include": [
+    "src/renderer/components/chat/chat-composer-mention-token.test.ts",
+    "src/renderer/components/chat/chat-composer-plugin-token.test.ts",
     "src/renderer/components/settings/aws-worker-panel.test.tsx",
     "src/preload/global.d.ts"
   ],

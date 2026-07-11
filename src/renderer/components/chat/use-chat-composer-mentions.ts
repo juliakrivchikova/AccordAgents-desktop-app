@@ -16,8 +16,7 @@ import {
   matchingChatSavedPrompts
 } from "../../../shared/chatSavedPrompts";
 import {
-  slashSuggestionAtIndex,
-  slashSuggestionCount
+  rankSlashSuggestions
 } from "../../../shared/slashSuggestions";
 import {
   chatParticipantDisplayName,
@@ -28,9 +27,11 @@ import {
   activeFileQuery,
   activeMentionQuery,
   activeSkillQuery,
+  type ChatSlashSuggestion,
   compactCommandOption,
   draftHasArtifactMention,
   draftHasFileMention,
+  draftHasMention,
   draftHasSkillMention,
   matchArtifactMentions,
   normalizeArtifactDraft,
@@ -39,6 +40,7 @@ import {
   replaceActiveArtifactMention,
   replaceActiveFileMention,
   replaceActiveMention,
+  replaceActivePluginMention,
   replaceActiveSkillMention,
   replaceActiveSlashToken,
   type DraftPluginMention,
@@ -109,6 +111,7 @@ export function useChatComposerMentions(props: {
   visiblePromptOptions: ChatSavedPromptConfig[];
   visibleSkillOptions: UserSkillSummary[];
   visiblePluginOptions: PluginCatalogItem[];
+  visibleSlashOptions: ChatSlashSuggestion[];
   visibleSlashOptionCount: number;
 } {
   const [mentionQuery, setMentionQuery] = useState<string | undefined>();
@@ -157,13 +160,32 @@ export function useChatComposerMentions(props: {
   const skillTargetLabel = skillTarget ? skillPickerTargetLabel(skillTarget, props.participants) : undefined;
   const compactOption = props.searchSource.type === "conversation" ? compactCommandOption(skillQuery, skillTarget) : undefined;
   const visibleCommandOptions = compactOption ? [compactOption] : [];
-  const visibleSlashOptionCount = slashSuggestionCount({
+  const visibleSlashOptions = rankSlashSuggestions({
     commands: visibleCommandOptions,
     prompts: visiblePromptOptions,
     skills: visibleSkillOptions,
     plugins: visiblePluginOptions
+  }, skillQuery ?? "", (selection) => {
+    if (selection.kind === "command") {
+      return { primary: [selection.item.id, selection.item.label], secondary: [selection.item.description] };
+    }
+    if (selection.kind === "prompt") {
+      return { primary: [selection.item.trigger, selection.item.label] };
+    }
+    if (selection.kind === "skill") {
+      return {
+        primary: [selection.item.frontmatterName, selection.item.displayName],
+        secondary: [selection.item.description ?? ""]
+      };
+    }
+    return {
+      primary: [selection.item.name, selection.item.displayName],
+      secondary: [selection.item.description ?? "", selection.item.category ?? ""]
+    };
   });
-  const showSkillHighlights = draftHasArtifactMention(props.draft) ||
+  const visibleSlashOptionCount = visibleSlashOptions.length;
+  const showSkillHighlights = draftHasMention(props.draft) ||
+    draftHasArtifactMention(props.draft) ||
     selectedSkillMentions.some((mention) => draftHasSkillMention(props.draft, mention.frontmatterName)) ||
     selectedPluginMentions.some((mention) => draftHasSkillMention(props.draft, mention.name));
 
@@ -280,7 +302,7 @@ export function useChatComposerMentions(props: {
   }, [skillQuery, skillSearchAvailable, props.draft, props.searchSource]);
 
   function updateDraft(value: string): void {
-    const normalized = normalizeArtifactDraft(value);
+    const normalized = normalizeArtifactDraft(value, selectedPluginMentions);
     props.onDraftChange(normalized);
     const nextFileQuery = hashTriggerAvailable ? activeFileQuery(normalized) : undefined;
     const nextMentionQuery = nextFileQuery === undefined ? activeMentionQuery(normalized) : undefined;
@@ -294,7 +316,7 @@ export function useChatComposerMentions(props: {
   }
 
   function updateDraftWithCaret(value: string, position = value.length): void {
-    const normalized = normalizeArtifactDraft(value);
+    const normalized = normalizeArtifactDraft(value, selectedPluginMentions);
     pendingCaretRef.current = { value: normalized, position: Math.min(position, normalized.length) };
     props.onDraftChange(normalized);
   }
@@ -376,21 +398,16 @@ export function useChatComposerMentions(props: {
       insertSkillMention(invocation.skill);
       return;
     }
-    const insertPluginToken = invocation.kind === "mcp-passive" || plugin.installedProviderKinds.length > 0;
-    if (insertPluginToken) {
-      const prompt = invocation.kind === "prompt-insert" ? invocation.prompt.trim() : "";
-      updateDraftWithCaret(prompt
-        ? replaceActiveSlashToken(props.draft, `/${plugin.name} ${prompt}`)
-        : replaceActiveSkillMention(props.draft, plugin.name));
-      setSelectedPluginMentions((current) => {
-        if (current.some((mention) => mention.name === plugin.name)) {
-          return current;
-        }
-        return [...current, { name: plugin.name, displayName: plugin.displayName, iconUrl: plugin.iconUrl }];
-      });
-    } else if (invocation.kind === "prompt-insert") {
-      updateDraftWithCaret(replaceActiveSlashToken(props.draft, invocation.prompt));
-    }
+    // The slash picker selects an installed tool. Its manifest defaultPrompt is
+    // reserved for the Settings "Try in chat" shortcut and must not overwrite
+    // what the user intends to write in the composer.
+    updateDraftWithCaret(replaceActivePluginMention(props.draft, plugin.name));
+    setSelectedPluginMentions((current) => {
+      if (current.some((mention) => mention.name === plugin.name)) {
+        return current;
+      }
+      return [...current, { name: plugin.name, displayName: plugin.displayName, iconUrl: plugin.iconUrl }];
+    });
     setSkillQuery(undefined);
     setSkillOptions([]);
     setPluginOptions([]);
@@ -399,12 +416,7 @@ export function useChatComposerMentions(props: {
   }
 
   function insertSlashOptionAtIndex(index: number): void {
-    const selection = slashSuggestionAtIndex({
-      commands: visibleCommandOptions,
-      prompts: visiblePromptOptions,
-      skills: visibleSkillOptions,
-      plugins: visiblePluginOptions
-    }, index);
+    const selection = visibleSlashOptions[index];
     if (!selection) {
       return;
     }
@@ -470,6 +482,7 @@ export function useChatComposerMentions(props: {
     visiblePromptOptions,
     visibleSkillOptions,
     visiblePluginOptions,
+    visibleSlashOptions,
     visibleSlashOptionCount
   };
 }

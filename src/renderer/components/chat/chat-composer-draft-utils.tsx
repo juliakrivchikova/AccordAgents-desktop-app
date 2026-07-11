@@ -1,14 +1,24 @@
-import type { CSSProperties, ReactNode } from "react";
-import { FileBox, Puzzle } from "lucide-react";
+import type { CSSProperties } from "react";
 
 import type {
   ArtifactSummary,
   ChatParticipant,
-  ChatSkillMention,
+  ChatSavedPromptConfig,
+  PluginCatalogItem,
+  UserSkillSummary,
   UserSkillTargetSummary
 } from "../../../shared/types";
+import type { SlashSuggestionSelection } from "../../../shared/slashSuggestions";
 import { artifactReference } from "../../../shared/artifacts";
 import { providerLabel } from "./chat-conversation-data";
+import {
+  normalizePluginIconSpacers,
+  replaceActiveSlashQuery,
+  stripPluginIconMetadata
+} from "./chat-composer-plugin-token";
+
+export { replaceActivePluginMention } from "./chat-composer-plugin-token";
+export { draftHasMention } from "./chat-composer-mention-token";
 
 export const CHAT_COMPOSER_TEXTAREA_STYLE: CSSProperties = {
   fontSize: "14.5px",
@@ -24,25 +34,24 @@ export interface SlashCommandOption {
   description: string;
 }
 
+export type ChatSlashSuggestion = SlashSuggestionSelection<
+  SlashCommandOption,
+  ChatSavedPromptConfig,
+  UserSkillSummary,
+  PluginCatalogItem
+>;
+
 export interface DraftPluginMention {
   name: string;
   displayName: string;
   iconUrl?: string;
 }
 
-interface DraftArtifactMention {
+export interface DraftArtifactMention {
   id: string;
   label: string;
   start: number;
   end: number;
-}
-
-interface DraftHighlight {
-  start: number;
-  end: number;
-  key: string;
-  className: string;
-  content: ReactNode;
 }
 
 const ARTIFACT_MARKER_START = "\u2063";
@@ -52,7 +61,6 @@ const ARTIFACT_MARKER_DIGIT_INDEX: ReadonlyMap<string, number> = new Map(ARTIFAC
 // The transparent textarea needs to reserve the icon's width so its caret lines
 // up with the rendered FileBox in the highlight layer.
 const ARTIFACT_ICON_SPACER = "\u2003\u2004";
-
 export function activeMentionQuery(value: string): string | undefined {
   const match = value.match(/(?:^|\s)@([A-Za-z0-9_-]*)$/);
   return match ? match[1] : undefined;
@@ -145,6 +153,10 @@ export function serializeArtifactDraft(value: string): string {
   return serialized + stripInvalidArtifactMarkers(value.slice(cursor));
 }
 
+export function serializeComposerDraft(value: string): string {
+  return stripPluginIconMetadata(serializeArtifactDraft(value));
+}
+
 export function replaceActiveArtifactMention(value: string, artifact: Pick<ArtifactSummary, "id" | "name">): string {
   const label = artifactDisplayLabel(artifact.name);
   const token = `${ARTIFACT_ICON_SPACER}${label}${artifactMarker(artifact.id, label)}`;
@@ -158,24 +170,12 @@ export function replaceActiveArtifactMention(value: string, artifact: Pick<Artif
 }
 
 export function replaceActiveSkillMention(value: string, skillName: string): string {
-  const match = value.match(/(?:^|\s)\/([A-Za-z0-9_-]*)$/);
-  if (!match || match.index === undefined) {
-    return `${value}${value.endsWith(" ") || !value ? "" : " "}/${skillName} `;
-  }
-  const prefix = value.slice(0, match.index);
-  const leadingSpace = match[0].startsWith(" ") ? " " : "";
-  return `${prefix}${leadingSpace}/${skillName} `;
+  return replaceActiveSlashQuery(value, `/${skillName} `);
 }
 
 export function replaceActiveSlashToken(value: string, replacement: string): string {
   const insertion = replacement.trim();
-  const match = value.match(/(?:^|\s)\/([A-Za-z0-9_-]*)$/);
-  if (!match || match.index === undefined) {
-    return `${value}${value.endsWith(" ") || !value ? "" : " "}${insertion}`;
-  }
-  const prefix = value.slice(0, match.index);
-  const leadingSpace = match[0].startsWith(" ") ? " " : "";
-  return `${prefix}${leadingSpace}${insertion}`;
+  return replaceActiveSlashQuery(value, insertion);
 }
 
 export function removeSkillMentionToken(value: string, skillName: string): string {
@@ -195,72 +195,6 @@ export function draftStartsWithPluginMention(value: string, pluginMentions: Draf
   return pluginMentions.some((mention) => new RegExp(`^/${escapeRegExp(mention.name)}(?=\\s|$)`).test(value));
 }
 
-export function renderSlashHighlightedDraft(
-  value: string,
-  skillMentions: ChatSkillMention[],
-  pluginMentions: DraftPluginMention[] = []
-): ReactNode[] {
-  const byName = new Map<string, { className: string; icon?: ReactNode }>();
-  for (const mention of pluginMentions) {
-    byName.set(mention.name, {
-      className: "chat-draft-plugin-token",
-      icon: mention.iconUrl
-        ? <img className="chat-draft-plugin-token-icon" src={mention.iconUrl} alt="" aria-hidden="true" />
-        : <Puzzle className="chat-draft-plugin-token-icon" size={15} strokeWidth={2.2} aria-hidden="true" />
-    });
-  }
-  for (const mention of skillMentions) {
-    byName.set(mention.frontmatterName, { className: "chat-draft-skill-token" });
-  }
-  const names = Array.from(byName.keys()).sort((left, right) => right.length - left.length);
-  const highlights: DraftHighlight[] = draftArtifactMentions(value).map((mention, index) => ({
-    start: mention.start,
-    end: mention.end,
-    key: `artifact-${mention.id}-${index}`,
-    className: "chat-draft-artifact-token",
-    content: <><FileBox size={15} strokeWidth={2.2} aria-hidden /><span>{mention.label}</span></>
-  }));
-  if (names.length > 0) {
-    const pattern = new RegExp(`(^|\\s)/(${names.map(escapeRegExp).join("|")})(?=\\s|$)`, "g");
-    let index = 0;
-    for (const match of value.matchAll(pattern)) {
-      const leading = match[1] ?? "";
-      const name = match[2] ?? "";
-      const start = (match.index ?? 0) + leading.length;
-      const end = start + name.length + 1;
-      const token = byName.get(name);
-      highlights.push({
-        start,
-        end,
-        key: `slash-${name}-${index}`,
-        className: token?.className ?? "chat-draft-skill-token",
-        content: <>{token?.icon}{value.slice(start, end)}</>
-      });
-      index += 1;
-    }
-  }
-  if (highlights.length === 0 || !value) {
-    return [value || "\u00a0"];
-  }
-  highlights.sort((left, right) => left.start - right.start || left.end - right.end);
-  const nodes: ReactNode[] = [];
-  let cursor = 0;
-  for (const highlight of highlights) {
-    if (highlight.start < cursor) {
-      continue;
-    }
-    if (highlight.start > cursor) {
-      nodes.push(value.slice(cursor, highlight.start));
-    }
-    nodes.push(<span className={highlight.className} key={highlight.key}>{highlight.content}</span>);
-    cursor = highlight.end;
-  }
-  if (cursor < value.length) {
-    nodes.push(value.slice(cursor));
-  }
-  return nodes.length > 0 ? nodes : [value];
-}
-
 export function draftHasFileMention(value: string, filePath: string): boolean {
   return new RegExp(`(^|\\s)#${escapeRegExp(filePath)}(?=\\s|$)`).test(value);
 }
@@ -269,8 +203,11 @@ export function draftHasArtifactMention(value: string): boolean {
   return draftArtifactMentions(value).length > 0;
 }
 
-export function normalizeArtifactDraft(value: string): string {
-  return stripInvalidArtifactMarkers(value, true);
+export function normalizeArtifactDraft(value: string, pluginMentions: readonly DraftPluginMention[] = []): string {
+  return normalizePluginIconSpacers(
+    stripInvalidArtifactMarkers(value, true),
+    pluginMentions.map((mention) => mention.name)
+  );
 }
 
 export function repoFileBasename(filePath: string): string {
@@ -289,7 +226,7 @@ export function skillPickerTargetLabel(target: UserSkillTargetSummary, participa
   return `For ${handles.length > 0 ? handles.join(", ") : "selected target"} · ${providerText}`;
 }
 
-function escapeRegExp(value: string): string {
+export function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
@@ -309,7 +246,7 @@ function artifactMarker(id: string, label: string): string {
   return `${encoded}${ARTIFACT_MARKER_END}`;
 }
 
-function draftArtifactMentions(value: string): DraftArtifactMention[] {
+export function draftArtifactMentions(value: string): DraftArtifactMention[] {
   const mentions: DraftArtifactMention[] = [];
   let searchFrom = 0;
   while (searchFrom < value.length) {

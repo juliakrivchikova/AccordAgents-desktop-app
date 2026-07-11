@@ -407,19 +407,22 @@
 }
 
 .chat-mention {
-  color: var(--app-accent);
+  color: var(--app-warning);
   font-weight: 400;
-  background: var(--app-accent-soft);
-  border-radius: 4px;
-  padding: 0 3px;
+  background: transparent;
   white-space: nowrap;
   cursor: default;
 }
 
 .chat-mention:hover,
 .chat-mention:focus-visible {
-  background: color-mix(in srgb, var(--app-accent) 22%, transparent);
-  outline: none;
+  color: var(--app-warning);
+  background: transparent;
+}
+
+.chat-mention:focus-visible {
+  outline: 1px solid var(--app-warning);
+  outline-offset: 2px;
 }
 
 .chat-mention-card {
