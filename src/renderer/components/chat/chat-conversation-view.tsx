@@ -40,11 +40,15 @@ import { ChatThreadPanel } from "./chat-thread-panel";
 import { useChatConversationViewport } from "./use-chat-conversation-viewport";
 import { useChatLocalFileOpen } from "./use-chat-local-file-open";
 import { useSubmittingIdSet } from "./use-submitting-id-set";
+import { useStableChatMessageActions } from "./use-stable-chat-message-actions";
 
 export type { ChatMessageFocusRequest } from "./chat-conversation-types";
 
 export function ChatConversationView(props: ChatConversationViewProps): JSX.Element {
-  const participants = chatParticipants(props.conversation);
+  const participants = useMemo(
+    () => chatParticipants(props.conversation),
+    [props.conversation.metadata.participants]
+  );
   const pendingAppToolApprovals = chatAppToolApprovals(props.conversation).filter((approval) => approval.status === "pending");
   const resolvedTimelineApprovals = useMemo(
     () =>
@@ -87,6 +91,15 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   const [isResizingThread, setIsResizingThread] = useState(false);
   const approvalSubmission = useSubmittingIdSet();
   const choiceSubmission = useSubmittingIdSet();
+  const chatMessageActions = useStableChatMessageActions({
+    onApproveMentions: props.onApproveMentions,
+    onRejectMentions: props.onRejectMentions,
+    onRespondToChoice: props.onRespondToChoice,
+    onToggleReaction: props.onToggleReaction,
+    onCompactParticipant: props.onCompactParticipant,
+    onStopRun: props.onStopRun,
+    runChoiceWithSubmittingId: choiceSubmission.runWithSubmittingId
+  });
   const localFileOpen = useChatLocalFileOpen({
     conversationId: props.conversation.id,
     repoFileOpenAction: props.settings.repoFileOpenAction,
@@ -100,7 +113,10 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   );
   const thinkingRows = useMemo(() => chatThinkingRows(props.progress), [props.progress]);
   const liveProgressById = useMemo(() => liveMessageProgressById(props.progress), [props.progress]);
-  const thinkingSignature = thinkingRows.map((row) => `${row.key}:${row.activity ?? ""}:${row.activityEvents?.length ?? 0}:${row.updatedAt}`).join("|");
+  const thinkingSignature = useMemo(
+    () => thinkingRows.map((row) => `${row.key}:${row.activity ?? ""}:${row.activityEvents?.length ?? 0}:${row.updatedAt}`).join("|"),
+    [thinkingRows]
+  );
   const latestMessage = topLevelMessages[topLevelMessages.length - 1];
   const selectedThreadRoot = selectedThreadRootId
     ? topLevelMessages.find((message) => message.id === selectedThreadRootId)
@@ -187,12 +203,6 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     );
   }
 
-  function handleChoiceResponse(sourceMessageId: string, choiceId: string, response: Parameters<ChatConversationViewProps["onRespondToChoice"]>[2]): Promise<void> {
-    return choiceSubmission.runWithSubmittingId(choiceId, async () => {
-      await props.onRespondToChoice(sourceMessageId, choiceId, response);
-    });
-  }
-
   function startThreadResize(event: ReactPointerEvent<HTMLDivElement>): void {
     const view = viewport.viewRef.current;
     if (!view) {
@@ -268,17 +278,17 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               isRunning={props.isRunning}
               liveProgressById={liveProgressById}
               olderMessagesLoading={props.olderMessagesLoading}
-              onApproveMentions={props.onApproveMentions}
-              onCompactParticipant={props.onCompactParticipant}
+              onApproveMentions={chatMessageActions.onApproveMentions}
+              onCompactParticipant={chatMessageActions.onCompactParticipant}
               onLoadOlderMessages={props.onLoadOlderMessages}
               onOpenThread={setSelectedThreadRootId}
-              onRejectMentions={props.onRejectMentions}
+              onRejectMentions={chatMessageActions.onRejectMentions}
               onRespondToAppToolApproval={handleAppToolApproval}
-              onRespondToChoice={handleChoiceResponse}
+              onRespondToChoice={chatMessageActions.onRespondToChoice}
               onScroll={viewport.updateStickToBottom}
               onScrollIntent={viewport.markUserScrollIntent}
-              onStopRun={props.onStopRun}
-              onToggleReaction={props.onToggleReaction}
+              onStopRun={props.onStopRun ? chatMessageActions.onStopRun : undefined}
+              onToggleReaction={chatMessageActions.onToggleReaction}
               participantStatusById={props.participantStatusById}
               participants={participants}
               pendingApprovalRows={pendingAppToolApprovals}
@@ -354,12 +364,12 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               onSend={(repoFileMentions, imageAttachments, skillMentions, content) =>
                 sendThreadDraft(selectedThreadRoot, repoFileMentions, imageAttachments, skillMentions, content)}
               onClose={() => setSelectedThreadRootId(undefined)}
-              onApproveMentions={props.onApproveMentions}
-              onRejectMentions={props.onRejectMentions}
-              onRespondToChoice={handleChoiceResponse}
-              onToggleReaction={props.onToggleReaction}
-              onCompactParticipant={props.onCompactParticipant}
-              onStopRun={props.onStopRun}
+              onApproveMentions={chatMessageActions.onApproveMentions}
+              onRejectMentions={chatMessageActions.onRejectMentions}
+              onRespondToChoice={chatMessageActions.onRespondToChoice}
+              onToggleReaction={chatMessageActions.onToggleReaction}
+              onCompactParticipant={chatMessageActions.onCompactParticipant}
+              onStopRun={props.onStopRun ? chatMessageActions.onStopRun : undefined}
               continuedMentionRequestIds={continuedMentionRequestIds}
               inferredParticipantRequestsByTrigger={inferredParticipantRequestsByTrigger}
             />

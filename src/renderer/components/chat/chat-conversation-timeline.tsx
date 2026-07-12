@@ -132,7 +132,7 @@ export function ChatConversationTimeline(props: {
                   hasContinuationReply={props.continuedMentionRequestIds.has(row.message.id)}
                   inferredParticipantRequests={props.inferredParticipantRequestsByTrigger.get(row.message.id)}
                   liveProgress={props.liveProgressById.get(row.message.id)}
-                  onOpenThread={() => props.onOpenThread(row.message.id)}
+                  onOpenThread={props.onOpenThread}
                   onApproveMentions={props.onApproveMentions}
                   onRejectMentions={props.onRejectMentions}
                   onRespondToChoice={props.onRespondToChoice}

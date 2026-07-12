@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Copy, FileText, ListChecks, RefreshCw, Reply, Smile, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -39,6 +39,12 @@ import { WorkedRow } from "./chat-worked-row";
 const MESSAGE_ACTION_CLASS = "message-action size-[26px] min-h-[26px] rounded-[8px] border-0 bg-transparent shadow-none";
 const MESSAGE_ACTION_STOP_CLASS = `${MESSAGE_ACTION_CLASS} message-action-stop`;
 
+declare global {
+  interface Window {
+    __accordAgentsChatMessageRenderProbe?: (messageId: string, role: string, status?: string) => void;
+  }
+}
+
 export type ChatChoiceResponse = {
   cancel?: boolean;
   selectedOptionId?: string;
@@ -46,7 +52,7 @@ export type ChatChoiceResponse = {
   note?: string;
 };
 
-export function ChatMessageItem(props: {
+export const ChatMessageItem = memo(function ChatMessageItem(props: {
   message: Conversation["messages"][number];
   conversationId: string;
   participants?: ChatParticipant[];
@@ -63,7 +69,7 @@ export function ChatMessageItem(props: {
   hasContinuationReply?: boolean;
   inferredParticipantRequests?: ChatParticipantRequestBatch[];
   liveProgress?: AgentRunProgress;
-  onOpenThread?: () => void;
+  onOpenThread?: (messageId: string) => void;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void | Promise<void>;
@@ -72,6 +78,9 @@ export function ChatMessageItem(props: {
   onStopRun?: (runId: string) => void;
 }): JSX.Element {
   const { message } = props;
+  if (typeof window !== "undefined" && typeof window.__accordAgentsChatMessageRenderProbe === "function") {
+    window.__accordAgentsChatMessageRenderProbe(message.id, message.role, message.status);
+  }
   const [copied, setCopied] = useState(false);
   const [reactionPickerOpen, setReactionPickerOpen] = useState(false);
   const [processingTranscriptOpen, setProcessingTranscriptOpen] = useState(false);
@@ -179,7 +188,7 @@ export function ChatMessageItem(props: {
   }
 
   const threadActions = showThreadActions && (replyCount > 0 || participantRequest) ? (
-    <button type="button" className="chat-thread-pill" onClick={props.onOpenThread}>
+    <button type="button" className="chat-thread-pill" onClick={() => props.onOpenThread?.(message.id)}>
       {replyPreviewAvatars.length > 0 && (
         <span className="chat-thread-avatars" aria-hidden="true">
           {replyPreviewAvatars.map((entry) => (
@@ -280,7 +289,7 @@ export function ChatMessageItem(props: {
                 icon={Reply}
                 label="Reply in thread"
                 tooltip="Reply in thread"
-                onClick={props.onOpenThread}
+                onClick={() => props.onOpenThread?.(message.id)}
               />
             )}
           </div>
@@ -416,7 +425,7 @@ export function ChatMessageItem(props: {
       )}
     </>
   );
-}
+});
 
 function participantRequestNoteClass(request: ChatParticipantRequestBatch): string {
   return `is-${request.status.replace(/_/g, "-")}`;

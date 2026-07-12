@@ -432,11 +432,75 @@ test("agent progress sink keeps in-progress formatted stream for visible runs", 
   sink.emit({ kind: "text", text: preamble, cumulative: preamble });
   sink.emit({ kind: "tool", text: "Reading renderer state", activityKind: "tool" });
   sink.emit({ kind: "text", text: `\n\n${final}`, cumulative: full });
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  await new Promise((resolve) => setTimeout(resolve, 300));
 
   assert.equal(progressItems.at(-1)?.partialContent, full);
   assert.equal(progressItems.at(-1)?.activityEvents?.length, 1);
   assert.equal(sink.processingTranscript(NOW)?.content, full);
+});
+
+test("agent progress sink coalesces rapid text updates and flushes the latest partial", async () => {
+  const service = testService().service as any;
+  const progressItems: Array<{ state?: string; partialContent?: string }> = [];
+  const sink = service.createAgentProgressSink(
+    "run-1",
+    (progress: { agentProgress?: { state?: string; partialContent?: string } }) => {
+      progressItems.push({
+        state: progress.agentProgress?.state,
+        partialContent: progress.agentProgress?.partialContent
+      });
+    },
+    chatParticipant("codex-cli"),
+    "message-1"
+  );
+
+  sink.beginAttempt();
+  sink.emit({ kind: "text", text: "A", cumulative: "A" });
+  sink.emit({ kind: "text", text: "B", cumulative: "AB" });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+
+  assert.equal(progressItems.at(-1)?.partialContent, undefined);
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+
+  assert.equal(progressItems.at(-1)?.partialContent, "AB");
+});
+
+test("agent progress sink emits finish immediately and suppresses pending flushes", async () => {
+  const service = testService().service as any;
+  const progressItems: Array<{ state?: string; partialContent?: string }> = [];
+  const sink = service.createAgentProgressSink(
+    "run-1",
+    (progress: { agentProgress?: { state?: string; partialContent?: string } }) => {
+      progressItems.push({
+        state: progress.agentProgress?.state,
+        partialContent: progress.agentProgress?.partialContent
+      });
+    },
+    chatParticipant("codex-cli"),
+    "message-1"
+  );
+
+  sink.beginAttempt();
+  sink.emit({ kind: "text", text: "A", cumulative: "A" });
+  sink.finish();
+
+  assert.equal(progressItems.at(-1)?.state, "finished");
+
+  const countAfterFinish = progressItems.length;
+  await new Promise((resolve) => setTimeout(resolve, 300));
+
+  assert.equal(progressItems.length, countAfterFinish);
+});
+
+test("run owner heartbeat timer clears when final active run is forgotten", () => {
+  const service = testService().service as any;
+
+  service.rememberActiveChatRun("conversation-1", "run-1");
+  assert.ok(service.runOwnerHeartbeatTimer);
+
+  service.forgetActiveChatRun("conversation-1", "run-1");
+  assert.equal(service.runOwnerHeartbeatTimer, undefined);
 });
 
 test("applyPreparedPermissionChange is the merge-additions path for shell rules and Claude native tools", () => {

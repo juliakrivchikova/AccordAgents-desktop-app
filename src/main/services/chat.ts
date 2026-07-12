@@ -16600,6 +16600,14 @@ export class ChatService {
     this.runOwnerHeartbeatTimer.unref();
   }
 
+  private clearRunOwnerHeartbeatTimer(): void {
+    if (!this.runOwnerHeartbeatTimer) {
+      return;
+    }
+    clearInterval(this.runOwnerHeartbeatTimer);
+    this.runOwnerHeartbeatTimer = undefined;
+  }
+
   // Honors Stop clicks recorded by other app instances sharing this storage:
   // they cannot abort this instance's in-memory controllers, so they enqueue
   // the run id via StorageService.requestRunCancel and this instance cancels
@@ -16673,11 +16681,17 @@ export class ChatService {
     }
     const runIds = this.activeConversationRunIds.get(conversationId);
     if (!runIds) {
+      if (this.activeRunIds.size === 0) {
+        this.clearRunOwnerHeartbeatTimer();
+      }
       return;
     }
     runIds.delete(runId);
     if (runIds.size === 0) {
       this.activeConversationRunIds.delete(conversationId);
+    }
+    if (this.activeRunIds.size === 0) {
+      this.clearRunOwnerHeartbeatTimer();
     }
   }
 
@@ -16837,7 +16851,7 @@ export class ChatService {
     processingTranscript: (capturedAt: string) => ChatProcessingTranscript | undefined;
   } {
     const participantLabel = `@${participant.handle}`;
-    const THROTTLE_MS = 100;
+    const THROTTLE_MS = 250;
     let finished = false;
     let cumulative = "";
     let activity: ChatActivityAccumulator = {

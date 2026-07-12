@@ -954,3 +954,19 @@ ul.markdown-list {
 .spin {
   animation: spin 900ms linear infinite;
 }
+
+.app-inactive .progress-active .message-body::before,
+.app-inactive .progress-active .message-body::after,
+.app-inactive .typing-dots i,
+.app-inactive .spin {
+  animation-play-state: paused !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-active .message-body::before,
+  .progress-active .message-body::after,
+  .typing-dots i,
+  .spin {
+    animation: none !important;
+  }
+}
