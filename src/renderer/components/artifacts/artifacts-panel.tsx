@@ -53,7 +53,7 @@ export function ArtifactsPanel(props: {
       if (panelResize.panelRef.current?.contains(target)) {
         return;
       }
-      if (target instanceof Element && target.closest(".chat-artifacts-toggle")) {
+      if (target instanceof Element && target.closest("[data-artifacts-trigger='true']")) {
         return;
       }
       props.onClose();

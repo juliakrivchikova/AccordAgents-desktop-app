@@ -1,33 +1,5 @@
 /* Artifacts: durable, versioned, signable chat work products. */
 
-.chat-artifacts-toggle {
-  position: absolute;
-  top: 10px;
-  right: 16px;
-  z-index: 12;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 10px;
-  border: 1px solid var(--app-border);
-  border-radius: 999px;
-  background: var(--app-surface);
-  color: var(--app-muted);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.chat-artifacts-toggle:hover {
-  background: var(--app-surface-hover);
-  color: var(--app-text);
-}
-
-.chat-artifacts-toggle.active {
-  color: var(--app-text-strong);
-  border-color: var(--app-border-strong);
-}
-
 .artifacts-panel {
   position: absolute;
   top: 0;

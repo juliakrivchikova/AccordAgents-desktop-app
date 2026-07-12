@@ -7,7 +7,8 @@ import type {
   PluginCatalogItem,
   StartReviewResult
 } from "../shared/types";
-import { RefreshCw, XCircle } from "lucide-react";
+import { FileBox, RefreshCw, XCircle } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
@@ -20,6 +21,8 @@ import { SettingsView, type SettingsSection } from "./components/settings/settin
 import { SettingsSidebar } from "./components/settings/settings-sidebar";
 import { ConversationPanel } from "./components/conversation/conversation-panel";
 import { ChatParticipantMenu } from "./components/chat/chat-participant-menu";
+import { useArtifacts } from "./components/artifacts/use-artifacts";
+import { IconButton } from "./components/primitives";
 import { ChatAccordLauncherDialog } from "./components/chat/chat-accord-launcher-dialog";
 import { NewChatScreen } from "./components/chat/new-chat-screen";
 import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
@@ -51,6 +54,7 @@ function App(): JSX.Element {
   const settingsActions = useSettingsActions(state);
   useAppEffects(state, conversationActions.refreshAll, conversationActions.refreshActivity, conversationActions.markConversationViewed);
   const view = useAppViewModel(state);
+  const artifacts = useArtifacts(state.conversation?.id);
   const activityUnreadCount = state.activityItems.reduce(
     (count, item) => count + (item.read || item.status === "running" ? 0 : 1),
     0
@@ -202,26 +206,38 @@ function App(): JSX.Element {
         </Button>
       )}
       {view.activeChatConversation && (
-        <ChatParticipantMenu
-          participants={view.activeChatParticipants}
-          participantHasRunById={view.participantHasRunById}
-          settings={state.settings}
-          agents={state.agents}
-          draft={state.chatMessageDraft}
-          addParticipantDraft={state.chatAddParticipantDraft ?? defaultChatParticipantDraft(state.settings)}
-          isRunning={view.conversationRunning}
-          participantStatusById={view.participantStatusById}
-          participantWatchers={view.activeChatConversation.metadata.participantWatchers}
-          onDraftChange={state.setChatMessageDraft}
-          onAddParticipantDraftChange={state.setChatAddParticipantDraft}
-          onAddParticipant={() => void chatActions.addChatParticipant()}
-          onAddSavedParticipant={(participant, remoteExecution) => void chatActions.addSavedChatParticipant(participant, remoteExecution)}
-          onUpdateParticipantRuntime={(participantId, patch) => void chatActions.updateChatParticipantRuntime(participantId, patch)}
-          onCompactParticipant={(participantId) => void chatActions.compactChatParticipant(participantId)}
-          onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
-          onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
-          onManageInSettings={() => openSettingsSection("participants")}
-        />
+        <>
+          <IconButton
+            label="Artifacts"
+            icon={FileBox}
+            data-artifacts-trigger="true"
+            pressed={artifacts.panelOpen}
+            onClick={() => (artifacts.panelOpen ? artifacts.closePanel() : artifacts.openPanel())}
+            tooltip="Artifacts — durable shared documents (plans, QA cases, decisions) with versions and sign-off"
+            className={cn("topbar-icon-button", artifacts.panelOpen && "is-active")}
+            size="sm"
+          />
+          <ChatParticipantMenu
+            participants={view.activeChatParticipants}
+            participantHasRunById={view.participantHasRunById}
+            settings={state.settings}
+            agents={state.agents}
+            draft={state.chatMessageDraft}
+            addParticipantDraft={state.chatAddParticipantDraft ?? defaultChatParticipantDraft(state.settings)}
+            isRunning={view.conversationRunning}
+            participantStatusById={view.participantStatusById}
+            participantWatchers={view.activeChatConversation.metadata.participantWatchers}
+            onDraftChange={state.setChatMessageDraft}
+            onAddParticipantDraftChange={state.setChatAddParticipantDraft}
+            onAddParticipant={() => void chatActions.addChatParticipant()}
+            onAddSavedParticipant={(participant, remoteExecution) => void chatActions.addSavedChatParticipant(participant, remoteExecution)}
+            onUpdateParticipantRuntime={(participantId, patch) => void chatActions.updateChatParticipantRuntime(participantId, patch)}
+            onCompactParticipant={(participantId) => void chatActions.compactChatParticipant(participantId)}
+            onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
+            onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
+            onManageInSettings={() => openSettingsSection("participants")}
+          />
+        </>
       )}
     </>
   );
@@ -237,6 +253,7 @@ function App(): JSX.Element {
       openingConversationDescription={openingConversationDescription}
       accordDisabledReason={accordDisabledReason}
       onOpenAccord={() => setAccordDialogOpen(true)}
+      artifacts={artifacts}
     />
   ) : undefined;
 

@@ -10,6 +10,7 @@ import type { ReviewDecisionActions } from "../../app/use-review-decision-action
 import type { ReviewPlanActions } from "../../app/use-review-plan-actions";
 import type { SettingsActions } from "../../app/use-settings-actions";
 import type { useAppViewModel } from "../../app/use-app-view-model";
+import type { ArtifactsState } from "../artifacts/use-artifacts";
 
 type AppViewModel = ReturnType<typeof useAppViewModel>;
 
@@ -24,6 +25,7 @@ export interface ConversationPanelProps {
   openingConversationDescription: string;
   accordDisabledReason?: string;
   onOpenAccord: () => void;
+  artifacts: ArtifactsState;
 }
 
 export function ConversationPanel({
@@ -36,7 +38,8 @@ export function ConversationPanel({
   settingsActions,
   openingConversationDescription,
   accordDisabledReason,
-  onOpenAccord
+  onOpenAccord,
+  artifacts
 }: ConversationPanelProps): JSX.Element | null {
   if (!view.hasResultContext) {
     return null;
@@ -49,6 +52,7 @@ export function ConversationPanel({
         <ChatConversationView
           conversation={state.conversation}
           settings={state.settings}
+          artifacts={artifacts}
           progress={view.visibleProgressLog}
           isRunning={view.conversationRunning}
           participantStatusById={view.participantStatusById}

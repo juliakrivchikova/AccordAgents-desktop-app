@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
-import { ArrowDown, FileBox } from "lucide-react";
+import { ArrowDown } from "lucide-react";
 
 import type {
   ChatAppToolApprovalRequest,
@@ -34,7 +34,6 @@ import {
 } from "./chat-conversation-data";
 import { ArtifactsContext } from "../artifacts/artifacts-context";
 import { ArtifactsPanel } from "../artifacts/artifacts-panel";
-import { useArtifacts } from "../artifacts/use-artifacts";
 import { ChatConversationTimeline } from "./chat-conversation-timeline";
 import type { ChatConversationViewProps } from "./chat-conversation-types";
 import { ChatThreadPanel } from "./chat-thread-panel";
@@ -81,7 +80,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     () => chatMentionDirectory(participants, props.settings.chatRoleConfigs, sessionsByParticipant, contextUsageByParticipant),
     [participants, props.settings.chatRoleConfigs, sessionsByParticipant, contextUsageByParticipant]
   );
-  const artifacts = useArtifacts(props.conversation.id);
+  const artifacts = props.artifacts;
   const [selectedThreadRootId, setSelectedThreadRootId] = useState<string | undefined>();
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
   const [threadWidth, setThreadWidth] = useState(430);
@@ -260,16 +259,6 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
           }}
         >
           <div className="chat-main">
-            <button
-              type="button"
-              className={`chat-artifacts-toggle${artifacts.panelOpen ? " active" : ""}`}
-              aria-label="Artifacts"
-              title="Artifacts — durable shared documents (plans, QA cases, decisions) with versions and sign-off"
-              onClick={() => (artifacts.panelOpen ? artifacts.closePanel() : artifacts.openPanel())}
-            >
-              <FileBox size={15} aria-hidden />
-              <span>Artifacts{artifacts.artifacts.length > 0 ? ` (${artifacts.artifacts.length})` : ""}</span>
-            </button>
             <ChatConversationTimeline
               conversationId={props.conversation.id}
               contextUsageByParticipant={contextUsageByParticipant}

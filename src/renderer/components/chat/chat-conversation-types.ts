@@ -10,6 +10,7 @@ import type {
   ReviewProgress
 } from "../../../shared/types";
 import type { ParticipantCompactHandler } from "../content/participant-hover-card";
+import type { ArtifactsState } from "../artifacts/use-artifacts";
 import type { ChatChoiceResponse } from "./chat-message-item";
 import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 
@@ -34,6 +35,7 @@ export interface ChatConversationViewProps {
   onLoadOlderMessages: () => void;
   onLoadMessagePageForMessage: (messageId: string) => Promise<boolean>;
   messageFocusRequest?: ChatMessageFocusRequest;
+  artifacts: ArtifactsState;
   onSend: (
     repoFileMentions?: RepoFileMention[],
     imageAttachments?: ChatImageInput[],
