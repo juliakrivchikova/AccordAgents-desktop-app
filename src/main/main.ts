@@ -736,7 +736,7 @@ function registerIpc(): void {
 
     try {
       return await chatService.compactParticipant(
-        { ...request, runId },
+        { ...request, triggeredBy: "user", runId },
         controller.signal,
         (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
       );

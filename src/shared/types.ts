@@ -1086,6 +1086,12 @@ export interface ChatMessageMetadata {
   approvedContinuation?: boolean;
   syncedThroughMessageId?: string;
   runId?: string;
+  compaction?: {
+    triggeredBy: "user" | "agent";
+    participantId: string;
+    outcome: "completed" | "failed" | "no-active-session";
+    instructionsProvided: boolean;
+  };
   workedMs?: number;
   queuedBehind?: { handle: string };
   appMessageSource?: string;
@@ -1290,6 +1296,7 @@ export interface CompactChatParticipantRequest {
   participantId?: string;
   handle?: string;
   instructions?: string;
+  triggeredBy?: "user" | "agent";
   runId?: string;
   threadId?: string;
   parentMessageId?: string;

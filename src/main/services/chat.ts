@@ -1319,30 +1319,66 @@ export class ChatService {
     progress?: ProgressCallback
   ): Promise<StartReviewResult> {
     const runId = request.runId ?? randomUUID();
+    const triggeredBy = request.triggeredBy === "agent" ? "agent" : "user";
     const compactInstructions = this.normalizeCompactInstructions(request.instructions);
     const warnings: string[] = [];
-    const ingest = await this.withChatRunLock(request.conversationId, async () => {
-      const conversation = await this.requireChat(request.conversationId);
-      const participant = this.compactRequestParticipant(conversation, request);
-      if (!participant) {
-        throw new Error("Chat member was not found.");
-      }
-      const sessionState = await this.sessionForParticipant(conversation, participant);
-      if (!sessionState.session.sessionId) {
-        await this.withChatMutation(conversation, async () => {
-          conversation.messages.push(this.message("system", `@${participant.handle} does not have an active session to compact yet.`, undefined, this.compactMessageMetadata(request)));
-          conversation.updatedAt = new Date().toISOString();
-          await this.saveConversation(conversation);
-          this.queueSnapshot(conversation);
-        });
-        return { conversation, participant, session: sessionState.session, runStarted: false };
-      }
-      await this.beginChatParticipantCompactionRun(conversation, runId, participant.id);
-      await this.waitForQueuedSave(conversation.id);
-      return { conversation, participant, session: sessionState.session, runStarted: true };
-    });
+    const auditBase = {
+      conversationId: request.conversationId,
+      runId,
+      triggeredBy,
+      requestedParticipantId: request.participantId,
+      requestedHandle: request.handle,
+      instructionsProvided: Boolean(compactInstructions)
+    };
+    await this.debugLogs.write("chat.compaction.requested", auditBase);
+    let ingest: {
+      conversation: Conversation;
+      participant: ChatParticipant;
+      session: ChatParticipantSession;
+      runStarted: boolean;
+    };
+    try {
+      ingest = await this.withChatRunLock(request.conversationId, async () => {
+        const conversation = await this.requireChat(request.conversationId);
+        const participant = this.compactRequestParticipant(conversation, request);
+        if (!participant) {
+          throw new Error("Chat member was not found.");
+        }
+        const sessionState = await this.sessionForParticipant(conversation, participant);
+        if (!sessionState.session.sessionId) {
+          await this.withChatMutation(conversation, async () => {
+            conversation.messages.push(this.message(
+              "system",
+              `@${participant.handle} does not have an active session to compact yet.`,
+              undefined,
+              this.compactMessageMetadata(request, participant.id, "no-active-session")
+            ));
+            conversation.updatedAt = new Date().toISOString();
+            await this.saveConversation(conversation);
+            this.queueSnapshot(conversation);
+          });
+          return { conversation, participant, session: sessionState.session, runStarted: false };
+        }
+        await this.beginChatParticipantCompactionRun(conversation, runId, participant.id);
+        await this.waitForQueuedSave(conversation.id);
+        return { conversation, participant, session: sessionState.session, runStarted: true };
+      });
+    } catch (error) {
+      await this.debugLogs.write("chat.compaction.finished", {
+        ...auditBase,
+        outcome: signal?.aborted ? "cancelled" : "failed",
+        message: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
 
     if (!ingest.runStarted) {
+      await this.debugLogs.write("chat.compaction.finished", {
+        ...auditBase,
+        participantId: ingest.participant.id,
+        participantHandle: ingest.participant.handle,
+        outcome: "no-active-session"
+      });
       return { conversation: ingest.conversation, warnings };
     }
 
@@ -1415,7 +1451,12 @@ export class ChatService {
         const content = result.ok
           ? this.compactSuccessMessage(participant.handle, compactInstructions)
           : `Could not compact @${participant.handle} context: ${result.error ?? "unknown error"}.`;
-        conversation.messages.push(this.message("system", content, undefined, this.compactMessageMetadata(request)));
+        conversation.messages.push(this.message(
+          "system",
+          content,
+          undefined,
+          this.compactMessageMetadata(request, participant.id, result.ok ? "completed" : "failed")
+        ));
         if (!result.ok) {
           warnings.push(content);
         }
@@ -1426,9 +1467,22 @@ export class ChatService {
       this.emitProgress(runId, progress, result.ok ? "done" : "error", result.ok ? `Compacted @${participant.handle}.` : `Could not compact @${participant.handle}.`, {
         participantLabel: `@${participant.handle}`
       });
+      await this.debugLogs.write("chat.compaction.finished", {
+        ...auditBase,
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        outcome: result.ok ? "completed" : "failed"
+      });
       return { conversation, warnings };
     } catch (error) {
       this.emitChatRunFailure(runId, progress, error);
+      await this.debugLogs.write("chat.compaction.finished", {
+        ...auditBase,
+        participantId: ingest.participant.id,
+        participantHandle: ingest.participant.handle,
+        outcome: signal?.aborted ? "cancelled" : "failed",
+        message: error instanceof Error ? error.message : String(error)
+      });
       throw error;
     } finally {
       reservation.release();
@@ -4741,6 +4795,7 @@ export class ChatService {
         conversationId: request.conversationId,
         handle: compactCommand.handle,
         instructions: compactCommand.instructions,
+        triggeredBy: "user",
         runId,
         threadId: request.threadId,
         parentMessageId: request.parentMessageId,
@@ -13564,6 +13619,7 @@ export class ChatService {
       conversationId,
       participantId: participant.id,
       instructions: request.instructions,
+      triggeredBy: "agent",
       runId
     }, backgroundController.signal, this.onReviewProgress).catch(async (error) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -13585,7 +13641,14 @@ export class ChatService {
           "system",
           `Could not compact @${participant.handle} context: ${message}.`,
           undefined,
-          { threadId: "system", runId }
+          {
+            ...this.compactMessageMetadata(
+              { runId, triggeredBy: "agent", instructions: request.instructions },
+              participant.id,
+              "failed"
+            ),
+            threadId: "system"
+          }
         ));
         latest.updatedAt = new Date().toISOString();
         await this.saveConversation(latest);
@@ -13612,12 +13675,22 @@ export class ChatService {
     return request.handle ? this.participantForMentionHandle(participants, request.handle) : undefined;
   }
 
-  private compactMessageMetadata(request: Pick<CompactChatParticipantRequest, "threadId" | "parentMessageId" | "chatThreadRootId" | "runId">): ChatMessageMetadata {
+  private compactMessageMetadata(
+    request: Pick<CompactChatParticipantRequest, "threadId" | "parentMessageId" | "chatThreadRootId" | "runId" | "triggeredBy" | "instructions">,
+    participantId: string,
+    outcome: "completed" | "failed" | "no-active-session"
+  ): ChatMessageMetadata {
     return {
       threadId: request.threadId?.trim() || undefined,
       parentMessageId: request.parentMessageId?.trim() || undefined,
       chatThreadRootId: request.chatThreadRootId?.trim() || undefined,
-      runId: request.runId?.trim() || undefined
+      runId: request.runId?.trim() || undefined,
+      compaction: {
+        triggeredBy: request.triggeredBy === "agent" ? "agent" : "user",
+        participantId,
+        outcome,
+        instructionsProvided: Boolean(request.instructions?.trim())
+      }
     };
   }
 
