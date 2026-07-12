@@ -55,7 +55,6 @@ function App(): JSX.Element {
     (count, item) => count + (item.read || item.status === "running" ? 0 : 1),
     0
   );
-  const [appVersion, setAppVersion] = React.useState("");
   const [accordDialogOpen, setAccordDialogOpen] = React.useState(false);
   const [newChatPrefill, setNewChatPrefill] = React.useState<{
     key: number;
@@ -63,24 +62,6 @@ function App(): JSX.Element {
     pluginMentions: DraftPluginMention[];
     skillMentions: ChatSkillMention[];
   }>();
-
-  React.useEffect(() => {
-    let cancelled = false;
-    void window.consensus.getAppVersion()
-      .then((version) => {
-        if (!cancelled) {
-          setAppVersion(version);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setAppVersion("");
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const openSettingsSection = (section: SettingsSection): void => {
     conversationActions.clearChatMessageFocus();
@@ -309,7 +290,6 @@ function App(): JSX.Element {
         state.railView === "settings" ? (
           <SettingsSidebar
             section={state.activeSettingsSection}
-            appVersion={appVersion}
             onSectionChange={state.setActiveSettingsSection}
             onBackToChats={closeSettings}
             onToggleSidebar={() => state.setSidebarCollapsed(true)}

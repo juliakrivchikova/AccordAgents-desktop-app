@@ -18,7 +18,6 @@ const SETTINGS_NAV: Array<{ section: SettingsSection; label: string; icon: typeo
 
 export function SettingsSidebar(props: {
   section: SettingsSection;
-  appVersion?: string;
   onSectionChange: (section: SettingsSection) => void;
   onBackToChats: () => void;
   onToggleSidebar?: () => void;
@@ -116,7 +115,6 @@ export function SettingsSidebar(props: {
         >
           <Settings className="size-[15px] text-[var(--app-text-strong)]" aria-hidden />
           <span>Settings</span>
-          {props.appVersion && <span className="ml-auto shrink-0 text-[11px] font-medium text-muted-foreground">v{props.appVersion}</span>}
         </div>
       </div>
     </aside>

@@ -47,8 +47,7 @@
   min-width: 0;
   min-height: 0;
   flex-direction: column;
-  border-right: 1px solid var(--app-border-subtle);
-  background: var(--app-activity-bg);
+  background: var(--app-sidebar-bg);
 }
 
 .activity-list-header {
