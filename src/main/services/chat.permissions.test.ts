@@ -1517,6 +1517,103 @@ test("permission resume registers a cancellable chat run controller", async () =
   assert.equal(storage.current.metadata.lastMessageByParticipant?.[participant.id]?.messageId, stoppedMessage?.id);
 });
 
+test("stop from a non-owner instance records a cancel request the owning instance honors", async () => {
+  const participant = chatParticipant("gemini-cli");
+  const runId = "cross-instance-run";
+  const ownerHeartbeat = new Date().toISOString();
+  const conversation = chatConversation([participant], {
+    running: true,
+    runId,
+    activeRunIds: [runId],
+    activeRunOwnersByRunId: {
+      [runId]: {
+        processId: process.ppid,
+        instanceId: "owner-instance",
+        startedAt: ownerHeartbeat,
+        updatedAt: ownerHeartbeat
+      }
+    }
+  });
+  const { service, storage } = testService({ conversation });
+
+  // This instance has no controller for the run and the owner heartbeat is
+  // fresh: Stop must enqueue a cancel request instead of silently no-oping or
+  // sweeping the owner's live run state.
+  assert.equal(service.cancelRun(runId), true);
+  await waitFor(() => storage.cancelRequests.has(runId));
+  assert.deepEqual(storage.current.metadata.activeRunIds, [runId]);
+  assert.equal(storage.current.metadata.running, true);
+
+  // The owning instance shares the same storage and holds the live controller.
+  const ownerService = new ChatService(
+    storage as never,
+    {} as never,
+    {} as never,
+    { write: async () => undefined } as never
+  );
+  const controller = new AbortController();
+  (ownerService as never as {
+    registerTargetRun(runId: string, controller: AbortController, meta: { conversationId: string; participantId: string; participantHandle: string }): void;
+  }).registerTargetRun(runId, controller, {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    participantHandle: participant.handle
+  });
+  (ownerService as never as {
+    rememberActiveChatRun(conversationId: string, runId: string): void;
+  }).rememberActiveChatRun(conversation.id, runId);
+
+  await (ownerService as never as {
+    consumeCrossInstanceCancelRequests(): Promise<void>;
+  }).consumeCrossInstanceCancelRequests();
+
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(storage.cancelRequests.size, 0);
+});
+
+test("cross-instance cancel requests stay queued until the run registers a controller", async () => {
+  const participant = chatParticipant("gemini-cli");
+  const runId = "early-active-run";
+  const conversation = chatConversation([participant], {
+    running: true,
+    runId,
+    activeRunIds: [runId]
+  });
+  const { storage } = testService({ conversation });
+  storage.cancelRequests.set(runId, conversation.id);
+
+  const ownerService = new ChatService(
+    storage as never,
+    {} as never,
+    {} as never,
+    { write: async () => undefined } as never
+  );
+  const ownerInternals = ownerService as never as {
+    rememberActiveChatRun(conversationId: string, runId: string): void;
+    registerTargetRun(runId: string, controller: AbortController, meta: { conversationId: string; participantId: string; participantHandle: string }): void;
+    consumeCrossInstanceCancelRequests(): Promise<void>;
+  };
+
+  // beginChatRun marks the run active before the turn registers its abort
+  // controller; a heartbeat tick in that window must leave the request queued
+  // instead of consuming it with nothing to abort.
+  ownerInternals.rememberActiveChatRun(conversation.id, runId);
+  await ownerInternals.consumeCrossInstanceCancelRequests();
+  assert.equal(storage.cancelRequests.has(runId), true);
+  assert.deepEqual(storage.current.metadata.activeRunIds, [runId]);
+  assert.equal(storage.current.metadata.running, true);
+
+  const controller = new AbortController();
+  ownerInternals.registerTargetRun(runId, controller, {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    participantHandle: participant.handle
+  });
+  await ownerInternals.consumeCrossInstanceCancelRequests();
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(storage.cancelRequests.size, 0);
+});
+
 test("approved permission resume ignores duplicate concurrent resume attempts", async () => {
   const participant = chatParticipant("claude-code");
   const approval = permissionApproval(participant, {
@@ -8900,6 +8997,17 @@ function testService(options: {
     },
     async saveConversation(conversation: Conversation): Promise<void> {
       this.current = clone(conversation);
+    },
+    cancelRequests: new Map<string, string>(),
+    async requestRunCancel(conversationId: string, runId: string): Promise<void> {
+      this.cancelRequests.set(runId, conversationId);
+    },
+    async takeRunCancelRequests(runIds: string[]): Promise<string[]> {
+      const matched = runIds.filter((runId) => this.cancelRequests.has(runId));
+      for (const runId of matched) {
+        this.cancelRequests.delete(runId);
+      }
+      return matched;
     }
   };
   const settingsState = {

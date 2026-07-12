@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { commandExists, commandEnvironment, parseLoginShellEnvOutput } from "./command";
+import { CommandError, commandExists, commandEnvironment, parseLoginShellEnvOutput, runCommand } from "./command";
 
 test("parseLoginShellEnvOutput extracts valid env lines between sentinels", () => {
   const env = parseLoginShellEnvOutput([
@@ -97,4 +97,36 @@ test("commandEnvironment discovers nvm bins when versions root contains non-dire
 
   const command = await commandExists("codex");
   assert.equal(command.path, codexPath);
+});
+
+test("aborted run settles even when a grandchild keeps the stdio pipes open", async () => {
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  setTimeout(() => controller.abort(), 300);
+  // `sh` dies on SIGTERM but both `sleep`s survive it and inherit the stdio
+  // pipes; without releasing our pipe ends the promise would settle only when
+  // the sleeps exit (~15s).
+  await assert.rejects(
+    runCommand("sh", ["-c", "sleep 15 & sleep 15"], {
+      timeoutMs: 30_000,
+      primeLoginShellEnv: false,
+      signal: controller.signal
+    }),
+    (error: unknown) => error instanceof CommandError && /cancelled/.test((error as CommandError).message)
+  );
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs < 5_000, `expected prompt cancellation, took ${elapsedMs}ms`);
+});
+
+test("timed-out run settles even when a grandchild keeps the stdio pipes open", async () => {
+  const startedAt = Date.now();
+  await assert.rejects(
+    runCommand("sh", ["-c", "sleep 15 & sleep 15"], {
+      timeoutMs: 300,
+      primeLoginShellEnv: false
+    }),
+    (error: unknown) => error instanceof CommandError && /timed out/.test((error as CommandError).message)
+  );
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs < 5_000, `expected prompt timeout, took ${elapsedMs}ms`);
 });

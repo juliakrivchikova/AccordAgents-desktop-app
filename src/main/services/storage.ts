@@ -33,6 +33,7 @@ const SQLITE_COMMAND_TIMEOUT_MS = 45_000;
 const SQLITE_MIGRATION_TIMEOUT_MS = 120_000;
 const SCHEMA_META_COMPLETE = "complete";
 const INFERRED_REQUEST_THREAD_MIGRATION_KEY = "inferred-participant-request-threads-v1";
+const RUN_CANCEL_REQUEST_MAX_AGE_MS = 60 * 60_000;
 
 function sqlString(value: string | undefined | null): string {
   if (value === undefined || value === null) {
@@ -168,12 +169,57 @@ export class StorageService {
         unique (conversation_id, message_id)
       );
       create index if not exists idx_conversation_messages_conversation_sequence on conversation_messages(conversation_id, sequence);
+      create table if not exists run_cancel_requests (
+        run_id text primary key,
+        conversation_id text not null,
+        requested_at text not null
+      );
     `);
+    await this.pruneStaleRunCancelRequests();
     await this.ensureColumn("conversations", "body_json", "text");
     await this.backfillConversationBodiesAndMessages();
     this.initialized = true;
     await this.normalizeInferredParticipantRequestThreads();
     await this.clearInterruptedRuns();
+  }
+
+  // Cross-instance run cancellation. Multiple app instances can share this
+  // database (a second dev/QA instance opens the same userData); a Stop click
+  // in a non-owner instance cannot abort the owner's in-memory controllers, so
+  // it records a request row here and the owning instance consumes it on its
+  // run-owner heartbeat.
+  async requestRunCancel(conversationId: string, runId: string): Promise<void> {
+    await this.init();
+    const normalizedRunId = runId.trim();
+    if (!normalizedRunId) {
+      return;
+    }
+    await this.runSql(`
+      insert into run_cancel_requests (run_id, conversation_id, requested_at)
+      values (${sqlString(normalizedRunId)}, ${sqlString(conversationId)}, ${sqlString(new Date().toISOString())})
+      on conflict(run_id) do update set requested_at = excluded.requested_at;
+    `);
+  }
+
+  async takeRunCancelRequests(runIds: string[]): Promise<string[]> {
+    await this.init();
+    const normalized = Array.from(new Set(runIds.map((runId) => runId.trim()).filter(Boolean)));
+    if (normalized.length === 0) {
+      return [];
+    }
+    const rows = await this.queryJson<{ runId: string }>(
+      `select run_id as runId from run_cancel_requests where run_id in ${sqlStringList(normalized)};`
+    );
+    const matched = rows.map((row) => row.runId);
+    if (matched.length > 0) {
+      await this.runSql(`delete from run_cancel_requests where run_id in ${sqlStringList(matched)};`);
+    }
+    return matched;
+  }
+
+  private async pruneStaleRunCancelRequests(): Promise<void> {
+    const cutoff = new Date(Date.now() - RUN_CANCEL_REQUEST_MAX_AGE_MS).toISOString();
+    await this.runSql(`delete from run_cancel_requests where requested_at < ${sqlString(cutoff)};`);
   }
 
   async listConversations(): Promise<ConversationSummary[]> {

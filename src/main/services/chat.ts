@@ -16107,6 +16107,10 @@ export class ChatService {
       return false;
     }
     const controllers = this.chatRunControllers.get(targetRunId);
+    void this.debugLogs.write("chat.cancel.requested", {
+      runId: targetRunId,
+      localControllers: controllers?.size ?? 0
+    });
     let cancelled = false;
     if (controllers && controllers.size > 0) {
       for (const controller of controllers) {
@@ -16166,6 +16170,25 @@ export class ChatService {
         await this.stopRemoteRunLocallyFirst(handle, targetRunId);
         return true;
       }
+      const ownerState = this.localRunOwnerState(conversation.metadata, targetRunId);
+      if (ownerState === "external-live") {
+        // Another live app instance owns this run (instances can share this
+        // userData, e.g. a second dev/QA instance). Sweeping its stored state
+        // here would strand the owner's CLI process, so record a cancel
+        // request that the owning instance consumes on its run-owner
+        // heartbeat.
+        await this.storage.requestRunCancel(conversation.id, targetRunId);
+        void this.debugLogs.write("chat.cancel.cross-instance-requested", {
+          conversationId: conversation.id,
+          runId: targetRunId
+        });
+        return true;
+      }
+      void this.debugLogs.write("chat.cancel.stored-run-swept", {
+        conversationId: conversation.id,
+        runId: targetRunId,
+        ownerState
+      });
       await this.cancelStoredOrphanedRun(conversation, targetRunId);
       return true;
     }
@@ -16568,8 +16591,37 @@ export class ChatService {
           message: error instanceof Error ? error.message : String(error)
         });
       });
+      void this.consumeCrossInstanceCancelRequests().catch((error) => {
+        void this.debugLogs.write("chat.cancel.cross-instance-consume.error", {
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
     }, CHAT_RUN_OWNER_HEARTBEAT_MS);
     this.runOwnerHeartbeatTimer.unref();
+  }
+
+  // Honors Stop clicks recorded by other app instances sharing this storage:
+  // they cannot abort this instance's in-memory controllers, so they enqueue
+  // the run id via StorageService.requestRunCancel and this instance cancels
+  // it on the next heartbeat tick.
+  private async consumeCrossInstanceCancelRequests(): Promise<void> {
+    if (this.activeRunIds.size === 0) {
+      return;
+    }
+    // A run enters activeRunIds (beginChatRun) before its abort controller
+    // registers (ensureChatTurnController), and takeRunCancelRequests deletes
+    // the rows it returns — consuming a request in that window would drop the
+    // Stop permanently. Take only runs cancellable right now; the rest stay
+    // queued for the next heartbeat tick.
+    const cancellable = Array.from(this.activeRunIds).filter((runId) => this.chatRunControllers.has(runId));
+    if (cancellable.length === 0) {
+      return;
+    }
+    const requested = await this.storage.takeRunCancelRequests(cancellable);
+    for (const runId of requested) {
+      void this.debugLogs.write("chat.cancel.cross-instance-honored", { runId });
+      this.cancelRun(runId);
+    }
   }
 
   private async heartbeatActiveRunOwners(): Promise<void> {

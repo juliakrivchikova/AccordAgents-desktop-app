@@ -103,12 +103,22 @@ export async function runCommand(command: string, args: string[], options: Comma
     let timedOut = false;
     let stdinError: Error | undefined;
 
+    // Descendants of the child can inherit its stdio pipes and keep them open
+    // past the child's death; `close` (and this promise) would then wait on
+    // them indefinitely. A cancelled or timed-out run must not, so release our
+    // ends once the child itself is gone.
+    const releaseStdio = () => {
+      child.stdout.destroy();
+      child.stderr.destroy();
+    };
+
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
       setTimeout(() => {
         if (!settled) {
           child.kill("SIGKILL");
+          releaseStdio();
         }
       }, 1500).unref();
     }, timeoutMs);
@@ -119,6 +129,7 @@ export async function runCommand(command: string, args: string[], options: Comma
       setTimeout(() => {
         if (!settled) {
           child.kill("SIGKILL");
+          releaseStdio();
         }
       }, 1500).unref();
     };
@@ -127,6 +138,12 @@ export async function runCommand(command: string, args: string[], options: Comma
       abort();
     }
     options.signal?.addEventListener("abort", abort, { once: true });
+
+    child.on("exit", () => {
+      if (!settled && (options.signal?.aborted || timedOut)) {
+        releaseStdio();
+      }
+    });
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
