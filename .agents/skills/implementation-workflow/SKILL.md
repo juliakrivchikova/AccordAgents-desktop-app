@@ -34,7 +34,7 @@ is actually needed:
 - If the correction requires more or different code but preserves all user-visible behavior, including existing behavior
   outside the originally stated acceptance criteria, UX, data semantics, and external effects, do not pause for User.
   Treat any reasonably affected existing user-visible workflow as a regression acceptance criterion that needs real PASS
-  evidence. Return to the implementation-plan accord stage so Drew and Taylor update the canonical plan, then continue
+  evidence. Return to the implementation-plan accord stage so Drew and Taylor revise the plan resolution (the accord artifact), then continue
   the workflow from the appropriate implementation or fix step.
 - Pause and ask User when the correction would affect any user-visible behavior, including existing behavior in adjacent
   or unrelated flows, acceptance criteria, UX, product decisions, data semantics, destructive migration, irreversible
@@ -118,6 +118,28 @@ If the user has already clearly confirmed the requirement, continue. During subs
 follow the user's stated requirement and clarifications. If there is a good reason to revise it, stop flow and ask for
 user approval; don't continue silently.
 
+**Suggest and confirm the acceptance criteria — this is User-owned.** The manager proposes them and the User confirms;
+never derive them silently, and never ask Drew or Taylor to decide them.
+
+Derive a concise, testable list from the user's explicit requirement and references — each an observable, user-visible
+completion check. Include, as regression criteria, every existing user-visible workflow the change could reasonably
+affect that you can foresee now, so they are locked up front instead of discovered during QA. Keep each criterion
+faithful to the user's intent; if one would introduce a decision the user did not state, ask instead of inventing it.
+
+Post the proposed list on the main timeline and ask the User to confirm or edit it:
+
+```text
+User choice:
+T: Confirm Acceptance Criteria
+Q: Are these the acceptance criteria we verify live before merge?
+O1: Confirm | Lock this list and continue.
+O2: Revise | I will edit the criteria first.
+R: O1
+```
+
+Once confirmed, the list is locked: the Step 4 plan resolution must carry it, and every live-QA and manager gate (Step 5
+onward) verifies against it. If the User revises it, re-post the updated list and confirm again before continuing.
+
 ### 2. Confirm Final Step
 
 After the user confirms requirements, ask what the workflow should do at the end:
@@ -145,7 +167,10 @@ To ask both Drew and Taylor to prepare implementation plans, respond as follows:
 
 [user's stated feature/bug description and explicit references, without manager-added scope]
 
-prepare exact implementation plan independently, add plan for QA verification steps and full test coverage
+Confirmed acceptance criteria (User-locked), including affected existing-workflow regressions:
+[the confirmed acceptance-criteria list]
+
+prepare exact implementation plan independently, plan how each acceptance criterion is verified live, add QA verification steps and full test coverage
 ```
 
 Stop after assigning. Resume when both plans are done and continue with the next step.
@@ -163,10 +188,13 @@ To ask Drew to come to accord with Taylor, respond as follows:
 @drew-codex-engineer have an /accord on exact implementation plan with Taylor
 ```
 
-The accord must produce one canonical plan with final scope, file-by-file changes, risks, tests, Electron QA when
-relevant, and unresolved questions.
+The accord must produce one **plan resolution** — captured as a signable artifact — carrying the confirmed
+acceptance-criteria list (including the locked affected-existing-workflow regression criteria), final scope,
+file-by-file changes, risks, tests, Electron QA when relevant, and unresolved questions. Note the resolution's
+`#artifact:` link from the facilitator's closeout and reuse it in every later stage.
 
-Do not proceed to next step until the canonical plan is approved or the user overrides. If Drew reports that accord is
+Do not proceed to next step until the plan resolution shows approved — the facilitator's closeout links it as
+`#artifact:…`; open it and confirm its approval — or the user overrides. If Drew reports that accord is
 still in progress, wait. Ping @drew-codex-engineer and ask him to finish accord only if he stopped or the request failed.
 
 ### 5. Ask Drew To Implement The Approved Plan In A Separate Worktree
@@ -174,7 +202,7 @@ still in progress, wait. Ping @drew-codex-engineer and ask him to finish accord 
 To ask Drew to implement, respond as follows:
 
 ```text
-@drew-codex-engineer implement the plan you agreed with Taylor on in a separate worktree and do QA with /electron-desktop-qa.
+@drew-codex-engineer implement the approved plan resolution (its `#artifact:` link from the accord) you agreed with Taylor on in a separate worktree and do QA with /electron-desktop-qa.
 
 Real acceptance QA and fix loop are mandatory before reporting approval-ready:
 - Verify every acceptance criterion through the live product using the real user-visible workflow, production code path, and actual integrations involved. Mocks, simulated events, fixtures, unit tests, typecheck, builds, source inspection, or merely launching/screenshotting the product are supporting checks, not acceptance evidence.
@@ -199,7 +227,7 @@ Drew to complete the real acceptance QA and fix loop.
 To ask for review, respond as follows:
 
 ```text
-@drew-codex-engineer, @taylor-claude-engineer review the whole implementation [worktree path] independently, run focused subagents if needed to find bugs and regressions
+@drew-codex-engineer, @taylor-claude-engineer review the whole implementation [worktree path] independently against the locked acceptance criteria and the approved plan resolution (its `#artifact:` link), run focused subagents if needed to find bugs and regressions
 ```
 
 Stop after assigning. Resume when both reviews are in.
@@ -212,7 +240,7 @@ To ask Drew to come to accord with Taylor on required fixes, respond as follows:
 @drew-codex-engineer Based on what was locked during planning part, by user explicitly and review findings, have an /accord with Taylor regarding the complete list of required corrections before merge
 ```
 
-Do not proceed to next step until the canonical list is approved. If Drew reports that accord is still in progress, wait.
+Do not proceed to next step until the required-fix resolution shows approved (its `#artifact:` link from the facilitator's closeout). If Drew reports that accord is still in progress, wait.
 Ping @drew-codex-engineer and ask him to finish accord only if he stopped or the request failed.
 
 ### 8. Ask Drew To Implement Fixes
@@ -233,7 +261,7 @@ failed, or incomplete, send the work back to Drew before asking Taylor for final
 To ask Taylor for final review, respond as follows:
 
 ```text
-@taylor-claude-engineer review the full implementation diff again, not only the agreed fixes: check the whole worktree diff against the locked scope and canonical plan, audit the latest acceptance-evidence table, look for regressions introduced by the fix round, and confirm implementation is ready for main
+@taylor-claude-engineer review the full implementation diff again, not only the agreed fixes: check the whole worktree diff against the locked scope, the locked acceptance criteria, and the approved plan resolution (its `#artifact:` link), audit the latest acceptance-evidence table, look for regressions introduced by the fix round, and confirm implementation is ready for main
 ```
 
 Manager gate after Taylor's final review: continue only if Taylor explicitly audited the latest acceptance-evidence table,
