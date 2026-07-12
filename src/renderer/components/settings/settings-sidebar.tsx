@@ -1,4 +1,5 @@
-import { ArrowLeft, Circle, FileText, KeyRound, ListChecks, Plug, Settings, SlidersHorizontal, Users } from "lucide-react";
+import { ArrowLeft, Circle, FileText, KeyRound, ListChecks, Plug, SlidersHorizontal, Users } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { SidebarPanelIcon } from "../shell/sidebar-panel-icon";
@@ -6,7 +7,7 @@ import type { SettingsSection } from "./settings-view";
 
 const ACCORDAGENTS_MARK_URL = new URL("../../assets/accordagents-mark.png", import.meta.url).href;
 
-const SETTINGS_NAV: Array<{ section: SettingsSection; label: string; icon: typeof Settings }> = [
+const SETTINGS_NAV: Array<{ section: SettingsSection; label: string; icon: LucideIcon }> = [
   { section: "general", label: "General", icon: SlidersHorizontal },
   { section: "environment", label: "Environment", icon: KeyRound },
   { section: "roles", label: "Roles", icon: Circle },
@@ -104,19 +105,6 @@ export function SettingsSidebar(props: {
           })}
         </div>
       </nav>
-
-      <div className="shrink-0 px-[var(--app-gutter-tight)] py-2">
-        <div
-          className={cn(
-            "inline-flex h-8 w-full items-center justify-start gap-2 rounded-md px-2.5 text-[13px] font-semibold",
-            "bg-[var(--app-surface-active)] text-[var(--app-text-strong)]"
-          )}
-          aria-current="page"
-        >
-          <Settings className="size-[15px] text-[var(--app-text-strong)]" aria-hidden />
-          <span>Settings</span>
-        </div>
-      </div>
     </aside>
   );
 }
