@@ -45,6 +45,7 @@ export interface CliReadinessCommandResult {
 
 export interface CliReadinessDependencies {
   refreshEnvironment: typeof refreshLoginShellEnv;
+  manualEnvironment: () => Promise<NodeJS.ProcessEnv>;
   lookup: typeof lookupCommand;
   run: typeof runCommand;
   now: () => Date;
@@ -63,6 +64,7 @@ export class CliReadinessService {
   ) {
     this.dependencies = {
       refreshEnvironment: dependencies.refreshEnvironment ?? refreshLoginShellEnv,
+      manualEnvironment: dependencies.manualEnvironment ?? (async () => ({})),
       lookup: dependencies.lookup ?? lookupCommand,
       run: dependencies.run ?? runCommand,
       now: dependencies.now ?? (() => new Date())
@@ -125,8 +127,24 @@ export class CliReadinessService {
         diagnosticCode: "environment-check-failed"
       }));
     }
+    let manualEnvironment: NodeJS.ProcessEnv;
+    try {
+      manualEnvironment = await this.dependencies.manualEnvironment();
+    } catch {
+      return CLI_PROVIDER_DISPLAY_ORDER.map((kind) => this.health(kind, checkedAt, generation, {
+        detection: "unknown",
+        runnable: "unknown",
+        authentication: "unknown",
+        installed: false,
+        diagnosticCode: "environment-check-failed"
+      }));
+    }
+    const effectiveEnvironment = {
+      ...environment.env,
+      ...manualEnvironment
+    };
     return Promise.all(CLI_PROVIDER_DISPLAY_ORDER.map((kind) =>
-      this.probeProvider(CLI_PROVIDER_SETUP[kind], environment.env, checkedAt, generation, trigger)
+      this.probeProvider(CLI_PROVIDER_SETUP[kind], effectiveEnvironment, checkedAt, generation, trigger)
     ));
   }
 
@@ -288,11 +306,14 @@ export function classifyCodexAuth(result: CliReadinessCommandResult): AuthClassi
   if (result.timedOut) {
     return { authentication: "unknown", diagnosticCode: "probe-timeout", exitCode: result.exitCode };
   }
-  const text = `${result.stdout}\n${result.stderr}`.toLowerCase();
-  if (/not logged in|logged out|login required|sign.?in required|not authenticated|unauthenticated/.test(text)) {
+  const outputLines = [result.stdout, result.stderr]
+    .flatMap((value) => value.split(/\r?\n/))
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (result.exitCode === 1 && outputLines.length === 1 && outputLines[0] === "Not logged in") {
     return { authentication: "required", diagnosticCode: "auth-required", exitCode: result.exitCode };
   }
-  if (result.ok && /\blogged in\b|\bauthenticated\b/.test(text)) {
+  if (result.ok && outputLines.some((line) => /^Logged in(?:\s|$)/.test(line))) {
     return { authentication: "ready", exitCode: result.exitCode };
   }
   return { authentication: "unknown", diagnosticCode: "auth-check-failed", exitCode: result.exitCode };

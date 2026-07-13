@@ -420,8 +420,13 @@ export class CliAgentRunner {
   private geminiMcpConfigSyncing?: Promise<string | undefined>;
   private runTimeoutMs = CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS;
 
-  constructor(private readonly debugLogs?: CliAgentDebugLogger) {
-    this.readiness = new CliReadinessService(debugLogs);
+  constructor(
+    private readonly debugLogs?: CliAgentDebugLogger,
+    manualReadinessEnvironment?: () => Promise<{ env: NodeJS.ProcessEnv }>
+  ) {
+    this.readiness = new CliReadinessService(debugLogs, {
+      manualEnvironment: async () => (await manualReadinessEnvironment?.())?.env ?? {}
+    });
   }
 
   setRunTimeoutMs(timeoutMs: number): void {

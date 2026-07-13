@@ -16,6 +16,7 @@ import {
 } from "../components/review/review-conversation-data";
 import { defaultChatParticipantDraft } from "../components/chat/chat-participant-drafts";
 import type { AppState } from "./app-state";
+import { revokePendingImageUrls } from "../components/chat/use-chat-composer-images";
 import { conversationTimeValue, normalizeProjectPath } from "./conversation-summaries";
 import { persistLastViewedAt } from "./storage";
 import { activityItemsWithStoredPreferences } from "./activity-item-state";
@@ -537,6 +538,13 @@ export function useConversationActions(state: AppState): ConversationActions {
     state.setSetupCompletedProviderKind(undefined);
     state.setKind("chat");
     state.setQuestion("");
+    state.setNewChatPendingImages((current) => {
+      revokePendingImageUrls(current);
+      return [];
+    });
+    state.setNewChatRepoFileMentions([]);
+    state.setNewChatSkillMentions([]);
+    state.setNewChatPluginMentions([]);
     state.setRepoPath("");
     state.setRepoInfo(undefined);
     state.setError(undefined);

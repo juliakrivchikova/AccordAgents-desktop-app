@@ -34,6 +34,7 @@ import { upsertConversationSummary } from "./conversation-summaries";
 import { normalizeAutoChatTitle, normalizeManualChatTitle } from "../../shared/chatTitles";
 import { persistLastViewedAt } from "./storage";
 import { serializeComposerDraft } from "../components/chat/chat-composer-draft-utils";
+import { revokePendingImageUrls } from "../components/chat/use-chat-composer-images";
 import {
   isAgentSnapshotStale,
   resolveAssistantProviderKind
@@ -102,9 +103,15 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setError("Enter a message or attach an image to start a chat.");
       return false;
     }
-    const agents = isAgentSnapshotStale(state.agents)
-      ? await conversationActions.refreshAgents({ trigger: "submit" }).catch(() => state.agents)
-      : state.agents;
+    let agents = state.agents;
+    if (isAgentSnapshotStale(agents)) {
+      try {
+        agents = await conversationActions.refreshAgents({ trigger: "submit" });
+      } catch {
+        state.setError("Could not verify CLI readiness. Check again and retry.");
+        return false;
+      }
+    }
     const assistantProviderKind = resolveAssistantProviderKind({
       agents,
       providers: state.settings.providers,
@@ -152,8 +159,6 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       createdConversationId = result.conversation.id;
       state.setConversation(result.conversation);
       state.setWarnings(result.warnings);
-      state.setChatMessageDraft("");
-      state.setSelectedChatParticipantRunLocations({});
       const sendResult = await window.consensus.sendChatMessage({
         conversationId: result.conversation.id,
         runId,
@@ -166,6 +171,14 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setWarnings([...result.warnings, ...sendResult.warnings]);
       await refreshPersistedProviderPreference();
       state.setQuestion("");
+      state.setNewChatPendingImages((current) => {
+        revokePendingImageUrls(current);
+        return [];
+      });
+      state.setNewChatRepoFileMentions([]);
+      state.setNewChatSkillMentions([]);
+      state.setNewChatPluginMentions([]);
+      state.setSelectedChatParticipantRunLocations({});
       await conversationActions.refreshConversations();
       return true;
     } catch (caught) {
@@ -276,9 +289,6 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     const runId = crypto.randomUUID();
     state.setError(undefined);
     state.setWarnings([]);
-    if (!options.chatThreadRootId) {
-      state.setChatMessageDraft("");
-    }
     try {
       const result = await window.consensus.sendChatMessage({
         conversationId: state.conversation.id,
@@ -291,6 +301,9 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         parentMessageId: options.parentMessageId,
         chatThreadRootId: options.chatThreadRootId
       });
+      if (!options.chatThreadRootId) {
+        state.setChatMessageDraft("");
+      }
       state.setConversation((current) =>
         current && current.id === result.conversation.id
           ? mergeProgressIntoConversation(result.conversation, state.progressLogRef.current.filter((item) => item.runId === runId))

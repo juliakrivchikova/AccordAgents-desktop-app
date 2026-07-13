@@ -438,6 +438,7 @@ export interface UserSkillSearchRequest {
   conversationId?: string;
   repoPath?: string;
   participants?: ChatParticipantInput[];
+  assistantProviderKind?: ChatProviderKind;
   query: string;
   content?: string;
   limit?: number;
@@ -563,6 +564,7 @@ export interface PluginListRequest {
   conversationId?: string;
   repoPath?: string;
   participants?: ChatParticipantInput[];
+  assistantProviderKind?: ChatProviderKind;
   query?: string;
   content?: string;
   limit?: number;
@@ -1774,6 +1776,7 @@ export interface ChatParticipantWatcherState {
 }
 
 export type ConversationMetadata = Record<string, unknown> & {
+  activationProviderKind?: ChatProviderKind;
   activeRunParticipantIdsByRunId?: Record<string, string>;
   lastMessageByParticipant?: ChatLastMessageByParticipant;
   participantCompactionsByParticipantId?: Record<string, ChatParticipantCompactionState>;

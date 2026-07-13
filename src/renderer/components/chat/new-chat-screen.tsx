@@ -61,10 +61,7 @@ import {
   draftStartsWithPluginMention
 } from "./chat-composer-draft-utils";
 import { renderSlashHighlightedDraft } from "./chat-composer-draft-highlights";
-import {
-  revokePendingImageUrls,
-  useChatComposerImages
-} from "./use-chat-composer-images";
+import { useChatComposerImages } from "./use-chat-composer-images";
 import { useChatComposerMentions } from "./use-chat-composer-mentions";
 import { sortSavedParticipantOptionsByUsage } from "./new-chat-participant-usage";
 import {
@@ -84,6 +81,10 @@ export function NewChatScreen(props: {
   prompt: string;
   initialPluginMentions?: DraftPluginMention[];
   initialSkillMentions?: ChatSkillMention[];
+  pendingImages: ReturnType<typeof useChatComposerImages>["pendingImages"];
+  selectedFileMentions: RepoFileMention[];
+  selectedPluginMentions: DraftPluginMention[];
+  selectedSkillMentions: ChatSkillMention[];
   prefillPrompt?: string;
   prefillRequestKey?: number;
   repoPath: string;
@@ -98,6 +99,10 @@ export function NewChatScreen(props: {
   renderParticipantAvatar: (participant: ChatParticipant) => ReactNode;
   participantRoleLabel: (participant: Pick<ChatParticipant, "roleConfigId">) => string;
   onPromptChange: (value: string) => void;
+  onPendingImagesChange: ReturnType<typeof useChatComposerImages>["setPendingImages"];
+  onSelectedFileMentionsChange: Dispatch<SetStateAction<RepoFileMention[]>>;
+  onSelectedPluginMentionsChange: Dispatch<SetStateAction<DraftPluginMention[]>>;
+  onSelectedSkillMentionsChange: Dispatch<SetStateAction<ChatSkillMention[]>>;
   onRepoPathChange: (value: string) => void;
   onRepoBlur: (path?: string) => void;
   onSelectRepo: () => void;
@@ -114,7 +119,10 @@ export function NewChatScreen(props: {
   const highlightRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const handledPrefillCaretKeyRef = useRef<number | undefined>();
-  const images = useChatComposerImages(undefined);
+  const images = useChatComposerImages(undefined, {
+    pendingImages: props.pendingImages,
+    setPendingImages: props.onPendingImagesChange
+  });
   const readyKinds = useMemo(
     () => readyProviderKinds(props.agents, props.settings.providers),
     [props.agents, props.settings.providers]
@@ -129,8 +137,8 @@ export function NewChatScreen(props: {
     [props.agents, props.selectedAssistantProviderKind, props.settings.lastSuccessfulChatProviderKind, props.settings.providers]
   );
   const assistantParticipant = useMemo(
-    () => newChatAssistantParticipant(assistantProviderKind ?? readyKinds[0] ?? "codex-cli"),
-    [assistantProviderKind, readyKinds]
+    () => assistantProviderKind ? newChatAssistantParticipant(assistantProviderKind) : undefined,
+    [assistantProviderKind]
   );
   const savedParticipantOptions = useMemo(
     () => sortSavedParticipantOptionsByUsage(
@@ -142,7 +150,7 @@ export function NewChatScreen(props: {
   );
   const mentionParticipants = useMemo<ChatParticipant[]>(
     () => [
-      assistantParticipant,
+      ...(assistantParticipant ? [assistantParticipant] : []),
       ...savedParticipantOptions
         .filter(({ invalidReason }) => !invalidReason)
         .map(({ config }) => config)
@@ -162,9 +170,10 @@ export function NewChatScreen(props: {
     () => ({
       type: "pre-chat" as const,
       repoPath: props.repoPath.trim() || undefined,
-      participants: prospectiveParticipantDrafts
+      participants: prospectiveParticipantDrafts,
+      assistantProviderKind
     }),
-    [props.repoPath, prospectiveParticipantDrafts]
+    [assistantProviderKind, props.repoPath, prospectiveParticipantDrafts]
   );
   const mentions = useChatComposerMentions({
     draft: props.prompt,
@@ -175,6 +184,12 @@ export function NewChatScreen(props: {
     onDraftChange: props.onPromptChange,
     participants: mentionParticipants,
     savedPrompts: props.settings.chatSavedPrompts,
+    selectedFileMentions: props.selectedFileMentions,
+    selectedPluginMentions: props.selectedPluginMentions,
+    selectedSkillMentions: props.selectedSkillMentions,
+    onSelectedFileMentionsChange: props.onSelectedFileMentionsChange,
+    onSelectedPluginMentionsChange: props.onSelectedPluginMentionsChange,
+    onSelectedSkillMentionsChange: props.onSelectedSkillMentionsChange,
     onMentionInserted: (participant) => {
       if (!isNewChatAssistantOption(participant)) {
         props.onSelectedParticipantIdsChange((current) => new Set(current).add(participant.id));
@@ -274,23 +289,13 @@ export function NewChatScreen(props: {
     if (!canStart) return;
     const fileMentionsToSend = mentions.selectedFileMentions;
     const skillMentionsToSend = mentions.selectedSkillMentions;
-    const pendingImagesToSend = images.pendingImages;
     const imageInputs = images.readyImages.map((image): ChatImageInput => ({
       filename: image.filename,
       mimeType: image.mimeType,
       dataBase64: image.dataBase64 ?? ""
     }));
-    mentions.setSelectedFileMentions([]);
-    mentions.setSelectedSkillMentions([]);
-    images.setPendingImages([]);
     const started = await props.onStart(fileMentionsToSend, imageInputs, skillMentionsToSend);
-    if (started === false) {
-      mentions.setSelectedFileMentions(fileMentionsToSend);
-      mentions.setSelectedSkillMentions(skillMentionsToSend);
-      images.setPendingImages(pendingImagesToSend);
-      return;
-    }
-    revokePendingImageUrls(pendingImagesToSend);
+    if (started === false) return;
   }
 
   return (
@@ -628,7 +633,7 @@ function FolderPicker(props: {
 }
 
 function ParticipantPicker(props: {
-  assistantParticipant: ChatParticipantConfig;
+  assistantParticipant?: ChatParticipantConfig;
   savedParticipantOptions: AddableSavedParticipantConfig[];
   selectedParticipantIds: Set<string>;
   selectedParticipantRunLocations: Record<string, CloudRunRemoteExecutionMode>;
@@ -643,7 +648,7 @@ function ParticipantPicker(props: {
   const rootRef = useCloseOnOutside<HTMLDivElement>(open, () => setOpen(false));
   const participantMenuMaxHeight = useNewChatMenuMaxHeight(rootRef, open);
   const participantOptions: Array<AddableSavedParticipantConfig & { locked?: boolean }> = [
-    { config: props.assistantParticipant, locked: true },
+    ...(props.assistantParticipant ? [{ config: props.assistantParticipant, locked: true }] : []),
     ...props.savedParticipantOptions
   ];
   const selectedOptions = participantOptions.filter(({ config, locked }) => locked || props.selectedParticipantIds.has(config.id));

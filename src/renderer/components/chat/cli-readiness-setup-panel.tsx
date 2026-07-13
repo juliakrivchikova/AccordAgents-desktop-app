@@ -98,6 +98,7 @@ export function CliReadinessSetupPanel(props: {
           const health = props.agents.find((agent) => agent.kind === kind);
           const readiness = deriveAgentReadiness(health, providerEnabled(props.settings.providers, kind));
           const expanded = expandedKind === kind;
+          const supportedPlatform = health?.platform === "darwin";
           return (
             <article className={`cli-readiness-card ${expanded ? "is-expanded" : ""}`} key={kind} data-provider-kind={kind}>
               <div className="cli-readiness-card-header">
@@ -129,7 +130,7 @@ export function CliReadinessSetupPanel(props: {
                     <p className="cli-readiness-ready"><Check size={15} aria-hidden /> Ready to use.</p>
                   ) : (
                     <>
-                      {readiness === "not-detected" && (
+                      {supportedPlatform && readiness === "not-detected" && (
                         <SetupCommand
                           label="Install"
                           command={health?.platform === "darwin" ? metadata.installCommandByPlatform.darwin : undefined}
@@ -137,7 +138,7 @@ export function CliReadinessSetupPanel(props: {
                           onCopy={copyCommand}
                         />
                       )}
-                      {(readiness === "sign-in-required" || readiness === "could-not-verify") && (
+                      {supportedPlatform && (readiness === "sign-in-required" || readiness === "could-not-verify") && (
                         <SetupCommand
                           label={readiness === "sign-in-required" ? "Sign in" : "Try sign-in"}
                           command={metadata.loginCommand}
@@ -146,9 +147,11 @@ export function CliReadinessSetupPanel(props: {
                         />
                       )}
                       <div className="cli-readiness-actions">
-                        <button type="button" className="cli-readiness-secondary" onClick={() => void window.consensus.openTerminal().catch(() => setActionError("Could not open Terminal."))}>
-                          <Terminal size={15} aria-hidden /> Open Terminal
-                        </button>
+                        {supportedPlatform && (
+                          <button type="button" className="cli-readiness-secondary" onClick={() => void window.consensus.openTerminal().catch(() => setActionError("Could not open Terminal."))}>
+                            <Terminal size={15} aria-hidden /> Open Terminal
+                          </button>
+                        )}
                         <button type="button" className="cli-readiness-secondary" onClick={() => void window.consensus.openExternal(metadata.guideUrl).catch(() => setActionError("Could not open the official guide."))}>
                           <ExternalLink size={15} aria-hidden /> Official guide
                         </button>

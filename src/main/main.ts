@@ -118,7 +118,7 @@ const localFileOpenerService = new LocalFileOpenerService(storageService, settin
 const providerRunner = new ProviderRunner();
 const debugLogService = new DebugLogService();
 setCommandDebugLogger(debugLogService);
-const cliAgentRunner = new CliAgentRunner(debugLogService);
+const cliAgentRunner = new CliAgentRunner(debugLogService, () => settingsService.getManualAgentEnvironment());
 void settingsService.getCliAgentRunTimeoutMs()
   .then((timeoutMs) => cliAgentRunner.setRunTimeoutMs(timeoutMs))
   .catch((error) => {
@@ -333,7 +333,7 @@ async function detectAgentsWithAppSkills(request?: AgentDetectionRequest): Promi
   if (request?.trigger === "focus" || request?.trigger === "submit") {
     const cached = agents.map((agent) => ({
       ...agent,
-      appSkillSync: appSkillsService.statusFor(agent.kind)
+      appSkillSync: appSkillsService.statusForAgent(agent)
     }));
     if (cached.every((agent) => agent.appSkillSync)) {
       return cached;
@@ -547,11 +547,13 @@ function registerIpc(): void {
   ipcMain.handle("settings:save-agent-environment-variable", async (_event, request: SaveAgentEnvironmentVariableRequest) => {
     await settingsService.saveAgentEnvironmentVariable(request);
     await cliAgentRunner.shutdownWarmAgents();
+    cliAgentRunner.invalidateAgentReadiness();
     return agentEnvironmentService.snapshot();
   });
   ipcMain.handle("settings:delete-agent-environment-variable", async (_event, request: DeleteAgentEnvironmentVariableRequest) => {
     await settingsService.deleteAgentEnvironmentVariable(request.key);
     await cliAgentRunner.shutdownWarmAgents();
+    cliAgentRunner.invalidateAgentReadiness();
     return agentEnvironmentService.snapshot();
   });
   ipcMain.handle("settings:update-provider", async (_event, update: ProviderSettingsUpdate) => {
@@ -655,6 +657,7 @@ function registerIpc(): void {
       await chatService.prospectiveUserSkillRunContext({
         repoPath: typeof request?.repoPath === "string" ? request.repoPath : undefined,
         participants: Array.isArray(request?.participants) ? request.participants : [],
+        assistantProviderKind: request?.assistantProviderKind,
         content
       })
     );
@@ -1144,10 +1147,15 @@ async function resolvePluginListRequest(request?: PluginListRequest): Promise<{
   if (participants) {
     const skills = await userSkillsService.search(
       { repoPath, participants, query, content, limit: 100 },
-      await chatService.prospectiveUserSkillRunContext({ repoPath, participants, content })
+      await chatService.prospectiveUserSkillRunContext({
+        repoPath,
+        participants,
+        assistantProviderKind: request?.assistantProviderKind,
+        content
+      })
     );
     return {
-      request: { repoPath, participants, query, content, limit },
+      request: { repoPath, participants, assistantProviderKind: request?.assistantProviderKind, query, content, limit },
       skills: skills.skills
     };
   }

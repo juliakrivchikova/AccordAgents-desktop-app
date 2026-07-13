@@ -193,6 +193,9 @@ test("unsupported platforms show guide-only installation without a macOS copy ac
   assert.match(textOf(expanded), /official guide/i);
   assert.equal(expanded.findAll((node) => node.type === "button" && /Copy/.test(textOf(node))).length, 0);
   assert.doesNotMatch(textOf(expanded), /curl /);
+  assert.doesNotMatch(textOf(expanded), /Open Terminal|Try sign-in|Sign in/);
+  assert.match(textOf(expanded), /Official guide/);
+  assert.match(textOf(expanded), /Check again/);
   renderer.unmount();
 });
 
@@ -200,6 +203,10 @@ test("renderer readiness validation blocks an explicitly selected unready member
   assert.match(
     validateChatCliAgents([{ kind: "claude-code" }], MISSING, SETTINGS.providers) ?? "",
     /Claude Code was not detected/
+  );
+  assert.equal(
+    validateChatCliAgents([{ kind: "claude-code", remoteExecution: "remote" }], MISSING, SETTINGS.providers),
+    undefined
   );
 });
 

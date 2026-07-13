@@ -70,6 +70,21 @@ test("renders only installed providers and later adds newly detected providers",
   });
 });
 
+test("cached app-skill status is reusable only while CLI installation state matches", async () => {
+  await withTempWorkspace(async ({ homeDir, sourceRoot }) => {
+    await writeSkill(sourceRoot, "app-chat-reply", skillText("body"));
+    const service = serviceFor(sourceRoot, homeDir);
+
+    await service.reconcileAgents([MISSING_CLAUDE_AGENT]);
+    assert.equal(service.statusForAgent(MISSING_CLAUDE_AGENT)?.status, "not-installed");
+    assert.equal(service.statusForAgent(CLAUDE_AGENT), undefined);
+
+    await service.reconcileAgents([CLAUDE_AGENT]);
+    assert.notEqual(service.statusForAgent(CLAUDE_AGENT)?.status, "not-installed");
+    assert.equal(service.statusForAgent(MISSING_CLAUDE_AGENT), undefined);
+  });
+});
+
 test("syncs multiple bundled skills to Codex and Claude", async () => {
   await withTempWorkspace(async ({ homeDir, sourceRoot }) => {
     await writeSkill(sourceRoot, "app-chat-reply", skillText("reply body"));

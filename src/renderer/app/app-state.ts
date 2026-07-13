@@ -3,6 +3,7 @@ import type {
   AgentHealth,
   AppSettings,
   ChatActivityItem,
+  ChatSkillMention,
   ChatProviderKind,
   CloudRunRemoteExecutionMode,
   Conversation,
@@ -10,12 +11,15 @@ import type {
   ConversationMessagePageInfo,
   ConversationSummary,
   GitRepoInfo,
+  RepoFileMention,
   PlanDecisionReply,
   ReviewProgress
 } from "../../shared/types";
 import type { SettingsSection } from "../components/settings/settings-view";
 import type { ChatMessageFocusRequest } from "../components/chat/chat-conversation-view";
 import type { ChatParticipantDraft } from "../components/chat/chat-participant-drafts";
+import type { DraftPluginMention } from "../components/chat/chat-composer-draft-utils";
+import type { PendingChatImage } from "../components/chat/use-chat-composer-images";
 import { DEFAULT_SETTINGS } from "./constants";
 import {
   persistChatSidebarWidth,
@@ -74,6 +78,14 @@ export interface AppState {
   setKind: StateSetter<ConversationKind>;
   question: string;
   setQuestion: StateSetter<string>;
+  newChatPendingImages: PendingChatImage[];
+  setNewChatPendingImages: StateSetter<PendingChatImage[]>;
+  newChatRepoFileMentions: RepoFileMention[];
+  setNewChatRepoFileMentions: StateSetter<RepoFileMention[]>;
+  newChatSkillMentions: ChatSkillMention[];
+  setNewChatSkillMentions: StateSetter<ChatSkillMention[]>;
+  newChatPluginMentions: DraftPluginMention[];
+  setNewChatPluginMentions: StateSetter<DraftPluginMention[]>;
   repoPath: string;
   setRepoPath: StateSetter<string>;
   repoInfo: GitRepoInfo | undefined;
@@ -158,6 +170,10 @@ export function useAppState(): AppState {
   const [focusedThreadId, setFocusedThreadId] = useState<string | undefined>();
   const [kind, setKind] = useState<ConversationKind>("chat");
   const [question, setQuestion] = useState("");
+  const [newChatPendingImages, setNewChatPendingImages] = useState<PendingChatImage[]>([]);
+  const [newChatRepoFileMentions, setNewChatRepoFileMentions] = useState<RepoFileMention[]>([]);
+  const [newChatSkillMentions, setNewChatSkillMentions] = useState<ChatSkillMention[]>([]);
+  const [newChatPluginMentions, setNewChatPluginMentions] = useState<DraftPluginMention[]>([]);
   const [repoPath, setRepoPath] = useState("");
   const [repoInfo, setRepoInfo] = useState<GitRepoInfo | undefined>();
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -216,7 +232,9 @@ export function useAppState(): AppState {
     activityFocusError, setActivityFocusError,
     selectedActivityItem, setSelectedActivityItem,
     activeSettingsSection, setActiveSettingsSection, sidebarCollapsed, setSidebarCollapsed, sidebarWidth,
-    setSidebarWidth, selectedThreadId, setSelectedThreadId, focusedThreadId, setFocusedThreadId, kind, setKind, question, setQuestion, repoPath,
+    setSidebarWidth, selectedThreadId, setSelectedThreadId, focusedThreadId, setFocusedThreadId, kind, setKind, question, setQuestion,
+    newChatPendingImages, setNewChatPendingImages, newChatRepoFileMentions, setNewChatRepoFileMentions,
+    newChatSkillMentions, setNewChatSkillMentions, newChatPluginMentions, setNewChatPluginMentions, repoPath,
     setRepoPath, repoInfo, setRepoInfo, warnings, setWarnings, dismissedWarningKeysByScope,
     setDismissedWarningKeysByScope, initializing, setInitializing, historyLoading, setHistoryLoading,
     openingConversationId, setOpeningConversationId, busy, setBusy, currentRunId, setCurrentRunId,

@@ -1676,10 +1676,13 @@ export class ChatService {
   async prospectiveUserSkillRunContext(request: {
     repoPath?: string;
     participants?: ChatParticipantInput[];
+    assistantProviderKind?: ChatProviderKind;
     content?: string;
   }): Promise<UserSkillRunContext> {
     const requestedParticipants = await this.validateParticipants(request.participants ?? [], [], true);
-    const participants = await this.ensureAdministratorParticipant(requestedParticipants);
+    const participants = request.assistantProviderKind
+      ? await this.ensureAdministratorParticipant(requestedParticipants, request.assistantProviderKind)
+      : requestedParticipants;
     const conversation: Conversation = {
       id: "prospective-chat",
       title: "",
@@ -1988,7 +1991,9 @@ export class ChatService {
           providerOutputLineBuffer: undefined,
           providerOutputText: undefined,
           providerSessionId: resumeMiss ? undefined : record.sessionId ?? state.providerSessionId,
-          successfulProviderKind: record.ok && record.content.trim() ? participant.kind : undefined
+          successfulProviderKind: record.ok && record.content.trim() && participant.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID
+            ? participant.kind
+            : undefined
         };
       } else if (!suppressPresentation && record.kind === "permission_pending") {
         const requester = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
@@ -2059,7 +2064,7 @@ export class ChatService {
         }
         terminalRecordApplied = terminalRecordApplied || terminal.changed;
         if (terminalState === "completed" && publishedState.successfulProviderKind) {
-          await this.recordSuccessfulChatProvider(publishedState.successfulProviderKind);
+          await this.recordSuccessfulAssistantProvider(conversation, publishedState.successfulProviderKind);
         }
       }
       conversation.updatedAt = new Date().toISOString();
@@ -4874,6 +4879,11 @@ export class ChatService {
           replyContext
         );
         dispatch = { ...dispatch, targets: skillValidation.targets };
+        const [agents, settings] = await Promise.all([
+          this.detectAgentsForReadiness("submit"),
+          this.settings.getPublicSettings()
+        ]);
+        this.assertParticipantProvidersReady(dispatch.targets, agents, settings.providers ?? []);
       } catch (error) {
         await this.rollbackPreparedImageAttachments(conversation.id, preparedImages, "MessageValidationFailed", error);
         throw error;
@@ -5488,6 +5498,7 @@ export class ChatService {
       let participantRequestsToRun: Array<{ requestMessageId: string; depth: number; source: ChatParticipantRequestBatch["source"] }> = [];
       await this.withChatMutation(conversation, async () => {
         participantRequestsToRun = await this.appendParticipantTurnMessages(conversation, participant, messages);
+        await this.recordSuccessfulAssistantProviderForMessages(conversation, participant, messages);
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
       });
@@ -6104,7 +6115,6 @@ export class ChatService {
         }
       }
       if (!signal?.aborted && result.ok && result.content.trim()) {
-        await this.recordSuccessfulChatProvider(participant.kind);
         this.commitPromptContextPointerAdvance(conversation, participant.id, preparedPromptContext.pointerAdvance);
         this.logMissingSelectedSkillStatus(triggerMessage, participant, pendingMessage, runId);
         const pendingMentions: ChatPendingMention[] = [];
@@ -6262,6 +6272,7 @@ export class ChatService {
       const accepted = this.upsertCompletedMessage(conversation, pendingMessage)
         ? [pendingMessage]
         : [];
+      await this.recordSuccessfulAssistantProviderForMessages(conversation, participant, accepted);
       participantRequestsToRun = await this.createImplicitParticipantRequestApproval(conversation, participant, accepted);
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
@@ -9024,6 +9035,9 @@ export class ChatService {
       return;
     }
     for (const item of items) {
+      if (this.normalizeConcreteRemoteExecutionMode(item.remoteExecution) === "remote") {
+        continue;
+      }
       const kind = item.kind as ChatProviderKind;
       const state = readinessForProvider(kind, agents, providers);
       if (state !== "ready") {
@@ -9033,18 +9047,51 @@ export class ChatService {
     }
   }
 
-  private async recordSuccessfulChatProvider(kind: ChatProviderKind): Promise<void> {
+  private async recordSuccessfulAssistantProviderForMessages(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    messages: ChatMessage[]
+  ): Promise<void> {
+    if (
+      participant.roleConfigId !== CHAT_ADMINISTRATOR_ROLE_ID ||
+      !messages.some((message) => message.status === "done" && message.content.trim())
+    ) {
+      return;
+    }
+    await this.recordSuccessfulAssistantProvider(conversation, participant.kind);
+  }
+
+  private async recordSuccessfulAssistantProvider(
+    conversation: Conversation,
+    kind: ChatProviderKind
+  ): Promise<void> {
+    if (conversation.metadata.activationProviderKind) {
+      return;
+    }
+    if (await this.recordSuccessfulChatProvider(kind)) {
+      conversation.metadata = {
+        ...conversation.metadata,
+        activationProviderKind: kind
+      };
+    }
+  }
+
+  private async recordSuccessfulChatProvider(kind: ChatProviderKind): Promise<boolean> {
     const writer = (this.settings as SettingsService & {
       recordSuccessfulChatProvider?: (providerKind: ChatProviderKind) => Promise<void>;
     }).recordSuccessfulChatProvider;
     if (typeof writer === "function") {
-      await writer.call(this.settings, kind).catch((error) => {
+      try {
+        await writer.call(this.settings, kind);
+        return true;
+      } catch (error) {
         void this.debugLogs.write("chat.provider-preference.persist-failed", {
           kind,
           error: error instanceof Error ? error.message : String(error)
         }).catch(() => undefined);
-      });
+      }
     }
+    return false;
   }
 
   private async detectAgentsForReadiness(

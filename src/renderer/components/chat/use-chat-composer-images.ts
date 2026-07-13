@@ -17,7 +17,13 @@ export interface PendingChatImage {
   error?: string;
 }
 
-export function useChatComposerImages(conversationId: string | undefined): {
+export function useChatComposerImages(
+  conversationId: string | undefined,
+  controlled?: {
+    pendingImages: PendingChatImage[];
+    setPendingImages: React.Dispatch<React.SetStateAction<PendingChatImage[]>>;
+  }
+): {
   addImageFiles: (files: File[]) => Promise<void>;
   hasInvalidImages: boolean;
   pendingImages: PendingChatImage[];
@@ -25,7 +31,9 @@ export function useChatComposerImages(conversationId: string | undefined): {
   removePendingImage: (imageId: string) => void;
   setPendingImages: React.Dispatch<React.SetStateAction<PendingChatImage[]>>;
 } {
-  const [pendingImages, setPendingImages] = useState<PendingChatImage[]>([]);
+  const [internalPendingImages, setInternalPendingImages] = useState<PendingChatImage[]>([]);
+  const pendingImages = controlled?.pendingImages ?? internalPendingImages;
+  const setPendingImages = controlled?.setPendingImages ?? setInternalPendingImages;
   const pendingImagesRef = useRef<PendingChatImage[]>([]);
   const readyImages = pendingImages.filter((image) => image.status === "ready" && image.dataBase64);
   const hasInvalidImages = pendingImages.some((image) => image.status !== "ready");
@@ -35,6 +43,9 @@ export function useChatComposerImages(conversationId: string | undefined): {
   }, [pendingImages]);
 
   useEffect(() => {
+    if (controlled) {
+      return;
+    }
     setPendingImages((current) => {
       revokePendingImageUrls(current);
       return [];
@@ -42,10 +53,13 @@ export function useChatComposerImages(conversationId: string | undefined): {
   }, [conversationId]);
 
   useEffect(() => {
+    if (controlled) {
+      return;
+    }
     return () => {
       revokePendingImageUrls(pendingImagesRef.current);
     };
-  }, []);
+  }, [controlled]);
 
   const addImageFiles = useCallback(async (files: File[]): Promise<void> => {
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));

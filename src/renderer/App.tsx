@@ -92,10 +92,13 @@ function App(): JSX.Element {
     }
     void conversationActions.newChatSession().then(() => {
       state.setQuestion(draft);
+      const mentions = pluginNewChatMentions(plugin, draft);
+      state.setNewChatPluginMentions(mentions.pluginMentions);
+      state.setNewChatSkillMentions(mentions.skillMentions);
       setNewChatPrefill({
         key: Date.now(),
         prompt: draft,
-        ...pluginNewChatMentions(plugin, draft)
+        ...mentions
       });
       state.setRailView("chats");
       state.setSidebarCollapsed(false);
@@ -427,6 +430,10 @@ function App(): JSX.Element {
             <section className="composer new-chat-composer">
               <NewChatScreen
                 prompt={state.question}
+                pendingImages={state.newChatPendingImages}
+                selectedFileMentions={state.newChatRepoFileMentions}
+                selectedPluginMentions={state.newChatPluginMentions}
+                selectedSkillMentions={state.newChatSkillMentions}
                 repoPath={state.repoPath}
                 repoInfo={state.repoInfo}
                 selectedParticipantIds={state.selectedChatParticipantConfigIds}
@@ -443,6 +450,10 @@ function App(): JSX.Element {
                 renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}
                 participantRoleLabel={(participant) => chatRoleLabel(state.settings.chatRoleConfigs, participant)}
                 onPromptChange={state.setQuestion}
+                onPendingImagesChange={state.setNewChatPendingImages}
+                onSelectedFileMentionsChange={state.setNewChatRepoFileMentions}
+                onSelectedPluginMentionsChange={state.setNewChatPluginMentions}
+                onSelectedSkillMentionsChange={state.setNewChatSkillMentions}
                 onRepoPathChange={(value) => {
                   state.setRepoPath(value);
                   state.setRepoInfo(undefined);

@@ -83,7 +83,9 @@ test("provider auth fixtures classify ready, signed-out, malformed, offline, and
   assert.equal(classifyClaudeAuth({ ...captured(false, ""), timedOut: true }).diagnosticCode, "probe-timeout");
   assert.equal(classifyCodexAuth(captured(true, "Logged in using ChatGPT")).authentication, "ready");
   assert.equal(classifyCodexAuth(captured(false, "Not logged in")).authentication, "required");
-  assert.equal(classifyCodexAuth(captured(true, "Not logged in")).authentication, "required");
+  assert.equal(classifyCodexAuth(captured(true, "Not logged in")).authentication, "unknown");
+  assert.equal(classifyCodexAuth(captured(false, "Network error: unauthenticated upstream")).authentication, "unknown");
+  assert.equal(classifyCodexAuth(captured(false, "Not logged in\nNetwork unavailable")).authentication, "unknown");
   assert.equal(classifyCodexAuth(captured(false, "Network unavailable")).authentication, "unknown");
   assert.equal(classifyCodexAuth({ ...captured(false, ""), timedOut: true }).diagnosticCode, "probe-timeout");
   assert.equal(classifyAntigravityAuth(captured(true, "gemini-2.5-pro")).authentication, "ready");
@@ -130,6 +132,30 @@ test("environment, lookup, and version failures produce distinct normalized fact
   assert.equal(codex?.runnable, "failed");
   assert.equal(codex?.diagnosticCode, "failed-to-run");
   assert.equal(authCalls, 0, "authentication must not run after a version failure");
+});
+
+test("readiness probes use the same filtered manual environment as local agent runs", async () => {
+  const observed: NodeJS.ProcessEnv[] = [];
+  const service = new CliReadinessService(undefined, fakeDependencies({
+    refreshEnvironment: async () => ({ ok: true, env: { PATH: "/login/bin", SHARED: "login" } }),
+    manualEnvironment: async () => ({ OPENAI_API_KEY: "manual-secret", SHARED: "manual" }),
+    lookup: async (_command, env) => {
+      observed.push({ ...env });
+      return { status: "found", path: "/fixture/bin/provider" };
+    },
+    run: async (command, args, options) => {
+      observed.push({ ...options?.env });
+      return successfulCommand(command, args);
+    }
+  }));
+
+  const snapshot = await service.refresh({ force: true, trigger: "manual" });
+
+  assert.ok(snapshot.every((health) => health.authentication === "ready"));
+  assert.ok(observed.every((env) => env.PATH === "/login/bin"));
+  assert.ok(observed.every((env) => env.OPENAI_API_KEY === "manual-secret"));
+  assert.ok(observed.every((env) => env.SHARED === "manual"));
+  assert.equal(JSON.stringify(snapshot).includes("manual-secret"), false);
 });
 
 test("renderer snapshots and logs exclude raw output, account fields, arbitrary versions, and executable paths", async () => {
@@ -220,6 +246,7 @@ test("invalidated in-flight generation cannot overwrite a newer refresh", async 
 function fakeDependencies(overrides: Partial<CliReadinessDependencies> = {}): Partial<CliReadinessDependencies> {
   return {
     refreshEnvironment: async () => ({ ok: true, env: { PATH: "/fixture/bin" } }),
+    manualEnvironment: async () => ({}),
     lookup: async (command) => ({ status: "found", path: `/fixture/bin/${command}` }),
     run: async (command, args) => successfulCommand(command, args),
     now: () => new Date(),
