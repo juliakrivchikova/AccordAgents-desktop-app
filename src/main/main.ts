@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import type {
   AddChatParticipantRequest,
+  AgentDetectionRequest,
   DeleteAgentEnvironmentVariableRequest,
   AgentHealth,
   ChatBehaviorRuleConfigUpdate,
@@ -327,8 +328,17 @@ function appSkillsSourceRoot(): string {
     : path.join(process.cwd(), "src/main/appSkills");
 }
 
-async function detectAgentsWithAppSkills(): Promise<AgentHealth[]> {
-  const agents = await cliAgentRunner.detectAgents();
+async function detectAgentsWithAppSkills(request?: AgentDetectionRequest): Promise<AgentHealth[]> {
+  const agents = await cliAgentRunner.detectAgents(request);
+  if (request?.trigger === "focus" || request?.trigger === "submit") {
+    const cached = agents.map((agent) => ({
+      ...agent,
+      appSkillSync: appSkillsService.statusFor(agent.kind)
+    }));
+    if (cached.every((agent) => agent.appSkillSync)) {
+      return cached;
+    }
+  }
   return appSkillsService.reconcileAgents(agents).catch((error) => {
     void debugLogService.write("app-skills-detect-sync-error", {
       error: error instanceof Error ? error.message : String(error)
@@ -344,6 +354,23 @@ async function detectAgentsWithAppSkills(): Promise<AgentHealth[]> {
 
 async function openExternalUrl(url: unknown): Promise<void> {
   await shell.openExternal(normalizeExternalUrlForOpen(url));
+}
+
+async function openTerminal(): Promise<void> {
+  if (process.platform !== "darwin") {
+    throw new Error("Open Terminal is available on macOS only.");
+  }
+  const candidates = [
+    "/System/Applications/Utilities/Terminal.app",
+    "/Applications/Utilities/Terminal.app"
+  ];
+  for (const candidate of candidates) {
+    const error = await shell.openPath(candidate);
+    if (!error) {
+      return;
+    }
+  }
+  throw new Error("Terminal could not be opened.");
 }
 
 function createWindow(): void {
@@ -467,6 +494,7 @@ async function withCloudRunWorker<T>(
 function registerIpc(): void {
   ipcMain.handle("app:get-version", () => app.getVersion());
   ipcMain.handle("app:open-external", (_event, url: unknown) => openExternalUrl(url));
+  ipcMain.handle("app:open-terminal", () => openTerminal());
   ipcMain.handle("app:inspect-local-file", (_event, request: InspectLocalFileRequest) => localFileOpenerService.inspectLocalFile(request));
   ipcMain.handle("app:open-local-file", (_event, request: OpenLocalFileRequest) => localFileOpenerService.openLocalFile(request));
   ipcMain.handle("settings:get", () => settingsService.getPublicSettings());
@@ -526,7 +554,16 @@ function registerIpc(): void {
     await cliAgentRunner.shutdownWarmAgents();
     return agentEnvironmentService.snapshot();
   });
-  ipcMain.handle("settings:update-provider", (_event, update: ProviderSettingsUpdate) => settingsService.updateProvider(update));
+  ipcMain.handle("settings:update-provider", async (_event, update: ProviderSettingsUpdate) => {
+    const next = await settingsService.updateProvider(update);
+    if (typeof update.enabled === "boolean") {
+      cliAgentRunner.invalidateAgentReadiness();
+      if (update.enabled) {
+        void detectAgentsWithAppSkills({ force: true, trigger: "provider-enabled" }).catch(() => undefined);
+      }
+    }
+    return next;
+  });
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));
   ipcMain.handle("settings:archive-chat-role", (_event, id: string) => settingsService.archiveChatRoleConfig(id));
   ipcMain.handle("settings:save-chat-behavior-rule", (_event, update: ChatBehaviorRuleConfigUpdate) => settingsService.saveChatBehaviorRuleConfig(update));
@@ -563,8 +600,8 @@ function registerIpc(): void {
     }
     return providerRunner.listModelCatalog(kind);
   });
-  ipcMain.handle("agents:detect", async () => {
-    const agents = await detectAgentsWithAppSkills();
+  ipcMain.handle("agents:detect", async (_event, request?: AgentDetectionRequest) => {
+    const agents = await detectAgentsWithAppSkills(normalizeAgentDetectionRequest(request));
     await settingsService.ensureGenericChatParticipantSeeds(agents);
     return agents;
   });
@@ -1063,6 +1100,18 @@ function registerIpc(): void {
     const result = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
     return result.canceled ? undefined : result.filePaths[0];
   });
+}
+
+function normalizeAgentDetectionRequest(value: unknown): AgentDetectionRequest {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const record = value as Partial<AgentDetectionRequest>;
+  const trigger = record.trigger === "initial" || record.trigger === "focus" || record.trigger === "manual" ||
+    record.trigger === "submit" || record.trigger === "provider-enabled" || record.trigger === "service"
+    ? record.trigger
+    : undefined;
+  return { force: record.force === true, trigger };
 }
 
 async function resolvePluginListRequest(request?: PluginListRequest): Promise<{

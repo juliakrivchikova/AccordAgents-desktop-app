@@ -33,6 +33,7 @@ import {
 } from "../../../shared/chatPromptContext";
 import { writeClipboardText, type ClipboardWriteResult } from "../../../shared/clipboard";
 import { AwsWorkerPanel as SharedAwsWorkerPanel } from "./aws-worker-panel";
+import { deriveAgentReadiness } from "../../../shared/cliReadiness";
 
 const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits transitive member-to-member request nesting, not repeated rounds by the same requester.";
 const PARTICIPANT_REQUEST_PROMPT_MAX_HELP = "Maximum characters accepted for each member request prompt. Longer prompts are rejected, not truncated.";
@@ -64,15 +65,18 @@ export function GeneralSettingsSection(props: {
   setChatPromptContext: (settings: ChatPromptContextSettings) => Promise<void>;
   saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => Promise<void>;
 }): JSX.Element {
-  const detectedCount = props.providers.filter(
-    (provider) => props.agents.find((agent) => agent.kind === provider.kind)?.installed
+  const readyCount = props.providers.filter(
+    (provider) => deriveAgentReadiness(
+      props.agents.find((agent) => agent.kind === provider.kind),
+      provider.enabled
+    ) === "ready"
   ).length;
   return (
     <>
       <section className="gen-section">
         <div className="gen-section-head">
           <h2 className="gen-section-title">Local CLI setup</h2>
-          <span className="gen-section-meta">{detectedCount} of {props.providers.length} detected</span>
+          <span className="gen-section-meta">{readyCount} of {props.providers.length} ready</span>
         </div>
         <div className="gen-card">
           {props.providers.map((provider, index) => {
@@ -81,17 +85,18 @@ export function GeneralSettingsSection(props: {
             return (
               <Fragment key={provider.kind}>
                 {index > 0 && <div className="gen-card-divider" />}
-                <div className="gen-cli-row">
+                <div className="gen-cli-row" data-provider-kind={provider.kind}>
                   <span className={`gen-cli-icon${provider.kind === "claude-code" ? " gen-cli-icon-full" : ""}`}>
                     {iconUrl ? <img src={iconUrl} alt="" /> : null}
                   </span>
                   <div className="gen-cli-text">
                     <div className="gen-cli-name">{provider.label}</div>
-                    <div className="gen-cli-sub">{healthLine(health)}</div>
+                    <div className="gen-cli-sub">{healthLine(provider.enabled, health)}</div>
                   </div>
                   <label className="toggle">
                     <input
                       type="checkbox"
+                      data-testid={`provider-toggle-${provider.kind}`}
                       checked={provider.enabled}
                       onChange={(event) => void props.updateProvider(provider, { enabled: event.target.checked })}
                     />
@@ -951,15 +956,24 @@ function ParticipantRequestPromptMaxControl(props: {
   );
 }
 
-function healthLine(health: AgentHealth | undefined): string {
-  if (!health) {
-    return "Not checked";
-  }
-  if (!health.installed) {
-    return "Not installed";
-  }
-  const base = health.version || health.path || "Installed";
-  const syncIssue = appSkillSyncIssueLine(health.appSkillSync);
+function healthLine(enabled: boolean, health: AgentHealth | undefined): string {
+  const readiness = deriveAgentReadiness(health, enabled);
+  const status = readiness === "not-detected"
+    ? "Not detected"
+    : readiness === "failed-to-run"
+      ? "Failed to run"
+      : readiness === "sign-in-required"
+        ? "Sign-in required"
+        : readiness === "could-not-verify"
+          ? "Could not verify"
+          : readiness === "disabled"
+            ? "Disabled"
+            : readiness === "checking"
+              ? "Checking"
+              : "Ready";
+  const stable = health?.version && readiness === "ready" ? `${status} · ${health.version}` : status;
+  const base = health?.checking && readiness !== "checking" ? `${stable} · Checking` : stable;
+  const syncIssue = appSkillSyncIssueLine(health?.appSkillSync);
   return syncIssue ? `${base} · ${syncIssue}` : base;
 }
 

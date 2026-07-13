@@ -8,6 +8,7 @@ import path from "node:path";
 import type {
   AgentContextUsage,
   AgentContextUsageSource,
+  AgentDetectionRequest,
   AgentHealth,
   ChatAgentActivityEvent,
   ChatAgentActivityKind,
@@ -30,7 +31,8 @@ import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS, normalizeCliAgentRunTimeoutMs } from 
 import { chatTextEndsAtSentenceOrParagraphBoundary } from "../../shared/processingTranscript";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
 import { cliFailureNoticeText } from "../../shared/warnings";
-import { CommandError, commandEnvironment, commandExists, ensureLoginShellEnvPrimed, runCommand, type CommandEnvironmentOptions } from "./command";
+import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, runCommand, type CommandEnvironmentOptions } from "./command";
+import { CliReadinessService } from "./cliReadiness";
 import {
   buildCodexExecInvocation,
   createCodexLineHandler,
@@ -406,6 +408,7 @@ export function geminiMcpProxyLaunchArgs(
 }
 
 export class CliAgentRunner {
+  private readonly readiness: CliReadinessService;
   private readonly warmAgents = new Map<string, WarmAgentEntry>();
   private readonly warmUnsupportedLogged = new Set<ParticipantConfig["kind"]>();
   private readonly modelCatalogs = new Map<ChatProviderKind, CachedModelCatalog>();
@@ -417,15 +420,24 @@ export class CliAgentRunner {
   private geminiMcpConfigSyncing?: Promise<string | undefined>;
   private runTimeoutMs = CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS;
 
-  constructor(private readonly debugLogs?: CliAgentDebugLogger) {}
+  constructor(private readonly debugLogs?: CliAgentDebugLogger) {
+    this.readiness = new CliReadinessService(debugLogs);
+  }
 
   setRunTimeoutMs(timeoutMs: number): void {
     this.runTimeoutMs = normalizeCliAgentRunTimeoutMs(timeoutMs);
   }
 
-  async detectAgents(): Promise<AgentHealth[]> {
-    const [codex, claude, gemini] = await Promise.all([this.detectCodex(), this.detectClaude(), this.detectGemini()]);
-    return [codex, claude, gemini];
+  async detectAgents(request?: AgentDetectionRequest): Promise<AgentHealth[]> {
+    const agents = await this.readiness.refresh(request);
+    if (agents.some((agent) => agent.kind === "gemini-cli" && agent.installed)) {
+      void this.ensureGeminiMcpConfig().catch(() => undefined);
+    }
+    return agents;
+  }
+
+  invalidateAgentReadiness(): number {
+    return this.readiness.invalidate();
   }
 
   async listModelCatalog(kind: ChatProviderKind, configuredModel?: string): Promise<ProviderModelCatalog> {
@@ -858,48 +870,6 @@ export class CliAgentRunner {
 
   private dedupeModels(models: ProviderModel[]): ProviderModel[] {
     return dedupeProviderModels(models);
-  }
-
-  private async detectCodex(): Promise<AgentHealth> {
-    const command = await commandExists("codex");
-    if (!command.path) {
-      return { kind: "codex-cli", label: "Codex CLI", installed: false, error: command.error };
-    }
-    try {
-      const version = await runCommand("codex", ["--version"], { timeoutMs: 10_000 });
-      return { kind: "codex-cli", label: "Codex CLI", installed: true, path: command.path, version: version.stdout.trim() };
-    } catch (error) {
-      return { kind: "codex-cli", label: "Codex CLI", installed: true, path: command.path, error: this.errorText(error) };
-    }
-  }
-
-  private async detectClaude(): Promise<AgentHealth> {
-    const command = await commandExists("claude");
-    if (!command.path) {
-      return { kind: "claude-code", label: "Claude Code", installed: false, error: command.error };
-    }
-    try {
-      const version = await runCommand("claude", ["--version"], { timeoutMs: 10_000 });
-      return { kind: "claude-code", label: "Claude Code", installed: true, path: command.path, version: version.stdout.trim() };
-    } catch (error) {
-      return { kind: "claude-code", label: "Claude Code", installed: true, path: command.path, error: this.errorText(error) };
-    }
-  }
-
-  private async detectGemini(): Promise<AgentHealth> {
-    const command = await commandExists("agy");
-    if (!command.path) {
-      return { kind: "gemini-cli", label: "Gemini CLI (Antigravity)", installed: false, error: command.error };
-    }
-    // Keep the App-MCP bridge entry in the global agy config current whenever the
-    // CLI is present; failures surface on the run instead of blocking detection.
-    void this.ensureGeminiMcpConfig().catch(() => undefined);
-    try {
-      const version = await runCommand("agy", ["--version"], { timeoutMs: 10_000 });
-      return { kind: "gemini-cli", label: "Gemini CLI (Antigravity)", installed: true, path: command.path, version: version.stdout.trim() };
-    } catch (error) {
-      return { kind: "gemini-cli", label: "Gemini CLI (Antigravity)", installed: true, path: command.path, error: this.errorText(error) };
-    }
   }
 
   private async listGeminiModelCatalog(fetchedAt: string): Promise<ProviderModelCatalog> {

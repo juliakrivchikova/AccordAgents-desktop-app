@@ -1,4 +1,4 @@
-import type { ChatActivityItem, ChatMessage, Conversation } from "../../shared/types";
+import type { AgentDetectionRequest, AgentHealth, ChatActivityItem, ChatMessage, Conversation } from "../../shared/types";
 import { buildChatActivityItems, reconcileChatActivityRefreshItems } from "../../shared/chatActivity";
 import { executeChatActivityFocus } from "../../shared/chatActivityFocus";
 import {
@@ -22,6 +22,7 @@ import { activityItemsWithStoredPreferences } from "./activity-item-state";
 
 export interface ConversationActions {
   refreshAll: () => Promise<void>;
+  refreshAgents: (request?: AgentDetectionRequest) => Promise<AgentHealth[]>;
   refreshActivity: () => Promise<void>;
   refreshConversations: () => Promise<void>;
   openConversation: (id: string) => Promise<void>;
@@ -41,6 +42,26 @@ export interface ConversationActions {
 }
 
 export function useConversationActions(state: AppState): ConversationActions {
+  async function refreshAgents(request?: AgentDetectionRequest): Promise<AgentHealth[]> {
+    const requestId = state.agentRefreshRequestRef.current + 1;
+    state.agentRefreshRequestRef.current = requestId;
+    if (request?.force) {
+      state.setAgents((current) => current.map((agent) => ({ ...agent, checking: true })));
+    }
+    try {
+      const agents = await window.consensus.detectAgents(request);
+      if (requestId === state.agentRefreshRequestRef.current) {
+        state.setAgents(agents);
+      }
+      return agents;
+    } catch (error) {
+      if (requestId === state.agentRefreshRequestRef.current) {
+        state.setAgents((current) => current.map((agent) => ({ ...agent, checking: false })));
+      }
+      throw error;
+    }
+  }
+
   async function refreshConversations(): Promise<void> {
     const summaries = await window.consensus.listConversations();
     state.archivedConversationIdsRef.current = new Set(
@@ -90,7 +111,7 @@ export function useConversationActions(state: AppState): ConversationActions {
     try {
       const [nextSettings, nextAgents, nextSummaries] = await Promise.all([
         window.consensus.getSettings(),
-        window.consensus.detectAgents(),
+        refreshAgents({ trigger: "initial" }),
         window.consensus.listConversations()
       ]);
       const seededSettings = await window.consensus.getSettings();
@@ -478,6 +499,7 @@ export function useConversationActions(state: AppState): ConversationActions {
 
   async function newChatSession(): Promise<void> {
     if (state.busy) return;
+    await refreshSettingsForNewChat();
     const nextRepoPath = preferredNewChatRepoPath();
     resetNewChatState();
     await applyNewChatRepoPath(nextRepoPath);
@@ -485,6 +507,7 @@ export function useConversationActions(state: AppState): ConversationActions {
 
   async function newProjectSession(projectRepoPath?: string): Promise<void> {
     if (state.busy) return;
+    await refreshSettingsForNewChat();
     const nextRepoPath = normalizeProjectPath(projectRepoPath) ?? "";
     resetNewChatState();
     await applyNewChatRepoPath(nextRepoPath);
@@ -510,11 +533,21 @@ export function useConversationActions(state: AppState): ConversationActions {
     state.setChatAddParticipantDraft(defaultChatParticipantDraft(state.settings));
     state.setSelectedChatParticipantConfigIds(defaultSelectedChatParticipantConfigIds());
     state.setSelectedChatParticipantRunLocations({});
+    state.setSelectedAssistantProviderKind(undefined);
+    state.setSetupCompletedProviderKind(undefined);
     state.setKind("chat");
     state.setQuestion("");
     state.setRepoPath("");
     state.setRepoInfo(undefined);
     state.setError(undefined);
+  }
+
+  async function refreshSettingsForNewChat(): Promise<void> {
+    try {
+      state.setSettings(await window.consensus.getSettings());
+    } catch {
+      // Keep the existing settings snapshot if the preference refresh fails.
+    }
   }
 
   async function applyNewChatRepoPath(nextRepoPath: string): Promise<void> {
@@ -546,7 +579,7 @@ export function useConversationActions(state: AppState): ConversationActions {
   }
 
   return {
-    refreshAll, refreshActivity, refreshConversations, openConversation, openConversationAndFocusActivityItem, markConversationViewed, clearChatMessageFocus, loadOlderConversationMessages,
+    refreshAll, refreshAgents, refreshActivity, refreshConversations, openConversation, openConversationAndFocusActivityItem, markConversationViewed, clearChatMessageFocus, loadOlderConversationMessages,
     loadConversationMessagePageForMessage, jumpToParticipantLastMessage, selectRepo,
     inspectRepo, rememberRepoPath, cancelReview, newChatSession, newProjectSession,
     updateSelectedChatParticipantConfigIds: state.setSelectedChatParticipantConfigIds

@@ -29,15 +29,13 @@ import {
 const CODEX_AGENT: AgentHealth = {
   kind: "codex-cli",
   label: "Codex CLI",
-  installed: true,
-  path: "/usr/local/bin/codex"
+  installed: true
 };
 
 const CLAUDE_AGENT: AgentHealth = {
   kind: "claude-code",
   label: "Claude Code",
-  installed: true,
-  path: "/usr/local/bin/claude"
+  installed: true
 };
 
 const MISSING_CLAUDE_AGENT: AgentHealth = {
@@ -197,6 +195,21 @@ test("CLI agent run timeout defaults to 24 hours and persists bounded values", a
   await service.setCliAgentRunTimeoutMs(5_000);
 
   assert.equal(stored().cliAgentRunTimeoutMs, CLI_AGENT_RUN_TIMEOUT_MIN_MS);
+});
+
+test("last successful chat provider persists idempotently", async () => {
+  const { service, stored, writeCount } = settingsServiceWithStoredSettings();
+
+  await service.recordSuccessfulChatProvider("claude-code");
+  assert.equal(stored().lastSuccessfulChatProviderKind, "claude-code");
+  assert.equal(writeCount(), 1);
+
+  await service.recordSuccessfulChatProvider("claude-code");
+  assert.equal(writeCount(), 1);
+
+  await service.recordSuccessfulChatProvider("codex-cli");
+  assert.equal(stored().lastSuccessfulChatProviderKind, "codex-cli");
+  assert.equal(writeCount(), 2);
 });
 
 test("participant request max depth defaults to 2 and persists bounded values", async () => {

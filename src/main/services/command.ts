@@ -4,8 +4,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
-const LOGIN_SHELL_ENV_TIMEOUT_MS = 4000;
-const LOGIN_SHELL_ENV_KILL_GRACE_MS = 1500;
+const LOGIN_SHELL_ENV_TIMEOUT_MS = 8000;
 const LOGIN_SHELL_ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const VOLATILE_LOGIN_SHELL_ENV_KEYS = new Set(["PWD", "OLDPWD", "SHLVL", "_", "TERM"]);
 
@@ -29,6 +28,7 @@ export interface CommandOptions {
   env?: NodeJS.ProcessEnv;
   envOptions?: CommandEnvironmentOptions;
   primeLoginShellEnv?: boolean;
+  killProcessGroup?: boolean;
   signal?: AbortSignal;
   onStdout?: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
@@ -39,7 +39,7 @@ export interface CommandEnvironmentOptions {
 }
 
 let loginShellEnv: NodeJS.ProcessEnv | undefined;
-let loginShellEnvPrime: Promise<NodeJS.ProcessEnv> | undefined;
+let loginShellEnvRefresh: Promise<LoginShellEnvironmentRefresh> | undefined;
 let debugLogger: CommandDebugLogger | undefined;
 
 export function setCommandDebugLogger(logger: CommandDebugLogger | undefined): void {
@@ -50,11 +50,42 @@ export async function ensureLoginShellEnvPrimed(): Promise<NodeJS.ProcessEnv> {
   if (loginShellEnv) {
     return loginShellEnv;
   }
-  loginShellEnvPrime ??= primeLoginShellEnv().then((env) => {
-    loginShellEnv = env;
-    return env;
+  return (await refreshLoginShellEnv()).env;
+}
+
+export interface LoginShellEnvironmentRefresh {
+  ok: boolean;
+  env: NodeJS.ProcessEnv;
+}
+
+export function refreshLoginShellEnv(): Promise<LoginShellEnvironmentRefresh> {
+  if (loginShellEnvRefresh) {
+    return loginShellEnvRefresh;
+  }
+  const refresh = captureFreshLoginShellEnv().finally(() => {
+    if (loginShellEnvRefresh === refresh) {
+      loginShellEnvRefresh = undefined;
+    }
   });
-  return loginShellEnvPrime;
+  loginShellEnvRefresh = refresh;
+  return refresh;
+}
+
+async function captureFreshLoginShellEnv(): Promise<LoginShellEnvironmentRefresh> {
+  if (process.platform !== "darwin") {
+    loginShellEnv = {};
+    return { ok: true, env: {} };
+  }
+  try {
+    const env = await captureLoginShellEnv();
+    loginShellEnv = env;
+    return { ok: true, env };
+  } catch (error) {
+    void writeCommandDebugLog("command.login-shell-env-prime-failed", {
+      reason: error instanceof CommandError && error.result.timedOut ? "timeout" : "failed"
+    });
+    return { ok: false, env: {} };
+  }
 }
 
 export function commandEnvironment(extraEnv: NodeJS.ProcessEnv = {}, options: CommandEnvironmentOptions = {}): NodeJS.ProcessEnv {
@@ -91,9 +122,11 @@ export async function runCommand(command: string, args: string[], options: Comma
   const timeoutMs = options.timeoutMs ?? 30_000;
 
   return new Promise((resolve, reject) => {
+    const useProcessGroup = options.killProcessGroup === true && process.platform !== "win32";
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: commandEnvironment(options.env, options.envOptions),
+      detached: useProcessGroup,
       stdio: ["pipe", "pipe", "pipe"]
     });
 
@@ -112,26 +145,43 @@ export async function runCommand(command: string, args: string[], options: Comma
       child.stderr.destroy();
     };
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
+    const terminate = (signal: NodeJS.Signals): void => {
+      if (useProcessGroup && child.pid) {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch {
+          // Fall back to the direct child when the process group is already gone
+          // or the current platform cannot signal it.
+        }
+      }
+      child.kill(signal);
+    };
+
+    const scheduleForceKill = (): void => {
       setTimeout(() => {
+        // A shell can exit after SIGTERM while a descendant in its process
+        // group ignores the signal. Escalate the whole group even after the
+        // direct child has settled so readiness probes cannot leak helpers.
+        if (useProcessGroup || !settled) {
+          terminate("SIGKILL");
+        }
         if (!settled) {
-          child.kill("SIGKILL");
           releaseStdio();
         }
       }, 1500).unref();
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminate("SIGTERM");
+      scheduleForceKill();
     }, timeoutMs);
     timer.unref();
 
     const abort = () => {
-      child.kill("SIGTERM");
-      setTimeout(() => {
-        if (!settled) {
-          child.kill("SIGKILL");
-          releaseStdio();
-        }
-      }, 1500).unref();
+      terminate("SIGTERM");
+      scheduleForceKill();
     };
 
     if (options.signal?.aborted) {
@@ -240,13 +290,39 @@ export function parseLoginShellEnvOutput(stdout: string, startSentinel: string, 
   return env;
 }
 
-export async function commandExists(command: string): Promise<{ path?: string; version?: string; error?: string }> {
+export interface CommandLookupResult {
+  status: "found" | "not-found" | "unknown";
+  path?: string;
+  timedOut?: boolean;
+}
+
+export async function lookupCommand(command: string, env?: NodeJS.ProcessEnv): Promise<CommandLookupResult> {
   try {
-    const which = await runCommand("which", [command], { timeoutMs: 5000 });
-    return { path: which.stdout.trim() };
+    const which = await runCommand("which", [command], {
+      env,
+      killProcessGroup: true,
+      primeLoginShellEnv: env ? false : undefined,
+      timeoutMs: 5000
+    });
+    const commandPath = which.stdout.trim();
+    return commandPath ? { status: "found", path: commandPath } : { status: "not-found" };
   } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) };
+    if (error instanceof CommandError && error.result.exitCode === 1 && !error.result.timedOut) {
+      return { status: "not-found" };
+    }
+    return {
+      status: "unknown",
+      timedOut: error instanceof CommandError ? error.result.timedOut : false
+    };
   }
+}
+
+export async function commandExists(command: string): Promise<{ path?: string; version?: string; error?: string }> {
+  const result = await lookupCommand(command);
+  if (result.status === "found") {
+    return { path: result.path };
+  }
+  return result.status === "not-found" ? {} : { error: "Command lookup failed." };
 }
 
 function commandPath(basePath?: string, extraPath?: string): string {
@@ -319,11 +395,7 @@ function nvmNodeBinSegments(home: string): string[] {
   }
 }
 
-async function primeLoginShellEnv(): Promise<NodeJS.ProcessEnv> {
-  if (process.platform !== "darwin") {
-    return {};
-  }
-
+async function captureLoginShellEnv(): Promise<NodeJS.ProcessEnv> {
   const shell = process.env.SHELL?.trim() || "/bin/zsh";
   const startSentinel = `__ACCORD_AGENTS_ENV_START_${randomUUID()}__`;
   const endSentinel = `__ACCORD_AGENTS_ENV_END_${randomUUID()}__`;
@@ -333,75 +405,13 @@ async function primeLoginShellEnv(): Promise<NodeJS.ProcessEnv> {
     `printf '%s\\n' ${shellQuote(endSentinel)}`
   ].join("; ");
 
-  try {
-    const stdout = await runLoginShellEnvCapture(shell, script);
-    return parseLoginShellEnvOutput(stdout, startSentinel, endSentinel);
-  } catch (error) {
-    void writeCommandDebugLog("command.login-shell-env-prime-failed", {
-      reason: error instanceof Error ? error.message : String(error)
-    });
-    return {};
-  }
-}
-
-function runLoginShellEnvCapture(shell: string, script: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(shell, ["-ilc", script], {
-      env: process.env,
-      stdio: ["pipe", "pipe", "pipe"]
-    });
-
-    let stdout = "";
-    let settled = false;
-    let timedOut = false;
-    let killTimer: NodeJS.Timeout | undefined;
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      killTimer = setTimeout(() => {
-        if (!settled) {
-          child.kill("SIGKILL");
-        }
-      }, LOGIN_SHELL_ENV_KILL_GRACE_MS);
-      killTimer.unref();
-    }, LOGIN_SHELL_ENV_TIMEOUT_MS);
-    timer.unref();
-
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.resume();
-
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      if (killTimer) {
-        clearTimeout(killTimer);
-      }
-      settled = true;
-      reject(new Error(`login shell env capture failed to start: ${error.message}`));
-    });
-
-    child.on("close", (exitCode) => {
-      clearTimeout(timer);
-      if (killTimer) {
-        clearTimeout(killTimer);
-      }
-      settled = true;
-      if (timedOut) {
-        reject(new Error(`login shell env capture timed out after ${LOGIN_SHELL_ENV_TIMEOUT_MS}ms`));
-        return;
-      }
-      if (exitCode !== 0) {
-        reject(new Error(`login shell env capture exited with code ${exitCode ?? "unknown"}`));
-        return;
-      }
-      resolve(stdout);
-    });
-
-    child.stdin.end();
+  const result = await runCommand(shell, ["-ilc", script], {
+    env: process.env,
+    primeLoginShellEnv: false,
+    killProcessGroup: true,
+    timeoutMs: LOGIN_SHELL_ENV_TIMEOUT_MS
   });
+  return parseLoginShellEnvOutput(result.stdout, startSentinel, endSentinel);
 }
 
 function shellQuote(value: string): string {

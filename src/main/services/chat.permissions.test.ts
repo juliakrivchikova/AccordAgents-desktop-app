@@ -1165,6 +1165,38 @@ test("reported provider session id is persisted even if the first turn fails", a
   assert.equal(runs[1].options.sessionId, earlySessionId);
 });
 
+test("local provider preference records only a nonempty successful response", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  let outcome: "failed" | "empty" | "success" = "failed";
+  const { service, settingsState, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => outcome === "failed"
+      ? { participant: runParticipant, ok: false, content: "Provider failed.", error: "failed", durationMs: 1 }
+      : outcome === "empty"
+        ? { participant: runParticipant, ok: true, content: "", durationMs: 1 }
+        : { participant: runParticipant, ok: true, content: "Completed.", durationMs: 1 }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await (service as any).runParticipantTurnSerialized(
+    conversation, participant, conversation.messages[0], "failed-preference", undefined, undefined, { warnings: [] }
+  );
+  assert.deepEqual(settingsState.recordedSuccessfulProviders, []);
+
+  outcome = "empty";
+  await (service as any).runParticipantTurnSerialized(
+    conversation, participant, conversation.messages[0], "empty-preference", undefined, undefined, { warnings: [] }
+  );
+  assert.deepEqual(settingsState.recordedSuccessfulProviders, []);
+
+  outcome = "success";
+  await (service as any).runParticipantTurnSerialized(
+    conversation, participant, conversation.messages[0], "successful-preference", undefined, undefined, { warnings: [] }
+  );
+  assert.deepEqual(settingsState.recordedSuccessfulProviders, ["claude-code"]);
+});
+
 test("non-batch participant turns record pending bubbles as last-message pointer", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
@@ -2472,7 +2504,7 @@ test("stale conversation replay merge does not double-count omitted remote activ
   assert.equal(replay.providerOmittedActivityEventCount, 70);
 });
 
-test("remote provider result keeps exact content until terminal lifecycle finalizes", async () => {
+test("remote provider result keeps exact content and records preference only after successful terminalization", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant], {
     running: true,
@@ -2512,7 +2544,7 @@ test("remote provider result keeps exact content until terminal lifecycle finali
       }]
     }
   });
-  const { service, storage } = testService({ conversation });
+  const { service, storage, settingsState } = testService({ conversation });
 
   await service.applyRemoteRunReplayRecord({
     id: "remote-run:provider-result",
@@ -2527,6 +2559,7 @@ test("remote provider result keeps exact content until terminal lifecycle finali
   } as any);
   assert.equal(storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote")?.status, "pending");
   assert.equal(storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote")?.content, "Authoritative final.");
+  assert.deepEqual(settingsState.recordedSuccessfulProviders, []);
 
   await service.applyRemoteRunReplayRecord({
     id: "remote-run:terminal",
@@ -2545,6 +2578,7 @@ test("remote provider result keeps exact content until terminal lifecycle finali
   assert.equal(messages[0].metadata?.activityEvents, undefined);
   assert.equal(messages[0].metadata?.remoteRunStatus?.label, "Completed");
   assert.deepEqual(storage.current.metadata.activeRunIds, undefined);
+  assert.deepEqual(settingsState.recordedSuccessfulProviders, ["codex-cli"]);
 });
 
 test("remote cancellation suppresses late output, result, and permission side effects", async () => {
@@ -4702,20 +4736,24 @@ test("chat creation is blocked when no local CLI is installed", async () => {
 
   await assert.rejects(
     () => service.createConversation({ title: "Fresh chat", participants: [] }),
-    /Install Codex CLI, Claude Code, or Gemini CLI/
+    /Set up and sign in to at least one CLI provider/
   );
 });
 
-test("preferred chat provider falls back to enabled Gemini when other providers are unavailable", () => {
-  const { service } = testService();
-  assert.equal(
-    (service as any).preferredChatProviderKind([
-      { kind: "codex-cli", enabled: false },
-      { kind: "claude-code", enabled: false },
-      { kind: "gemini-cli", enabled: true }
-    ], []),
-    "gemini-cli"
-  );
+test("chat creation uses the sole ready provider without a hidden priority fallback", async () => {
+  const { service } = testService({
+    agents: [{ kind: "gemini-cli", label: "Antigravity", installed: true }],
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE] }
+  });
+
+  const result = await service.createConversation({
+    title: "Fresh chat",
+    participants: [],
+    skipDefaultParticipants: true
+  });
+  const assistant = (result.conversation.metadata.participants as ChatParticipant[])
+    .find((participant) => participant.roleConfigId === ADMIN_ROLE.id);
+  assert.equal(assistant?.kind, "gemini-cli");
 });
 
 test("last message pointer advances by createdAt even when the new message has a smaller window-relative index", () => {
@@ -9042,6 +9080,7 @@ function testService(options: {
   chatBehaviorRules: ChatBehaviorRuleConfig[];
   chatParticipantConfigs: ChatParticipantConfig[];
   batchWriteCount: number;
+  recordedSuccessfulProviders: ChatProviderKind[];
 }; tempRoot: string } {
   const tempRoot = path.join(tmpdir(), "accordagents-chat-permissions-test");
   const storage = {
@@ -9078,7 +9117,8 @@ function testService(options: {
     chatRoleConfigs: clone(options.settings?.chatRoleConfigs ?? [ROLE]),
     chatBehaviorRules: clone(options.settings?.chatBehaviorRules ?? []),
     chatParticipantConfigs: clone(options.settings?.chatParticipantConfigs ?? []),
-    batchWriteCount: 0
+    batchWriteCount: 0,
+    recordedSuccessfulProviders: [] as ChatProviderKind[]
   };
   const publicSettings = (): AppSettings => ({
     roundLimitDefault: 1,
@@ -9118,6 +9158,9 @@ function testService(options: {
     },
     async ensureGenericChatParticipantSeeds(): Promise<AppSettings> {
       return publicSettings();
+    },
+    async recordSuccessfulChatProvider(kind: ChatProviderKind): Promise<void> {
+      settingsState.recordedSuccessfulProviders.push(kind);
     },
     async getChatParticipantRequestMaxDepth(): Promise<number> {
       return publicSettings().chatParticipantRequestMaxDepth;

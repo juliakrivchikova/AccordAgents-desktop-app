@@ -3,6 +3,7 @@ import type {
   AgentHealth,
   AppSettings,
   ChatActivityItem,
+  ChatProviderKind,
   CloudRunRemoteExecutionMode,
   Conversation,
   ConversationKind,
@@ -35,6 +36,10 @@ export interface AppState {
   setSettings: StateSetter<AppSettings>;
   agents: AgentHealth[];
   setAgents: StateSetter<AgentHealth[]>;
+  selectedAssistantProviderKind: ChatProviderKind | undefined;
+  setSelectedAssistantProviderKind: StateSetter<ChatProviderKind | undefined>;
+  setupCompletedProviderKind: ChatProviderKind | undefined;
+  setSetupCompletedProviderKind: StateSetter<ChatProviderKind | undefined>;
   summaries: ConversationSummary[];
   setSummaries: StateSetter<ConversationSummary[]>;
   conversation: Conversation | undefined;
@@ -119,6 +124,7 @@ export interface AppState {
   openConversationRequestRef: React.MutableRefObject<number>;
   chatMessageFocusNonceRef: React.MutableRefObject<number>;
   activityRefreshRequestRef: React.MutableRefObject<number>;
+  agentRefreshRequestRef: React.MutableRefObject<number>;
   activityRevisionByConversationRef: React.MutableRefObject<Record<string, number>>;
   activityItemPreferencesRef: React.MutableRefObject<ActivityItemPreferences>;
   archivedConversationIdsRef: React.MutableRefObject<Set<string>>;
@@ -130,6 +136,8 @@ export interface AppState {
 export function useAppState(): AppState {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [agents, setAgents] = useState<AgentHealth[]>([]);
+  const [selectedAssistantProviderKind, setSelectedAssistantProviderKind] = useState<ChatProviderKind | undefined>();
+  const [setupCompletedProviderKind, setSetupCompletedProviderKind] = useState<ChatProviderKind | undefined>();
   const [summaries, setSummaries] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<Conversation | undefined>();
   const [messagePage, setMessagePage] = useState<ConversationMessagePageInfo | undefined>();
@@ -177,6 +185,7 @@ export function useAppState(): AppState {
   const openConversationRequestRef = useRef(0);
   const chatMessageFocusNonceRef = useRef(0);
   const activityRefreshRequestRef = useRef(0);
+  const agentRefreshRequestRef = useRef(0);
   const activityRevisionByConversationRef = useRef<Record<string, number>>({});
   const activityItemPreferencesRef = useRef<ActivityItemPreferences>(initialActivityItemPreferences);
   const archivedConversationIdsRef = useRef<Set<string>>(new Set());
@@ -200,7 +209,8 @@ export function useAppState(): AppState {
   };
 
   return {
-    settings, setSettings, agents, setAgents, summaries, setSummaries, conversation, setConversation,
+    settings, setSettings, agents, setAgents, selectedAssistantProviderKind, setSelectedAssistantProviderKind,
+    setupCompletedProviderKind, setSetupCompletedProviderKind, summaries, setSummaries, conversation, setConversation,
     messagePage, setMessagePage, olderMessagesLoading, setOlderMessagesLoading, railView, setRailView,
     activityItems, setActivityItems, activityLoading, setActivityLoading, activityError, setActivityError,
     activityFocusError, setActivityFocusError,
@@ -218,7 +228,7 @@ export function useAppState(): AppState {
     chatMessageDraft, setChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
     setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef,
-    activityRefreshRequestRef, activityRevisionByConversationRef, activityItemPreferencesRef, archivedConversationIdsRef,
+    activityRefreshRequestRef, agentRefreshRequestRef, activityRevisionByConversationRef, activityItemPreferencesRef, archivedConversationIdsRef,
     lastViewedAtRef, startingChatRef, railViewRef
   };
 }

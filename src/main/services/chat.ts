@@ -80,6 +80,7 @@ import type {
   DismissConversationWarningsRequest,
   ExportChatAttachmentRequest,
   ParticipantConfig,
+  ProviderSettings,
   ProviderModelCatalog,
   ReadChatAttachmentRequest,
   RenameChatConversationRequest,
@@ -188,6 +189,13 @@ import {
 } from "../../shared/chatRunState";
 import { INTERRUPTED_RUN_WARNING, sanitizeWarningList, sanitizeWarningText } from "../../shared/warnings";
 import { normalizeAutoChatTitle, normalizeManualChatTitle, sanitizeAutoChatTitleSuggestion } from "../../shared/chatTitles";
+import {
+  agentReadinessReason,
+  cliProviderMetadata,
+  readinessForProvider,
+  readyProviderKinds,
+  resolveAssistantProviderKind
+} from "../../shared/cliReadiness";
 
 type ProgressCallback = (progress: ReviewProgress) => void;
 
@@ -551,6 +559,7 @@ interface RemoteRunReplayState {
   providerOutputText?: string;
   providerOutputLineBuffer?: string;
   providerSessionId?: string;
+  successfulProviderKind?: ChatProviderKind;
   providerActivityEvents?: ChatAgentActivityEvent[];
   providerActivitySequence?: number;
   providerActivityLabel?: string;
@@ -787,14 +796,28 @@ export class ChatService {
     let conversation: Conversation | undefined;
     let stage = "initializing";
     try {
-      const agents = await this.cliRunner.detectAgents().catch((): AgentHealth[] => []);
-      const installedCliKinds = agents
-        .filter((agent) => agent.installed && (agent.kind === "codex-cli" || agent.kind === "claude-code" || agent.kind === "gemini-cli"))
-        .map((agent) => agent.kind);
-      if (installedCliKinds.length === 0) {
-        throw new Error("Install Codex CLI, Claude Code, or Gemini CLI before creating a chat.");
-      }
+      const agents = await this.detectAgentsForReadiness("submit");
       const settings = await this.settings.ensureGenericChatParticipantSeeds(agents);
+      const readyKinds = readyProviderKinds(agents, settings.providers);
+      if (readyKinds.length === 0) {
+        throw new Error("Set up and sign in to at least one CLI provider before creating a chat.");
+      }
+      if (request.assistantProviderKind) {
+        const state = readinessForProvider(request.assistantProviderKind, agents, settings.providers);
+        if (state !== "ready") {
+          const label = cliProviderMetadata(request.assistantProviderKind).label;
+          throw new Error(agentReadinessReason(state, label) ?? `${label} is not ready.`);
+        }
+      }
+      const assistantProviderKind = resolveAssistantProviderKind({
+        agents,
+        providers: settings.providers,
+        explicitKind: request.assistantProviderKind,
+        lastSuccessfulKind: settings.lastSuccessfulChatProviderKind
+      });
+      if (!assistantProviderKind) {
+        throw new Error("Choose which ready CLI provider should power the Assistant.");
+      }
       const hasRequestedParticipants = request.participants.length > 0;
       const skipDefaultParticipants = request.skipDefaultParticipants === true;
       const participantInputs = hasRequestedParticipants
@@ -804,11 +827,12 @@ export class ChatService {
           : this.seededParticipantInputs(
             settings.chatParticipantConfigs,
             settings.chatParticipantSeedState,
-            installedCliKinds,
+            readyKinds,
             Boolean(requestedRepoPath)
           );
+      this.assertParticipantProvidersReady(participantInputs, agents, settings.providers);
       const requestedParticipants = await this.validateParticipants(participantInputs, [], true);
-      const participants = await this.ensureAdministratorParticipant(requestedParticipants);
+      const participants = await this.ensureAdministratorParticipant(requestedParticipants, assistantProviderKind);
       conversation = {
         id: randomUUID(),
         title: normalizeAutoChatTitle(requestedTitle),
@@ -1187,6 +1211,9 @@ export class ChatService {
     return this.withChatMutation(conversation, async () => {
       const participants = this.chatParticipants(conversation);
       const nextParticipant = (await this.validateParticipants([request.participant], participants))[0];
+      const settings = await this.settings.getPublicSettings();
+      const agents = await this.detectAgentsForReadiness();
+      this.assertParticipantProvidersReady([request.participant], agents, settings.providers ?? []);
       conversation.metadata = {
         ...conversation.metadata,
         participants: [...participants, nextParticipant]
@@ -1960,7 +1987,8 @@ export class ChatService {
         statePatch = {
           providerOutputLineBuffer: undefined,
           providerOutputText: undefined,
-          providerSessionId: resumeMiss ? undefined : record.sessionId ?? state.providerSessionId
+          providerSessionId: resumeMiss ? undefined : record.sessionId ?? state.providerSessionId,
+          successfulProviderKind: record.ok && record.content.trim() ? participant.kind : undefined
         };
       } else if (!suppressPresentation && record.kind === "permission_pending") {
         const requester = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
@@ -2014,7 +2042,7 @@ export class ChatService {
       const terminalState = record.kind === "terminal_state"
         ? this.remoteRunPresentedTerminalOutcome(conversation, record.runId) ?? record.status
         : nextState.terminalState;
-      this.setRemoteRunReplayState(conversation, record.runId, {
+      const publishedState: RemoteRunReplayState = {
         ...nextState,
         ...statePatch,
         cursorSeq: Math.max(nextState.cursorSeq, record.seq),
@@ -2022,13 +2050,17 @@ export class ChatService {
         permissionRequestIdsByRecordId,
         terminalState,
         updatedAt: new Date().toISOString()
-      });
+      };
+      this.setRemoteRunReplayState(conversation, record.runId, publishedState);
       if (record.kind === "terminal_state") {
         const terminal = this.applyRemoteTerminalStateToConversation(conversation, record.runId, record.status, record.reason);
         for (const requestMessageId of terminal.autoResumeRequestMessageIds) {
           autoResumeRequestMessageIds.add(requestMessageId);
         }
         terminalRecordApplied = terminalRecordApplied || terminal.changed;
+        if (terminalState === "completed" && publishedState.successfulProviderKind) {
+          await this.recordSuccessfulChatProvider(publishedState.successfulProviderKind);
+        }
       }
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
@@ -3363,10 +3395,15 @@ export class ChatService {
     const settings = await this.settings.getPublicSettings();
     const roleById = new Map(settings.chatRoleConfigs.map((role) => [role.id, role]));
     const agents = await this.cliRunner.detectAgents().catch((): AgentHealth[] => []);
-    const defaultKind = this.preferredChatProviderKind(settings.providers, agents);
+    const defaultKind = resolveAssistantProviderKind({
+      agents,
+      providers: settings.providers,
+      lastSuccessfulKind: settings.lastSuccessfulChatProviderKind
+    }) ?? requester.kind;
     const providers: ChatRosterAvailableProvider[] = await Promise.all((["codex-cli", "claude-code", "gemini-cli"] as ChatProviderKind[]).map(async (kind) => {
       const provider = settings.providers.find((item) => item.kind === kind);
       const health = agents.find((item) => item.kind === kind);
+      const readiness = readinessForProvider(kind, agents, settings.providers);
       const configuredModel = provider?.model?.trim() || undefined;
       return {
         kind,
@@ -3378,7 +3415,8 @@ export class ChatService {
         modelCatalog: await this.safeCliModelCatalog(kind, configuredModel),
         reasoningEfforts: reasoningEffortOptionsForProvider(kind),
         version: health?.version,
-        error: health?.error
+        readiness,
+        diagnosticCode: health?.diagnosticCode
       };
     }));
 
@@ -3788,6 +3826,7 @@ export class ChatService {
     const providers = (["codex-cli", "claude-code", "gemini-cli"] as ChatProviderKind[]).map((kind) => {
       const provider = settings.providers.find((item) => item.kind === kind);
       const health = agents.find((item) => item.kind === kind);
+      const readiness = readinessForProvider(kind, agents, settings.providers);
       return {
         kind,
         label: provider?.label ?? health?.label ?? (kind === "codex-cli" ? "Codex CLI" : kind === "gemini-cli" ? "Gemini CLI (Antigravity)" : "Claude Code"),
@@ -3796,7 +3835,8 @@ export class ChatService {
         configuredModel: provider?.model?.trim() || undefined,
         reasoningEfforts: reasoningEffortOptionsForProvider(kind),
         version: health?.version,
-        error: health?.error
+        readiness,
+        diagnosticCode: health?.diagnosticCode
       };
     });
     const providerByKind = new Map(providers.map((provider) => [provider.kind, provider]));
@@ -6063,7 +6103,8 @@ export class ChatService {
           pendingMessage.metadata = { ...pendingMessage.metadata, processingTranscript };
         }
       }
-      if (!signal?.aborted && result.ok) {
+      if (!signal?.aborted && result.ok && result.content.trim()) {
+        await this.recordSuccessfulChatProvider(participant.kind);
         this.commitPromptContextPointerAdvance(conversation, participant.id, preparedPromptContext.pointerAdvance);
         this.logMissingSelectedSkillStatus(triggerMessage, participant, pendingMessage, runId);
         const pendingMentions: ChatPendingMention[] = [];
@@ -8038,6 +8079,7 @@ export class ChatService {
         providerOutputText: currentState.providerOutputText ?? storedState.providerOutputText,
         providerOutputLineBuffer: currentState.providerOutputLineBuffer ?? storedState.providerOutputLineBuffer,
         providerSessionId: currentState.providerSessionId ?? storedState.providerSessionId,
+        successfulProviderKind: currentState.successfulProviderKind ?? storedState.successfulProviderKind,
         providerActivityEvents: activity.events.length > 0 ? activity.events : undefined,
         providerActivitySequence,
         providerActivityLabel: currentActivityIsLatest
@@ -8084,6 +8126,10 @@ export class ChatService {
       const providerOutputText = typeof record.providerOutputText === "string" ? record.providerOutputText : undefined;
       const providerOutputLineBuffer = typeof record.providerOutputLineBuffer === "string" ? record.providerOutputLineBuffer : undefined;
       const providerSessionId = typeof record.providerSessionId === "string" ? record.providerSessionId : undefined;
+      const successfulProviderKind = record.successfulProviderKind === "codex-cli" ||
+        record.successfulProviderKind === "claude-code" || record.successfulProviderKind === "gemini-cli"
+        ? record.successfulProviderKind
+        : undefined;
       const providerActivityEvents = this.remoteRunActivityEvents(record.providerActivityEvents);
       const providerActivitySequence = this.normalizeOptionalInteger(record.providerActivitySequence);
       const providerActivityLabel = typeof record.providerActivityLabel === "string"
@@ -8100,6 +8146,7 @@ export class ChatService {
         providerOutputText,
         providerOutputLineBuffer,
         providerSessionId,
+        successfulProviderKind,
         providerActivityEvents,
         providerActivitySequence,
         providerActivityLabel,
@@ -8911,7 +8958,10 @@ export class ChatService {
     return Object.keys(defaults).length > 0 ? defaults : undefined;
   }
 
-  private async ensureAdministratorParticipant(participants: ChatParticipant[]): Promise<ChatParticipant[]> {
+  private async ensureAdministratorParticipant(
+    participants: ChatParticipant[],
+    preferredKind?: ChatProviderKind
+  ): Promise<ChatParticipant[]> {
     if (participants.some((participant) => participant.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID)) {
       return participants;
     }
@@ -8922,7 +8972,7 @@ export class ChatService {
     }
     const existingHandles = new Set(participants.map((participant) => participant.handle.toLowerCase()));
     const handle = this.uniqueHandle(CHAT_ADMINISTRATOR_HANDLE, existingHandles);
-    const kind = await this.defaultAdministratorProviderKind(settings.providers);
+    const kind = preferredKind ?? participants[0]?.kind ?? await this.defaultAdministratorProviderKind(settings.providers);
     const [administrator] = await this.validateParticipants([
       {
         handle,
@@ -8946,43 +8996,65 @@ export class ChatService {
     return administrator ? [administrator, ...participants] : participants;
   }
 
-  private async defaultAdministratorProviderKind(providers: Array<{ kind: string; enabled: boolean }>): Promise<ChatProviderKind> {
+  private async defaultAdministratorProviderKind(
+    providers: Array<Pick<ProviderSettings, "kind" | "enabled">>
+  ): Promise<ChatProviderKind> {
     const agents = await this.cliRunner.detectAgents().catch(() => []);
-    return this.preferredChatProviderKind(providers, agents);
+    const settings = await this.settings.getPublicSettings();
+    const kind = resolveAssistantProviderKind({
+      agents,
+      providers,
+      lastSuccessfulKind: settings.lastSuccessfulChatProviderKind
+    });
+    if (!kind) {
+      throw new Error("Choose which ready CLI provider should power the Assistant.");
+    }
+    return kind;
   }
 
-  private preferredChatProviderKind(providers: Array<{ kind: string; enabled: boolean }>, agents: AgentHealth[]): ChatProviderKind {
-    const codexInstalled = agents.some((agent) => agent.kind === "codex-cli" && agent.installed);
-    const claudeInstalled = agents.some((agent) => agent.kind === "claude-code" && agent.installed);
-    const geminiInstalled = agents.some((agent) => agent.kind === "gemini-cli" && agent.installed);
-    const codexEnabled = providers.some((provider) => provider.kind === "codex-cli" && provider.enabled);
-    const claudeEnabled = providers.some((provider) => provider.kind === "claude-code" && provider.enabled);
-    const geminiEnabled = providers.some((provider) => provider.kind === "gemini-cli" && provider.enabled);
-    if (codexInstalled && codexEnabled) {
-      return "codex-cli";
+  private assertParticipantProvidersReady(
+    items: CreateChatConversationRequest["participants"],
+    agents: AgentHealth[],
+    providers: Array<Pick<ProviderSettings, "kind" | "enabled">>
+  ): void {
+    // Production detection always returns one normalized entry per CLI,
+    // including environment-check failures. Empty snapshots are accepted only
+    // for legacy focused-test doubles that predate readiness detection.
+    if (agents.length === 0) {
+      return;
     }
-    if (claudeInstalled && claudeEnabled) {
-      return "claude-code";
+    for (const item of items) {
+      const kind = item.kind as ChatProviderKind;
+      const state = readinessForProvider(kind, agents, providers);
+      if (state !== "ready") {
+        const label = cliProviderMetadata(kind).label;
+        throw new Error(`@${item.handle.replace(/^@/, "")}: ${agentReadinessReason(state, label) ?? `${label} is not ready.`}`);
+      }
     }
-    if (geminiInstalled && geminiEnabled) {
-      return "gemini-cli";
+  }
+
+  private async recordSuccessfulChatProvider(kind: ChatProviderKind): Promise<void> {
+    const writer = (this.settings as SettingsService & {
+      recordSuccessfulChatProvider?: (providerKind: ChatProviderKind) => Promise<void>;
+    }).recordSuccessfulChatProvider;
+    if (typeof writer === "function") {
+      await writer.call(this.settings, kind).catch((error) => {
+        void this.debugLogs.write("chat.provider-preference.persist-failed", {
+          kind,
+          error: error instanceof Error ? error.message : String(error)
+        }).catch(() => undefined);
+      });
     }
-    if (codexInstalled) {
-      return "codex-cli";
+  }
+
+  private async detectAgentsForReadiness(
+    trigger?: "submit"
+  ): Promise<AgentHealth[]> {
+    try {
+      return await this.cliRunner.detectAgents(trigger ? { trigger } : undefined);
+    } catch {
+      throw new Error("Could not verify CLI readiness. Check again and retry.");
     }
-    if (claudeInstalled) {
-      return "claude-code";
-    }
-    if (geminiInstalled) {
-      return "gemini-cli";
-    }
-    if (codexEnabled) {
-      return "codex-cli";
-    }
-    if (claudeEnabled) {
-      return "claude-code";
-    }
-    return geminiEnabled ? "gemini-cli" : "codex-cli";
   }
 
   private uniqueHandle(base: string, existingHandles: Set<string>): string {
@@ -9181,6 +9253,8 @@ export class ChatService {
     const existing = this.chatParticipants(conversation);
     const participantInputs = request.operations.map((operation) => operation.participant);
     const participants = await this.validateParticipants(participantInputs, existing, false, settings.chatRoleConfigs);
+    const agents = await this.detectAgentsForReadiness();
+    this.assertParticipantProvidersReady(participantInputs, agents, settings.providers ?? []);
     const normalizedRequest: ChatRosterChangeRequest = {
       reason: request.reason,
       operations: participants.map((participant) => ({
@@ -9742,6 +9816,8 @@ export class ChatService {
       ...participant,
       participantConfigId: participant.participantConfigId ?? savedPresetIdByOperationIndex.get(index)
     }));
+    const agents = await this.detectAgentsForReadiness();
+    this.assertParticipantProvidersReady(participantInputs, agents, settings.providers ?? []);
     const managementEscalation = participants.some((participant, index) => {
       const operation = request.operations[index];
       const role = roleById.get(participant.roleConfigId);

@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import type { Conversation } from "../../shared/types";
+import type { AgentDetectionRequest, Conversation } from "../../shared/types";
 import {
   buildChatActivityItemsForConversationUpdate,
   mergeChatActivityItems,
@@ -27,6 +27,7 @@ import {
 export function useAppEffects(
   state: AppState,
   refreshAll: () => Promise<void>,
+  refreshAgents: (request?: AgentDetectionRequest) => Promise<unknown>,
   refreshActivity: () => Promise<void>,
   markConversationViewed: (conversation: Conversation) => void
 ): void {
@@ -98,14 +99,20 @@ export function useAppEffects(
       const inactive = document.visibilityState !== "visible" || !document.hasFocus();
       document.documentElement.classList.toggle("app-inactive", inactive);
     };
+    const refreshReadinessOnFocus = (): void => {
+      updateInactiveState();
+      if (document.visibilityState === "visible" && document.hasFocus()) {
+        void refreshAgents({ force: true, trigger: "focus" });
+      }
+    };
     updateInactiveState();
-    document.addEventListener("visibilitychange", updateInactiveState);
+    document.addEventListener("visibilitychange", refreshReadinessOnFocus);
     window.addEventListener("blur", updateInactiveState);
-    window.addEventListener("focus", updateInactiveState);
+    window.addEventListener("focus", refreshReadinessOnFocus);
     return () => {
-      document.removeEventListener("visibilitychange", updateInactiveState);
+      document.removeEventListener("visibilitychange", refreshReadinessOnFocus);
       window.removeEventListener("blur", updateInactiveState);
-      window.removeEventListener("focus", updateInactiveState);
+      window.removeEventListener("focus", refreshReadinessOnFocus);
       document.documentElement.classList.remove("app-inactive");
     };
   }, []);

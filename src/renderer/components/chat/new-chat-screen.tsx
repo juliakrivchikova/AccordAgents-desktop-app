@@ -47,6 +47,13 @@ import {
   validateChatStartupDrafts
 } from "./chat-participant-drafts";
 import { providerLabel } from "./chat-conversation-data";
+import {
+  CLI_PROVIDER_DISPLAY_ORDER,
+  cliProviderMetadata,
+  readyProviderKinds,
+  resolveAssistantProviderKind
+} from "../../../shared/cliReadiness";
+import { CliReadinessSetupPanel } from "./cli-readiness-setup-panel";
 import { ChatComposerAttachmentChips } from "./chat-composer-attachment-chips";
 import { ChatComposerMenus } from "./chat-composer-menus";
 import {
@@ -87,6 +94,7 @@ export function NewChatScreen(props: {
   summaries: ConversationSummary[];
   agents: AgentHealth[];
   busy: boolean;
+  selectedAssistantProviderKind?: ChatProviderKind;
   renderParticipantAvatar: (participant: ChatParticipant) => ReactNode;
   participantRoleLabel: (participant: Pick<ChatParticipant, "roleConfigId">) => string;
   onPromptChange: (value: string) => void;
@@ -96,6 +104,10 @@ export function NewChatScreen(props: {
   onSelectedParticipantIdsChange: Dispatch<SetStateAction<Set<string>>>;
   onSelectedParticipantRunLocationsChange: Dispatch<SetStateAction<Record<string, CloudRunRemoteExecutionMode>>>;
   onOpenParticipantsSettings: () => void;
+  onOpenProviderSettings: () => void;
+  onSelectedAssistantProviderKindChange: (kind: ChatProviderKind | undefined) => void;
+  onSetupCompletedProviderKindChange: (kind: ChatProviderKind | undefined) => void;
+  onRefreshAgents: () => Promise<AgentHealth[]>;
   onStart: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => boolean | void | Promise<boolean | void>;
 }): JSX.Element {
   const promptRef = useRef<HTMLTextAreaElement>(null);
@@ -103,9 +115,22 @@ export function NewChatScreen(props: {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const handledPrefillCaretKeyRef = useRef<number | undefined>();
   const images = useChatComposerImages(undefined);
-  const assistantParticipant = useMemo(
-    () => newChatAssistantParticipant(props.settings, props.agents),
+  const readyKinds = useMemo(
+    () => readyProviderKinds(props.agents, props.settings.providers),
     [props.agents, props.settings.providers]
+  );
+  const assistantProviderKind = useMemo(
+    () => resolveAssistantProviderKind({
+      agents: props.agents,
+      providers: props.settings.providers,
+      explicitKind: props.selectedAssistantProviderKind,
+      lastSuccessfulKind: props.settings.lastSuccessfulChatProviderKind
+    }),
+    [props.agents, props.selectedAssistantProviderKind, props.settings.lastSuccessfulChatProviderKind, props.settings.providers]
+  );
+  const assistantParticipant = useMemo(
+    () => newChatAssistantParticipant(assistantProviderKind ?? readyKinds[0] ?? "codex-cli"),
+    [assistantProviderKind, readyKinds]
   );
   const savedParticipantOptions = useMemo(
     () => sortSavedParticipantOptionsByUsage(
@@ -156,9 +181,15 @@ export function NewChatScreen(props: {
       }
     }
   });
-  const validation = validateChatStartupDrafts(prospectiveParticipantDrafts, props.settings.chatRoleConfigs, props.agents, props.settings.chatBehaviorRules);
+  const validation = validateChatStartupDrafts(
+    prospectiveParticipantDrafts,
+    props.settings.chatRoleConfigs,
+    props.agents,
+    props.settings.chatBehaviorRules,
+    props.settings.providers
+  );
   const hasPrompt = props.prompt.trim().length > 0;
-  const canStart = (hasPrompt || images.readyImages.length > 0 || mentions.selectedSkillMentions.length > 0) && !images.hasInvalidImages && !props.busy && !validation;
+  const canStart = Boolean(assistantProviderKind) && (hasPrompt || images.readyImages.length > 0 || mentions.selectedSkillMentions.length > 0) && !images.hasInvalidImages && !props.busy && !validation;
   const hasLeadingPluginToken = draftStartsWithPluginMention(props.prompt, mentions.selectedPluginMentions);
 
   useLayoutEffect(() => {
@@ -274,7 +305,37 @@ export function NewChatScreen(props: {
         <p>Coordinate AI agents in one workspace</p>
       </div>
 
-      <div className="new-chat-card">
+      {readyKinds.length === 0 && (
+        <CliReadinessSetupPanel
+          agents={props.agents}
+          settings={props.settings}
+          checking={props.agents.some((agent) => agent.checking)}
+          onRefresh={props.onRefreshAgents}
+          onOpenSettings={props.onOpenProviderSettings}
+          onProviderReady={(kind) => {
+            props.onSetupCompletedProviderKindChange(kind);
+            props.onSelectedAssistantProviderKindChange(kind);
+          }}
+        />
+      )}
+
+      {readyKinds.length > 0 && !assistantProviderKind && (
+        <div className="new-chat-provider-choice" data-testid="new-chat-provider-choice">
+          <strong>Choose the Assistant provider</strong>
+          <span>{props.selectedAssistantProviderKind
+            ? "The selected provider is no longer ready. Choose another ready provider."
+            : "All ready providers are available equally."}</span>
+          <div>
+            {CLI_PROVIDER_DISPLAY_ORDER.filter((kind) => readyKinds.includes(kind)).map((kind) => (
+              <button type="button" key={kind} onClick={() => props.onSelectedAssistantProviderKindChange(kind)}>
+                {cliProviderMetadata(kind).label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="new-chat-card" hidden={readyKinds.length === 0}>
         <ChatComposerAttachmentChips
           pendingImages={images.pendingImages}
           removeFileMention={mentions.removeFileMention}
@@ -467,7 +528,7 @@ export function NewChatScreen(props: {
         </div>
       )}
 
-      {validation && <div className="inline-error new-chat-error">{validation}</div>}
+      {readyKinds.length > 0 && validation && <div className="inline-error new-chat-error">{validation}</div>}
     </div>
   );
 }
@@ -683,7 +744,7 @@ function ParticipantPicker(props: {
                       <strong>{displayName}</strong>
                       <span>- {providerLabel(participant.kind)}</span>
                     </span>
-                    <small>{props.participantRoleLabel(participant)}</small>
+                    <small>{invalidReason ?? props.participantRoleLabel(participant)}</small>
                   </span>
                   <ChevronDown className="new-chat-participant-disclosure" size={14} aria-hidden />
                 </button>
@@ -746,13 +807,13 @@ function ParticipantPicker(props: {
   );
 }
 
-function newChatAssistantParticipant(settings: AppSettings, agents: AgentHealth[]): ChatParticipantConfig {
+function newChatAssistantParticipant(kind: ChatProviderKind): ChatParticipantConfig {
   return {
     id: NEW_CHAT_ASSISTANT_PARTICIPANT_ID,
     handle: CHAT_ASSISTANT_HANDLE,
     roleConfigId: CHAT_ASSISTANT_ROLE_ID,
     behaviorRuleIds: [],
-    kind: preferredAssistantProviderKind(settings, agents),
+    kind,
     agentMode: "default",
     permissions: {
       repoRead: false,
@@ -772,25 +833,6 @@ function newChatAssistantParticipant(settings: AppSettings, agents: AgentHealth[
 
 function isNewChatAssistantOption(participant: Pick<ChatParticipantConfig, "id" | "handle" | "roleConfigId">): boolean {
   return participant.id === NEW_CHAT_ASSISTANT_PARTICIPANT_ID || isChatAssistantParticipant(participant);
-}
-
-function preferredAssistantProviderKind(settings: AppSettings, agents: AgentHealth[]): ChatProviderKind {
-  const codexInstalled = agents.some((agent) => agent.kind === "codex-cli" && agent.installed);
-  const claudeInstalled = agents.some((agent) => agent.kind === "claude-code" && agent.installed);
-  const geminiInstalled = agents.some((agent) => agent.kind === "gemini-cli" && agent.installed);
-  const codexEnabled = settings.providers.some((provider) => provider.kind === "codex-cli" && provider.enabled);
-  const claudeEnabled = settings.providers.some((provider) => provider.kind === "claude-code" && provider.enabled);
-  const geminiEnabled = settings.providers.some((provider) => provider.kind === "gemini-cli" && provider.enabled);
-  if (codexInstalled && codexEnabled) return "codex-cli";
-  if (claudeInstalled && claudeEnabled) return "claude-code";
-  if (geminiInstalled && geminiEnabled) return "gemini-cli";
-  if (codexInstalled) return "codex-cli";
-  if (claudeInstalled) return "claude-code";
-  if (geminiInstalled) return "gemini-cli";
-  if (codexEnabled) return "codex-cli";
-  if (claudeEnabled) return "claude-code";
-  if (geminiEnabled) return "gemini-cli";
-  return "codex-cli";
 }
 
 function participantDetailValues(participant: ChatParticipantConfig): string[] {

@@ -68,7 +68,7 @@ export function ParticipantEditorDialog(props: {
   const normalizedMode = normalizeChatAgentMode(draft.agentMode);
   const changed = !participant || !sameParticipantDraft(normalized, participant);
   const validation = validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs, existingHandles, props.settings.chatBehaviorRules)
-    ?? validateChatCliAgents([normalized], props.agents);
+    ?? validateChatCliAgents([normalized], props.agents, props.settings.providers);
   const canSave = changed && !validation && !saving;
   const roleLabel = displayChatRoleLabel(
     props.settings.chatRoleConfigs.find((role) => role.id === draft.roleConfigId),

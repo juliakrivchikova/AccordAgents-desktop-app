@@ -34,6 +34,10 @@ import { upsertConversationSummary } from "./conversation-summaries";
 import { normalizeAutoChatTitle, normalizeManualChatTitle } from "../../shared/chatTitles";
 import { persistLastViewedAt } from "./storage";
 import { serializeComposerDraft } from "../components/chat/chat-composer-draft-utils";
+import {
+  isAgentSnapshotStale,
+  resolveAssistantProviderKind
+} from "../../shared/cliReadiness";
 
 export interface ChatActions {
   startChat: (options?: StartChatOptions) => Promise<boolean>;
@@ -98,13 +102,33 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setError("Enter a message or attach an image to start a chat.");
       return false;
     }
+    const agents = isAgentSnapshotStale(state.agents)
+      ? await conversationActions.refreshAgents({ trigger: "submit" }).catch(() => state.agents)
+      : state.agents;
+    const assistantProviderKind = resolveAssistantProviderKind({
+      agents,
+      providers: state.settings.providers,
+      explicitKind: state.selectedAssistantProviderKind,
+      lastSuccessfulKind: state.settings.lastSuccessfulChatProviderKind,
+      setupCompletedKind: state.setupCompletedProviderKind
+    });
+    if (!assistantProviderKind) {
+      state.setError("Choose which ready CLI provider should power the Assistant.");
+      return false;
+    }
     const participants = selectedOrMentionedChatParticipantDrafts(
       state.settings.chatParticipantConfigs,
       state.selectedChatParticipantConfigIds,
       initialMessage,
       state.selectedChatParticipantRunLocations
     );
-    const validation = validateChatStartupDrafts(participants, state.settings.chatRoleConfigs, state.agents, state.settings.chatBehaviorRules);
+    const validation = validateChatStartupDrafts(
+      participants,
+      state.settings.chatRoleConfigs,
+      agents,
+      state.settings.chatBehaviorRules,
+      state.settings.providers
+    );
     if (validation) {
       state.setError(validation);
       return false;
@@ -122,6 +146,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         title: initialChatTitle(initialMessage, imageAttachments),
         repoPath: state.repoPath.trim() || undefined,
         skipDefaultParticipants: participants.length === 0,
+        assistantProviderKind,
         participants
       });
       createdConversationId = result.conversation.id;
@@ -139,6 +164,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       });
       state.setConversation(mergeProgressIntoConversation(sendResult.conversation, state.progressLogRef.current.filter((item) => item.runId === runId)));
       state.setWarnings([...result.warnings, ...sendResult.warnings]);
+      await refreshPersistedProviderPreference();
       state.setQuestion("");
       await conversationActions.refreshConversations();
       return true;
@@ -273,6 +299,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       if (result.warnings.length > 0) {
         state.setWarnings(result.warnings);
       }
+      await refreshPersistedProviderPreference();
       return true;
     } catch (caught) {
       const message = errorText(caught);
@@ -455,7 +482,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
   async function commitChatParticipant(participant: ChatParticipantDraft): Promise<boolean> {
     if (!state.conversation || state.conversation.kind !== "chat") return false;
     const existingHandles = new Set(chatParticipants(state.conversation).map((item) => item.handle.toLowerCase()));
-    const validation = validateChatParticipantDrafts([participant], activeChatRoleConfigs(state.settings), existingHandles, state.settings.chatBehaviorRules) ?? validateChatCliAgents([participant], state.agents);
+    const validation = validateChatParticipantDrafts([participant], activeChatRoleConfigs(state.settings), existingHandles, state.settings.chatBehaviorRules) ?? validateChatCliAgents([participant], state.agents, state.settings.providers);
     if (validation) {
       state.setError(validation);
       return false;
@@ -493,6 +520,14 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     } finally {
       state.setBusy(false);
       state.setCurrentRunId(undefined);
+    }
+  }
+
+  async function refreshPersistedProviderPreference(): Promise<void> {
+    try {
+      state.setSettings(await window.consensus.getSettings());
+    } catch {
+      // A successful chat turn remains successful if the preference refresh fails.
     }
   }
 

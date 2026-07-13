@@ -12,15 +12,13 @@ const FIXED_NOW = new Date("2026-05-17T12:00:00.000Z");
 const CODEX_AGENT: AgentHealth = {
   kind: "codex-cli",
   label: "Codex CLI",
-  installed: true,
-  path: "/usr/local/bin/codex"
+  installed: true
 };
 
 const CLAUDE_AGENT: AgentHealth = {
   kind: "claude-code",
   label: "Claude Code",
-  installed: true,
-  path: "/usr/local/bin/claude"
+  installed: true
 };
 
 const MISSING_CLAUDE_AGENT: AgentHealth = {

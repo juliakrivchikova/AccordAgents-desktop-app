@@ -334,6 +334,7 @@ export interface AppSettings {
   chatSavedPrompts: ChatSavedPromptConfig[];
   chatParticipantConfigs: ChatParticipantConfig[];
   chatParticipantSeedState?: ChatParticipantSeedState;
+  lastSuccessfulChatProviderKind?: ChatProviderKind;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
 }
@@ -939,7 +940,8 @@ export interface ChatRosterAvailableProvider {
   modelCatalog?: ProviderModelCatalog;
   reasoningEfforts?: ProviderReasoningEffortOption[];
   version?: string;
-  error?: string;
+  readiness: AgentReadinessState;
+  diagnosticCode?: AgentReadinessDiagnosticCode;
 }
 
 export interface ChatRosterCurrentParticipant {
@@ -1266,6 +1268,7 @@ export interface CreateChatConversationRequest {
   title?: string;
   repoPath?: string;
   skipDefaultParticipants?: boolean;
+  assistantProviderKind?: ChatProviderKind;
   participants: ChatParticipantInput[];
 }
 
@@ -1478,10 +1481,41 @@ export interface AgentHealth {
   kind: Extract<ProviderKind, "codex-cli" | "claude-code" | "gemini-cli">;
   label: string;
   installed: boolean;
-  path?: string;
   version?: string;
-  error?: string;
+  detection?: AgentDetectionState;
+  runnable?: AgentRunnableState;
+  authentication?: AgentAuthenticationState;
+  diagnosticCode?: AgentReadinessDiagnosticCode;
+  checking?: boolean;
+  lastCheckedAt?: string;
+  generation?: number;
+  platform?: AgentPlatform;
   appSkillSync?: AppSkillSyncHealth;
+}
+
+export type AgentDetectionState = "detected" | "not-detected" | "unknown";
+export type AgentPlatform = "darwin" | "linux" | "win32" | "other";
+export type AgentRunnableState = "ready" | "failed" | "unknown";
+export type AgentAuthenticationState = "ready" | "required" | "unknown";
+export type AgentReadinessState =
+  | "not-detected"
+  | "failed-to-run"
+  | "sign-in-required"
+  | "could-not-verify"
+  | "ready"
+  | "disabled"
+  | "checking";
+export type AgentReadinessDiagnosticCode =
+  | "environment-check-failed"
+  | "not-detected"
+  | "failed-to-run"
+  | "auth-required"
+  | "auth-check-failed"
+  | "probe-timeout";
+
+export interface AgentDetectionRequest {
+  force?: boolean;
+  trigger?: "initial" | "focus" | "manual" | "submit" | "provider-enabled" | "service";
 }
 
 export interface GitRepoInfo {
@@ -2063,7 +2097,8 @@ export interface AppBridge {
   deleteChatParticipantConfig(id: string): Promise<AppSettings>;
   updateLastRepoPath(repoPath: string): Promise<AppSettings>;
   listProviderModels(kind: ProviderKind): Promise<ProviderModelCatalog>;
-  detectAgents(): Promise<AgentHealth[]>;
+  detectAgents(request?: AgentDetectionRequest): Promise<AgentHealth[]>;
+  openTerminal(): Promise<void>;
   selectRepoDirectory(): Promise<string | undefined>;
   inspectRepo(repoPath: string): Promise<GitRepoInfo>;
   getDiff(request: GitDiffRequest): Promise<GitDiffResult>;

@@ -52,7 +52,13 @@ function App(): JSX.Element {
   const reviewDecisionActions = useReviewDecisionActions(state, conversationActions);
   const reviewPlanActions = useReviewPlanActions(state, conversationActions);
   const settingsActions = useSettingsActions(state);
-  useAppEffects(state, conversationActions.refreshAll, conversationActions.refreshActivity, conversationActions.markConversationViewed);
+  useAppEffects(
+    state,
+    conversationActions.refreshAll,
+    conversationActions.refreshAgents,
+    conversationActions.refreshActivity,
+    conversationActions.markConversationViewed
+  );
   const view = useAppViewModel(state);
   const artifacts = useArtifacts(state.conversation?.id);
   const activityUnreadCount = state.activityItems.reduce(
@@ -428,6 +434,7 @@ function App(): JSX.Element {
                 settings={state.settings}
                 summaries={state.summaries}
                 agents={state.agents}
+                selectedAssistantProviderKind={state.selectedAssistantProviderKind}
                 initialPluginMentions={newChatPrefill?.pluginMentions}
                 initialSkillMentions={newChatPrefill?.skillMentions}
                 prefillPrompt={newChatPrefill?.prompt}
@@ -445,6 +452,10 @@ function App(): JSX.Element {
                 onSelectedParticipantIdsChange={conversationActions.updateSelectedChatParticipantConfigIds}
                 onSelectedParticipantRunLocationsChange={state.setSelectedChatParticipantRunLocations}
                 onOpenParticipantsSettings={() => openSettingsSection("participants")}
+                onOpenProviderSettings={() => openSettingsSection("general")}
+                onSelectedAssistantProviderKindChange={state.setSelectedAssistantProviderKind}
+                onSetupCompletedProviderKindChange={state.setSetupCompletedProviderKind}
+                onRefreshAgents={() => conversationActions.refreshAgents({ force: true, trigger: "manual" })}
                 onStart={(repoFileMentions, imageAttachments, skillMentions) => chatActions.startChat({ repoFileMentions, imageAttachments, skillMentions })}
               />
             </section>

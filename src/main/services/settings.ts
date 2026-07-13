@@ -118,6 +118,7 @@ interface StoredSettings {
   };
   awsWorkerVolumeExpansion?: AwsWorkerVolumeExpansion;
   agentEnvironment?: StoredAgentEnvironmentSettings;
+  lastSuccessfulChatProviderKind?: ChatProviderKind;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
   providers: StoredProviderSettings[];
@@ -1744,6 +1745,7 @@ export class SettingsService {
       chatAutoWatchWakeLimit: this.normalizeChatAutoWatchWakeLimit(stored.chatAutoWatchWakeLimit),
       chatPromptContext: this.normalizeChatPromptContextSettings(stored.chatPromptContext),
       cloudRuns: this.normalizeCloudRunsSettings(stored),
+      lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind),
       lastRepoPath: stored.lastRepoPath,
       repoFileOpenAction: stored.repoFileOpenAction,
       chatRoleConfigs: stored.chatRoleConfigs ?? DEFAULT_CHAT_ROLES,
@@ -1829,6 +1831,15 @@ export class SettingsService {
 
     await this.writeStored(stored);
     return this.getPublicSettings();
+  }
+
+  async recordSuccessfulChatProvider(kind: ChatProviderKind): Promise<void> {
+    const stored = await this.readStored();
+    if (stored.lastSuccessfulChatProviderKind === kind) {
+      return;
+    }
+    stored.lastSuccessfulChatProviderKind = kind;
+    await this.writeStored(stored);
   }
 
   async saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings> {
@@ -2641,6 +2652,7 @@ export class SettingsService {
       agentEnvironment: {
         variables: this.normalizeAgentEnvironmentVariables(settings.agentEnvironment?.variables)
       },
+      lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(settings.lastSuccessfulChatProviderKind),
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
       repoFileOpenAction: this.normalizeRepoFileOpenAction(settings.repoFileOpenAction),
       providers,
@@ -2657,6 +2669,10 @@ export class SettingsService {
         settings.remoteSessionCleanupTombstones
       )
     };
+  }
+
+  private normalizeChatProviderKind(value: unknown): ChatProviderKind | undefined {
+    return value === "codex-cli" || value === "claude-code" || value === "gemini-cli" ? value : undefined;
   }
 
   private shouldMigrateWorkflowManagerParticipantManagement(roles: ChatRoleConfig[] | undefined): boolean {
