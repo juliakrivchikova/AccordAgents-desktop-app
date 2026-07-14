@@ -3,18 +3,23 @@ import type {
   AgentHealth,
   AppSettings,
   ChatActivityItem,
+  ChatSkillMention,
+  ChatProviderKind,
   CloudRunRemoteExecutionMode,
   Conversation,
   ConversationKind,
   ConversationMessagePageInfo,
   ConversationSummary,
   GitRepoInfo,
+  RepoFileMention,
   PlanDecisionReply,
   ReviewProgress
 } from "../../shared/types";
 import type { SettingsSection } from "../components/settings/settings-view";
 import type { ChatMessageFocusRequest } from "../components/chat/chat-conversation-view";
 import type { ChatParticipantDraft } from "../components/chat/chat-participant-drafts";
+import type { DraftPluginMention } from "../components/chat/chat-composer-draft-utils";
+import type { PendingChatImage } from "../components/chat/use-chat-composer-images";
 import { DEFAULT_SETTINGS } from "./constants";
 import {
   persistChatSidebarWidth,
@@ -35,6 +40,10 @@ export interface AppState {
   setSettings: StateSetter<AppSettings>;
   agents: AgentHealth[];
   setAgents: StateSetter<AgentHealth[]>;
+  selectedAssistantProviderKind: ChatProviderKind | undefined;
+  setSelectedAssistantProviderKind: StateSetter<ChatProviderKind | undefined>;
+  setupCompletedProviderKind: ChatProviderKind | undefined;
+  setSetupCompletedProviderKind: StateSetter<ChatProviderKind | undefined>;
   summaries: ConversationSummary[];
   setSummaries: StateSetter<ConversationSummary[]>;
   conversation: Conversation | undefined;
@@ -69,6 +78,14 @@ export interface AppState {
   setKind: StateSetter<ConversationKind>;
   question: string;
   setQuestion: StateSetter<string>;
+  newChatPendingImages: PendingChatImage[];
+  setNewChatPendingImages: StateSetter<PendingChatImage[]>;
+  newChatRepoFileMentions: RepoFileMention[];
+  setNewChatRepoFileMentions: StateSetter<RepoFileMention[]>;
+  newChatSkillMentions: ChatSkillMention[];
+  setNewChatSkillMentions: StateSetter<ChatSkillMention[]>;
+  newChatPluginMentions: DraftPluginMention[];
+  setNewChatPluginMentions: StateSetter<DraftPluginMention[]>;
   repoPath: string;
   setRepoPath: StateSetter<string>;
   repoInfo: GitRepoInfo | undefined;
@@ -119,6 +136,7 @@ export interface AppState {
   openConversationRequestRef: React.MutableRefObject<number>;
   chatMessageFocusNonceRef: React.MutableRefObject<number>;
   activityRefreshRequestRef: React.MutableRefObject<number>;
+  agentRefreshRequestRef: React.MutableRefObject<number>;
   activityRevisionByConversationRef: React.MutableRefObject<Record<string, number>>;
   activityItemPreferencesRef: React.MutableRefObject<ActivityItemPreferences>;
   archivedConversationIdsRef: React.MutableRefObject<Set<string>>;
@@ -130,6 +148,8 @@ export interface AppState {
 export function useAppState(): AppState {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [agents, setAgents] = useState<AgentHealth[]>([]);
+  const [selectedAssistantProviderKind, setSelectedAssistantProviderKind] = useState<ChatProviderKind | undefined>();
+  const [setupCompletedProviderKind, setSetupCompletedProviderKind] = useState<ChatProviderKind | undefined>();
   const [summaries, setSummaries] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<Conversation | undefined>();
   const [messagePage, setMessagePage] = useState<ConversationMessagePageInfo | undefined>();
@@ -150,6 +170,10 @@ export function useAppState(): AppState {
   const [focusedThreadId, setFocusedThreadId] = useState<string | undefined>();
   const [kind, setKind] = useState<ConversationKind>("chat");
   const [question, setQuestion] = useState("");
+  const [newChatPendingImages, setNewChatPendingImages] = useState<PendingChatImage[]>([]);
+  const [newChatRepoFileMentions, setNewChatRepoFileMentions] = useState<RepoFileMention[]>([]);
+  const [newChatSkillMentions, setNewChatSkillMentions] = useState<ChatSkillMention[]>([]);
+  const [newChatPluginMentions, setNewChatPluginMentions] = useState<DraftPluginMention[]>([]);
   const [repoPath, setRepoPath] = useState("");
   const [repoInfo, setRepoInfo] = useState<GitRepoInfo | undefined>();
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -177,6 +201,7 @@ export function useAppState(): AppState {
   const openConversationRequestRef = useRef(0);
   const chatMessageFocusNonceRef = useRef(0);
   const activityRefreshRequestRef = useRef(0);
+  const agentRefreshRequestRef = useRef(0);
   const activityRevisionByConversationRef = useRef<Record<string, number>>({});
   const activityItemPreferencesRef = useRef<ActivityItemPreferences>(initialActivityItemPreferences);
   const archivedConversationIdsRef = useRef<Set<string>>(new Set());
@@ -200,13 +225,16 @@ export function useAppState(): AppState {
   };
 
   return {
-    settings, setSettings, agents, setAgents, summaries, setSummaries, conversation, setConversation,
+    settings, setSettings, agents, setAgents, selectedAssistantProviderKind, setSelectedAssistantProviderKind,
+    setupCompletedProviderKind, setSetupCompletedProviderKind, summaries, setSummaries, conversation, setConversation,
     messagePage, setMessagePage, olderMessagesLoading, setOlderMessagesLoading, railView, setRailView,
     activityItems, setActivityItems, activityLoading, setActivityLoading, activityError, setActivityError,
     activityFocusError, setActivityFocusError,
     selectedActivityItem, setSelectedActivityItem,
     activeSettingsSection, setActiveSettingsSection, sidebarCollapsed, setSidebarCollapsed, sidebarWidth,
-    setSidebarWidth, selectedThreadId, setSelectedThreadId, focusedThreadId, setFocusedThreadId, kind, setKind, question, setQuestion, repoPath,
+    setSidebarWidth, selectedThreadId, setSelectedThreadId, focusedThreadId, setFocusedThreadId, kind, setKind, question, setQuestion,
+    newChatPendingImages, setNewChatPendingImages, newChatRepoFileMentions, setNewChatRepoFileMentions,
+    newChatSkillMentions, setNewChatSkillMentions, newChatPluginMentions, setNewChatPluginMentions, repoPath,
     setRepoPath, repoInfo, setRepoInfo, warnings, setWarnings, dismissedWarningKeysByScope,
     setDismissedWarningKeysByScope, initializing, setInitializing, historyLoading, setHistoryLoading,
     openingConversationId, setOpeningConversationId, busy, setBusy, currentRunId, setCurrentRunId,
@@ -218,7 +246,7 @@ export function useAppState(): AppState {
     chatMessageDraft, setChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
     setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef,
-    activityRefreshRequestRef, activityRevisionByConversationRef, activityItemPreferencesRef, archivedConversationIdsRef,
+    activityRefreshRequestRef, agentRefreshRequestRef, activityRevisionByConversationRef, activityItemPreferencesRef, archivedConversationIdsRef,
     lastViewedAtRef, startingChatRef, railViewRef
   };
 }

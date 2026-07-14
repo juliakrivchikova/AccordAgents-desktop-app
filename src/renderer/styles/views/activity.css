@@ -251,6 +251,10 @@
   animation: activityPulse 1.4s ease-in-out infinite;
 }
 
+.app-inactive .activity-status-dot {
+  animation-play-state: paused !important;
+}
+
 .activity-row[data-status="recent"] .activity-status-dot {
   background: var(--app-accent);
   box-shadow: 0 0 0 3px var(--app-accent-soft);

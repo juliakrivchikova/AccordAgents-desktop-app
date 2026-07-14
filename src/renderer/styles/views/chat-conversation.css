@@ -653,6 +653,13 @@
   }
 }
 
+.app-inactive .chat-rt-status-dot,
+.app-inactive .streaming-status-label,
+.app-inactive .streaming-caret,
+.app-inactive .animate-pulse {
+  animation-play-state: paused !important;
+}
+
 .chat-popover-section-title {
   margin-bottom: 6px;
   color: var(--app-muted);
@@ -2755,6 +2762,10 @@
     background: none;
     color: var(--app-muted);
     -webkit-text-fill-color: currentColor;
+    animation: none;
+  }
+
+  .streaming-caret {
     animation: none;
   }
 }

@@ -58,6 +58,7 @@ export type ChatComposerSearchSource =
       type: "pre-chat";
       repoPath?: string;
       participants: ChatParticipantInput[];
+      assistantProviderKind?: ChatParticipant["kind"];
     };
 
 export function useChatComposerMentions(props: {
@@ -70,6 +71,12 @@ export function useChatComposerMentions(props: {
   onMentionInserted?: (participant: ChatParticipant) => void;
   participants: ChatParticipant[];
   savedPrompts: ChatSavedPromptConfig[];
+  selectedFileMentions?: RepoFileMention[];
+  selectedPluginMentions?: DraftPluginMention[];
+  selectedSkillMentions?: ChatSkillMention[];
+  onSelectedFileMentionsChange?: React.Dispatch<React.SetStateAction<RepoFileMention[]>>;
+  onSelectedPluginMentionsChange?: React.Dispatch<React.SetStateAction<DraftPluginMention[]>>;
+  onSelectedSkillMentionsChange?: React.Dispatch<React.SetStateAction<ChatSkillMention[]>>;
 }): {
   fileIndex: number;
   fileOptions: RepoFileSearchResult[];
@@ -124,9 +131,20 @@ export function useChatComposerMentions(props: {
   const [skillOptions, setSkillOptions] = useState<UserSkillSummary[]>([]);
   const [pluginOptions, setPluginOptions] = useState<PluginCatalogItem[]>([]);
   const [skillTarget, setSkillTarget] = useState<UserSkillTargetSummary | undefined>();
-  const [selectedSkillMentions, setSelectedSkillMentions] = useState<ChatSkillMention[]>([]);
-  const [selectedPluginMentions, setSelectedPluginMentions] = useState<DraftPluginMention[]>([]);
-  const [selectedFileMentions, setSelectedFileMentions] = useState<RepoFileMention[]>([]);
+  const [internalSelectedSkillMentions, setInternalSelectedSkillMentions] = useState<ChatSkillMention[]>([]);
+  const [internalSelectedPluginMentions, setInternalSelectedPluginMentions] = useState<DraftPluginMention[]>([]);
+  const [internalSelectedFileMentions, setInternalSelectedFileMentions] = useState<RepoFileMention[]>([]);
+  const selectedSkillMentions = props.selectedSkillMentions ?? internalSelectedSkillMentions;
+  const selectedPluginMentions = props.selectedPluginMentions ?? internalSelectedPluginMentions;
+  const selectedFileMentions = props.selectedFileMentions ?? internalSelectedFileMentions;
+  const setSelectedSkillMentions = props.onSelectedSkillMentionsChange ?? setInternalSelectedSkillMentions;
+  const setSelectedPluginMentions = props.onSelectedPluginMentionsChange ?? setInternalSelectedPluginMentions;
+  const setSelectedFileMentions = props.onSelectedFileMentionsChange ?? setInternalSelectedFileMentions;
+  const controlledSelections = Boolean(
+    props.onSelectedFileMentionsChange &&
+    props.onSelectedPluginMentionsChange &&
+    props.onSelectedSkillMentionsChange
+  );
   const fileSearchRequestRef = useRef(0);
   const skillSearchRequestRef = useRef(0);
   const pendingCaretRef = useRef<{ value: string; position: number } | undefined>();
@@ -196,9 +214,11 @@ export function useChatComposerMentions(props: {
     setSkillOptions([]);
     setPluginOptions([]);
     setSkillTarget(undefined);
-    setSelectedSkillMentions([]);
-    setSelectedPluginMentions([]);
-    setSelectedFileMentions([]);
+    if (!controlledSelections) {
+      setSelectedSkillMentions([]);
+      setSelectedPluginMentions([]);
+      setSelectedFileMentions([]);
+    }
   }, [searchResetKey]);
 
   useEffect(() => {
@@ -270,6 +290,7 @@ export function useChatComposerMentions(props: {
         : {
             repoPath: props.searchSource.repoPath,
             participants: props.searchSource.participants,
+            assistantProviderKind: props.searchSource.assistantProviderKind,
             query: skillQuery,
             content: props.draft,
             limit: 50

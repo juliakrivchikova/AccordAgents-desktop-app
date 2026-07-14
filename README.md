@@ -1,6 +1,6 @@
 # AccordAgents
 
-AccordAgents is an open-source macOS app for coordinating AI agents in one shared project workspace. It currently supports local CLI participants backed by Claude Code and Codex CLI.
+AccordAgents is an open-source macOS app for coordinating AI agents in one shared project workspace. It supports local CLI participants backed by Antigravity, Claude Code, and Codex.
 
 Instead of copy-pasting context between separate terminals or chats, you keep roles, rules, history, approvals, and decisions in one project workspace.
 
@@ -26,7 +26,7 @@ AccordAgents lets multiple agents work from the same project, compare perspectiv
 - Node.js 20+
 - npm
 - macOS (primary development target; the signed release pipeline is macOS arm64)
-- The `claude` and/or `codex` CLIs on your `PATH`
+- At least one supported CLI (`agy`, `claude`, or `codex`) installed and authenticated; first-run setup guides you when none is ready
 
 ## Install
 
@@ -52,7 +52,7 @@ make clean
 
 ## Configuration
 
-- **Local CLI agents** (`claude`, `codex`) are detected via `which`. They run in a
+- **Local CLI agents** (`agy`, `claude`, `codex`) are checked through a refreshed login-shell environment plus AccordAgents' filtered manual agent environment. Detection, runnable state, and authentication are reported separately; multiple ready providers remain an equal, neutral choice until you select one. They run in a
   permission-scoped sandbox of the selected repository: read-only by default, with
   file/shell/web access controlled per participant through approval cards, saved
   allow rules, or auto mode for trusted workflows.
@@ -63,11 +63,12 @@ make clean
 
 - Conversations are stored locally in `accordagents.sqlite3` under Electron's
   `userData` directory.
-- Debug logs (raw CLI output) may be written to
+- Redacted diagnostic logs may be written to
   `userData/debug-logs/<date>.jsonl` when running unpackaged. Force on/off with
   `ACCORD_AGENTS_DEBUG_LOGS=1` / `=0`.
-- Saved conversations and debug logs contain your prompts, diffs, and raw model
-  responses. Treat them as sensitive and do not commit them.
+- Saved conversations contain your prompts, diffs, and model responses. Diagnostic
+  logs omit raw CLI readiness output, account fields, executable paths, and environment
+  values, but should still be treated as sensitive and never committed.
 
 ## Releases
 

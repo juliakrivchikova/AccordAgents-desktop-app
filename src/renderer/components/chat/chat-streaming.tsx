@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { ChevronRight, FilePenLine, Globe, ShieldCheck, Terminal, type LucideIcon } from "lucide-react";
 
 import { MarkdownText } from "../content/markdown-text";
@@ -11,7 +11,7 @@ import {
 } from "../../../shared/processingTranscript";
 import type { ChatThinkingRow } from "./chat-conversation-data";
 
-export function ChatThinkingRowItem({ row }: { row: ChatThinkingRow }): JSX.Element {
+export const ChatThinkingRowItem = memo(function ChatThinkingRowItem({ row }: { row: ChatThinkingRow }): JSX.Element {
   return (
     <div className="chat-thinking-row" aria-live="polite">
       <div className="chat-thinking-primary">
@@ -21,9 +21,9 @@ export function ChatThinkingRowItem({ row }: { row: ChatThinkingRow }): JSX.Elem
       {row.activity && <div className="chat-thinking-activity">{row.activity}</div>}
     </div>
   );
-}
+});
 
-export function StreamingMessageContent(props: {
+export const StreamingMessageContent = memo(function StreamingMessageContent(props: {
   content?: string;
   activity?: string;
   activityEvents?: ChatAgentActivityEvent[];
@@ -49,9 +49,9 @@ export function StreamingMessageContent(props: {
       {!hasContent && activity && !props.activityEvents?.length && <div className="streaming-message-activity">{activity}</div>}
     </div>
   );
-}
+});
 
-export function ChatInlineTranscript(props: {
+export const ChatInlineTranscript = memo(function ChatInlineTranscript(props: {
   content: string;
   activityEvents: ChatAgentActivityEvent[];
   segment?: ChatTranscriptSegment;
@@ -69,9 +69,9 @@ export function ChatInlineTranscript(props: {
       ))}
     </div>
   );
-}
+});
 
-export function ChatExpandedProcessingTranscript(props: {
+export const ChatExpandedProcessingTranscript = memo(function ChatExpandedProcessingTranscript(props: {
   view: ChatProcessingTranscriptView;
   activityEvents: ChatAgentActivityEvent[];
 }): JSX.Element {
@@ -98,7 +98,7 @@ export function ChatExpandedProcessingTranscript(props: {
       )}
     </>
   );
-}
+});
 
 function ChatInlineActivityEvent({ event }: { event: ChatAgentActivityEvent }): JSX.Element {
   const Icon = iconForActivityKind(event.kind);
@@ -110,7 +110,7 @@ function ChatInlineActivityEvent({ event }: { event: ChatAgentActivityEvent }): 
   );
 }
 
-function StreamingMarkdownText({ content, activityEvents }: { content: string; activityEvents: ChatAgentActivityEvent[] }): JSX.Element {
+const StreamingMarkdownText = memo(function StreamingMarkdownText({ content, activityEvents }: { content: string; activityEvents: ChatAgentActivityEvent[] }): JSX.Element {
   const { completed, tail, tailOffset } = useMemo(() => splitStreamingMarkdown(content), [content]);
   const completedSegment = useMemo<ChatTranscriptSegment>(() => ({
     key: "prefix",
@@ -133,9 +133,9 @@ function StreamingMarkdownText({ content, activityEvents }: { content: string; a
       {!tail && <span className="streaming-caret" aria-hidden="true" />}
     </div>
   );
-}
+});
 
-function StreamingTailTranscript(props: {
+const StreamingTailTranscript = memo(function StreamingTailTranscript(props: {
   content: string;
   activityEvents: ChatAgentActivityEvent[];
   segment: ChatTranscriptSegment;
@@ -155,7 +155,7 @@ function StreamingTailTranscript(props: {
       {lastPart?.kind === "activity" && <span className="streaming-caret" aria-hidden="true" />}
     </div>
   );
-}
+});
 
 function splitStreamingMarkdown(content: string): { completed: string; tail: string; tailOffset: number } {
   const normalized = content.replace(/\r\n/g, "\n");

@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type {
   AppBridge,
   AddChatParticipantRequest,
+  AgentDetectionRequest,
   ArtifactsUpdatedEvent,
   ChatBehaviorRuleConfigUpdate,
   CreateArtifactRequest,
@@ -74,6 +75,7 @@ import type {
 const bridge: AppBridge = {
   getAppVersion: () => ipcRenderer.invoke("app:get-version"),
   openExternal: (url: string) => ipcRenderer.invoke("app:open-external", url),
+  openTerminal: () => ipcRenderer.invoke("app:open-terminal"),
   inspectLocalFile: (request: InspectLocalFileRequest) => ipcRenderer.invoke("app:inspect-local-file", request),
   openLocalFile: (request: OpenLocalFileRequest) => ipcRenderer.invoke("app:open-local-file", request),
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => ipcRenderer.invoke("settings:set-repo-file-open-preference", action),
@@ -123,7 +125,7 @@ const bridge: AppBridge = {
   deleteChatParticipantConfig: (id: string) => ipcRenderer.invoke("settings:delete-chat-participant", id),
   updateLastRepoPath: (repoPath: string) => ipcRenderer.invoke("settings:update-last-repo-path", repoPath),
   listProviderModels: (kind) => ipcRenderer.invoke("settings:list-provider-models", kind),
-  detectAgents: () => ipcRenderer.invoke("agents:detect"),
+  detectAgents: (request?: AgentDetectionRequest) => ipcRenderer.invoke("agents:detect", request),
   selectRepoDirectory: () => ipcRenderer.invoke("dialog:select-repo"),
   inspectRepo: (repoPath: string) => ipcRenderer.invoke("git:inspect-repo", repoPath),
   getDiff: (request: GitDiffRequest) => ipcRenderer.invoke("git:get-diff", request),

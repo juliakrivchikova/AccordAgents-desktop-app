@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -109,6 +109,7 @@ test("aborted run settles even when a grandchild keeps the stdio pipes open", as
   await assert.rejects(
     runCommand("sh", ["-c", "sleep 15 & sleep 15"], {
       timeoutMs: 30_000,
+      killProcessGroup: true,
       primeLoginShellEnv: false,
       signal: controller.signal
     }),
@@ -123,6 +124,7 @@ test("timed-out run settles even when a grandchild keeps the stdio pipes open", 
   await assert.rejects(
     runCommand("sh", ["-c", "sleep 15 & sleep 15"], {
       timeoutMs: 300,
+      killProcessGroup: true,
       primeLoginShellEnv: false
     }),
     (error: unknown) => error instanceof CommandError && /timed out/.test((error as CommandError).message)
@@ -130,3 +132,116 @@ test("timed-out run settles even when a grandchild keeps the stdio pipes open", 
   const elapsedMs = Date.now() - startedAt;
   assert.ok(elapsedMs < 5_000, `expected prompt timeout, took ${elapsedMs}ms`);
 });
+
+test("timed-out process-group run leaves no helper process", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX process groups are not available on Windows");
+    return;
+  }
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-process-group-"));
+  const pidFile = path.join(root, "helper.pid");
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await assert.rejects(
+    runCommand("sh", ["-c", `sleep 15 & echo $! > ${JSON.stringify(pidFile)}; wait`], {
+      timeoutMs: 300,
+      killProcessGroup: true,
+      primeLoginShellEnv: false
+    }),
+    (error: unknown) => error instanceof CommandError && error.result.timedOut
+  );
+
+  const helperPid = Number.parseInt((await readFile(pidFile, "utf8")).trim(), 10);
+  for (let attempt = 0; attempt < 20 && processExists(helperPid); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(processExists(helperPid), false, `helper process ${helperPid} survived timeout`);
+});
+
+test("aborted process-group run leaves no helper process", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX process groups are not available on Windows");
+    return;
+  }
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-process-group-abort-"));
+  const pidFile = path.join(root, "helper.pid");
+  const controller = new AbortController();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  setTimeout(() => controller.abort(), 300);
+
+  await assert.rejects(
+    runCommand("sh", ["-c", `sleep 15 & echo $! > ${JSON.stringify(pidFile)}; wait`], {
+      timeoutMs: 30_000,
+      killProcessGroup: true,
+      primeLoginShellEnv: false,
+      signal: controller.signal
+    }),
+    (error: unknown) => error instanceof CommandError && /cancelled/.test(error.message)
+  );
+
+  await assertProcessStops(Number.parseInt((await readFile(pidFile, "utf8")).trim(), 10));
+});
+
+test("repeated bounded probes leave no helper processes", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX process groups are not available on Windows");
+    return;
+  }
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-process-group-repeat-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  for (let index = 0; index < 3; index += 1) {
+    const pidFile = path.join(root, `helper-${index}.pid`);
+    await assert.rejects(
+      runCommand("sh", ["-c", `sleep 15 & echo $! > ${JSON.stringify(pidFile)}; wait`], {
+        timeoutMs: 150,
+        killProcessGroup: true,
+        primeLoginShellEnv: false
+      }),
+      (error: unknown) => error instanceof CommandError && error.result.timedOut
+    );
+    await assertProcessStops(Number.parseInt((await readFile(pidFile, "utf8")).trim(), 10));
+  }
+});
+
+test("timed-out process-group run force-kills a helper that ignores SIGTERM", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX process groups are not available on Windows");
+    return;
+  }
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-process-group-stubborn-"));
+  const pidFile = path.join(root, "helper.pid");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const helper = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)";
+
+  await assert.rejects(
+    runCommand("sh", ["-c", `node -e ${JSON.stringify(helper)} & echo $! > ${JSON.stringify(pidFile)}; wait`], {
+      timeoutMs: 300,
+      killProcessGroup: true,
+      primeLoginShellEnv: false
+    }),
+    (error: unknown) => error instanceof CommandError && error.result.timedOut
+  );
+
+  const helperPid = Number.parseInt((await readFile(pidFile, "utf8")).trim(), 10);
+  for (let attempt = 0; attempt < 50 && processExists(helperPid); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(processExists(helperPid), false, `SIGTERM-resistant helper process ${helperPid} survived timeout`);
+});
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+async function assertProcessStops(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 30 && processExists(pid); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(processExists(pid), false, `helper process ${pid} survived`);
+}

@@ -23,9 +23,11 @@ test("chat:send routes exact @participant /compact to participant compaction", a
   try {
     const participant = chatParticipant();
     const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+    const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
     let compactCalls = 0;
     const { service, storage } = testService({
       conversation,
+      debugEvents,
       compactSession: async (runParticipant, _repoPath, _diffMode, kind, _signal, options) => {
         compactCalls += 1;
         assert.equal(runParticipant.id, participant.id);
@@ -59,6 +61,16 @@ test("chat:send routes exact @participant /compact to participant compaction", a
     assert.equal(storage.current.messages.some((message: any) => message.role === "user"), false);
     assert.equal(storage.current.messages.some((message: any) => message.role === "participant"), false);
     assert.equal(storage.current.messages.at(-1)?.content, "Compacted @admin context.");
+    assert.deepEqual(storage.current.messages.at(-1)?.metadata?.compaction, {
+      triggeredBy: "user",
+      participantId: participant.id,
+      outcome: "completed",
+      instructionsProvided: false
+    });
+    assert.deepEqual(debugEvents.map(({ event, payload }) => ({ event, triggeredBy: payload.triggeredBy, outcome: payload.outcome })), [
+      { event: "chat.compaction.requested", triggeredBy: "user", outcome: undefined },
+      { event: "chat.compaction.finished", triggeredBy: "user", outcome: "completed" }
+    ]);
     assert.equal(storage.current.metadata.agentContextUsageByParticipant?.[participant.id]?.usedTokens, 100);
     assert.equal(storage.current.metadata.running, false);
     assert.equal(storage.current.metadata.activeRunIds, undefined);
@@ -332,6 +344,7 @@ test("compactParticipant clears running state when compact fails", async () => {
   try {
     const participant = chatParticipant();
     const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+    const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
     conversation.metadata.agentContextUsageByParticipant = {
       [participant.id]: {
         usedTokens: 900,
@@ -343,6 +356,7 @@ test("compactParticipant clears running state when compact fails", async () => {
     };
     const { service, storage } = testService({
       conversation,
+      debugEvents,
       compactSession: async (runParticipant) => ({
         participant: runParticipant,
         ok: false,
@@ -369,6 +383,8 @@ test("compactParticipant clears running state when compact fails", async () => {
 
     assert.equal(result.warnings.length, 1);
     assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: codex app-server compact timed out after 300000ms.");
+    assert.equal(storage.current.messages.at(-1)?.metadata?.compaction?.outcome, "failed");
+    assert.equal(debugEvents.filter(({ event }) => event === "chat.compaction.finished").at(-1)?.payload.outcome, "failed");
     assert.equal(storage.current.metadata.running, false);
     assert.equal(storage.current.metadata.runId, undefined);
     assert.equal(storage.current.metadata.activeRunIds, undefined);
@@ -385,8 +401,10 @@ test("compactParticipant clears running and compaction state when compact throws
   try {
     const participant = chatParticipant();
     const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+    const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
     const { service, storage } = testService({
       conversation,
+      debugEvents,
       compactSession: async () => {
         throw new Error("compact transport failed");
       }
@@ -406,6 +424,7 @@ test("compactParticipant clears running and compaction state when compact throws
     assert.equal(storage.current.metadata.runId, undefined);
     assert.equal(storage.current.metadata.activeRunIds, undefined);
     assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
+    assert.equal(debugEvents.filter(({ event }) => event === "chat.compaction.finished").at(-1)?.payload.outcome, "failed");
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -458,9 +477,11 @@ test("compactParticipant does not overwrite newer context usage after compact fa
 test("compactParticipant records a clear note when the participant has no active session", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant], []);
+  const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
   let compactCalls = 0;
   const { service, storage } = testService({
     conversation,
+    debugEvents,
     compactSession: async (runParticipant) => {
       compactCalls += 1;
       return { participant: runParticipant, ok: true };
@@ -476,6 +497,8 @@ test("compactParticipant records a clear note when the participant has no active
   assert.equal(compactCalls, 0);
   assert.equal(result.warnings.length, 0);
   assert.equal(storage.current.messages.at(-1)?.content, "@admin does not have an active session to compact yet.");
+  assert.equal(storage.current.messages.at(-1)?.metadata?.compaction?.outcome, "no-active-session");
+  assert.equal(debugEvents.filter(({ event }) => event === "chat.compaction.finished").at(-1)?.payload.outcome, "no-active-session");
   assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
 });
 
@@ -510,9 +533,11 @@ test("requestSelfCompactionFromTool queues behind the current participant turn a
       permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "allow" })
     });
     const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+    const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
     let compactCalls = 0;
     const { service, storage } = testService({
       conversation,
+      debugEvents,
       compactSession: async (runParticipant, _repoPath, _diffMode, _kind, _signal, options) => {
         compactCalls += 1;
         assert.equal(options.sessionId, "session-1");
@@ -535,6 +560,16 @@ test("requestSelfCompactionFromTool queues behind the current participant turn a
     activeTurn.release();
     await waitFor(() => compactCalls === 1);
     await waitFor(() => storage.current.messages.at(-1)?.content === "Compacted @admin context with focus instructions.");
+    assert.deepEqual(storage.current.messages.at(-1)?.metadata?.compaction, {
+      triggeredBy: "agent",
+      participantId: participant.id,
+      outcome: "completed",
+      instructionsProvided: true
+    });
+    assert.deepEqual(debugEvents.map(({ event, payload }) => ({ event, triggeredBy: payload.triggeredBy, outcome: payload.outcome })), [
+      { event: "chat.compaction.requested", triggeredBy: "agent", outcome: undefined },
+      { event: "chat.compaction.finished", triggeredBy: "agent", outcome: "completed" }
+    ]);
     assert.equal((storage.current.metadata.participantSelfCompactionRequestedAtByParticipantId as Record<string, string>)[participant.id] !== undefined, true);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
@@ -548,9 +583,11 @@ test("queued self-compaction can be cancelled through the chat run controller", 
       permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "allow" })
     });
     const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+    const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
     let compactSignal: AbortSignal | undefined;
     const { service, storage } = testService({
       conversation,
+      debugEvents,
       compactSession: async (runParticipant, _repoPath, _diffMode, _kind, signal) => {
         compactSignal = signal;
         await new Promise<void>((_resolve, reject) => {
@@ -576,6 +613,7 @@ test("queued self-compaction can be cancelled through the chat run controller", 
     await waitFor(() => compactSignal?.aborted === true);
     await waitFor(() => storage.current.metadata.running === false);
     assert.equal(storage.current.messages.some((message: any) => message.content.startsWith("Could not compact @admin context:")), false);
+    assert.equal(debugEvents.filter(({ event }) => event === "chat.compaction.finished").at(-1)?.payload.outcome, "cancelled");
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -677,6 +715,7 @@ function testService(options: {
   conversation: Conversation;
   compactSession: (participant: ParticipantConfig, repoPath: string | undefined, diffMode: undefined, kind: "chat", signal: AbortSignal | undefined, options: Record<string, unknown>) => Promise<Record<string, unknown>>;
   contextUsageForSession?: (participant: ParticipantConfig, sessionId: string | undefined) => Promise<Record<string, unknown> | undefined>;
+  debugEvents?: Array<{ event: string; payload: Record<string, unknown> }>;
 }): { service: ChatService; storage: any } {
   const storage = {
     current: clone(options.conversation),
@@ -701,8 +740,8 @@ function testService(options: {
     }
   };
   const debugLogs = {
-    async write(): Promise<void> {
-      return undefined;
+    async write(event: string, payload: Record<string, unknown>): Promise<void> {
+      options.debugEvents?.push({ event, payload });
     }
   };
   return {

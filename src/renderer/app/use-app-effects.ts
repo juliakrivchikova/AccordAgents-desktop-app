@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import type { Conversation } from "../../shared/types";
+import type { AgentDetectionRequest, Conversation } from "../../shared/types";
 import {
   buildChatActivityItemsForConversationUpdate,
   mergeChatActivityItems,
@@ -27,6 +27,7 @@ import {
 export function useAppEffects(
   state: AppState,
   refreshAll: () => Promise<void>,
+  refreshAgents: (request?: AgentDetectionRequest) => Promise<unknown>,
   refreshActivity: () => Promise<void>,
   markConversationViewed: (conversation: Conversation) => void
 ): void {
@@ -47,14 +48,73 @@ export function useAppEffects(
   }, [state.sidebarCollapsed]);
 
   useEffect(() => {
-    return window.consensus.onReviewProgress((progress) => {
-      state.setProgressLog((current) => {
-        const appended = [...current, progress];
-        const next = appended.length > 500 ? appended.slice(appended.length - 500) : appended;
-        state.progressLogRef.current = next;
-        return next;
-      });
+    let frameId: number | undefined;
+    let timeoutId: number | undefined;
+    let queued = false;
+
+    const clearScheduledCommit = (): void => {
+      if (frameId != null) {
+        window.cancelAnimationFrame(frameId);
+        frameId = undefined;
+      }
+      if (timeoutId != null) {
+        window.clearTimeout(timeoutId);
+        timeoutId = undefined;
+      }
+    };
+
+    const commitProgressLog = (): void => {
+      clearScheduledCommit();
+      queued = false;
+      state.setProgressLog([...state.progressLogRef.current]);
+    };
+
+    const scheduleProgressCommit = (): void => {
+      if (queued) {
+        return;
+      }
+      queued = true;
+      if (document.visibilityState === "visible") {
+        frameId = window.requestAnimationFrame(commitProgressLog);
+        return;
+      }
+      timeoutId = window.setTimeout(commitProgressLog, 16);
+    };
+
+    const unsubscribe = window.consensus.onReviewProgress((progress) => {
+      state.progressLogRef.current.push(progress);
+      if (state.progressLogRef.current.length > 500) {
+        state.progressLogRef.current.splice(0, state.progressLogRef.current.length - 500);
+      }
+      scheduleProgressCommit();
     });
+    return () => {
+      unsubscribe();
+      clearScheduledCommit();
+    };
+  }, []);
+
+  useEffect(() => {
+    const updateInactiveState = (): void => {
+      const inactive = document.visibilityState !== "visible" || !document.hasFocus();
+      document.documentElement.classList.toggle("app-inactive", inactive);
+    };
+    const refreshReadinessOnFocus = (): void => {
+      updateInactiveState();
+      if (document.visibilityState === "visible" && document.hasFocus()) {
+        void refreshAgents({ force: true, trigger: "focus" });
+      }
+    };
+    updateInactiveState();
+    document.addEventListener("visibilitychange", refreshReadinessOnFocus);
+    window.addEventListener("blur", updateInactiveState);
+    window.addEventListener("focus", refreshReadinessOnFocus);
+    return () => {
+      document.removeEventListener("visibilitychange", refreshReadinessOnFocus);
+      window.removeEventListener("blur", updateInactiveState);
+      window.removeEventListener("focus", refreshReadinessOnFocus);
+      document.documentElement.classList.remove("app-inactive");
+    };
   }, []);
 
   useEffect(() => {

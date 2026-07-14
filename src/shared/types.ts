@@ -334,6 +334,7 @@ export interface AppSettings {
   chatSavedPrompts: ChatSavedPromptConfig[];
   chatParticipantConfigs: ChatParticipantConfig[];
   chatParticipantSeedState?: ChatParticipantSeedState;
+  lastSuccessfulChatProviderKind?: ChatProviderKind;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
 }
@@ -437,6 +438,7 @@ export interface UserSkillSearchRequest {
   conversationId?: string;
   repoPath?: string;
   participants?: ChatParticipantInput[];
+  assistantProviderKind?: ChatProviderKind;
   query: string;
   content?: string;
   limit?: number;
@@ -562,6 +564,7 @@ export interface PluginListRequest {
   conversationId?: string;
   repoPath?: string;
   participants?: ChatParticipantInput[];
+  assistantProviderKind?: ChatProviderKind;
   query?: string;
   content?: string;
   limit?: number;
@@ -939,7 +942,8 @@ export interface ChatRosterAvailableProvider {
   modelCatalog?: ProviderModelCatalog;
   reasoningEfforts?: ProviderReasoningEffortOption[];
   version?: string;
-  error?: string;
+  readiness: AgentReadinessState;
+  diagnosticCode?: AgentReadinessDiagnosticCode;
 }
 
 export interface ChatRosterCurrentParticipant {
@@ -1086,6 +1090,12 @@ export interface ChatMessageMetadata {
   approvedContinuation?: boolean;
   syncedThroughMessageId?: string;
   runId?: string;
+  compaction?: {
+    triggeredBy: "user" | "agent";
+    participantId: string;
+    outcome: "completed" | "failed" | "no-active-session";
+    instructionsProvided: boolean;
+  };
   workedMs?: number;
   queuedBehind?: { handle: string };
   appMessageSource?: string;
@@ -1261,6 +1271,7 @@ export interface CreateChatConversationRequest {
   title?: string;
   repoPath?: string;
   skipDefaultParticipants?: boolean;
+  assistantProviderKind?: ChatProviderKind;
   participants: ChatParticipantInput[];
 }
 
@@ -1291,6 +1302,7 @@ export interface CompactChatParticipantRequest {
   participantId?: string;
   handle?: string;
   instructions?: string;
+  triggeredBy?: "user" | "agent";
   runId?: string;
   threadId?: string;
   parentMessageId?: string;
@@ -1472,10 +1484,41 @@ export interface AgentHealth {
   kind: Extract<ProviderKind, "codex-cli" | "claude-code" | "gemini-cli">;
   label: string;
   installed: boolean;
-  path?: string;
   version?: string;
-  error?: string;
+  detection?: AgentDetectionState;
+  runnable?: AgentRunnableState;
+  authentication?: AgentAuthenticationState;
+  diagnosticCode?: AgentReadinessDiagnosticCode;
+  checking?: boolean;
+  lastCheckedAt?: string;
+  generation?: number;
+  platform?: AgentPlatform;
   appSkillSync?: AppSkillSyncHealth;
+}
+
+export type AgentDetectionState = "detected" | "not-detected" | "unknown";
+export type AgentPlatform = "darwin" | "linux" | "win32" | "other";
+export type AgentRunnableState = "ready" | "failed" | "unknown";
+export type AgentAuthenticationState = "ready" | "required" | "unknown";
+export type AgentReadinessState =
+  | "not-detected"
+  | "failed-to-run"
+  | "sign-in-required"
+  | "could-not-verify"
+  | "ready"
+  | "disabled"
+  | "checking";
+export type AgentReadinessDiagnosticCode =
+  | "environment-check-failed"
+  | "not-detected"
+  | "failed-to-run"
+  | "auth-required"
+  | "auth-check-failed"
+  | "probe-timeout";
+
+export interface AgentDetectionRequest {
+  force?: boolean;
+  trigger?: "initial" | "focus" | "manual" | "submit" | "provider-enabled" | "service";
 }
 
 export interface GitRepoInfo {
@@ -1734,6 +1777,7 @@ export interface ChatParticipantWatcherState {
 }
 
 export type ConversationMetadata = Record<string, unknown> & {
+  activationProviderKind?: ChatProviderKind;
   activeRunParticipantIdsByRunId?: Record<string, string>;
   lastMessageByParticipant?: ChatLastMessageByParticipant;
   participantCompactionsByParticipantId?: Record<string, ChatParticipantCompactionState>;
@@ -2198,7 +2242,8 @@ export interface AppBridge {
   deleteChatParticipantConfig(id: string): Promise<AppSettings>;
   updateLastRepoPath(repoPath: string): Promise<AppSettings>;
   listProviderModels(kind: ProviderKind): Promise<ProviderModelCatalog>;
-  detectAgents(): Promise<AgentHealth[]>;
+  detectAgents(request?: AgentDetectionRequest): Promise<AgentHealth[]>;
+  openTerminal(): Promise<void>;
   selectRepoDirectory(): Promise<string | undefined>;
   inspectRepo(repoPath: string): Promise<GitRepoInfo>;
   getDiff(request: GitDiffRequest): Promise<GitDiffResult>;

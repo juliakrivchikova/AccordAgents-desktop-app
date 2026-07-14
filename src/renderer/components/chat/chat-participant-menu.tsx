@@ -63,7 +63,7 @@ export function ChatParticipantMenu(props: {
     activeChatRoleConfigs(props.settings),
     existingHandles,
     props.settings.chatBehaviorRules
-  ) ?? validateChatCliAgents(addDraft, props.agents);
+  ) ?? validateChatCliAgents(addDraft, props.agents, props.settings.providers);
   const savedParticipants = addableSavedParticipantConfigs(props.settings, props.agents, existingHandles);
   const activeWatcher = props.participants.find((participant) => participant.autoWatch === true);
   const autoWatchConflictReason = activeWatcher

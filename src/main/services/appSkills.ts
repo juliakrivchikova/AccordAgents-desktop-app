@@ -151,6 +151,17 @@ export class AppSkillsService {
     return this.lastStatuses.get(provider);
   }
 
+  statusForAgent(agent: Pick<AgentHealth, "kind" | "installed">): AppSkillSyncHealth | undefined {
+    const status = this.statusFor(agent.kind);
+    if (!status) {
+      return undefined;
+    }
+    const matchesInstalledState = agent.installed
+      ? status.status !== "not-installed"
+      : status.status === "not-installed";
+    return matchesInstalledState ? status : undefined;
+  }
+
   private async reconcileNow(agents: AgentHealth[]): Promise<Map<AppSkillProvider, AppSkillSyncHealth>> {
     const statuses = new Map<AppSkillProvider, AppSkillSyncHealth>();
     const skills = await this.loadCanonicalSkills().catch((error) => {

@@ -28,6 +28,11 @@ import {
 import { normalizeChatReasoningEffort } from "../../../shared/reasoningEffort";
 import { chatProviderKind, preferredChatProviderSetting } from "../../../shared/chatProviders";
 import {
+  readyProviderKinds
+} from "../../../shared/cliReadiness";
+import { validateChatCliAgents } from "./chat-cli-readiness";
+export { validateChatCliAgents } from "./chat-cli-readiness";
+import {
   defaultChatAvatarId,
   isChatAvatarIdForKind,
   normalizedChatAvatarId
@@ -82,7 +87,7 @@ export function chatCliProviderLabel(kind: ChatProviderKind | undefined): string
     return "Codex CLI";
   }
   if (kind === "gemini-cli") {
-    return "Gemini CLI";
+    return "Antigravity";
   }
   return "CLI";
 }
@@ -212,7 +217,7 @@ export function addableSavedParticipantConfigs(
       const draft = chatParticipantConfigToDraft(config);
       return {
         config,
-        invalidReason: validateChatParticipantDrafts([draft], settings.chatRoleConfigs, new Set(), settings.chatBehaviorRules) ?? validateChatCliAgents([draft], agents)
+        invalidReason: validateChatParticipantDrafts([draft], settings.chatRoleConfigs, new Set(), settings.chatBehaviorRules) ?? validateChatCliAgents([draft], agents, settings.providers)
       };
     });
 }
@@ -470,28 +475,19 @@ export function validateChatStartupDrafts(
   drafts: ChatParticipantDraft[],
   roles: ChatRoleConfig[],
   agents: AgentHealth[],
-  behaviorRules: ChatBehaviorRuleConfig[] = []
+  behaviorRules: ChatBehaviorRuleConfig[] = [],
+  providers: Array<Pick<ProviderSettings, "kind" | "enabled">> = []
 ): string | undefined {
   if (drafts.length === 0) {
     if (!roles.some((role) => role.id === "administrator")) {
       return "Chat Assistant role is required to start an empty chat.";
     }
-    if (!agents.some((agent) => agent.installed)) {
-      return "Codex CLI, Claude Code, or Gemini CLI is required to start a chat.";
+    if (readyProviderKinds(agents, providers).length === 0) {
+      return "Set up and sign in to at least one CLI provider to start a chat.";
     }
     return undefined;
   }
-  return validateChatParticipantDrafts(drafts, roles, new Set(), behaviorRules) ?? validateChatCliAgents(drafts, agents);
-}
-
-export function validateChatCliAgents(drafts: ChatParticipantDraft[], agents: AgentHealth[]): string | undefined {
-  for (const draft of drafts) {
-    const health = agents.find((agent) => agent.kind === draft.kind);
-    if (!health?.installed) {
-      return `${chatCliProviderLabel(draft.kind)} is not installed.`;
-    }
-  }
-  return undefined;
+  return validateChatParticipantDrafts(drafts, roles, new Set(), behaviorRules) ?? validateChatCliAgents(drafts, agents, providers);
 }
 
 function normalizeBehaviorRuleIds(value: unknown): string[] {

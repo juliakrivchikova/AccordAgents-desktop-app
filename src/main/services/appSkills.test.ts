@@ -12,15 +12,13 @@ const FIXED_NOW = new Date("2026-05-17T12:00:00.000Z");
 const CODEX_AGENT: AgentHealth = {
   kind: "codex-cli",
   label: "Codex CLI",
-  installed: true,
-  path: "/usr/local/bin/codex"
+  installed: true
 };
 
 const CLAUDE_AGENT: AgentHealth = {
   kind: "claude-code",
   label: "Claude Code",
-  installed: true,
-  path: "/usr/local/bin/claude"
+  installed: true
 };
 
 const MISSING_CLAUDE_AGENT: AgentHealth = {
@@ -69,6 +67,21 @@ test("renders only installed providers and later adds newly detected providers",
     const both = await service.reconcileAgents([CODEX_AGENT, CLAUDE_AGENT]);
     assert.equal(both.find((agent) => agent.kind === "claude-code")?.appSkillSync?.status, "synced");
     assert.equal(await exists(path.join(homeDir, ".claude/skills/accordagents-app-chat-reply/SKILL.md")), true);
+  });
+});
+
+test("cached app-skill status is reusable only while CLI installation state matches", async () => {
+  await withTempWorkspace(async ({ homeDir, sourceRoot }) => {
+    await writeSkill(sourceRoot, "app-chat-reply", skillText("body"));
+    const service = serviceFor(sourceRoot, homeDir);
+
+    await service.reconcileAgents([MISSING_CLAUDE_AGENT]);
+    assert.equal(service.statusForAgent(MISSING_CLAUDE_AGENT)?.status, "not-installed");
+    assert.equal(service.statusForAgent(CLAUDE_AGENT), undefined);
+
+    await service.reconcileAgents([CLAUDE_AGENT]);
+    assert.notEqual(service.statusForAgent(CLAUDE_AGENT)?.status, "not-installed");
+    assert.equal(service.statusForAgent(MISSING_CLAUDE_AGENT), undefined);
   });
 });
 

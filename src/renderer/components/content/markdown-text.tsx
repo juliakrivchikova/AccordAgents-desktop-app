@@ -1,4 +1,4 @@
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, memo, useContext, useMemo, type ReactNode } from "react";
 import { FileBox } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
@@ -173,13 +173,16 @@ function ExternalLink({ url, label }: { url: string; label: string }): JSX.Eleme
   );
 }
 
-export function MarkdownText({ content }: { content: string }): JSX.Element {
-  const blocks = markdownBlocks(content);
+function MarkdownTextView({ content }: { content: string }): JSX.Element {
+  const blocks = useMemo(() => markdownBlocks(content), [content]);
   if (blocks.length === 0) {
     return <div className="markdown-text" />;
   }
   return <div className="markdown-text">{blocks.map((block, index) => renderMarkdownBlock(block, index))}</div>;
 }
+
+export const MarkdownText = memo(MarkdownTextView);
+MarkdownText.displayName = "MarkdownText";
 
 function renderMarkdownBlock(block: MarkdownBlock, index: number): ReactNode {
   if (block.type === "heading") {

@@ -52,7 +52,13 @@ function App(): JSX.Element {
   const reviewDecisionActions = useReviewDecisionActions(state, conversationActions);
   const reviewPlanActions = useReviewPlanActions(state, conversationActions);
   const settingsActions = useSettingsActions(state);
-  useAppEffects(state, conversationActions.refreshAll, conversationActions.refreshActivity, conversationActions.markConversationViewed);
+  useAppEffects(
+    state,
+    conversationActions.refreshAll,
+    conversationActions.refreshAgents,
+    conversationActions.refreshActivity,
+    conversationActions.markConversationViewed
+  );
   const view = useAppViewModel(state);
   const artifacts = useArtifacts(state.conversation?.id);
   const activityUnreadCount = state.activityItems.reduce(
@@ -86,10 +92,13 @@ function App(): JSX.Element {
     }
     void conversationActions.newChatSession().then(() => {
       state.setQuestion(draft);
+      const mentions = pluginNewChatMentions(plugin, draft);
+      state.setNewChatPluginMentions(mentions.pluginMentions);
+      state.setNewChatSkillMentions(mentions.skillMentions);
       setNewChatPrefill({
         key: Date.now(),
         prompt: draft,
-        ...pluginNewChatMentions(plugin, draft)
+        ...mentions
       });
       state.setRailView("chats");
       state.setSidebarCollapsed(false);
@@ -421,6 +430,10 @@ function App(): JSX.Element {
             <section className="composer new-chat-composer">
               <NewChatScreen
                 prompt={state.question}
+                pendingImages={state.newChatPendingImages}
+                selectedFileMentions={state.newChatRepoFileMentions}
+                selectedPluginMentions={state.newChatPluginMentions}
+                selectedSkillMentions={state.newChatSkillMentions}
                 repoPath={state.repoPath}
                 repoInfo={state.repoInfo}
                 selectedParticipantIds={state.selectedChatParticipantConfigIds}
@@ -428,6 +441,7 @@ function App(): JSX.Element {
                 settings={state.settings}
                 summaries={state.summaries}
                 agents={state.agents}
+                selectedAssistantProviderKind={state.selectedAssistantProviderKind}
                 initialPluginMentions={newChatPrefill?.pluginMentions}
                 initialSkillMentions={newChatPrefill?.skillMentions}
                 prefillPrompt={newChatPrefill?.prompt}
@@ -436,6 +450,10 @@ function App(): JSX.Element {
                 renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}
                 participantRoleLabel={(participant) => chatRoleLabel(state.settings.chatRoleConfigs, participant)}
                 onPromptChange={state.setQuestion}
+                onPendingImagesChange={state.setNewChatPendingImages}
+                onSelectedFileMentionsChange={state.setNewChatRepoFileMentions}
+                onSelectedPluginMentionsChange={state.setNewChatPluginMentions}
+                onSelectedSkillMentionsChange={state.setNewChatSkillMentions}
                 onRepoPathChange={(value) => {
                   state.setRepoPath(value);
                   state.setRepoInfo(undefined);
@@ -445,6 +463,10 @@ function App(): JSX.Element {
                 onSelectedParticipantIdsChange={conversationActions.updateSelectedChatParticipantConfigIds}
                 onSelectedParticipantRunLocationsChange={state.setSelectedChatParticipantRunLocations}
                 onOpenParticipantsSettings={() => openSettingsSection("participants")}
+                onOpenProviderSettings={() => openSettingsSection("general")}
+                onSelectedAssistantProviderKindChange={state.setSelectedAssistantProviderKind}
+                onSetupCompletedProviderKindChange={state.setSetupCompletedProviderKind}
+                onRefreshAgents={() => conversationActions.refreshAgents({ force: true, trigger: "manual" })}
                 onStart={(repoFileMentions, imageAttachments, skillMentions) => chatActions.startChat({ repoFileMentions, imageAttachments, skillMentions })}
               />
             </section>

@@ -39,6 +39,20 @@ export interface SettingsActions {
 export function useSettingsActions(state: AppState): SettingsActions {
   async function updateProvider(provider: ProviderSettings, patch: { enabled?: boolean; model?: string }): Promise<void> {
     await updateSettings(() => window.consensus.updateProviderSettings({ kind: provider.kind, ...patch }));
+    if (typeof patch.enabled === "boolean") {
+      if (patch.enabled) {
+        state.setAgents((current) => current.map((agent) => ({ ...agent, checking: true })));
+      }
+      try {
+        state.setAgents(await window.consensus.detectAgents({
+          force: patch.enabled,
+          trigger: patch.enabled ? "provider-enabled" : "service"
+        }));
+      } catch (caught) {
+        state.setAgents((current) => current.map((agent) => ({ ...agent, checking: false })));
+        state.setError(errorText(caught));
+      }
+    }
   }
 
   async function setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<void> {
@@ -74,11 +88,25 @@ export function useSettingsActions(state: AppState): SettingsActions {
   }
 
   async function saveAgentEnvironmentVariable(request: SaveAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot> {
-    return loadSettingResult(() => window.consensus.saveAgentEnvironmentVariable(request));
+    const snapshot = await loadSettingResult(() => window.consensus.saveAgentEnvironmentVariable(request));
+    await refreshAgentsAfterEnvironmentMutation();
+    return snapshot;
   }
 
   async function deleteAgentEnvironmentVariable(request: DeleteAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot> {
-    return loadSettingResult(() => window.consensus.deleteAgentEnvironmentVariable(request));
+    const snapshot = await loadSettingResult(() => window.consensus.deleteAgentEnvironmentVariable(request));
+    await refreshAgentsAfterEnvironmentMutation();
+    return snapshot;
+  }
+
+  async function refreshAgentsAfterEnvironmentMutation(): Promise<void> {
+    state.setAgents((current) => current.map((agent) => ({ ...agent, checking: true })));
+    try {
+      state.setAgents(await window.consensus.detectAgents({ force: true, trigger: "manual" }));
+    } catch (caught) {
+      state.setAgents((current) => current.map((agent) => ({ ...agent, checking: false })));
+      state.setError(errorText(caught));
+    }
   }
 
   async function saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<void> {
