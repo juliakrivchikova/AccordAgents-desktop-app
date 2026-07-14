@@ -1,6 +1,6 @@
 ---
 name: implementation-workflow
-description: Coordinate a reusable multi-agent implementation workflow for feature or bug delivery. Use when the user wants a manager participant to understand a requirement, confirm scope, ask Drew and Taylor for independent implementation plans, drive accord, delegate implementation in a separate worktree, require Electron desktop QA when relevant, collect reviews, coordinate fixes, optionally open a user-check instance, and prepare delivery to main.
+description: Coordinate a reusable multi-agent implementation workflow for feature or bug delivery. Use when the user wants a manager participant to understand a requirement, confirm scope, run a blind-draft accord for the implementation plan, delegate implementation in a separate worktree, require Electron desktop QA when relevant, run a blind-draft accord for required fixes from independent review, coordinate fixes, optionally open a user-check instance, and prepare delivery to main.
 ---
 
 # Implementation Workflow
@@ -158,34 +158,31 @@ The final-step choice must be visible on the main timeline. Before pausing for t
 Idle Status and Main-Timeline User Choices rules so the main timeline says progress is waiting on User's final-step
 decision. Continue only after the user chooses one final step.
 
-### 3. Ask Both Drew And Taylor To Prepare Implementation Plan
+### 3. Post The Plan Assignment For Drew And Taylor To Get Familiar
 
-To ask both Drew and Taylor to prepare implementation plans, respond as follows:
+Post the assignment for everyone to get familiar. Mention both drafters and quote the requirement and the User-locked
+acceptance criteria exactly as the User gave them:
 
 ```text
-@drew-codex-engineer @taylor-claude-engineer we need to [implement new feature/fix bug]:
+@drew-codex-engineer @taylor-claude-engineer This is the assignment you will resolve via an accord with Drew as facilitator:
 
 [user's stated feature/bug description and explicit references, without manager-added scope]
 
 Confirmed acceptance criteria (User-locked), including affected existing-workflow regressions:
 [the confirmed acceptance-criteria list]
 
-prepare exact implementation plan independently, plan how each acceptance criterion is verified live, add QA verification steps and full test coverage
+Just get familiar — everything else is part of the accord flow.
 ```
 
-Stop after assigning. Resume when both plans are done and continue with the next step.
+Stop after posting. The accord runs in the next step.
 
-Before continuing, inspect both replies. Continue only if each reply is an implementation plan with concrete approach,
-code/file changes, QA verification, and test coverage. If either reply says the work is already implemented instead of
-providing a plan, or otherwise answers the wrong stage, report that to the user and ask how to proceed. Do not start
-accord or implementation from incomplete or wrong-stage plan replies.
+### 4. Ask Drew To Run The Plan Accord With Taylor
 
-### 4. Ask Drew To Come To Accord With Taylor
-
-To ask Drew to come to accord with Taylor, respond as follows:
+Tell Drew to run the accord on the assignment above. Reference the get-familiar message so the accord's question stays
+verbatim:
 
 ```text
-@drew-codex-engineer have an /accord on exact implementation plan with Taylor
+@drew-codex-engineer run an /accord with Taylor to resolve the assignment above [#msg:<id of the get-familiar message>]. Use it verbatim as the question — do not rephrase, summarize, or add scope.
 ```
 
 The accord must produce one **plan resolution** — captured as a signable artifact — carrying the confirmed
@@ -222,22 +219,26 @@ workflows and integrations, and contain only PASS results. If evidence is missin
 simulated outside the explicitly documented unforceable-failure exception, do not start review; send the work back to
 Drew to complete the real acceptance QA and fix loop.
 
-### 6. Ask Both To Review
+### 6. Post The Review Assignment For Drew And Taylor To Get Familiar
 
-To ask for review, respond as follows:
+Post the review assignment for everyone to get familiar:
 
 ```text
-@drew-codex-engineer, @taylor-claude-engineer review the whole implementation [worktree path] independently against the locked acceptance criteria and the approved plan resolution (its `#artifact:` link), run focused subagents if needed to find bugs and regressions
+@drew-codex-engineer @taylor-claude-engineer This is the assignment you will resolve via an accord with Drew as facilitator:
+
+Review the whole implementation at [worktree path] against the locked acceptance criteria and the approved plan resolution [#artifact:…] and other decision locked by user that you are aware of; find bugs and regressions and agree the complete list of required corrections before merge.
+
+Just get familiar — everything else is part of the accord flow.
 ```
 
-Stop after assigning. Resume when both reviews are in.
+Stop after posting. Resume when both reviews are in.
 
-### 7. Ask Drew To Come To Accord With Taylor On Full List For Required Fixes Before Merge
+### 7. Ask Drew To Run The Required-Fix Accord With Taylor
 
-To ask Drew to come to accord with Taylor on required fixes, respond as follows:
+Tell Drew to run the accord on the assignment above:
 
 ```text
-@drew-codex-engineer Based on what was locked during planning part, by user explicitly and review findings, have an /accord with Taylor regarding the complete list of required corrections before merge
+@drew-codex-engineer run the accord with Taylor to resolve the assignment above [#msg:<id of the get-familiar message>]. Use it verbatim as the question — do not rephrase, summarize, or add scope.
 ```
 
 Do not proceed to next step until the required-fix resolution shows approved (its `#artifact:` link from the facilitator's closeout). If Drew reports that accord is still in progress, wait.
@@ -316,7 +317,7 @@ Keep this closeout concise. Do not bury it only in the final workflow thread.
 ## Failure Handling
 
 - If a participant request is pending approval or running, stop and wait for app resume.
-- If one participant fails during independent plan/review, tell the user on the main timeline and ask whether to retry or
-  continue with one answer.
+- If one participant fails during their assigned task, tell the user on the main timeline and ask
+  whether to retry or what to do next.
 - If the user sends new requirements mid-run, update the state and choose the right restart point: scope confirmation,
   plan accord, or fix-list accord.
