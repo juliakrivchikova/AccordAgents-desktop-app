@@ -640,6 +640,7 @@ export class ChatService {
   private remoteRuns?: RemoteRunStarter;
   private remoteRunCoordinator?: RemoteRunCoordinatorControl;
   private cloudRunAws?: CloudRunAwsResolver;
+  private artifactCleanup?: (conversationId: string) => Promise<void>;
 
   constructor(
     private readonly storage: StorageService,
@@ -670,6 +671,10 @@ export class ChatService {
 
   setCloudRunAwsService(service: CloudRunAwsResolver): void {
     this.cloudRunAws = service;
+  }
+
+  setArtifactCleanup(handler: (conversationId: string) => Promise<void>): void {
+    this.artifactCleanup = handler;
   }
 
   onAppToolApprovalDecision(listener: (event: ChatAppToolApprovalDecisionEvent) => Promise<void> | void): () => void {
@@ -1094,6 +1099,7 @@ export class ChatService {
   private async cleanupDeletedConversationArtifacts(conversation: Conversation): Promise<void> {
     const runIds = Object.keys(this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles));
     await Promise.all([
+      this.artifactCleanup?.(conversation.id) ?? Promise.resolve(),
       rm(path.join(this.chatUserDataPath(), "chats", conversation.id), {
         recursive: true,
         force: true
@@ -1140,6 +1146,7 @@ export class ChatService {
           ? record.runIds.filter((value): value is string => typeof value === "string")
           : [];
         await Promise.all([
+          this.artifactCleanup?.(record.conversationId) ?? Promise.resolve(),
           rm(path.join(this.chatUserDataPath(), "chats", record.conversationId), { recursive: true, force: true }),
           ...runIds.map((runId) => rm(path.join(this.chatUserDataPath(), "remote-runs", `${runId}.jsonl`), { force: true }))
         ]);
@@ -4050,21 +4057,38 @@ export class ChatService {
   // the chat timeline. Notes are system messages flagged with
   // ARTIFACT_NOTE_MESSAGE_SOURCE so the timeline keeps them visible; they carry
   // a link token, never artifact bodies.
-  async postArtifactChatNote(conversationId: string, content: string): Promise<void> {
+  async postArtifactChatNote(conversationId: string, eventId: string, content: string): Promise<void> {
     const conversation = await this.requireChat(conversationId);
     await this.withChatMutation(conversation, async () => {
-      conversation.messages.push({
+      if (conversation.messages.some((message) => message.metadata?.artifactEventId === eventId)) {
+        return;
+      }
+      const note = {
         id: randomUUID(),
         role: "system",
         content,
         createdAt: new Date().toISOString(),
         status: "done",
         metadata: {
-          appMessageSource: ARTIFACT_NOTE_MESSAGE_SOURCE
+          appMessageSource: ARTIFACT_NOTE_MESSAGE_SOURCE,
+          artifactEventId: eventId
         }
-      });
+      } satisfies ChatMessage;
+      const previousUpdatedAt = conversation.updatedAt;
+      conversation.messages.push(note);
       conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
+      try {
+        // The artifact outbox is acknowledged only after this promise resolves,
+        // so the note must be durable rather than merely queued in memory.
+        await this.saveConversation(conversation);
+      } catch (error) {
+        const index = conversation.messages.findIndex((message) => message.id === note.id);
+        if (index >= 0) {
+          conversation.messages.splice(index, 1);
+        }
+        conversation.updatedAt = previousUpdatedAt;
+        throw error;
+      }
     });
   }
 

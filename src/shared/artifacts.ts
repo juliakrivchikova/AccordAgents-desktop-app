@@ -1,5 +1,5 @@
 import { ARTIFACT_USER_MEMBER } from "./types";
-import type { ArtifactApproval, ArtifactSignature, ChatParticipant, Conversation } from "./types";
+import type { ArtifactApproval, ArtifactSignature, ArtifactSummary, ChatParticipant, Conversation } from "./types";
 
 // metadata.appMessageSource marker for the brief system notes artifacts post
 // into the chat timeline. These notes stay visible (system messages are
@@ -13,7 +13,7 @@ export const ARTIFACT_LABEL_MAX_LENGTH = 40;
 export const ARTIFACT_MAX_LABELS = 12;
 
 // Member identity inside the artifact system: "user" for the human chat owner,
-// or a chat participant's normalized handle (lowercase, no leading @).
+// or a chat member's normalized handle (lowercase, no leading @).
 export function normalizeArtifactMember(raw: unknown): string {
   if (typeof raw !== "string") {
     return "";
@@ -34,7 +34,7 @@ export function artifactMemberLabel(member: string): string {
 }
 
 // Current member set of a chat conversation: the human user plus every
-// participant handle. Artifact ACLs are validated against this set.
+// chat member handle. Artifact ACLs are validated against this set.
 export function artifactMembersForConversation(conversation: Pick<Conversation, "metadata">): string[] {
   const rawParticipants = conversation.metadata?.participants;
   const participants = Array.isArray(rawParticipants) ? rawParticipants as ChatParticipant[] : [];
@@ -92,4 +92,11 @@ export function artifactApprovalShortLabel(approval: ArtifactApproval): string {
     return "fully approved";
   }
   return `${approval.signedCurrent.length}/${approval.requiredSigners.length} signed`;
+}
+
+export function artifactSummaryStatusLabel(summary: ArtifactSummary): string {
+  if (summary.lifecycle === "collecting_drafts") {
+    return `Collecting drafts · ${summary.submittedDraftCount}/${summary.requiredDraftCount} submitted`;
+  }
+  return `v${summary.headVersion} · ${artifactApprovalShortLabel(summary.approval)}`;
 }

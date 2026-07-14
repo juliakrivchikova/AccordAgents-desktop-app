@@ -92,6 +92,39 @@ test("renameConversation marks the title as manual and clears first-agent title 
   assert.equal((await storage.getConversation(conversation.id))?.metadata.autoTitleEligibility, undefined);
 });
 
+test("artifact chat notes deduplicate replayed outbox event ids inside the mutation queue", async () => {
+  const conversation = chatConversation();
+  const { service, storage } = testService([conversation]);
+
+  await Promise.all([
+    service.postArtifactChatNote(conversation.id, "event-1", "First delivery"),
+    service.postArtifactChatNote(conversation.id, "event-1", "Replayed delivery")
+  ]);
+  await service.postArtifactChatNote(conversation.id, "event-2", "Second event");
+
+  const saved = await storage.getConversation(conversation.id);
+  const artifactNotes = saved?.messages.filter((message) => message.metadata?.artifactEventId) ?? [];
+  assert.equal(artifactNotes.length, 2);
+  assert.deepEqual(artifactNotes.map((message) => message.metadata?.artifactEventId), ["event-1", "event-2"]);
+  assert.equal(artifactNotes[0].content, "First delivery");
+});
+
+test("artifact chat note rejects and rolls back memory when durable storage fails", async () => {
+  const conversation = chatConversation();
+  const { service, storage } = testService([conversation], { failSaves: 1 });
+
+  await assert.rejects(
+    service.postArtifactChatNote(conversation.id, "event-fail", "Must stay pending"),
+    /injected save failure/
+  );
+  const afterFailure = await storage.getConversation(conversation.id);
+  assert.equal(afterFailure?.messages.some((message) => message.metadata?.artifactEventId === "event-fail"), false);
+
+  await service.postArtifactChatNote(conversation.id, "event-fail", "Must stay pending");
+  const afterRetry = await storage.getConversation(conversation.id);
+  assert.equal(afterRetry?.messages.filter((message) => message.metadata?.artifactEventId === "event-fail").length, 1);
+});
+
 test("setChatTitleFromTool applies the first eligible participant title", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation({
@@ -884,6 +917,7 @@ test("participant-session metadata merge preserves newer handles and respects ne
 function testService(conversationList: Conversation[], options: {
   participantConfigs?: ChatParticipantConfig[];
   contextUsageBySession?: Record<string, AgentContextUsage | undefined>;
+  failSaves?: number;
 } = {}): {
   service: ChatService;
   storage: {
@@ -900,6 +934,7 @@ function testService(conversationList: Conversation[], options: {
   const snapshots: Conversation[] = [];
   const historyWrites: string[] = [];
   const cleanupTombstones: RemoteSessionCleanupTombstone[] = [];
+  let remainingFailedSaves = options.failSaves ?? 0;
   const storage = {
     async listConversations(): Promise<ConversationSummary[]> {
       return Array.from(conversations.values()).map((conversation) => ({
@@ -917,6 +952,10 @@ function testService(conversationList: Conversation[], options: {
       return conversation ? cloneConversation(conversation) : undefined;
     },
     async saveConversation(conversation: Conversation): Promise<void> {
+      if (remainingFailedSaves > 0) {
+        remainingFailedSaves -= 1;
+        throw new Error("injected save failure");
+      }
       conversations.set(conversation.id, cloneConversation(conversation));
     },
     async deleteConversation(id: string): Promise<boolean> {

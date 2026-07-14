@@ -10,7 +10,7 @@ import { markdownBlocks, type MarkdownBlock } from "./markdown-blocks";
 import { FileLink } from "./local-file-link";
 import { MentionDirectoryContext, ParticipantHoverCard, profileHandleLabel, useHoverCard } from "./participant-hover-card";
 import { ArtifactsContext } from "../artifacts/artifacts-context";
-import type { ArtifactApproval } from "../../../shared/types";
+import { artifactSummaryStatusLabel } from "../../../shared/artifacts";
 
 // A clickable reference to another chat message. Authors write `[label](#msg:<id>)` (or a bare
 // `#msg:<id>`); we render a link that scrolls the referenced message into view and flashes it.
@@ -120,7 +120,7 @@ function ArtifactLink({ artifactId, label }: { artifactId: string; label?: strin
   const summary = artifacts?.byId.get(artifactId);
   const name = summary?.name ?? label ?? "artifact";
   const title = summary
-    ? `Open artifact "${summary.name}" (v${summary.headVersion}) · ${artifactApprovalTooltip(summary.approval)}`
+    ? `Open artifact "${summary.name}" · ${artifactSummaryStatusLabel(summary)}`
     : "Artifact reference";
   const activate = (): void => {
     artifacts?.openArtifact(artifactId);
@@ -137,20 +137,6 @@ function ArtifactLink({ artifactId, label }: { artifactId: string; label?: strin
       <FileBox size={15} strokeWidth={2.2} aria-hidden /><span className="artifact-link-name">{name}</span>
     </a>
   );
-}
-
-function artifactApprovalTooltip(approval: ArtifactApproval): string {
-  if (approval.state === "none-required") {
-    return "No signers required";
-  }
-  if (approval.state === "approved") {
-    return "Approved: every required signer signed the current version";
-  }
-  const signed = `${approval.signedCurrent.length}/${approval.requiredSigners.length} signed`;
-  const required = approval.requiredSigners.join(", ");
-  return approval.state === "unsigned"
-    ? `Unsigned: ${signed} · required signers: ${required}`
-    : `${signed} · required signers: ${required}`;
 }
 
 function openExternalLink(url: string): void {

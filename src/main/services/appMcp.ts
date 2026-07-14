@@ -34,6 +34,14 @@ export const APP_ARTIFACT_REVISE_TOOL = "app_artifact_revise";
 export const APP_ARTIFACT_RENAME_TOOL = "app_artifact_rename";
 export const APP_ARTIFACT_SIGN_TOOL = "app_artifact_sign";
 export const APP_ARTIFACT_SET_ACCESS_TOOL = "app_artifact_set_access";
+export const APP_ARTIFACT_DRAFT_LIST_TOOL = "app_artifact_draft_list";
+export const APP_ARTIFACT_DRAFT_READ_TOOL = "app_artifact_draft_read";
+export const APP_ARTIFACT_DRAFT_SAVE_TOOL = "app_artifact_draft_save";
+export const APP_ARTIFACT_DRAFT_SUBMIT_TOOL = "app_artifact_draft_submit";
+export const APP_ARTIFACT_DRAFT_REPLACE_TOOL = "app_artifact_draft_replace";
+export const APP_ARTIFACT_DRAFT_WITHDRAW_TOOL = "app_artifact_draft_withdraw";
+export const APP_ARTIFACT_DRAFT_SET_ROSTER_TOOL = "app_artifact_draft_set_roster";
+export const APP_ARTIFACT_PUBLISH_TOOL = "app_artifact_publish";
 
 export const APP_ARTIFACT_TOOL_NAMES = [
   APP_ARTIFACT_LIST_TOOL,
@@ -43,7 +51,15 @@ export const APP_ARTIFACT_TOOL_NAMES = [
   APP_ARTIFACT_REVISE_TOOL,
   APP_ARTIFACT_RENAME_TOOL,
   APP_ARTIFACT_SIGN_TOOL,
-  APP_ARTIFACT_SET_ACCESS_TOOL
+  APP_ARTIFACT_SET_ACCESS_TOOL,
+  APP_ARTIFACT_DRAFT_LIST_TOOL,
+  APP_ARTIFACT_DRAFT_READ_TOOL,
+  APP_ARTIFACT_DRAFT_SAVE_TOOL,
+  APP_ARTIFACT_DRAFT_SUBMIT_TOOL,
+  APP_ARTIFACT_DRAFT_REPLACE_TOOL,
+  APP_ARTIFACT_DRAFT_WITHDRAW_TOOL,
+  APP_ARTIFACT_DRAFT_SET_ROSTER_TOOL,
+  APP_ARTIFACT_PUBLISH_TOOL
 ] as const;
 
 // Shared schema fragment: every artifact-targeting tool accepts the stable
@@ -57,6 +73,20 @@ const ARTIFACT_REF_PROPERTIES = {
     type: "string",
     description: "Current artifact name (case-insensitive) as an alternative to artifactId."
   }
+} as const;
+
+const ARTIFACT_DRAFT_AUDIENCE_POLICY_SCHEMA = {
+  type: "object",
+  additionalProperties: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      allowedReaders: { type: "array", items: { type: "string" } },
+      requiredReaders: { type: "array", items: { type: "string" } }
+    },
+    required: ["allowedReaders", "requiredReaders"]
+  },
+  description: "Per-author reader policy. The User and draft author are always implicit readers."
 } as const;
 
 const CHAT_AGENT_PERMISSION_INPUT_SCHEMA = {
@@ -109,7 +139,7 @@ const CHAT_AGENT_PERMISSION_INPUT_SCHEMA = {
 // Definitions for the artifact tools every chat participant gets. Artifacts are
 // durable, versioned, signable work products shared by all chat members; the
 // tools return structured JSON results ({ok: true, value} | {ok: false, error}).
-function artifactToolDefinitions(): unknown[] {
+export function artifactToolDefinitions(): unknown[] {
   return [
     {
       name: APP_ARTIFACT_LIST_TOOL,
@@ -123,7 +153,7 @@ function artifactToolDefinitions(): unknown[] {
       name: APP_ARTIFACT_READ_TOOL,
       title: "Read Artifact",
       description:
-        "Read one artifact: the current version by default, or one named earlier version. Set includeHistory to also get version metadata (authors, notes, signatures — no contents). Keep reads lean: request only the version you need; use app_artifact_diff to compare versions.",
+        "Read one artifact. Published artifacts return the current version by default; collecting artifacts return only drafts visible to the caller plus durable draft progress. Set includeHistory for published version metadata.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -156,19 +186,56 @@ function artifactToolDefinitions(): unknown[] {
       name: APP_ARTIFACT_CREATE_TOOL,
       title: "Create Artifact",
       description:
-        "Create a durable, versioned artifact in this chat under any unique name (no fixed categories). You become the owner. Optionally set contributors (members who may revise/rename), requiredSigners (members whose signatures on the current version mean fully approved), and free-form labels. Members are \"user\" (the human) and participant handles. Posts a brief linked note to the chat; do NOT paste the artifact body into chat messages — reference it as [name](#artifact:<id>).",
+        "Create a durable artifact. Omit initialState (or use published) for an ordinary v1 artifact. Use collecting_drafts with a roster, per-author audience policy, and stable operationId to collect private drafts before publishing v1.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
         properties: {
           name: { type: "string", description: "Unique human-readable name within this chat (renameable later)." },
-          content: { type: "string", description: "Free-form text content of version 1." },
+          initialState: { type: "string", enum: ["published", "collecting_drafts"] },
+          content: { type: "string", description: "Free-form text content of version 1. Required for published; omit while collecting drafts." },
           note: { type: "string", description: "Optional short note describing version 1." },
           contributors: { type: "array", items: { type: "string" }, description: "Members allowed to revise/rename (owner always can)." },
           requiredSigners: { type: "array", items: { type: "string" }, description: "Members whose signatures approve a version. Only they can sign." },
-          labels: { type: "array", items: { type: "string" }, description: "Optional free-form labels; never required, never a fixed set." }
+          labels: { type: "array", items: { type: "string" }, description: "Optional free-form labels; never required, never a fixed set." },
+          allowedDraftAuthors: { type: "array", items: { type: "string" } },
+          requiredDraftAuthors: { type: "array", items: { type: "string" } },
+          audiencePolicyByAuthor: ARTIFACT_DRAFT_AUDIENCE_POLICY_SCHEMA,
+          operationId: { type: "string", description: "Stable retry key. Required for collecting_drafts." }
         },
-        required: ["name", "content"]
+        required: ["name"],
+        allOf: [{
+          if: {
+            properties: { initialState: { const: "collecting_drafts" } },
+            required: ["initialState"]
+          },
+          then: {
+            required: [
+              "allowedDraftAuthors",
+              "requiredDraftAuthors",
+              "audiencePolicyByAuthor",
+              "operationId"
+            ],
+            not: {
+              anyOf: [
+                { required: ["content"] },
+                { required: ["note"] },
+                { required: ["requiredSigners"] }
+              ]
+            }
+          },
+          else: {
+            required: ["content"],
+            not: {
+              anyOf: [
+                { required: ["allowedDraftAuthors"] },
+                { required: ["requiredDraftAuthors"] },
+                { required: ["audiencePolicyByAuthor"] },
+                { required: ["operationId"] }
+              ]
+            }
+          }
+        }]
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
     },
@@ -238,6 +305,152 @@ function artifactToolDefinitions(): unknown[] {
         }
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_DRAFT_LIST_TOOL,
+      title: "List Artifact Drafts",
+      description: "List durable draft submissions for a collecting artifact. Unauthorized editing drafts are hidden; submitted drafts expose metadata only unless their reader ACL permits the caller. The User can read all drafts.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { ...ARTIFACT_REF_PROPERTIES }
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_DRAFT_READ_TOOL,
+      title: "Read Artifact Draft",
+      description: "Read one draft through its content ACL. The User always has access; otherwise only its author and explicitly selected readers may read the body, including while it is still being edited.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ...ARTIFACT_REF_PROPERTIES,
+          draftId: { type: "string" }
+        },
+        required: ["draftId"]
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_DRAFT_SAVE_TOOL,
+      title: "Save Artifact Draft",
+      description: "Create or edit your own unsubmitted draft. The User and author are implicit readers; selected readers can inspect the body before submission and must satisfy the artifact's policy. Pass expectedEditRevision=0 to create and a stable operationId for retries.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ...ARTIFACT_REF_PROPERTIES,
+          draftId: { type: "string" },
+          expectedEditRevision: { type: "integer", minimum: 0 },
+          content: { type: "string" },
+          readers: { type: "array", items: { type: "string" } },
+          operationId: { type: "string" }
+        },
+        required: ["expectedEditRevision", "content", "readers", "operationId"]
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_DRAFT_SUBMIT_TOOL,
+      title: "Submit Artifact Draft",
+      description: "Freeze your editing draft as submitted. Submission is immutable; replace or withdraw explicitly instead of editing it.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ...ARTIFACT_REF_PROPERTIES,
+          draftId: { type: "string" },
+          expectedEditRevision: { type: "integer", minimum: 1 },
+          operationId: { type: "string" }
+        },
+        required: ["draftId", "expectedEditRevision", "operationId"]
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_DRAFT_REPLACE_TOOL,
+      title: "Create Editable Draft Replacement",
+      description: "Create an editable replacement for your own submitted draft while preserving the original draft and its provenance. This does not submit or freeze the replacement: call Submit Artifact Draft afterward.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ...ARTIFACT_REF_PROPERTIES,
+          supersedesDraftId: { type: "string" },
+          content: { type: "string" },
+          readers: { type: "array", items: { type: "string" } },
+          operationId: { type: "string" }
+        },
+        required: ["supersedesDraftId", "content", "readers", "operationId"]
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_DRAFT_WITHDRAW_TOOL,
+      title: "Withdraw Artifact Draft",
+      description: "Withdraw your submitted draft without deleting its durable provenance.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ...ARTIFACT_REF_PROPERTIES,
+          draftId: { type: "string" },
+          operationId: { type: "string" }
+        },
+        required: ["draftId", "operationId"]
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_DRAFT_SET_ROSTER_TOOL,
+      title: "Update Artifact Draft Roster",
+      description: "Owner-only: update draft authors and per-author audience policy using an optimistic roster revision and stable retry key.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ...ARTIFACT_REF_PROPERTIES,
+          allowedDraftAuthors: { type: "array", items: { type: "string" } },
+          requiredDraftAuthors: { type: "array", items: { type: "string" } },
+          audiencePolicyByAuthor: ARTIFACT_DRAFT_AUDIENCE_POLICY_SCHEMA,
+          expectedDraftRosterRevision: { type: "integer", minimum: 0 },
+          operationId: { type: "string" }
+        },
+        required: ["allowedDraftAuthors", "requiredDraftAuthors", "audiencePolicyByAuthor", "expectedDraftRosterRevision", "operationId"]
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_PUBLISH_TOOL,
+      title: "Publish Artifact Version 1",
+      description: "Owner-only: publish version 1 after every required author has a current submitted draft. Publishing records structured version sources without creating signatures.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ...ARTIFACT_REF_PROPERTIES,
+          content: { type: "string" },
+          note: { type: "string" },
+          requiredSigners: { type: "array", items: { type: "string" } },
+          sources: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                draftId: { type: "string" },
+                disposition: { type: "string", enum: ["considered", "excluded"] },
+                exclusionRationale: { type: "string" }
+              },
+              required: ["draftId", "disposition"]
+            }
+          },
+          operationId: { type: "string" }
+        },
+        required: ["content", "requiredSigners", "sources", "operationId"]
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     }
   ];
 }

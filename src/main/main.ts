@@ -53,13 +53,23 @@ import type {
   UserSkillSummary
 } from "../shared/types";
 import type {
+  ArtifactDraftAudiencePolicyByAuthor,
   CreateArtifactRequest,
   DiffArtifactRequest,
   ListArtifactsRequest,
+  ListArtifactDraftsRequest,
+  PublishArtifactRequest,
+  PublishArtifactSourceRequest,
   ReadArtifactRequest,
+  ReadArtifactDraftRequest,
   RenameArtifactRequest,
+  ReplaceArtifactDraftRequest,
   ReviseArtifactRequest,
+  SaveArtifactDraftRequest,
   SignArtifactRequest,
+  SubmitArtifactDraftRequest,
+  UpdateArtifactDraftRosterRequest,
+  WithdrawArtifactDraftRequest,
   UpdateArtifactAccessRequest
 } from "../shared/types";
 import { ARTIFACT_USER_MEMBER } from "../shared/types";
@@ -67,14 +77,23 @@ import { artifactMembersForConversation } from "../shared/artifacts";
 import { normalizeExternalUrlForOpen } from "../shared/externalLinks";
 import { ArtifactService } from "./services/artifacts";
 import { ArtifactStore } from "./services/artifactStore";
+import { validateArtifactCreateToolRequest } from "./services/artifactToolRequest";
 import { ChatService } from "./services/chat";
 import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
 import {
   APP_ARTIFACT_CREATE_TOOL,
+  APP_ARTIFACT_DRAFT_LIST_TOOL,
+  APP_ARTIFACT_DRAFT_READ_TOOL,
+  APP_ARTIFACT_DRAFT_REPLACE_TOOL,
+  APP_ARTIFACT_DRAFT_SAVE_TOOL,
+  APP_ARTIFACT_DRAFT_SET_ROSTER_TOOL,
+  APP_ARTIFACT_DRAFT_SUBMIT_TOOL,
+  APP_ARTIFACT_DRAFT_WITHDRAW_TOOL,
   APP_ARTIFACT_DIFF_TOOL,
   APP_ARTIFACT_LIST_TOOL,
+  APP_ARTIFACT_PUBLISH_TOOL,
   APP_ARTIFACT_READ_TOOL,
   APP_ARTIFACT_RENAME_TOOL,
   APP_ARTIFACT_REVISE_TOOL,
@@ -200,7 +219,7 @@ const artifactService = new ArtifactService({
     }
     return artifactMembersForConversation(conversation);
   },
-  postNote: (conversationId, content) => chatService.postArtifactChatNote(conversationId, content),
+  postNote: (conversationId, eventId, content) => chatService.postArtifactChatNote(conversationId, eventId, content),
   onChanged: (conversationId) => {
     mainWindow?.webContents.send("artifacts:updated", { conversationId });
   },
@@ -208,6 +227,7 @@ const artifactService = new ArtifactService({
     void debugLogService.write(event, payload);
   }
 });
+chatService.setArtifactCleanup((conversationId) => artifactService.deleteConversationArtifacts(conversationId));
 appMcpService.setArtifactToolHandler(async (actor, toolName, request) => {
   let member: string;
   try {
@@ -247,6 +267,45 @@ function artifactToolStringArray(value: unknown): string[] | undefined {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
+function artifactToolAudiencePolicy(value: unknown): ArtifactDraftAudiencePolicyByAuthor {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return Object.fromEntries(Object.entries(value).map(([author, rawPolicy]) => {
+    const policy = rawPolicy && typeof rawPolicy === "object" && !Array.isArray(rawPolicy)
+      ? rawPolicy as Record<string, unknown>
+      : {};
+    return [author, {
+      allowedReaders: artifactToolStringArray(policy.allowedReaders) ?? [],
+      requiredReaders: artifactToolStringArray(policy.requiredReaders) ?? []
+    }];
+  }));
+}
+
+function artifactToolSources(value: unknown): PublishArtifactSourceRequest[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return [];
+    }
+    const source = entry as Record<string, unknown>;
+    const draftId = artifactToolString(source.draftId);
+    const disposition = source.disposition === "considered" || source.disposition === "excluded"
+      ? source.disposition
+      : undefined;
+    if (!draftId || !disposition) {
+      return [];
+    }
+    return [{
+      draftId,
+      disposition,
+      exclusionRationale: artifactToolString(source.exclusionRationale)
+    }];
+  });
+}
+
 async function dispatchArtifactTool(
   member: string,
   conversationId: string,
@@ -277,15 +336,93 @@ async function dispatchArtifactTool(
         fromVersion: artifactToolNumber(args.fromVersion),
         toVersion: artifactToolNumber(args.toVersion)
       });
-    case APP_ARTIFACT_CREATE_TOOL:
-      return artifactService.create(member, {
+    case APP_ARTIFACT_CREATE_TOOL: {
+      const validationError = validateArtifactCreateToolRequest(args);
+      if (validationError) {
+        return { ok: false, error: { code: "invalid_request", message: validationError } };
+      }
+      return artifactService.create(member, args.initialState === "collecting_drafts" ? {
         conversationId,
         name: typeof args.name === "string" ? args.name : "",
+        initialState: "collecting_drafts",
+        contributors: artifactToolStringArray(args.contributors),
+        labels: artifactToolStringArray(args.labels),
+        allowedDraftAuthors: artifactToolStringArray(args.allowedDraftAuthors) ?? [],
+        requiredDraftAuthors: artifactToolStringArray(args.requiredDraftAuthors) ?? [],
+        audiencePolicyByAuthor: artifactToolAudiencePolicy(args.audiencePolicyByAuthor),
+        operationId: typeof args.operationId === "string" ? args.operationId : ""
+      } : {
+        conversationId,
+        name: typeof args.name === "string" ? args.name : "",
+        initialState: "published",
         content: typeof args.content === "string" ? args.content : "",
         note: artifactToolString(args.note),
         contributors: artifactToolStringArray(args.contributors),
         requiredSigners: artifactToolStringArray(args.requiredSigners),
         labels: artifactToolStringArray(args.labels)
+      });
+    }
+    case APP_ARTIFACT_DRAFT_LIST_TOOL:
+      return artifactService.listDrafts(member, { conversationId, ...ref });
+    case APP_ARTIFACT_DRAFT_READ_TOOL:
+      return artifactService.readDraft(member, {
+        conversationId,
+        ...ref,
+        draftId: typeof args.draftId === "string" ? args.draftId : ""
+      });
+    case APP_ARTIFACT_DRAFT_SAVE_TOOL:
+      return artifactService.saveDraft(member, {
+        conversationId,
+        ...ref,
+        draftId: artifactToolString(args.draftId),
+        expectedEditRevision: artifactToolNumber(args.expectedEditRevision),
+        content: typeof args.content === "string" ? args.content : "",
+        readers: artifactToolStringArray(args.readers) ?? [],
+        operationId: typeof args.operationId === "string" ? args.operationId : ""
+      });
+    case APP_ARTIFACT_DRAFT_SUBMIT_TOOL:
+      return artifactService.submitDraft(member, {
+        conversationId,
+        ...ref,
+        draftId: typeof args.draftId === "string" ? args.draftId : "",
+        expectedEditRevision: artifactToolNumber(args.expectedEditRevision),
+        operationId: typeof args.operationId === "string" ? args.operationId : ""
+      });
+    case APP_ARTIFACT_DRAFT_REPLACE_TOOL:
+      return artifactService.replaceDraft(member, {
+        conversationId,
+        ...ref,
+        supersedesDraftId: typeof args.supersedesDraftId === "string" ? args.supersedesDraftId : "",
+        content: typeof args.content === "string" ? args.content : "",
+        readers: artifactToolStringArray(args.readers) ?? [],
+        operationId: typeof args.operationId === "string" ? args.operationId : ""
+      });
+    case APP_ARTIFACT_DRAFT_WITHDRAW_TOOL:
+      return artifactService.withdrawDraft(member, {
+        conversationId,
+        ...ref,
+        draftId: typeof args.draftId === "string" ? args.draftId : "",
+        operationId: typeof args.operationId === "string" ? args.operationId : ""
+      });
+    case APP_ARTIFACT_DRAFT_SET_ROSTER_TOOL:
+      return artifactService.updateDraftRoster(member, {
+        conversationId,
+        ...ref,
+        allowedDraftAuthors: artifactToolStringArray(args.allowedDraftAuthors) ?? [],
+        requiredDraftAuthors: artifactToolStringArray(args.requiredDraftAuthors) ?? [],
+        audiencePolicyByAuthor: artifactToolAudiencePolicy(args.audiencePolicyByAuthor),
+        expectedDraftRosterRevision: artifactToolNumber(args.expectedDraftRosterRevision),
+        operationId: typeof args.operationId === "string" ? args.operationId : ""
+      });
+    case APP_ARTIFACT_PUBLISH_TOOL:
+      return artifactService.publish(member, {
+        conversationId,
+        ...ref,
+        content: typeof args.content === "string" ? args.content : "",
+        note: artifactToolString(args.note),
+        requiredSigners: artifactToolStringArray(args.requiredSigners) ?? [],
+        sources: artifactToolSources(args.sources),
+        operationId: typeof args.operationId === "string" ? args.operationId : ""
       });
     case APP_ARTIFACT_REVISE_TOOL:
       return artifactService.revise(member, {
@@ -1055,6 +1192,22 @@ function registerIpc(): void {
     artifactService.sign(ARTIFACT_USER_MEMBER, request));
   ipcMain.handle("artifacts:set-access", (_event, request: UpdateArtifactAccessRequest) =>
     artifactService.updateAccess(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:drafts:list", (_event, request: ListArtifactDraftsRequest) =>
+    artifactService.listDrafts(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:drafts:read", (_event, request: ReadArtifactDraftRequest) =>
+    artifactService.readDraft(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:drafts:save", (_event, request: SaveArtifactDraftRequest) =>
+    artifactService.saveDraft(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:drafts:submit", (_event, request: SubmitArtifactDraftRequest) =>
+    artifactService.submitDraft(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:drafts:replace", (_event, request: ReplaceArtifactDraftRequest) =>
+    artifactService.replaceDraft(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:drafts:withdraw", (_event, request: WithdrawArtifactDraftRequest) =>
+    artifactService.withdrawDraft(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:drafts:set-roster", (_event, request: UpdateArtifactDraftRosterRequest) =>
+    artifactService.updateDraftRoster(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:publish", (_event, request: PublishArtifactRequest) =>
+    artifactService.publish(ARTIFACT_USER_MEMBER, request));
   ipcMain.handle("dialog:select-repo", async () => {
     const options: Electron.OpenDialogOptions = {
       title: "Select repository",
@@ -1112,6 +1265,11 @@ void app.whenReady().then(async () => {
   bootstrapAppUpdater(debugLogService);
   await appMcpService.start();
   await storageService.init();
+  await artifactService.flushPendingArtifactEvents().catch((error) => {
+    void debugLogService.write("artifacts.outbox.startup-error", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+  });
   await chatService.reconcileDeletedConversationArtifacts().catch((error) => {
     void debugLogService.write("chat.delete.artifacts.reconcile-error", {
       message: error instanceof Error ? error.message : String(error)

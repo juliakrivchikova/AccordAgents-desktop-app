@@ -136,6 +136,17 @@
   white-space: nowrap;
 }
 
+.artifact-draft-chip {
+  border-color: var(--app-border-strong);
+  background: var(--app-surface-muted);
+  color: var(--app-text-strong);
+}
+
+.artifact-draft-progress {
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
 .artifact-approval {
   font-size: 11px;
   white-space: nowrap;
@@ -170,7 +181,21 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  overflow: hidden;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.artifact-draft-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 10px;
+  color: var(--app-text);
+  font-size: 12px;
 }
 
 .artifact-detail-head {
@@ -207,13 +232,123 @@
 
 .artifact-actions-row {
   display: flex;
+  align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
 
+.artifact-diff-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  color: var(--app-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.artifact-diff-toggle.is-disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.artifact-diff-toggle > input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.artifact-diff-toggle-track {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-pill);
+  background: var(--app-muted);
+  transition: background 120ms ease;
+}
+
+.artifact-diff-toggle-track > span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--app-surface);
+  transition: transform 120ms ease;
+}
+
+.artifact-diff-toggle > input:checked + .artifact-diff-toggle-track {
+  background: var(--app-accent);
+}
+
+.artifact-diff-toggle > input:checked + .artifact-diff-toggle-track > span {
+  transform: translateX(14px);
+}
+
+.artifact-diff-toggle > input:focus-visible + .artifact-diff-toggle-track {
+  box-shadow: var(--focus-ring);
+}
+
+.artifact-version-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 10px;
+  background: var(--app-surface-subtle);
+}
+
+.artifact-version-selector-label {
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.artifact-version-selector-control {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.artifact-version-selector-control select {
+  width: 100%;
+  height: 38px;
+  appearance: none;
+  padding: 0 38px 0 11px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.artifact-version-selector-control select:hover {
+  border-color: var(--app-border-strong);
+  background: var(--app-surface-hover);
+}
+
+.artifact-version-selector-control select:focus-visible {
+  border-color: var(--app-primary);
+  box-shadow: var(--focus-ring);
+  outline: none;
+}
+
+.artifact-version-selector-control > svg {
+  position: absolute;
+  right: 11px;
+  color: var(--app-muted);
+  pointer-events: none;
+}
+
 .artifact-primary-action,
-.artifact-secondary-action,
-.artifact-diff-action {
+.artifact-secondary-action {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -242,21 +377,36 @@
 }
 
 .artifact-primary-action:disabled,
-.artifact-secondary-action:disabled,
-.artifact-diff-action:disabled {
+.artifact-secondary-action:disabled {
   opacity: 0.55;
   cursor: default;
-}
-
-.artifact-diff-action {
-  padding: 2px 7px;
-  font-size: 11px;
-  color: var(--app-muted);
 }
 
 .artifact-version-note {
   font-size: 12px;
   color: var(--app-muted);
+}
+
+.artifact-draft-author {
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.artifact-draft-author strong {
+  color: var(--app-text-strong);
+  font-weight: 650;
+}
+
+.artifact-draft-unavailable {
+  display: grid;
+  min-height: 180px;
+  flex: 1 1 auto;
+  place-items: center;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-surface-subtle);
+  color: var(--app-muted);
+  font-size: 12px;
 }
 
 .artifact-content-markdown,
@@ -271,31 +421,47 @@
   overflow-y: auto;
 }
 
+.artifact-content-surface {
+  position: relative;
+  display: flex;
+  min-height: 0;
+}
+
+.artifact-detail > .artifact-content-surface {
+  min-height: 180px;
+  flex: 1 1 auto;
+}
+
+.artifact-content-surface > .artifact-content-markdown {
+  min-height: 0;
+  max-height: none;
+  flex: 1 1 auto;
+  padding-right: 48px;
+}
+
+.artifact-content-copy {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  right: 8px;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--app-border);
+  background: color-mix(in srgb, var(--app-surface) 90%, transparent);
+  color: var(--app-text);
+  opacity: 0.82;
+  backdrop-filter: blur(6px);
+}
+
+.artifact-content-copy:hover,
+.artifact-content-copy:focus-visible {
+  opacity: 1;
+  background: var(--app-surface-hover);
+}
+
 .artifact-content-markdown .markdown-text {
   font-size: 13px;
   line-height: 1.5;
-}
-
-.artifact-detail > .artifact-content-markdown {
-  flex: 1 1 auto;
-  min-height: 180px;
-  max-height: none;
-}
-
-.artifact-history,
-.artifact-compare {
-  flex: 0 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.artifact-history {
-  max-height: min(240px, 28vh);
-}
-
-.artifact-compare {
-  max-height: min(260px, 30vh);
 }
 
 .artifact-diff-pre {
@@ -305,57 +471,22 @@
   white-space: pre-wrap;
 }
 
-.artifact-history h5,
-.artifact-compare h5 {
-  margin: 4px 0 6px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--app-text-strong);
-}
-
-.artifact-history ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-height: 0;
-  overflow-y: auto;
-  padding-right: 4px;
-}
-
-.artifact-compare > .artifact-diff-pre {
-  min-height: 0;
+.artifact-detail > .artifact-diff-pre {
+  flex: 1 1 auto;
+  min-height: 180px;
   max-height: none;
 }
 
-.artifact-history li {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 11.5px;
+.artifact-diff-loading {
+  display: grid;
+  min-height: 180px;
+  flex: 1 1 auto;
+  place-items: center;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-surface-subtle);
   color: var(--app-muted);
-}
-
-.artifact-history-current .artifact-history-version {
-  font-weight: 700;
-  color: var(--app-text-strong);
-}
-
-.artifact-history-version {
-  border: 0;
-  background: none;
-  padding: 0;
-  font-size: 11.5px;
-  color: var(--app-text);
-  text-decoration: underline;
-  cursor: pointer;
-}
-
-.artifact-history-meta {
-  flex: 1;
-  overflow-wrap: anywhere;
+  font-size: 12px;
 }
 
 .artifact-diff-add {
@@ -368,6 +499,10 @@
 
 .artifact-diff-hunk {
   color: var(--app-muted);
+}
+
+.artifact-draft-inbox {
+  overflow-y: auto;
 }
 
 .artifact-error {

@@ -1089,6 +1089,7 @@ export interface ChatMessageMetadata {
   workedMs?: number;
   queuedBehind?: { handle: string };
   appMessageSource?: string;
+  artifactEventId?: string;
   activityEvents?: ChatAgentActivityEvent[];
   processingTranscript?: ChatProcessingTranscript;
   remoteRunStatus?: ChatRemoteRunStatus;
@@ -1879,6 +1880,17 @@ export interface StartReviewResult {
 
 export const ARTIFACT_USER_MEMBER = "user";
 
+export type ArtifactLifecycle = "collecting_drafts" | "published";
+export type ArtifactDraftState = "editing" | "submitted" | "superseded" | "withdrawn";
+export type ArtifactSourceDisposition = "considered" | "excluded";
+
+export interface ArtifactDraftAudiencePolicy {
+  allowedReaders: string[];
+  requiredReaders: string[];
+}
+
+export type ArtifactDraftAudiencePolicyByAuthor = Record<string, ArtifactDraftAudiencePolicy>;
+
 export interface ArtifactSignature {
   signer: string;
   signedAt: string;
@@ -1894,6 +1906,15 @@ export interface ArtifactVersionMeta {
 
 export interface ArtifactVersionContent extends ArtifactVersionMeta {
   content: string;
+}
+
+export interface ArtifactVersionSource {
+  draftId: string;
+  author: string;
+  submittedAt: string;
+  contentHash: string;
+  disposition: ArtifactSourceDisposition;
+  exclusionRationale?: string;
 }
 
 export type ArtifactApprovalState = "none-required" | "unsigned" | "partially-signed" | "approved";
@@ -1912,17 +1933,58 @@ export interface ArtifactSummary {
   owner: string;
   contributors: string[];
   labels: string[];
+  lifecycle: ArtifactLifecycle;
   headVersion: number;
+  draftRosterRevision: number;
+  requiredDraftCount: number;
+  submittedDraftCount: number;
   createdAt: string;
   updatedAt: string;
   approval: ArtifactApproval;
 }
 
-export interface ArtifactReadResult {
+export interface PublishedArtifactReadResult {
+  lifecycle: "published";
   summary: ArtifactSummary;
   version: ArtifactVersionContent;
   history?: ArtifactVersionMeta[];
+  sources?: ArtifactVersionSource[];
 }
+
+export interface ArtifactDraftSummary {
+  id: string;
+  artifactId: string;
+  author: string;
+  state: ArtifactDraftState;
+  editRevision: number;
+  createdAt: string;
+  updatedAt: string;
+  submittedAt?: string;
+  supersedesDraftId?: string;
+  hasContent: boolean;
+}
+
+export interface ArtifactDraftContent extends ArtifactDraftSummary {
+  hasContent: true;
+  content: string;
+  readers: string[];
+  effectiveReaders: string[];
+}
+
+export type ArtifactDraftView = ArtifactDraftSummary | ArtifactDraftContent;
+
+export interface CollectingArtifactReadResult {
+  lifecycle: "collecting_drafts";
+  summary: ArtifactSummary;
+  allowedDraftAuthors: string[];
+  requiredDraftAuthors: string[];
+  audiencePolicyByAuthor: ArtifactDraftAudiencePolicyByAuthor;
+  drafts: ArtifactDraftView[];
+  missingRequiredAuthors: string[];
+  readyToPublish: boolean;
+}
+
+export type ArtifactReadResult = PublishedArtifactReadResult | CollectingArtifactReadResult;
 
 export interface ArtifactDiffResult {
   summary: ArtifactSummary;
@@ -1945,6 +2007,8 @@ export interface ArtifactError {
   // so the editor can redo the change on top of it.
   currentVersion?: number;
   current?: ArtifactVersionContent;
+  currentEditRevision?: number;
+  currentRosterRevision?: number;
 }
 
 export type ArtifactResult<T> =
@@ -1971,15 +2035,33 @@ export interface DiffArtifactRequest {
   toVersion: number;
 }
 
-export interface CreateArtifactRequest {
+export interface CreatePublishedArtifactRequest {
   conversationId: string;
   name: string;
+  initialState?: "published";
   content: string;
   note?: string;
   contributors?: string[];
   requiredSigners?: string[];
   labels?: string[];
 }
+
+export interface CreateCollectingArtifactRequest {
+  conversationId: string;
+  name: string;
+  initialState: "collecting_drafts";
+  content?: never;
+  note?: never;
+  contributors?: string[];
+  requiredSigners?: never;
+  labels?: string[];
+  allowedDraftAuthors: string[];
+  requiredDraftAuthors: string[];
+  audiencePolicyByAuthor: ArtifactDraftAudiencePolicyByAuthor;
+  operationId: string;
+}
+
+export type CreateArtifactRequest = CreatePublishedArtifactRequest | CreateCollectingArtifactRequest;
 
 export interface ReviseArtifactRequest {
   conversationId: string;
@@ -2012,6 +2094,66 @@ export interface UpdateArtifactAccessRequest {
   contributors?: string[];
   requiredSigners?: string[];
   labels?: string[];
+}
+
+export interface ArtifactReferenceRequest {
+  conversationId: string;
+  artifactId?: string;
+  name?: string;
+}
+
+export interface ListArtifactDraftsRequest extends ArtifactReferenceRequest {}
+
+export interface ReadArtifactDraftRequest extends ArtifactReferenceRequest {
+  draftId: string;
+}
+
+export interface SaveArtifactDraftRequest extends ArtifactReferenceRequest {
+  draftId?: string;
+  expectedEditRevision: number;
+  content: string;
+  readers: string[];
+  operationId: string;
+}
+
+export interface SubmitArtifactDraftRequest extends ArtifactReferenceRequest {
+  draftId: string;
+  expectedEditRevision: number;
+  operationId: string;
+}
+
+export interface ReplaceArtifactDraftRequest extends ArtifactReferenceRequest {
+  supersedesDraftId: string;
+  content: string;
+  readers: string[];
+  operationId: string;
+}
+
+export interface WithdrawArtifactDraftRequest extends ArtifactReferenceRequest {
+  draftId: string;
+  operationId: string;
+}
+
+export interface UpdateArtifactDraftRosterRequest extends ArtifactReferenceRequest {
+  allowedDraftAuthors: string[];
+  requiredDraftAuthors: string[];
+  audiencePolicyByAuthor: ArtifactDraftAudiencePolicyByAuthor;
+  expectedDraftRosterRevision: number;
+  operationId: string;
+}
+
+export interface PublishArtifactSourceRequest {
+  draftId: string;
+  disposition: ArtifactSourceDisposition;
+  exclusionRationale?: string;
+}
+
+export interface PublishArtifactRequest extends ArtifactReferenceRequest {
+  content: string;
+  note?: string;
+  requiredSigners: string[];
+  sources: PublishArtifactSourceRequest[];
+  operationId: string;
 }
 
 export interface ArtifactsUpdatedEvent {
@@ -2106,6 +2248,14 @@ export interface AppBridge {
   renameArtifact(request: RenameArtifactRequest): Promise<ArtifactResult<ArtifactSummary>>;
   signArtifact(request: SignArtifactRequest): Promise<ArtifactResult<ArtifactSummary>>;
   updateArtifactAccess(request: UpdateArtifactAccessRequest): Promise<ArtifactResult<ArtifactSummary>>;
+  listArtifactDrafts(request: ListArtifactDraftsRequest): Promise<ArtifactResult<ArtifactDraftView[]>>;
+  readArtifactDraft(request: ReadArtifactDraftRequest): Promise<ArtifactResult<ArtifactDraftContent>>;
+  saveArtifactDraft(request: SaveArtifactDraftRequest): Promise<ArtifactResult<ArtifactDraftContent>>;
+  submitArtifactDraft(request: SubmitArtifactDraftRequest): Promise<ArtifactResult<ArtifactDraftContent>>;
+  replaceArtifactDraft(request: ReplaceArtifactDraftRequest): Promise<ArtifactResult<ArtifactDraftContent>>;
+  withdrawArtifactDraft(request: WithdrawArtifactDraftRequest): Promise<ArtifactResult<ArtifactDraftSummary>>;
+  updateArtifactDraftRoster(request: UpdateArtifactDraftRosterRequest): Promise<ArtifactResult<CollectingArtifactReadResult>>;
+  publishArtifact(request: PublishArtifactRequest): Promise<ArtifactResult<PublishedArtifactReadResult>>;
   onArtifactsUpdated(callback: (event: ArtifactsUpdatedEvent) => void): () => void;
   onReviewProgress(callback: (progress: ReviewProgress) => void): () => void;
   onConversationUpdated(callback: (conversation: Conversation) => void): () => void;

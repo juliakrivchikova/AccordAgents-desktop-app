@@ -1,13 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Pencil } from "lucide-react";
 
-import type { ArtifactReadResult } from "../../../shared/types";
-import { artifactMemberLabel, artifactReference } from "../../../shared/artifacts";
-import { MarkdownText } from "../content/markdown-text";
+import type { ArtifactDraftContent, ArtifactDraftView, ArtifactError, PublishedArtifactReadResult } from "../../../shared/types";
+import { artifactMemberLabel } from "../../../shared/artifacts";
 import { IconButton } from "../primitives";
 import { ArtifactApprovalBadge } from "./artifact-approval-badge";
 import { AccessArtifactForm, ReviseArtifactForm } from "./artifact-forms";
 import type { ArtifactAccessValues } from "./artifact-forms";
+import { ArtifactVersionSelector } from "./artifact-version-selector";
+import { ArtifactContentSurface } from "./artifact-content-surface";
 
 export interface ArtifactCompareState {
   fromVersion: number;
@@ -24,7 +25,9 @@ export function formatArtifactTimestamp(value: string): string {
 }
 
 export function ArtifactDetailView(props: {
-  detail: ArtifactReadResult;
+  detail: PublishedArtifactReadResult;
+  drafts: ArtifactDraftView[];
+  draftError?: ArtifactError;
   mode: "view" | "revise" | "access";
   busy: boolean;
   canEdit: boolean;
@@ -33,6 +36,7 @@ export function ArtifactDetailView(props: {
   alreadySigned: boolean;
   reviseBase: number;
   compare?: ArtifactCompareState;
+  showDiff: boolean;
   renaming: boolean;
   renameValue: string;
   onRenameValueChange: (value: string) => void;
@@ -46,24 +50,23 @@ export function ArtifactDetailView(props: {
   onCancelForm: () => void;
   onSign: () => void;
   onShowVersion: (version: number) => void;
-  onCompare: (fromVersion: number, toVersion: number) => void;
+  onShowDiffChange: (showDiff: boolean) => void;
+  onRetryDrafts: () => void;
 }): JSX.Element {
   const { detail } = props;
-  const [referenceCopied, setReferenceCopied] = useState(false);
-  const copiedResetRef = useRef<number | undefined>(undefined);
+  const [selectedDraftId, setSelectedDraftId] = useState<string | undefined>(undefined);
+  const selectedDraft = props.drafts.find((draft) => draft.id === selectedDraftId);
+  const selectedDraftContent = selectedDraft?.hasContent ? selectedDraft as ArtifactDraftContent : undefined;
 
-  useEffect(() => () => window.clearTimeout(copiedResetRef.current), []);
-
-  function copyReference(): void {
-    void navigator.clipboard.writeText(artifactReference(detail.summary.id, detail.summary.name)).then(() => {
-      setReferenceCopied(true);
-      window.clearTimeout(copiedResetRef.current);
-      copiedResetRef.current = window.setTimeout(() => setReferenceCopied(false), 1600);
-    });
-  }
+  useEffect(() => setSelectedDraftId(undefined), [detail.summary.id, detail.version.version]);
+  useEffect(() => {
+    if (selectedDraftId && !props.drafts.some((draft) => draft.id === selectedDraftId)) {
+      setSelectedDraftId(undefined);
+    }
+  }, [props.drafts, selectedDraftId]);
 
   return (
-    <div className="artifacts-panel-body artifact-detail">
+    <div className="artifacts-panel-body artifact-detail" tabIndex={0} aria-label="Artifact details">
       <div className="artifact-detail-head">
         {props.renaming ? (
           <div className="artifact-rename-row">
@@ -86,15 +89,21 @@ export function ArtifactDetailView(props: {
           </h4>
         )}
         <div className="artifact-detail-meta">
-          <span className="artifact-version-chip">v{detail.version.version}{detail.version.version !== detail.summary.headVersion ? ` of ${detail.summary.headVersion}` : ""}</span>
-          <ArtifactApprovalBadge approval={detail.summary.approval} />
+          {selectedDraft ? (
+            <span className="artifact-version-chip artifact-draft-chip">Draft by {artifactMemberLabel(selectedDraft.author)}</span>
+          ) : (
+            <>
+              <span className="artifact-version-chip">v{detail.version.version}{detail.version.version !== detail.summary.headVersion ? ` of ${detail.summary.headVersion}` : ""}</span>
+              <ArtifactApprovalBadge approval={detail.summary.approval} />
+            </>
+          )}
         </div>
         <div className="artifact-people">
           <span>Owner {artifactMemberLabel(detail.summary.owner)}</span>
           {detail.summary.contributors.length > 0 && (
             <span> · Contributors {detail.summary.contributors.map(artifactMemberLabel).join(", ")}</span>
           )}
-          {detail.summary.approval.requiredSigners.length > 0 && (
+          {!selectedDraft && detail.summary.approval.requiredSigners.length > 0 && (
             <span> · Signers {detail.summary.approval.requiredSigners.map((signer) => `${artifactMemberLabel(signer)}${detail.summary.approval.signedCurrent.includes(signer) ? " ✓" : ""}`).join(", ")}</span>
           )}
         </div>
@@ -121,64 +130,96 @@ export function ArtifactDetailView(props: {
         />
       ) : (
         <>
-          <div className="artifact-actions-row">
-            {props.canEdit && <button type="button" className="artifact-primary-action" disabled={props.busy} onClick={props.onStartRevise}>Revise</button>}
-            {props.canSign && (
-              <button
-                type="button"
-                className="artifact-secondary-action"
-                disabled={props.busy || props.alreadySigned}
-                title={props.alreadySigned ? "You already signed this version" : `Sign v${detail.version.version}`}
-                onClick={props.onSign}
-              >
-                {props.alreadySigned ? "Signed ✓" : `Sign v${detail.version.version}`}
-              </button>
-            )}
-            <button
-              type="button"
-              className="artifact-secondary-action"
-              title="Copy a chat reference; it keeps pointing at this artifact even after renames"
-              onClick={copyReference}
-            >
-              {referenceCopied ? "Copied ✓" : "Copy reference"}
-            </button>
-            {props.isOwner && <button type="button" className="artifact-secondary-action" disabled={props.busy} onClick={props.onStartAccess}>Access…</button>}
-          </div>
-          {detail.version.note && <div className="artifact-version-note">Note: {detail.version.note}</div>}
-          <div className="artifact-content-markdown">
-            <MarkdownText content={detail.version.content} />
-          </div>
-          <div className="artifact-history">
-            <h5>History</h5>
-            <ul>
-              {[...(detail.history ?? [])].reverse().map((meta) => (
-                <li key={meta.version} className={meta.version === detail.version.version ? "artifact-history-current" : undefined}>
-                  <button type="button" className="artifact-history-version" onClick={() => props.onShowVersion(meta.version)}>
-                    v{meta.version}
-                  </button>
-                  <span className="artifact-history-meta">
-                    {artifactMemberLabel(meta.author)} · {formatArtifactTimestamp(meta.createdAt)}
-                    {meta.note ? ` · ${meta.note}` : ""}
-                    {meta.signatures.length > 0 ? ` · signed by ${meta.signatures.map((signature) => artifactMemberLabel(signature.signer)).join(", ")}` : ""}
-                  </span>
-                  {meta.version > 1 && (
-                    <button type="button" className="artifact-diff-action" disabled={props.busy} onClick={() => props.onCompare(meta.version - 1, meta.version)}>
-                      diff v{meta.version - 1}→v{meta.version}
-                    </button>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-          {props.compare?.diff !== undefined && (
-            <div className="artifact-compare">
-              <h5>Comparison v{props.compare.fromVersion} → v{props.compare.toVersion}</h5>
-              <pre className="artifact-diff-pre">
-                {props.compare.diff.split("\n").map((line, index) => (
-                  <span key={index} className={diffLineClass(line)}>{line || " "}{"\n"}</span>
-                ))}
-              </pre>
+          <ArtifactVersionSelector
+            key={detail.summary.id}
+            selectedVersion={selectedDraftId ? undefined : detail.version.version}
+            headVersion={detail.summary.headVersion}
+            history={detail.history ?? []}
+            drafts={props.drafts}
+            selectedDraftId={selectedDraftId}
+            onShowVersion={(version) => {
+              setSelectedDraftId(undefined);
+              props.onShowVersion(version);
+            }}
+            onShowDraft={setSelectedDraftId}
+          />
+          {props.draftError ? (
+            <div className="artifact-draft-error" role="alert">
+              <span>Drafts could not be loaded: {props.draftError.message}</span>
+              <button type="button" className="artifact-secondary-action" onClick={props.onRetryDrafts}>Retry</button>
             </div>
+          ) : null}
+          {selectedDraft ? (
+            <>
+              <div className="artifact-draft-author" data-testid="artifact-draft-author">
+                Draft by <strong>{artifactMemberLabel(selectedDraft.author)}</strong>
+              </div>
+              {selectedDraftContent ? (
+                <ArtifactContentSurface
+                  content={selectedDraftContent.content}
+                  testId="artifact-draft-content"
+                />
+              ) : (
+                <div className="artifact-draft-unavailable">Draft content is unavailable.</div>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="artifact-actions-row">
+                {props.canEdit && <button type="button" className="artifact-primary-action" disabled={props.busy} onClick={props.onStartRevise}>Revise</button>}
+                {props.canSign && (
+                  <button
+                    type="button"
+                    className="artifact-secondary-action"
+                    disabled={props.busy || props.alreadySigned}
+                    title={props.alreadySigned ? "You already signed this version" : `Sign v${detail.version.version}`}
+                    onClick={props.onSign}
+                  >
+                    {props.alreadySigned ? "Signed ✓" : `Sign v${detail.version.version}`}
+                  </button>
+                )}
+                {detail.version.version > 1 && (
+                  <label className={`artifact-diff-toggle${props.busy ? " is-disabled" : ""}`}>
+                    <input
+                      type="checkbox"
+                      checked={props.showDiff}
+                      disabled={props.busy}
+                      aria-label="Show diff"
+                      data-testid="artifact-show-diff-toggle"
+                      onChange={(event) => props.onShowDiffChange(event.currentTarget.checked)}
+                    />
+                    <span className="artifact-diff-toggle-track" aria-hidden><span /></span>
+                    <span>Show diff</span>
+                  </label>
+                )}
+                {props.isOwner && <button type="button" className="artifact-secondary-action" disabled={props.busy} onClick={props.onStartAccess}>Access…</button>}
+              </div>
+              {props.showDiff ? (
+                props.compare?.diff !== undefined ? (
+                  <pre
+                    className="artifact-diff-pre"
+                    data-testid="artifact-version-diff"
+                    aria-label={`Changes from v${detail.version.version - 1} to v${detail.version.version}`}
+                  >
+                    {props.compare.diff.split("\n").map((line, index) => (
+                      <span key={index} className={diffLineClass(line)}>{line || " "}{"\n"}</span>
+                    ))}
+                  </pre>
+                ) : (
+                  <div className="artifact-diff-loading" role="status">
+                    {props.busy ? "Loading diff…" : "Diff unavailable."}
+                  </div>
+                )
+              ) : (
+                <>
+                  {detail.version.note && <div className="artifact-version-note">Note: {detail.version.note}</div>}
+                  <ArtifactContentSurface
+                    content={detail.version.content}
+                    testId="artifact-version-content"
+                  />
+                </>
+              )}
+            </>
           )}
         </>
       )}

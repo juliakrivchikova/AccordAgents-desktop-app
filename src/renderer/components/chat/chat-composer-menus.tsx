@@ -9,7 +9,7 @@ import type {
   RepoFileSearchResult,
   UserSkillSummary
 } from "../../../shared/types";
-import { artifactApprovalShortLabel } from "../../../shared/artifacts";
+import { artifactSummaryStatusLabel } from "../../../shared/artifacts";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import { providerLabel } from "./chat-conversation-data";
 import {
@@ -99,7 +99,7 @@ export function ChatComposerMenus(props: {
             >
               <span className="file-mention-icon"><FileBox size={18} /></span>
               <strong>{artifact.name}</strong>
-              <span>{`v${artifact.headVersion} · ${artifactApprovalShortLabel(artifact.approval)}`}</span>
+              <span>{artifactSummaryStatusLabel(artifact)}</span>
               {index === 0 && <kbd>Enter</kbd>}
             </button>
           ))}

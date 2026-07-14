@@ -20,10 +20,22 @@ participant. Not for an ordinary answer, a normal review, a "double-check", or a
 "what do you think". When unsure whether User wants multiple participants, ask
 first.
 
-## Core Rule — approval = signatures on the current version
+## Core Rules — independent drafts first; approval = current signatures
 
-The resolution is one artifact whose `requiredSigners` are you (the facilitator)
-and every selected participant. Consensus is reached only when
+Before anyone sees another participant's proposal, every Accord author must submit
+one frozen, attributable draft to the same collecting artifact. You (the
+facilitator) submit first, before requesting participants. Each selected
+participant submits independently. Draft bodies are not chat content: User can
+always read every draft; you can read every participant draft because each
+participant explicitly includes you in its audience; peers cannot read one
+another's drafts. Public chat may say that a draft was submitted, but must never
+contain draft content, snippets, readers, or summaries.
+
+After all required drafts are frozen, publish canonical `v1` by synthesizing them
+and recording every required current draft as a considered source. Draft
+authorship is provenance, never approval and never a signature. The published
+resolution's `requiredSigners` are you and every selected participant. Consensus
+is reached only when
 `approval.state === "approved"` — every required signer has signed the **current**
 version — you have signed it too, and no selected participant has an open
 objection against that version. Approval is signature identity on the current
@@ -37,48 +49,71 @@ sign round — the artifact tracks "who approved the current version" for you.
 
 ## State machine
 
-classify → select → review → create/revise → sign → verify (→ resume if
-interrupted). Match ceremony to the decision; only the number of rounds and the
-resolution's size scale, never the mechanism.
+classify → select → create collection → facilitator draft → blind participant
+drafts → synthesize/publish v1 → sign → verify (→ resume if interrupted). Match
+the resolution's size to the decision; never skip independent draft submission.
 
-1. **Classify.** Open/architectural (several valid approaches, real trade-offs, a
-   plan to design) → full flow. Concrete/bounded (a specific fix or single named
-   decision where the proposal *is* the change) → collapsed path, allowed only
-   when ALL hold: complete and directly reviewable; low-risk; touches no security,
-   permissions, persistence, concurrency, deletion, billing, or external side
-   effect; no User-owned decision or open concern. If any is unclear, use the full
-   flow.
+1. **Classify.** Decide how much analysis and how many correction rounds the
+   question needs. Concrete/bounded decisions may produce short drafts, but they
+   still use the same independent-draft, publication, and signature mechanism.
 2. **Select participants** (see Participant Selection).
-3. **Review.** Full flow: ask each selected participant for independent skeptical
-   review of the original question/artifact — do not bias them with your own draft
-   unless User asked everyone to review it. Collapsed path: skip this independent
-   review round; participants review the candidate resolution directly in the
-   Step 5 sign round.
-4. **Create/revise the resolution.** Merge your own facilitator input and the
-   replies into one candidate; keep every substantive concern until it is
+3. **Create the collection.** Create exactly one artifact with
+   `initialState: "collecting_drafts"`. Its allowed and required draft authors are
+   you plus every selected participant. Audience policy is explicit per author:
+   your allowed/required readers are empty; every participant's allowed and
+   required readers contain only you. User and each draft author are implicit
+   readers. Use `accord:<chatThreadRootId>:create` as the stable operation id.
+   Do not set required signers yet. Do not create a second resolution artifact on
+   retry or resume. Immediately read the collecting artifact back and assert the
+   normalized audience policy before any participant request: your policy has no
+   explicit readers, and every selected participant's allowed and required reader
+   lists contain exactly you. If any selected participant can read another
+   participant's draft, stop and correct the roster policy first.
+4. **Submit your facilitator draft first.** Before asking any participant,
+   formulate your own concrete independent resolution. Save it with no explicit
+   readers, then submit/freeze it. Use stable operation ids derived from the root,
+   such as `accord:<chatThreadRootId>:draft:<facilitator>:save:1` and
+   `accord:<chatThreadRootId>:draft:<facilitator>:submit`. Verify your draft is
+   `submitted`. Never paste or summarize its body in chat.
+5. **Collect blind participant drafts.** Only after Step 4 is durable, request
+   each selected participant using the Independent Draft Prompt. Each participant
+   must save and submit one proposal whose only explicit reader is you. A response
+   containing prose without a frozen draft is incomplete. After replies, read the
+   artifact's durable draft state and verify one current submitted draft for every
+   required author. Do not treat chat replies as proposal storage. Do not publish
+   early.
+6. **Synthesize and publish v1.** Read all submitted drafts through the artifact
+   service. Merge your facilitator input and the participant proposals into one
+   candidate; keep every substantive concern until it is
    incorporated, or reframed/rejected/User-resolved with visible reasoning (see
    Reasoning / Dispositions); separate User-owned decisions from technical ones.
-   Self-review skeptically before writing. On the **first** round, create the
-   artifact with `app_artifact_create` and `requiredSigners` = you + the selected
-   participants. On **every later** round — including a collapsed-path escalation —
-   `app_artifact_revise` that same artifact: revise preserves the signer set and
-   starts a new unsigned version, so never recreate it, never start a second
-   resolution artifact, and never restart independent review.
+   Self-review skeptically, then publish canonical v1 on that same artifact with
+   `requiredSigners` = you + selected participants. The source manifest must list
+   every current required draft as `considered`; do not imply signatures. Use
+   `accord:<chatThreadRootId>:publish:v1` as the stable operation id. On every
+   later correction, revise that same published artifact: revision preserves the
+   signer set and starts a new unsigned version. Never recreate it and never
+   restart independent draft collection merely because a signing concern caused
+   a revision.
 
-   Changing the selected-participant set is a User-approved action, not a
-   facilitator shortcut, and the order matters: `app_artifact_set_access` mutates
-   `requiredSigners` on the current version *without* versioning or clearing
-   signatures, so changing signers before revising can transiently mark a signed
-   version approved (an observer could read consensus in that gap). Do it in this
-   order: (a) get User approval; (b) `app_artifact_revise` **first**, producing a
-   fresh unsigned version; (c) then `app_artifact_set_access` to the new signer
-   set; (d) verify the current version is still unsigned and the signer set is
-   exactly you + the selected participants; (e) give any newly added participant
-   the Step 3 independent review (full flow); (f) rerun the full sign round.
-5. **Sign.** Sign the current version yourself, then ask each selected participant
-   to read the artifact and sign it (see Approval Prompt). On the collapsed path
-   this sign round is also their first look at the candidate.
-6. **Verify.** `app_artifact_read` and confirm `approval.state === "approved"` and
+   Before publishing, inspect every current submitted draft and assert its actual
+   `effectiveReaders` set: your facilitator draft is readable by exactly User and
+   you; each participant draft is readable by exactly User, its author, and you.
+   If any peer participant appears, or any expected reader is absent, stop and
+   correct the draft/roster state before synthesis. Policy intent alone is not
+   sufficient evidence of blind collection.
+
+   Changing the selected-participant set is User-approved. While collecting,
+   update the roster and audience policy with the current roster revision, then
+   collect any newly required independent draft before publication. After
+   publication, the order matters: (a) get User approval; (b)
+   `app_artifact_revise` first, producing a fresh unsigned version; (c) then
+   `app_artifact_set_access`; (d) verify the signer set and unsigned state; (e)
+   request a focused independent assessment from a newly added participant; (f)
+   rerun the full sign round.
+7. **Sign.** Sign the current version yourself, then ask each selected participant
+   to read the published artifact and sign it (see Approval Prompt).
+8. **Verify.** `app_artifact_read` and confirm `approval.state === "approved"` and
    `signedCurrent` covers you and every selected participant (identity, not count).
    Also read replies: address any concern raised without a signature before
    claiming consensus. If a reply corrects the resolution, do not re-ask for a
@@ -137,22 +172,24 @@ JSON. Reference the resolution as a link: `[the resolution](#artifact:ARTIFACT_I
 (it renders the current name and approval badge; that link is the only reference
 anyone needs).
 
-Independent review:
+Independent draft submission:
 
 ```text
-Review this independently. Do not agree by default.
+Create your own independent proposal before seeing anyone else's. Do not agree by
+default and do not ask for another proposal.
 
 Question/artifact:
 ...
 
-Look for blockers, wrong assumptions, missing edge cases, hidden requirements,
-simpler alternatives, and verification gaps. <one task-specific line — e.g. plan
-corrections and missing steps; code-review findings with severity and evidence;
-decision trade-off gaps; bug repro/regression risks; API migration/compatibility;
-UI states and accessibility; test coverage; or spec ambiguities.>
+Submit your complete proposal as a draft on [the collecting
+resolution](#artifact:ARTIFACT_ID). Share its content only with the facilitator;
+User and you already have implicit access. Save, then submit/freeze it. Use stable
+retry keys derived from this request's chat-thread root so a resumed request does
+not create a duplicate.
 
-Reply with the concrete concern, correction, or risk, or say you have none. Your
-reply is shared with everyone — do not repost it separately.
+Your chat reply is public metadata only. Say that the draft was submitted, or
+report a blocking error. Do not include its content, snippets, readers, summary,
+or conclusions in chat.
 ```
 
 Approval round:
@@ -171,13 +208,20 @@ Your reply reaches everyone; do not repost it separately.
 ## Resume
 
 A turn can end mid-accord (a request returns `pending_approval` or `running`, or
-the run is interrupted). On re-entry, do not blindly recreate or re-request. Read
-the original and approval-request threads and the request status, then
-`app_artifact_read` the resolution. Its `signedCurrent` is the source of truth for
-who approved the current version; the request thread carries unresolved replies.
-Artifact versions have no chat-sequence boundary — do not look for replies "since a
-version". Resume from the first incomplete step, revising the existing artifact
-when the resolution must change.
+the run is interrupted). On re-entry, do not blindly recreate, resave, resubmit,
+publish, or re-request. Read the original/request threads and request status, then
+read the resolution artifact:
+
+- `collecting_drafts`: roster, current submitted drafts, and missing required
+  authors are the source of truth. Resume from the first incomplete author. A
+  submitted facilitator draft means participant requests may begin. Stable
+  operation ids make lost responses safe to retry.
+- `published`: v1 and its source manifest are the source of truth that synthesis
+  completed. `signedCurrent` is the source of truth for current approvals; the
+  request thread carries unresolved signing replies.
+
+Artifact versions have no chat-sequence boundary — do not look for replies "since
+a version". Revise the published artifact when the resolution must change.
 
 ## Final Output
 
@@ -197,14 +241,16 @@ Blocking issue / Remaining objection (per participant) / User decision needed.
 
 - `app_chat_get_participants` — roster. `app_chat_read_messages` — context and
   replies. `app_chat_request_participants` — participant answers/approvals.
-- `app_artifact_create` sets the resolution and its `requiredSigners` (first round
-  only). `app_artifact_revise` starts a new unsigned version and preserves the
-  signer set. `app_artifact_set_access` changes the signer set (only on a
-  User-approved participant-set change); it does not version or clear signatures,
-  so it must come *after* a `revise` that has already produced a fresh unsigned
-  version — never before (see Step 4). `app_artifact_sign` signs the current
-  version. `app_artifact_read` / `app_artifact_diff` verify `approval` and compare
-  versions.
+- First round: `app_artifact_create` with `collecting_drafts` creates the durable
+  inbox; draft save/submit tools create attributable frozen proposals;
+  `app_artifact_draft_read` enforces content audiences; `app_artifact_publish`
+  atomically creates v1, its source manifest, and required signers only after all
+  required drafts are submitted.
+- Later rounds: `app_artifact_revise` starts a new unsigned version and preserves
+  the signer set. `app_artifact_set_access` changes signers only after a fresh
+  revise for a User-approved participant change. `app_artifact_sign` signs the
+  current version. `app_artifact_read` / `app_artifact_diff` verify approval and
+  compare published versions.
 - Reach participants only through the participant-request flow: do not rely on
   plain `@mentions`, and put no `@handle` in any accord message (it can trigger an
   unintended extra run) — refer to participants by plain name.
