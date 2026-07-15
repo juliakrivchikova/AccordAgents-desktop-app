@@ -103,6 +103,13 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setError("Enter a message or attach an image to start a chat.");
       return false;
     }
+    const resolveProvider = (agents: typeof state.agents) => resolveAssistantProviderKind({
+      agents,
+      providers: state.settings.providers,
+      explicitKind: state.selectedAssistantProviderKind ?? state.settings.assistantProviderKind,
+      lastSuccessfulKind: state.settings.lastSuccessfulChatProviderKind,
+      setupCompletedKind: state.setupCompletedProviderKind
+    });
     let agents = state.agents;
     if (isAgentSnapshotStale(agents)) {
       try {
@@ -112,15 +119,9 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         return false;
       }
     }
-    const assistantProviderKind = resolveAssistantProviderKind({
-      agents,
-      providers: state.settings.providers,
-      explicitKind: state.selectedAssistantProviderKind,
-      lastSuccessfulKind: state.settings.lastSuccessfulChatProviderKind,
-      setupCompletedKind: state.setupCompletedProviderKind
-    });
+    const assistantProviderKind = resolveProvider(agents);
     if (!assistantProviderKind) {
-      state.setError("Choose which ready CLI provider should power the Assistant.");
+      state.setError("Choose an Assistant provider above or in General Settings, then try again.");
       return false;
     }
     const participants = selectedOrMentionedChatParticipantDrafts(

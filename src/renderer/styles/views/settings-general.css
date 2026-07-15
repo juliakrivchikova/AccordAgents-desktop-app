@@ -236,6 +236,11 @@
   min-width: 92px;
 }
 
+.settings-view .assistant-provider-select {
+  width: 206px;
+  flex-shrink: 0;
+}
+
 /* ---- File-open dropdown pill ---- */
 
 .settings-view .gen-dropdown {

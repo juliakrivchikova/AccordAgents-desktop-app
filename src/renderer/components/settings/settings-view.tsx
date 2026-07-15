@@ -5,6 +5,7 @@ import type {
   AppSettings,
   ChatBehaviorRuleConfigUpdate,
   ChatParticipantConfigUpdate,
+  ChatProviderKind,
   ChatPromptContextSettings,
   ChatRoleConfigUpdate,
   ChatSavedPromptConfigUpdate,
@@ -34,6 +35,7 @@ export function SettingsView(props: {
   settings: AppSettings;
   agents: AgentHealth[];
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
+  setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => Promise<void>;
   archiveChatRoleConfig: (id: string) => Promise<void>;
   saveChatBehaviorRuleConfig: (update: ChatBehaviorRuleConfigUpdate) => Promise<void>;
@@ -156,6 +158,7 @@ export function SettingsView(props: {
           <GeneralSettingsSection
             providers={props.settings.providers}
             agents={props.agents}
+            assistantProviderKind={props.settings.assistantProviderKind}
             repoFileOpenAction={props.settings.repoFileOpenAction}
             cliAgentRunTimeoutMs={props.settings.cliAgentRunTimeoutMs}
             chatParticipantRequestMaxDepth={props.settings.chatParticipantRequestMaxDepth}
@@ -163,6 +166,7 @@ export function SettingsView(props: {
             chatAutoWatchWakeLimit={props.settings.chatAutoWatchWakeLimit}
             chatPromptContext={props.settings.chatPromptContext}
             updateProvider={props.updateProvider}
+            setAssistantProviderKind={props.setAssistantProviderKind}
             setRepoFileOpenPreference={props.setRepoFileOpenPreference}
             setCliAgentRunTimeoutMs={props.setCliAgentRunTimeoutMs}
             setChatParticipantRequestMaxDepth={props.setChatParticipantRequestMaxDepth}

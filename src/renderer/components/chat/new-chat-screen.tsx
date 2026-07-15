@@ -110,7 +110,7 @@ export function NewChatScreen(props: {
   onSelectedParticipantRunLocationsChange: Dispatch<SetStateAction<Record<string, CloudRunRemoteExecutionMode>>>;
   onOpenParticipantsSettings: () => void;
   onOpenProviderSettings: () => void;
-  onSelectedAssistantProviderKindChange: (kind: ChatProviderKind | undefined) => void;
+  onSelectedAssistantProviderKindChange: (kind: ChatProviderKind) => void | Promise<void>;
   onSetupCompletedProviderKindChange: (kind: ChatProviderKind | undefined) => void;
   onRefreshAgents: () => Promise<AgentHealth[]>;
   onStart: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => boolean | void | Promise<boolean | void>;
@@ -127,14 +127,15 @@ export function NewChatScreen(props: {
     () => readyProviderKinds(props.agents, props.settings.providers),
     [props.agents, props.settings.providers]
   );
+  const configuredAssistantProviderKind = props.selectedAssistantProviderKind ?? props.settings.assistantProviderKind;
   const assistantProviderKind = useMemo(
     () => resolveAssistantProviderKind({
       agents: props.agents,
       providers: props.settings.providers,
-      explicitKind: props.selectedAssistantProviderKind,
+      explicitKind: configuredAssistantProviderKind,
       lastSuccessfulKind: props.settings.lastSuccessfulChatProviderKind
     }),
-    [props.agents, props.selectedAssistantProviderKind, props.settings.lastSuccessfulChatProviderKind, props.settings.providers]
+    [configuredAssistantProviderKind, props.agents, props.settings.lastSuccessfulChatProviderKind, props.settings.providers]
   );
   const assistantParticipant = useMemo(
     () => assistantProviderKind ? newChatAssistantParticipant(assistantProviderKind) : undefined,
@@ -204,7 +205,7 @@ export function NewChatScreen(props: {
     props.settings.providers
   );
   const hasPrompt = props.prompt.trim().length > 0;
-  const canStart = Boolean(assistantProviderKind) && (hasPrompt || images.readyImages.length > 0 || mentions.selectedSkillMentions.length > 0) && !images.hasInvalidImages && !props.busy && !validation;
+  const canSubmit = (hasPrompt || images.readyImages.length > 0 || mentions.selectedSkillMentions.length > 0) && !images.hasInvalidImages && !props.busy && !validation;
   const hasLeadingPluginToken = draftStartsWithPluginMention(props.prompt, mentions.selectedPluginMentions);
 
   useLayoutEffect(() => {
@@ -286,7 +287,7 @@ export function NewChatScreen(props: {
   }
 
   async function startChat(): Promise<void> {
-    if (!canStart) return;
+    if (!canSubmit) return;
     const fileMentionsToSend = mentions.selectedFileMentions;
     const skillMentionsToSend = mentions.selectedSkillMentions;
     const imageInputs = images.readyImages.map((image): ChatImageInput => ({
@@ -319,7 +320,7 @@ export function NewChatScreen(props: {
           onOpenSettings={props.onOpenProviderSettings}
           onProviderReady={(kind) => {
             props.onSetupCompletedProviderKindChange(kind);
-            props.onSelectedAssistantProviderKindChange(kind);
+            void props.onSelectedAssistantProviderKindChange(kind);
           }}
         />
       )}
@@ -327,12 +328,12 @@ export function NewChatScreen(props: {
       {readyKinds.length > 0 && !assistantProviderKind && (
         <div className="new-chat-provider-choice" data-testid="new-chat-provider-choice">
           <strong>Choose the Assistant provider</strong>
-          <span>{props.selectedAssistantProviderKind
+          <span>{configuredAssistantProviderKind
             ? "The selected provider is no longer ready. Choose another ready provider."
             : "All ready providers are available equally."}</span>
           <div>
             {CLI_PROVIDER_DISPLAY_ORDER.filter((kind) => readyKinds.includes(kind)).map((kind) => (
-              <button type="button" key={kind} onClick={() => props.onSelectedAssistantProviderKindChange(kind)}>
+              <button type="button" key={kind} onClick={() => void props.onSelectedAssistantProviderKindChange(kind)}>
                 {cliProviderMetadata(kind).label}
               </button>
             ))}
@@ -515,7 +516,7 @@ export function NewChatScreen(props: {
           <button
             type="button"
             className="new-chat-send"
-            disabled={!canStart}
+            disabled={!canSubmit}
             title="Start chat"
             aria-label="Start chat"
             data-testid="new-chat-start"

@@ -60,6 +60,60 @@ test("multiple ready providers render a neutral New Chat without a hidden Assist
   renderer.unmount();
 });
 
+test("saved Assistant provider hides the provider choice", () => {
+  installWindowBridge();
+  const renderer = create(<NewChatScreen
+    {...baseProps(readyAgents(), { settings: { ...SETTINGS, assistantProviderKind: "codex-cli" } })}
+  />);
+
+  assert.doesNotMatch(textOf(renderer.root), /Choose the Assistant provider/);
+  renderer.unmount();
+});
+
+test("unavailable saved Assistant provider requires an explicit replacement", () => {
+  installWindowBridge();
+  const renderer = create(<NewChatScreen
+    {...baseProps([readyAgent("codex-cli")], {
+      settings: { ...SETTINGS, assistantProviderKind: "claude-code" }
+    })}
+  />);
+
+  assert.match(textOf(renderer.root), /selected provider is no longer ready/i);
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "new-chat-provider-choice" })), /Codex/);
+  renderer.unmount();
+});
+
+test("inline Assistant choice delegates to the global provider setting callback", async () => {
+  installWindowBridge();
+  let selected: string | undefined;
+  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), {
+    onSelectedAssistantProviderKindChange: (kind: string) => { selected = kind; }
+  })} />);
+
+  const codex = renderer.root.findAllByType("button").find((button) => textOf(button) === "Codex");
+  assert.ok(codex);
+  await click(codex);
+  assert.equal(selected, "codex-cli");
+  renderer.unmount();
+});
+
+test("send without a configured Assistant provider reaches the action error path", async () => {
+  installWindowBridge();
+  let startCalls = 0;
+  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), {
+    onStart: async () => {
+      startCalls += 1;
+      return false;
+    }
+  })} />);
+
+  const start = renderer.root.findByProps({ "data-testid": "new-chat-start" });
+  assert.equal(start.props.disabled, false);
+  await click(start);
+  assert.equal(startCalls, 1);
+  renderer.unmount();
+});
+
 test("complete controlled New Chat draft survives unmount and is submitted intact", async () => {
   installWindowBridge();
   const fileMentions: RepoFileMention[] = [{ path: "src/main.ts" }];

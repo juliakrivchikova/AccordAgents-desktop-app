@@ -2,6 +2,7 @@ import type {
   AgentEnvironmentSnapshot,
   ChatBehaviorRuleConfigUpdate,
   ChatParticipantConfigUpdate,
+  ChatProviderKind,
   ChatPromptContextSettings,
   ChatRoleConfigUpdate,
   ChatSavedPromptConfigUpdate,
@@ -16,6 +17,7 @@ import type { AppState } from "./app-state";
 
 export interface SettingsActions {
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean; model?: string }) => Promise<void>;
+  setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
@@ -52,6 +54,19 @@ export function useSettingsActions(state: AppState): SettingsActions {
         state.setAgents((current) => current.map((agent) => ({ ...agent, checking: false })));
         state.setError(errorText(caught));
       }
+    }
+  }
+
+  async function setAssistantProviderKind(kind: ChatProviderKind): Promise<void> {
+    state.setError(undefined);
+    const previous = state.selectedAssistantProviderKind;
+    state.setSelectedAssistantProviderKind(kind);
+    try {
+      const next = await window.consensus.setAssistantProviderKind(kind);
+      state.setSettings(next);
+    } catch (caught) {
+      state.setSelectedAssistantProviderKind(previous);
+      state.setError(errorText(caught));
     }
   }
 
@@ -194,6 +209,7 @@ export function useSettingsActions(state: AppState): SettingsActions {
 
   return {
     updateProvider,
+    setAssistantProviderKind,
     setRepoFileOpenPreference,
     setCliAgentRunTimeoutMs,
     setChatParticipantRequestMaxDepth,

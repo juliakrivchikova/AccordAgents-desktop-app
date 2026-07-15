@@ -4,6 +4,7 @@ import { Check, CheckCircle2, ChevronDown, Code2, Copy, ExternalLink, FolderOpen
 
 import type {
   AgentHealth,
+  ChatProviderKind,
   CloudRunsSettings,
   CloudRunsSettingsUpdate,
   CloudRunWorkerDoctorReport,
@@ -34,6 +35,8 @@ import {
 import { writeClipboardText, type ClipboardWriteResult } from "../../../shared/clipboard";
 import { AwsWorkerPanel as SharedAwsWorkerPanel } from "./aws-worker-panel";
 import { deriveAgentReadiness } from "../../../shared/cliReadiness";
+import { isChatProviderKind } from "../../../shared/chatProviders";
+import { AppSelect } from "../primitives";
 
 const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits transitive member-to-member request nesting, not repeated rounds by the same requester.";
 const PARTICIPANT_REQUEST_PROMPT_MAX_HELP = "Maximum characters accepted for each member request prompt. Longer prompts are rejected, not truncated.";
@@ -49,6 +52,7 @@ const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
 export function GeneralSettingsSection(props: {
   providers: ProviderSettings[];
   agents: AgentHealth[];
+  assistantProviderKind?: ChatProviderKind;
   repoFileOpenAction?: RepoFileOpenAction;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
@@ -57,6 +61,7 @@ export function GeneralSettingsSection(props: {
   chatPromptContext: ChatPromptContextSettings;
   cloudRuns: CloudRunsSettings;
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
+  setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
@@ -112,6 +117,36 @@ export function GeneralSettingsSection(props: {
       <section className="gen-section">
         <h2 className="gen-section-title gen-section-title-solo">General</h2>
         <div className="gen-card">
+          <div className="gen-row">
+            <div className="gen-row-text">
+              <div className="gen-row-title">Assistant provider</div>
+              <div className="gen-row-desc">Default CLI used by the built-in Assistant in new chats.</div>
+            </div>
+            <AppSelect
+              value={props.assistantProviderKind ?? ""}
+              options={props.providers.filter((provider) => isChatProviderKind(provider.kind)).map((provider) => {
+                const readiness = deriveAgentReadiness(
+                  props.agents.find((agent) => agent.kind === provider.kind),
+                  provider.enabled
+                );
+                return {
+                  value: provider.kind,
+                  label: readiness === "ready" ? provider.label : `${provider.label} (not ready)`,
+                  disabled: readiness !== "ready"
+                };
+              })}
+              placeholder="Choose provider"
+              ariaLabel="Assistant provider"
+              testId="assistant-provider-select"
+              className="assistant-provider-select"
+              onValueChange={(value) => {
+                if (isChatProviderKind(value)) {
+                  void props.setAssistantProviderKind(value);
+                }
+              }}
+            />
+          </div>
+          <div className="gen-card-divider" />
           <div className="gen-row">
             <div className="gen-row-text">
               <div className="gen-row-title">Default file open destination</div>

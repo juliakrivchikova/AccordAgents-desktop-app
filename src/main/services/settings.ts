@@ -118,6 +118,7 @@ interface StoredSettings {
   };
   awsWorkerVolumeExpansion?: AwsWorkerVolumeExpansion;
   agentEnvironment?: StoredAgentEnvironmentSettings;
+  assistantProviderKind?: ChatProviderKind;
   lastSuccessfulChatProviderKind?: ChatProviderKind;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
@@ -1745,6 +1746,8 @@ export class SettingsService {
       chatAutoWatchWakeLimit: this.normalizeChatAutoWatchWakeLimit(stored.chatAutoWatchWakeLimit),
       chatPromptContext: this.normalizeChatPromptContextSettings(stored.chatPromptContext),
       cloudRuns: this.normalizeCloudRunsSettings(stored),
+      assistantProviderKind: this.normalizeChatProviderKind(stored.assistantProviderKind)
+        ?? this.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind),
       lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind),
       lastRepoPath: stored.lastRepoPath,
       repoFileOpenAction: stored.repoFileOpenAction,
@@ -1829,6 +1832,20 @@ export class SettingsService {
       provider.model = update.model.trim();
     }
 
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
+  async setAssistantProviderKind(kind: ChatProviderKind): Promise<AppSettings> {
+    const stored = await this.readStored();
+    const normalized = this.normalizeChatProviderKind(kind);
+    if (!normalized) {
+      throw new Error(`Unknown Assistant provider: ${kind}`);
+    }
+    if (stored.assistantProviderKind === normalized) {
+      return this.getPublicSettings();
+    }
+    stored.assistantProviderKind = normalized;
     await this.writeStored(stored);
     return this.getPublicSettings();
   }
@@ -2652,6 +2669,8 @@ export class SettingsService {
       agentEnvironment: {
         variables: this.normalizeAgentEnvironmentVariables(settings.agentEnvironment?.variables)
       },
+      assistantProviderKind: this.normalizeChatProviderKind(settings.assistantProviderKind)
+        ?? this.normalizeChatProviderKind(settings.lastSuccessfulChatProviderKind),
       lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(settings.lastSuccessfulChatProviderKind),
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
       repoFileOpenAction: this.normalizeRepoFileOpenAction(settings.repoFileOpenAction),

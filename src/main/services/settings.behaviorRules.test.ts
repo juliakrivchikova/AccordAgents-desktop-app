@@ -79,7 +79,10 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     chatBehaviorRules: stored.chatBehaviorRules,
     chatSavedPrompts: stored.chatSavedPrompts,
     chatParticipantConfigs: stored.chatParticipantConfigs,
-    chatParticipantSeedState: stored.chatParticipantSeedState
+    chatParticipantSeedState: stored.chatParticipantSeedState,
+    assistantProviderKind: service.normalizeChatProviderKind(stored.assistantProviderKind)
+      ?? service.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind),
+    lastSuccessfulChatProviderKind: service.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind)
   });
 
   return {
@@ -210,6 +213,33 @@ test("last successful chat provider persists idempotently", async () => {
   await service.recordSuccessfulChatProvider("codex-cli");
   assert.equal(stored().lastSuccessfulChatProviderKind, "codex-cli");
   assert.equal(writeCount(), 2);
+});
+
+test("Assistant provider preference persists immediately and falls back to the last successful provider", async () => {
+  const { service, stored, writeCount } = settingsServiceWithStoredSettings({
+    lastSuccessfulChatProviderKind: "claude-code"
+  });
+
+  assert.equal((await service.getPublicSettings()).assistantProviderKind, "claude-code");
+
+  const updated = await service.setAssistantProviderKind("codex-cli");
+  assert.equal(stored().assistantProviderKind, "codex-cli");
+  assert.equal(updated.assistantProviderKind, "codex-cli");
+  assert.equal(writeCount(), 1);
+
+  await service.setAssistantProviderKind("codex-cli");
+  assert.equal(writeCount(), 1);
+});
+
+test("invalid Assistant provider preference is rejected without writing settings", async () => {
+  const { service, stored, writeCount } = settingsServiceWithStoredSettings();
+
+  await assert.rejects(
+    service.setAssistantProviderKind("openai"),
+    /Unknown Assistant provider: openai/
+  );
+  assert.equal(stored().assistantProviderKind, undefined);
+  assert.equal(writeCount(), 0);
 });
 
 test("participant request max depth defaults to 2 and persists bounded values", async () => {

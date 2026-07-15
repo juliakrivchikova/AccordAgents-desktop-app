@@ -817,7 +817,7 @@ export class ChatService {
       const assistantProviderKind = resolveAssistantProviderKind({
         agents,
         providers: settings.providers,
-        explicitKind: request.assistantProviderKind,
+        explicitKind: request.assistantProviderKind ?? settings.assistantProviderKind,
         lastSuccessfulKind: settings.lastSuccessfulChatProviderKind
       });
       if (!assistantProviderKind) {
@@ -3410,6 +3410,7 @@ export class ChatService {
     const defaultKind = resolveAssistantProviderKind({
       agents,
       providers: settings.providers,
+      explicitKind: settings.assistantProviderKind,
       lastSuccessfulKind: settings.lastSuccessfulChatProviderKind
     }) ?? requester.kind;
     const providers: ChatRosterAvailableProvider[] = await Promise.all((["codex-cli", "claude-code", "gemini-cli"] as ChatProviderKind[]).map(async (kind) => {
@@ -9039,6 +9040,7 @@ export class ChatService {
     const kind = resolveAssistantProviderKind({
       agents,
       providers,
+      explicitKind: settings.assistantProviderKind,
       lastSuccessfulKind: settings.lastSuccessfulChatProviderKind
     });
     if (!kind) {

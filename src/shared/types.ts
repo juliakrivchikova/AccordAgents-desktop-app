@@ -334,6 +334,7 @@ export interface AppSettings {
   chatSavedPrompts: ChatSavedPromptConfig[];
   chatParticipantConfigs: ChatParticipantConfig[];
   chatParticipantSeedState?: ChatParticipantSeedState;
+  assistantProviderKind?: ChatProviderKind;
   lastSuccessfulChatProviderKind?: ChatProviderKind;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
@@ -2231,6 +2232,7 @@ export interface AppBridge {
   saveAgentEnvironmentVariable(request: SaveAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot>;
   deleteAgentEnvironmentVariable(request: DeleteAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot>;
   getSettings(): Promise<AppSettings>;
+  setAssistantProviderKind(kind: ChatProviderKind): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;
   archiveChatRoleConfig(id: string): Promise<AppSettings>;

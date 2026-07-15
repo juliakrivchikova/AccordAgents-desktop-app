@@ -4781,6 +4781,26 @@ test("chat creation uses the sole ready provider without a hidden priority fallb
   assert.equal(assistant?.kind, "gemini-cli");
 });
 
+test("chat creation uses the saved Assistant provider when multiple CLIs are ready", async () => {
+  const agents: AgentHealth[] = [
+    { kind: "codex-cli", label: "Codex", installed: true, detection: "detected", runnable: "ready", authentication: "ready" },
+    { kind: "claude-code", label: "Claude Code", installed: true, detection: "detected", runnable: "ready", authentication: "ready" }
+  ];
+  const { service } = testService({
+    agents,
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], assistantProviderKind: "codex-cli" }
+  });
+
+  const result = await service.createConversation({
+    title: "Fresh chat",
+    participants: [],
+    skipDefaultParticipants: true
+  });
+  const assistant = (result.conversation.metadata.participants as ChatParticipant[])
+    .find((participant) => participant.roleConfigId === ADMIN_ROLE.id);
+  assert.equal(assistant?.kind, "codex-cli");
+});
+
 test("chat creation allows an unready provider only for remote participants", async () => {
   const agents: AgentHealth[] = [
     { kind: "codex-cli", label: "Codex", installed: true, detection: "detected", runnable: "ready", authentication: "ready" },
@@ -9172,6 +9192,8 @@ function testService(options: {
     chatAutoWatchWakeLimit?: number;
     chatPromptContext?: AppSettings["chatPromptContext"];
     cloudRuns?: Partial<AppSettings["cloudRuns"]>;
+    assistantProviderKind?: ChatProviderKind;
+    lastSuccessfulChatProviderKind?: ChatProviderKind;
   };
 } = {}): { service: ChatService; storage: any; settingsState: {
   chatRoleConfigs: ChatRoleConfig[];
@@ -9246,7 +9268,9 @@ function testService(options: {
     chatBehaviorRules: clone(settingsState.chatBehaviorRules),
     chatSavedPrompts: [],
     chatParticipantConfigs: clone(settingsState.chatParticipantConfigs),
-    chatParticipantSeedState: {}
+    chatParticipantSeedState: {},
+    assistantProviderKind: options.settings?.assistantProviderKind,
+    lastSuccessfulChatProviderKind: options.settings?.lastSuccessfulChatProviderKind
   });
   const roleIdFromLabel = (label: string): string =>
     `custom-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "role"}-test`;

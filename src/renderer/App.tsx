@@ -368,6 +368,7 @@ function App(): JSX.Element {
           settings={state.settings}
           agents={state.agents}
           updateProvider={settingsActions.updateProvider}
+          setAssistantProviderKind={settingsActions.setAssistantProviderKind}
           saveChatRoleConfig={settingsActions.saveChatRoleConfig}
           archiveChatRoleConfig={settingsActions.archiveChatRoleConfig}
           saveChatBehaviorRuleConfig={settingsActions.saveChatBehaviorRuleConfig}
@@ -464,7 +465,7 @@ function App(): JSX.Element {
                 onSelectedParticipantRunLocationsChange={state.setSelectedChatParticipantRunLocations}
                 onOpenParticipantsSettings={() => openSettingsSection("participants")}
                 onOpenProviderSettings={() => openSettingsSection("general")}
-                onSelectedAssistantProviderKindChange={state.setSelectedAssistantProviderKind}
+                onSelectedAssistantProviderKindChange={settingsActions.setAssistantProviderKind}
                 onSetupCompletedProviderKindChange={state.setSetupCompletedProviderKind}
                 onRefreshAgents={() => conversationActions.refreshAgents({ force: true, trigger: "manual" })}
                 onStart={(repoFileMentions, imageAttachments, skillMentions) => chatActions.startChat({ repoFileMentions, imageAttachments, skillMentions })}
