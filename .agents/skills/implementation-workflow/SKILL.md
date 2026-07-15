@@ -164,14 +164,16 @@ Post the assignment for everyone to get familiar. Mention both drafters and quot
 acceptance criteria exactly as the User gave them:
 
 ```text
-@drew-codex-engineer @taylor-claude-engineer This is the assignment you will resolve via an accord with Drew as facilitator:
+@drew-codex-engineer @taylor-claude-engineer This is the assignment you will need to resolve via an accord with Drew as facilitator; treat this message as the single source of truth for the assignment:
 
+=== BEGIN ASSIGNMENT ===
 [user's stated feature/bug description and explicit references, without manager-added scope]
 
 Confirmed acceptance criteria (User-locked), including affected existing-workflow regressions:
 [the confirmed acceptance-criteria list]
+=== END ASSIGNMENT ===
 
-Just get familiar — everything else is part of the accord flow.
+Read and reply "Done"
 ```
 
 Stop after posting. The accord runs in the next step.
@@ -182,7 +184,7 @@ Tell Drew to run the accord on the assignment above. Reference the get-familiar 
 verbatim:
 
 ```text
-@drew-codex-engineer run an /accord with Taylor to resolve the assignment above [#msg:<id of the get-familiar message>]. Use it verbatim as the question — do not rephrase, summarize, or add scope.
+@drew-codex-engineer run an /accord with Taylor to resolve the assignment above [#msg:<id of the get-familiar message>]. Use only the text between === BEGIN ASSIGNMENT === and === END ASSIGNMENT === verbatim as the question — do not include the footer or any status line, and do not rephrase, summarize, or add scope.
 ```
 
 The accord must produce one **plan resolution** — captured as a signable artifact — carrying the confirmed
@@ -224,11 +226,13 @@ Drew to complete the real acceptance QA and fix loop.
 Post the review assignment for everyone to get familiar:
 
 ```text
-@drew-codex-engineer @taylor-claude-engineer This is the assignment you will resolve via an accord with Drew as facilitator:
+@drew-codex-engineer @taylor-claude-engineer This is the assignment you will need to resolve via an accord with Drew as facilitator; treat this message as the single source of truth for the assignment:
 
-Review the whole implementation at [worktree path] against the locked acceptance criteria and the approved plan resolution [#artifact:…] and other decision locked by user that you are aware of; find bugs and regressions and agree the complete list of required corrections before merge.
+=== BEGIN ASSIGNMENT ===
+Review the whole implementation at [worktree path] against the locked acceptance criteria and the approved plan resolution [#artifact:…] and other decisions locked by User that you are aware of; find bugs and regressions and agree the complete list of required corrections before merge.
+=== END ASSIGNMENT ===
 
-Just get familiar — everything else is part of the accord flow.
+Read and reply "Done"
 ```
 
 Stop after posting. Resume when both reviews are in.
@@ -238,7 +242,7 @@ Stop after posting. Resume when both reviews are in.
 Tell Drew to run the accord on the assignment above:
 
 ```text
-@drew-codex-engineer run the accord with Taylor to resolve the assignment above [#msg:<id of the get-familiar message>]. Use it verbatim as the question — do not rephrase, summarize, or add scope.
+@drew-codex-engineer run the accord with Taylor to resolve the assignment above [#msg:<id of the get-familiar message>]. Use only the text between === BEGIN ASSIGNMENT === and === END ASSIGNMENT === verbatim as the question — do not include the footer or any status line, and do not rephrase, summarize, or add scope.
 ```
 
 Do not proceed to next step until the required-fix resolution shows approved (its `#artifact:` link from the facilitator's closeout). If Drew reports that accord is still in progress, wait.
