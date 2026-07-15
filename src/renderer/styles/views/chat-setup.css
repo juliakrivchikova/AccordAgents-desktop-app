@@ -127,7 +127,7 @@
   display: none;
 }
 
-.new-chat-provider-choice,
+.new-chat-provider-warning,
 .cli-readiness-panel {
   width: min(100%, var(--new-chat-card-width));
   margin-top: 22px;
@@ -136,14 +136,14 @@
   background: var(--app-surface);
 }
 
-.new-chat-provider-choice {
+.new-chat-provider-warning {
   display: grid;
   gap: 8px;
   padding: 16px;
   color: var(--app-text);
 }
 
-.new-chat-provider-choice > span,
+.new-chat-provider-warning > span,
 .cli-readiness-heading p,
 .cli-readiness-note {
   color: var(--app-muted);
@@ -151,14 +151,13 @@
   line-height: 1.45;
 }
 
-.new-chat-provider-choice > div,
 .cli-readiness-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.new-chat-provider-choice button,
+.new-chat-provider-warning button,
 .cli-readiness-primary,
 .cli-readiness-secondary,
 .cli-readiness-command button {

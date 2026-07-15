@@ -18,6 +18,7 @@ import {
   ImagePlus,
   Plus,
   RefreshCw,
+  Settings,
   XCircle
 } from "lucide-react";
 
@@ -48,7 +49,6 @@ import {
 } from "./chat-participant-drafts";
 import { providerLabel } from "./chat-conversation-data";
 import {
-  CLI_PROVIDER_DISPLAY_ORDER,
   cliProviderMetadata,
   readyProviderKinds,
   resolveAssistantProviderKind
@@ -95,7 +95,6 @@ export function NewChatScreen(props: {
   summaries: ConversationSummary[];
   agents: AgentHealth[];
   busy: boolean;
-  selectedAssistantProviderKind?: ChatProviderKind;
   renderParticipantAvatar: (participant: ChatParticipant) => ReactNode;
   participantRoleLabel: (participant: Pick<ChatParticipant, "roleConfigId">) => string;
   onPromptChange: (value: string) => void;
@@ -110,8 +109,6 @@ export function NewChatScreen(props: {
   onSelectedParticipantRunLocationsChange: Dispatch<SetStateAction<Record<string, CloudRunRemoteExecutionMode>>>;
   onOpenParticipantsSettings: () => void;
   onOpenProviderSettings: () => void;
-  onSelectedAssistantProviderKindChange: (kind: ChatProviderKind) => void | Promise<void>;
-  onSetupCompletedProviderKindChange: (kind: ChatProviderKind | undefined) => void;
   onRefreshAgents: () => Promise<AgentHealth[]>;
   onStart: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => boolean | void | Promise<boolean | void>;
 }): JSX.Element {
@@ -127,16 +124,17 @@ export function NewChatScreen(props: {
     () => readyProviderKinds(props.agents, props.settings.providers),
     [props.agents, props.settings.providers]
   );
-  const configuredAssistantProviderKind = props.selectedAssistantProviderKind ?? props.settings.assistantProviderKind;
   const assistantProviderKind = useMemo(
     () => resolveAssistantProviderKind({
       agents: props.agents,
       providers: props.settings.providers,
-      explicitKind: configuredAssistantProviderKind,
-      lastSuccessfulKind: props.settings.lastSuccessfulChatProviderKind
+      explicitKind: props.settings.assistantProviderKind
     }),
-    [configuredAssistantProviderKind, props.agents, props.settings.lastSuccessfulChatProviderKind, props.settings.providers]
+    [props.agents, props.settings.assistantProviderKind, props.settings.providers]
   );
+  const unavailableAssistantProviderKind = props.settings.assistantProviderKind && !assistantProviderKind
+    ? props.settings.assistantProviderKind
+    : undefined;
   const assistantParticipant = useMemo(
     () => assistantProviderKind ? newChatAssistantParticipant(assistantProviderKind) : undefined,
     [assistantProviderKind]
@@ -205,7 +203,7 @@ export function NewChatScreen(props: {
     props.settings.providers
   );
   const hasPrompt = props.prompt.trim().length > 0;
-  const canSubmit = (hasPrompt || images.readyImages.length > 0 || mentions.selectedSkillMentions.length > 0) && !images.hasInvalidImages && !props.busy && !validation;
+  const canSubmit = Boolean(assistantProviderKind) && (hasPrompt || images.readyImages.length > 0 || mentions.selectedSkillMentions.length > 0) && !images.hasInvalidImages && !props.busy && !validation;
   const hasLeadingPluginToken = draftStartsWithPluginMention(props.prompt, mentions.selectedPluginMentions);
 
   useLayoutEffect(() => {
@@ -318,26 +316,16 @@ export function NewChatScreen(props: {
           checking={props.agents.some((agent) => agent.checking)}
           onRefresh={props.onRefreshAgents}
           onOpenSettings={props.onOpenProviderSettings}
-          onProviderReady={(kind) => {
-            props.onSetupCompletedProviderKindChange(kind);
-            void props.onSelectedAssistantProviderKindChange(kind);
-          }}
         />
       )}
 
-      {readyKinds.length > 0 && !assistantProviderKind && (
-        <div className="new-chat-provider-choice" data-testid="new-chat-provider-choice">
-          <strong>Choose the Assistant provider</strong>
-          <span>{configuredAssistantProviderKind
-            ? "The selected provider is no longer ready. Choose another ready provider."
-            : "All ready providers are available equally."}</span>
-          <div>
-            {CLI_PROVIDER_DISPLAY_ORDER.filter((kind) => readyKinds.includes(kind)).map((kind) => (
-              <button type="button" key={kind} onClick={() => void props.onSelectedAssistantProviderKindChange(kind)}>
-                {cliProviderMetadata(kind).label}
-              </button>
-            ))}
-          </div>
+      {unavailableAssistantProviderKind && (
+        <div className="new-chat-provider-warning" data-testid="new-chat-provider-unavailable">
+          <strong>{cliProviderMetadata(unavailableAssistantProviderKind).label} is unavailable</strong>
+          <span>The saved Assistant provider is not ready. Choose another provider in General Settings.</span>
+          <button type="button" onClick={props.onOpenProviderSettings}>
+            <Settings size={15} aria-hidden /> Open General Settings
+          </button>
         </div>
       )}
 

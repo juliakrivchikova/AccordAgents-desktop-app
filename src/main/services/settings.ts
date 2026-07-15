@@ -77,6 +77,7 @@ import {
   normalizeChatSavedPromptTrigger
 } from "../../shared/chatSavedPrompts";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
+import { preferredReadyAssistantProviderKind } from "../../shared/cliReadiness";
 import { normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 
@@ -1730,6 +1731,7 @@ export class SettingsService {
   private storedState: StoredSettings | undefined;
   private storedLoad: Promise<StoredSettings> | undefined;
   private storedWriteQueue: Promise<void> = Promise.resolve();
+  private assistantProviderMutation: Promise<void> = Promise.resolve();
 
   constructor() {
     this.settingsPath = path.join(app.getPath("userData"), "settings.json");
@@ -1746,8 +1748,7 @@ export class SettingsService {
       chatAutoWatchWakeLimit: this.normalizeChatAutoWatchWakeLimit(stored.chatAutoWatchWakeLimit),
       chatPromptContext: this.normalizeChatPromptContextSettings(stored.chatPromptContext),
       cloudRuns: this.normalizeCloudRunsSettings(stored),
-      assistantProviderKind: this.normalizeChatProviderKind(stored.assistantProviderKind)
-        ?? this.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind),
+      assistantProviderKind: this.normalizeChatProviderKind(stored.assistantProviderKind),
       lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind),
       lastRepoPath: stored.lastRepoPath,
       repoFileOpenAction: stored.repoFileOpenAction,
@@ -1837,17 +1838,42 @@ export class SettingsService {
   }
 
   async setAssistantProviderKind(kind: ChatProviderKind): Promise<AppSettings> {
-    const stored = await this.readStored();
     const normalized = this.normalizeChatProviderKind(kind);
     if (!normalized) {
       throw new Error(`Unknown Assistant provider: ${kind}`);
     }
-    if (stored.assistantProviderKind === normalized) {
+    return this.withAssistantProviderMutation(async () => {
+      const stored = await this.readStored();
+      if (stored.assistantProviderKind === normalized) {
+        return this.getPublicSettings();
+      }
+      stored.assistantProviderKind = normalized;
+      await this.writeStored(stored);
       return this.getPublicSettings();
-    }
-    stored.assistantProviderKind = normalized;
-    await this.writeStored(stored);
-    return this.getPublicSettings();
+    });
+  }
+
+  async ensureAssistantProviderDefault(agents: AgentHealth[]): Promise<AppSettings> {
+    return this.withAssistantProviderMutation(async () => {
+      const stored = await this.readStored();
+      const existing = this.normalizeChatProviderKind(stored.assistantProviderKind);
+      if (existing) {
+        return this.getPublicSettings();
+      }
+
+      const migrated = this.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind);
+      const selected = migrated ?? preferredReadyAssistantProviderKind(agents, stored.providers);
+      if (!selected) {
+        return this.getPublicSettings();
+      }
+
+      if (this.normalizeChatProviderKind(stored.assistantProviderKind)) {
+        return this.getPublicSettings();
+      }
+      stored.assistantProviderKind = selected;
+      await this.writeStored(stored);
+      return this.getPublicSettings();
+    });
   }
 
   async recordSuccessfulChatProvider(kind: ChatProviderKind): Promise<void> {
@@ -2669,8 +2695,7 @@ export class SettingsService {
       agentEnvironment: {
         variables: this.normalizeAgentEnvironmentVariables(settings.agentEnvironment?.variables)
       },
-      assistantProviderKind: this.normalizeChatProviderKind(settings.assistantProviderKind)
-        ?? this.normalizeChatProviderKind(settings.lastSuccessfulChatProviderKind),
+      assistantProviderKind: this.normalizeChatProviderKind(settings.assistantProviderKind),
       lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(settings.lastSuccessfulChatProviderKind),
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
       repoFileOpenAction: this.normalizeRepoFileOpenAction(settings.repoFileOpenAction),
@@ -2692,6 +2717,12 @@ export class SettingsService {
 
   private normalizeChatProviderKind(value: unknown): ChatProviderKind | undefined {
     return value === "codex-cli" || value === "claude-code" || value === "gemini-cli" ? value : undefined;
+  }
+
+  private withAssistantProviderMutation<T>(mutation: () => Promise<T>): Promise<T> {
+    const run = (this.assistantProviderMutation ?? Promise.resolve()).then(mutation);
+    this.assistantProviderMutation = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   private shouldMigrateWorkflowManagerParticipantManagement(roles: ChatRoleConfig[] | undefined): boolean {

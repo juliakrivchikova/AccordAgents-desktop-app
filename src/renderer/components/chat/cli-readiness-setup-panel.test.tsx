@@ -49,7 +49,6 @@ test("zero-ready onboarding shows three equal alphabetical setup cards with no p
       settings={SETTINGS}
       checking={false}
       onRefresh={async () => MISSING}
-      onProviderReady={() => undefined}
       onOpenSettings={() => undefined}
     />
   );
@@ -61,19 +60,21 @@ test("zero-ready onboarding shows three equal alphabetical setup cards with no p
   renderer.unmount();
 });
 
-test("check again unlocks the provider that became ready", async () => {
+test("check again only refreshes readiness after setup", async () => {
   installWindowBridge();
   const ready = MISSING.map((health) => health.kind === "claude-code"
     ? { ...health, installed: true, detection: "detected" as const, runnable: "ready" as const, authentication: "ready" as const }
     : health);
-  let selected: string | undefined;
+  let refreshCalls = 0;
   const renderer = create(
     <CliReadinessSetupPanel
       agents={MISSING}
       settings={SETTINGS}
       checking={false}
-      onRefresh={async () => ready}
-      onProviderReady={(kind) => { selected = kind; }}
+      onRefresh={async () => {
+        refreshCalls += 1;
+        return ready;
+      }}
       onOpenSettings={() => undefined}
     />
   );
@@ -82,7 +83,7 @@ test("check again unlocks the provider that became ready", async () => {
   const expandedCard = renderer.root.findByProps({ "data-provider-kind": "claude-code" });
   assert.match(textOf(expandedCard), /Check again/);
   await click(findButton(expandedCard, "Check again"));
-  assert.equal(selected, "claude-code");
+  assert.equal(refreshCalls, 1);
   renderer.unmount();
 });
 
@@ -104,7 +105,6 @@ test("missing, signed-out, unknown, and disabled states show only their safe cur
       settings={settings}
       checking={false}
       onRefresh={async () => states}
-      onProviderReady={() => undefined}
       onOpenSettings={() => { openedSettings = true; }}
     />
   );
@@ -140,7 +140,6 @@ test("could-not-verify offers recovery without claiming sign-in is required", as
       settings={SETTINGS}
       checking={false}
       onRefresh={async () => agents}
-      onProviderReady={() => undefined}
       onOpenSettings={() => undefined}
     />
   );
@@ -165,7 +164,6 @@ test("a stable ready state stays visible with a checking indicator", () => {
       settings={SETTINGS}
       checking={true}
       onRefresh={async () => agents}
-      onProviderReady={() => undefined}
       onOpenSettings={() => undefined}
     />
   );
@@ -183,7 +181,6 @@ test("unsupported platforms show guide-only installation without a macOS copy ac
       settings={SETTINGS}
       checking={false}
       onRefresh={async () => agents}
-      onProviderReady={() => undefined}
       onOpenSettings={() => undefined}
     />
   );
@@ -210,9 +207,9 @@ test("renderer readiness validation blocks an explicitly selected unready member
   );
 });
 
-test("renderer provider selection stays neutral with multiple ready providers and no valid preference", () => {
+test("renderer provider preview uses Codex priority when no default is stored", () => {
   const agents = MISSING.map((health) => normalized(health.kind, "ready"));
-  assert.equal(resolveAssistantProviderKind({ agents, providers: SETTINGS.providers }), undefined);
+  assert.equal(resolveAssistantProviderKind({ agents, providers: SETTINGS.providers }), "codex-cli");
   assert.equal(resolveAssistantProviderKind({
     agents,
     providers: SETTINGS.providers,

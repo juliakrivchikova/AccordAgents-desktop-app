@@ -38,6 +38,12 @@ const CLAUDE_AGENT: AgentHealth = {
   installed: true
 };
 
+const GEMINI_AGENT: AgentHealth = {
+  kind: "gemini-cli",
+  label: "Antigravity",
+  installed: true
+};
+
 const MISSING_CLAUDE_AGENT: AgentHealth = {
   kind: "claude-code",
   label: "Claude Code",
@@ -80,8 +86,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     chatSavedPrompts: stored.chatSavedPrompts,
     chatParticipantConfigs: stored.chatParticipantConfigs,
     chatParticipantSeedState: stored.chatParticipantSeedState,
-    assistantProviderKind: service.normalizeChatProviderKind(stored.assistantProviderKind)
-      ?? service.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind),
+    assistantProviderKind: service.normalizeChatProviderKind(stored.assistantProviderKind),
     lastSuccessfulChatProviderKind: service.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind)
   });
 
@@ -215,20 +220,78 @@ test("last successful chat provider persists idempotently", async () => {
   assert.equal(writeCount(), 2);
 });
 
-test("Assistant provider preference persists immediately and falls back to the last successful provider", async () => {
+test("Assistant provider reads are pure and do not fold the last successful provider", async () => {
   const { service, stored, writeCount } = settingsServiceWithStoredSettings({
     lastSuccessfulChatProviderKind: "claude-code"
   });
 
-  assert.equal((await service.getPublicSettings()).assistantProviderKind, "claude-code");
+  assert.equal((await service.getPublicSettings()).assistantProviderKind, undefined);
+  assert.equal(writeCount(), 0);
+
+  await service.ensureAssistantProviderDefault([CODEX_AGENT]);
+  assert.equal(stored().assistantProviderKind, "claude-code");
+  assert.equal(writeCount(), 1);
 
   const updated = await service.setAssistantProviderKind("codex-cli");
   assert.equal(stored().assistantProviderKind, "codex-cli");
   assert.equal(updated.assistantProviderKind, "codex-cli");
-  assert.equal(writeCount(), 1);
+  assert.equal(writeCount(), 2);
 
   await service.setAssistantProviderKind("codex-cli");
+  assert.equal(writeCount(), 2);
+});
+
+test("Assistant provider default uses Codex, Claude, then Antigravity priority and persists once", async () => {
+  const { service, stored, writeCount } = settingsServiceWithStoredSettings();
+
+  await service.ensureAssistantProviderDefault([GEMINI_AGENT, CLAUDE_AGENT, CODEX_AGENT]);
+  assert.equal(stored().assistantProviderKind, "codex-cli");
   assert.equal(writeCount(), 1);
+
+  await service.ensureAssistantProviderDefault([CLAUDE_AGENT]);
+  assert.equal(stored().assistantProviderKind, "codex-cli");
+  assert.equal(writeCount(), 1);
+});
+
+test("Assistant provider default skips disabled providers and supports an Antigravity-only install", async () => {
+  const disabledCodex = settingsServiceWithStoredSettings({
+    providers: [
+      { kind: "codex-cli", label: "Codex", enabled: false },
+      { kind: "claude-code", label: "Claude Code", enabled: true },
+      { kind: "gemini-cli", label: "Antigravity", enabled: true }
+    ]
+  });
+  await disabledCodex.service.ensureAssistantProviderDefault([CODEX_AGENT, CLAUDE_AGENT]);
+  assert.equal(disabledCodex.stored().assistantProviderKind, "claude-code");
+
+  const antigravityOnly = settingsServiceWithStoredSettings();
+  await antigravityOnly.service.ensureAssistantProviderDefault([GEMINI_AGENT]);
+  assert.equal(antigravityOnly.stored().assistantProviderKind, "gemini-cli");
+});
+
+test("Assistant provider default waits for readiness and initializes on a later refresh", async () => {
+  const { service, stored, writeCount } = settingsServiceWithStoredSettings();
+
+  await service.ensureAssistantProviderDefault([]);
+  assert.equal(stored().assistantProviderKind, undefined);
+  assert.equal(writeCount(), 0);
+
+  await service.ensureAssistantProviderDefault([CLAUDE_AGENT]);
+  assert.equal(stored().assistantProviderKind, "claude-code");
+  assert.equal(writeCount(), 1);
+});
+
+test("concurrent Assistant initialization never overwrites an explicit Settings choice", async () => {
+  const { service, stored } = settingsServiceWithStoredSettings();
+
+  await Promise.all([
+    service.ensureAssistantProviderDefault([CODEX_AGENT, CLAUDE_AGENT]),
+    service.setAssistantProviderKind("claude-code")
+  ]);
+
+  assert.equal(stored().assistantProviderKind, "claude-code");
+  await service.ensureAssistantProviderDefault([CODEX_AGENT]);
+  assert.equal(stored().assistantProviderKind, "claude-code");
 });
 
 test("invalid Assistant provider preference is rejected without writing settings", async () => {

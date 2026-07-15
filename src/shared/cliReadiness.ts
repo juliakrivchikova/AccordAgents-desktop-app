@@ -4,6 +4,7 @@ import type {
   ChatProviderKind,
   ProviderSettings
 } from "./types";
+import { CHAT_PROVIDER_PREFERENCE } from "./chatProviders";
 
 export const CLI_READINESS_STALE_MS = 30_000;
 
@@ -128,27 +129,24 @@ export function readyProviderKinds(
   return CLI_PROVIDER_DISPLAY_ORDER.filter((kind) => readinessForProvider(kind, agents, providers) === "ready");
 }
 
+export function preferredReadyAssistantProviderKind(
+  agents: AgentHealth[],
+  providers: Array<Pick<ProviderSettings, "kind" | "enabled">>
+): ChatProviderKind | undefined {
+  return CHAT_PROVIDER_PREFERENCE.find((kind) => readinessForProvider(kind, agents, providers) === "ready");
+}
+
 export function resolveAssistantProviderKind(options: {
   agents: AgentHealth[];
   providers: Array<Pick<ProviderSettings, "kind" | "enabled">>;
   explicitKind?: ChatProviderKind;
-  lastSuccessfulKind?: ChatProviderKind;
-  setupCompletedKind?: ChatProviderKind;
 }): ChatProviderKind | undefined {
-  const ready = new Set(readyProviderKinds(options.agents, options.providers));
   if (options.explicitKind) {
-    return ready.has(options.explicitKind) ? options.explicitKind : undefined;
+    return readinessForProvider(options.explicitKind, options.agents, options.providers) === "ready"
+      ? options.explicitKind
+      : undefined;
   }
-  if (ready.size === 1) {
-    return [...ready][0];
-  }
-  if (options.lastSuccessfulKind && ready.has(options.lastSuccessfulKind)) {
-    return options.lastSuccessfulKind;
-  }
-  if (options.setupCompletedKind && ready.has(options.setupCompletedKind)) {
-    return options.setupCompletedKind;
-  }
-  return undefined;
+  return preferredReadyAssistantProviderKind(options.agents, options.providers);
 }
 
 export function isAgentSnapshotStale(agents: AgentHealth[], now = Date.now()): boolean {

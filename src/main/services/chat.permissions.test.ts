@@ -34,6 +34,7 @@ import {
 } from "../../shared/chatParticipantRequests";
 import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
+import { preferredReadyAssistantProviderKind } from "../../shared/cliReadiness";
 import type {
   AgentHealth,
   AppSettings,
@@ -4765,7 +4766,7 @@ test("chat creation is blocked when no local CLI is installed", async () => {
   );
 });
 
-test("chat creation uses the sole ready provider without a hidden priority fallback", async () => {
+test("chat creation initializes the persisted default from the sole ready provider", async () => {
   const { service } = testService({
     agents: [{ kind: "gemini-cli", label: "Antigravity", installed: true }],
     settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE] }
@@ -4814,7 +4815,6 @@ test("chat creation allows an unready provider only for remote participants", as
 
   const created = await service.createConversation({
     title: "Remote member",
-    assistantProviderKind: "codex-cli",
     participants: [remote]
   });
   const participants = created.conversation.metadata.participants as ChatParticipant[];
@@ -4823,7 +4823,6 @@ test("chat creation allows an unready provider only for remote participants", as
   await assert.rejects(
     () => service.createConversation({
       title: "Local member",
-      assistantProviderKind: "codex-cli",
       participants: [{ ...remote, remoteExecution: "local" }]
     }),
     /Claude Code was not detected/
@@ -9240,6 +9239,7 @@ function testService(options: {
     batchWriteCount: 0,
     recordedSuccessfulProviders: [] as ChatProviderKind[]
   };
+  let assistantProviderKind = options.settings?.assistantProviderKind;
   const publicSettings = (): AppSettings => ({
     roundLimitDefault: 1,
     cliAgentRunTimeoutMs: 24 * 60 * 60_000,
@@ -9269,13 +9269,19 @@ function testService(options: {
     chatSavedPrompts: [],
     chatParticipantConfigs: clone(settingsState.chatParticipantConfigs),
     chatParticipantSeedState: {},
-    assistantProviderKind: options.settings?.assistantProviderKind,
+    assistantProviderKind,
     lastSuccessfulChatProviderKind: options.settings?.lastSuccessfulChatProviderKind
   });
   const roleIdFromLabel = (label: string): string =>
     `custom-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "role"}-test`;
   const settings = {
     async getPublicSettings(): Promise<AppSettings> {
+      return publicSettings();
+    },
+    async ensureAssistantProviderDefault(agents: AgentHealth[]): Promise<AppSettings> {
+      assistantProviderKind = assistantProviderKind
+        ?? options.settings?.lastSuccessfulChatProviderKind
+        ?? preferredReadyAssistantProviderKind(agents, publicSettings().providers);
       return publicSettings();
     },
     async ensureGenericChatParticipantSeeds(): Promise<AppSettings> {

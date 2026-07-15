@@ -1272,7 +1272,6 @@ export interface CreateChatConversationRequest {
   title?: string;
   repoPath?: string;
   skipDefaultParticipants?: boolean;
-  assistantProviderKind?: ChatProviderKind;
   participants: ChatParticipantInput[];
 }
 

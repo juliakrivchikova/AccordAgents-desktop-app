@@ -7,7 +7,7 @@ import type { AppState } from "./app-state";
 import { useChatActions, type ChatActions } from "./use-chat-actions";
 import type { ConversationActions } from "./use-conversation-actions";
 
-test("send without a configured Assistant provider reports a visible error", async () => {
+test("unavailable saved Assistant provider reports a visible Settings error without creating", async () => {
   let createCalls = 0;
   let refreshCalls = 0;
   (globalThis as any).window = {
@@ -24,12 +24,11 @@ test("send without a configured Assistant provider reports a visible error", asy
     { kind: "claude-code", label: "Claude Code", enabled: true },
     { kind: "codex-cli", label: "Codex", enabled: true }
   ];
+  currentSettings.assistantProviderKind = "claude-code";
   const state = {
     question: "Draft",
-    agents: [readyAgent("claude-code"), readyAgent("codex-cli")],
+    agents: [readyAgent("codex-cli")],
     settings: currentSettings,
-    selectedAssistantProviderKind: undefined,
-    setupCompletedProviderKind: undefined,
     setError: (value: string | undefined) => { error = value; },
     setWarnings: () => undefined
   } as unknown as AppState;
@@ -54,16 +53,16 @@ test("send without a configured Assistant provider reports a visible error", asy
   assert.equal(started, false);
   assert.equal(createCalls, 0);
   assert.equal(refreshCalls, 0);
-  assert.equal(error, "Choose an Assistant provider above or in General Settings, then try again.");
+  assert.equal(error, "Claude Code is not ready. Change the Assistant provider in General Settings.");
   renderer.unmount();
 });
 
-test("stale ambiguous readiness refreshes before selecting the sole ready provider", async () => {
-  let selectedProvider: string | undefined;
+test("stale readiness refreshes before creating without a per-chat provider override", async () => {
+  let createRequest: { assistantProviderKind?: string } | undefined;
   (globalThis as any).window = {
     consensus: {
       createChatConversation: async (request: { assistantProviderKind?: string }) => {
-        selectedProvider = request.assistantProviderKind;
+        createRequest = request;
         throw new Error("stop after provider selection");
       }
     }
@@ -79,8 +78,6 @@ test("stale ambiguous readiness refreshes before selecting the sole ready provid
     question: "Draft",
     agents: [staleReadyAgent("claude-code"), staleReadyAgent("codex-cli")],
     settings: currentSettings,
-    selectedAssistantProviderKind: undefined,
-    setupCompletedProviderKind: undefined,
     selectedChatParticipantConfigIds: new Set<string>(),
     selectedChatParticipantRunLocations: {},
     startingChatRef: { current: false },
@@ -110,7 +107,7 @@ test("stale ambiguous readiness refreshes before selecting the sole ready provid
 
   assert.equal(started, false);
   assert.equal(refreshCalls, 1);
-  assert.equal(selectedProvider, "codex-cli");
+  assert.equal(createRequest?.assistantProviderKind, undefined);
   assert.equal(error, "stop after provider selection");
   renderer.unmount();
 });
@@ -129,9 +126,7 @@ test("stale New Chat readiness refresh failure fails closed and preserves the co
   const state = {
     question: "/office-hours #src/main.ts Draft",
     agents: [staleReadyAgent()],
-    settings: settings(),
-    selectedAssistantProviderKind: "claude-code",
-    setupCompletedProviderKind: undefined,
+    settings: { ...settings(), assistantProviderKind: "claude-code" },
     selectedChatParticipantConfigIds: new Set<string>(),
     selectedChatParticipantRunLocations: {},
     newChatPendingImages: [{ id: "image", filename: "qa.png", mimeType: "image/png", sizeBytes: 3, dataBase64: "YWJj", status: "ready" }],

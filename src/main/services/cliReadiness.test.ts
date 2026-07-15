@@ -61,14 +61,20 @@ test("readiness snapshot staleness uses the exact 30-second boundary", () => {
   assert.equal(isAgentSnapshotStale([{ ...snapshot[0], lastCheckedAt: undefined }]), true);
 });
 
-test("assistant resolution never silently preselects among equal ready providers", () => {
+test("assistant resolution uses Codex, Claude, then Antigravity without using display order", () => {
   const agents = readyAgents(["gemini-cli", "claude-code", "codex-cli"]);
-  assert.equal(resolveAssistantProviderKind({ agents, providers: PROVIDERS }), undefined);
+  assert.equal(resolveAssistantProviderKind({ agents, providers: PROVIDERS }), "codex-cli");
   assert.equal(resolveAssistantProviderKind({ agents, providers: PROVIDERS, explicitKind: "claude-code" }), "claude-code");
   assert.equal(resolveAssistantProviderKind({ agents: readyAgents(["codex-cli"]), providers: PROVIDERS, explicitKind: "claude-code" }), undefined);
-  assert.equal(resolveAssistantProviderKind({ agents, providers: PROVIDERS, lastSuccessfulKind: "codex-cli" }), "codex-cli");
-  assert.equal(resolveAssistantProviderKind({ agents, providers: PROVIDERS, setupCompletedKind: "gemini-cli" }), "gemini-cli");
   assert.equal(resolveAssistantProviderKind({ agents: readyAgents(["claude-code"]), providers: PROVIDERS }), "claude-code");
+  assert.equal(resolveAssistantProviderKind({
+    agents,
+    providers: PROVIDERS.map((provider) => provider.kind === "codex-cli" ? { ...provider, enabled: false } : provider)
+  }), "claude-code");
+  assert.equal(resolveAssistantProviderKind({
+    agents: readyAgents(["gemini-cli", "codex-cli"]),
+    providers: PROVIDERS
+  }), "codex-cli");
   assert.deepEqual(readyProviderKinds(agents, PROVIDERS), ["gemini-cli", "claude-code", "codex-cli"]);
 });
 

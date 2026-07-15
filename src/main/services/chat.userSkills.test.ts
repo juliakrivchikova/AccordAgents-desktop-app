@@ -711,6 +711,21 @@ function testService(options: {
         providers: [{ kind: "codex-cli", enabled: true }],
         chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT
       };
+    },
+    async ensureAssistantProviderDefault(): Promise<{
+      chatRoleConfigs: ChatRoleConfig[];
+      chatBehaviorRules: [];
+      providers: Array<{ kind: string; enabled: boolean }>;
+      chatPromptContext: typeof DEFAULT_CHAT_PROMPT_CONTEXT;
+      assistantProviderKind: "codex-cli";
+    }> {
+      return {
+        chatRoleConfigs: options.roles ?? [ROLE, GENERIC_ROLE],
+        chatBehaviorRules: [],
+        providers: [{ kind: "codex-cli", enabled: true }],
+        chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
+        assistantProviderKind: "codex-cli"
+      };
     }
   };
   const cliRunner = {

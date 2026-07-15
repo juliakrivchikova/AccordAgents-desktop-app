@@ -49,13 +49,13 @@ const SETTINGS: AppSettings = {
   chatParticipantConfigs: []
 };
 
-test("multiple ready providers render a neutral New Chat without a hidden Assistant member", () => {
+test("multiple ready providers silently use Codex without rendering a chooser", () => {
   installWindowBridge();
   const renderer = create(<NewChatScreen {...baseProps(readyAgents())} />);
 
-  assert.match(textOf(renderer.root), /Choose the Assistant provider/);
-  assert.match(textOf(renderer.root), /Add members/);
-  assert.doesNotMatch(textOf(renderer.root), /1 member|Chat Assistant -/);
+  assert.doesNotMatch(textOf(renderer.root), /Choose the Assistant provider/);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "new-chat-provider-choice" }).length, 0);
+  assert.match(textOf(renderer.root), /1 member/);
   assert.equal(renderer.root.findByProps({ "data-testid": "new-chat-prompt" }).props.value, "Draft");
   renderer.unmount();
 });
@@ -70,34 +70,26 @@ test("saved Assistant provider hides the provider choice", () => {
   renderer.unmount();
 });
 
-test("unavailable saved Assistant provider requires an explicit replacement", () => {
+test("unavailable saved Assistant provider blocks send and opens General Settings without changing the draft", async () => {
   installWindowBridge();
+  let openedSettings = false;
   const renderer = create(<NewChatScreen
     {...baseProps([readyAgent("codex-cli")], {
-      settings: { ...SETTINGS, assistantProviderKind: "claude-code" }
+      settings: { ...SETTINGS, assistantProviderKind: "claude-code" },
+      onOpenProviderSettings: () => { openedSettings = true; }
     })}
   />);
 
-  assert.match(textOf(renderer.root), /selected provider is no longer ready/i);
-  assert.match(textOf(renderer.root.findByProps({ "data-testid": "new-chat-provider-choice" })), /Codex/);
+  const warning = renderer.root.findByProps({ "data-testid": "new-chat-provider-unavailable" });
+  assert.match(textOf(warning), /Claude Code is unavailable/);
+  assert.equal(renderer.root.findByProps({ "data-testid": "new-chat-start" }).props.disabled, true);
+  await click(warning.findByType("button"));
+  assert.equal(openedSettings, true);
+  assert.equal(renderer.root.findByProps({ "data-testid": "new-chat-prompt" }).props.value, "Draft");
   renderer.unmount();
 });
 
-test("inline Assistant choice delegates to the global provider setting callback", async () => {
-  installWindowBridge();
-  let selected: string | undefined;
-  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), {
-    onSelectedAssistantProviderKindChange: (kind: string) => { selected = kind; }
-  })} />);
-
-  const codex = renderer.root.findAllByType("button").find((button) => textOf(button) === "Codex");
-  assert.ok(codex);
-  await click(codex);
-  assert.equal(selected, "codex-cli");
-  renderer.unmount();
-});
-
-test("send without a configured Assistant provider reaches the action error path", async () => {
+test("send without a stored Assistant provider uses the priority preview", async () => {
   installWindowBridge();
   let startCalls = 0;
   const renderer = create(<NewChatScreen {...baseProps(readyAgents(), {
@@ -202,8 +194,6 @@ function baseProps(agents: AgentHealth[], patch: Record<string, unknown> = {}) {
     onSelectedParticipantRunLocationsChange: () => undefined,
     onOpenParticipantsSettings: () => undefined,
     onOpenProviderSettings: () => undefined,
-    onSelectedAssistantProviderKindChange: () => undefined,
-    onSetupCompletedProviderKindChange: () => undefined,
     onRefreshAgents: async () => agents,
     onStart: async () => true,
     ...patch

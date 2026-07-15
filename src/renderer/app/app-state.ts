@@ -4,7 +4,6 @@ import type {
   AppSettings,
   ChatActivityItem,
   ChatSkillMention,
-  ChatProviderKind,
   CloudRunRemoteExecutionMode,
   Conversation,
   ConversationKind,
@@ -40,10 +39,6 @@ export interface AppState {
   setSettings: StateSetter<AppSettings>;
   agents: AgentHealth[];
   setAgents: StateSetter<AgentHealth[]>;
-  selectedAssistantProviderKind: ChatProviderKind | undefined;
-  setSelectedAssistantProviderKind: StateSetter<ChatProviderKind | undefined>;
-  setupCompletedProviderKind: ChatProviderKind | undefined;
-  setSetupCompletedProviderKind: StateSetter<ChatProviderKind | undefined>;
   summaries: ConversationSummary[];
   setSummaries: StateSetter<ConversationSummary[]>;
   conversation: Conversation | undefined;
@@ -148,8 +143,6 @@ export interface AppState {
 export function useAppState(): AppState {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [agents, setAgents] = useState<AgentHealth[]>([]);
-  const [selectedAssistantProviderKind, setSelectedAssistantProviderKind] = useState<ChatProviderKind | undefined>();
-  const [setupCompletedProviderKind, setSetupCompletedProviderKind] = useState<ChatProviderKind | undefined>();
   const [summaries, setSummaries] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<Conversation | undefined>();
   const [messagePage, setMessagePage] = useState<ConversationMessagePageInfo | undefined>();
@@ -225,8 +218,7 @@ export function useAppState(): AppState {
   };
 
   return {
-    settings, setSettings, agents, setAgents, selectedAssistantProviderKind, setSelectedAssistantProviderKind,
-    setupCompletedProviderKind, setSetupCompletedProviderKind, summaries, setSummaries, conversation, setConversation,
+    settings, setSettings, agents, setAgents, summaries, setSummaries, conversation, setConversation,
     messagePage, setMessagePage, olderMessagesLoading, setOlderMessagesLoading, railView, setRailView,
     activityItems, setActivityItems, activityLoading, setActivityLoading, activityError, setActivityError,
     activityFocusError, setActivityFocusError,

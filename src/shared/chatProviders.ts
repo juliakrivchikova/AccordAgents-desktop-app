@@ -1,6 +1,6 @@
 import type { ChatProviderKind, ProviderSettings } from "./types";
 
-const CHAT_PROVIDER_PREFERENCE: ChatProviderKind[] = ["codex-cli", "claude-code", "gemini-cli"];
+export const CHAT_PROVIDER_PREFERENCE: ChatProviderKind[] = ["codex-cli", "claude-code", "gemini-cli"];
 
 export function isChatProviderKind(value: unknown): value is ChatProviderKind {
   return value === "codex-cli" || value === "claude-code" || value === "gemini-cli";

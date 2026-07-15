@@ -36,7 +36,9 @@ import { persistLastViewedAt } from "./storage";
 import { serializeComposerDraft } from "../components/chat/chat-composer-draft-utils";
 import { revokePendingImageUrls } from "../components/chat/use-chat-composer-images";
 import {
+  cliProviderMetadata,
   isAgentSnapshotStale,
+  readinessForProvider,
   resolveAssistantProviderKind
 } from "../../shared/cliReadiness";
 
@@ -106,9 +108,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     const resolveProvider = (agents: typeof state.agents) => resolveAssistantProviderKind({
       agents,
       providers: state.settings.providers,
-      explicitKind: state.selectedAssistantProviderKind ?? state.settings.assistantProviderKind,
-      lastSuccessfulKind: state.settings.lastSuccessfulChatProviderKind,
-      setupCompletedKind: state.setupCompletedProviderKind
+      explicitKind: state.settings.assistantProviderKind
     });
     let agents = state.agents;
     if (isAgentSnapshotStale(agents)) {
@@ -121,7 +121,14 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
     const assistantProviderKind = resolveProvider(agents);
     if (!assistantProviderKind) {
-      state.setError("Choose an Assistant provider above or in General Settings, then try again.");
+      const savedKind = state.settings.assistantProviderKind;
+      if (savedKind) {
+        const label = cliProviderMetadata(savedKind).label;
+        const readiness = readinessForProvider(savedKind, agents, state.settings.providers);
+        state.setError(`${label} is ${readiness === "disabled" ? "disabled" : "not ready"}. Change the Assistant provider in General Settings.`);
+      } else {
+        state.setError("Could not initialize an Assistant provider. Check General Settings and try again.");
+      }
       return false;
     }
     const participants = selectedOrMentionedChatParticipantDrafts(
@@ -154,7 +161,6 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         title: initialChatTitle(initialMessage, imageAttachments),
         repoPath: state.repoPath.trim() || undefined,
         skipDefaultParticipants: participants.length === 0,
-        assistantProviderKind,
         participants
       });
       createdConversationId = result.conversation.id;

@@ -474,10 +474,11 @@ async function detectAgentsWithAppSkills(request?: AgentDetectionRequest): Promi
       appSkillSync: appSkillsService.statusForAgent(agent)
     }));
     if (cached.every((agent) => agent.appSkillSync)) {
+      await settingsService.ensureAssistantProviderDefault(cached);
       return cached;
     }
   }
-  return appSkillsService.reconcileAgents(agents).catch((error) => {
+  const reconciled: AgentHealth[] = await appSkillsService.reconcileAgents(agents).catch((error): AgentHealth[] => {
     void debugLogService.write("app-skills-detect-sync-error", {
       error: error instanceof Error ? error.message : String(error)
     });
@@ -488,6 +489,8 @@ async function detectAgentsWithAppSkills(request?: AgentDetectionRequest): Promi
         : { status: "not-installed", skillCount: 0, updatedAt: new Date().toISOString() }
     }));
   });
+  await settingsService.ensureAssistantProviderDefault(reconciled);
+  return reconciled;
 }
 
 async function openExternalUrl(url: unknown): Promise<void> {

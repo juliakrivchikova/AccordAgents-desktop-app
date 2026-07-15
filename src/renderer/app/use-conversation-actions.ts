@@ -51,8 +51,10 @@ export function useConversationActions(state: AppState): ConversationActions {
     }
     try {
       const agents = await window.consensus.detectAgents(request);
+      const settings = await window.consensus.getSettings();
       if (requestId === state.agentRefreshRequestRef.current) {
         state.setAgents(agents);
+        state.setSettings(settings);
       }
       return agents;
     } catch (error) {
@@ -534,8 +536,6 @@ export function useConversationActions(state: AppState): ConversationActions {
     state.setChatAddParticipantDraft(defaultChatParticipantDraft(state.settings));
     state.setSelectedChatParticipantConfigIds(defaultSelectedChatParticipantConfigIds());
     state.setSelectedChatParticipantRunLocations({});
-    state.setSelectedAssistantProviderKind(undefined);
-    state.setSetupCompletedProviderKind(undefined);
     state.setKind("chat");
     state.setQuestion("");
     state.setNewChatPendingImages((current) => {

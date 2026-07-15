@@ -26,7 +26,6 @@ export function CliReadinessSetupPanel(props: {
   settings: AppSettings;
   checking: boolean;
   onRefresh: () => Promise<AgentHealth[]>;
-  onProviderReady: (kind: ChatProviderKind) => void;
   onOpenSettings: () => void;
 }): JSX.Element {
   const [expandedKind, setExpandedKind] = useState<ChatProviderKind | undefined>();
@@ -50,11 +49,7 @@ export function CliReadinessSetupPanel(props: {
     setRefreshing(true);
     setActionError(undefined);
     try {
-      const agents = await props.onRefresh();
-      const health = agents.find((agent) => agent.kind === kind);
-      if (deriveAgentReadiness(health, providerEnabled(props.settings.providers, kind)) === "ready") {
-        props.onProviderReady(kind);
-      }
+      await props.onRefresh();
     } catch {
       setActionError("Could not check CLI readiness. Try again.");
     } finally {

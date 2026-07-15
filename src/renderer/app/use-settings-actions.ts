@@ -46,10 +46,12 @@ export function useSettingsActions(state: AppState): SettingsActions {
         state.setAgents((current) => current.map((agent) => ({ ...agent, checking: true })));
       }
       try {
-        state.setAgents(await window.consensus.detectAgents({
+        const agents = await window.consensus.detectAgents({
           force: patch.enabled,
           trigger: patch.enabled ? "provider-enabled" : "service"
-        }));
+        });
+        state.setAgents(agents);
+        state.setSettings(await window.consensus.getSettings());
       } catch (caught) {
         state.setAgents((current) => current.map((agent) => ({ ...agent, checking: false })));
         state.setError(errorText(caught));
@@ -59,13 +61,10 @@ export function useSettingsActions(state: AppState): SettingsActions {
 
   async function setAssistantProviderKind(kind: ChatProviderKind): Promise<void> {
     state.setError(undefined);
-    const previous = state.selectedAssistantProviderKind;
-    state.setSelectedAssistantProviderKind(kind);
     try {
       const next = await window.consensus.setAssistantProviderKind(kind);
       state.setSettings(next);
     } catch (caught) {
-      state.setSelectedAssistantProviderKind(previous);
       state.setError(errorText(caught));
     }
   }

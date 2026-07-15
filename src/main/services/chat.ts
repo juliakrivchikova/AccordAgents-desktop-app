@@ -802,26 +802,25 @@ export class ChatService {
     let stage = "initializing";
     try {
       const agents = await this.detectAgentsForReadiness("submit");
+      await this.settings.ensureAssistantProviderDefault(agents);
       const settings = await this.settings.ensureGenericChatParticipantSeeds(agents);
       const readyKinds = readyProviderKinds(agents, settings.providers);
       if (readyKinds.length === 0) {
         throw new Error("Set up and sign in to at least one CLI provider before creating a chat.");
       }
-      if (request.assistantProviderKind) {
-        const state = readinessForProvider(request.assistantProviderKind, agents, settings.providers);
-        if (state !== "ready") {
-          const label = cliProviderMetadata(request.assistantProviderKind).label;
-          throw new Error(agentReadinessReason(state, label) ?? `${label} is not ready.`);
-        }
-      }
       const assistantProviderKind = resolveAssistantProviderKind({
         agents,
         providers: settings.providers,
-        explicitKind: request.assistantProviderKind ?? settings.assistantProviderKind,
-        lastSuccessfulKind: settings.lastSuccessfulChatProviderKind
+        explicitKind: settings.assistantProviderKind
       });
       if (!assistantProviderKind) {
-        throw new Error("Choose which ready CLI provider should power the Assistant.");
+        const savedKind = settings.assistantProviderKind;
+        if (savedKind) {
+          const label = cliProviderMetadata(savedKind).label;
+          const state = readinessForProvider(savedKind, agents, settings.providers);
+          throw new Error(`${agentReadinessReason(state, label) ?? `${label} is not ready.`} Change the Assistant provider in General Settings.`);
+        }
+        throw new Error("Could not initialize an Assistant provider. Check General Settings and try again.");
       }
       const hasRequestedParticipants = request.participants.length > 0;
       const skipDefaultParticipants = request.skipDefaultParticipants === true;
@@ -1687,8 +1686,11 @@ export class ChatService {
     content?: string;
   }): Promise<UserSkillRunContext> {
     const requestedParticipants = await this.validateParticipants(request.participants ?? [], [], true);
-    const participants = request.assistantProviderKind
-      ? await this.ensureAdministratorParticipant(requestedParticipants, request.assistantProviderKind)
+    const settings = request.assistantProviderKind ? undefined : await this.settings.getPublicSettings();
+    const assistantProviderKind = request.assistantProviderKind
+      ?? await this.defaultAdministratorProviderKind(settings?.providers ?? []).catch(() => undefined);
+    const participants = assistantProviderKind
+      ? await this.ensureAdministratorParticipant(requestedParticipants, assistantProviderKind)
       : requestedParticipants;
     const conversation: Conversation = {
       id: "prospective-chat",
@@ -3404,14 +3406,13 @@ export class ChatService {
     const participants = this.chatParticipants(conversation);
     const { requester } = await this.requireParticipantManager(conversation, actor);
 
-    const settings = await this.settings.getPublicSettings();
-    const roleById = new Map(settings.chatRoleConfigs.map((role) => [role.id, role]));
     const agents = await this.cliRunner.detectAgents().catch((): AgentHealth[] => []);
+    const settings = await this.settings.ensureAssistantProviderDefault(agents);
+    const roleById = new Map(settings.chatRoleConfigs.map((role) => [role.id, role]));
     const defaultKind = resolveAssistantProviderKind({
       agents,
       providers: settings.providers,
-      explicitKind: settings.assistantProviderKind,
-      lastSuccessfulKind: settings.lastSuccessfulChatProviderKind
+      explicitKind: settings.assistantProviderKind
     }) ?? requester.kind;
     const providers: ChatRosterAvailableProvider[] = await Promise.all((["codex-cli", "claude-code", "gemini-cli"] as ChatProviderKind[]).map(async (kind) => {
       const provider = settings.providers.find((item) => item.kind === kind);
@@ -9036,15 +9037,14 @@ export class ChatService {
     providers: Array<Pick<ProviderSettings, "kind" | "enabled">>
   ): Promise<ChatProviderKind> {
     const agents = await this.cliRunner.detectAgents().catch(() => []);
-    const settings = await this.settings.getPublicSettings();
+    const settings = await this.settings.ensureAssistantProviderDefault(agents);
     const kind = resolveAssistantProviderKind({
       agents,
-      providers,
-      explicitKind: settings.assistantProviderKind,
-      lastSuccessfulKind: settings.lastSuccessfulChatProviderKind
+      providers: settings.providers.length > 0 ? settings.providers : providers,
+      explicitKind: settings.assistantProviderKind
     });
     if (!kind) {
-      throw new Error("Choose which ready CLI provider should power the Assistant.");
+      throw new Error("The saved Assistant provider is not ready. Change it in General Settings.");
     }
     return kind;
   }
