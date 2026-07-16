@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -114,7 +114,7 @@ test("skill-only send stores explicit content and keeps skill metadata path/cont
   }
 });
 
-test("runtime skill revalidation blocks a single target when the selected variant disappears", async () => {
+test("runtime skill dispatch leaves a disappeared selected variant to the native provider", async () => {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-user-skills-"));
   const homeDir = path.join(tempRoot, "home");
   await writeSkill(path.join(homeDir, ".claude/skills/qa"), "qa", "QA", "claude body");
@@ -143,8 +143,8 @@ test("runtime skill revalidation blocks a single target when the selected varian
     });
     assert.equal(selected.skills[0].capabilityState, "invocable");
 
-    // Delete the Claude variant after selection: send-time revalidation should persist the
-    // user message but block the participant run because the selected skill no longer exists.
+    // Delete the Claude variant after selection: AccordAgents still dispatches the inline
+    // token and lets the native provider decide current availability.
     await rm(path.join(homeDir, ".claude/skills/qa"), { recursive: true, force: true });
     const runParticipants: string[] = [];
     const { service, storage } = testService({
@@ -164,17 +164,16 @@ test("runtime skill revalidation blocks a single target when the selected varian
 
     await service.sendMessage({
       conversationId: conversation.id,
-      runId: "blocked-skill-run",
+      runId: "native-skill-run",
       content: "@claude",
       skillMentions: [selected.skills[0]]
     });
 
-    assert.deepEqual(runParticipants, []);
+    await waitFor(() => runParticipants.length === 1);
+    assert.deepEqual(runParticipants, ["claude-code"]);
     assert.equal((storage.current as Conversation).messages.some((message) =>
-      message.role === "system" &&
-      message.content.includes("@claude was not run") &&
-      message.content.includes("no longer available")
-    ), true);
+      message.role === "system" && message.content.includes("@claude was not run")
+    ), false);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -632,7 +631,10 @@ function testService(options: {
       return {
         chatRoleConfigs: options.roles ?? [ROLE, GENERIC_ROLE],
         chatBehaviorRules: [],
-        providers: [{ kind: "codex-cli", enabled: true }],
+        providers: [
+          { kind: "codex-cli", enabled: true },
+          { kind: "claude-code", enabled: true }
+        ],
         chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT
       };
     },
@@ -646,7 +648,10 @@ function testService(options: {
       return {
         chatRoleConfigs: options.roles ?? [ROLE, GENERIC_ROLE],
         chatBehaviorRules: [],
-        providers: [{ kind: "codex-cli", enabled: true }],
+        providers: [
+          { kind: "codex-cli", enabled: true },
+          { kind: "claude-code", enabled: true }
+        ],
         chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
         assistantProviderKind: "codex-cli"
       };
@@ -654,7 +659,10 @@ function testService(options: {
   };
   const cliRunner = {
     async detectAgents(): Promise<Array<{ kind: string; label: string; installed: boolean }>> {
-      return [{ kind: "codex-cli", label: "Codex CLI", installed: true }];
+      return [
+        { kind: "codex-cli", label: "Codex CLI", installed: true },
+        { kind: "claude-code", label: "Claude Code", installed: true }
+      ];
     },
     run: options.run
   };

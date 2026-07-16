@@ -150,7 +150,6 @@ import type {
 } from "./remoteRuns";
 import { emitCodexLiveOutput } from "./codexExec";
 import {
-  APP_ARTIFACT_TOOL_NAMES,
   APP_CHAT_EXPORT_ATTACHMENT_TOOL,
   APP_CHAT_GET_CONTEXT_TOOL,
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
@@ -170,7 +169,9 @@ import {
   APP_ROLES_REQUEST_CHANGE_TOOL,
   APP_ROSTER_DESCRIBE_OPTIONS_TOOL,
   APP_ROSTER_REQUEST_CHANGE_TOOL,
-  APP_TOOL_PERMISSION_TOOL
+  APP_TOOL_PERMISSION_TOOL,
+  appMcpToolNamesForCapabilities,
+  autoPreauthorizedAppMcpToolNames as classifiedAutoPreauthorizedAppMcpToolNames
 } from "./appMcp";
 import type { AppMcpClientStatus } from "./appMcp";
 import { DebugLogService } from "./debugLogs";
@@ -334,58 +335,6 @@ const CHAT_GITHUB_APP_REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const CHAT_GITHUB_APP_PERMISSION_PATTERN = /^[A-Za-z0-9_:-]+$/;
 const PARTICIPANT_REQUEST_SCRUTINY_APPENDIX =
   "Review for blockers, incorrect assumptions, missing edge cases, or simpler alternatives. If none, reply with only `No objections.` Do not restate the proposal.";
-const CHAT_CONTEXT_MCP_TOOL_NAMES = [
-  APP_CHAT_GET_CONTEXT_TOOL,
-  APP_CHAT_GET_PARTICIPANTS_TOOL,
-  APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
-  APP_CHAT_READ_MESSAGES_TOOL,
-  APP_CHAT_LIST_ATTACHMENTS_TOOL,
-  APP_CHAT_READ_ATTACHMENT_TOOL,
-  APP_CHAT_EXPORT_ATTACHMENT_TOOL,
-  APP_CHAT_REACT_TOOL,
-  APP_CHAT_SEND_MESSAGE_TOOL,
-  APP_CHAT_SET_TITLE_TOOL,
-  APP_TOOL_PERMISSION_TOOL,
-  ...APP_ARTIFACT_TOOL_NAMES
-];
-const CHAT_APP_MCP_TOOL_NAMES = [
-  ...CHAT_CONTEXT_MCP_TOOL_NAMES,
-  APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
-  APP_CHAT_REQUEST_COMPACTION_TOOL,
-  APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
-  APP_ROLES_DESCRIBE_OPTIONS_TOOL,
-  APP_ROLES_REQUEST_CHANGE_TOOL,
-  APP_PARTICIPANTS_DESCRIBE_OPTIONS_TOOL,
-  APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
-  APP_ROSTER_DESCRIBE_OPTIONS_TOOL,
-  APP_ROSTER_REQUEST_CHANGE_TOOL
-];
-// Auto may bypass the provider classifier only for explicitly reviewed tools whose
-// effects remain inside AccordAgents-managed state. Keep this opt-in: adding a new
-// exposed tool must not silently grant it Auto pre-authorization. Attachment export
-// is intentionally absent because it writes to the repository filesystem, and the
-// permission bridge is absent because Auto has no second app approval boundary.
-const CHAT_AUTO_PREAUTHORIZED_APP_MCP_TOOL_NAMES = new Set<string>([
-  APP_CHAT_GET_CONTEXT_TOOL,
-  APP_CHAT_GET_PARTICIPANTS_TOOL,
-  APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
-  APP_CHAT_READ_MESSAGES_TOOL,
-  APP_CHAT_LIST_ATTACHMENTS_TOOL,
-  APP_CHAT_READ_ATTACHMENT_TOOL,
-  APP_CHAT_REACT_TOOL,
-  APP_CHAT_SEND_MESSAGE_TOOL,
-  APP_CHAT_SET_TITLE_TOOL,
-  ...APP_ARTIFACT_TOOL_NAMES,
-  APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
-  APP_CHAT_REQUEST_COMPACTION_TOOL,
-  APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
-  APP_ROLES_DESCRIBE_OPTIONS_TOOL,
-  APP_ROLES_REQUEST_CHANGE_TOOL,
-  APP_PARTICIPANTS_DESCRIBE_OPTIONS_TOOL,
-  APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
-  APP_ROSTER_DESCRIBE_OPTIONS_TOOL,
-  APP_ROSTER_REQUEST_CHANGE_TOOL
-]);
 const CHAT_CONTEXT_READ_DEFAULT_LIMIT = 50;
 const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
 // A hard transport ceiling, not a truncation point. The send path rejects over-limit content
@@ -1833,7 +1782,7 @@ export class ChatService {
 
     const runPermissions = actor.runPermissions ? normalizeChatAgentPermissions(actor.runPermissions) : undefined;
     const prepared = this.preparePermissionChange(requester, this.normalizePermissionChangeRequest(rawRequest), runPermissions);
-    if (!runPermissions && normalizeChatAgentMode(requester.agentMode) === "auto" && prepared.request.kind === "shellRules") {
+    if (normalizeChatAgentMode(requester.agentMode) === "auto" && prepared.request.kind === "shellRules") {
       // In Auto-review the provider's native auto classifier decides each shell command,
       // so an agent shellRules request needs no User approval and stored app rules are
       // not forwarded as a second hard gate.
@@ -6813,21 +6762,7 @@ export class ChatService {
   }
 
   private appMcpToolNames(capabilities: ChatAppToolCapability[]): string[] {
-    return CHAT_APP_MCP_TOOL_NAMES.filter((toolName) => {
-      if (CHAT_CONTEXT_MCP_TOOL_NAMES.includes(toolName)) {
-        return true;
-      }
-      if (toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL) {
-        return hasChatAppToolCapability(capabilities, "participants.request");
-      }
-      if (toolName === APP_CHAT_REQUEST_COMPACTION_TOOL) {
-        return hasChatAppToolCapability(capabilities, "compaction.request");
-      }
-      if (toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL) {
-        return hasChatAppToolCapability(capabilities, "permissions.request");
-      }
-      return hasChatAppToolCapability(capabilities, "participants.manage");
-    });
+    return appMcpToolNamesForCapabilities(capabilities);
   }
 
   private appMcpToolInventoryKey(toolNames: string[]): string {
@@ -6835,7 +6770,7 @@ export class ChatService {
   }
 
   private autoPreauthorizedAppMcpToolNames(toolNames: string[]): string[] {
-    return toolNames.filter((toolName) => CHAT_AUTO_PREAUTHORIZED_APP_MCP_TOOL_NAMES.has(toolName));
+    return classifiedAutoPreauthorizedAppMcpToolNames(toolNames);
   }
 
   private isAdministratorSession(session: ChatParticipantSession): boolean {

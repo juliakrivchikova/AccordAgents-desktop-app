@@ -34,15 +34,17 @@ From the same working directory, with the same provider version and native setti
 3. Run a regular CLI shell write and record the sandbox result and any unsandboxed retry.
 4. Run the same shell write in AccordAgents Auto.
 
-Use the AccordAgents `cli.claude.launch` event to compare the redacted argv, cwd, session kind, add directories, and tool inventory hashes. Use `cli.claude.permission-denial` to identify native permission/classifier denials.
+Use the AccordAgents `cli.claude.launch` event (`layer: app-launch-argv-policy`) to compare the redacted argv, cwd, session kind, add directories, and tool inventory hashes. Use `cli.claude.permission-denial` for provider-native and structured sandbox evidence, and `app.mcp.denial` for first-party app-server policy failures.
+
+Denial events contain only stable codes, tool names, counts, and categorical evidence. Provider-authored reason/message text, prompts, tool inputs, paths, and tokens are deliberately omitted. A successful Auto run may contain an expected classifier decline in debug logs without showing a user-facing warning.
 
 ## Attribute the result
 
 - **App launch/argv:** only AccordAgents passes a hard deny, different cwd, inline setting, add directory, or stale resumed configuration.
-- **Provider permission/classifier:** the provider records a permission denial before the tool runs.
-- **Provider sandbox or OS:** the command starts but filesystem or network isolation rejects it.
-- **App server:** a first-party app tool reaches AccordAgents and server policy rejects it.
-- **Unknown:** evidence is incomplete. Record exactly what is missing and keep the issue open.
+- **Provider permission/classifier:** `cli.claude.permission-denial` records `layer: provider-native-permission-or-classifier`.
+- **Provider sandbox or OS:** the denial records `layer: provider-sandbox-settings-or-os` from a structured provider stage/category.
+- **App server:** `app.mcp.denial` records `layer: first-party-app-server-policy` plus a stable app error code.
+- **Unknown:** the event records `unknown-provider-or-runtime-behavior` (or `unknown-provider-runtime`) and lists the exact missing evidence. Keep the issue open.
 
 If regular CLI permits the action and AccordAgents denies it, remove the smallest app-introduced delta and add that exact case as a regression test. If both behave the same, document the native setting or prompt change required; do not add an AccordAgents bypass.
 

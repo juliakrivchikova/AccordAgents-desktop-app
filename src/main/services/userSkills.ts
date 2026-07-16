@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
+import { lstat, open, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import type {
@@ -18,7 +18,7 @@ import type {
   UserSkillSummary,
   UserSkillTargetSummary
 } from "../../shared/types";
-import { parseSkillFrontmatter, stripOuterMarkdownFence } from "./appSkills";
+import { parseSkillFrontmatter } from "./appSkills";
 
 const INTERNAL_MANIFEST_FILE = ".accordagents-skills.json";
 const INTERNAL_MARKER_FILE = ".accordagents-generated.json";
@@ -26,6 +26,7 @@ const INTERNAL_TMP_PREFIX = ".accordagents-tmp-";
 const USER_SKILL_HASH_VERSION = "user-skills-v1";
 const DEFAULT_LIMIT = 30;
 const MAX_LIMIT = 100;
+const MAX_SKILL_FRONTMATTER_BYTES = 64 * 1024;
 
 export interface UserSkillRunContext {
   repoPath?: string;
@@ -179,8 +180,8 @@ export class UserSkillsService {
   async validateMentionForParticipant(
     mention: ChatSkillMention,
     providerKind: ChatProviderKind,
-    context: UserSkillRunContext,
-    participantId?: string
+    _context: UserSkillRunContext,
+    _participantId?: string
   ): Promise<{ ok: true; mention: ChatSkillMention } | { ok: false; message: string }> {
     const sanitized = sanitizeChatSkillMention(mention);
     if (!sanitized) {
@@ -190,66 +191,10 @@ export class UserSkillsService {
     if (!selectedVariant) {
       return { ok: false, message: `${sanitized.displayName} is not available for ${providerLabel(providerKind)}.` };
     }
-    const scan = await this.scan(context.repoPath);
-    const current = scan.variants.find((variant) =>
-      variant.providerKind === selectedVariant.providerKind &&
-      variant.scope === selectedVariant.scope &&
-      variant.sourceKey === selectedVariant.sourceKey &&
-      variant.frontmatterName === selectedVariant.frontmatterName
-    );
-    if (!current) {
-      return { ok: false, message: `${sanitized.displayName} is no longer available for ${providerLabel(providerKind)}.` };
-    }
-    const currentCapability = this.capabilityForVariant(current, context, participantId);
-    if (currentCapability !== "invocable") {
-      return { ok: false, message: `${sanitized.displayName} is ${currentCapability} for ${providerLabel(providerKind)} in this chat run.` };
-    }
-    if (current.contentHash !== selectedVariant.contentHash) {
-      return { ok: false, message: `${sanitized.displayName} changed since it was selected. Reopen the slash picker and select it again.` };
-    }
+    // Selection metadata identifies the provider and slash token only. The native
+    // provider CLI owns current-file lookup, root precedence, settings, and sandbox
+    // decisions at invocation time; the app must not add a second execution gate.
     return { ok: true, mention: sanitized };
-  }
-
-  // Resolve the validated selected skills for a participant run to their provider-recognized name
-  // and real directory. Returns only variants that exist, are invocable for the run, and whose
-  // content hash is unchanged. Real paths stay server-side (never sent to the renderer); the run
-  // layer uses them to enable the provider's skill-loading path.
-  async resolveInvocableSkillsForParticipant(
-    mentions: ChatSkillMention[],
-    providerKind: ChatProviderKind,
-    context: UserSkillRunContext,
-    participantId?: string
-  ): Promise<Array<{ name: string; dir: string }>> {
-    if (mentions.length === 0) {
-      return [];
-    }
-    const scan = await this.scan(context.repoPath);
-    const resolved: Array<{ name: string; dir: string }> = [];
-    const seen = new Set<string>();
-    for (const mention of mentions) {
-      const sanitized = sanitizeChatSkillMention(mention);
-      const selectedVariant = sanitized?.variants.find((variant) => variant.providerKind === providerKind);
-      if (!selectedVariant) {
-        continue;
-      }
-      const current = scan.variants.find((variant) =>
-        variant.providerKind === selectedVariant.providerKind &&
-        variant.scope === selectedVariant.scope &&
-        variant.sourceKey === selectedVariant.sourceKey &&
-        variant.frontmatterName === selectedVariant.frontmatterName
-      );
-      if (
-        !current ||
-        this.capabilityForVariant(current, context, participantId) !== "invocable" ||
-        current.contentHash !== selectedVariant.contentHash ||
-        seen.has(current.realPath)
-      ) {
-        continue;
-      }
-      seen.add(current.realPath);
-      resolved.push({ name: current.frontmatterName, dir: current.realPath });
-    }
-    return resolved;
   }
 
   private async scan(repoPath?: string): Promise<ScanResult> {
@@ -356,10 +301,11 @@ export class UserSkillsService {
       return undefined;
     }
     try {
-      const normalizedContent = ensureTrailingNewline(stripOuterMarkdownFence(await readFile(skillRealPath, "utf8")));
-      const parsed = parseSkillFrontmatter(normalizedContent);
-      const contentHash = hashText(normalizedContent);
+      const parsed = await this.readSkillFrontmatter(skillRealPath);
       const sourceKey = hashText(`${USER_SKILL_HASH_VERSION}\0${skillRealPath}`);
+      const contentHash = hashText(
+        `${USER_SKILL_HASH_VERSION}\0metadata\0${root.providerKind}\0${root.scope}\0${sourceKey}\0${parsed.name}\0${parsed.description}`
+      );
       return {
         id: hashText(`${USER_SKILL_HASH_VERSION}\0${root.providerKind}\0${root.scope}\0${sourceKey}\0${parsed.name}`),
         providerKind: root.providerKind,
@@ -382,6 +328,27 @@ export class UserSkillsService {
     }
   }
 
+  private async readSkillFrontmatter(skillPath: string): Promise<{ name: string; description: string }> {
+    const handle = await open(skillPath, "r");
+    try {
+      const buffer = Buffer.alloc(MAX_SKILL_FRONTMATTER_BYTES);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      let prefix = buffer.subarray(0, bytesRead).toString("utf8").replace(/\r\n/g, "\n");
+      const openingFence = prefix.match(/^`{3,}[^\n]*\n/);
+      if (openingFence) {
+        prefix = prefix.slice(openingFence[0].length);
+      }
+      const frontmatterEnd = prefix.indexOf("\n---", 4);
+      if (!prefix.startsWith("---\n") || frontmatterEnd < 0) {
+        throw new Error(`Skill frontmatter is missing or exceeds ${MAX_SKILL_FRONTMATTER_BYTES} bytes.`);
+      }
+      const parsed = parseSkillFrontmatter(`${prefix.slice(0, frontmatterEnd + 4)}\n`);
+      return { name: parsed.name, description: parsed.description };
+    } finally {
+      await handle.close();
+    }
+  }
+
   private summariesForVariants(variants: DiscoveredSkillVariant[], context: UserSkillRunContext): UserSkillSummary[] {
     const targetProviders = uniqueProviderKinds(context.target.providerKinds);
     const byName = new Map<string, DiscoveredSkillVariant[]>();
@@ -401,12 +368,8 @@ export class UserSkillsService {
         ? targetProviders
         : uniqueProviderKinds(group.map((variant) => variant.providerKind));
       const selected: DiscoveredSkillVariant[] = [];
-      let ambiguous = false;
       for (const providerKind of providers) {
         const best = this.bestVariant(group.filter((variant) => variant.providerKind === providerKind), context);
-        if (best.ambiguous) {
-          ambiguous = true;
-        }
         if (best.variant) {
           selected.push(best.variant);
         }
@@ -418,7 +381,7 @@ export class UserSkillsService {
         continue;
       }
       const needsClearTarget = !context.target.hasClearTargets;
-      const capabilityState: UserSkillCapabilityState = needsClearTarget || ambiguous
+      const capabilityState: UserSkillCapabilityState = needsClearTarget
         ? "discovery-only"
         : selected.every((variant) => this.capabilityForVariant(variant, context) === "invocable")
           ? "invocable"
@@ -429,8 +392,8 @@ export class UserSkillsService {
         ...mention,
         providerKinds: uniqueProviderKinds(selected.map((variant) => variant.providerKind)),
         scopeKinds: Array.from(new Set(selected.map((variant) => variant.scope))).sort(),
-        statusMessage: needsClearTarget ? "Mention a member before selecting a skill." : ambiguous ? "Duplicate skill variants are ambiguous." : undefined,
-        ambiguous
+        statusMessage: needsClearTarget ? "Mention a member before selecting a skill." : undefined,
+        ambiguous: false
       });
     }
     return summaries.sort((left, right) => left.frontmatterName.localeCompare(right.frontmatterName));
@@ -451,14 +414,14 @@ export class UserSkillsService {
       return { variant: repo[0], ambiguous: false };
     }
     if (repo.length > 1) {
-      return { variant: repo[0], ambiguous: true };
+      return { variant: repo[0], ambiguous: false };
     }
     const personal = byScope.get("personal") ?? [];
     if (personal.length === 1) {
       return { variant: personal[0], ambiguous: false };
     }
     if (personal.length > 1) {
-      return { variant: personal[0], ambiguous: true };
+      return { variant: personal[0], ambiguous: false };
     }
     return { ambiguous: false };
   }
@@ -764,10 +727,6 @@ function isPathInside(basePath: string, candidatePath: string): boolean {
 
 function hashText(value: string): string {
   return createHash("sha256").update(value).digest("hex");
-}
-
-function ensureTrailingNewline(value: string): string {
-  return value.endsWith("\n") ? value : `${value}\n`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

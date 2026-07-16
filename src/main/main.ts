@@ -157,7 +157,7 @@ const appSkillsService = new AppSkillsService({
   appVersion: app.getVersion(),
   debugLogs: debugLogService
 });
-const appMcpService = new AppMcpService();
+const appMcpService = new AppMcpService(debugLogService);
 const consensusService = new ConsensusService(gitService, storageService, providerRunner, cliAgentRunner, debugLogService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
 });

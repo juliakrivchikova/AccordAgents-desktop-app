@@ -568,19 +568,68 @@ test("claude launch diagnostics redact MCP tokens, inline settings, and role ins
   assert.equal(redacted.filter((value) => value === "<redacted>").length, 3);
 });
 
-test("claude denial diagnostics retain only bounded layer evidence", () => {
+test("claude denial diagnostics retain only categorical layer evidence", () => {
   const runner = makeRunner() as any;
+  const secretCanary = "CANARY_SECRET /private/target $(cat ~/.ssh/id_ed25519)";
   const denials = runner.claudePermissionDenials(JSON.stringify({
     permission_denials: [
-      { tool_name: "Write", reason: "Target is outside the working directory", input: { file_path: "/secret/file" } }
+      { tool_name: "Write", reason: secretCanary, input: { file_path: "/secret/file" } },
+      { tool_name: "Bash", stage: "sandbox", decision_code: "sandbox_denied", message: secretCanary },
+      { tool_name: "Read", stage: "novel-runtime-stage", decision_reason: secretCanary }
     ]
   }));
 
-  assert.deepEqual(denials, [{
-    toolName: "Write",
-    reason: "Target is outside the working directory"
-  }]);
+  assert.deepEqual(denials, [
+    {
+      toolName: "Write",
+      layer: "provider-native-permission-or-classifier",
+      decisionCode: "permission_denied"
+    },
+    {
+      toolName: "Bash",
+      layer: "provider-sandbox-settings-or-os",
+      decisionCode: "sandbox_denied"
+    },
+    {
+      toolName: "Read",
+      layer: "unknown-provider-runtime",
+      decisionCode: "permission_denied",
+      missingEvidence: ["recognized denial stage/category"]
+    }
+  ]);
   assert.equal(JSON.stringify(denials).includes("/secret/file"), false);
+  assert.equal(JSON.stringify(denials).includes(secretCanary), false);
+});
+
+test("claude denial diagnostics do not warn for a successful Auto classifier decision", () => {
+  const events: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const runner = new CliAgentRunner({
+    async write(event, payload) {
+      events.push({ event, payload });
+    }
+  }) as any;
+  const participant = { id: "claude-1", kind: "claude-code", label: "@claude" };
+  const raw = {
+    permission_denials: [{ tool_name: "Write", reason: "private target path" }]
+  };
+  const success = runner.withClaudePermissionDenialWarning({
+    participant,
+    ok: true,
+    content: "Handled safely.",
+    durationMs: 1
+  }, raw, participant, "one-shot");
+  const failure = runner.withClaudePermissionDenialWarning({
+    participant,
+    ok: false,
+    content: "Failed.",
+    error: "failed",
+    durationMs: 1
+  }, raw, participant, "one-shot");
+
+  assert.equal(success.warnings, undefined);
+  assert.equal(failure.warnings.length, 1);
+  assert.match(failure.warnings[0], /native permission\/classifier layer/);
+  assert.equal(JSON.stringify(events).includes("private target path"), false);
 });
 
 test("claudeToolConfig maps default + workspaceWrite=true to acceptEdits", () => {
@@ -855,6 +904,93 @@ test("claude auto app MCP preauthorization is deny-by-default and intersects exp
     noClassification,
     runner.claudeToolConfig("chat", "/repo", [], noClassification)
   ), []);
+});
+
+test("claude production launch-argv matrix preserves Auto authority across session paths", () => {
+  const runner = makeRunner() as any;
+  const participant = {
+    id: "claude-1",
+    kind: "claude-code",
+    label: "@claude",
+    model: undefined,
+    reasoningEffort: undefined
+  };
+  const base = chatOptions({
+    agentMode: "auto",
+    workspaceWrite: true,
+    webAccess: true,
+    canRequestPermissions: true,
+    appToolNames: ["app_artifact_create", "app_chat_export_attachment", "app_tool_permission"]
+  });
+  const scenarios: Array<{
+    name: string;
+    transport: "one-shot" | "warm";
+    options: any;
+    newSessionId?: string;
+  }> = [
+    { name: "cold", transport: "one-shot", options: base, newSessionId: "new-session" },
+    { name: "warm", transport: "warm", options: base, newSessionId: "warm-session" },
+    { name: "resume", transport: "one-shot", options: { ...base, sessionId: "resume-session" } },
+    { name: "retry-fallback", transport: "one-shot", options: { ...base, warm: undefined }, newSessionId: "retry-session" },
+    { name: "participant-request", transport: "warm", options: base, newSessionId: "request-session" },
+    { name: "restored-session", transport: "one-shot", options: { ...base, sessionId: "restored-session" } }
+  ];
+
+  for (const scenario of scenarios) {
+    const config = runner.claudeToolConfig("chat", "/selected/repo", ["/chat-history"], scenario.options);
+    const args = runner.claudeLaunchArgs(
+      participant,
+      "chat",
+      scenario.options,
+      config,
+      ["/chat-history"],
+      scenario.transport,
+      scenario.newSessionId
+    ) as string[];
+    const allowedTools = claudeAllowedToolsFromArgs(args);
+
+    assert.deepEqual(allowedTools, ["mcp__accord_agents__app_artifact_create"], scenario.name);
+    assert.equal(args.includes("--tools"), false, scenario.name);
+    assert.equal(args.includes("--disallowedTools"), false, scenario.name);
+    assert.equal(args.includes("/outside/explicit-target.txt"), false, scenario.name);
+    assert.equal(args.includes("--add-dir"), true, scenario.name);
+    assert.equal(args.includes("/chat-history"), true, scenario.name);
+    for (const nativeTool of ["Bash", "Edit", "Write", "Read", "WebSearch", "Skill", "Agent", "Task"]) {
+      assert.equal(allowedTools.includes(nativeTool), false, `${scenario.name}:${nativeTool}`);
+    }
+    if (scenario.options.sessionId) {
+      assert.equal(args.includes("--resume"), true, scenario.name);
+    }
+  }
+});
+
+test("claude outside-directory parity fixture adds no app path denial or writable root", () => {
+  const runner = makeRunner() as any;
+  const options = chatOptions({
+    agentMode: "auto",
+    workspaceWrite: true,
+    webAccess: true,
+    canRequestPermissions: true,
+    appToolNames: ["app_artifact_create"]
+  });
+  const config = runner.claudeToolConfig("chat", "/selected/repo", ["/chat-history"], options);
+  const args = runner.claudeLaunchArgs(
+    { id: "claude-1", kind: "claude-code", label: "@claude" },
+    "chat",
+    options,
+    config,
+    ["/chat-history"],
+    "one-shot",
+    "session-1"
+  ) as string[];
+  const serialized = JSON.stringify(args);
+
+  assert.equal(config.permissionMode, "auto");
+  assert.deepEqual(config.disallowedTools, []);
+  assert.deepEqual(config.askTools, []);
+  assert.equal(serialized.includes("/outside/explicit-target.txt"), false);
+  assert.equal(serialized.includes("sandbox.filesystem.allowWrite"), false);
+  assert.equal(serialized.includes("writable_roots"), false);
 });
 
 test("claude auto chat without app MCP still omits allowedTools", () => {

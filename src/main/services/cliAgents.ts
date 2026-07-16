@@ -163,9 +163,16 @@ interface CliAgentDebugLogger {
   write(event: string, payload: Record<string, unknown>): Promise<void>;
 }
 
+type ClaudePermissionDenialLayer =
+  | "provider-native-permission-or-classifier"
+  | "provider-sandbox-settings-or-os"
+  | "unknown-provider-runtime";
+
 interface ClaudePermissionDenialDiagnostic {
   toolName: string;
-  reason?: string;
+  layer: ClaudePermissionDenialLayer;
+  decisionCode: string;
+  missingEvidence?: string[];
 }
 
 interface WarmAgentEntry {
@@ -2422,41 +2429,15 @@ export class CliAgentRunner {
     const extraReadableDirs = this.normalizedExtraReadableDirs(options.extraReadableDirs);
     const toolConfig = this.claudeToolConfig(kind, repoPath, extraReadableDirs, options);
     try {
-      const args = [
-        "-p",
-        "--output-format",
-        "json",
-        "--permission-mode",
-        toolConfig.permissionMode
-      ];
-      args.push(...this.claudeAllowedToolsArgs(kind, options, toolConfig));
-      if (toolConfig.disallowedTools.length > 0) {
-        args.push("--disallowedTools", toolConfig.disallowedTools.join(","));
-      }
-      if (toolConfig.askTools.length > 0) {
-        args.push("--settings", JSON.stringify({ permissions: { ask: toolConfig.askTools } }));
-      }
-      if (options.sessionId) {
-        args.push("--resume", options.sessionId);
-      } else if (newSessionId) {
-        args.push("--session-id", newSessionId);
-      }
-      if (participant.model) {
-        args.push("--model", participant.model);
-      }
-      const reasoningEffort = this.claudeReasoningEffort(participant.reasoningEffort);
-      if (reasoningEffort) {
-        args.push("--effort", reasoningEffort);
-      }
-      if (options.role && !options.sessionId) {
-        args.push("--agents", this.claudeAgentsJson(options.role), "--agent", options.role.name);
-      }
-      args.push(...this.claudeMcpArgs(kind, options));
-      args.push(...this.claudePermissionPromptArgs(kind, options));
-      if (extraReadableDirs.length > 0) {
-        args.push("--add-dir", ...extraReadableDirs);
-      }
-      args.push(...this.claudeToolsArgs(kind, toolConfig, options));
+      const args = this.claudeLaunchArgs(
+        participant,
+        kind,
+        options,
+        toolConfig,
+        extraReadableDirs,
+        "one-shot",
+        newSessionId
+      );
       this.logClaudeLaunch(participant, repoPath, kind, options, args, toolConfig, extraReadableDirs, "one-shot");
       this.reportSessionId(options.onSessionId, newSessionId);
 
@@ -2630,45 +2611,15 @@ export class CliAgentRunner {
     const newSessionId = options.persistSession && !options.sessionId ? randomUUID() : undefined;
     const extraReadableDirs = this.normalizedExtraReadableDirs(options.extraReadableDirs);
     const toolConfig = this.claudeToolConfig(kind, repoPath, extraReadableDirs, options);
-    const args = [
-      "-p",
-      "--verbose",
-      "--include-partial-messages",
-      "--input-format",
-      "stream-json",
-      "--output-format",
-      "stream-json",
-      "--permission-mode",
-      toolConfig.permissionMode
-    ];
-    args.push(...this.claudeAllowedToolsArgs(kind, options, toolConfig));
-    if (toolConfig.disallowedTools.length > 0) {
-      args.push("--disallowedTools", toolConfig.disallowedTools.join(","));
-    }
-    if (toolConfig.askTools.length > 0) {
-      args.push("--settings", JSON.stringify({ permissions: { ask: toolConfig.askTools } }));
-    }
-    if (options.sessionId) {
-      args.push("--resume", options.sessionId);
-    } else if (newSessionId) {
-      args.push("--session-id", newSessionId);
-    }
-    if (participant.model) {
-      args.push("--model", participant.model);
-    }
-    const reasoningEffort = this.claudeReasoningEffort(participant.reasoningEffort);
-    if (reasoningEffort) {
-      args.push("--effort", reasoningEffort);
-    }
-    if (options.role && !options.sessionId) {
-      args.push("--agents", this.claudeAgentsJson(options.role), "--agent", options.role.name);
-    }
-    args.push(...this.claudeMcpArgs(kind, options));
-    args.push(...this.claudePermissionPromptArgs(kind, options));
-    if (extraReadableDirs.length > 0) {
-      args.push("--add-dir", ...extraReadableDirs);
-    }
-    args.push(...this.claudeToolsArgs(kind, toolConfig, options));
+    const args = this.claudeLaunchArgs(
+      participant,
+      kind,
+      options,
+      toolConfig,
+      extraReadableDirs,
+      "warm",
+      newSessionId
+    );
     this.logClaudeLaunch(participant, repoPath, kind, options, args, toolConfig, extraReadableDirs, "warm");
 
     const child = spawn("claude", args, {
@@ -2791,6 +2742,65 @@ export class CliAgentRunner {
         });
       }
     };
+  }
+
+  private claudeLaunchArgs(
+    participant: ParticipantConfig,
+    kind: ConversationKind,
+    options: CliAgentRunOptions,
+    toolConfig: ClaudeToolConfig,
+    extraReadableDirs: string[],
+    transport: "one-shot" | "warm",
+    newSessionId?: string
+  ): string[] {
+    const args = transport === "warm"
+      ? [
+          "-p",
+          "--verbose",
+          "--include-partial-messages",
+          "--input-format",
+          "stream-json",
+          "--output-format",
+          "stream-json",
+          "--permission-mode",
+          toolConfig.permissionMode
+        ]
+      : [
+          "-p",
+          "--output-format",
+          "json",
+          "--permission-mode",
+          toolConfig.permissionMode
+        ];
+    args.push(...this.claudeAllowedToolsArgs(kind, options, toolConfig));
+    if (toolConfig.disallowedTools.length > 0) {
+      args.push("--disallowedTools", toolConfig.disallowedTools.join(","));
+    }
+    if (toolConfig.askTools.length > 0) {
+      args.push("--settings", JSON.stringify({ permissions: { ask: toolConfig.askTools } }));
+    }
+    if (options.sessionId) {
+      args.push("--resume", options.sessionId);
+    } else if (newSessionId) {
+      args.push("--session-id", newSessionId);
+    }
+    if (participant.model) {
+      args.push("--model", participant.model);
+    }
+    const reasoningEffort = this.claudeReasoningEffort(participant.reasoningEffort);
+    if (reasoningEffort) {
+      args.push("--effort", reasoningEffort);
+    }
+    if (options.role && !options.sessionId) {
+      args.push("--agents", this.claudeAgentsJson(options.role), "--agent", options.role.name);
+    }
+    args.push(...this.claudeMcpArgs(kind, options));
+    args.push(...this.claudePermissionPromptArgs(kind, options));
+    if (extraReadableDirs.length > 0) {
+      args.push("--add-dir", ...extraReadableDirs);
+    }
+    args.push(...this.claudeToolsArgs(kind, toolConfig, options));
+    return args;
   }
 
   private handleClaudeWarmLine(
@@ -3410,6 +3420,7 @@ export class CliAgentRunner {
     const allowedTools = this.claudeToolListArg(args, "--allowedTools");
     const disallowedTools = this.claudeToolListArg(args, "--disallowedTools");
     void this.claudeVersionForDiagnostics().then((providerVersion) => this.writeDebugLog("cli.claude.launch", {
+      layer: "app-launch-argv-policy",
       providerKind: participant.kind,
       providerVersion: providerVersion ?? "unknown",
       participantId: participant.id,
@@ -3482,21 +3493,32 @@ export class CliAgentRunner {
     if (denials.length === 0) {
       return result;
     }
+    const byLayer = new Map<ClaudePermissionDenialLayer, ClaudePermissionDenialDiagnostic[]>();
+    for (const denial of denials) {
+      byLayer.set(denial.layer, [...(byLayer.get(denial.layer) ?? []), denial]);
+    }
+    for (const [layer, layerDenials] of byLayer) {
+      void this.writeDebugLog("cli.claude.permission-denial", {
+        providerKind: participant.kind,
+        participantId: participant.id,
+        transport,
+        layer,
+        count: layerDenials.length,
+        toolNames: Array.from(new Set(layerDenials.map((denial) => denial.toolName))).sort(),
+        decisionCodes: Array.from(new Set(layerDenials.map((denial) => denial.decisionCode))).sort(),
+        missingEvidence: Array.from(new Set(layerDenials.flatMap((denial) => denial.missingEvidence ?? []))).sort()
+      });
+    }
+    if (result.ok) {
+      return result;
+    }
     const toolNames = Array.from(new Set(denials.map((denial) => denial.toolName))).sort();
-    void this.writeDebugLog("cli.claude.permission-denial", {
-      providerKind: participant.kind,
-      participantId: participant.id,
-      transport,
-      layer: "provider-native-permission-or-classifier",
-      count: denials.length,
-      toolNames,
-      reasons: denials.map((denial) => denial.reason).filter(Boolean)
-    });
+    const layers = Array.from(byLayer.keys()).map((layer) => this.claudeDenialLayerLabel(layer));
     return {
       ...result,
       warnings: [
         ...(result.warnings ?? []),
-        `${participant.label}: Claude denied ${denials.length} action${denials.length === 1 ? "" : "s"} at the native permission/classifier layer${toolNames.length > 0 ? ` (${toolNames.join(", ")})` : ""}.`
+        `${participant.label}: Claude failed after ${denials.length} denied action${denials.length === 1 ? "" : "s"} at ${layers.join(" and ")}${toolNames.length > 0 ? ` (${toolNames.join(", ")})` : ""}.`
       ]
     };
   }
@@ -3525,14 +3547,60 @@ export class CliAgentRunner {
         this.stringField(denial, "toolName") ??
         this.stringField(denial, "name") ??
         "unknown-tool";
-      const reason = this.stringField(denial, "reason") ??
-        this.stringField(denial, "message") ??
-        this.stringField(denial, "decision_reason");
+      const stage = this.claudeDenialStage(denial);
       return [{
         toolName: this.truncateText(toolName, 120),
-        ...(reason ? { reason: this.truncateText(reason, MAX_CLI_ERROR_CHARS) } : {})
+        layer: stage.layer,
+        decisionCode: this.claudeDenialDecisionCode(denial),
+        ...(stage.missingEvidence ? { missingEvidence: stage.missingEvidence } : {})
       }];
     });
+  }
+
+  private claudeDenialStage(denial: Record<string, unknown>): {
+    layer: ClaudePermissionDenialLayer;
+    missingEvidence?: string[];
+  } {
+    const stage = this.stringField(denial, "stage") ??
+      this.stringField(denial, "source") ??
+      this.stringField(denial, "category") ??
+      this.stringField(denial, "layer");
+    if (!stage) {
+      // The provider's structured permission_denials envelope is itself evidence
+      // for the native permission/classifier layer.
+      return { layer: "provider-native-permission-or-classifier" };
+    }
+    const normalized = stage.trim().toLowerCase();
+    if (/sandbox|filesystem|file-system|\bos\b/.test(normalized)) {
+      return { layer: "provider-sandbox-settings-or-os" };
+    }
+    if (/permission|classifier|approval|policy/.test(normalized)) {
+      return { layer: "provider-native-permission-or-classifier" };
+    }
+    return {
+      layer: "unknown-provider-runtime",
+      missingEvidence: ["recognized denial stage/category"]
+    };
+  }
+
+  private claudeDenialDecisionCode(denial: Record<string, unknown>): string {
+    for (const field of ["reason_code", "decision_code", "code", "decision", "status"]) {
+      const value = this.stringField(denial, field)?.trim().toLowerCase();
+      if (value && /^[a-z0-9_.:-]{1,80}$/.test(value)) {
+        return value;
+      }
+    }
+    return "permission_denied";
+  }
+
+  private claudeDenialLayerLabel(layer: ClaudePermissionDenialLayer): string {
+    if (layer === "provider-sandbox-settings-or-os") {
+      return "the provider sandbox/settings or OS layer";
+    }
+    if (layer === "unknown-provider-runtime") {
+      return "an unknown provider/runtime layer";
+    }
+    return "the native permission/classifier layer";
   }
 
   private agentModeForRun(kind: ConversationKind, options: CliAgentRunOptions): ChatAgentMode {

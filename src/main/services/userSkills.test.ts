@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -119,35 +119,6 @@ test("ranks the exact query match first so the highlighted result is correct", a
     });
 
     assert.deepEqual(result.skills.map((skill) => skill.frontmatterName), ["qa", "qa-only", "browse"]);
-  });
-});
-
-test("resolveInvocableSkillsForParticipant returns name + real dir for invocable selections only", async () => {
-  await withTempWorkspace(async ({ homeDir, repoPath }) => {
-    await writeSkill(path.join(repoPath, ".agents/skills/troubleshoot"), "troubleshoot", "Troubleshoot", "body");
-    const service = new UserSkillsService({ homeDir });
-    const context = {
-      repoPath,
-      target: { hasClearTargets: true, participantIds: ["codex-1"], providerKinds: ["codex-cli" as ChatProviderKind] },
-      participantProviderKindById: { "codex-1": "codex-cli" as ChatProviderKind },
-      runRootByParticipant: { "codex-1": repoPath },
-      runRootByProvider: { "codex-cli": repoPath }
-    };
-    const search = await service.search({ ...NOW_REQUEST, query: "troubleshoot" }, context);
-    assert.equal(search.skills.length, 1);
-
-    const resolved = await service.resolveInvocableSkillsForParticipant(search.skills, "codex-cli", context, "codex-1");
-    assert.equal(resolved.length, 1);
-    assert.equal(resolved[0].name, "troubleshoot");
-    assert.equal(resolved[0].dir, await realpath(path.join(repoPath, ".agents/skills/troubleshoot")));
-
-    // Not invocable when the run root no longer matches the repo (discovery-only) → not resolved.
-    const offRepo = await service.resolveInvocableSkillsForParticipant(search.skills, "codex-cli", {
-      ...context,
-      runRootByParticipant: { "codex-1": undefined },
-      runRootByProvider: { "codex-cli": undefined }
-    }, "codex-1");
-    assert.equal(offRepo.length, 0);
   });
 });
 
@@ -328,7 +299,7 @@ test("keeps public app-owned generated skills discoverable in slash search", asy
   });
 });
 
-test("flags a collision between public /accord and a user-owned accord skill instead of silently overriding", async () => {
+test("leaves duplicate skill-root precedence to the native provider", async () => {
   await withTempWorkspace(async ({ homeDir, repoPath }) => {
     const root = path.join(homeDir, ".agents/skills");
     const generated = path.join(root, "accordagents-accord");
@@ -357,8 +328,8 @@ test("flags a collision between public /accord and a user-owned accord skill ins
     });
 
     assert.equal(search.skills.length, 1);
-    assert.equal(search.skills[0].ambiguous, true);
-    assert.equal(search.skills[0].capabilityState, "discovery-only");
+    assert.equal(search.skills[0].ambiguous, false);
+    assert.equal(search.skills[0].capabilityState, "invocable");
   });
 });
 
@@ -433,31 +404,36 @@ test("counts broken symlinked skill folders without exposing them as visible ski
   });
 });
 
-test("revalidates selected skill content hashes before a participant run", async () => {
+test("does not block native skill invocation when the body changes after selection", async () => {
   await withTempWorkspace(async ({ homeDir, repoPath }) => {
-    const folder = path.join(homeDir, ".claude/skills/qa");
-    await writeSkill(folder, "qa", "QA", "old body");
     const service = new UserSkillsService({ homeDir });
-    const context = {
-      repoPath,
-      target: {
-        hasClearTargets: true,
-        participantIds: ["claude-1"],
-        providerKinds: ["claude-code" as ChatProviderKind]
-      },
-      participantProviderKindById: { "claude-1": "claude-code" as ChatProviderKind },
-      runRootByParticipant: { "claude-1": repoPath },
-      runRootByProvider: { "claude-code": repoPath }
-    };
-    const search = await service.search({ ...NOW_REQUEST, query: "qa" }, context);
-    assert.equal(search.skills.length, 1);
+    const variants: Array<{ providerKind: ChatProviderKind; participantId: string; folder: string }> = [
+      { providerKind: "codex-cli", participantId: "codex-1", folder: path.join(homeDir, ".codex/skills/qa") },
+      { providerKind: "claude-code", participantId: "claude-1", folder: path.join(homeDir, ".claude/skills/qa") },
+      { providerKind: "gemini-cli", participantId: "gemini-1", folder: path.join(homeDir, ".gemini/config/skills/qa") }
+    ];
+    for (const variant of variants) {
+      await writeSkill(variant.folder, "qa", "QA", "old body");
+      const context = {
+        repoPath,
+        target: {
+          hasClearTargets: true,
+          participantIds: [variant.participantId],
+          providerKinds: [variant.providerKind]
+        },
+        participantProviderKindById: { [variant.participantId]: variant.providerKind },
+        runRootByParticipant: { [variant.participantId]: repoPath },
+        runRootByProvider: { [variant.providerKind]: repoPath }
+      };
+      const search = await service.search({ ...NOW_REQUEST, query: "qa" }, context);
+      assert.equal(search.skills.length, 1, variant.providerKind);
 
-    await writeSkill(folder, "qa", "QA", "new body");
-    const validation = await service.validateMentionForParticipant(search.skills[0], "claude-code", context);
+      await writeSkill(variant.folder, "qa", "QA", "new body");
+      const validation = await service.validateMentionForParticipant(search.skills[0], variant.providerKind, context);
+      const refreshed = await service.search({ ...NOW_REQUEST, query: "qa" }, context);
 
-    assert.equal(validation.ok, false);
-    if (!validation.ok) {
-      assert.match(validation.message, /changed since it was selected/);
+      assert.equal(validation.ok, true, variant.providerKind);
+      assert.equal(refreshed.skills[0].contentHash, search.skills[0].contentHash, variant.providerKind);
     }
   });
 });
