@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { SetStateAction } from "react";
 import { act, create } from "react-test-renderer";
 
 import type { AgentHealth, AppSettings } from "../../shared/types";
@@ -167,12 +168,13 @@ test("stale New Chat readiness refresh failure fails closed and preserves the co
   renderer.unmount();
 });
 
-test("existing chat send failure preserves the composer draft", async () => {
+test("existing chat send clears immediately and restores the composer draft on failure", async () => {
+  let rejectSend: ((reason: Error) => void) | undefined;
   (globalThis as any).window = {
     consensus: {
-      sendChatMessage: async () => {
-        throw new Error("Claude Code was not detected.");
-      }
+      sendChatMessage: () => new Promise((_, reject) => {
+        rejectSend = reject;
+      })
     }
   };
   let draft = "draft must survive unavailable provider";
@@ -190,9 +192,9 @@ test("existing chat send failure preserves the composer draft", async () => {
     },
     chatMessageDraft: draft,
     progressLogRef: { current: [] },
-    setChatMessageDraft: (value: string) => {
-      draft = value;
-      state.chatMessageDraft = value;
+    setChatMessageDraft: (value: SetStateAction<string>) => {
+      draft = typeof value === "function" ? value(draft) : value;
+      state.chatMessageDraft = draft;
     },
     setConversation: () => undefined,
     setError: (value: string | undefined) => { error = value; },
@@ -207,14 +209,36 @@ test("existing chat send failure preserves the composer draft", async () => {
   }
 
   const renderer = create(<Harness />);
+  let sendPromise: Promise<boolean> | undefined;
   let sent: boolean | undefined;
+  act(() => {
+    sendPromise = actions?.sendChatMessage();
+  });
+
+  assert.equal(draft, "", "the sent draft should clear before the send IPC resolves");
+
+  rejectSend?.(new Error("Claude Code was not detected."));
   await act(async () => {
-    sent = await actions?.sendChatMessage();
+    sent = await sendPromise;
   });
 
   assert.equal(sent, false);
   assert.equal(draft, "draft must survive unavailable provider");
   assert.equal(error, "Claude Code was not detected.");
+
+  draft = "second draft";
+  state.chatMessageDraft = draft;
+  act(() => {
+    sendPromise = actions?.sendChatMessage();
+  });
+  state.setChatMessageDraft("new text typed while sending");
+  rejectSend?.(new Error("Claude Code was not detected."));
+  await act(async () => {
+    sent = await sendPromise;
+  });
+
+  assert.equal(sent, false);
+  assert.equal(draft, "new text typed while sending", "a failed send must not overwrite a newer draft");
   renderer.unmount();
 });
 

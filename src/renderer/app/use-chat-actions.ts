@@ -282,6 +282,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
 
   async function sendChatMessage(options: SendChatMessageOptions = {}): Promise<boolean> {
     if (!state.conversation || state.conversation.kind !== "chat") return false;
+    const draftBeforeSend = state.chatMessageDraft;
     const content = (options.content ?? state.chatMessageDraft).trim();
     const imageAttachments = options.imageAttachments ?? [];
     const skillMentions = options.skillMentions ?? [];
@@ -296,6 +297,9 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     const runId = crypto.randomUUID();
     state.setError(undefined);
     state.setWarnings([]);
+    if (!options.chatThreadRootId) {
+      state.setChatMessageDraft("");
+    }
     try {
       const result = await window.consensus.sendChatMessage({
         conversationId: state.conversation.id,
@@ -308,9 +312,6 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         parentMessageId: options.parentMessageId,
         chatThreadRootId: options.chatThreadRootId
       });
-      if (!options.chatThreadRootId) {
-        state.setChatMessageDraft("");
-      }
       state.setConversation((current) =>
         current && current.id === result.conversation.id
           ? mergeProgressIntoConversation(result.conversation, state.progressLogRef.current.filter((item) => item.runId === runId))
@@ -322,6 +323,9 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       await refreshPersistedProviderPreference();
       return true;
     } catch (caught) {
+      if (!options.chatThreadRootId) {
+        state.setChatMessageDraft((current) => current || draftBeforeSend);
+      }
       const message = errorText(caught);
       if (message.toLowerCase().includes("cancel")) {
         state.setWarnings((current) => [...current, "Chat turn cancelled."]);
