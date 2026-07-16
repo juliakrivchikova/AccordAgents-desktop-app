@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  APP_ARTIFACT_CREATE_TOOL,
   APP_CHAT_EXPORT_ATTACHMENT_TOOL,
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
   APP_CHAT_LIST_ATTACHMENTS_TOOL,
@@ -8261,6 +8262,24 @@ test("appMcpToolNames exposes request tools only with their capabilities", () =>
   assert.ok(requestTools.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL));
   assert.ok(compactionTools.includes(APP_CHAT_REQUEST_COMPACTION_TOOL));
   assert.ok(requestTools.includes(APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL));
+});
+
+test("auto app MCP preauthorization is explicit and excludes filesystem and permission-bridge tools", () => {
+  const { service } = testService();
+  const exposed = (service as any).appMcpToolNames([
+    "participants.request",
+    "compaction.request",
+    "permissions.request",
+    "participants.manage"
+  ]) as string[];
+  const eligible = (service as any).autoPreauthorizedAppMcpToolNames(exposed) as string[];
+
+  assert.ok(eligible.includes(APP_ARTIFACT_CREATE_TOOL));
+  assert.ok(eligible.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL));
+  assert.ok(eligible.includes(APP_PERMISSIONS_REQUEST_CHANGE_TOOL));
+  assert.equal(eligible.includes(APP_CHAT_EXPORT_ATTACHMENT_TOOL), false);
+  assert.equal(eligible.includes(APP_TOOL_PERMISSION_TOOL), false);
+  assert.equal(eligible.some((toolName) => toolName.startsWith("app_skill_")), false);
 });
 
 test("app MCP advertises self-compaction only with compaction permission", () => {

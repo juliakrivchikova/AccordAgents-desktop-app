@@ -276,7 +276,7 @@ function geminiPrompt(
   if (repoPath) {
     lines.push(`The selected repository workspace is ${repoPath}.`);
   }
-  if (repoPath && (mode === "auto" || permissions.workspaceWrite)) {
+  if (repoPath && mode !== "auto" && permissions.workspaceWrite) {
     lines.push(
       `File modifications are limited to the selected repository workspace (${repoPath}). Do not create, modify, move, or delete files outside that workspace.`
     );

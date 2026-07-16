@@ -104,7 +104,8 @@ export function effectiveChatAgentPermissionsForProvider(
   // its workspace-write sandbox; Claude runs under native `--permission-mode auto`,
   // whose classifier decides each command — so Bash must stay available to the
   // session tool surface.
-  // Existing deny rules are preserved and still honored.
+  // Stored app rules remain part of the saved configuration but are not forwarded as
+  // hard provider policy in Auto; the provider's native classifier owns each decision.
   const shell = {
     ...normalized.shell,
     enabled: true

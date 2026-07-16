@@ -100,7 +100,7 @@ test("buildGeminiExecInvocation: auto mode and granted write skip tool confirmat
     }
   });
   assert.equal(write.args.includes("--dangerously-skip-permissions"), true);
-  assert.match(flagValue(auto.args, "--print") ?? "", /File modifications are limited to the selected repository workspace/);
+  assert.doesNotMatch(flagValue(auto.args, "--print") ?? "", /File modifications are limited to the selected repository workspace/);
   assert.match(flagValue(write.args, "--print") ?? "", /Do not create, modify, move, or delete files outside that workspace/);
 });
 

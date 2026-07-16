@@ -515,8 +515,10 @@ function chatOptions(overrides: {
   shell?: ReturnType<typeof defaultChatAgentPermissions>["shell"];
   canRequestPermissions?: boolean;
   appToolNames?: string[];
+  autoPreauthorizedToolNames?: string[];
 }) {
   const permissions = defaultChatAgentPermissions();
+  const appToolNames = overrides.appToolNames ?? ["app_permissions_request_change"];
   return {
     agentMode: overrides.agentMode,
     permissions: {
@@ -530,7 +532,10 @@ function chatOptions(overrides: {
       ? {
           url: "http://127.0.0.1:1/mcp",
           token: "token",
-          toolNames: overrides.appToolNames ?? ["app_permissions_request_change"]
+          toolNames: appToolNames,
+          autoPreauthorizedToolNames: overrides.autoPreauthorizedToolNames ?? appToolNames.filter((toolName) =>
+            toolName !== "app_tool_permission" && toolName !== "app_chat_export_attachment"
+          )
         }
       : undefined
   };
@@ -540,6 +545,43 @@ function claudeAllowedToolsFromArgs(args: string[]): string[] {
   const index = args.indexOf("--allowedTools");
   return index >= 0 ? (args[index + 1] ?? "").split(",").filter(Boolean) : [];
 }
+
+test("claude launch diagnostics redact MCP tokens, inline settings, and role instructions", () => {
+  const runner = makeRunner() as any;
+  const args = [
+    "-p",
+    "--mcp-config",
+    "{\"headers\":{\"Authorization\":\"Bearer secret-token\"}}",
+    "--settings",
+    "{\"permissions\":{\"ask\":[\"Bash(secret-path)\"]}}",
+    "--agents",
+    "{\"role\":{\"prompt\":\"private instructions\"}}",
+    "--add-dir",
+    "/repo/history"
+  ];
+
+  const redacted = runner.redactedClaudeArgs(args) as string[];
+  assert.equal(redacted.join(" ").includes("secret-token"), false);
+  assert.equal(redacted.join(" ").includes("secret-path"), false);
+  assert.equal(redacted.join(" ").includes("private instructions"), false);
+  assert.ok(redacted.includes("/repo/history"));
+  assert.equal(redacted.filter((value) => value === "<redacted>").length, 3);
+});
+
+test("claude denial diagnostics retain only bounded layer evidence", () => {
+  const runner = makeRunner() as any;
+  const denials = runner.claudePermissionDenials(JSON.stringify({
+    permission_denials: [
+      { tool_name: "Write", reason: "Target is outside the working directory", input: { file_path: "/secret/file" } }
+    ]
+  }));
+
+  assert.deepEqual(denials, [{
+    toolName: "Write",
+    reason: "Target is outside the working directory"
+  }]);
+  assert.equal(JSON.stringify(denials).includes("/secret/file"), false);
+});
 
 test("claudeToolConfig maps default + workspaceWrite=true to acceptEdits", () => {
   const runner = makeRunner() as any;
@@ -620,7 +662,7 @@ test("claudeToolConfig auto mode uses native auto permission mode with Bash avai
   assert.equal(config.disallowedTools.includes("Bash"), false);
 });
 
-test("claudeToolConfig auto mode forwards only deny shell rules and drops allow/ask", () => {
+test("claudeToolConfig auto mode ignores all stored shell rules", () => {
   const runner = makeRunner() as any;
   const config = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
     agentMode: "auto",
@@ -637,9 +679,7 @@ test("claudeToolConfig auto mode forwards only deny shell rules and drops allow/
   }));
   assert.equal(config.permissionMode, "auto");
   assert.ok(config.tools.includes("Bash"));
-  // deny rule forwarded as a hard stop...
-  assert.ok(config.disallowedTools.some((tool: string) => tool.includes("rm -rf")));
-  // ...but stale allow/ask rules are NOT forwarded (native auto classifier decides).
+  assert.equal(config.disallowedTools.some((tool: string) => tool.includes("rm -rf")), false);
   assert.equal(config.allowedTools.some((tool: string) => tool.includes("curl")), false);
   assert.equal(config.askTools.some((tool: string) => tool.includes("git push")), false);
   assert.equal(config.allowedTools.includes("Bash"), false);
@@ -732,15 +772,19 @@ test("claude default chat delegates unmatched tool approvals to app_tool_permiss
   ]);
 });
 
-test("claude auto chat passes only read-context app MCP allowedTools", () => {
+test("claude auto chat preauthorizes the eligible exposed app MCP inventory only", () => {
   const runner = makeRunner() as any;
-  const readContextTools = [
+  const eligibleAppTools = [
     "mcp__accord_agents__app_chat_get_context",
     "mcp__accord_agents__app_chat_get_participants",
     "mcp__accord_agents__app_chat_get_participant_request_status",
     "mcp__accord_agents__app_chat_read_messages",
     "mcp__accord_agents__app_chat_list_attachments",
-    "mcp__accord_agents__app_chat_read_attachment"
+    "mcp__accord_agents__app_chat_read_attachment",
+    "mcp__accord_agents__app_chat_react",
+    "mcp__accord_agents__app_chat_send_message",
+    "mcp__accord_agents__app_chat_set_title",
+    "mcp__accord_agents__app_permissions_request_change"
   ];
   const options = chatOptions({
     agentMode: "auto",
@@ -768,13 +812,9 @@ test("claude auto chat passes only read-context app MCP allowedTools", () => {
 
   assert.equal(config.allowedTools.length > 0, true);
   assert.deepEqual(args.slice(0, 1), ["--allowedTools"]);
-  assert.deepEqual(allowedTools, readContextTools);
+  assert.deepEqual(allowedTools, eligibleAppTools);
   for (const tool of [
     "mcp__accord_agents__app_chat_export_attachment",
-    "mcp__accord_agents__app_chat_react",
-    "mcp__accord_agents__app_chat_send_message",
-    "mcp__accord_agents__app_chat_set_title",
-    "mcp__accord_agents__app_permissions_request_change",
     "mcp__accord_agents__app_tool_permission",
     "Bash",
     "Edit",
@@ -786,6 +826,35 @@ test("claude auto chat passes only read-context app MCP allowedTools", () => {
     assert.equal(allowedTools.includes(tool), false, `${tool} should not be auto-allowed`);
   }
   assert.deepEqual(runner.claudePermissionPromptArgs("chat", options), []);
+});
+
+test("claude auto app MCP preauthorization is deny-by-default and intersects exposed tools", () => {
+  const runner = makeRunner() as any;
+  const options = chatOptions({
+    agentMode: "auto",
+    workspaceWrite: false,
+    canRequestPermissions: true,
+    appToolNames: ["app_artifact_create", "app_chat_export_attachment", "app_tool_permission"],
+    autoPreauthorizedToolNames: ["app_artifact_create", "app_unexposed", "app_chat_export_attachment", "app_tool_permission"]
+  });
+  const config = runner.claudeToolConfig("chat", "/repo", [], options);
+  const allowedTools = claudeAllowedToolsFromArgs(runner.claudeAllowedToolsArgs("chat", options, config));
+
+  assert.deepEqual(allowedTools, [
+    "mcp__accord_agents__app_artifact_create",
+    "mcp__accord_agents__app_chat_export_attachment"
+  ]);
+  assert.equal(allowedTools.includes("mcp__accord_agents__app_tool_permission"), false);
+
+  const noClassification = {
+    ...options,
+    appMcp: { ...options.appMcp, autoPreauthorizedToolNames: undefined }
+  };
+  assert.deepEqual(runner.claudeAllowedToolsArgs(
+    "chat",
+    noClassification,
+    runner.claudeToolConfig("chat", "/repo", [], noClassification)
+  ), []);
 });
 
 test("claude auto chat without app MCP still omits allowedTools", () => {

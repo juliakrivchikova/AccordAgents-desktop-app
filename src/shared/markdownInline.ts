@@ -21,6 +21,7 @@ const BARE_MESSAGE_RE = new RegExp(`^#msg:(${MESSAGE_ID_RE_SOURCE})`);
 // is the artifact's stable identity; the renderer shows the artifact's CURRENT
 // name, so renames never break or redirect existing references.
 const ARTIFACT_LINK_RE = new RegExp(`^\\[([^\\]\\n]+)\\]\\(#artifact:(${MESSAGE_ID_RE_SOURCE})\\)`);
+const ARTIFACT_URI_LINK_RE = new RegExp(`^\\[([^\\]\\n]+)\\]\\(artifact:\\/\\/(${MESSAGE_ID_RE_SOURCE})\\)`, "i");
 const BARE_ARTIFACT_RE = new RegExp(`^#artifact:(${MESSAGE_ID_RE_SOURCE})`);
 const MARKDOWN_EXTERNAL_LINK_RE = /^\[([^\]\n]+)\]\((https?:\/\/[^\s<>)]+)\)/i;
 const MARKDOWN_FILE_LINK_RE = /^\[([^\]\n]+)\]\((<[^>\n]+>|[^)\s]+)\)/;
@@ -117,6 +118,12 @@ export function parseMarkdownInline(text: string): MarkdownInlineNode[] {
       if (artifactLink) {
         nodes.push({ type: "artifactLink", artifactId: artifactLink[2], label: artifactLink[1] });
         index += artifactLink[0].length;
+        continue;
+      }
+      const artifactUriLink = text.slice(index).match(ARTIFACT_URI_LINK_RE);
+      if (artifactUriLink) {
+        nodes.push({ type: "artifactLink", artifactId: artifactUriLink[2], label: artifactUriLink[1] });
+        index += artifactUriLink[0].length;
         continue;
       }
       const fileLink = text.slice(index).match(MARKDOWN_FILE_LINK_RE);

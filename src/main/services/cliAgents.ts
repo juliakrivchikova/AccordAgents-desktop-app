@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Dirent } from "node:fs";
@@ -79,14 +79,6 @@ const GEMINI_MCP_PROXY_ARG = "--accordagents-gemini-mcp-proxy";
 const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 const APP_TOOL_PERMISSION_TOOL = "app_tool_permission";
 const APP_TOOL_PERMISSION_MCP_TOOL = `mcp__accord_agents__${APP_TOOL_PERMISSION_TOOL}`;
-const CLAUDE_AUTO_READ_CONTEXT_APP_MCP_TOOLS = [
-  "app_chat_get_context",
-  "app_chat_get_participants",
-  "app_chat_get_participant_request_status",
-  "app_chat_read_messages",
-  "app_chat_list_attachments",
-  "app_chat_read_attachment"
-];
 
 export interface CliAgentRunOptions {
   persistSession?: boolean;
@@ -104,17 +96,8 @@ export interface CliAgentRunOptions {
   onSessionId?: CliAgentSessionIdCallback;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
-  // Validated user-visible skills selected for this run, resolved to their real directories
-  // server-side. Codex uses this for scoped read-only skill-file reads; Claude's native
-  // Skill tool is available for every Claude session.
-  selectedSkills?: CliAgentSelectedSkill[];
   timeoutMs?: number;
   allowEmptyContent?: boolean;
-}
-
-export interface CliAgentSelectedSkill {
-  name: string;
-  dir: string;
 }
 
 export type CliAgentOutputKind = "tool" | "text";
@@ -150,6 +133,9 @@ export interface CliAgentAppMcpOptions {
   url: string;
   token: string;
   toolNames: string[];
+  // Explicit app-owned subset that may bypass a provider classifier in Auto.
+  // The caller derives this from the app tool registry; absent means deny by default.
+  autoPreauthorizedToolNames?: string[];
   clientGenerationId?: string;
   clientStatus?: (clientGenerationId: string) => CliAgentAppMcpClientStatus | undefined;
 }
@@ -175,6 +161,11 @@ export interface CliAgentCompactResult {
 
 interface CliAgentDebugLogger {
   write(event: string, payload: Record<string, unknown>): Promise<void>;
+}
+
+interface ClaudePermissionDenialDiagnostic {
+  toolName: string;
+  reason?: string;
 }
 
 interface WarmAgentEntry {
@@ -413,6 +404,7 @@ export class CliAgentRunner {
   private readonly warmUnsupportedLogged = new Set<ParticipantConfig["kind"]>();
   private readonly modelCatalogs = new Map<ChatProviderKind, CachedModelCatalog>();
   private readonly modelCatalogRequests = new Map<ChatProviderKind, Promise<ProviderModelCatalog>>();
+  private claudeVersionRequest?: Promise<string | undefined>;
   // Last-known context usage per Antigravity conversation id. agy reports usage
   // in the print-mode result JSON only, so post-run refreshes read this cache
   // instead of a provider session log.
@@ -2401,7 +2393,6 @@ export class CliAgentRunner {
       ...options,
       warm: undefined,
       role: undefined,
-      selectedSkills: undefined,
       appMcp: undefined,
       onOutput: undefined,
       timeoutMs: options.timeoutMs ?? CLI_AGENT_COMPACT_TIMEOUT_MS,
@@ -2466,6 +2457,7 @@ export class CliAgentRunner {
         args.push("--add-dir", ...extraReadableDirs);
       }
       args.push(...this.claudeToolsArgs(kind, toolConfig, options));
+      this.logClaudeLaunch(participant, repoPath, kind, options, args, toolConfig, extraReadableDirs, "one-shot");
       this.reportSessionId(options.onSessionId, newSessionId);
 
       const result = await runCommand(
@@ -2486,7 +2478,7 @@ export class CliAgentRunner {
       if (!content && !options.allowEmptyContent) {
         throw new Error("Claude Code completed without response content.");
       }
-      return this.withAppMcpClientStatus({
+      return this.withClaudePermissionDenialWarning(this.withAppMcpClientStatus({
         participant,
         ok: true,
         content,
@@ -2496,7 +2488,7 @@ export class CliAgentRunner {
         contextUsage:
           this.extractClaudeContextUsage(result.stdout, participant) ??
           await this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant)
-      }, participant, options);
+      }, participant, options), result.stdout, participant, "one-shot");
     } catch (error) {
       if (this.agentModeForRun(kind, options) === "auto" && this.isClaudePermissionModeUnsupported(error)) {
         // Fail loudly instead of silently downgrading: Auto-review must run as native
@@ -2545,7 +2537,12 @@ export class CliAgentRunner {
         });
         return { ...restarted, sessionRestarted: true };
       }
-      return this.failed(participant, error, Date.now() - startedAt);
+      return this.withClaudePermissionDenialWarning(
+        this.failed(participant, error, Date.now() - startedAt),
+        error instanceof CommandError ? `${error.result.stdout}\n${error.result.stderr}` : undefined,
+        participant,
+        "one-shot"
+      );
     }
   }
 
@@ -2672,6 +2669,7 @@ export class CliAgentRunner {
       args.push("--add-dir", ...extraReadableDirs);
     }
     args.push(...this.claudeToolsArgs(kind, toolConfig, options));
+    this.logClaudeLaunch(participant, repoPath, kind, options, args, toolConfig, extraReadableDirs, "warm");
 
     const child = spawn("claude", args, {
       cwd: repoPath,
@@ -2873,7 +2871,7 @@ export class CliAgentRunner {
       source: "claude-code",
       model: current.model
     });
-    const result: ParticipantRunResult = {
+    const result: ParticipantRunResult = this.withClaudePermissionDenialWarning({
       participant,
       ok: true,
       content: content.trim(),
@@ -2881,7 +2879,7 @@ export class CliAgentRunner {
       sessionId,
       roleRuntime: options.role && !options.sessionId ? "claude-agent" : undefined,
       contextUsage
-    };
+    }, event, participant, "warm");
     if (contextUsage || !sessionId) {
       current.resolve(result);
       return;
@@ -3320,8 +3318,10 @@ export class CliAgentRunner {
       return [];
     }
     const exposedAppTools = new Set(options.appMcp?.toolNames ?? []);
+    const autoPreauthorizedTools = new Set(options.appMcp?.autoPreauthorizedToolNames ?? []);
     const configuredAllowedTools = new Set(toolConfig.allowedTools);
-    return CLAUDE_AUTO_READ_CONTEXT_APP_MCP_TOOLS
+    return Array.from(autoPreauthorizedTools)
+      .filter((toolName) => toolName !== APP_TOOL_PERMISSION_TOOL)
       .filter((toolName) => exposedAppTools.has(toolName))
       .map((toolName) => `mcp__accord_agents__${toolName}`)
       .filter((toolName) => configuredAllowedTools.has(toolName));
@@ -3392,6 +3392,147 @@ export class CliAgentRunner {
 
   private async writeDebugLog(event: string, payload: Record<string, unknown>): Promise<void> {
     await this.debugLogs?.write(event, payload);
+  }
+
+  private logClaudeLaunch(
+    participant: ParticipantConfig,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    options: CliAgentRunOptions,
+    args: string[],
+    toolConfig: ClaudeToolConfig,
+    extraReadableDirs: string[],
+    transport: "one-shot" | "warm"
+  ): void {
+    if (!this.debugLogs) {
+      return;
+    }
+    const allowedTools = this.claudeToolListArg(args, "--allowedTools");
+    const disallowedTools = this.claudeToolListArg(args, "--disallowedTools");
+    void this.claudeVersionForDiagnostics().then((providerVersion) => this.writeDebugLog("cli.claude.launch", {
+      providerKind: participant.kind,
+      providerVersion: providerVersion ?? "unknown",
+      participantId: participant.id,
+      model: participant.model ?? null,
+      mode: this.agentModeForRun(kind, options),
+      permissionMode: toolConfig.permissionMode,
+      cwd: repoPath ?? null,
+      transport,
+      sessionKind: options.sessionId ? "resume" : "cold",
+      argv: this.redactedClaudeArgs(args),
+      allowedTools: {
+        count: allowedTools.length,
+        hash: this.stableToolInventoryHash(allowedTools)
+      },
+      disallowedTools: {
+        count: disallowedTools.length,
+        hash: this.stableToolInventoryHash(disallowedTools)
+      },
+      autoPreauthorizedAppTools: {
+        count: options.appMcp?.autoPreauthorizedToolNames?.length ?? 0,
+        hash: this.stableToolInventoryHash(options.appMcp?.autoPreauthorizedToolNames ?? [])
+      },
+      addDirs: extraReadableDirs
+    })).catch(() => undefined);
+  }
+
+  private claudeToolListArg(args: string[], flag: string): string[] {
+    const index = args.indexOf(flag);
+    if (index < 0) {
+      return [];
+    }
+    return (args[index + 1] ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+  }
+
+  private redactedClaudeArgs(args: string[]): string[] {
+    const sensitiveValueFlags = new Set(["--agents", "--mcp-config", "--settings"]);
+    const redacted: string[] = [];
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index] ?? "";
+      redacted.push(arg);
+      if (sensitiveValueFlags.has(arg) && index + 1 < args.length) {
+        redacted.push("<redacted>");
+        index += 1;
+      }
+    }
+    return redacted;
+  }
+
+  private stableToolInventoryHash(toolNames: string[]): string {
+    return createHash("sha256").update([...toolNames].sort().join("\0")).digest("hex").slice(0, 16);
+  }
+
+  private claudeVersionForDiagnostics(): Promise<string | undefined> {
+    if (!this.claudeVersionRequest) {
+      this.claudeVersionRequest = runCommand("claude", ["--version"], {
+        timeoutMs: CLAUDE_MODEL_PROBE_TIMEOUT_MS,
+        envOptions: CLAUDE_CODE_COMMAND_ENV_OPTIONS
+      }).then((result) => result.stdout.trim() || undefined).catch(() => undefined);
+    }
+    return this.claudeVersionRequest;
+  }
+
+  private withClaudePermissionDenialWarning(
+    result: ParticipantRunResult,
+    raw: unknown,
+    participant: ParticipantConfig,
+    transport: "one-shot" | "warm"
+  ): ParticipantRunResult {
+    const denials = this.claudePermissionDenials(raw);
+    if (denials.length === 0) {
+      return result;
+    }
+    const toolNames = Array.from(new Set(denials.map((denial) => denial.toolName))).sort();
+    void this.writeDebugLog("cli.claude.permission-denial", {
+      providerKind: participant.kind,
+      participantId: participant.id,
+      transport,
+      layer: "provider-native-permission-or-classifier",
+      count: denials.length,
+      toolNames,
+      reasons: denials.map((denial) => denial.reason).filter(Boolean)
+    });
+    return {
+      ...result,
+      warnings: [
+        ...(result.warnings ?? []),
+        `${participant.label}: Claude denied ${denials.length} action${denials.length === 1 ? "" : "s"} at the native permission/classifier layer${toolNames.length > 0 ? ` (${toolNames.join(", ")})` : ""}.`
+      ]
+    };
+  }
+
+  private claudePermissionDenials(raw: unknown): ClaudePermissionDenialDiagnostic[] {
+    let value = raw;
+    if (typeof raw === "string") {
+      const candidates = raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.startsWith("{"));
+      for (let index = candidates.length - 1; index >= 0; index -= 1) {
+        try {
+          value = JSON.parse(candidates[index] as string) as unknown;
+          break;
+        } catch {
+          // Keep scanning earlier JSON lines.
+        }
+      }
+    }
+    const record = this.asRecord(value);
+    const items = Array.isArray(record?.permission_denials) ? record.permission_denials : [];
+    return items.flatMap((item): ClaudePermissionDenialDiagnostic[] => {
+      const denial = this.asRecord(item);
+      if (!denial) {
+        return [];
+      }
+      const toolName = this.stringField(denial, "tool_name") ??
+        this.stringField(denial, "toolName") ??
+        this.stringField(denial, "name") ??
+        "unknown-tool";
+      const reason = this.stringField(denial, "reason") ??
+        this.stringField(denial, "message") ??
+        this.stringField(denial, "decision_reason");
+      return [{
+        toolName: this.truncateText(toolName, 120),
+        ...(reason ? { reason: this.truncateText(reason, MAX_CLI_ERROR_CHARS) } : {})
+      }];
+    });
   }
 
   private agentModeForRun(kind: ConversationKind, options: CliAgentRunOptions): ChatAgentMode {
@@ -3468,12 +3609,12 @@ export class CliAgentRunner {
       tools.add("Bash");
       for (const rule of permissions.shell.rules) {
         const toolRule = this.claudeBashPermissionRule(rule);
-        if (rule.action === "deny") {
-          disallowedTools.push(toolRule);
-        } else if (agentMode !== "auto") {
-          // In Auto-review the native auto classifier owns allow/ask decisions, so only
-          // deny rules are forwarded as hard stops. Outside auto, honor allow/ask too.
-          if (rule.action === "allow") {
+        if (agentMode !== "auto") {
+          // Auto uses the provider's native classifier without app-stored shell policy.
+          // Default mode continues to honor every explicit app rule.
+          if (rule.action === "deny") {
+            disallowedTools.push(toolRule);
+          } else if (rule.action === "allow") {
             allowedTools.push(toolRule);
           } else {
             askTools.push(toolRule);
