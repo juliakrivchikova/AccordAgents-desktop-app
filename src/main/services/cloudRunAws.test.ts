@@ -103,6 +103,7 @@ class FakeEc2Client implements Ec2Client {
   describeError: Error | undefined;
   terminateError: Error | undefined;
   stopError: Error | undefined;
+  findErrors: Error[] = [];
   listRegionErrors: Error[] = [];
   discovered: AwsWorkerInstanceInfo[] = [];
   runCount = 0;
@@ -111,6 +112,7 @@ class FakeEc2Client implements Ec2Client {
   runTokens: Array<string | undefined> = [];
   modifiedSizes: number[] = [];
   enabledRegions = ["us-east-1"];
+  findCalls = 0;
   listRegionCalls = 0;
 
   constructor(public state: AwsWorkerInstanceInfo | undefined = { instanceId: "i-new", state: "running", publicIp: "198.51.100.5" }) {}
@@ -127,6 +129,9 @@ class FakeEc2Client implements Ec2Client {
   }
 
   async findWorkerInstances(): Promise<AwsWorkerInstanceInfo[]> {
+    this.findCalls += 1;
+    const error = this.findErrors.shift();
+    if (error) throw error;
     return this.discovered;
   }
 
@@ -494,6 +499,100 @@ test("refreshed credentials adopt the configured tagged worker before replacing 
   assert.deepEqual(settings.credentials, NEW_CREDS);
   assert.equal(settings.handle?.instanceId, "i-old");
   assert.equal(newClient.runCount, 0);
+});
+
+test("refreshed credentials use a new launch token after the configured worker is gone", async () => {
+  const settings = new FakeSettings();
+  settings.credentials = OLD_CREDS;
+  settings.handle = OLD_HANDLE;
+  settings.mode = "aws";
+  settings.provisioningToken = "completed-launch-token";
+  const previous = new FakeEc2Client({ instanceId: "i-old", state: "terminated" });
+  const refreshed = new FakeEc2Client();
+  refreshed.discovered = [];
+  const originalRun = refreshed.runInstance.bind(refreshed);
+  let ambiguous = true;
+  refreshed.runInstance = async (spec) => {
+    if (ambiguous) {
+      ambiguous = false;
+      refreshed.runCount += 1;
+      refreshed.runTokens.push(spec.clientToken);
+      throw new Error("socket closed after replacement launch");
+    }
+    return originalRun(spec);
+  };
+  const service = serviceWith(settings, new Map([
+    [OLD_CREDS.accessKeyId, previous],
+    [NEW_CREDS.accessKeyId, refreshed]
+  ]));
+
+  const request = {
+    operationId: "old-operation",
+    clientToken: "completed-launch-token",
+    blob: encodeWorkerBlob(NEW_CREDS)
+  };
+  await assert.rejects(() => service.prepareWorker(request), /socket closed/);
+  assert.notEqual(refreshed.runTokens[0], "completed-launch-token");
+  await service.prepareWorker(request);
+  assert.equal(refreshed.runCount, 2);
+  assert.equal(refreshed.runTokens.length, 2);
+  assert.equal(refreshed.runTokens[0], refreshed.runTokens[1]);
+  assert.notEqual(refreshed.runTokens[0], "completed-launch-token");
+  assert.equal(settings.provisioningToken, undefined);
+});
+
+test("worker discovery retries a transient DescribeInstances authorization denial", async () => {
+  const settings = new FakeSettings();
+  const client = new FakeEc2Client();
+  client.discovered = [];
+  client.findErrors = [Object.assign(new Error("not authorized to perform ec2:DescribeInstances"), { name: "UnauthorizedOperation" })];
+  const service = serviceWith(settings, new Map([[NEW_CREDS.accessKeyId, client]]));
+
+  const prepared = await service.prepareWorker({ operationId: "transient-describe", blob: encodeWorkerBlob(NEW_CREDS) });
+  assert.equal(prepared.info.instanceId, "i-new");
+  assert.ok(client.findCalls >= 2);
+  assert.equal(client.runCount, 1);
+});
+
+test("cross-region discovery retries a transient DescribeInstances authorization denial", async () => {
+  const settings = new FakeSettings();
+  const local = new FakeEc2Client();
+  local.discovered = [];
+  local.enabledRegions = ["us-east-1", "us-west-2"];
+  const west = new FakeEc2Client();
+  west.discovered = [];
+  west.findErrors = [new Error("not authorized to perform ec2:DescribeInstances")];
+  const service = serviceWith(settings, new Map([
+    [NEW_CREDS.accessKeyId, local],
+    [`${NEW_CREDS.accessKeyId}:us-west-2`, west]
+  ]));
+
+  const prepared = await service.prepareWorker({ operationId: "transient-regional-describe", blob: encodeWorkerBlob(NEW_CREDS) });
+  assert.equal(prepared.info.instanceId, "i-new");
+  assert.ok(west.findCalls >= 2);
+  assert.equal(local.runCount, 1);
+});
+
+test("persistent DescribeInstances denial preserves configured credentials and handle", async () => {
+  const settings = new FakeSettings();
+  settings.credentials = OLD_CREDS;
+  settings.handle = OLD_HANDLE;
+  settings.mode = "aws";
+  const refreshed = new FakeEc2Client();
+  refreshed.findErrors = Array.from({ length: 4 }, () => new Error("not authorized to perform ec2:DescribeInstances"));
+  const service = serviceWith(settings, new Map([
+    [OLD_CREDS.accessKeyId, new FakeEc2Client()],
+    [NEW_CREDS.accessKeyId, refreshed]
+  ]));
+
+  await assert.rejects(
+    () => service.prepareWorker({ operationId: "persistent-describe", blob: encodeWorkerBlob(NEW_CREDS) }),
+    /not authorized to perform/
+  );
+  assert.equal(refreshed.findCalls, 4);
+  assert.equal(refreshed.runCount, 0);
+  assert.deepEqual(settings.credentials, OLD_CREDS);
+  assert.deepEqual(settings.handle, OLD_HANDLE);
 });
 
 test("worker discovery retries a transient authorization denial without weakening cross-region discovery", async () => {

@@ -21,6 +21,9 @@ test("AWS authorization errors recognize SDK identifiers and user-visible messag
 test("AWS authorization classifier does not hide unrelated failures", () => {
   assert.equal(isAwsAuthorizationError(new Error("socket timed out")), false);
   assert.equal(isAwsAuthorizationError(Object.assign(new Error("missing"), { name: "InvalidInstanceID.NotFound" })), false);
+  assert.equal(isAwsAuthorizationError(new Error("Permission denied (publickey)")), false);
+  assert.equal(isAwsAuthorizationError(new Error("GitHub API returned 403 access denied")), false);
+  assert.equal(isAwsAuthorizationError(new Error("AccessDenied")), false);
   assert.equal(isAwsAuthorizationError(undefined), false);
 });
 

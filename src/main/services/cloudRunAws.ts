@@ -1,7 +1,7 @@
 // AWS-managed Cloud Runs worker ownership and reconciliation. AWS tags are the
 // source of truth; persisted handles are local caches, while guarded automatic
 // stop is authorized by worker-side registered activity across upgraded apps.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   AwsWorkerActualSpec,
   AwsWorkerHandleInfo,
@@ -181,6 +181,7 @@ export class CloudRunAwsService {
     const desiredDisk = normalizeAwsRootVolumeSizeGb(request.rootVolumeSizeGb ?? publicSettings.cloudRuns.awsRootVolumeSizeGb);
     let matches = await this.discoverWorkers(credentials, false);
     if (matches.length > 1) throw multipleWorkerError(matches);
+    let replacedInstanceId: string | undefined;
     if (matches.length === 0 && request.blob?.trim()) {
       const previousCredentials = await this.settings.getAwsWorkerCredentials();
       const previousHandle = publicSettings.cloudRuns.awsHandle;
@@ -194,6 +195,7 @@ export class CloudRunAwsService {
         if (previous && previous.state !== "terminated" && previous.state !== "absent") {
           throw new Error("An AWS worker is already configured but is not visible to the new credentials. Delete the existing worker first.");
         }
+        replacedInstanceId = previousHandle.instanceId;
       }
     }
     let created = false;
@@ -204,7 +206,9 @@ export class CloudRunAwsService {
         getAwsWorkerProvisioningToken?: () => Promise<string | undefined>;
         saveAwsWorkerProvisioningToken?: (token: string | undefined) => Promise<void>;
       }).getAwsWorkerProvisioningToken?.();
-      const clientToken = persistedToken ?? request.clientToken ?? request.operationId;
+      const clientToken = replacedInstanceId
+        ? replacementLaunchToken(request.operationId, replacedInstanceId)
+        : persistedToken ?? request.clientToken ?? request.operationId;
       await (this.settings as SettingsService & {
         saveAwsWorkerProvisioningToken?: (token: string | undefined) => Promise<void>;
       }).saveAwsWorkerProvisioningToken?.(clientToken);
@@ -534,24 +538,37 @@ export class CloudRunAwsService {
   private async discoverWorkers(credentials: AwsWorkerCredentials, forceAll: boolean): Promise<AwsWorkerInstanceInfo[]> {
     const configured = this.createEc2Client(credentials);
     if (!configured.findWorkerInstances) return [];
-    const local = await configured.findWorkerInstances();
+    const local = await this.withAuthorizationRetry(
+      "find-worker-instances",
+      () => configured.findWorkerInstances?.() ?? Promise.resolve([])
+    );
     if (!forceAll && local.length > 0) return local;
     const regions = await this.listEnabledRegions(configured, credentials.region);
     const others = await Promise.all(regions
       .filter((region) => region !== credentials.region)
-      .map((region) => this.clientForRegion(credentials, region).findWorkerInstances?.() ?? Promise.resolve([])));
+      .map((region) => {
+        const regional = this.clientForRegion(credentials, region);
+        return this.withAuthorizationRetry(
+          "find-worker-instances",
+          () => regional.findWorkerInstances?.() ?? Promise.resolve([])
+        );
+      }));
     return [...local, ...others.flat()];
   }
 
   private async listEnabledRegions(client: Ec2Client, fallbackRegion: string): Promise<string[]> {
     if (!client.listEnabledRegions) return [fallbackRegion];
+    return this.withAuthorizationRetry("list-enabled-regions", () => client.listEnabledRegions?.() ?? Promise.resolve([fallbackRegion]));
+  }
+
+  private async withAuthorizationRetry<T>(operation: string, action: () => Promise<T>): Promise<T> {
     for (let attempt = 0; ; attempt += 1) {
       try {
-        return await client.listEnabledRegions();
+        return await action();
       } catch (error) {
         const delayMs = AWS_AUTHORIZATION_RETRY_DELAYS_MS[attempt];
         if (!isAwsAuthorizationError(error) || delayMs === undefined) throw error;
-        this.log("aws-worker.discovery.authorization-retry", { attempt: attempt + 1, delayMs });
+        this.log("aws-worker.discovery.authorization-retry", { operation, attempt: attempt + 1, delayMs });
         await this.wait(delayMs);
       }
     }
@@ -723,6 +740,12 @@ async function defaultSshExec(worker: CloudRunWorkerSettings, command: string, t
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function replacementLaunchToken(operationId: string, instanceId: string): string {
+  return createHash("sha256")
+    .update(`accordagents:replacement:${operationId}:${instanceId}`)
+    .digest("hex");
 }
 
 function retainedActionFailure(

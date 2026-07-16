@@ -149,6 +149,29 @@ test("non-authorization setup failures do not request an AWS authorization refre
   assert.match(failed.operation.message, /capacity/);
 });
 
+test("doctor access failures do not request an AWS authorization refresh", async () => {
+  const aws = {
+    prepareWorker: async () => ({ ...PREPARED }),
+    resumePendingVolumeExpansion: async (prepared: PreparedAwsWorker) => prepared,
+    hasAcceptedMismatch: async () => false,
+    ensurePreparedRunning: async () => ({ host: "198.51.100.10" }),
+    status: async () => ({ configured: true, state: "running" })
+  };
+  const doctor = {
+    waitForCloudInit: async () => undefined,
+    setup: async () => { throw new Error("GitHub API returned 403 access denied"); }
+  };
+  const settings = {
+    saveAwsWorkerOperation: async () => undefined,
+    getAwsWorkerOperation: async () => undefined
+  };
+  const service = new AwsWorkerSetupService(aws as any, doctor as any, settings as any);
+  const failed = await service.start({ operationId: "op-doctor-access" });
+  assert.equal(failed.operation.phase, "error");
+  assert.equal(failed.operation.remediation, undefined);
+  assert.match(failed.operation.message, /403 access denied/);
+});
+
 test("mismatch resolution rejects a desired spec that differs from the displayed decision", async () => {
   const mismatch = {
     instanceId: "i-shared",

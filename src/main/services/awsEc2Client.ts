@@ -84,7 +84,7 @@ export function isAwsAuthorizationError(error: unknown): boolean {
     : typeof record?.message === "string"
       ? record.message
       : String(error ?? "");
-  return /UnauthorizedOperation|AccessDenied|access denied|not authorized to perform|no identity-based policy allows/i.test(message);
+  return /not authorized to perform|no identity-based policy allows/i.test(message);
 }
 
 export class SdkEc2Client implements Ec2Client {
