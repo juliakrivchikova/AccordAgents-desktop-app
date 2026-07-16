@@ -67,6 +67,26 @@ export function createAwsEc2Client(credentials: AwsWorkerCredentials): Ec2Client
   return new SdkEc2Client(new EC2Client(config), new EC2InstanceConnectClient(config), credentials.region);
 }
 
+export function isAwsAuthorizationError(error: unknown): boolean {
+  const record = error && typeof error === "object"
+    ? error as { name?: unknown; Code?: unknown; code?: unknown; message?: unknown }
+    : undefined;
+  const identifiers = [record?.name, record?.Code, record?.code]
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.toLowerCase());
+  if (identifiers.some((value) => value === "unauthorizedoperation"
+    || value === "accessdenied"
+    || value === "accessdeniedexception")) {
+    return true;
+  }
+  const message = error instanceof Error
+    ? error.message
+    : typeof record?.message === "string"
+      ? record.message
+      : String(error ?? "");
+  return /UnauthorizedOperation|AccessDenied|access denied|not authorized to perform|no identity-based policy allows/i.test(message);
+}
+
 export class SdkEc2Client implements Ec2Client {
   constructor(
     private readonly client: EC2Client,

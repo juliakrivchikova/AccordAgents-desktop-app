@@ -98,6 +98,57 @@ test("retry reuses the persisted provisioning token", async () => {
   assert.deepEqual(tokens, ["token-stable", "token-stable"]);
 });
 
+test("DescribeRegions authorization denial requests an AWS authorization refresh", async () => {
+  let snapshot: AwsWorkerOperationSnapshot | undefined;
+  let attempts = 0;
+  const tokens: string[] = [];
+  const aws = {
+    prepareWorker: async (request: { clientToken: string }) => {
+      attempts += 1;
+      tokens.push(request.clientToken);
+      if (attempts === 1) {
+        throw new Error("User is not authorized to perform: ec2:DescribeRegions because no identity-based policy allows the ec2:DescribeRegions action");
+      }
+      return { ...PREPARED };
+    },
+    resumePendingVolumeExpansion: async (prepared: PreparedAwsWorker) => prepared,
+    hasAcceptedMismatch: async () => false,
+    ensurePreparedRunning: async () => ({ host: "198.51.100.10" }),
+    status: async () => ({ configured: true, state: "running" })
+  };
+  const doctor = {
+    waitForCloudInit: async () => undefined,
+    setup: async () => ({ ok: true, message: "Worker ready.", checks: [] })
+  };
+  const settings = {
+    saveAwsWorkerOperation: async (operation: AwsWorkerOperationSnapshot) => { snapshot = operation; },
+    getAwsWorkerOperation: async () => snapshot
+  };
+  const service = new AwsWorkerSetupService(aws as any, doctor as any, settings as any);
+  const failed = await service.start({ operationId: "op-auth", clientToken: "token-auth" });
+  assert.equal(failed.operation.phase, "error");
+  assert.equal(failed.operation.remediation, "refresh-aws-authorization");
+  assert.match(failed.operation.message, /Update AWS permissions/);
+  const recovered = await service.start({ operationId: "op-auth" });
+  assert.equal(recovered.operation.phase, "ready");
+  assert.deepEqual(tokens, ["token-auth", "token-auth"]);
+});
+
+test("non-authorization setup failures do not request an AWS authorization refresh", async () => {
+  const aws = {
+    prepareWorker: async () => { throw new Error("EC2 capacity is unavailable"); },
+    status: async () => ({ configured: false })
+  };
+  const settings = {
+    saveAwsWorkerOperation: async () => undefined,
+    getAwsWorkerOperation: async () => undefined
+  };
+  const service = new AwsWorkerSetupService(aws as any, {} as any, settings as any);
+  const failed = await service.start({ operationId: "op-capacity" });
+  assert.equal(failed.operation.remediation, undefined);
+  assert.match(failed.operation.message, /capacity/);
+});
+
 test("mismatch resolution rejects a desired spec that differs from the displayed decision", async () => {
   const mismatch = {
     instanceId: "i-shared",

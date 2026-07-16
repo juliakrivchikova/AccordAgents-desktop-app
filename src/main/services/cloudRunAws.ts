@@ -25,6 +25,7 @@ import {
   createAwsEc2Client,
   deleteGeneratedAwsWorkerKeyMaterial,
   generateAwsWorkerKeyMaterial,
+  isAwsAuthorizationError,
   resolveAwsWorkerPrivateKeyPath,
   resolveCurrentPublicIp
 } from "./awsEc2Client";
@@ -40,6 +41,7 @@ import type {
 
 const WORKER_SSH_USER = "ubuntu";
 const WORKER_ROOT = "~/.accordagents/remote-runs";
+const AWS_AUTHORIZATION_RETRY_DELAYS_MS = [250, 1_000, 2_500] as const;
 
 export interface CloudRunAwsServiceOptions {
   createEc2Client?: (credentials: AwsWorkerCredentials) => Ec2Client;
@@ -423,13 +425,21 @@ export class CloudRunAwsService {
     try {
       result = await this.lifecycle.deleteWorker(this.credentialsForHandle(credentials, handle), this.toHandle(handle));
     } catch (error) {
-      return { configured: true, handle, message: errorMessage(error) };
-    }
-    if (result.terminateFailed || !result.terminationConfirmed) {
+      const current = await this.status();
       return {
+        ...current,
         configured: true,
         handle,
-        message: `The shared worker was not deleted; settings were retained. ${result.terminateFailed ?? "Termination was not confirmed."}`
+        message: retainedActionFailure("deleted", current.state, errorMessage(error))
+      };
+    }
+    if (result.terminateFailed || !result.terminationConfirmed) {
+      const current = await this.status();
+      return {
+        ...current,
+        configured: true,
+        handle,
+        message: retainedActionFailure("deleted", current.state, result.terminateFailed ?? "Termination was not confirmed.")
       };
     }
     await this.settings.clearAwsWorker();
@@ -447,7 +457,17 @@ export class CloudRunAwsService {
     const settings = await this.settings.getPublicSettings();
     const handle = settings.cloudRuns.awsHandle;
     if (!credentials || !handle) return { configured: false };
-    await this.lifecycle.stopWorker(this.credentialsForHandle(credentials, handle), this.toHandle(handle));
+    try {
+      await this.lifecycle.stopWorker(this.credentialsForHandle(credentials, handle), this.toHandle(handle));
+    } catch (error) {
+      const current = await this.status();
+      return {
+        ...current,
+        configured: true,
+        handle,
+        message: retainedActionFailure("stopped", current.state, errorMessage(error))
+      };
+    }
     return this.status();
   }
 
@@ -516,13 +536,25 @@ export class CloudRunAwsService {
     if (!configured.findWorkerInstances) return [];
     const local = await configured.findWorkerInstances();
     if (!forceAll && local.length > 0) return local;
-    const regions = configured.listEnabledRegions
-      ? await configured.listEnabledRegions()
-      : [credentials.region];
+    const regions = await this.listEnabledRegions(configured, credentials.region);
     const others = await Promise.all(regions
       .filter((region) => region !== credentials.region)
       .map((region) => this.clientForRegion(credentials, region).findWorkerInstances?.() ?? Promise.resolve([])));
     return [...local, ...others.flat()];
+  }
+
+  private async listEnabledRegions(client: Ec2Client, fallbackRegion: string): Promise<string[]> {
+    if (!client.listEnabledRegions) return [fallbackRegion];
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await client.listEnabledRegions();
+      } catch (error) {
+        const delayMs = AWS_AUTHORIZATION_RETRY_DELAYS_MS[attempt];
+        if (!isAwsAuthorizationError(error) || delayMs === undefined) throw error;
+        this.log("aws-worker.discovery.authorization-retry", { attempt: attempt + 1, delayMs });
+        await this.wait(delayMs);
+      }
+    }
   }
 
   private async reconcileCreatedWorker(
@@ -691,4 +723,13 @@ async function defaultSshExec(worker: CloudRunWorkerSettings, command: string, t
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function retainedActionFailure(
+  action: "stopped" | "deleted",
+  state: AwsWorkerStatus["state"],
+  detail: string
+): string {
+  const observed = state ? ` Observed state: ${state}.` : " Observed state is unknown.";
+  return `The shared worker was not ${action}; settings were retained.${observed} ${detail}`;
 }

@@ -6,6 +6,7 @@ import type {
   CloudRunWorkerSetupProgress
 } from "../../shared/types";
 import type { CloudRunDoctorService } from "./cloudRunDoctor";
+import { isAwsAuthorizationError } from "./awsEc2Client";
 import type { CloudRunAwsService, PreparedAwsWorker } from "./cloudRunAws";
 import type { SettingsService } from "./settings";
 
@@ -112,8 +113,13 @@ export class AwsWorkerSetupService {
       const operation = await emit("ready", report.message || "Worker ready.");
       return { operation, status: await this.aws.status(), report };
     } catch (error) {
-      const message = actionableError(error);
-      const operation = await emit("error", message, { error: message, retryable: true });
+      const needsAuthorizationRefresh = isAwsAuthorizationError(error);
+      const message = actionableError(error, needsAuthorizationRefresh);
+      const operation = await emit("error", message, {
+        error: message,
+        retryable: true,
+        ...(needsAuthorizationRefresh ? { remediation: "refresh-aws-authorization" as const } : {})
+      });
       return { operation, status: await this.aws.status() };
     }
   }
@@ -156,9 +162,9 @@ function mismatchMessage(prepared: PreparedAwsWorker): string {
   return `The existing shared worker's ${gaps} is smaller than configured. Choose what to do.`;
 }
 
-function actionableError(error: unknown): string {
+function actionableError(error: unknown, needsAuthorizationRefresh = isAwsAuthorizationError(error)): string {
   const message = error instanceof Error ? error.message : String(error);
-  return /AccessDenied|UnauthorizedOperation/i.test(message)
-    ? "AWS permissions are outdated or insufficient. Re-run the AWS setup command, paste the new result, and retry."
+  return needsAuthorizationRefresh
+    ? "AWS permissions are outdated or insufficient. Update AWS permissions below, paste the new result, and Retry."
     : message;
 }

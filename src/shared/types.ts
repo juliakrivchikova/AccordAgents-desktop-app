@@ -198,6 +198,7 @@ export interface AwsWorkerOperationSnapshot {
   message: string;
   updatedAt: string;
   retryable?: boolean;
+  remediation?: "refresh-aws-authorization";
   error?: string;
   authUrl?: string;
   authCode?: string;

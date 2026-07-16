@@ -32,6 +32,7 @@ export function AwsWorkerPanel(props: {
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<ConfirmAction>(null);
   const [copyFeedback, setCopyFeedback] = useState<ClipboardFeedback>("idle");
+  const [actionMessage, setActionMessage] = useState<string>();
   const diskOptions = useMemo(() => {
     const options: number[] = [...AWS_WORKER_ROOT_VOLUME_SIZE_GB_OPTIONS];
     return options.includes(props.settings.awsRootVolumeSizeGb)
@@ -68,6 +69,7 @@ export function AwsWorkerPanel(props: {
     setActiveOperationId(operationId);
     setBusy(true);
     setConfirm(null);
+    setActionMessage(undefined);
     try {
       const result = await window.consensus.startAwsWorker({
         operationId,
@@ -93,6 +95,7 @@ export function AwsWorkerPanel(props: {
       const next = await window.consensus.getAwsWorkerStatus();
       setStatus(next);
       setOperation(next.operation ?? operation);
+      setActionMessage(next.message ?? stateMessage(next.state));
     } finally {
       setBusy(false);
     }
@@ -105,7 +108,9 @@ export function AwsWorkerPanel(props: {
     }
     setBusy(true);
     try {
-      setStatus(await window.consensus.stopAwsWorker());
+      const next = await window.consensus.stopAwsWorker();
+      setStatus(next);
+      setActionMessage(next.message ?? stateMessage(next.state));
       setConfirm(null);
     } finally {
       setBusy(false);
@@ -121,7 +126,8 @@ export function AwsWorkerPanel(props: {
     try {
       const next = await window.consensus.deleteAwsWorker();
       setStatus(next);
-      setOperation(null);
+      setOperation(next.configured ? next.operation ?? operation : null);
+      setActionMessage(next.message);
       setConfirm(null);
       if (!next.configured) await props.onDeleted();
     } finally {
@@ -138,17 +144,21 @@ export function AwsWorkerPanel(props: {
 
   const actual = status?.actualSpec ?? operation?.specMismatch?.actual;
   const mismatch = operation?.specMismatch;
+  const needsAuthorizationRefresh = operation?.remediation === "refresh-aws-authorization";
+  const showConnection = needsAuthorizationRefresh || !props.settings.hasAwsCredentials && !status?.configured;
   const canStart = Boolean(blob.trim() || props.settings.hasAwsCredentials || status?.configured);
   const isRunning = status?.state === "running" || status?.state === "pending";
 
   return (
     <div className="gen-aws" data-testid="aws-worker-panel">
-      {!props.settings.hasAwsCredentials && !status?.configured ? (
+      {showConnection ? (
         <>
-          <div className="gen-row gen-row-stack">
+          <div className="gen-row gen-row-stack" data-testid={needsAuthorizationRefresh ? "aws-worker-authorization-recovery" : "aws-worker-connect"}>
             <div className="gen-row-text">
-              <div className="gen-row-title">Connect AWS account</div>
-              <div className="gen-row-desc">Run this scoped setup command once, then paste its result before starting the worker.</div>
+              <div className="gen-row-title">{needsAuthorizationRefresh ? "Update AWS permissions" : "Connect AWS account"}</div>
+              <div className="gen-row-desc">{needsAuthorizationRefresh
+                ? "Run this command to refresh the scoped AWS policy, then paste its result and Retry."
+                : "Run this scoped setup command once, then paste its result before starting the worker."}</div>
             </div>
             <div className="gen-grid-form gen-grid-form-compact">
               <input className="gen-input" aria-label="AWS region" value={region} onChange={(event) => setRegion(event.target.value)} />
@@ -169,10 +179,10 @@ export function AwsWorkerPanel(props: {
           <div className="gen-card-divider" />
           <div className="gen-row gen-row-stack">
             <div className="gen-row-text">
-              <div className="gen-row-title">Paste the result</div>
+              <div className="gen-row-title">{needsAuthorizationRefresh ? "Paste the updated result" : "Paste the result"}</div>
               <div className="gen-row-desc">The command prints a line beginning with <code>accord-aws-v1:</code>.</div>
             </div>
-            <textarea className="gen-input gen-aws-paste" value={blob} onChange={(event) => setBlob(event.target.value)} />
+            <textarea className="gen-input gen-aws-paste" aria-label="AWS setup result" value={blob} onChange={(event) => setBlob(event.target.value)} />
           </div>
         </>
       ) : null}
@@ -229,7 +239,7 @@ export function AwsWorkerPanel(props: {
 
       <div className="gen-row">
         <div className="gen-row-text">
-          <div className="gen-row-title">{operation?.message ?? status?.message ?? (status?.configured ? "Shared worker configured" : "Not connected")}</div>
+          <div className="gen-row-title">{actionMessage ?? operation?.message ?? status?.message ?? (status?.configured ? "Shared worker configured" : "Not connected")}</div>
           <div className="gen-row-desc">This worker is shared by every configured laptop and project. It does not stop automatically.</div>
         </div>
         <div className="gen-actions">
@@ -244,6 +254,10 @@ export function AwsWorkerPanel(props: {
       </div>
     </div>
   );
+}
+
+function stateMessage(state: AwsWorkerStatus["state"]): string | undefined {
+  return state ? `Worker ${state}.` : undefined;
 }
 
 function WorkerProgress({ operation }: { operation: AwsWorkerOperationSnapshot }): JSX.Element {

@@ -43,6 +43,54 @@ test("Retry reuses the persisted operation and client token", async () => {
   renderer.unmount();
 });
 
+test("authorization recovery exposes the setup command and sends the refreshed blob on Retry", async () => {
+  const operation: AwsWorkerOperationSnapshot = {
+    operationId: "op-auth",
+    clientToken: "token-auth",
+    phase: "error",
+    message: "Update AWS permissions below",
+    updatedAt: "2026-07-10T00:00:00.000Z",
+    retryable: true,
+    remediation: "refresh-aws-authorization"
+  };
+  const requests: any[] = [];
+  const renderer = await renderPanel({
+    status: { configured: true, state: "running", operation },
+    start: async (request) => {
+      requests.push(request);
+      return {
+        operation: { ...operation, phase: "ready", message: "Ready", remediation: undefined },
+        status: { configured: true, state: "running" }
+      };
+    }
+  });
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-recovery" })).includes("Update AWS permissions"), true);
+  await click(findButton(renderer, "Show setup command"));
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-command" })), "command");
+  await change(renderer.root.findByProps({ "aria-label": "AWS setup result" }), "accord-aws-v1:updated");
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-start" }));
+  assert.equal(requests[0].blob, "accord-aws-v1:updated");
+  assert.equal(requests[0].operationId, "op-auth");
+  assert.equal(requests[0].clientToken, "token-auth");
+  renderer.unmount();
+});
+
+test("failed Stop remains visible with the observed worker state", async () => {
+  const renderer = await renderPanel({
+    status: { configured: true, state: "running" },
+    stop: async () => ({
+      configured: true,
+      state: "running",
+      message: "The shared worker was not stopped; settings were retained. Observed state: running. UnauthorizedOperation"
+    })
+  });
+  await click(findButton(renderer, "Stop"));
+  await click(findButton(renderer, "Confirm stop"));
+  assert.equal(textOf(renderer.root).includes("The shared worker was not stopped"), true);
+  assert.equal(textOf(renderer.root).includes("running"), true);
+  renderer.unmount();
+});
+
 test("successful Delete refreshes enclosing settings while failed Delete does not", async () => {
   let deleted = 0;
   const renderer = await renderPanel({
@@ -103,6 +151,7 @@ async function renderPanel(options: {
   settings?: CloudRunsSettings;
   status: AwsWorkerStatus;
   start?: (request: any) => Promise<any>;
+  stop?: () => Promise<AwsWorkerStatus>;
   remove?: () => Promise<AwsWorkerStatus>;
   onDeleted?: () => Promise<void>;
 }): Promise<ReactTestRenderer> {
@@ -111,7 +160,7 @@ async function renderPanel(options: {
     onAwsWorkerProgress: () => () => undefined,
     startAwsWorker: options.start ?? (async () => ({ operation: options.status.operation, status: options.status })),
     deleteAwsWorker: options.remove ?? (async () => options.status),
-    stopAwsWorker: async () => options.status,
+    stopAwsWorker: options.stop ?? (async () => options.status),
     getAwsWorkerBootstrapCommand: async () => "command",
     openExternal: async () => undefined
   };
@@ -142,6 +191,13 @@ function findButton(renderer: ReactTestRenderer, label: string): ReactTestInstan
 async function click(node: ReactTestInstance): Promise<void> {
   await act(async () => {
     node.props.onClick();
+    await flush();
+  });
+}
+
+async function change(node: ReactTestInstance, value: string): Promise<void> {
+  await act(async () => {
+    node.props.onChange({ target: { value } });
     await flush();
   });
 }

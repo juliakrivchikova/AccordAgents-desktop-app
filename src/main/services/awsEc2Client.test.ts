@@ -3,7 +3,26 @@ import test from "node:test";
 import type { EC2Client, Instance } from "@aws-sdk/client-ec2";
 import type { EC2InstanceConnectClient } from "@aws-sdk/client-ec2-instance-connect";
 
-import { awsWorkerInstanceInfoFromSdkInstance, SdkEc2Client } from "./awsEc2Client";
+import {
+  awsWorkerInstanceInfoFromSdkInstance,
+  isAwsAuthorizationError,
+  SdkEc2Client
+} from "./awsEc2Client";
+
+test("AWS authorization errors recognize SDK identifiers and user-visible messages", () => {
+  const byCode = new Error("denied") as Error & { Code?: string };
+  byCode.Code = "AccessDenied";
+  assert.equal(isAwsAuthorizationError(Object.assign(new Error("denied"), { name: "UnauthorizedOperation" })), true);
+  assert.equal(isAwsAuthorizationError(byCode), true);
+  assert.equal(isAwsAuthorizationError({ code: "AccessDeniedException", message: "denied" }), true);
+  assert.equal(isAwsAuthorizationError(new Error("User is not authorized to perform: ec2:DescribeRegions because no identity-based policy allows it")), true);
+});
+
+test("AWS authorization classifier does not hide unrelated failures", () => {
+  assert.equal(isAwsAuthorizationError(new Error("socket timed out")), false);
+  assert.equal(isAwsAuthorizationError(Object.assign(new Error("missing"), { name: "InvalidInstanceID.NotFound" })), false);
+  assert.equal(isAwsAuthorizationError(undefined), false);
+});
 
 test("EC2 instance mapping derives EBS state independently from block-device mappings", () => {
   const pendingEbs = awsWorkerInstanceInfoFromSdkInstance({

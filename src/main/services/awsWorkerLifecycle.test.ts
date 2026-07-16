@@ -53,6 +53,10 @@ test("scoped policy limits state changes to tagged instances in-region", () => {
   assert.ok(manage);
   assert.deepEqual(manage.Action.sort(), ["ec2:StartInstances", "ec2:StopInstances", "ec2:TerminateInstances"]);
   assert.equal(manage.Condition.StringEquals[`ec2:ResourceTag/${AWS_WORKER_TAG_KEY}`], "1");
+  const discover = policy.Statement.find((statement) => statement.Sid === "DiscoverWorkers");
+  assert.ok(discover);
+  assert.ok(discover.Action.includes("ec2:DescribeRegions"));
+  assert.equal(discover.Resource, "*");
 });
 
 test("bootstrap command creates a scoped user and prints a paste blob", () => {

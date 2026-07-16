@@ -102,6 +102,8 @@ class FakeEc2Client implements Ec2Client {
   importError: Error | undefined;
   describeError: Error | undefined;
   terminateError: Error | undefined;
+  stopError: Error | undefined;
+  listRegionErrors: Error[] = [];
   discovered: AwsWorkerInstanceInfo[] = [];
   runCount = 0;
   describeCalls = 0;
@@ -109,6 +111,7 @@ class FakeEc2Client implements Ec2Client {
   runTokens: Array<string | undefined> = [];
   modifiedSizes: number[] = [];
   enabledRegions = ["us-east-1"];
+  listRegionCalls = 0;
 
   constructor(public state: AwsWorkerInstanceInfo | undefined = { instanceId: "i-new", state: "running", publicIp: "198.51.100.5" }) {}
 
@@ -117,6 +120,9 @@ class FakeEc2Client implements Ec2Client {
   }
 
   async listEnabledRegions(): Promise<string[]> {
+    this.listRegionCalls += 1;
+    const error = this.listRegionErrors.shift();
+    if (error) throw error;
     return this.enabledRegions;
   }
 
@@ -190,6 +196,7 @@ class FakeEc2Client implements Ec2Client {
 
   async stopInstance(): Promise<void> {
     this.stopCount += 1;
+    if (this.stopError) throw this.stopError;
     this.state = { instanceId: this.state?.instanceId ?? "i-new", state: "stopped" };
   }
 
@@ -319,10 +326,27 @@ test("deleteWorker retains settings when termination fails", async () => {
 
   const status = await service.deleteWorker();
   assert.equal(status.configured, true);
+  assert.equal(status.state, "running");
   assert.match(status.message ?? "", /not deleted/);
   assert.deepEqual(settings.credentials, OLD_CREDS);
   assert.deepEqual(settings.handle, OLD_HANDLE);
   assert.equal(settings.mode, "aws");
+});
+
+test("stopWorker retains configured state and reports an authorization failure", async () => {
+  const settings = new FakeSettings();
+  settings.credentials = OLD_CREDS;
+  settings.handle = OLD_HANDLE;
+  settings.mode = "aws";
+  const client = new FakeEc2Client({ instanceId: "i-old", state: "running", publicIp: "198.51.100.10" });
+  client.stopError = Object.assign(new Error("not authorized to perform ec2:StopInstances"), { name: "UnauthorizedOperation" });
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]));
+
+  const status = await service.stopWorker();
+  assert.equal(status.configured, true);
+  assert.equal(status.state, "running");
+  assert.match(status.message ?? "", /not stopped.*settings were retained/i);
+  assert.deepEqual(settings.handle, OLD_HANDLE);
 });
 
 test("ensureWorkerForRun uses the current device SSH identity", async () => {
@@ -440,6 +464,66 @@ test("prepareWorker adopts the tagged account worker without creating a duplicat
   assert.equal(prepared.handle.adopted, true);
   assert.equal(prepared.mismatch, undefined);
   assert.equal(client.runCount, 0);
+});
+
+test("refreshed credentials adopt the configured tagged worker before replacing saved credentials", async () => {
+  const settings = new FakeSettings();
+  settings.credentials = OLD_CREDS;
+  settings.handle = OLD_HANDLE;
+  settings.mode = "aws";
+  const refreshedWorker: AwsWorkerInstanceInfo = {
+    instanceId: "i-old",
+    state: "running",
+    publicIp: "198.51.100.10",
+    region: "us-east-1",
+    availabilityZone: "us-east-1a",
+    securityGroupId: "sg-old",
+    keyName: "accordagents-worker-old",
+    instanceType: "t3.small",
+    rootVolumeSizeGb: 8
+  };
+  const newClient = new FakeEc2Client(refreshedWorker);
+  newClient.discovered = [refreshedWorker];
+  const service = serviceWith(settings, new Map([
+    [OLD_CREDS.accessKeyId, new FakeEc2Client(refreshedWorker)],
+    [NEW_CREDS.accessKeyId, newClient]
+  ]));
+
+  const prepared = await service.prepareWorker({ operationId: "refresh-auth", blob: encodeWorkerBlob(NEW_CREDS) });
+  assert.equal(prepared.info.instanceId, "i-old");
+  assert.deepEqual(settings.credentials, NEW_CREDS);
+  assert.equal(settings.handle?.instanceId, "i-old");
+  assert.equal(newClient.runCount, 0);
+});
+
+test("worker discovery retries a transient authorization denial without weakening cross-region discovery", async () => {
+  const settings = new FakeSettings();
+  const client = new FakeEc2Client();
+  client.discovered = [];
+  client.listRegionErrors = [Object.assign(new Error("not authorized to perform ec2:DescribeRegions"), { name: "UnauthorizedOperation" })];
+  const service = serviceWith(settings, new Map([[NEW_CREDS.accessKeyId, client]]));
+
+  const prepared = await service.prepareWorker({ operationId: "transient-auth", blob: encodeWorkerBlob(NEW_CREDS) });
+  assert.equal(prepared.info.instanceId, "i-new");
+  assert.ok(client.listRegionCalls >= 2);
+  assert.equal(client.runCount, 1);
+});
+
+test("worker discovery surfaces a persistent authorization denial without creating a worker", async () => {
+  const settings = new FakeSettings();
+  const client = new FakeEc2Client();
+  client.discovered = [];
+  client.listRegionErrors = Array.from({ length: 4 }, () => new Error("not authorized to perform ec2:DescribeRegions"));
+  const service = serviceWith(settings, new Map([[NEW_CREDS.accessKeyId, client]]));
+
+  await assert.rejects(
+    () => service.prepareWorker({ operationId: "persistent-auth", blob: encodeWorkerBlob(NEW_CREDS) }),
+    /not authorized to perform/
+  );
+  assert.equal(client.listRegionCalls, 4);
+  assert.equal(client.runCount, 0);
+  assert.equal(settings.credentials, undefined);
+  assert.equal(settings.handle, undefined);
 });
 
 test("prepareWorker returns an explicit mismatch for an undersized tagged worker", async () => {
