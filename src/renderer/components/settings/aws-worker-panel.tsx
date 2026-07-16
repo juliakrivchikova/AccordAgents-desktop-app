@@ -145,47 +145,62 @@ export function AwsWorkerPanel(props: {
   const actual = status?.actualSpec ?? operation?.specMismatch?.actual;
   const mismatch = operation?.specMismatch;
   const needsAuthorizationRefresh = operation?.remediation === "refresh-aws-authorization";
-  const showConnection = needsAuthorizationRefresh || !props.settings.hasAwsCredentials && !status?.configured;
+  const showInitialConnection = !needsAuthorizationRefresh && !props.settings.hasAwsCredentials && !status?.configured;
   const canStart = Boolean(blob.trim() || props.settings.hasAwsCredentials || status?.configured);
   const isRunning = status?.state === "running" || status?.state === "pending";
+  const connectionForm = (
+    <>
+      <div className="gen-row gen-row-stack" data-testid={needsAuthorizationRefresh ? "aws-worker-authorization-recovery" : "aws-worker-connect"}>
+        <div className="gen-row-text">
+          <div className="gen-row-title">{needsAuthorizationRefresh ? "AWS administrator update required" : "Connect AWS account"}</div>
+          {needsAuthorizationRefresh ? (
+            <div className="gen-row-desc" data-testid="aws-worker-authorization-steps">
+              The restricted worker credentials cannot update their own permissions.<br />
+              1. Select Show setup command, then Copy.<br />
+              2. Run it in Terminal using an AWS administrator account. If you do not have one, send the copied command to your AWS administrator.<br />
+              3. Paste its <code>accord-aws-v1:</code> result here, then select Apply update and Retry.
+            </div>
+          ) : (
+            <div className="gen-row-desc">Run this scoped setup command once, then paste its result before starting the worker.</div>
+          )}
+        </div>
+        <div className="gen-grid-form gen-grid-form-compact">
+          <input className="gen-input" aria-label="AWS region" value={region} onChange={(event) => setRegion(event.target.value)} />
+          <button type="button" className="gen-pill" disabled={busy} onClick={() => void loadCommand()}>
+            <span className="gen-pill-label">Show setup command</span>
+          </button>
+        </div>
+      </div>
+      {command ? (
+        <div className="gen-aws-command-box">
+          <button type="button" className="gen-aws-copy" aria-label="Copy AWS setup command" onClick={() => void copyCommand()}>
+            {copyFeedback === "copied" ? <CheckCircle2 size={14} /> : <Copy size={14} />}
+            <span>{copyFeedback === "copied" ? "Copied" : copyFeedback === "failed" ? "Copy failed" : "Copy"}</span>
+          </button>
+          <pre className="gen-aws-command" data-testid="aws-worker-command">{command}</pre>
+        </div>
+      ) : null}
+      <div className="gen-card-divider" />
+      <div className="gen-row gen-row-stack">
+        <div className="gen-row-text">
+          <div className="gen-row-title">{needsAuthorizationRefresh ? "Paste the updated result" : "Paste the result"}</div>
+          <div className="gen-row-desc">The command prints a line beginning with <code>accord-aws-v1:</code>.</div>
+        </div>
+        <textarea className="gen-input gen-aws-paste" aria-label="AWS setup result" value={blob} onChange={(event) => setBlob(event.target.value)} />
+        {needsAuthorizationRefresh ? (
+          <div className="gen-actions">
+            <button type="button" className="gen-pill" data-testid="aws-worker-apply-authorization" disabled={busy || !blob.trim()} onClick={() => void start()}>
+              <span className="gen-pill-label">Apply update and Retry</span>
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </>
+  );
 
   return (
     <div className="gen-aws" data-testid="aws-worker-panel">
-      {showConnection ? (
-        <>
-          <div className="gen-row gen-row-stack" data-testid={needsAuthorizationRefresh ? "aws-worker-authorization-recovery" : "aws-worker-connect"}>
-            <div className="gen-row-text">
-              <div className="gen-row-title">{needsAuthorizationRefresh ? "Update AWS permissions" : "Connect AWS account"}</div>
-              <div className="gen-row-desc">{needsAuthorizationRefresh
-                ? "Run this command to refresh the scoped AWS policy, then paste its result and Retry."
-                : "Run this scoped setup command once, then paste its result before starting the worker."}</div>
-            </div>
-            <div className="gen-grid-form gen-grid-form-compact">
-              <input className="gen-input" aria-label="AWS region" value={region} onChange={(event) => setRegion(event.target.value)} />
-              <button type="button" className="gen-pill" disabled={busy} onClick={() => void loadCommand()}>
-                <span className="gen-pill-label">Show setup command</span>
-              </button>
-            </div>
-          </div>
-          {command ? (
-            <div className="gen-aws-command-box">
-              <button type="button" className="gen-aws-copy" aria-label="Copy AWS setup command" onClick={() => void copyCommand()}>
-                {copyFeedback === "copied" ? <CheckCircle2 size={14} /> : <Copy size={14} />}
-                <span>{copyFeedback === "copied" ? "Copied" : copyFeedback === "failed" ? "Copy failed" : "Copy"}</span>
-              </button>
-              <pre className="gen-aws-command" data-testid="aws-worker-command">{command}</pre>
-            </div>
-          ) : null}
-          <div className="gen-card-divider" />
-          <div className="gen-row gen-row-stack">
-            <div className="gen-row-text">
-              <div className="gen-row-title">{needsAuthorizationRefresh ? "Paste the updated result" : "Paste the result"}</div>
-              <div className="gen-row-desc">The command prints a line beginning with <code>accord-aws-v1:</code>.</div>
-            </div>
-            <textarea className="gen-input gen-aws-paste" aria-label="AWS setup result" value={blob} onChange={(event) => setBlob(event.target.value)} />
-          </div>
-        </>
-      ) : null}
+      {showInitialConnection ? connectionForm : null}
 
       <div className="gen-card-divider" />
       <div className="gen-row gen-row-stack">
@@ -237,7 +252,7 @@ export function AwsWorkerPanel(props: {
       {confirm === "stop" ? <ConfirmSharedAction label="Stop" onCancel={() => setConfirm(null)} onConfirm={() => void stop()} /> : null}
       {confirm === "delete" ? <ConfirmSharedAction label="Delete" onCancel={() => setConfirm(null)} onConfirm={() => void remove()} /> : null}
 
-      <div className="gen-row">
+      <div className="gen-row" data-testid="aws-worker-actions">
         <div className="gen-row-text">
           <div className="gen-row-title">{actionMessage ?? operation?.message ?? status?.message ?? (status?.configured ? "Shared worker configured" : "Not connected")}</div>
           <div className="gen-row-desc">This worker is shared by every configured laptop and project. It does not stop automatically.</div>
@@ -245,13 +260,14 @@ export function AwsWorkerPanel(props: {
         <div className="gen-actions">
           <button type="button" className="gen-pill" data-testid="aws-worker-start" disabled={busy || !canStart} onClick={() => void start()}>
             <span className="gen-pill-lead"><Server size={16} /></span>
-            <span className="gen-pill-label">{operation?.phase === "error" ? "Retry" : "Start worker"}</span>
+            <span className="gen-pill-label">{needsAuthorizationRefresh ? "Retry existing permissions" : operation?.phase === "error" ? "Retry" : "Start worker"}</span>
           </button>
           {status?.configured ? <button type="button" className="gen-pill" disabled={busy} onClick={() => void refresh()}><span className="gen-pill-label">Refresh</span></button> : null}
           {status?.configured ? <button type="button" className="gen-pill" disabled={busy || !isRunning} onClick={() => void stop()}><span className="gen-pill-label">Stop</span></button> : null}
           {status?.configured ? <button type="button" className="gen-pill gen-pill-danger" disabled={busy} onClick={() => void remove()}><span className="gen-pill-label">Delete</span></button> : null}
         </div>
       </div>
+      {needsAuthorizationRefresh ? <><div className="gen-card-divider" />{connectionForm}</> : null}
     </div>
   );
 }

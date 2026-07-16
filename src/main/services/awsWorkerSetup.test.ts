@@ -128,7 +128,7 @@ test("DescribeRegions authorization denial requests an AWS authorization refresh
   const failed = await service.start({ operationId: "op-auth", clientToken: "token-auth" });
   assert.equal(failed.operation.phase, "error");
   assert.equal(failed.operation.remediation, "refresh-aws-authorization");
-  assert.match(failed.operation.message, /Update AWS permissions/);
+  assert.match(failed.operation.message, /AWS administrator update shown next/);
   const recovered = await service.start({ operationId: "op-auth" });
   assert.equal(recovered.operation.phase, "ready");
   assert.deepEqual(tokens, ["token-auth", "token-auth"]);

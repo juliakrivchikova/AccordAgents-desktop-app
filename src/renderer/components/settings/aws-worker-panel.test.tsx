@@ -43,12 +43,12 @@ test("Retry reuses the persisted operation and client token", async () => {
   renderer.unmount();
 });
 
-test("authorization recovery exposes the setup command and sends the refreshed blob on Retry", async () => {
+test("authorization recovery exposes the setup command and applies the refreshed blob", async () => {
   const operation: AwsWorkerOperationSnapshot = {
     operationId: "op-auth",
     clientToken: "token-auth",
     phase: "error",
-    message: "Update AWS permissions below",
+    message: "Cloud Run cannot access required AWS APIs",
     updatedAt: "2026-07-10T00:00:00.000Z",
     retryable: true,
     remediation: "refresh-aws-authorization"
@@ -64,11 +64,20 @@ test("authorization recovery exposes the setup command and sends the refreshed b
       };
     }
   });
-  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-recovery" })).includes("Update AWS permissions"), true);
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-recovery" })).includes("AWS administrator update required"), true);
+  const panelChildren = renderer.root.findByProps({ "data-testid": "aws-worker-panel" }).children as ReactTestInstance[];
+  const actionsIndex = panelChildren.findIndex((node) => node.props?.["data-testid"] === "aws-worker-actions");
+  const recoveryIndex = panelChildren.findIndex((node) => node.props?.["data-testid"] === "aws-worker-authorization-recovery");
+  assert.ok(actionsIndex >= 0 && recoveryIndex > actionsIndex, "recovery steps must render directly after the visible error actions");
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-steps" })), /cannot update their own permissions/);
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-steps" })), /send the copied command to your AWS administrator/);
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-start" })), "Retry existing permissions");
   await click(findButton(renderer, "Show setup command"));
   assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-command" })), "command");
+  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-apply-authorization" }).props.disabled, true);
   await change(renderer.root.findByProps({ "aria-label": "AWS setup result" }), "accord-aws-v1:updated");
-  await click(renderer.root.findByProps({ "data-testid": "aws-worker-start" }));
+  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-apply-authorization" }).props.disabled, false);
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-apply-authorization" }));
   assert.equal(requests[0].blob, "accord-aws-v1:updated");
   assert.equal(requests[0].operationId, "op-auth");
   assert.equal(requests[0].clientToken, "token-auth");

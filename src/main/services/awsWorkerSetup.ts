@@ -165,6 +165,6 @@ function mismatchMessage(prepared: PreparedAwsWorker): string {
 function actionableError(error: unknown, needsAuthorizationRefresh = isAwsAuthorizationError(error)): string {
   const message = error instanceof Error ? error.message : String(error);
   return needsAuthorizationRefresh
-    ? "AWS permissions are outdated or insufficient. Update AWS permissions below, paste the new result, and Retry."
+    ? "Cloud Run cannot access required AWS APIs. First try Retry existing permissions. If it fails again, complete the AWS administrator update shown next."
     : message;
 }
