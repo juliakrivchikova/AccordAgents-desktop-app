@@ -192,6 +192,7 @@ import { normalizeAutoChatTitle, normalizeManualChatTitle, sanitizeAutoChatTitle
 import {
   agentReadinessReason,
   cliProviderMetadata,
+  providerEnabled,
   readinessForProvider,
   readyProviderKinds,
   resolveAssistantProviderKind
@@ -4905,11 +4906,8 @@ export class ChatService {
           replyContext
         );
         dispatch = { ...dispatch, targets: skillValidation.targets };
-        const [agents, settings] = await Promise.all([
-          this.detectAgentsForReadiness("submit"),
-          this.settings.getPublicSettings()
-        ]);
-        this.assertParticipantProvidersReady(dispatch.targets, agents, settings.providers ?? []);
+        const settings = await this.settings.getPublicSettings();
+        this.assertParticipantProvidersEnabled(dispatch.targets, settings.providers ?? []);
       } catch (error) {
         await this.rollbackPreparedImageAttachments(conversation.id, preparedImages, "MessageValidationFailed", error);
         throw error;
@@ -9069,6 +9067,21 @@ export class ChatService {
       if (state !== "ready") {
         const label = cliProviderMetadata(kind).label;
         throw new Error(`@${item.handle.replace(/^@/, "")}: ${agentReadinessReason(state, label) ?? `${label} is not ready.`}`);
+      }
+    }
+  }
+
+  private assertParticipantProvidersEnabled(
+    items: CreateChatConversationRequest["participants"],
+    providers: Array<Pick<ProviderSettings, "kind" | "enabled">>
+  ): void {
+    for (const item of items) {
+      if (this.normalizeConcreteRemoteExecutionMode(item.remoteExecution) === "remote") {
+        continue;
+      }
+      const kind = item.kind as ChatProviderKind;
+      if (!providerEnabled(providers, kind)) {
+        throw new Error(`${cliProviderMetadata(kind).label} is disabled. Enable it in Settings.`);
       }
     }
   }

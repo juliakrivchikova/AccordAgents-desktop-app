@@ -119,25 +119,13 @@ export class CliReadinessService {
     const environment = await this.dependencies.refreshEnvironment();
     const checkedAt = this.dependencies.now().toISOString();
     if (!environment.ok) {
-      return CLI_PROVIDER_DISPLAY_ORDER.map((kind) => this.health(kind, checkedAt, generation, {
-        detection: "unknown",
-        runnable: "unknown",
-        authentication: "unknown",
-        installed: false,
-        diagnosticCode: "environment-check-failed"
-      }));
+      return this.sharedFailureSnapshot(checkedAt, generation);
     }
     let manualEnvironment: NodeJS.ProcessEnv;
     try {
       manualEnvironment = await this.dependencies.manualEnvironment();
     } catch {
-      return CLI_PROVIDER_DISPLAY_ORDER.map((kind) => this.health(kind, checkedAt, generation, {
-        detection: "unknown",
-        runnable: "unknown",
-        authentication: "unknown",
-        installed: false,
-        diagnosticCode: "environment-check-failed"
-      }));
+      return this.sharedFailureSnapshot(checkedAt, generation);
     }
     const effectiveEnvironment = {
       ...environment.env,
@@ -262,6 +250,24 @@ export class CliReadinessService {
       generation,
       platform: normalizedPlatform(process.platform)
     };
+  }
+
+  private sharedFailureSnapshot(checkedAt: string, generation: number): AgentHealth[] {
+    const previousByKind = new Map(this.stableSnapshot.map((health) => [health.kind, health]));
+    if (CLI_PROVIDER_DISPLAY_ORDER.every((kind) => previousByKind.has(kind))) {
+      return CLI_PROVIDER_DISPLAY_ORDER.map((kind) => ({
+        ...previousByKind.get(kind)!,
+        checking: false,
+        generation
+      }));
+    }
+    return CLI_PROVIDER_DISPLAY_ORDER.map((kind) => this.health(kind, checkedAt, generation, {
+      detection: "unknown",
+      runnable: "unknown",
+      authentication: "unknown",
+      installed: false,
+      diagnosticCode: "environment-check-failed"
+    }));
   }
 
   private logProbe(

@@ -140,6 +140,30 @@ test("environment, lookup, and version failures produce distinct normalized fact
   assert.equal(authCalls, 0, "authentication must not run after a version failure");
 });
 
+test("a shared environment failure preserves the last complete readiness snapshot", async () => {
+  let refreshCalls = 0;
+  const checkedAt = [
+    new Date("2026-07-16T20:00:00.000Z"),
+    new Date("2026-07-16T20:01:00.000Z")
+  ];
+  const service = new CliReadinessService(undefined, fakeDependencies({
+    refreshEnvironment: async () => {
+      refreshCalls += 1;
+      return refreshCalls === 1
+        ? { ok: true, env: { PATH: "/fixture/bin" } }
+        : { ok: false, env: {} };
+    },
+    now: () => checkedAt.shift() ?? new Date("2026-07-16T20:02:00.000Z")
+  }));
+
+  const healthy = await service.refresh({ force: true, trigger: "manual" });
+  const afterFailure = await service.refresh({ force: true, trigger: "submit" });
+
+  assert.ok(healthy.every((health) => health.detection === "detected" && health.authentication === "ready"));
+  assert.deepEqual(afterFailure, healthy, "a failed shared prerequisite must not demote runnable providers");
+  assert.ok(afterFailure.every((health) => health.lastCheckedAt === "2026-07-16T20:00:00.000Z"));
+});
+
 test("readiness probes use the same filtered manual environment as local agent runs", async () => {
   const observed: NodeJS.ProcessEnv[] = [];
   const service = new CliReadinessService(undefined, fakeDependencies({

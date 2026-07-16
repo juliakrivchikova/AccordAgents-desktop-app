@@ -55,7 +55,8 @@ import type {
   ChatRoleConfigUpdate,
   ChatSkillMention,
   Conversation,
-  ParticipantConfig
+  ParticipantConfig,
+  ProviderSettings
 } from "../../shared/types";
 import {
   chatActivityEventsForSegment,
@@ -4829,7 +4830,41 @@ test("chat creation allows an unready provider only for remote participants", as
   );
 });
 
-test("existing chat submit rejects an unready local target before ingest", async () => {
+test("existing chat submit attempts an unready local target and lets the provider run decide", async () => {
+  const assistant = {
+    ...chatParticipant("claude-code"),
+    handle: "assistant",
+    roleConfigId: ADMIN_ROLE.id
+  };
+  const conversation = chatConversation([assistant]);
+  const runs: ParticipantConfig[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    agents: [
+      { kind: "codex-cli", label: "Codex", installed: true, detection: "detected", runnable: "ready", authentication: "ready" },
+      { kind: "claude-code", label: "Claude Code", installed: false, detection: "not-detected", runnable: "unknown", authentication: "unknown" }
+    ],
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE] },
+    run: async (participant) => {
+      runs.push(participant);
+      return { participant, ok: true, content: "The actual provider run succeeded.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "unready-submit",
+    content: "@assistant try the provider despite stale readiness."
+  });
+  await waitFor(() => runs.length === 1);
+
+  assert.equal(runs[0].id, assistant.id);
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.content.includes("despite stale readiness")));
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.content === "The actual provider run succeeded."));
+});
+
+test("existing chat submit still rejects an explicitly disabled local provider", async () => {
   const assistant = {
     ...chatParticipant("claude-code"),
     handle: "assistant",
@@ -4839,23 +4874,24 @@ test("existing chat submit rejects an unready local target before ingest", async
   const initialMessageCount = conversation.messages.length;
   const { service, storage } = testService({
     conversation,
-    agents: [
-      { kind: "codex-cli", label: "Codex", installed: true, detection: "detected", runnable: "ready", authentication: "ready" },
-      { kind: "claude-code", label: "Claude Code", installed: false, detection: "not-detected", runnable: "unknown", authentication: "unknown" }
-    ],
-    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE] }
+    settings: {
+      chatRoleConfigs: [ADMIN_ROLE, ROLE],
+      providers: [
+        { kind: "codex-cli", label: "Codex CLI", enabled: true },
+        { kind: "claude-code", label: "Claude Code", enabled: false }
+      ]
+    }
   });
 
   await assert.rejects(
     () => service.sendMessage({
       conversationId: conversation.id,
-      runId: "unready-submit",
-      content: "This draft must not be ingested."
+      runId: "disabled-submit",
+      content: "@assistant this must remain blocked."
     }),
-    /Claude Code was not detected/
+    /Claude Code is disabled/
   );
   assert.equal(storage.current.messages.length, initialMessageCount);
-  assert.equal(storage.current.messages.some((message: ChatMessage) => message.content.includes("must not be ingested")), false);
 });
 
 test("prospective skill context remains provider-neutral until Assistant selection", async () => {
@@ -9191,6 +9227,7 @@ function testService(options: {
     chatAutoWatchWakeLimit?: number;
     chatPromptContext?: AppSettings["chatPromptContext"];
     cloudRuns?: Partial<AppSettings["cloudRuns"]>;
+    providers?: ProviderSettings[];
     assistantProviderKind?: ChatProviderKind;
     lastSuccessfulChatProviderKind?: ChatProviderKind;
   };
@@ -9260,10 +9297,10 @@ function testService(options: {
       maxRuntimeMs: options.settings?.cloudRuns?.maxRuntimeMs ?? 24 * 60 * 60_000,
       pollIntervalMs: options.settings?.cloudRuns?.pollIntervalMs ?? 2_500
     },
-    providers: [
+    providers: clone(options.settings?.providers ?? [
       { kind: "codex-cli", label: "Codex CLI", enabled: true },
       { kind: "claude-code", label: "Claude Code", enabled: true }
-    ],
+    ]),
     chatRoleConfigs: clone(settingsState.chatRoleConfigs),
     chatBehaviorRules: clone(settingsState.chatBehaviorRules),
     chatSavedPrompts: [],
