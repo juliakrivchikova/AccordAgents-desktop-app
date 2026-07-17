@@ -150,7 +150,6 @@ import type {
 } from "./remoteRuns";
 import { emitCodexLiveOutput } from "./codexExec";
 import {
-  APP_ARTIFACT_TOOL_NAMES,
   APP_CHAT_EXPORT_ATTACHMENT_TOOL,
   APP_CHAT_GET_CONTEXT_TOOL,
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
@@ -170,7 +169,9 @@ import {
   APP_ROLES_REQUEST_CHANGE_TOOL,
   APP_ROSTER_DESCRIBE_OPTIONS_TOOL,
   APP_ROSTER_REQUEST_CHANGE_TOOL,
-  APP_TOOL_PERMISSION_TOOL
+  APP_TOOL_PERMISSION_TOOL,
+  appMcpToolNamesForCapabilities,
+  autoPreauthorizedAppMcpToolNames as classifiedAutoPreauthorizedAppMcpToolNames
 } from "./appMcp";
 import type { AppMcpClientStatus } from "./appMcp";
 import { DebugLogService } from "./debugLogs";
@@ -335,32 +336,6 @@ const CHAT_GITHUB_APP_REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const CHAT_GITHUB_APP_PERMISSION_PATTERN = /^[A-Za-z0-9_:-]+$/;
 const PARTICIPANT_REQUEST_SCRUTINY_APPENDIX =
   "Review for blockers, incorrect assumptions, missing edge cases, or simpler alternatives. If none, reply with only `No objections.` Do not restate the proposal.";
-const CHAT_CONTEXT_MCP_TOOL_NAMES = [
-  APP_CHAT_GET_CONTEXT_TOOL,
-  APP_CHAT_GET_PARTICIPANTS_TOOL,
-  APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
-  APP_CHAT_READ_MESSAGES_TOOL,
-  APP_CHAT_LIST_ATTACHMENTS_TOOL,
-  APP_CHAT_READ_ATTACHMENT_TOOL,
-  APP_CHAT_EXPORT_ATTACHMENT_TOOL,
-  APP_CHAT_REACT_TOOL,
-  APP_CHAT_SEND_MESSAGE_TOOL,
-  APP_CHAT_SET_TITLE_TOOL,
-  APP_TOOL_PERMISSION_TOOL,
-  ...APP_ARTIFACT_TOOL_NAMES
-];
-const CHAT_APP_MCP_TOOL_NAMES = [
-  ...CHAT_CONTEXT_MCP_TOOL_NAMES,
-  APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
-  APP_CHAT_REQUEST_COMPACTION_TOOL,
-  APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
-  APP_ROLES_DESCRIBE_OPTIONS_TOOL,
-  APP_ROLES_REQUEST_CHANGE_TOOL,
-  APP_PARTICIPANTS_DESCRIBE_OPTIONS_TOOL,
-  APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
-  APP_ROSTER_DESCRIBE_OPTIONS_TOOL,
-  APP_ROSTER_REQUEST_CHANGE_TOOL
-];
 const CHAT_CONTEXT_READ_DEFAULT_LIMIT = 50;
 const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
 // A hard transport ceiling, not a truncation point. The send path rejects over-limit content
@@ -1808,10 +1783,10 @@ export class ChatService {
 
     const runPermissions = actor.runPermissions ? normalizeChatAgentPermissions(actor.runPermissions) : undefined;
     const prepared = this.preparePermissionChange(requester, this.normalizePermissionChangeRequest(rawRequest), runPermissions);
-    if (!runPermissions && normalizeChatAgentMode(requester.agentMode) === "auto" && prepared.request.kind === "shellRules") {
+    if (normalizeChatAgentMode(requester.agentMode) === "auto" && prepared.request.kind === "shellRules") {
       // In Auto-review the provider's native auto classifier decides each shell command,
-      // so an agent shellRules request needs no User approval. Configured deny rules are
-      // still applied at launch as hard stops.
+      // so an agent shellRules request needs no User approval and stored app rules are
+      // not forwarded as a second hard gate.
       return {
         result: {
           ok: true,
@@ -1838,34 +1813,6 @@ export class ChatService {
         result: this.permissionRequestStatusResult(existingApproval),
         mutated: false
       };
-    }
-
-    // Reading a selected skill's own files is part of skill invocation and is covered by repoRead.
-    // Codex (which has no non-shell read tool) loads a skill by running a read command like
-    // `cat <skill-dir>/SKILL.md`; with shell off it would otherwise ask the User to grant a shell
-    // rule just to read the skill they selected. Auto-grant when every requested rule is a simple
-    // read-only command scoped to a validated selected-skill directory. Mutating/networked/chained
-    // commands and any path outside the selected skill dirs still require normal approval.
-    if (prepared.request.kind === "shellRules" && actor.triggerMessageId) {
-      const triggerMessage = conversation.messages.find((message) => message.id === actor.triggerMessageId);
-      const selectedSkills = triggerMessage && this.userSkills
-        ? await this.userSkills.resolveInvocableSkillsForParticipant(
-            this.chatSkillMentions(triggerMessage),
-            requester.kind,
-            this.userSkillRunContext(conversation, triggerMessage.content, this.replyContextFromMessage(triggerMessage)),
-            requester.id
-          )
-        : [];
-      if (selectedSkills.length > 0 && await this.shellRulesAreSelectedSkillReads(prepared.request.rules, selectedSkills.map((skill) => skill.dir))) {
-        return {
-          result: {
-            ok: true,
-            status: "already_granted",
-            summary: "Reading the selected skill files is permitted as read-only skill invocation context; no shell-rule grant is needed."
-          },
-          mutated: false
-        };
-      }
     }
 
     const approval = this.newAppToolApproval(
@@ -5876,14 +5823,6 @@ export class ChatService {
         messageId: pendingMessage.id
       }
     });
-    const selectedSkills = this.userSkills
-      ? await this.userSkills.resolveInvocableSkillsForParticipant(
-          this.chatSkillMentions(triggerMessage),
-          participant.kind,
-          this.userSkillRunContext(conversation, triggerMessage.content, this.replyContextFromMessage(triggerMessage)),
-          participant.id
-        )
-      : [];
     const agentEnvironment = await this.manualAgentEnvironmentForRun();
     const persistSessionId = (sessionId: string): void => {
       this.persistParticipantSessionId(conversation, session, sessionId);
@@ -6079,11 +6018,11 @@ export class ChatService {
         extraReadableDirs: [workspacePath],
         resumeFallbackPrompt,
         role,
-        selectedSkills,
         appMcp: appMcp
           ? {
               ...appMcp,
               toolNames: appMcpToolNames,
+              autoPreauthorizedToolNames: this.autoPreauthorizedAppMcpToolNames(appMcpToolNames),
               clientGenerationId: appMcpClientGenerationId,
               clientStatus: (clientGenerationId: string) => this.appMcp?.clientStatus?.(clientGenerationId)
             }
@@ -6097,7 +6036,7 @@ export class ChatService {
         warm: {
           conversationId: conversation.id,
           participantId: participant.id,
-          contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey, this.skillRuntimeKey(triggerMessage, participant.kind)),
+          contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey),
           idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
         }
       });
@@ -6637,15 +6576,6 @@ export class ChatService {
       content.includes("Skill blocked:");
   }
 
-  private skillRuntimeKey(message: ChatMessage, providerKind: ChatProviderKind): string {
-    const variants = this.chatSkillMentions(message)
-      .flatMap((mention) => mention.variants
-        .filter((variant) => variant.providerKind === providerKind)
-        .map((variant) => `${mention.skillId}:${variant.providerKind}:${variant.scope}:${variant.sourceKey}:${variant.contentHash}:${variant.capabilityState}`))
-      .sort();
-    return variants.join("|");
-  }
-
   private cliRoleOptions(
     participant: ChatParticipant,
     session: ChatParticipantSession,
@@ -6830,25 +6760,15 @@ export class ChatService {
   }
 
   private appMcpToolNames(capabilities: ChatAppToolCapability[]): string[] {
-    return CHAT_APP_MCP_TOOL_NAMES.filter((toolName) => {
-      if (CHAT_CONTEXT_MCP_TOOL_NAMES.includes(toolName)) {
-        return true;
-      }
-      if (toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL) {
-        return hasChatAppToolCapability(capabilities, "participants.request");
-      }
-      if (toolName === APP_CHAT_REQUEST_COMPACTION_TOOL) {
-        return hasChatAppToolCapability(capabilities, "compaction.request");
-      }
-      if (toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL) {
-        return hasChatAppToolCapability(capabilities, "permissions.request");
-      }
-      return hasChatAppToolCapability(capabilities, "participants.manage");
-    });
+    return appMcpToolNamesForCapabilities(capabilities);
   }
 
   private appMcpToolInventoryKey(toolNames: string[]): string {
     return this.shortHash([...toolNames].sort().join("|"));
+  }
+
+  private autoPreauthorizedAppMcpToolNames(toolNames: string[]): string[] {
+    return classifiedAutoPreauthorizedAppMcpToolNames(toolNames);
   }
 
   private isAdministratorSession(session: ChatParticipantSession): boolean {
@@ -7263,8 +7183,7 @@ export class ChatService {
     runPath: string,
     workspacePath: string,
     runPermissions: ChatAgentPermissions,
-    appMcpToolInventoryKey: string,
-    skillRuntimeKey = ""
+    appMcpToolInventoryKey: string
   ): string {
     return JSON.stringify({
       conversationId: conversation.id,
@@ -7288,8 +7207,7 @@ export class ChatService {
       appMcpClientGeneration: session.appMcpClientGeneration ?? 0,
       appMcpToolInventoryKey,
       runPath,
-      workspacePath,
-      skillRuntimeKey
+      workspacePath
     });
   }
 
@@ -12822,202 +12740,6 @@ export class ChatService {
 
   private shellPermissionRuleKey(rule: ChatShellPermissionRule): string {
     return `${rule.action}\0${rule.match}\0${rule.pattern}`;
-  }
-
-  // True only when every requested shell rule is a simple, single, read-only command whose path
-  // arguments all live inside one of the validated selected-skill directories. Used to silently
-  // allow a skill-load read (e.g. `cat <skill-dir>/SKILL.md` or `sed -n 1,40p
-  // ~/.codex/skills/<skill>/SKILL.md`) without a User prompt, while never auto-allowing mutation,
-  // chaining/redirection, or reads outside the selected skill dirs.
-  private async shellRulesAreSelectedSkillReads(rules: ChatShellPermissionRule[], skillDirs: string[]): Promise<boolean> {
-    if (rules.length === 0 || skillDirs.length === 0) {
-      return false;
-    }
-    const resolvedDirs: string[] = [];
-    for (const dir of skillDirs) {
-      const real = await realpath(dir).catch(() => undefined);
-      if (!real) {
-        return false;
-      }
-      resolvedDirs.push(path.resolve(real));
-    }
-    for (const rule of rules) {
-      if (!await this.shellRuleIsSelectedSkillRead(rule, resolvedDirs)) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  private async shellRuleIsSelectedSkillRead(rule: ChatShellPermissionRule, resolvedSkillDirs: string[]): Promise<boolean> {
-    if (rule.action !== "allow" || rule.match !== "exact") {
-      return false;
-    }
-    const pattern = rule.pattern.trim();
-    // Reject anything that could chain, redirect, substitute, or glob into another command.
-    if (!pattern || /[|&;><`$(){}*?!\\]/.test(pattern)) {
-      return false;
-    }
-    const tokens = pattern.split(/\s+/);
-    const program = tokens[0];
-    const args = tokens.slice(1).map((token) => this.stripSimpleShellQuotes(token));
-    if (!program || args.some((token) => /['"]/.test(token))) {
-      return false;
-    }
-    // Validate every token that looks like a filesystem path (absolute, home-relative, or containing
-    // a separator such as a relative escape). Non-path args (flags, sed scripts like `1,40p`) are
-    // ignored. Require at least one path arg, every path arg to resolve absolute, and all inside a
-    // selected skill dir.
-    const pathArgs = args.filter((token) => path.isAbsolute(token) || token.includes("/"));
-    if (pathArgs.length === 0) {
-      return false;
-    }
-    if (!this.selectedSkillReadCommandIsSafe(program, args, pathArgs)) {
-      return false;
-    }
-    for (const arg of pathArgs) {
-      const normalizedArg = this.normalizeSkillReadPathArg(arg);
-      if (!normalizedArg) {
-        return false;
-      }
-      // Selected skill dirs are realpaths; global skills are commonly symlinked into the provider's
-      // skill root, so the agent's command path (e.g. ~/.codex/skills/<name>/SKILL.md) is itself a
-      // symlink. Require the resolved realpath of the read target to land inside a selected skill
-      // dir: this still allows symlinked skill dirs, but rejects a path that is lexically inside the
-      // skill dir yet symlinks back out to an arbitrary file (e.g. a planted SKILL.md -> /etc/passwd).
-      const real = await realpath(normalizedArg).catch(() => undefined);
-      if (!real) {
-        return false;
-      }
-      const inside = resolvedSkillDirs.some((dir) => real === dir || real.startsWith(`${dir}${path.sep}`));
-      if (!inside) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  private normalizeSkillReadPathArg(arg: string): string | undefined {
-    if (path.isAbsolute(arg)) {
-      return path.resolve(arg);
-    }
-    if (arg === "~") {
-      return this.homePathForSkillReads();
-    }
-    if (arg.startsWith("~/")) {
-      return path.resolve(this.homePathForSkillReads(), arg.slice(2));
-    }
-    return undefined;
-  }
-
-  private homePathForSkillReads(): string {
-    const home = process.env.HOME?.trim();
-    return path.resolve(home || app.getPath("home"));
-  }
-
-  private selectedSkillReadCommandIsSafe(program: string, args: string[], pathArgs: string[]): boolean {
-    const nonPathArgs = args.filter((arg) => !pathArgs.includes(arg));
-    if (program === "cat") {
-      return nonPathArgs.every((arg) => /^-[benstuvAET]+$/.test(arg));
-    }
-    if (program === "head" || program === "tail") {
-      return this.headTailArgsAreReadOnly(nonPathArgs);
-    }
-    if (program === "ls") {
-      return nonPathArgs.every((arg) => /^-[AahlLrt1FRd]+$/.test(arg));
-    }
-    if (program === "grep") {
-      return this.grepArgsAreReadOnly(nonPathArgs);
-    }
-    if (program === "rg") {
-      return this.ripgrepArgsAreReadOnly(nonPathArgs);
-    }
-    if (program === "sed") {
-      return this.sedArgsAreReadOnly(nonPathArgs);
-    }
-    return false;
-  }
-
-  private headTailArgsAreReadOnly(args: string[]): boolean {
-    for (let index = 0; index < args.length; index += 1) {
-      const arg = args[index];
-      if (/^-\d+$/.test(arg) || /^[+]?\d+$/.test(arg) || /^-[nc]\d+$/.test(arg)) {
-        continue;
-      }
-      if (arg === "-n" || arg === "-c") {
-        index += 1;
-        if (index >= args.length || !/^[+]?\d+$/.test(args[index])) {
-          return false;
-        }
-        continue;
-      }
-      return false;
-    }
-    return true;
-  }
-
-  private grepArgsAreReadOnly(args: string[]): boolean {
-    const safeLongFlags = new Set(["--fixed-strings", "--ignore-case", "--line-number", "--no-heading", "--word-regexp"]);
-    for (const arg of args) {
-      if (!arg.startsWith("-")) {
-        continue;
-      }
-      if (safeLongFlags.has(arg) || /^-[EinFw]+$/.test(arg)) {
-        continue;
-      }
-      return false;
-    }
-    return true;
-  }
-
-  private ripgrepArgsAreReadOnly(args: string[]): boolean {
-    const safeLongFlags = new Set(["--fixed-strings", "--ignore-case", "--line-number", "--no-heading", "--smart-case", "--word-regexp"]);
-    for (const arg of args) {
-      if (!arg.startsWith("-")) {
-        continue;
-      }
-      if (arg === "--pre" || arg.startsWith("--pre=") || arg === "--pre-glob" || arg.startsWith("--pre-glob=")) {
-        return false;
-      }
-      if (safeLongFlags.has(arg) || /^-[FinSw]+$/.test(arg)) {
-        continue;
-      }
-      return false;
-    }
-    return true;
-  }
-
-  private sedArgsAreReadOnly(args: string[]): boolean {
-    let sawNoPrint = false;
-    let sawScript = false;
-    for (const arg of args) {
-      if (arg === "-n") {
-        sawNoPrint = true;
-        continue;
-      }
-      if (arg === "-i" || arg.startsWith("-i") || arg === "--in-place" || arg.startsWith("--in-place=")) {
-        return false;
-      }
-      if (arg.startsWith("-")) {
-        return false;
-      }
-      if (!/^(\d+|0|,|\$)(\d+|\$)?p$/.test(arg) && !/^(\d+|\$)(,(\d+|\$))?p$/.test(arg)) {
-        return false;
-      }
-      sawScript = true;
-    }
-    return sawNoPrint && sawScript;
-  }
-
-  private stripSimpleShellQuotes(token: string): string {
-    if (token.length >= 2) {
-      const first = token[0];
-      const last = token[token.length - 1];
-      if ((first === "'" && last === "'") || (first === "\"" && last === "\"")) {
-        return token.slice(1, -1);
-      }
-    }
-    return token;
   }
 
   private isDeniedShellPermissionRule(rule: ChatShellPermissionRule): boolean {

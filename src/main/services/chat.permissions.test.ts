@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  APP_ARTIFACT_CREATE_TOOL,
   APP_CHAT_EXPORT_ATTACHMENT_TOOL,
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
   APP_CHAT_LIST_ATTACHMENTS_TOOL,
@@ -17,6 +18,9 @@ import {
   APP_ROLES_REQUEST_CHANGE_TOOL,
   APP_ROSTER_REQUEST_CHANGE_TOOL,
   APP_TOOL_PERMISSION_TOOL,
+  APP_MCP_TOOL_POLICIES,
+  appMcpToolNamesForCapabilities,
+  autoPreauthorizedAppMcpToolNames,
   AppMcpService
 } from "./appMcp";
 import { ChatService } from "./chat";
@@ -1317,6 +1321,7 @@ test("auto mode handles shell permission requests via native auto without a user
   participant.agentMode = "auto";
   const conversation = chatConversation([participant]);
   const { service, storage } = testService({ conversation });
+  const beforePermissions = structuredClone(participant.permissions);
 
   const result = await service.requestPermissionChangeFromTool({
     conversationId: conversation.id,
@@ -1325,7 +1330,13 @@ test("auto mode handles shell permission requests via native auto without a user
     roleConfigVersion: 0,
     capabilities: ["permissions.request"],
     runId: "auto-shell-run",
-    triggerMessageId: "user-message"
+    triggerMessageId: "user-message",
+    runPermissions: {
+      ...defaultChatAgentPermissions(),
+      workspaceWrite: true,
+      webAccess: true,
+      shell: { enabled: true, rules: [] }
+    }
   }, {
     kind: "shellRules",
     rules: [{ action: "allow", match: "prefix", pattern: "git diff" }],
@@ -1339,6 +1350,7 @@ test("auto mode handles shell permission requests via native auto without a user
     (approval) => approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL
   );
   assert.equal(approvals.length, 0);
+  assert.deepEqual(storage.current.metadata.participants[0].permissions, beforePermissions);
 });
 
 test("permission resume attaches resumed participant-request reply to the original batch", async () => {
@@ -8297,6 +8309,168 @@ test("appMcpToolNames exposes request tools only with their capabilities", () =>
   assert.ok(requestTools.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL));
   assert.ok(compactionTools.includes(APP_CHAT_REQUEST_COMPACTION_TOOL));
   assert.ok(requestTools.includes(APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL));
+});
+
+test("app MCP policy registry exhaustively drives exposure and Auto preauthorization", () => {
+  const { service } = testService();
+  const capabilities = [
+    "participants.request",
+    "compaction.request",
+    "permissions.request",
+    "participants.manage"
+  ] as const;
+  const exposed = (service as any).appMcpToolNames([...capabilities]) as string[];
+  const eligible = (service as any).autoPreauthorizedAppMcpToolNames(exposed) as string[];
+  const registryNames = APP_MCP_TOOL_POLICIES.map((policy) => policy.name);
+  const registeredEffects = new Map(APP_MCP_TOOL_POLICIES.map((policy) => [policy.name, policy.effect]));
+
+  assert.equal(new Set(registryNames).size, registryNames.length, "every first-party tool must have one policy");
+  assert.deepEqual(exposed, appMcpToolNamesForCapabilities([...capabilities]));
+  assert.deepEqual(eligible, autoPreauthorizedAppMcpToolNames(exposed));
+  assert.deepEqual(
+    eligible,
+    exposed.filter((toolName) => registeredEffects.get(toolName) === "app-managed"),
+    "all and only app-managed exposed tools must be preauthorized"
+  );
+
+  assert.ok(eligible.includes(APP_ARTIFACT_CREATE_TOOL));
+  assert.ok(eligible.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL));
+  assert.ok(eligible.includes(APP_PERMISSIONS_REQUEST_CHANGE_TOOL));
+  assert.equal(eligible.includes(APP_CHAT_EXPORT_ATTACHMENT_TOOL), false);
+  assert.equal(eligible.includes(APP_TOOL_PERMISSION_TOOL), false);
+  assert.equal(eligible.some((toolName) => toolName.startsWith("app_skill_")), false);
+
+  const appMcp = new AppMcpService();
+  const listedNames = ((appMcp as any).toolsForActor({
+    conversationId: "conversation-1",
+    participantId: "participant-1",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    capabilities: [...capabilities]
+  }) as Array<{ name: string }>).map((tool) => tool.name);
+  assert.deepEqual(
+    [...listedNames].sort(),
+    [...exposed].sort(),
+    "runtime tools/list exposure must use the same policy registry"
+  );
+});
+
+test("ChatService constructs classified Auto app MCP launch options for cold, resumed, and participant-request runs", async () => {
+  const appMcp = new AppMcpService();
+  // Exercise the real grant/token and ChatService option construction without opening
+  // a listener in the unit-test sandbox.
+  (appMcp as any).url = "http://127.0.0.1:1/mcp";
+  try {
+    const requester: ChatParticipant = {
+      ...chatParticipant("codex-cli", { requestParticipants: "allow" }),
+      id: "requester-participant",
+      handle: "requester"
+    };
+    const target: ChatParticipant = {
+      ...chatParticipant("claude-code", { repoRead: true, workspaceWrite: true }),
+      id: "auto-claude-participant",
+      handle: "auto-claude",
+      agentMode: "auto"
+    };
+    const selectedRepoPath = path.join(tmpdir(), "accordagents-launch-matrix-repo");
+    const conversation: Conversation = {
+      ...chatConversation([requester, target]),
+      repoPath: selectedRepoPath
+    };
+    const runs: Array<{
+      participantId: string;
+      repoPath: string | undefined;
+      options: any;
+    }> = [];
+    const { service, tempRoot } = testService({
+      conversation,
+      appMcp,
+      run: async (participant, _prompt, repoPath, _diffMode, _kind, _signal, options) => {
+        runs.push({ participantId: participant.id, repoPath, options });
+        return {
+          participant,
+          ok: true,
+          content: "Completed.",
+          durationMs: 1,
+          sessionId: `provider-session-${participant.id}`
+        };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+
+    await service.sendMessage({
+      conversationId: conversation.id,
+      runId: "auto-cold-run",
+      content: "@auto-claude Run the cold path."
+    });
+    await waitFor(() => runs.length === 1);
+    await service.sendMessage({
+      conversationId: conversation.id,
+      runId: "auto-resumed-run",
+      content: "@auto-claude Run the resumed path."
+    });
+    await waitFor(() => runs.length === 2);
+    await service.requestParticipantsFromTool(participantRequestActor(requester), {
+      requests: [{ target: target.handle, prompt: "Run the participant-request path." }],
+      timeoutMs: 5_000,
+      resumeRequester: false
+    });
+    await waitFor(() => runs.length === 3);
+
+    assert.equal(Boolean(runs[0].options.sessionId), false);
+    assert.equal(runs[1].options.sessionId, `provider-session-${target.id}`);
+    for (const [index, run] of runs.entries()) {
+      assert.equal(run.participantId, target.id, `run ${index}`);
+      assert.equal(run.repoPath, selectedRepoPath, `run ${index}`);
+      assert.ok(run.options.appMcp, `run ${index}`);
+      assert.ok(run.options.appMcp.toolNames.includes(APP_ARTIFACT_CREATE_TOOL), `run ${index}`);
+      assert.ok(run.options.appMcp.autoPreauthorizedToolNames.includes(APP_ARTIFACT_CREATE_TOOL), `run ${index}`);
+      assert.equal(run.options.appMcp.autoPreauthorizedToolNames.includes(APP_CHAT_EXPORT_ATTACHMENT_TOOL), false, `run ${index}`);
+      assert.equal(run.options.appMcp.autoPreauthorizedToolNames.includes(APP_TOOL_PERMISSION_TOOL), false, `run ${index}`);
+    }
+  } finally {
+    (appMcp as any).url = undefined;
+  }
+});
+
+test("app MCP denial diagnostics keep stable app-server codes without request content", async () => {
+  const events: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const secretCanary = "CANARY_SECRET /private/artifact/path";
+  const appMcp = new AppMcpService({
+    async write(event, payload) {
+      events.push({ event, payload });
+    }
+  });
+  appMcp.setArtifactToolHandler(async () => ({
+    ok: false,
+    error: { code: "ARTIFACT_AUDIENCE_DENIED", message: secretCanary }
+  }));
+  const actor = {
+    conversationId: "conversation-1",
+    participantId: "participant-1",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    capabilities: []
+  };
+
+  await (appMcp as any).callTool(actor, {
+    name: APP_ARTIFACT_CREATE_TOOL,
+    arguments: { content: secretCanary }
+  });
+  await assert.rejects(
+    () => (appMcp as any).callTool(actor, {
+      name: APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
+      arguments: { reason: secretCanary }
+    }),
+    /not allowed/
+  );
+
+  assert.deepEqual(events.map((item) => item.payload.code), [
+    "ARTIFACT_AUDIENCE_DENIED",
+    "APP_TOOL_CAPABILITY_DENIED"
+  ]);
+  assert.equal(events.every((item) => item.payload.layer === "first-party-app-server-policy"), true);
+  assert.equal(JSON.stringify(events).includes(secretCanary), false);
 });
 
 test("app MCP advertises self-compaction only with compaction permission", () => {

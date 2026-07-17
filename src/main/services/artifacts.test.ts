@@ -497,6 +497,10 @@ test("artifact reference tokens parse into artifact links (rename-safe by id)", 
   const bareLink = bare.find((node) => node.type === "artifactLink");
   assert.deepEqual(bareLink, { type: "artifactLink", artifactId: "abc-123" });
 
+  const uri = parseMarkdownInline("[Release Plan](artifact://0b9f3d3a-1)");
+  const uriLink = uri.find((node) => node.type === "artifactLink");
+  assert.deepEqual(uriLink, { type: "artifactLink", artifactId: "0b9f3d3a-1", label: "Release Plan" });
+
   // Message links keep working unchanged.
   const message = parseMarkdownInline("see [msg](#msg:xyz)");
   assert.equal(message.find((node) => node.type === "messageLink") !== undefined, true);

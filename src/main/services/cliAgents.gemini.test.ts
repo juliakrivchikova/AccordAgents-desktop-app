@@ -75,7 +75,7 @@ test("buildGeminiExecInvocation: resume passes --conversation and keeps the conf
 test("buildGeminiExecInvocation: auto mode and granted write skip tool confirmations", () => {
   const auto = buildGeminiExecInvocation({
     participant,
-    prompt: "Do work",
+    prompt: "Create exactly /outside/explicit-target.txt with the text parity-proof.",
     repoPath: "/repo/project",
     kind: "chat",
     options: { agentMode: "auto" }
@@ -100,7 +100,10 @@ test("buildGeminiExecInvocation: auto mode and granted write skip tool confirmat
     }
   });
   assert.equal(write.args.includes("--dangerously-skip-permissions"), true);
-  assert.match(flagValue(auto.args, "--print") ?? "", /File modifications are limited to the selected repository workspace/);
+  const autoPrompt = flagValue(auto.args, "--print") ?? "";
+  assert.match(autoPrompt, /\/outside\/explicit-target\.txt/);
+  assert.doesNotMatch(autoPrompt, /File modifications are limited to the selected repository workspace/);
+  assert.doesNotMatch(JSON.stringify(auto.args), /writable_roots|sandbox\.filesystem\.allowWrite/);
   assert.match(flagValue(write.args, "--print") ?? "", /Do not create, modify, move, or delete files outside that workspace/);
 });
 

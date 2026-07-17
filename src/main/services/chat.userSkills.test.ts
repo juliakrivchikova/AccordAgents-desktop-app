@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -114,7 +114,7 @@ test("skill-only send stores explicit content and keeps skill metadata path/cont
   }
 });
 
-test("runtime skill revalidation blocks a single target when the selected variant disappears", async () => {
+test("runtime skill dispatch leaves a disappeared selected variant to the native provider", async () => {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-user-skills-"));
   const homeDir = path.join(tempRoot, "home");
   await writeSkill(path.join(homeDir, ".claude/skills/qa"), "qa", "QA", "claude body");
@@ -143,8 +143,8 @@ test("runtime skill revalidation blocks a single target when the selected varian
     });
     assert.equal(selected.skills[0].capabilityState, "invocable");
 
-    // Delete the Claude variant after selection: send-time revalidation should persist the
-    // user message but block the participant run because the selected skill no longer exists.
+    // Delete the Claude variant after selection: AccordAgents still dispatches the inline
+    // token and lets the native provider decide current availability.
     await rm(path.join(homeDir, ".claude/skills/qa"), { recursive: true, force: true });
     const runParticipants: string[] = [];
     const { service, storage } = testService({
@@ -164,17 +164,16 @@ test("runtime skill revalidation blocks a single target when the selected varian
 
     await service.sendMessage({
       conversationId: conversation.id,
-      runId: "blocked-skill-run",
+      runId: "native-skill-run",
       content: "@claude",
       skillMentions: [selected.skills[0]]
     });
 
-    assert.deepEqual(runParticipants, []);
+    await waitFor(() => runParticipants.length === 1);
+    assert.deepEqual(runParticipants, ["claude-code"]);
     assert.equal((storage.current as Conversation).messages.some((message) =>
-      message.role === "system" &&
-      message.content.includes("@claude was not run") &&
-      message.content.includes("no longer available")
-    ), true);
+      message.role === "system" && message.content.includes("@claude was not run")
+    ), false);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -352,7 +351,7 @@ test("prospective skill context honors explicit mentioned participant", async ()
   assert.equal(context.participantProviderKindById?.[context.target.participantIds[0]], "claude-code");
 });
 
-test("selected skill hashes affect the warm runtime key", () => {
+test("selected skill hashes do not change provider runtime configuration", () => {
   const { service } = testService({
     conversation: chatConversation([chatParticipant()]),
     userSkills: new UserSkillsService(),
@@ -387,9 +386,10 @@ test("selected skill hashes affect the warm runtime key", () => {
   changedMessage.metadata.skillMentions[0].contentHash = "hash-b";
   changedMessage.metadata.skillMentions[0].variants[0].contentHash = "hash-b";
 
-  assert.notEqual(
-    (service as any).skillRuntimeKey(baseMessage, "codex-cli"),
-    (service as any).skillRuntimeKey(changedMessage, "codex-cli")
+  assert.equal((service as any).skillRuntimeKey, undefined);
+  assert.equal(
+    (service as any).skillMentionsPromptSection(baseMessage, "codex-cli"),
+    (service as any).skillMentionsPromptSection(changedMessage, "codex-cli")
   );
 });
 
@@ -605,83 +605,6 @@ test("chat:send does not reject when a single participant run fails", async () =
   }
 });
 
-test("shellRulesAreSelectedSkillReads allows read-only skill-dir reads and rejects everything else", async () => {
-  const { service } = testService({
-    conversation: chatConversation([chatParticipant()]),
-    userSkills: new UserSkillsService(),
-    run: async (participant) => ({ participant, ok: true, content: "done", durationMs: 1 })
-  });
-  const skillRoot = await mkdtemp(path.join(tmpdir(), "accord-skill-read-"));
-  const dir = path.join(skillRoot, "proof");
-  const check = (rules: Array<{ action: string; match: string; pattern: string }>, dirs: string[] = [dir]) =>
-    (service as any).shellRulesAreSelectedSkillReads(rules, dirs) as Promise<boolean>;
-  try {
-    await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, "SKILL.md"), "marker\n", "utf8");
-
-    // Allowed: simple read-only commands scoped to the selected skill directory.
-    assert.equal(await check([{ action: "allow", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), true);
-    assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -n 1,40p ${dir}/SKILL.md` }]), true);
-    assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -n '1,40p' ${dir}/SKILL.md` }]), true);
-    assert.equal(await check([{ action: "allow", match: "exact", pattern: `head -n 20 ${dir}/SKILL.md` }]), true);
-    assert.equal(await check([{ action: "allow", match: "exact", pattern: `grep -n marker ${dir}/SKILL.md` }]), true);
-    assert.equal(await check([{ action: "allow", match: "exact", pattern: `rg --fixed-strings marker ${dir}` }]), true);
-
-    // Rejected: outside the skill dir, mutation, chaining/redirection, in-place edit, deny, empty.
-    assert.equal(await check([{ action: "allow", match: "exact", pattern: "cat /etc/passwd" }]), false);
-    assert.equal(await check([{ action: "allow", match: "exact", pattern: `rm ${dir}/SKILL.md` }]), false);
-    assert.equal(await check([{ action: "allow", match: "exact", pattern: `cat ${dir}/SKILL.md && rm -rf /` }]), false);
-    assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -i s/a/b/ ${dir}/SKILL.md` }]), false);
-    assert.equal(await check([{ action: "allow", match: "exact", pattern: `sed -n e whoami ${dir}/SKILL.md` }]), false);
-    assert.equal(await check([{ action: "allow", match: "exact", pattern: `rg --pre sh marker ${dir}` }]), false);
-    assert.equal(await check([{ action: "allow", match: "prefix", pattern: `cat ${dir}/SKILL.md` }]), false);
-    assert.equal(await check([{ action: "ask", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), false);
-    assert.equal(await check([{ action: "deny", match: "exact", pattern: `cat ${dir}/SKILL.md` }]), false);
-    assert.equal(await check([]), false);
-  } finally {
-    await rm(skillRoot, { recursive: true, force: true });
-  }
-
-  // Codex commonly spells global skill reads with ~. The matcher expands home-relative paths for
-  // validation but still requires the resolved target to stay inside the selected skill dir.
-  const oldHome = process.env.HOME;
-  const homeRoot = await mkdtemp(path.join(tmpdir(), "accord-skill-home-"));
-  try {
-    process.env.HOME = homeRoot;
-    const skillDir = path.join(homeRoot, ".codex/skills/proof");
-    await mkdir(skillDir, { recursive: true });
-    await writeFile(path.join(skillDir, "SKILL.md"), "x", "utf8");
-    await writeFile(path.join(homeRoot, ".codex/config.json"), "{}", "utf8");
-    const realDir = await realpath(skillDir);
-    assert.equal(await check([{ action: "allow", match: "exact", pattern: "sed -n 1,40p ~/.codex/skills/proof/SKILL.md" }], [realDir]), true);
-    assert.equal(await check([{ action: "allow", match: "exact", pattern: "cat ~/.codex/config.json" }], [realDir]), false);
-  } finally {
-    if (oldHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = oldHome;
-    }
-    await rm(homeRoot, { recursive: true, force: true });
-  }
-
-  // Symlinked global skill: selected dir is the realpath target, but the agent reads via the
-  // symlink path. The matcher must recognize it by resolving the command path's realpath.
-  const tempRoot = await mkdtemp(path.join(tmpdir(), "accord-skill-symlink-"));
-  try {
-    const target = path.join(tempRoot, "real-skill");
-    await mkdir(target, { recursive: true });
-    await writeFile(path.join(target, "SKILL.md"), "x", "utf8");
-    const linkRoot = path.join(tempRoot, "codex-skills");
-    await mkdir(linkRoot, { recursive: true });
-    const link = path.join(linkRoot, "proof");
-    await symlink(target, link);
-    const realDir = await realpath(target);
-    assert.equal(await check([{ action: "allow", match: "exact", pattern: `cat ${link}/SKILL.md` }], [realDir]), true);
-  } finally {
-    await rm(tempRoot, { recursive: true, force: true });
-  }
-});
-
 function testService(options: {
   conversation: Conversation;
   userSkills: UserSkillsService;
@@ -708,7 +631,10 @@ function testService(options: {
       return {
         chatRoleConfigs: options.roles ?? [ROLE, GENERIC_ROLE],
         chatBehaviorRules: [],
-        providers: [{ kind: "codex-cli", enabled: true }],
+        providers: [
+          { kind: "codex-cli", enabled: true },
+          { kind: "claude-code", enabled: true }
+        ],
         chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT
       };
     },
@@ -722,7 +648,10 @@ function testService(options: {
       return {
         chatRoleConfigs: options.roles ?? [ROLE, GENERIC_ROLE],
         chatBehaviorRules: [],
-        providers: [{ kind: "codex-cli", enabled: true }],
+        providers: [
+          { kind: "codex-cli", enabled: true },
+          { kind: "claude-code", enabled: true }
+        ],
         chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT,
         assistantProviderKind: "codex-cli"
       };
@@ -730,7 +659,10 @@ function testService(options: {
   };
   const cliRunner = {
     async detectAgents(): Promise<Array<{ kind: string; label: string; installed: boolean }>> {
-      return [{ kind: "codex-cli", label: "Codex CLI", installed: true }];
+      return [
+        { kind: "codex-cli", label: "Codex CLI", installed: true },
+        { kind: "claude-code", label: "Claude Code", installed: true }
+      ];
     },
     run: options.run
   };

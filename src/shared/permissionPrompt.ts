@@ -35,16 +35,10 @@ function chatShellPermissionLine({ agentMode, providerKind, permissions, canRequ
     return "Codex Auto-review mode enables native command execution inside the workspace-write sandbox; eligible provider approvals are handled by Codex Auto-review.";
   }
   if (agentMode === "auto" && providerKind === "gemini-cli") {
-    const denyNote = permissions.shell.rules.some((rule) => rule.action === "deny")
-      ? " Configured deny rules are hard stops: never run a matching command."
-      : "";
-    return `Auto-review runs Antigravity with tool confirmations skipped (print mode cannot prompt), so only run commands that are safe and reversible.${denyNote}`;
+    return "Auto-review runs Antigravity with tool confirmations skipped (print mode cannot prompt), so only run commands that are safe and reversible.";
   }
   if (agentMode === "auto") {
-    const denyNote = permissions.shell.rules.some((rule) => rule.action === "deny")
-      ? " Configured deny rules remain hard stops for matching commands."
-      : "";
-    return `Auto-review runs Claude under the native auto classifier: it auto-approves safe shell commands and edits without prompting and blocks dangerous ones.${denyNote}`;
+    return "Auto-review runs Claude under the native auto classifier: it auto-approves safe shell commands and edits without prompting and blocks dangerous ones.";
   }
   const requestGuidance = canRequestPermissions
     ? "call `app_permissions_request_change` with a narrow `shellRules` request before refusing."

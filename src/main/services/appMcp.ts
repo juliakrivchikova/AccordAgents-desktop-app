@@ -62,6 +62,59 @@ export const APP_ARTIFACT_TOOL_NAMES = [
   APP_ARTIFACT_PUBLISH_TOOL
 ] as const;
 
+export type AppMcpToolEffect = "app-managed" | "repository-filesystem" | "permission-bridge";
+
+export interface AppMcpToolPolicy {
+  name: string;
+  capability?: ChatAppToolCapability;
+  effect: AppMcpToolEffect;
+}
+
+// Single source of truth for first-party tool exposure and Auto preauthorization.
+// A tool is eligible for provider-side preauthorization only when its effects are
+// confined to AccordAgents-managed state. New tools must be classified here before
+// they can be exposed by the app MCP server.
+export const APP_MCP_TOOL_POLICIES: readonly AppMcpToolPolicy[] = [
+  { name: APP_CHAT_GET_CONTEXT_TOOL, effect: "app-managed" },
+  { name: APP_CHAT_GET_PARTICIPANTS_TOOL, effect: "app-managed" },
+  { name: APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL, effect: "app-managed" },
+  { name: APP_CHAT_READ_MESSAGES_TOOL, effect: "app-managed" },
+  { name: APP_CHAT_LIST_ATTACHMENTS_TOOL, effect: "app-managed" },
+  { name: APP_CHAT_READ_ATTACHMENT_TOOL, effect: "app-managed" },
+  { name: APP_CHAT_EXPORT_ATTACHMENT_TOOL, effect: "repository-filesystem" },
+  { name: APP_CHAT_REACT_TOOL, effect: "app-managed" },
+  { name: APP_CHAT_SEND_MESSAGE_TOOL, effect: "app-managed" },
+  { name: APP_CHAT_SET_TITLE_TOOL, effect: "app-managed" },
+  { name: APP_TOOL_PERMISSION_TOOL, effect: "permission-bridge" },
+  ...APP_ARTIFACT_TOOL_NAMES.map((name) => ({ name, effect: "app-managed" as const })),
+  { name: APP_CHAT_REQUEST_PARTICIPANTS_TOOL, capability: "participants.request", effect: "app-managed" },
+  { name: APP_CHAT_REQUEST_COMPACTION_TOOL, capability: "compaction.request", effect: "app-managed" },
+  { name: APP_PERMISSIONS_REQUEST_CHANGE_TOOL, capability: "permissions.request", effect: "app-managed" },
+  { name: APP_ROLES_DESCRIBE_OPTIONS_TOOL, capability: "participants.manage", effect: "app-managed" },
+  { name: APP_ROLES_REQUEST_CHANGE_TOOL, capability: "participants.manage", effect: "app-managed" },
+  { name: APP_PARTICIPANTS_DESCRIBE_OPTIONS_TOOL, capability: "participants.manage", effect: "app-managed" },
+  { name: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, capability: "participants.manage", effect: "app-managed" },
+  { name: APP_ROSTER_DESCRIBE_OPTIONS_TOOL, capability: "participants.manage", effect: "app-managed" },
+  { name: APP_ROSTER_REQUEST_CHANGE_TOOL, capability: "participants.manage", effect: "app-managed" }
+];
+
+export function appMcpToolPoliciesForCapabilities(capabilities: ChatAppToolCapability[]): AppMcpToolPolicy[] {
+  return APP_MCP_TOOL_POLICIES.filter((policy) =>
+    !policy.capability || hasChatAppToolCapability(capabilities, policy.capability)
+  );
+}
+
+export function appMcpToolNamesForCapabilities(capabilities: ChatAppToolCapability[]): string[] {
+  return appMcpToolPoliciesForCapabilities(capabilities).map((policy) => policy.name);
+}
+
+export function autoPreauthorizedAppMcpToolNames(toolNames: string[]): string[] {
+  const exposed = new Set(toolNames);
+  return APP_MCP_TOOL_POLICIES
+    .filter((policy) => policy.effect === "app-managed" && exposed.has(policy.name))
+    .map((policy) => policy.name);
+}
+
 // Shared schema fragment: every artifact-targeting tool accepts the stable
 // artifactId (preferred) or the current name (resolved once, then id-bound).
 const ARTIFACT_REF_PROPERTIES = {
@@ -501,6 +554,10 @@ interface AppMcpClientState extends AppMcpClientStatus {
   listedToolNames: string[];
 }
 
+interface AppMcpDebugLogger {
+  write(event: string, payload: Record<string, unknown>): Promise<void>;
+}
+
 type AppRosterChangeHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppRosterOptionsHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppRoleChangeHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
@@ -569,6 +626,8 @@ export class AppMcpService {
   private chatSendMessageHandler?: AppChatSendMessageHandler;
   private chatSetTitleHandler?: AppChatSetTitleHandler;
   private artifactToolHandler?: AppArtifactToolHandler;
+
+  constructor(private readonly debugLogs?: AppMcpDebugLogger) {}
 
   setRosterChangeHandler(handler: AppRosterChangeHandler): void {
     this.rosterChangeHandler = handler;
@@ -1673,10 +1732,48 @@ export class AppMcpService {
         }
       );
     }
-    return tools;
+    const exposedNames = new Set(appMcpToolNamesForCapabilities(actor.capabilities));
+    return tools.filter((tool) => {
+      const name = tool && typeof tool === "object" && !Array.isArray(tool)
+        ? (tool as { name?: unknown }).name
+        : undefined;
+      if (typeof name !== "string") {
+        throw new Error("App MCP tool definition is missing a name.");
+      }
+      if (!APP_MCP_TOOL_POLICIES.some((policy) => policy.name === name)) {
+        throw new Error(`Unclassified app MCP tool definition: ${name}.`);
+      }
+      return exposedNames.has(name);
+    });
   }
 
   private async callTool(actor: AppMcpActor, params: unknown): Promise<unknown> {
+    const toolName = this.diagnosticToolName(params);
+    try {
+      const result = await this.callToolUnchecked(actor, params);
+      const denialCode = this.structuredToolDenialCode(result);
+      if (denialCode) {
+        this.logToolDenial(actor, toolName, "first-party-app-server-policy", denialCode);
+      }
+      return result;
+    } catch (error) {
+      const denialCode = this.appToolPolicyDenialCode(error);
+      if (denialCode) {
+        this.logToolDenial(actor, toolName, "first-party-app-server-policy", denialCode);
+      } else {
+        this.logToolDenial(
+          actor,
+          toolName,
+          "unknown-provider-or-runtime-behavior",
+          "APP_TOOL_UNCLASSIFIED_FAILURE",
+          ["stable app error code"]
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async callToolUnchecked(actor: AppMcpActor, params: unknown): Promise<unknown> {
     if (!params || typeof params !== "object" || Array.isArray(params)) {
       throw new Error("Tool call params are required.");
     }
@@ -1859,6 +1956,80 @@ export class AppMcpService {
       throw new Error("Roster management is not available.");
     }
     return this.toolTextResult(await this.rosterChangeHandler(actor, record.arguments));
+  }
+
+  private diagnosticToolName(params: unknown): string {
+    if (!params || typeof params !== "object" || Array.isArray(params)) {
+      return "unknown-tool";
+    }
+    const name = (params as { name?: unknown }).name;
+    return typeof name === "string" && APP_MCP_TOOL_POLICIES.some((policy) => policy.name === name)
+      ? name
+      : "unknown-tool";
+  }
+
+  private structuredToolDenialCode(result: unknown): string | undefined {
+    if (!result || typeof result !== "object" || Array.isArray(result)) {
+      return undefined;
+    }
+    const content = (result as { content?: unknown }).content;
+    if (!Array.isArray(content)) {
+      return undefined;
+    }
+    const text = content.flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return [];
+      }
+      const value = (item as { text?: unknown }).text;
+      return typeof value === "string" ? [value] : [];
+    })[0];
+    if (!text) {
+      return undefined;
+    }
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || (parsed as { ok?: unknown }).ok !== false) {
+        return undefined;
+      }
+      const error = (parsed as { error?: unknown }).error;
+      const code = error && typeof error === "object" && !Array.isArray(error)
+        ? (error as { code?: unknown }).code
+        : undefined;
+      return typeof code === "string" && /^[A-Za-z0-9_.:-]{1,80}$/.test(code)
+        ? code
+        : "APP_TOOL_REQUEST_DENIED";
+    } catch {
+      return undefined;
+    }
+  }
+
+  private appToolPolicyDenialCode(error: unknown): string | undefined {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/not allowed/i.test(message)) {
+      return "APP_TOOL_CAPABILITY_DENIED";
+    }
+    if (/unauthorized/i.test(message)) {
+      return "APP_TOOL_UNAUTHORIZED";
+    }
+    return undefined;
+  }
+
+  private logToolDenial(
+    actor: AppMcpActor,
+    toolName: string,
+    layer: "first-party-app-server-policy" | "unknown-provider-or-runtime-behavior",
+    code: string,
+    missingEvidence: string[] = []
+  ): void {
+    void this.debugLogs?.write("app.mcp.denial", {
+      layer,
+      code,
+      toolName,
+      conversationId: actor.conversationId,
+      participantId: actor.participantId,
+      runId: actor.runId ?? null,
+      missingEvidence
+    });
   }
 
   private toolTextResult(result: unknown): unknown {
