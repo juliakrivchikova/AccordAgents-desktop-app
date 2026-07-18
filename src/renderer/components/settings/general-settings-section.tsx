@@ -34,7 +34,7 @@ import {
 } from "../../../shared/chatPromptContext";
 import { writeClipboardText, type ClipboardWriteResult } from "../../../shared/clipboard";
 import { AwsWorkerPanel as SharedAwsWorkerPanel } from "./aws-worker-panel";
-import { deriveAgentReadiness } from "../../../shared/cliReadiness";
+import { cliProviderMetadata, deriveAgentReadiness } from "../../../shared/cliReadiness";
 import { isChatProviderKind } from "../../../shared/chatProviders";
 import { AppSelect } from "../primitives";
 
@@ -46,8 +46,12 @@ type ClipboardFeedback = "idle" | ClipboardWriteResult;
 const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
   "codex-cli": new URL("../../assets/codex-cli.svg", import.meta.url).href,
   "claude-code": new URL("../../assets/claude-avatar.png", import.meta.url).href,
-  "gemini-cli": new URL("../../assets/gemini-cli.svg", import.meta.url).href
+  "gemini-cli": new URL("../../assets/antigravity-logo.png", import.meta.url).href
 };
+
+function providerDisplayLabel(provider: Pick<ProviderSettings, "kind" | "label">): string {
+  return isChatProviderKind(provider.kind) ? cliProviderMetadata(provider.kind).label : provider.label;
+}
 
 export function GeneralSettingsSection(props: {
   providers: ProviderSettings[];
@@ -87,15 +91,16 @@ export function GeneralSettingsSection(props: {
           {props.providers.map((provider, index) => {
             const health = props.agents.find((agent) => agent.kind === provider.kind);
             const iconUrl = CLI_ICON_URLS[provider.kind];
+            const displayLabel = providerDisplayLabel(provider);
             return (
               <Fragment key={provider.kind}>
                 {index > 0 && <div className="gen-card-divider" />}
                 <div className="gen-cli-row" data-provider-kind={provider.kind}>
-                  <span className={`gen-cli-icon${provider.kind === "claude-code" ? " gen-cli-icon-full" : ""}`}>
+                  <span className={`gen-cli-icon gen-cli-icon-${provider.kind}${provider.kind === "claude-code" ? " gen-cli-icon-full" : ""}`}>
                     {iconUrl ? <img src={iconUrl} alt="" /> : null}
                   </span>
                   <div className="gen-cli-text">
-                    <div className="gen-cli-name">{provider.label}</div>
+                    <div className="gen-cli-name">{displayLabel}</div>
                     <div className="gen-cli-sub">{healthLine(provider.enabled, health)}</div>
                   </div>
                   <label className="toggle">
@@ -129,9 +134,10 @@ export function GeneralSettingsSection(props: {
                   props.agents.find((agent) => agent.kind === provider.kind),
                   provider.enabled
                 );
+                const displayLabel = providerDisplayLabel(provider);
                 return {
                   value: provider.kind,
-                  label: readiness === "ready" ? provider.label : `${provider.label} (not ready)`,
+                  label: readiness === "ready" ? displayLabel : `${displayLabel} (not ready)`,
                   disabled: readiness !== "ready"
                 };
               })}

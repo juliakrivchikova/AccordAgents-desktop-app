@@ -205,6 +205,7 @@ export function NewChatScreen(props: {
   const hasPrompt = props.prompt.trim().length > 0;
   const canSubmit = Boolean(assistantProviderKind) && (hasPrompt || images.readyImages.length > 0 || mentions.selectedSkillMentions.length > 0) && !images.hasInvalidImages && !props.busy && !validation;
   const hasLeadingPluginToken = draftStartsWithPluginMention(props.prompt, mentions.selectedPluginMentions);
+  const needsProviderSetup = readyKinds.length === 0;
 
   useLayoutEffect(() => {
     resizeNewChatPrompt(promptRef.current);
@@ -298,7 +299,7 @@ export function NewChatScreen(props: {
   }
 
   return (
-    <div className="new-chat-screen" data-testid="new-chat-screen">
+    <div className={["new-chat-screen", needsProviderSetup ? "has-cli-readiness" : ""].filter(Boolean).join(" ")} data-testid="new-chat-screen">
       <div className="new-chat-hero">
         <div className="new-chat-logo" aria-hidden="true">
           <span className="new-chat-logo-glow" />
@@ -309,7 +310,7 @@ export function NewChatScreen(props: {
         <p>Coordinate AI agents in one workspace</p>
       </div>
 
-      {readyKinds.length === 0 && (
+      {needsProviderSetup && (
         <CliReadinessSetupPanel
           agents={props.agents}
           settings={props.settings}
@@ -329,7 +330,7 @@ export function NewChatScreen(props: {
         </div>
       )}
 
-      <div className="new-chat-card" hidden={readyKinds.length === 0}>
+      <div className="new-chat-card" hidden={needsProviderSetup}>
         <ChatComposerAttachmentChips
           pendingImages={images.pendingImages}
           removeFileMention={mentions.removeFileMention}

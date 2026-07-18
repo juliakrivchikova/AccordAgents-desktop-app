@@ -110,6 +110,16 @@
   display: block;
 }
 
+.settings-view .gen-cli-icon-codex-cli img {
+  width: 22px;
+  height: 22px;
+}
+
+.settings-view .gen-cli-icon-gemini-cli img {
+  width: 25px;
+  height: 23px;
+}
+
 /* Claude's normalized asset is a transparent white mark, so the chip supplies
    the terracotta disc (like the Avatar component) and insets the mark via the
    base .gen-cli-icon img rule. */

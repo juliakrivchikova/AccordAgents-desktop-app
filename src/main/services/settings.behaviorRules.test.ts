@@ -28,7 +28,7 @@ import {
 
 const CODEX_AGENT: AgentHealth = {
   kind: "codex-cli",
-  label: "Codex CLI",
+  label: "Codex",
   installed: true
 };
 
@@ -102,6 +102,7 @@ test("readStored purges legacy hosted providers and encrypted API keys from sett
   const settingsPath = path.join(dir, "settings.json");
   const service = Object.create(SettingsService.prototype) as any;
   service.settingsPath = settingsPath;
+  service.storedWriteQueue = Promise.resolve();
 
   await writeFile(
     settingsPath,
@@ -125,6 +126,8 @@ test("readStored purges legacy hosted providers and encrypted API keys from sett
 
   assert.deepEqual(stored.providers.map((provider: { kind: string }) => provider.kind), ["codex-cli", "claude-code", "gemini-cli"]);
   assert.deepEqual(persisted.providers.map((provider) => provider.kind), ["codex-cli", "claude-code", "gemini-cli"]);
+  assert.deepEqual(stored.providers.map((provider: { label: string }) => provider.label), ["Codex", "Claude Code", "Antigravity"]);
+  assert.deepEqual(persisted.providers.map((provider) => provider.label), ["Codex", "Claude Code", "Antigravity"]);
   assert.equal(JSON.stringify(persisted).includes("encryptedApiKey"), false);
   assert.equal(stored.providers.find((provider: { kind: string }) => provider.kind === "codex-cli")?.enabled, false);
 });

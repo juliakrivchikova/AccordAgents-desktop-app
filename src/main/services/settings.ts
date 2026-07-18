@@ -31,6 +31,7 @@ import type {
   ChatRoleParticipantDefaults,
   ChatRoleConfigUpdate,
   ManualAgentEnvironmentVariable,
+  ProviderKind,
   ProviderSettings,
   ProviderSettingsUpdate,
   RepoFileOpenAction,
@@ -77,7 +78,7 @@ import {
   normalizeChatSavedPromptTrigger
 } from "../../shared/chatSavedPrompts";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
-import { preferredReadyAssistantProviderKind } from "../../shared/cliReadiness";
+import { CLI_PROVIDER_SETUP, preferredReadyAssistantProviderKind } from "../../shared/cliReadiness";
 import { normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 
@@ -140,12 +141,19 @@ function isRemoteSessionCleanupReason(value: unknown): value is RemoteSessionCle
 }
 
 const DEFAULT_PROVIDERS: ProviderSettings[] = [
-  { kind: "codex-cli", label: "Codex CLI", enabled: true },
-  { kind: "claude-code", label: "Claude Code", enabled: true },
-  { kind: "gemini-cli", label: "Gemini CLI (Antigravity)", enabled: true }
+  { kind: "codex-cli", label: CLI_PROVIDER_SETUP["codex-cli"].label, enabled: true },
+  { kind: "claude-code", label: CLI_PROVIDER_SETUP["claude-code"].label, enabled: true },
+  { kind: "gemini-cli", label: CLI_PROVIDER_SETUP["gemini-cli"].label, enabled: true }
 ];
 
 const DEFAULT_PROVIDER_KINDS = new Set<ProviderSettings["kind"]>(DEFAULT_PROVIDERS.map((provider) => provider.kind));
+
+function canonicalProviderLabel(kind: ProviderKind, fallback: string): string {
+  if (kind === "codex-cli" || kind === "claude-code" || kind === "gemini-cli") {
+    return CLI_PROVIDER_SETUP[kind].label;
+  }
+  return fallback;
+}
 
 const DEFAULT_CLOUD_RUNS_SETTINGS: CloudRunsSettings = {
   enabled: false,
@@ -1759,7 +1767,7 @@ export class SettingsService {
       chatParticipantSeedState: stored.chatParticipantSeedState,
       providers: stored.providers.map((provider) => ({
         kind: provider.kind,
-        label: provider.label,
+        label: canonicalProviderLabel(provider.kind, provider.label),
         enabled: provider.enabled,
         model: provider.model
       }))
@@ -2663,7 +2671,7 @@ export class SettingsService {
       const existing = settings.providers?.find((item) => item.kind === fallback.kind);
       return {
         kind: fallback.kind,
-        label: fallback.label,
+        label: canonicalProviderLabel(fallback.kind, fallback.label),
         enabled: typeof existing?.enabled === "boolean" ? existing.enabled : fallback.enabled,
         model: typeof existing?.model === "string" ? existing.model.trim() || fallback.model : fallback.model
       };
@@ -2735,7 +2743,11 @@ export class SettingsService {
     if (!Array.isArray(settings.providers)) {
       return false;
     }
-    return settings.providers.some((provider) => !DEFAULT_PROVIDER_KINDS.has(provider.kind) || "encryptedApiKey" in provider);
+    return settings.providers.some((provider) =>
+      !DEFAULT_PROVIDER_KINDS.has(provider.kind) ||
+      "encryptedApiKey" in provider ||
+      provider.label !== canonicalProviderLabel(provider.kind, provider.label)
+    );
   }
 
   private mergeDefaultRoles(roles: ChatRoleConfig[] | undefined): ChatRoleConfig[] {
