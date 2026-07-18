@@ -41,7 +41,7 @@ const MISSING: AgentHealth[] = [
   missing("codex-cli", "Codex")
 ];
 
-test("zero-ready onboarding shows three equal alphabetical setup cards with no preselection", () => {
+test("zero-ready onboarding shows stacked provider setup rows with no preselection", () => {
   installWindowBridge();
   const renderer = create(
     <CliReadinessSetupPanel
@@ -54,7 +54,7 @@ test("zero-ready onboarding shows three equal alphabetical setup cards with no p
   );
   const cards = renderer.root.findAll((node) => node.type === "article");
   assert.deepEqual(cards.map((card) => card.props["data-provider-kind"]), ["gemini-cli", "claude-code", "codex-cli"]);
-  assert.deepEqual(cards.map((card) => textOf(card).includes("Set up")), [true, true, true]);
+  assert.deepEqual(cards.map((card) => Boolean(findButton(card, `Set up ${textOf(card.findByType("h3"))}`))), [true, true, true]);
   assert.equal(renderer.root.findAll((node) => typeof node.props.className === "string" && node.props.className.includes("is-expanded")).length, 0);
   assert.equal(textOf(renderer.root).toLowerCase().includes("recommend"), false);
   renderer.unmount();
@@ -79,11 +79,59 @@ test("check again only refreshes readiness after setup", async () => {
     />
   );
   const claudeCard = renderer.root.findByProps({ "data-provider-kind": "claude-code" });
-  await click(findButton(claudeCard, "Set up"));
+  await click(findButton(claudeCard, "Set up Claude Code"));
   const expandedCard = renderer.root.findByProps({ "data-provider-kind": "claude-code" });
-  assert.match(textOf(expandedCard), /Check again/);
-  await click(findButton(expandedCard, "Check again"));
+  assert.match(textOf(expandedCard), /Install the CLI in Terminal/);
+  await click(findButton(renderer.root, "Check again"));
   assert.equal(refreshCalls, 1);
+  renderer.unmount();
+});
+
+test("cold-start readiness auto-expands the first provider that needs recovery only once", async () => {
+  installWindowBridge();
+  const agents = MISSING.map((health) => health.kind === "claude-code" ? normalized("claude-code", "required") : health);
+  const renderer = create(
+    <CliReadinessSetupPanel
+      agents={[]}
+      settings={SETTINGS}
+      checking={true}
+      onRefresh={async () => agents}
+      onOpenSettings={() => undefined}
+    />
+  );
+  assert.equal(renderer.root.findAll((node) => typeof node.props.className === "string" && node.props.className.includes("is-expanded")).length, 0);
+
+  await act(async () => {
+    renderer.update(
+      <CliReadinessSetupPanel
+        agents={agents}
+        settings={SETTINGS}
+        checking={false}
+        onRefresh={async () => agents}
+        onOpenSettings={() => undefined}
+      />
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+
+  const claudeCard = renderer.root.findByProps({ "data-provider-kind": "claude-code" });
+  assert.equal(claudeCard.props.className.includes("is-expanded"), true);
+  assert.match(textOf(claudeCard), /claude auth login/);
+
+  await click(findButton(claudeCard, "Hide Claude Code"));
+  await act(async () => {
+    renderer.update(
+      <CliReadinessSetupPanel
+        agents={[...agents]}
+        settings={SETTINGS}
+        checking={false}
+        onRefresh={async () => agents}
+        onOpenSettings={() => undefined}
+      />
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+  assert.equal(renderer.root.findByProps({ "data-provider-kind": "claude-code" }).props.className.includes("is-expanded"), false);
   renderer.unmount();
 });
 
@@ -110,21 +158,25 @@ test("missing, signed-out, unknown, and disabled states show only their safe cur
   );
 
   const antigravity = renderer.root.findByProps({ "data-provider-kind": "gemini-cli" });
-  await click(findButton(antigravity, "Set up"));
+  await click(findButton(antigravity, "Set up Antigravity"));
   assert.match(textOf(renderer.root.findByProps({ "data-provider-kind": "gemini-cli" })), /Install/);
   assert.equal(textOf(renderer.root).includes(CLI_PROVIDER_SETUP["gemini-cli"].installCommandByPlatform.darwin ?? ""), true);
   assert.doesNotMatch(textOf(renderer.root.findByProps({ "data-provider-kind": "gemini-cli" })), /Try sign-in|Sign in/);
+  assert.equal(Boolean(findButton(renderer.root.findByProps({ "data-provider-kind": "gemini-cli" }), "Open Terminal")), true);
+  assert.equal(Boolean(findButton(renderer.root.findByProps({ "data-provider-kind": "gemini-cli" }), "Official guide")), true);
 
-  await click(findButton(renderer.root.findByProps({ "data-provider-kind": "gemini-cli" }), "Close"));
+  await click(findButton(renderer.root.findByProps({ "data-provider-kind": "gemini-cli" }), "Hide Antigravity"));
   const claude = renderer.root.findByProps({ "data-provider-kind": "claude-code" });
-  await click(findButton(claude, "Sign in"));
+  await click(findButton(claude, "Set up Claude Code"));
   const claudeText = textOf(renderer.root.findByProps({ "data-provider-kind": "claude-code" }));
   assert.match(claudeText, /claude auth login/);
   assert.doesNotMatch(claudeText, /npm install/);
+  assert.equal(Boolean(findButton(renderer.root.findByProps({ "data-provider-kind": "claude-code" }), "Open Terminal")), true);
+  assert.equal(Boolean(findButton(renderer.root.findByProps({ "data-provider-kind": "claude-code" }), "Official guide")), true);
 
-  await click(findButton(renderer.root.findByProps({ "data-provider-kind": "claude-code" }), "Close"));
+  await click(findButton(renderer.root.findByProps({ "data-provider-kind": "claude-code" }), "Hide Claude Code"));
   const codex = renderer.root.findByProps({ "data-provider-kind": "codex-cli" });
-  await click(findButton(codex, "Enable"));
+  await click(findButton(codex, "Set up Codex"));
   await click(findButton(renderer.root.findByProps({ "data-provider-kind": "codex-cli" }), "Enable in Settings"));
   assert.equal(openedSettings, true);
   assert.doesNotMatch(textOf(renderer.root.findByProps({ "data-provider-kind": "codex-cli" })), /codex login|curl /);
@@ -145,11 +197,36 @@ test("could-not-verify offers recovery without claiming sign-in is required", as
   );
   const card = renderer.root.findByProps({ "data-provider-kind": "codex-cli" });
   assert.match(textOf(card), /Could not verify/);
-  await click(findButton(card, "Troubleshoot"));
+  assert.equal(card.props.className.includes("is-expanded"), true);
   const expanded = textOf(renderer.root.findByProps({ "data-provider-kind": "codex-cli" }));
   assert.match(expanded, /Try sign-in.*codex login/);
-  assert.match(expanded, /Open Terminal/);
   assert.doesNotMatch(expanded, /Sign-in required/);
+  assert.equal(Boolean(findButton(renderer.root.findByProps({ "data-provider-kind": "codex-cli" }), "Open Terminal")), true);
+  assert.equal(Boolean(findButton(renderer.root.findByProps({ "data-provider-kind": "codex-cli" }), "Official guide")), true);
+  renderer.unmount();
+});
+
+test("failed-to-run offers troubleshooting without claiming auth will fix it", async () => {
+  installWindowBridge();
+  const agents = MISSING.map((health) => health.kind === "claude-code" ? {
+    ...normalized("claude-code", "ready"),
+    runnable: "failed" as const
+  } : health);
+  const renderer = create(
+    <CliReadinessSetupPanel
+      agents={agents}
+      settings={SETTINGS}
+      checking={false}
+      onRefresh={async () => agents}
+      onOpenSettings={() => undefined}
+    />
+  );
+  const card = renderer.root.findByProps({ "data-provider-kind": "claude-code" });
+  assert.equal(card.props.className.includes("is-expanded"), true);
+  assert.match(textOf(card), /could not run/i);
+  assert.doesNotMatch(textOf(card), /claude auth login|Sign in from Terminal/);
+  assert.equal(Boolean(findButton(card, "Open Terminal")), true);
+  assert.equal(Boolean(findButton(card, "Official guide")), true);
   renderer.unmount();
 });
 
@@ -185,14 +262,14 @@ test("unsupported platforms show guide-only installation without a macOS copy ac
     />
   );
   const card = renderer.root.findByProps({ "data-provider-kind": "gemini-cli" });
-  await click(findButton(card, "Set up"));
+  await click(findButton(card, "Set up Antigravity"));
   const expanded = renderer.root.findByProps({ "data-provider-kind": "gemini-cli" });
   assert.match(textOf(expanded), /official guide/i);
   assert.equal(expanded.findAll((node) => node.type === "button" && /Copy/.test(textOf(node))).length, 0);
   assert.doesNotMatch(textOf(expanded), /curl /);
   assert.doesNotMatch(textOf(expanded), /Open Terminal|Try sign-in|Sign in/);
   assert.match(textOf(expanded), /Official guide/);
-  assert.match(textOf(expanded), /Check again/);
+  assert.match(textOf(renderer.root), /Check again/);
   renderer.unmount();
 });
 
@@ -264,7 +341,11 @@ function installWindowBridge(): void {
 }
 
 function findButton(root: ReactTestInstance, label: string): ReactTestInstance {
-  return root.find((node) => node.type === "button" && textOf(node).trim() === label);
+  return root.find((node) => node.type === "button" && (
+    textOf(node).trim() === label ||
+    node.props["aria-label"] === label ||
+    node.props.title === label
+  ));
 }
 
 async function click(node: ReactTestInstance): Promise<void> {
