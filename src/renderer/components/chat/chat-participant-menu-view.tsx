@@ -82,7 +82,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
     if (props.isRunning) {
       return "Members cannot be removed while a turn is running";
     }
-    if (participant.roleConfigId === CHAT_ASSISTANT_ROLE_ID) {
+    if (participant.id === props.participants.find((item) => item.roleConfigId === CHAT_ASSISTANT_ROLE_ID)?.id) {
       return "Chat Assistant cannot be removed";
     }
     if (props.participants.length <= 1) {
