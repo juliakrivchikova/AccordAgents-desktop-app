@@ -1294,7 +1294,7 @@ export class ChatService {
       if (!target) {
         throw new Error("Chat member was not found.");
       }
-      if (target.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID) {
+      if (target.id === participants.find((item) => item.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID)?.id) {
         throw new Error("Chat Assistant cannot be removed from the chat.");
       }
       if (participants.length <= 1) {
