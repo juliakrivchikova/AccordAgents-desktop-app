@@ -475,7 +475,7 @@ export function useConversationActions(state: AppState): ConversationActions {
     try {
       const info = await window.consensus.inspectRepo(path.trim());
       state.setRepoInfo(info);
-      if (info.isRepo && options.remember !== false) {
+      if (!info.error && options.remember !== false) {
         await rememberRepoPath(info.repoPath || path.trim());
       }
     } catch (caught) {

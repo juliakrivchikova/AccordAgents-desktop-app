@@ -106,6 +106,40 @@ test("send without a stored Assistant provider uses the priority preview", async
   renderer.unmount();
 });
 
+test("plain project folders do not render as repository errors", () => {
+  installWindowBridge();
+  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), {
+    repoPath: "/tmp/plain-project",
+    repoInfo: {
+      repoPath: "/tmp/plain-project",
+      isRepo: false,
+      branches: [],
+      statusLines: []
+    }
+  })} />);
+
+  assert.doesNotMatch(textOf(renderer.root), /Not a git repository/);
+  assert.doesNotMatch(textOf(renderer.root), /fatal:/);
+  renderer.unmount();
+});
+
+test("folder inspection failures still render as repository errors", () => {
+  installWindowBridge();
+  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), {
+    repoPath: "/tmp/missing-project",
+    repoInfo: {
+      repoPath: "/tmp/missing-project",
+      isRepo: false,
+      branches: [],
+      statusLines: [],
+      error: "Folder does not exist."
+    }
+  })} />);
+
+  assert.match(textOf(renderer.root), /Folder does not exist/);
+  renderer.unmount();
+});
+
 test("complete controlled New Chat draft survives unmount and is submitted intact", async () => {
   installWindowBridge();
   const fileMentions: RepoFileMention[] = [{ path: "src/main.ts" }];

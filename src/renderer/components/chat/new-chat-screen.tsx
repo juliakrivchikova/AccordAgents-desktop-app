@@ -516,10 +516,10 @@ export function NewChatScreen(props: {
         </div>
       </div>
 
-      {props.repoInfo && !props.repoInfo.isRepo && (
+      {props.repoInfo && !props.repoInfo.isRepo && props.repoInfo.error && (
         <div className="repo-status new-chat-repo-status bad">
           <XCircle size={16} aria-hidden />
-          {props.repoInfo.error || "Not a git repository"}
+          {props.repoInfo.error}
         </div>
       )}
 
