@@ -1,5 +1,5 @@
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, FilePlus2, X } from "lucide-react";
+import { ArrowLeft, FilePlus2, FileText, Pencil, UsersRound, X } from "lucide-react";
 import { ARTIFACT_USER_MEMBER } from "../../../shared/types";
 import type {
   ArtifactError,
@@ -9,7 +9,8 @@ import type {
   ArtifactVersionContent
 } from "../../../shared/types";
 import { IconButton } from "../primitives";
-import { ArtifactDetailView, type ArtifactCompareState } from "./artifact-detail";
+import { ArtifactDetailView, formatArtifactRelativeTimestamp, type ArtifactCompareState } from "./artifact-detail";
+import { ArtifactApprovedMark } from "./artifact-approval-badge";
 import { CreateArtifactForm } from "./artifact-forms";
 import { useArtifactsPanelResize } from "./use-artifacts-panel-resize";
 import { MarkdownText } from "../content/markdown-text";
@@ -48,24 +49,6 @@ export function ArtifactsPanel(props: {
     setError(undefined);
     setStaleCurrent(undefined);
   }, []);
-  useEffect(() => {
-    const handlePointerDown = (event: PointerEvent): void => {
-      const { target } = event;
-      if (!(target instanceof Node)) {
-        return;
-      }
-      if (panelResize.panelRef.current?.contains(target)) {
-        return;
-      }
-      if (target instanceof Element && target.closest("[data-artifacts-trigger='true']")) {
-        return;
-      }
-      props.onClose();
-    };
-
-    document.addEventListener("pointerdown", handlePointerDown, true);
-    return () => document.removeEventListener("pointerdown", handlePointerDown, true);
-  }, [panelResize.panelRef, props.onClose]);
   const loadDetail = useCallback(async (artifactId: string, version?: number): Promise<ArtifactReadResult | undefined> => {
     const generation = ++loadGeneration.current;
     return loadArtifactDetail({
@@ -205,9 +188,12 @@ export function ArtifactsPanel(props: {
   }
   const me = ARTIFACT_USER_MEMBER;
   const canEdit = detail ? detail.summary.owner === me || detail.summary.contributors.includes(me) : false;
+  const isOwner = detail?.summary.owner === me;
+  const detailTitle = detail?.summary.name ?? selectedSummary?.name ?? "Artifact";
+  const isListMode = !props.selectedId && mode !== "create";
   return (
     <div ref={panelResize.panelRef} className="artifacts-panel" data-resizing={panelResize.resizing ? "true" : undefined}
-      data-testid="artifacts-panel" style={{ width: `${panelResize.panelWidth}px`, maxWidth: "88%" } as CSSProperties}>
+      data-testid="artifacts-panel" style={{ width: `${panelResize.panelWidth}px` } as CSSProperties}>
       <div
         className="artifacts-panel-resizer"
         role="separator"
@@ -222,7 +208,7 @@ export function ArtifactsPanel(props: {
         onKeyDown={panelResize.resizeWithKeyboard}
         onDoubleClick={panelResize.resetWidth}
       />
-      <div className="artifacts-panel-header">
+      <div className={`artifacts-panel-header${props.selectedId ? " is-detail" : ""}${isListMode ? " is-list" : ""}`}>
         {props.selectedId || mode === "create" ? (
           <IconButton
             label="Back to artifact list"
@@ -234,16 +220,70 @@ export function ArtifactsPanel(props: {
             }}
           />
         ) : null}
-        <h3 className="artifacts-panel-title">
-          {mode === "create" ? "New artifact" : detail && props.selectedId ? "Artifact" : "Artifacts"}
-        </h3>
+        {props.selectedId && mode !== "create" ? (
+          <span className="artifacts-panel-mark" aria-hidden>
+            <FileText size={17} strokeWidth={1.9} />
+          </span>
+        ) : null}
+        <div className="artifacts-panel-title-block">
+          {renaming && detail ? (
+            <div className="artifact-rename-row">
+              <input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} aria-label="New artifact name" />
+              <button type="button" className="artifact-primary-action" disabled={busy || !renameValue.trim()} onClick={() => void submitRename()}>Save</button>
+              <button type="button" className="artifact-secondary-action" onClick={() => setRenaming(false)}>Cancel</button>
+            </div>
+          ) : (
+            <>
+              <h3 className="artifacts-panel-title">
+                <span>{mode === "create" ? "New artifact" : props.selectedId ? detailTitle : "Artifacts"}</span>
+                {detail?.summary.approval.state === "approved" && <ArtifactApprovedMark />}
+                {props.selectedId && detail && canEdit && (
+                  <IconButton
+                    label="Rename artifact"
+                    icon={Pencil}
+                    size="xs"
+                    tooltip="Rename"
+                    onClick={() => { setRenameValue(detail.summary.name); setRenaming(true); }}
+                  />
+                )}
+              </h3>
+              {props.selectedId && detail ? (
+                <span className="artifacts-panel-subtitle">
+                  Current version: v{detail.lifecycle === "published" ? detail.version.version : detail.summary.headVersion} · Updated {formatArtifactRelativeTimestamp(detail.summary.updatedAt)}
+                </span>
+              ) : null}
+            </>
+          )}
+        </div>
         {!props.selectedId && mode !== "create" && (
-          <button type="button" className="artifact-primary-action" onClick={() => { clearTransient(); setMode("create"); }}>
-            <FilePlus2 size={14} aria-hidden /> New
-          </button>
+          <IconButton
+            label="New artifact"
+            icon={FilePlus2}
+            tooltip="New artifact"
+            onClick={() => { clearTransient(); setMode("create"); }}
+          />
+        )}
+        {props.selectedId && mode !== "create" && isOwner && (
+          <IconButton
+            label="Manage access"
+            icon={UsersRound}
+            tooltip="Manage access"
+            disabled={!detail || busy}
+            onClick={() => { clearTransient(); setMode("access"); }}
+          />
         )}
         <IconButton label="Close artifacts" icon={X} onClick={props.onClose} />
       </div>
+      {!props.selectedId && mode !== "create" && (
+        <div className="artifact-list-tabs" role="tablist" aria-label="Artifact status">
+          <button type="button" className="artifact-list-tab is-active" role="tab" aria-selected="true">
+            Active <span>{props.artifacts.length}</span>
+          </button>
+          <button type="button" className="artifact-list-tab" role="tab" aria-selected="false" disabled>
+            Archived <span>0</span>
+          </button>
+        </div>
+      )}
       {error && (
         <div className="artifact-error" role="alert">
           <strong>{errorTitle(error)}:</strong> {error.message}

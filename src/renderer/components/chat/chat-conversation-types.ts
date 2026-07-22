@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type {
   AppSettings,
   ChatAppToolApprovalRequest,
@@ -24,6 +25,7 @@ export interface ChatMessageFocusRequest {
 
 export interface ChatConversationViewProps {
   conversation: Conversation;
+  topBar?: ReactNode;
   settings: AppSettings;
   progress: ReviewProgress[];
   isRunning: boolean;

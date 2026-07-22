@@ -10,7 +10,8 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 
-  --app-header-height: 52px;
+  --app-header-height: 87px;
+  --app-header-title-offset-y: -7px;
   --app-rail-width: 90px;
   --activity-list-width: 320px;
   --app-sidebar-width: 320px;

@@ -247,13 +247,27 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     }
   }, [selectedThreadRootId, topLevelMessages]);
 
+  useEffect(() => {
+    if (artifacts.panelOpen && selectedThreadRootId) {
+      setSelectedThreadRootId(undefined);
+    }
+  }, [artifacts.panelOpen, selectedThreadRootId]);
+
+  const hasInlineTopBar = Boolean(props.topBar);
+  const showArtifactsPanel = artifacts.panelOpen && !hasThread;
+
+  function openThread(messageId: string): void {
+    artifacts.closePanel();
+    setSelectedThreadRootId(messageId);
+  }
+
   return (
     <MentionDirectoryContext.Provider value={mentionDirectory}>
     <MessageLinkContext.Provider value={viewport.focusChatMessage}>
       <ArtifactsContext.Provider value={artifacts.context}>
       <LocalFileLinkContext.Provider value={localFileOpen.localFileLinkContext}>
         <div
-          className={`chat-view ${hasThread ? "thread-open" : ""} ${isResizingThread ? "resizing-thread" : ""}`}
+          className={`chat-view ${hasInlineTopBar ? "with-inline-topbar" : ""} ${hasThread ? "thread-open" : ""} ${showArtifactsPanel ? "artifacts-open" : ""} ${isResizingThread ? "resizing-thread" : ""}`}
           data-testid="chat-view"
           ref={viewport.viewRef}
           style={{ "--chat-thread-width": `${threadWidth}px` } as CSSProperties}
@@ -268,6 +282,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
             }
           }}
         >
+          {props.topBar}
           <div className="chat-main">
             <ChatConversationTimeline
               conversationId={props.conversation.id}
@@ -281,7 +296,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               onApproveMentions={chatMessageActions.onApproveMentions}
               onCompactParticipant={chatMessageActions.onCompactParticipant}
               onLoadOlderMessages={props.onLoadOlderMessages}
-              onOpenThread={setSelectedThreadRootId}
+              onOpenThread={openThread}
               onRejectMentions={chatMessageActions.onRejectMentions}
               onRespondToAppToolApproval={handleAppToolApproval}
               onRespondToChoice={chatMessageActions.onRespondToChoice}
@@ -374,7 +389,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               inferredParticipantRequestsByTrigger={inferredParticipantRequestsByTrigger}
             />
           )}
-          {artifacts.panelOpen && (
+          {showArtifactsPanel && (
             <ArtifactsPanel
               conversationId={props.conversation.id}
               artifacts={artifacts.artifacts}

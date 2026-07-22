@@ -1,10 +1,8 @@
 import { useEffect, useState } from "react";
-import { Pencil } from "lucide-react";
+import { FileDiff, FileText } from "lucide-react";
 
 import type { ArtifactDraftContent, ArtifactDraftView, ArtifactError, PublishedArtifactReadResult } from "../../../shared/types";
 import { artifactMemberLabel } from "../../../shared/artifacts";
-import { IconButton } from "../primitives";
-import { ArtifactApprovalBadge } from "./artifact-approval-badge";
 import { AccessArtifactForm, ReviseArtifactForm } from "./artifact-forms";
 import type { ArtifactAccessValues } from "./artifact-forms";
 import { ArtifactVersionSelector } from "./artifact-version-selector";
@@ -22,6 +20,27 @@ export function formatArtifactTimestamp(value: string): string {
     return value;
   }
   return new Date(time).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+export function formatArtifactRelativeTimestamp(value: string): string {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) {
+    return value;
+  }
+  const seconds = Math.max(0, Math.round((Date.now() - time) / 1000));
+  const units: Array<[number, string]> = [
+    [60 * 60 * 24 * 30, "mo"],
+    [60 * 60 * 24 * 7, "w"],
+    [60 * 60 * 24, "d"],
+    [60 * 60, "h"],
+    [60, "m"]
+  ];
+  for (const [unitSeconds, label] of units) {
+    if (seconds >= unitSeconds) {
+      return `${Math.floor(seconds / unitSeconds)}${label} ago`;
+    }
+  }
+  return "just now";
 }
 
 export function ArtifactDetailView(props: {
@@ -68,45 +87,23 @@ export function ArtifactDetailView(props: {
   return (
     <div className="artifacts-panel-body artifact-detail" tabIndex={0} aria-label="Artifact details">
       <div className="artifact-detail-head">
-        {props.renaming ? (
-          <div className="artifact-rename-row">
-            <input value={props.renameValue} onChange={(event) => props.onRenameValueChange(event.target.value)} aria-label="New artifact name" />
-            <button type="button" className="artifact-primary-action" disabled={props.busy || !props.renameValue.trim()} onClick={props.onSubmitRename}>Save</button>
-            <button type="button" className="artifact-secondary-action" onClick={props.onCancelRename}>Cancel</button>
+        <div className="artifact-people-row">
+          <span className="artifact-people-label">Owner</span>
+          <span className="artifact-people-value">{artifactMemberLabel(detail.summary.owner)}</span>
+        </div>
+        {!selectedDraft && detail.summary.approval.requiredSigners.length > 0 && (
+          <div className="artifact-people-row">
+            <span className="artifact-people-label">Signers</span>
+            <span className="artifact-people-value">
+              {detail.summary.approval.requiredSigners.map((signer) => (
+                <span key={signer} className="artifact-signer">
+                  {artifactMemberLabel(signer)}
+                  {detail.summary.approval.signedCurrent.includes(signer) ? <span aria-label="signed">✓</span> : null}
+                </span>
+              ))}
+            </span>
           </div>
-        ) : (
-          <h4 className="artifact-name">
-            {detail.summary.name}
-            {props.canEdit && (
-              <IconButton
-                label="Rename artifact"
-                icon={Pencil}
-                size="xs"
-                tooltip="Rename (label only; references and versions keep working)"
-                onClick={props.onStartRename}
-              />
-            )}
-          </h4>
         )}
-        <div className="artifact-detail-meta">
-          {selectedDraft ? (
-            <span className="artifact-version-chip artifact-draft-chip">Draft by {artifactMemberLabel(selectedDraft.author)}</span>
-          ) : (
-            <>
-              <span className="artifact-version-chip">v{detail.version.version}{detail.version.version !== detail.summary.headVersion ? ` of ${detail.summary.headVersion}` : ""}</span>
-              <ArtifactApprovalBadge approval={detail.summary.approval} />
-            </>
-          )}
-        </div>
-        <div className="artifact-people">
-          <span>Owner {artifactMemberLabel(detail.summary.owner)}</span>
-          {detail.summary.contributors.length > 0 && (
-            <span> · Contributors {detail.summary.contributors.map(artifactMemberLabel).join(", ")}</span>
-          )}
-          {!selectedDraft && detail.summary.approval.requiredSigners.length > 0 && (
-            <span> · Signers {detail.summary.approval.requiredSigners.map((signer) => `${artifactMemberLabel(signer)}${detail.summary.approval.signedCurrent.includes(signer) ? " ✓" : ""}`).join(", ")}</span>
-          )}
-        </div>
         {detail.summary.labels.length > 0 && (
           <div className="artifact-labels">{detail.summary.labels.map((label) => <span key={label} className="artifact-label">{label}</span>)}</div>
         )}
@@ -130,19 +127,57 @@ export function ArtifactDetailView(props: {
         />
       ) : (
         <>
-          <ArtifactVersionSelector
-            key={detail.summary.id}
-            selectedVersion={selectedDraftId ? undefined : detail.version.version}
-            headVersion={detail.summary.headVersion}
-            history={detail.history ?? []}
-            drafts={props.drafts}
-            selectedDraftId={selectedDraftId}
-            onShowVersion={(version) => {
-              setSelectedDraftId(undefined);
-              props.onShowVersion(version);
-            }}
-            onShowDraft={setSelectedDraftId}
-          />
+          <div className="artifact-toolbar">
+            <ArtifactVersionSelector
+              key={detail.summary.id}
+              selectedVersion={selectedDraftId ? undefined : detail.version.version}
+              headVersion={detail.summary.headVersion}
+              history={detail.history ?? []}
+              drafts={props.drafts}
+              selectedDraftId={selectedDraftId}
+              onShowVersion={(version) => {
+                setSelectedDraftId(undefined);
+                props.onShowVersion(version);
+              }}
+              onShowDraft={setSelectedDraftId}
+            />
+            {!selectedDraft && detail.version.version > 1 && (
+              <div className="artifact-diff-segment" role="tablist" aria-label="Artifact view">
+                <button
+                  type="button"
+                  className={!props.showDiff ? "is-selected" : undefined}
+                  role="tab"
+                  aria-selected={!props.showDiff}
+                  disabled={props.busy}
+                  onClick={() => props.onShowDiffChange(false)}
+                >
+                  <FileText size={14} aria-hidden /> Content
+                </button>
+                <button
+                  type="button"
+                  className={props.showDiff ? "is-selected" : undefined}
+                  role="tab"
+                  aria-selected={props.showDiff}
+                  disabled={props.busy}
+                  data-testid="artifact-show-diff-toggle"
+                  onClick={() => props.onShowDiffChange(true)}
+                >
+                  <FileDiff size={14} aria-hidden /> Diff
+                </button>
+              </div>
+            )}
+            {!selectedDraft && props.canSign && !props.alreadySigned && (
+              <button
+                type="button"
+                className="artifact-secondary-action"
+                disabled={props.busy}
+                title={`Sign v${detail.version.version}`}
+                onClick={props.onSign}
+              >
+                Sign v{detail.version.version}
+              </button>
+            )}
+          </div>
           {props.draftError ? (
             <div className="artifact-draft-error" role="alert">
               <span>Drafts could not be loaded: {props.draftError.message}</span>
@@ -165,35 +200,6 @@ export function ArtifactDetailView(props: {
             </>
           ) : (
             <>
-              <div className="artifact-actions-row">
-                {props.canEdit && <button type="button" className="artifact-primary-action" disabled={props.busy} onClick={props.onStartRevise}>Revise</button>}
-                {props.canSign && (
-                  <button
-                    type="button"
-                    className="artifact-secondary-action"
-                    disabled={props.busy || props.alreadySigned}
-                    title={props.alreadySigned ? "You already signed this version" : `Sign v${detail.version.version}`}
-                    onClick={props.onSign}
-                  >
-                    {props.alreadySigned ? "Signed ✓" : `Sign v${detail.version.version}`}
-                  </button>
-                )}
-                {detail.version.version > 1 && (
-                  <label className={`artifact-diff-toggle${props.busy ? " is-disabled" : ""}`}>
-                    <input
-                      type="checkbox"
-                      checked={props.showDiff}
-                      disabled={props.busy}
-                      aria-label="Show diff"
-                      data-testid="artifact-show-diff-toggle"
-                      onChange={(event) => props.onShowDiffChange(event.currentTarget.checked)}
-                    />
-                    <span className="artifact-diff-toggle-track" aria-hidden><span /></span>
-                    <span>Show diff</span>
-                  </label>
-                )}
-                {props.isOwner && <button type="button" className="artifact-secondary-action" disabled={props.busy} onClick={props.onStartAccess}>Access…</button>}
-              </div>
               {props.showDiff ? (
                 props.compare?.diff !== undefined ? (
                   <pre
@@ -216,6 +222,8 @@ export function ArtifactDetailView(props: {
                   <ArtifactContentSurface
                     content={detail.version.content}
                     testId="artifact-version-content"
+                    onRevise={props.canEdit ? props.onStartRevise : undefined}
+                    reviseDisabled={props.busy}
                   />
                 </>
               )}
