@@ -51,7 +51,6 @@ export function ArtifactDetailView(props: {
   busy: boolean;
   canEdit: boolean;
   canSign: boolean;
-  isOwner: boolean;
   alreadySigned: boolean;
   reviseBase: number;
   compare?: ArtifactCompareState;

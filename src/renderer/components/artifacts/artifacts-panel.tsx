@@ -187,8 +187,8 @@ export function ArtifactsPanel(props: {
     }
   }
   const me = ARTIFACT_USER_MEMBER;
-  const canEdit = detail ? detail.summary.owner === me || detail.summary.contributors.includes(me) : false;
-  const isOwner = detail?.summary.owner === me;
+  const canEdit = detail ? me === ARTIFACT_USER_MEMBER || detail.summary.owner === me || detail.summary.contributors.includes(me) : false;
+  const canManageAccess = detail ? me === ARTIFACT_USER_MEMBER || detail.summary.owner === me : false;
   const detailTitle = detail?.summary.name ?? selectedSummary?.name ?? "Artifact";
   const isListMode = !props.selectedId && mode !== "create";
   return (
@@ -263,7 +263,7 @@ export function ArtifactsPanel(props: {
             onClick={() => { clearTransient(); setMode("create"); }}
           />
         )}
-        {props.selectedId && mode !== "create" && isOwner && (
+        {props.selectedId && mode !== "create" && canManageAccess && (
           <IconButton
             label="Manage access"
             icon={UsersRound}
@@ -351,7 +351,6 @@ export function ArtifactsPanel(props: {
           busy={busy || diffBusy}
           canEdit={canEdit}
           canSign={detail.summary.approval.requiredSigners.includes(me)}
-          isOwner={detail.summary.owner === me}
           alreadySigned={detail.version.signatures.some((signature) => signature.signer === me)}
           reviseBase={reviseBase}
           compare={compare}

@@ -428,6 +428,46 @@ test("access control: denied operations change nothing; owner manages the sets",
   }
 });
 
+test("human user can always revise and manage artifact access", async () => {
+  const h = await harness();
+  try {
+    const created = expectOk(await h.service.create("codex", {
+      conversationId: CONVERSATION_ID,
+      name: "Agent Owned",
+      content: "v1"
+    }));
+    const id = created.summary.id;
+
+    const userRevision = expectOk(await h.service.revise("user", {
+      conversationId: CONVERSATION_ID,
+      artifactId: id,
+      baseVersion: 1,
+      content: "v2 by user"
+    }));
+    assert.equal(userRevision.summary.headVersion, 2);
+
+    const updated = expectOk(await h.service.updateAccess("user", {
+      conversationId: CONVERSATION_ID,
+      artifactId: id,
+      contributors: ["drew"],
+      requiredSigners: ["user"]
+    }));
+    assert.equal(updated.owner, "codex");
+    assert.deepEqual(updated.contributors, ["drew"]);
+    assert.deepEqual(updated.approval.requiredSigners, ["user"]);
+
+    const drewRevision = expectOk(await h.service.revise("drew", {
+      conversationId: CONVERSATION_ID,
+      artifactId: id,
+      baseVersion: 2,
+      content: "v3 by drew"
+    }));
+    assert.equal(drewRevision.summary.headVersion, 3);
+  } finally {
+    await h.cleanup();
+  }
+});
+
 // Done-means #8: restart simulation. A brand-new store + service over the same
 // database file must see the full artifact state (nothing lives in memory or
 // in conversation payloads).

@@ -29,6 +29,7 @@ import type {
   UpdateArtifactAccessRequest,
   WithdrawArtifactDraftRequest
 } from "../../shared/types";
+import { ARTIFACT_USER_MEMBER } from "../../shared/types";
 import {
   ARTIFACT_CONTENT_MAX_BYTES,
   ARTIFACT_LABEL_MAX_LENGTH,
@@ -606,10 +607,10 @@ export class ArtifactService {
         return resolved;
       }
       const record = resolved.value;
-      if (record.owner !== actor) {
+      if (!this.canManageAccess(record, actor)) {
         return fail<ArtifactSummary>({
           code: "access_denied",
-          message: `Only the owner (${artifactMemberLabel(record.owner)}) can manage owner, contributors, or required signers of "${record.name}".`
+          message: `Only User or the owner (${artifactMemberLabel(record.owner)}) can manage owner, contributors, or required signers of "${record.name}".`
         });
       }
       if (record.lifecycle === "collecting_drafts" && request.requiredSigners !== undefined) {
@@ -1674,13 +1675,17 @@ export class ArtifactService {
   }
 
   private requireContributor(record: ArtifactRecord, actor: string, action: string): ArtifactError | undefined {
-    if (record.owner === actor || record.contributors.includes(actor)) {
+    if (actor === ARTIFACT_USER_MEMBER || record.owner === actor || record.contributors.includes(actor)) {
       return undefined;
     }
     return {
       code: "access_denied",
-      message: `${artifactMemberLabel(actor)} cannot ${action} "${record.name}": only the owner (${artifactMemberLabel(record.owner)}) and contributors (${record.contributors.map(artifactMemberLabel).join(", ") || "none"}) can.`
+      message: `${artifactMemberLabel(actor)} cannot ${action} "${record.name}": only User, the owner (${artifactMemberLabel(record.owner)}), and contributors (${record.contributors.map(artifactMemberLabel).join(", ") || "none"}) can.`
     };
+  }
+
+  private canManageAccess(record: ArtifactRecord, actor: string): boolean {
+    return actor === ARTIFACT_USER_MEMBER || record.owner === actor;
   }
 
   private async staleVersionError(record: ArtifactRecord, baseVersion: number): Promise<ArtifactResult<ArtifactReadResult>> {
