@@ -153,7 +153,7 @@ export function decisionThreadAnswer(
     `Question: ${decision.question}`,
     selectedOption ? `Selected option: ${selectedOption.label}` : "",
     "Thread transcript:",
-    ...threadReplies.map((reply) => `${reply.role === "user" ? "User" : reply.participantLabel ?? "Participant"}: ${reply.content.trim()}`)
+    ...threadReplies.map((reply) => `${reply.role === "user" ? "User" : reply.participantLabel ?? "Member"}: ${reply.content.trim()}`)
   ].filter(Boolean);
   return lines.join("\n");
 }

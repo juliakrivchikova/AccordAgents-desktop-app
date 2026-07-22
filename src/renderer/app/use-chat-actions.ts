@@ -18,6 +18,9 @@ import {
   activeChatRoleConfigs,
   chatParticipantConfigToDraft,
   defaultChatParticipantDraft,
+  hasChatParticipantRuntimeOverride,
+  NEW_CHAT_ASSISTANT_PARTICIPANT_ID,
+  newChatAssistantParticipantDraft,
   normalizedChatDrafts,
   selectedOrMentionedChatParticipantDrafts,
   validateChatCliAgents,
@@ -131,12 +134,19 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       }
       return false;
     }
-    const participants = selectedOrMentionedChatParticipantDrafts(
-      state.settings.chatParticipantConfigs,
-      state.selectedChatParticipantConfigIds,
-      initialMessage,
-      state.selectedChatParticipantRunLocations
-    );
+    const assistantRuntimeOverride = state.selectedChatParticipantRuntimeOverrides[NEW_CHAT_ASSISTANT_PARTICIPANT_ID];
+    const participants = [
+      ...(hasChatParticipantRuntimeOverride(assistantRuntimeOverride)
+        ? [newChatAssistantParticipantDraft(assistantProviderKind, assistantRuntimeOverride)]
+        : []),
+      ...selectedOrMentionedChatParticipantDrafts(
+        state.settings.chatParticipantConfigs,
+        state.selectedChatParticipantConfigIds,
+        initialMessage,
+        state.selectedChatParticipantRunLocations,
+        state.selectedChatParticipantRuntimeOverrides
+      )
+    ];
     const validation = validateChatStartupDrafts(
       participants,
       state.settings.chatRoleConfigs,
@@ -186,6 +196,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setNewChatSkillMentions([]);
       state.setNewChatPluginMentions([]);
       state.setSelectedChatParticipantRunLocations({});
+      state.setSelectedChatParticipantRuntimeOverrides({});
       await conversationActions.refreshConversations();
       return true;
     } catch (caught) {

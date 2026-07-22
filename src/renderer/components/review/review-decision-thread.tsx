@@ -136,7 +136,7 @@ export function DecisionThread(props: {
         {replies.map((reply) => (
           <ThreadMessage
             avatar={reply.role === "user" ? USER_AVATAR : avatarForParticipant(reply.participantLabel ?? reply.role, reply.participantId)}
-            author={reply.role === "user" ? "You" : reply.participantLabel ?? "Participant"}
+            author={reply.role === "user" ? "You" : reply.participantLabel ?? "Member"}
             meta={reply.id.startsWith("pending:") ? "Message sent" : reply.status === "error" ? "Reply error" : reply.answerSource === "automatic" ? "automatic" : reply.role === "user" ? "Message" : "Reply"}
             createdAt={reply.createdAt}
             content={reply.content}

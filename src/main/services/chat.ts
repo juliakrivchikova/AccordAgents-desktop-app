@@ -1237,8 +1237,9 @@ export class ChatService {
         throw new Error("Run location is locked after the member has run. Remove and re-add the member to change it.");
       }
       const autoWatchRequested = Object.prototype.hasOwnProperty.call(request, "autoWatch");
+      const autoWatchChanged = autoWatchRequested && (request.autoWatch === true) !== (target.autoWatch === true);
       if (
-        autoWatchRequested &&
+        autoWatchChanged &&
         request.autoWatch === true &&
         participants.some((participant) => participant.id !== target.id && participant.autoWatch === true)
       ) {
@@ -1261,7 +1262,7 @@ export class ChatService {
         autoWatch: autoWatchRequested ? request.autoWatch === true : target.autoWatch
       };
       let nextMetadata = conversation.metadata;
-      if (autoWatchRequested) {
+      if (autoWatchChanged) {
         nextMetadata = request.autoWatch === true
           ? this.metadataWithAutoWatchEnabled(conversation, target.id)
           : this.metadataWithAutoWatchDisabled(conversation.metadata, target.id);
@@ -1273,7 +1274,7 @@ export class ChatService {
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
       this.queueSnapshot(conversation);
-      if (autoWatchRequested && request.autoWatch === true) {
+      if (autoWatchChanged && request.autoWatch === true) {
         this.scheduleAutoWatchEvaluation(conversation.id, "toggle-on");
       }
       return conversation;
@@ -1752,7 +1753,7 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
       throw new Error("The issued app-tool token does not grant permission requests.");
@@ -1910,7 +1911,7 @@ export class ChatService {
       } else if (!suppressPresentation && record.kind === "output_text") {
         const participant = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
         if (!participant) {
-          throw new Error("Remote run output references a participant that is no longer in this chat.");
+          throw new Error("Remote run output references a member that is no longer in this chat.");
         }
         const message = this.message(
           "participant",
@@ -1937,7 +1938,7 @@ export class ChatService {
       } else if (!suppressPresentation && record.kind === "provider_result") {
         const participant = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
         if (!participant) {
-          throw new Error("Remote run provider result references a participant that is no longer in this chat.");
+          throw new Error("Remote run provider result references a member that is no longer in this chat.");
         }
         this.applyRemoteProviderResultRecord(conversation, record, participant, state);
         const resumeMiss = this.isConfirmedRemoteResumeMiss(record);
@@ -1955,7 +1956,7 @@ export class ChatService {
       } else if (!suppressPresentation && record.kind === "permission_pending") {
         const requester = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
         if (!requester) {
-          throw new Error("Remote run permission request references a participant that is no longer in this chat.");
+          throw new Error("Remote run permission request references a member that is no longer in this chat.");
         }
         const applied = await this.applyPermissionChangeRequestFromTool(
           conversation,
@@ -2732,7 +2733,7 @@ export class ChatService {
     }
     const participant = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
     if (!participant) {
-      throw new Error("Remote run provider output references a participant that is no longer in this chat.");
+      throw new Error("Remote run provider output references a member that is no longer in this chat.");
     }
     const combined = `${state.providerOutputLineBuffer ?? ""}${record.content}`;
     const complete = combined.endsWith("\n") || combined.endsWith("\r");
@@ -3053,10 +3054,10 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      return { behavior: "deny", message: "The requesting participant is no longer in this chat." };
+      return { behavior: "deny", message: "The requesting member is no longer in this chat." };
     }
     if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
-      return { behavior: "deny", message: "This chat participant is not allowed to request tool permissions." };
+      return { behavior: "deny", message: "This chat member is not allowed to request tool permissions." };
     }
 
     let prepared: PreparedToolPermission;
@@ -3130,10 +3131,10 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     if (!hasChatAppToolCapability(actor.capabilities, "participants.request")) {
-      return this.participantRequestFailedToolResult("This participant is not allowed to request other participants.");
+      return this.participantRequestFailedToolResult("This member is not allowed to request other members.");
     }
 
     let prepared: PreparedParticipantRequest;
@@ -3257,10 +3258,10 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      return { ok: false, status: "rejected", error: "The requesting participant is no longer in this chat." };
+      return { ok: false, status: "rejected", error: "The requesting member is no longer in this chat." };
     }
     if (!hasChatAppToolCapability(actor.capabilities, "compaction.request")) {
-      return { ok: false, status: "rejected", error: "This participant is not allowed to request context compaction." };
+      return { ok: false, status: "rejected", error: "This member is not allowed to request context compaction." };
     }
     const permission = normalizeChatParticipantRequestPermission(
       normalizeChatAgentPermissions(requester.permissions).requestCompaction
@@ -3316,7 +3317,7 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     const record = rawRequest && typeof rawRequest === "object" && !Array.isArray(rawRequest)
       ? rawRequest as { requestId?: unknown }
@@ -3464,7 +3465,7 @@ export class ChatService {
       })),
       roleChange: {
         supportedOperations: ["create_role", "edit_role", "archive_role"],
-        editPolicy: "Built-in roles are available for matching but cannot be edited or deleted by Chat Assistant. Create a custom role when no built-in role fits. Use archive_role to delete an unused custom role; roles with saved participant preset usage cannot be deleted."
+        editPolicy: "Built-in roles are available for matching but cannot be edited or deleted by Chat Assistant. Create a custom role when no built-in role fits. Use archive_role to delete an unused custom role; roles with saved member preset usage cannot be deleted."
       }
     };
   }
@@ -3493,7 +3494,7 @@ export class ChatService {
       })),
       participantChange: {
         supportedOperations: ["add_new_participant_to_chat", "add_existing_participant_to_chat"],
-        savePolicy: "For add_new_participant_to_chat, saveAsPreset defaults to true. Set it to false only for a one-off chat participant. Do not use archived roles for new participants; archived roles are returned only so existing saved/current references can still be understood."
+        savePolicy: "For add_new_participant_to_chat, saveAsPreset defaults to true. Set it to false only for a one-off chat member. Do not use archived roles for new members; archived roles are returned only so existing saved/current references can still be understood."
       }
     };
   }
@@ -3605,7 +3606,7 @@ export class ChatService {
         this.upsertAppToolApproval(conversation, approval);
         conversation.messages.push(this.message(
           "system",
-          `Auto-applied role and participant request from @${requester.handle}: ${applied.summary}.`,
+          `Auto-applied role and member request from @${requester.handle}: ${applied.summary}.`,
           undefined,
           { threadId: "system" }
         ));
@@ -3628,7 +3629,7 @@ export class ChatService {
         updatedAt: new Date().toISOString()
       };
       this.upsertAppToolApproval(conversation, approval);
-      conversation.messages.push(this.message("system", `Role and participant approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
+      conversation.messages.push(this.message("system", `Role and member approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
         threadId: "system"
       }));
       conversation.updatedAt = new Date().toISOString();
@@ -3659,7 +3660,7 @@ export class ChatService {
       this.upsertAppToolApproval(conversation, approval);
       conversation.messages.push(this.message(
         "system",
-        `Auto-applied participant request from @${requester.handle}: ${prepared.summary}.`,
+          `Auto-applied member request from @${requester.handle}: ${prepared.summary}.`,
         undefined,
         { threadId: "system" }
       ));
@@ -3684,7 +3685,7 @@ export class ChatService {
       "pending"
     );
     this.upsertAppToolApproval(conversation, approval);
-    conversation.messages.push(this.message("system", `Participant approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
+    conversation.messages.push(this.message("system", `Member approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
       threadId: "system"
     }));
     conversation.updatedAt = new Date().toISOString();
@@ -3704,7 +3705,7 @@ export class ChatService {
     const participants = this.chatParticipants(conversation);
     const requester = participants.find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     const triggerSequence = actor.triggerMessageId
       ? conversation.messages.findIndex((message) => message.id === actor.triggerMessageId)
@@ -3780,7 +3781,7 @@ export class ChatService {
     const participants = this.chatParticipants(conversation);
     const requester = participants.find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
 
     const settings = await this.settings.getPublicSettings();
@@ -3843,7 +3844,7 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
 
     const request = this.normalizeChatMessageReadRequest(rawRequest);
@@ -3934,7 +3935,7 @@ export class ChatService {
     await this.withChatMutation(conversation, async () => {
       const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
       if (!requester) {
-        throw new Error("The requesting participant is no longer in this chat.");
+        throw new Error("The requesting member is no longer in this chat.");
       }
       const messageRecord = this.findMessageRecord(conversation, request.messageId);
       if (!messageRecord || (typeof actor.snapshotMaxSequence === "number" && messageRecord.sequence > actor.snapshotMaxSequence)) {
@@ -3995,7 +3996,7 @@ export class ChatService {
       await this.withChatMutation(conversation, async () => {
         const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
         if (!requester) {
-          throw new Error("The requesting participant is no longer in this chat.");
+          throw new Error("The requesting member is no longer in this chat.");
         }
         // Resolve and validate the visible scope. parent/root, when provided, must be a message
         // visible to this turn; an invisible/wrong-conversation id is rejected.
@@ -4097,7 +4098,7 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const participant = this.chatParticipants(conversation).find((candidate) => candidate.id === actor.participantId);
     if (!participant) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     return normalizeArtifactMember(participant.handle);
   }
@@ -4224,7 +4225,7 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     const request = this.normalizeChatAttachmentListRequest(rawRequest);
     const records = this.visibleImageAttachmentRecords(conversation, actor)
@@ -4257,7 +4258,7 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     const request = this.normalizeChatAttachmentReadRequest(rawRequest);
     const record = this.visibleImageAttachmentRecords(conversation, actor).find((item) => item.attachment.id === request.attachmentId);
@@ -4269,7 +4270,7 @@ export class ChatService {
         snapshotMaxSequence: actor.snapshotMaxSequence
       });
       throw new Error(
-        "AttachmentReadDenied. Problem: this attachment is not visible to the current participant turn. Cause: the attachment id is absent, belongs to another conversation, or is newer than this turn snapshot. Fix: call app_chat_list_attachments for visible attachment IDs, or ask User to resend the image."
+        "AttachmentReadDenied. Problem: this attachment is not visible to the current member turn. Cause: the attachment id is absent, belongs to another conversation, or is newer than this turn snapshot. Fix: call app_chat_list_attachments for visible attachment IDs, or ask User to resend the image."
       );
     }
     const dataBase64 = await this.readAttachmentBase64(conversation.id, record.attachment);
@@ -4290,19 +4291,19 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     const runPermissions = actor.runPermissions
       ? normalizeChatAgentPermissions(actor.runPermissions)
       : undefined;
     if (!runPermissions) {
       throw new Error(
-        "AttachmentExportDenied. Problem: workspace write permission could not be verified for this participant run. Cause: the app MCP token does not include a run-scoped permission snapshot. Fix: retry in a new participant turn."
+        "AttachmentExportDenied. Problem: workspace write permission could not be verified for this member run. Cause: the app MCP token does not include a run-scoped permission snapshot. Fix: retry in a new member turn."
       );
     }
     if (!runPermissions.workspaceWrite) {
       throw new Error(
-        "AttachmentExportDenied. Problem: workspaceWrite is not granted for this participant run. Cause: exporting an attachment writes a file into the selected repository. Fix: request workspaceWrite permission, then retry the export."
+        "AttachmentExportDenied. Problem: workspaceWrite is not granted for this member run. Cause: exporting an attachment writes a file into the selected repository. Fix: request workspaceWrite permission, then retry the export."
       );
     }
     const request = this.normalizeChatAttachmentExportRequest(rawRequest);
@@ -4315,7 +4316,7 @@ export class ChatService {
         snapshotMaxSequence: actor.snapshotMaxSequence
       });
       throw new Error(
-        "AttachmentExportDenied. Problem: this attachment is not visible to the current participant turn. Cause: the attachment id is absent, belongs to another conversation, or is newer than this turn snapshot. Fix: call app_chat_list_attachments for visible attachment IDs, or ask User to resend the image."
+        "AttachmentExportDenied. Problem: this attachment is not visible to the current member turn. Cause: the attachment id is absent, belongs to another conversation, or is newer than this turn snapshot. Fix: call app_chat_list_attachments for visible attachment IDs, or ask User to resend the image."
       );
     }
 
@@ -4426,13 +4427,13 @@ export class ChatService {
       const requester = this.chatParticipants(conversation).find((participant) => participant.id === approval.requesterParticipantId);
       const guard = requester
         ? this.selfCompactionRequestGuard(conversation, requester, approval.id)
-        : { status: "rejected", error: "The requesting participant is no longer in this chat." };
+        : { status: "rejected", error: "The requesting member is no longer in this chat." };
       if (!requester || guard) {
         this.upsertAppToolApproval(conversation, {
           ...approval,
           status: "denied",
           updatedAt: now,
-          error: guard?.error ?? "The requesting participant is no longer in this chat."
+          error: guard?.error ?? "The requesting member is no longer in this chat."
         });
         conversation.updatedAt = now;
         await this.saveConversation(conversation);
@@ -4512,7 +4513,7 @@ export class ChatService {
           updatedAt: now,
           error: message
         });
-        conversation.messages.push(this.message("system", `Could not approve role and participant request from @${approval.requesterHandle}: ${message}`, undefined, {
+        conversation.messages.push(this.message("system", `Could not approve role and member request from @${approval.requesterHandle}: ${message}`, undefined, {
           threadId: "system"
         }));
         conversation.updatedAt = now;
@@ -4530,7 +4531,7 @@ export class ChatService {
       });
       conversation.messages.push(this.message(
         "system",
-        `Applied role and participant request from @${approval.requesterHandle}: ${applied.summary}.`,
+        `Applied role and member request from @${approval.requesterHandle}: ${applied.summary}.`,
         undefined,
         { threadId: "system" }
       ));
@@ -4589,7 +4590,7 @@ export class ChatService {
           updatedAt: now,
           error: message
         });
-        conversation.messages.push(this.message("system", `Could not approve participant request from @${approval.requesterHandle}: ${message}`, undefined, {
+        conversation.messages.push(this.message("system", `Could not approve member request from @${approval.requesterHandle}: ${message}`, undefined, {
           threadId: "system"
         }));
         conversation.updatedAt = now;
@@ -4607,7 +4608,7 @@ export class ChatService {
       });
       conversation.messages.push(this.message(
         "system",
-        `Applied participant request from @${approval.requesterHandle}: ${prepared.summary}.`,
+        `Applied member request from @${approval.requesterHandle}: ${prepared.summary}.`,
         undefined,
         { threadId: "system" }
       ));
@@ -4876,7 +4877,7 @@ export class ChatService {
       conversation.messages.push(userMessage);
       this.resetAutoWatchDepthForUserMessage(conversation);
       for (const unknown of dispatch.unknownHandles) {
-        const warning = `No participant named @${unknown}.`;
+        const warning = `No member named @${unknown}.`;
         warnings.push(warning);
         conversation.messages.push(this.message("system", warning, undefined, {
           threadId: userMessage.metadata?.threadId ?? threadId,
@@ -4923,7 +4924,7 @@ export class ChatService {
       return { conversation: ingest.conversation, warnings };
     }
 
-    this.emitProgress(runId, progress, "initial", `Running ${ingest.dispatch.targets.length} chat participant${ingest.dispatch.targets.length === 1 ? "" : "s"}.`, {
+    this.emitProgress(runId, progress, "initial", `Running ${ingest.dispatch.targets.length} chat member${ingest.dispatch.targets.length === 1 ? "" : "s"}.`, {
       total: ingest.dispatch.targets.length,
       completed: 0
     });
@@ -5111,7 +5112,7 @@ export class ChatService {
         throw new Error("Selected option was not found.");
       }
       if (!sourceMessage.participantId) {
-        throw new Error("Choice request is not attached to a chat participant.");
+        throw new Error("Choice request is not attached to a chat member.");
       }
       const requester = this.chatParticipants(conversation).find((participant) => participant.id === sourceMessage.participantId);
       if (!requester) {
@@ -9183,10 +9184,10 @@ export class ChatService {
   ): Promise<ParticipantManagementAuthorization> {
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-      throw new Error("The issued app-tool token does not grant participant management.");
+      throw new Error("The issued app-tool token does not grant member management.");
     }
     const manageRolesParticipants = await this.manageRolesParticipantsPermissionForParticipant(requester);
     if (manageRolesParticipants === "deny") {
@@ -9218,7 +9219,7 @@ export class ChatService {
         }
         const participant = operationRecord.participant;
         if (!participant || typeof participant !== "object" || Array.isArray(participant)) {
-          throw new Error(`Roster operation ${index + 1} needs a participant object.`);
+          throw new Error(`Roster operation ${index + 1} needs a member object.`);
         }
         const participantRecord = participant as Record<string, unknown>;
         const handle = typeof participantRecord.handle === "string" ? participantRecord.handle.trim() : "";
@@ -9467,7 +9468,7 @@ export class ChatService {
 
   private normalizeRoleParticipantChangeRequest(raw: unknown): ChatRoleParticipantChangeRequest {
     if (!this.isRoleParticipantChangeRequest(raw)) {
-      throw new Error("Role and participant request must include roleRequest and participantRequest.");
+      throw new Error("Role and member request must include roleRequest and participantRequest.");
     }
     const record = raw as ChatRoleParticipantChangeRequest;
     return {
@@ -9646,20 +9647,20 @@ export class ChatService {
 
   private normalizeParticipantChangeRequest(raw: unknown): ChatParticipantChangeRequest {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      throw new Error("Participant change request must be an object.");
+      throw new Error("Member change request must be an object.");
     }
     const record = raw as { reason?: unknown; operations?: unknown };
     if (!Array.isArray(record.operations) || record.operations.length === 0) {
-      throw new Error("Participant change request needs at least one operation.");
+      throw new Error("Member change request needs at least one operation.");
     }
     if (record.operations.length > CHAT_ROSTER_CHANGE_MAX_OPERATIONS) {
-      throw new Error("Participant change request is too large.");
+      throw new Error("Member change request is too large.");
     }
     return {
       reason: typeof record.reason === "string" ? record.reason.trim().slice(0, 500) || undefined : undefined,
       operations: record.operations.map((operation, index): ChatParticipantChangeOperation => {
         if (!operation || typeof operation !== "object" || Array.isArray(operation)) {
-          throw new Error(`Participant operation ${index + 1} must be an object.`);
+          throw new Error(`Member operation ${index + 1} must be an object.`);
         }
         const operationRecord = operation as Record<string, unknown>;
         if (operationRecord.type === "add_existing_participant_to_chat") {
@@ -9667,7 +9668,7 @@ export class ChatService {
             ? operationRecord.participantConfigId.trim()
             : "";
           if (!participantConfigId) {
-            throw new Error(`Participant operation ${index + 1} needs participantConfigId.`);
+            throw new Error(`Member operation ${index + 1} needs participantConfigId.`);
           }
           const overrides = this.normalizeExistingParticipantOverrides(operationRecord.overrides);
           return {
@@ -9677,16 +9678,16 @@ export class ChatService {
           };
         }
         if (operationRecord.type !== "add_new_participant_to_chat") {
-          throw new Error(`Participant operation ${index + 1} has an unsupported type.`);
+          throw new Error(`Member operation ${index + 1} has an unsupported type.`);
         }
         const participant = operationRecord.participant;
         if (!participant || typeof participant !== "object" || Array.isArray(participant)) {
-          throw new Error(`Participant operation ${index + 1} needs a participant object.`);
+          throw new Error(`Member operation ${index + 1} needs a member object.`);
         }
         const participantRecord = participant as Record<string, unknown>;
         const kind = participantRecord.kind;
         if (kind !== "codex-cli" && kind !== "claude-code" && kind !== "gemini-cli") {
-          throw new Error(`Participant operation ${index + 1} has an unsupported CLI kind.`);
+          throw new Error(`Member operation ${index + 1} has an unsupported CLI kind.`);
         }
         const roleConfigId = typeof participantRecord.roleConfigId === "string" ? participantRecord.roleConfigId.trim() : "";
         const permissionsProvided = Object.prototype.hasOwnProperty.call(participantRecord, "permissions");
@@ -10206,7 +10207,7 @@ export class ChatService {
         ok: false,
         status: "not_found",
         requestId,
-        error: "Permission request was not found for this participant run."
+        error: "Permission request was not found for this member run."
       };
     }
     return this.permissionRequestStatusResult(approval);
@@ -10597,7 +10598,7 @@ export class ChatService {
     currentPermissionsOverride?: ChatAgentPermissions
   ): PreparedPermissionChange {
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     if (!this.isPermissionChangeRequest(request)) {
       throw new Error("Permission approval request is invalid.");
@@ -10698,7 +10699,7 @@ export class ChatService {
     const participants = this.chatParticipants(conversation);
     const target = participants.find((participant) => participant.id === requesterParticipantId);
     if (!target) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     const nextPermissions = this.applyPermissionChangeToPermissions(
       normalizeChatAgentPermissions(target.permissions),
@@ -10721,28 +10722,28 @@ export class ChatService {
     resumeRequester: boolean;
   } {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      throw new Error("Participant request must be an object.");
+      throw new Error("Member request must be an object.");
     }
     const record = raw as { requests?: unknown; timeoutMs?: unknown; resumeRequester?: unknown };
     if (!Array.isArray(record.requests) || record.requests.length === 0) {
-      throw new Error("Participant request needs at least one target.");
+      throw new Error("Member request needs at least one target.");
     }
     if (record.requests.length > CHAT_PARTICIPANT_REQUEST_MAX_ITEMS) {
-      throw new Error(`Participant request can target at most ${CHAT_PARTICIPANT_REQUEST_MAX_ITEMS} participants.`);
+      throw new Error(`Member request can target at most ${CHAT_PARTICIPANT_REQUEST_MAX_ITEMS} members.`);
     }
     const requests: ChatParticipantRequestInput[] = [];
     for (const item of record.requests) {
       if (!item || typeof item !== "object" || Array.isArray(item)) {
-        throw new Error("Each participant request item must be an object.");
+        throw new Error("Each member request item must be an object.");
       }
       const candidate = item as { target?: unknown; prompt?: unknown; reason?: unknown };
       const target = typeof candidate.target === "string" ? candidate.target.trim().replace(/^@/, "") : "";
       const prompt = typeof candidate.prompt === "string" ? candidate.prompt.trim() : "";
       if (!HANDLE_PATTERN.test(target)) {
-        throw new Error(`Invalid participant target: ${String(candidate.target ?? "")}.`);
+        throw new Error(`Invalid member target: ${String(candidate.target ?? "")}.`);
       }
       if (!prompt) {
-        throw new Error(`Participant request for @${target} needs a prompt.`);
+        throw new Error(`Member request for @${target} needs a prompt.`);
       }
       requests.push({
         target,
@@ -10781,12 +10782,12 @@ export class ChatService {
     const promptMaxChars = await this.chatParticipantRequestPromptMaxChars();
     for (const request of normalized.requests) {
       if (request.prompt.length > promptMaxChars) {
-        throw new Error(`Participant request prompt for @${request.target} exceeds ${promptMaxChars} characters; it is rejected, not truncated.`);
+        throw new Error(`Member request prompt for @${request.target} exceeds ${promptMaxChars} characters; it is rejected, not truncated.`);
       }
     }
     const permission = normalizeChatAgentPermissions(requester.permissions).requestParticipants;
     if (permission === "deny") {
-      throw new Error(`Participant requests are disabled for @${requester.handle}.`);
+      throw new Error(`Member requests are disabled for @${requester.handle}.`);
     }
     const requestStatus: ChatParticipantRequestStatus = permission === "allow" ? "running" : "pending_approval";
     const participants = this.chatParticipants(conversation);
@@ -10795,10 +10796,10 @@ export class ChatService {
     for (const request of normalized.requests) {
       const target = this.participantForMentionHandle(participants, request.target);
       if (!target) {
-        throw new Error(`No participant named @${request.target}.`);
+        throw new Error(`No member named @${request.target}.`);
       }
       if (target.id === requester.id) {
-        throw new Error("A participant cannot request itself.");
+        throw new Error("A member cannot request itself.");
       }
       if (targets.has(target.id)) {
         continue;
@@ -10807,7 +10808,7 @@ export class ChatService {
       requests.push({ ...request, target: target.handle });
     }
     if (targets.size === 0) {
-      throw new Error("Participant request did not include any runnable targets.");
+      throw new Error("Member request did not include any runnable targets.");
     }
 
     const now = new Date().toISOString();
@@ -10887,7 +10888,7 @@ export class ChatService {
       this.participantRequestBatchChainRootId(batch) === chainRootId
     );
     if (chainBatches.length >= CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES) {
-      return `participant request chain limit (${CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES}) reached`;
+      return `member request chain limit (${CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES}) reached`;
     }
     const sameTurnMcpBatches = actor.triggerMessageId
       ? this.participantRequestBatches(conversation).filter((batch) =>
@@ -10900,12 +10901,12 @@ export class ChatService {
       return "one active request batch is already attached to this requester turn";
     }
     if (sameTurnMcpBatches.length >= CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN) {
-      return `participant request turn limit (${CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN}) reached`;
+      return `member request turn limit (${CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN}) reached`;
     }
     const threshold = Date.now() - CHAT_PARTICIPANT_REQUEST_RATE_WINDOW_MS;
     const recent = this.participantRequestBatches(conversation).filter((batch) => Date.parse(batch.createdAt) >= threshold);
     if (recent.length >= CHAT_PARTICIPANT_REQUEST_RATE_LIMIT) {
-      return `participant request rate limit (${CHAT_PARTICIPANT_REQUEST_RATE_LIMIT}/minute) reached`;
+      return `member request rate limit (${CHAT_PARTICIPANT_REQUEST_RATE_LIMIT}/minute) reached`;
     }
     return undefined;
   }
@@ -11004,7 +11005,7 @@ export class ChatService {
           return {
             ...item,
             status: "failed" as const,
-            error: "Target participant is no longer in this chat.",
+            error: "Target member is no longer in this chat.",
             updatedAt: now
           };
         }
@@ -11141,7 +11142,7 @@ export class ChatService {
     const requestMessage = conversation.messages.find((message) => message.id === requestMessageId);
     const batch = requestMessage?.metadata?.participantRequest;
     if (!requestMessage || !batch) {
-      throw new Error("Participant request message was not found.");
+      throw new Error("Member request message was not found.");
     }
     const participants = this.chatParticipants(conversation);
     const runnableItems = batch.items.filter((item) => item.status === "running");
@@ -11153,7 +11154,7 @@ export class ChatService {
         this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
           ...current,
           items: current.items.map((candidate) => candidate.targetParticipantId === item.targetParticipantId
-            ? { ...candidate, status: "failed", error: "Target participant is no longer in this chat.", updatedAt: now }
+            ? { ...candidate, status: "failed", error: "Target member is no longer in this chat.", updatedAt: now }
             : candidate),
           updatedAt: now
         }));
@@ -11572,7 +11573,7 @@ export class ChatService {
         const trigger = this.message(
           "system",
           [
-            `Auto-resumed @${requester.handle} after participant request.`,
+            `Auto-resumed @${requester.handle} after member request.`,
             "Target replies/errors are in the transcript above. Continue from your request using the available answers and errors."
           ].join("\n"),
           undefined,
@@ -12162,7 +12163,7 @@ export class ChatService {
     const message = conversation.messages.find((item) => item.id === requestMessageId);
     const batch = message?.metadata?.participantRequest;
     if (!batch) {
-      return { ok: false, status: "failed", error: "Participant request was not found." };
+      return { ok: false, status: "failed", error: "Member request was not found." };
     }
     return {
       ok: true,
@@ -12214,7 +12215,7 @@ export class ChatService {
     excludeMessageId?: string
   ): boolean {
     const now = new Date().toISOString();
-    const reason = "Superseded by a newer turn from this participant.";
+    const reason = "Superseded by a newer turn from this member.";
     let changed = false;
     for (const message of conversation.messages) {
       if (message.id === excludeMessageId || !message.metadata) {
@@ -12833,7 +12834,7 @@ export class ChatService {
   }
 
   private cleanupRemovedParticipantState(conversation: Conversation, participant: ChatParticipant, now: string): void {
-    const removalError = "Participant was removed from this chat.";
+    const removalError = "Member was removed from this chat.";
     const approvals = this.chatAppToolApprovals(conversation).map((approval) =>
       approval.status === "pending" && this.appToolApprovalReferencesParticipant(conversation, approval, participant)
         ? {
@@ -12865,8 +12866,8 @@ export class ChatService {
       "Subject:",
       subject,
       "",
-      `Selected accord participants: ${targetNames}.`,
-      "Run the accord skill for exactly those selected participants and this subject. Use app_chat_request_participants for those participants only. The app has enabled request-participants permission for you in this chat; the user can revoke it from your participant controls."
+      `Selected accord members: ${targetNames}.`,
+      "Run the accord skill for exactly those selected members and this subject. Use app_chat_request_participants for those members only. The app has enabled request-members permission for you in this chat; the user can revoke it from your member controls."
     ].join("\n");
   }
 
@@ -13741,7 +13742,7 @@ export class ChatService {
       `Conversation ID: ${conversation.id}`,
       conversation.repoPath ? `Repository: ${conversation.repoPath}` : "Repository: none",
       "",
-      "## Participants",
+      "## Members",
       "- User: human conversation owner, requirements authority, and clarification source",
       ...participants.map((participant) => `- @${participant.handle}: ${this.roleLabelForParticipant(conversation, participant)} (${participant.kind})`),
       "",
@@ -14554,13 +14555,13 @@ export class ChatService {
       : undefined;
     if (!runPermissions) {
       throw new Error(
-        "AttachmentImportDenied. Problem: sourcePath import permission could not be verified for this participant run. Cause: the app MCP token does not include a run-scoped permission snapshot. Fix: retry in a new participant turn."
+        "AttachmentImportDenied. Problem: sourcePath import permission could not be verified for this member run. Cause: the app MCP token does not include a run-scoped permission snapshot. Fix: retry in a new member turn."
       );
     }
     const allowedRoots = await this.chatAttachmentImportRoots(conversation, runPermissions);
     if (allowedRoots.length === 0) {
       throw new Error(
-        "AttachmentImportDenied. Problem: this participant run has no allowed image import roots. Cause: sourcePath imports require repoRead for selected-repository files. Fix: request repoRead or attach image content another way."
+        "AttachmentImportDenied. Problem: this member run has no allowed image import roots. Cause: sourcePath imports require repoRead for selected-repository files. Fix: request repoRead or attach image content another way."
       );
     }
 
@@ -14940,7 +14941,7 @@ export class ChatService {
   private chatIntro(participants: ChatParticipant[]): string {
     return [
       "Chat started.",
-      "Participants:",
+      "Members:",
       "- User",
       ...participants.map((participant) => `- @${participant.handle}`)
     ].join("\n");
