@@ -2818,6 +2818,38 @@
   overflow-wrap: anywhere;
 }
 
+.chat-inline-activity-detail.is-collapsed {
+  max-height: 108px;
+  overflow: hidden;
+}
+
+.chat-inline-activity-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-left: 23px;
+}
+
+.chat-inline-activity-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--app-border-subtle);
+  border-radius: 6px;
+  background: var(--app-surface);
+  color: var(--app-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-inline-activity-action:hover {
+  border-color: var(--app-border);
+  color: var(--app-text);
+}
+
 .chat-processing-transcript-notices {
   display: grid;
   gap: 4px;
