@@ -338,14 +338,15 @@ const PARTICIPANT_REQUEST_SCRUTINY_APPENDIX =
   "Review for blockers, incorrect assumptions, missing edge cases, or simpler alternatives. If none, reply with only `No objections.` Do not restate the proposal.";
 const CHAT_CONTEXT_READ_DEFAULT_LIMIT = 50;
 const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
+const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 2_000_000;
+const CHAT_ACTIVITY_EVENT_MAX_COUNT = 500;
+const CHAT_ACTIVITY_DETAIL_MAX_CHARS = 4_000;
 // A hard transport ceiling, not a truncation point. The send path rejects over-limit content
 // with an explicit error and never shortens it, so the canonical /accord message keeps the
 // exact text participants approve. Sits well under the MCP body cap (1 MB).
 const CHAT_SEND_MESSAGE_MAX_CONTENT_LENGTH = 200_000;
 const CHAT_SEND_MESSAGE_MAX_PER_RUN = 12;
 const CHAT_REMOVED_MESSAGE_ID_MAX = 100;
-const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 100_000;
-const CHAT_ACTIVITY_EVENT_MAX_COUNT = 80;
 const WORKFLOW_MANAGER_ROLE_ID = "workflow-manager";
 const ACTIVE_RUN_OWNERS_KEY = "activeRunOwnersByRunId";
 const ACTIVE_RUN_PARTICIPANTS_KEY = "activeRunParticipantIdsByRunId";
@@ -2762,7 +2763,7 @@ export class ChatService {
             createdAt: record.createdAt,
             afterContentLength: cumulative.length > 0 ? cumulative.length : undefined
           });
-          if (nextActivity.sequence !== activity.sequence) {
+          if (nextActivity !== activity) {
             activity = nextActivity;
             activityChanged = true;
             remoteRunStatus = this.remoteRunStatus("processing-request", "Processing request", undefined, remoteRunStatus);
@@ -5604,6 +5605,7 @@ export class ChatService {
     await this.withChatMutation(conversation, async () => {
       let threadId: string | undefined;
       let chatThreadRootId: string | undefined;
+      let keptStoppedParticipantMessage = false;
       if (pendingMessageId) {
         const idx = conversation.messages.findIndex((message) => message.id === pendingMessageId);
         if (idx >= 0) {
@@ -5625,6 +5627,13 @@ export class ChatService {
               metadata
             };
           }
+          if (
+            pending.role === "participant" &&
+            pending.status === "error" &&
+            pending.metadata?.terminalReason === "user-stopped"
+          ) {
+            keptStoppedParticipantMessage = true;
+          }
         }
       }
       this.markPendingAppToolApprovalsForRunTerminal(
@@ -5632,12 +5641,14 @@ export class ChatService {
         runId,
         `@${participant.handle} stopped before pending approval was resolved.`
       );
-      conversation.messages.push(this.message(
-        "system",
-        `@${participant.handle} stopped by user.`,
-        undefined,
-        { threadId, chatThreadRootId }
-      ));
+      if (!keptStoppedParticipantMessage) {
+        conversation.messages.push(this.message(
+          "system",
+          `@${participant.handle} stopped by user.`,
+          undefined,
+          { threadId, chatThreadRootId }
+        ));
+      }
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
     });
@@ -6063,19 +6074,23 @@ export class ChatService {
       if (!signal?.aborted && !result.ok && result.error) {
         options.warnings.push(`@${participant.handle}: ${result.error}`);
       }
-      if (!signal?.aborted) {
-        const workedMs = Date.parse(now) - Date.parse(pendingMessage.createdAt);
-        if (Number.isFinite(workedMs) && workedMs >= 0) {
-          pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
-        }
-        const activityEvents = progressSink.activityEvents();
-        if (activityEvents.length > 0) {
-          pendingMessage.metadata = { ...pendingMessage.metadata, activityEvents };
-        }
-        const processingTranscript = progressSink.processingTranscript(now);
-        if (processingTranscript) {
-          pendingMessage.metadata = { ...pendingMessage.metadata, processingTranscript };
-        }
+      const workedMs = Date.parse(now) - Date.parse(pendingMessage.createdAt);
+      if (Number.isFinite(workedMs) && workedMs >= 0) {
+        pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
+      }
+      const activityEvents = progressSink.activityEvents();
+      if (activityEvents.length > 0) {
+        pendingMessage.metadata = { ...pendingMessage.metadata, activityEvents };
+      }
+      let processingTranscript = progressSink.processingTranscript(now);
+      if (processingTranscript && signal?.aborted) {
+        processingTranscript = this.processingTranscriptWithTerminalMessage(
+          processingTranscript,
+          pendingMessage.content
+        );
+      }
+      if (processingTranscript) {
+        pendingMessage.metadata = { ...pendingMessage.metadata, processingTranscript };
       }
       if (!signal?.aborted && result.ok && result.content.trim()) {
         this.commitPromptContextPointerAdvance(conversation, participant.id, preparedPromptContext.pointerAdvance);
@@ -6113,9 +6128,9 @@ export class ChatService {
         }
       }
       // Skip the snapshot push for two cases:
-      //   1. The run was cancelled — caller (`discardStoppedTargetRun`) will drop
-      //      the pending message and emit a clean "stopped by user" note under
-      //      `withChatMutation`.
+      //   1. The run was cancelled — caller (`discardStoppedTargetRun`) will
+      //      preserve a finalized stopped bubble (including captured output),
+      //      or replace a never-started queued bubble with a system note.
       //   2. This run came from `runParticipantBatch` (identified by the
       //      pre-created `existingPendingMessage`) — that caller emits the final
       //      snapshot under `withChatMutation` via `appendCompletedTurn`.
@@ -6209,9 +6224,13 @@ export class ChatService {
       : `@${participant.handle} run failed before a response was produced.`;
   }
 
-  private markParticipantMessageStoppedByUser(message: ChatMessage, participant: ChatParticipant): void {
+  private markParticipantMessageStoppedByUser(
+    message: ChatMessage,
+    participant: ChatParticipant,
+    options: { preserveContent?: boolean } = {}
+  ): void {
     message.status = "error";
-    if (!message.content.trim()) {
+    if (!options.preserveContent || !message.content.trim()) {
       message.content = `@${participant.handle} stopped by user.`;
     }
     message.metadata = {
@@ -8020,6 +8039,10 @@ export class ChatService {
         currentState.providerActivitySequence ?? 0,
         activity.events.at(-1)?.sequence ?? 0
       );
+      const providerOmittedActivityEventCount = Math.max(
+        activity.dropped,
+        providerActivitySequence - activity.events.length
+      );
       merged[runId] = {
         cursorSeq: Math.max(storedState.cursorSeq, currentState.cursorSeq),
         appliedRecordIds,
@@ -8038,7 +8061,7 @@ export class ChatService {
         providerActivityLabel: currentActivityIsLatest
           ? currentState.providerActivityLabel ?? storedState.providerActivityLabel
           : storedState.providerActivityLabel ?? currentState.providerActivityLabel,
-        providerOmittedActivityEventCount: Math.max(0, providerActivitySequence - activity.events.length),
+        providerOmittedActivityEventCount,
         remoteRunStatus: this.latestRemoteRunStatus(currentState.remoteRunStatus, storedState.remoteRunStatus),
         updatedAt: currentState.updatedAt && storedState.updatedAt
           ? currentState.updatedAt >= storedState.updatedAt
@@ -8088,7 +8111,11 @@ export class ChatService {
       const providerActivityLabel = typeof record.providerActivityLabel === "string"
         ? record.providerActivityLabel.trim() || undefined
         : undefined;
-      const providerOmittedActivityEventCount = this.normalizeOptionalInteger(record.providerOmittedActivityEventCount);
+      const observedProviderActivitySequence = providerActivitySequence ?? providerActivityEvents.at(-1)?.sequence ?? 0;
+      const providerOmittedActivityEventCount = Math.max(
+        this.normalizeOptionalInteger(record.providerOmittedActivityEventCount) ?? 0,
+        Math.max(0, observedProviderActivitySequence - providerActivityEvents.length)
+      );
       const remoteRunStatus = this.remoteRunStatusFromMetadata(record.remoteRunStatus);
       states[runId] = {
         cursorSeq,
@@ -8131,9 +8158,11 @@ export class ChatService {
       const status = record.status === "started" || record.status === "completed" || record.status === "failed"
         ? record.status
         : undefined;
+      const itemId = typeof record.itemId === "string" ? record.itemId.trim() || undefined : undefined;
       byId.set(id, {
         id,
         sequence,
+        ...(itemId ? { itemId } : {}),
         kind: record.kind,
         label,
         detail: typeof record.detail === "string" ? record.detail.trim() || undefined : undefined,
@@ -8142,9 +8171,9 @@ export class ChatService {
         afterContentLength: this.normalizeOptionalInteger(record.afterContentLength)
       });
     }
-    return Array.from(byId.values())
-      .sort((left, right) => left.sequence - right.sequence || left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
-      .slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT);
+    const events = Array.from(byId.values())
+      .sort((left, right) => left.sequence - right.sequence || left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    return this.capChatActivityEvents(events).events;
   }
 
   private mergeRemoteRunActivityEvents(
@@ -8157,10 +8186,16 @@ export class ChatService {
     }
     const events = Array.from(byId.values())
       .sort((left, right) => left.sequence - right.sequence || left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
-    const dropped = Math.max(0, events.length - CHAT_ACTIVITY_EVENT_MAX_COUNT);
+    return this.capChatActivityEvents(events);
+  }
+
+  private capChatActivityEvents(events: ChatAgentActivityEvent[]): { events: ChatAgentActivityEvent[]; dropped: number } {
+    if (events.length <= CHAT_ACTIVITY_EVENT_MAX_COUNT) {
+      return { events, dropped: 0 };
+    }
     return {
-      events: dropped > 0 ? events.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT) : events,
-      dropped
+      events: events.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT),
+      dropped: events.length - CHAT_ACTIVITY_EVENT_MAX_COUNT
     };
   }
 
@@ -16254,7 +16289,7 @@ export class ChatService {
       const before = this.stableJson(message);
       const participant = message.participantId ? participantsById.get(message.participantId) : undefined;
       if (participant) {
-        this.markParticipantMessageStoppedByUser(message, participant);
+        this.markParticipantMessageStoppedByUser(message, participant, { preserveContent: true });
       } else {
         message.status = "error";
         if (!message.content.trim()) {
@@ -16766,33 +16801,71 @@ export class ChatService {
     options: { createdAt?: string; afterContentLength?: number } = {}
   ): ChatActivityAccumulator {
     const label = event.text.trim().replace(/\s+/g, " ");
-    if (!label || label === current.label) {
+    if (!label) {
       return current;
+    }
+    const itemId = event.activityItemId?.trim() || undefined;
+    const detail = this.chatActivityDetail(event.activityDetail);
+    if (itemId) {
+      const existingIndex = current.events.findIndex((activityEvent) => activityEvent.itemId === itemId);
+      if (existingIndex >= 0) {
+        const existing = current.events[existingIndex];
+        const nextEvent: ChatAgentActivityEvent = {
+          ...existing,
+          detail: detail ?? existing.detail,
+          status: event.activityStatus ?? existing.status
+        };
+        if (nextEvent.detail === existing.detail && nextEvent.status === existing.status && label === current.label) {
+          return current;
+        }
+        const events = [...current.events];
+        events[existingIndex] = nextEvent;
+        return {
+          events,
+          sequence: current.sequence,
+          label,
+          omittedCount: current.omittedCount
+        };
+      }
     }
     const sequence = current.sequence + 1;
     const nextEvent: ChatAgentActivityEvent = {
       id: `${runId}:activity:${sequence}`,
       sequence,
+      ...(itemId ? { itemId } : {}),
       kind: event.activityKind ?? "tool",
       label,
-      detail: event.activityDetail?.trim() || undefined,
+      detail,
       createdAt: options.createdAt ?? new Date().toISOString(),
       status: event.activityStatus ?? "started",
       afterContentLength: options.afterContentLength
     };
-    let events = [...current.events, nextEvent];
-    let omittedCount = current.omittedCount;
-    if (events.length > CHAT_ACTIVITY_EVENT_MAX_COUNT) {
-      const dropped = events.length - CHAT_ACTIVITY_EVENT_MAX_COUNT;
-      omittedCount += dropped;
-      events = events.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT);
-    }
+    const capped = this.capChatActivityEvents([...current.events, nextEvent]);
     return {
-      events,
+      events: capped.events,
       sequence,
       label,
-      omittedCount
+      omittedCount: Math.max(current.omittedCount + capped.dropped, sequence - capped.events.length)
     };
+  }
+
+  private chatActivityDetail(value: string | undefined): string | undefined {
+    const detail = value?.trim();
+    if (!detail) {
+      return undefined;
+    }
+    if (detail.length <= CHAT_ACTIVITY_DETAIL_MAX_CHARS) {
+      return detail;
+    }
+    let keep = CHAT_ACTIVITY_DETAIL_MAX_CHARS;
+    let omitted = detail.length - keep;
+    let marker = `… [+${omitted} chars omitted]`;
+    while (keep + marker.length > CHAT_ACTIVITY_DETAIL_MAX_CHARS) {
+      keep = Math.max(0, CHAT_ACTIVITY_DETAIL_MAX_CHARS - marker.length);
+      omitted = detail.length - keep;
+      marker = `… [+${omitted} chars omitted]`;
+    }
+    return `${detail.slice(0, keep)}${marker}`;
   }
 
   private createAgentProgressSink(
@@ -16808,7 +16881,6 @@ export class ChatService {
     processingTranscript: (capturedAt: string) => ChatProcessingTranscript | undefined;
   } {
     const participantLabel = `@${participant.handle}`;
-    const THROTTLE_MS = 250;
     let finished = false;
     let cumulative = "";
     let activity: ChatActivityAccumulator = {
@@ -16852,11 +16924,12 @@ export class ChatService {
       if (finished || pendingTimer) {
         return;
       }
+      const throttleMs = this.agentProgressFlushIntervalMs(cumulative.length);
       const elapsed = Date.now() - lastFlush;
-      if (elapsed >= THROTTLE_MS) {
+      if (elapsed >= throttleMs) {
         flush();
       } else {
-        pendingTimer = setTimeout(flush, THROTTLE_MS - elapsed);
+        pendingTimer = setTimeout(flush, throttleMs - elapsed);
         pendingTimer.unref?.();
       }
     };
@@ -16878,7 +16951,7 @@ export class ChatService {
       const nextActivity = this.appendChatActivity(runId, activity, event, {
         afterContentLength: cumulative.length > 0 ? cumulative.length : undefined
       });
-      if (nextActivity.sequence === activity.sequence) {
+      if (nextActivity === activity) {
         return;
       }
       activity = nextActivity;
@@ -16935,35 +17008,66 @@ export class ChatService {
     };
   }
 
+  private agentProgressFlushIntervalMs(cumulativeLength: number): number {
+    if (cumulativeLength >= 1_000_000) {
+      return 2_000;
+    }
+    if (cumulativeLength >= 256_000) {
+      return 1_000;
+    }
+    return 250;
+  }
+
   private processingTranscriptFromContent(
     content: string,
     capturedAt: string,
     options: { omittedActivityEventCount?: number } = {}
   ): ChatProcessingTranscript | undefined {
     const normalized = content.replace(/\r\n/g, "\n").trimEnd();
-    if (!normalized.trim()) {
-      return undefined;
-    }
-    const originalLength = normalized.length;
     const omittedActivityEventCount = options.omittedActivityEventCount && options.omittedActivityEventCount > 0
       ? options.omittedActivityEventCount
       : undefined;
-    if (originalLength <= CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS) {
-      return {
-        content: normalized,
-        capturedAt,
-        originalLength,
-        ...(omittedActivityEventCount ? { omittedActivityEventCount } : {})
-      };
+    if (!normalized.trim() && !omittedActivityEventCount) {
+      return undefined;
     }
-    const retainedStart = originalLength - CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS;
+    const originalLength = normalized.length;
+    const retainedStart = Math.max(0, originalLength - CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS);
+    const retained = retainedStart > 0 ? normalized.slice(retainedStart) : normalized;
     return {
-      content: normalized.slice(retainedStart),
+      content: retained,
       capturedAt,
       originalLength,
-      retainedStart,
-      truncated: true,
+      ...(retainedStart > 0 ? { retainedStart, truncated: true } : {}),
       ...(omittedActivityEventCount ? { omittedActivityEventCount } : {})
+    };
+  }
+
+  private processingTranscriptWithTerminalMessage(
+    transcript: ChatProcessingTranscript,
+    terminalMessage: string
+  ): ChatProcessingTranscript {
+    const terminal = terminalMessage.replace(/\r\n/g, "\n").trim();
+    if (!terminal || transcript.content.trimEnd().endsWith(terminal)) {
+      return transcript;
+    }
+    const retainedBase = transcript.content.trimEnd();
+    const trimmedChars = transcript.content.length - retainedBase.length;
+    const appended = `\n\n${terminal}`;
+    let content = `${retainedBase}${appended}`;
+    let retainedStart = transcript.retainedStart;
+    let truncated = transcript.truncated;
+    if (content.length > CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS) {
+      const overflow = content.length - CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS;
+      content = content.slice(overflow);
+      retainedStart = (retainedStart ?? 0) + overflow;
+      truncated = true;
+    }
+    return {
+      ...transcript,
+      content,
+      originalLength: Math.max(0, transcript.originalLength - trimmedChars) + appended.length,
+      retainedStart,
+      truncated
     };
   }
 

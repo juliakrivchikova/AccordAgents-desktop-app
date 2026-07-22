@@ -147,16 +147,22 @@ test("processing transcript metadata preserves visible stream text", () => {
   assert.equal(service.processingTranscriptFromContent("   ", NOW), undefined);
 });
 
-test("processing transcript metadata caps oversized streams to the latest text", () => {
+test("processing transcript metadata keeps 100k streams untruncated and bounds pathological streams", () => {
   const service = testService().service as any;
-  const content = `${"a".repeat(100_010)}tail`;
-  const transcript = service.processingTranscriptFromContent(content, NOW);
+  const ordinary = `${"a".repeat(100_010)}tail`;
+  const ordinaryTranscript = service.processingTranscriptFromContent(ordinary, NOW);
+  const oversized = `${"a".repeat(2_000_005)}tail`;
+  const oversizedTranscript = service.processingTranscriptFromContent(oversized, NOW);
 
-  assert.equal(transcript.content.length, 100_000);
-  assert.equal(transcript.content.endsWith("tail"), true);
-  assert.equal(transcript.originalLength, content.length);
-  assert.equal(transcript.retainedStart, content.length - 100_000);
-  assert.equal(transcript.truncated, true);
+  assert.equal(ordinaryTranscript.content, ordinary);
+  assert.equal(ordinaryTranscript.originalLength, ordinary.length);
+  assert.equal(ordinaryTranscript.retainedStart, undefined);
+  assert.equal(ordinaryTranscript.truncated, undefined);
+  assert.equal(oversizedTranscript.content.length, 2_000_000);
+  assert.equal(oversizedTranscript.content.endsWith("tail"), true);
+  assert.equal(oversizedTranscript.originalLength, oversized.length);
+  assert.equal(oversizedTranscript.retainedStart, oversized.length - 2_000_000);
+  assert.equal(oversizedTranscript.truncated, true);
 });
 
 test("processing transcript metadata records omitted activity event count", () => {
@@ -164,6 +170,36 @@ test("processing transcript metadata records omitted activity event count", () =
   const transcript = service.processingTranscriptFromContent("partial reply", NOW, { omittedActivityEventCount: 3 });
 
   assert.equal(transcript.omittedActivityEventCount, 3);
+});
+
+test("processing transcript stopped terminal note preserves and reapplies truncation metadata", () => {
+  const service = testService().service as any;
+  const terminal = "@codex stopped by user.";
+  const appendedLength = `\n\n${terminal}`.length;
+  const alreadyTruncated = service.processingTranscriptWithTerminalMessage({
+    content: "a".repeat(2_000_000),
+    capturedAt: NOW,
+    originalLength: 2_000_010,
+    retainedStart: 10,
+    truncated: true
+  }, terminal);
+  const crossesLimit = service.processingTranscriptWithTerminalMessage({
+    content: "b".repeat(2_000_000 - 3),
+    capturedAt: NOW,
+    originalLength: 2_000_000 - 3
+  }, terminal);
+
+  assert.equal(alreadyTruncated.content.length, 2_000_000);
+  assert.equal(alreadyTruncated.content.endsWith(terminal), true);
+  assert.equal(alreadyTruncated.originalLength, 2_000_010 + appendedLength);
+  assert.equal(alreadyTruncated.retainedStart, 10 + appendedLength);
+  assert.equal(alreadyTruncated.truncated, true);
+
+  assert.equal(crossesLimit.content.length, 2_000_000);
+  assert.equal(crossesLimit.content.endsWith(terminal), true);
+  assert.equal(crossesLimit.originalLength, (2_000_000 - 3) + appendedLength);
+  assert.equal(crossesLimit.retainedStart, appendedLength - 3);
+  assert.equal(crossesLimit.truncated, true);
 });
 
 test("processing transcript expansion hides when transcript only contains the final answer", () => {
@@ -414,6 +450,57 @@ test("agent progress sink preserves transcript without a visible progress callba
   assert.equal(sink.processingTranscript(NOW)?.content, full);
   assert.equal(sink.activityEvents()[0].label, "Reading renderer state");
   assert.equal(sink.activityEvents()[0].afterContentLength, preamble.length);
+});
+
+test("agent progress sink coalesces activity only by item id and caps retained activity", () => {
+  const service = testService().service as any;
+  const sink = service.createAgentProgressSink("run-1", undefined, chatParticipant("codex-cli"), "message-1");
+
+  sink.emit({
+    kind: "tool",
+    text: "Updating files",
+    activityKind: "file-edit",
+    activityStatus: "started",
+    activityDetail: "initial",
+    activityItemId: "file-change-1"
+  });
+  sink.emit({
+    kind: "tool",
+    text: "Updating files",
+    activityKind: "file-edit",
+    activityStatus: "completed",
+    activityDetail: "final",
+    activityItemId: "file-change-1"
+  });
+  sink.emit({ kind: "tool", text: "Running command", activityKind: "command", activityDetail: "npm test" });
+  sink.emit({ kind: "tool", text: "Running command", activityKind: "command", activityDetail: "npm test" });
+
+  const initialEvents = sink.activityEvents();
+  assert.deepEqual(initialEvents.map((event: ChatAgentActivityEvent) => [event.sequence, event.itemId, event.label, event.detail, event.status]), [
+    [1, "file-change-1", "Updating files", "final", "completed"],
+    [2, undefined, "Running command", "npm test", "started"],
+    [3, undefined, "Running command", "npm test", "started"]
+  ]);
+
+  const longDetail = "x".repeat(4_100);
+  for (let index = 0; index < 505; index += 1) {
+    sink.emit({
+      kind: "tool",
+      text: `Using tool ${index}`,
+      activityKind: "tool",
+      activityDetail: index === 504 ? longDetail : undefined,
+      activityItemId: `tool-${index}`
+    });
+  }
+
+  const retained = sink.activityEvents();
+  const transcript = sink.processingTranscript(NOW);
+  assert.equal(retained.length, 500);
+  assert.equal(retained[0].sequence, 9);
+  assert.equal(retained.at(-1)?.sequence, 508);
+  assert.equal(retained.at(-1)?.detail?.length, 4_000);
+  assert.match(retained.at(-1)?.detail ?? "", /… \[\+122 chars omitted\]$/);
+  assert.equal(transcript?.omittedActivityEventCount, 8);
 });
 
 test("agent progress sink keeps in-progress formatted stream for visible runs", async () => {
@@ -1599,8 +1686,19 @@ test("permission resume registers a cancellable chat run controller", async () =
   });
   const { service, storage, tempRoot } = testService({
     conversation,
-    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, signal: AbortSignal | undefined) => {
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, signal: AbortSignal | undefined, runOptions: any) => {
       capturedSignal = signal;
+      runOptions.onOutput?.({
+        kind: "text",
+        text: "Partial reply.",
+        cumulative: "Partial reply."
+      });
+      runOptions.onOutput?.({
+        kind: "tool",
+        text: "Running command\n",
+        activityKind: "command",
+        activityDetail: "npm test"
+      });
       markStarted();
       await new Promise<void>((resolve) => {
         if (signal?.aborted) {
@@ -1644,8 +1742,110 @@ test("permission resume registers a cancellable chat run controller", async () =
   assert.equal(stoppedMessage?.status, "error");
   assert.equal(stoppedMessage?.metadata?.terminalReason, "user-stopped");
   assert.equal(stoppedMessage?.content, "@drew stopped by user.");
+  assert.equal(
+    stoppedMessage?.metadata?.processingTranscript?.content,
+    "Partial reply.\n\n@drew stopped by user."
+  );
+  assert.equal(stoppedMessage?.metadata?.activityEvents?.[0]?.label, "Running command");
+  assert.equal(stoppedMessage?.metadata?.activityEvents?.[0]?.detail, "npm test");
   assert.equal(stoppedMessage?.id, pendingMessageId);
   assert.equal(storage.current.metadata.lastMessageByParticipant?.[participant.id]?.messageId, stoppedMessage?.id);
+});
+
+test("running participant cancellation preserves output in one stopped bubble", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, signal: AbortSignal | undefined, runOptions: any) => {
+      runOptions.onOutput?.({
+        kind: "text",
+        text: "Work in progress.",
+        cumulative: "Work in progress."
+      });
+      markStarted();
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) {
+          resolve();
+          return;
+        }
+        signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return {
+        participant: runParticipant,
+        ok: false,
+        content: "provider cancellation notice",
+        error: "cancelled",
+        durationMs: 1
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "send-run",
+    content: `@${participant.handle} start work`
+  });
+  await started;
+  const pending = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "participant" && message.status === "pending"
+  );
+  assert.ok(pending?.metadata?.runId);
+
+  assert.equal(service.cancelRun(pending.metadata.runId), true);
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.id === pending.id && message.metadata?.terminalReason === "user-stopped"
+  ));
+
+  const stopped = storage.current.messages.find((message: ChatMessage) => message.id === pending.id);
+  assert.equal(stopped?.content, `@${participant.handle} stopped by user.`);
+  assert.equal(
+    stopped?.metadata?.processingTranscript?.content,
+    `Work in progress.\n\n@${participant.handle} stopped by user.`
+  );
+  assert.equal(storage.current.messages.some((message: ChatMessage) =>
+    message.role === "system" && message.content === `@${participant.handle} stopped by user.`
+  ), false);
+});
+
+test("stored participant stop preserves nonblank pending and diagnostic content", () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  conversation.messages.push({
+    id: "pending-message",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "Partial remote content.",
+    createdAt: NOW,
+    status: "pending",
+    metadata: { runId: "stored-run" }
+  }, {
+    id: "error-message",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "Provider diagnostic.",
+    createdAt: NOW,
+    status: "error",
+    metadata: { runId: "stored-run" }
+  });
+  const { service } = testService({ conversation });
+
+  const changed = (service as any).markStoredParticipantRunStoppedByUser(conversation, "stored-run");
+
+  assert.equal(changed, true);
+  assert.equal(conversation.messages.find((message) => message.id === "pending-message")?.status, "error");
+  assert.equal(conversation.messages.find((message) => message.id === "pending-message")?.content, "Partial remote content.");
+  assert.equal(conversation.messages.find((message) => message.id === "pending-message")?.metadata?.terminalReason, "user-stopped");
+  assert.equal(conversation.messages.find((message) => message.id === "error-message")?.status, "error");
+  assert.equal(conversation.messages.find((message) => message.id === "error-message")?.content, "Provider diagnostic.");
+  assert.equal(conversation.messages.find((message) => message.id === "error-message")?.metadata?.terminalReason, "user-stopped");
 });
 
 test("stop from a non-owner instance records a cancel request the owning instance honors", async () => {
@@ -2351,7 +2551,7 @@ test("remote provider activity survives split JSONL and renders before text", as
   const { service, storage } = testService({ conversation });
   const commandLine = JSON.stringify({
     type: "item.started",
-    item: { type: "command_execution", command: "rg remote" }
+    item: { id: "command-1", type: "command_execution", command: "rg remote" }
   });
   const splitAt = Math.floor(commandLine.length / 2);
 
@@ -2385,7 +2585,7 @@ test("remote provider activity survives split JSONL and renders before text", as
   assert.equal(activityResult.applied, true);
   assert.equal(activityMessage?.status, "pending");
   assert.equal(activityMessage?.content, "");
-  assert.deepEqual(activityMessage?.metadata?.activityEvents?.map((event: ChatAgentActivityEvent) => [event.sequence, event.label]), [[1, "Running command"]]);
+  assert.deepEqual(activityMessage?.metadata?.activityEvents?.map((event: ChatAgentActivityEvent) => [event.sequence, event.itemId, event.label]), [[1, "command-1", "Running command"]]);
 
   const textResult = await service.applyRemoteRunReplayRecord({
     id: "remote-run:provider-output:3",
@@ -2415,14 +2615,15 @@ test("remote provider activity survives split JSONL and renders before text", as
   assert.equal(textResult.applied, true);
   assert.equal(duplicate.applied, false);
   assert.equal(message?.content, "Remote text.");
-  assert.deepEqual(message?.metadata?.activityEvents?.map((event: ChatAgentActivityEvent) => [event.sequence, event.label]), [[1, "Running command"]]);
+  assert.deepEqual(message?.metadata?.activityEvents?.map((event: ChatAgentActivityEvent) => [event.sequence, event.itemId, event.label]), [[1, "command-1", "Running command"]]);
   assert.equal(message?.metadata?.remoteRunStatus?.phase, "processing-request");
   assert.equal(replay.providerOutputLineBuffer, "");
   assert.equal(replay.providerActivitySequence, 1);
   assert.equal(replay.providerActivityEvents.length, 1);
+  assert.equal(replay.providerActivityEvents[0].itemId, "command-1");
 });
 
-test("remote activity accumulator survives restart, dedupes labels, and stays bounded", async () => {
+test("remote activity accumulator survives restart and preserves every activity", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant], {
     remoteRunHandles: {
@@ -2482,12 +2683,75 @@ test("remote activity accumulator survives restart, dedupes labels, and stays bo
 
   const replay = (restarted.storage.current.metadata.remoteRunReplay as any)["remote-run"];
   const message = restarted.storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote");
-  assert.equal(replay.providerActivitySequence, 83);
-  assert.equal(replay.providerActivityEvents.length, 80);
-  assert.equal(replay.providerOmittedActivityEventCount, 3);
-  assert.equal(replay.providerActivityEvents[0].label, "Using tool_2");
+  assert.equal(replay.providerActivitySequence, 84);
+  assert.equal(replay.providerActivityEvents.length, 84);
+  assert.equal(replay.providerOmittedActivityEventCount, 0);
+  assert.equal(replay.providerActivityEvents[0].label, "Using first_tool");
   assert.equal(replay.providerActivityEvents.at(-1).label, "Using tool_81");
-  assert.equal(message?.metadata?.activityEvents?.length, 80);
+  assert.equal(message?.metadata?.activityEvents?.length, 84);
+});
+
+test("remote activity item ids survive restart and coalesce replayed updates", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], {
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        conversationId: "conversation-1",
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        providerOutputMessageId: "pending-remote",
+        worker: { host: "worker.example" },
+        status: "running",
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push({
+    id: "pending-remote",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "",
+    createdAt: NOW,
+    status: "pending",
+    metadata: { runId: "remote-run", appMessageSource: "remote-run-provider-output" }
+  });
+  const first = testService({ conversation });
+  await first.service.applyRemoteRunReplayRecord({
+    id: "remote-run:provider-output:first",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 1,
+    createdAt: NOW,
+    kind: "provider_output",
+    participantId: participant.id,
+    stream: "stdout",
+    content: `${JSON.stringify({ type: "item.started", item: { id: "tool-1", type: "mcp_tool_call", name: "first_tool" } })}\n`
+  } as any);
+
+  const restarted = testService({ conversation: JSON.parse(JSON.stringify(first.storage.current)) });
+  await restarted.service.applyRemoteRunReplayRecord({
+    id: "remote-run:provider-output:update",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 2,
+    createdAt: "2026-06-27T22:00:01.000Z",
+    kind: "provider_output",
+    participantId: participant.id,
+    stream: "stdout",
+    content: `${JSON.stringify({ type: "item.started", item: { id: "tool-1", type: "mcp_tool_call", name: "first_tool" } })}\n`
+  } as any);
+
+  const replay = (restarted.storage.current.metadata.remoteRunReplay as any)["remote-run"];
+  const message = restarted.storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote");
+  assert.equal(replay.providerActivitySequence, 1);
+  assert.equal(replay.providerActivityEvents.length, 1);
+  assert.equal(replay.providerActivityEvents[0].itemId, "tool-1");
+  assert.deepEqual(message?.metadata?.activityEvents?.map((event: ChatAgentActivityEvent) => [event.sequence, event.itemId, event.label]), [
+    [1, "tool-1", "Using first_tool"]
+  ]);
 });
 
 test("stale conversation replay merge does not double-count omitted remote activity", async () => {
@@ -2533,10 +2797,33 @@ test("stale conversation replay merge does not double-count omitted remote activ
 
   const replay = (staleConversation.metadata.remoteRunReplay as any)["remote-run"];
   assert.equal(replay.providerActivitySequence, 150);
-  assert.equal(replay.providerActivityEvents.length, 80);
-  assert.equal(replay.providerActivityEvents[0].sequence, 71);
+  assert.equal(replay.providerActivityEvents.length, 90);
+  assert.equal(replay.providerActivityEvents[0].sequence, 61);
   assert.equal(replay.providerActivityEvents.at(-1).sequence, 150);
-  assert.equal(replay.providerOmittedActivityEventCount, 70);
+  assert.equal(replay.providerOmittedActivityEventCount, 60);
+});
+
+test("remote activity normalizer retains only the newest 500 events", () => {
+  const { service } = testService();
+  const events = Array.from({ length: 520 }, (_, index) => {
+    const sequence = index + 1;
+    return {
+      id: `remote-run:activity:${sequence}`,
+      sequence,
+      itemId: `item-${sequence}`,
+      kind: "tool",
+      label: `Using tool_${sequence}`,
+      createdAt: `2026-06-27T22:00:00.${String(sequence).padStart(3, "0")}Z`,
+      status: "started"
+    };
+  });
+
+  const normalized = (service as any).remoteRunActivityEvents(events) as ChatAgentActivityEvent[];
+
+  assert.equal(normalized.length, 500);
+  assert.equal(normalized[0].sequence, 21);
+  assert.equal(normalized[0].itemId, "item-21");
+  assert.equal(normalized.at(-1)?.sequence, 520);
 });
 
 test("remote Assistant result keeps exact content and records preference only after successful terminalization", async () => {

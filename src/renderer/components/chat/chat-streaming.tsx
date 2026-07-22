@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useState } from "react";
-import { ChevronRight, FilePenLine, Globe, ShieldCheck, Terminal, type LucideIcon } from "lucide-react";
+import { ChevronRight, Eye, EyeOff, FilePenLine, Globe, ShieldCheck, Terminal, type LucideIcon } from "lucide-react";
 
 import { MarkdownText } from "../content/markdown-text";
 import type { ChatAgentActivityEvent, ChatAgentActivityKind } from "../../../shared/types";
@@ -102,12 +102,47 @@ export const ChatExpandedProcessingTranscript = memo(function ChatExpandedProces
 
 function ChatInlineActivityEvent({ event }: { event: ChatAgentActivityEvent }): JSX.Element {
   const Icon = iconForActivityKind(event.kind);
+  const [detailExpanded, setDetailExpanded] = useState(false);
+  const [detailRevealed, setDetailRevealed] = useState(false);
+  const rawDetail = event.detail;
+  const maskedDetail = useMemo(() => rawDetail ? maskActivityDetailSecrets(rawDetail) : undefined, [rawDetail]);
+  const displayDetail = detailRevealed ? rawDetail : maskedDetail;
+  const detailIsMasked = Boolean(rawDetail && maskedDetail && rawDetail !== maskedDetail);
+  const detailIsLong = Boolean(rawDetail && (rawDetail.length > 600 || rawDetail.split(/\n/).length > 6));
   return (
-    <div className={`chat-inline-activity-event is-${event.kind}`} title={event.detail ?? event.label}>
-      <Icon size={14} aria-hidden />
-      <span>{event.label}</span>
+    <div className={`chat-inline-activity-event is-${event.kind}`}>
+      <div className="chat-inline-activity-heading" title={event.label}>
+        <Icon size={14} aria-hidden />
+        <span>{event.label}</span>
+      </div>
+      {displayDetail && (
+        <>
+          <pre className={`chat-inline-activity-detail ${detailIsLong && !detailExpanded ? "is-collapsed" : ""}`}>{displayDetail}</pre>
+          {(detailIsMasked || detailIsLong) && (
+            <div className="chat-inline-activity-actions">
+              {detailIsMasked && (
+                <button type="button" className="chat-inline-activity-action" onClick={() => setDetailRevealed((value) => !value)}>
+                  {detailRevealed ? <EyeOff size={13} aria-hidden /> : <Eye size={13} aria-hidden />}
+                  <span>{detailRevealed ? "Hide" : "Reveal"}</span>
+                </button>
+              )}
+              {detailIsLong && (
+                <button type="button" className="chat-inline-activity-action" onClick={() => setDetailExpanded((value) => !value)}>
+                  <span>{detailExpanded ? "Show less" : "Show more"}</span>
+                </button>
+              )}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
+}
+
+function maskActivityDetailSecrets(detail: string): string {
+  return detail
+    .replace(/\b(Authorization\s*:\s*Bearer\s+)([^\s"',;]+)/gi, "$1••••")
+    .replace(/((?:^|[\s,{])["']?[A-Za-z0-9_.-]*(?:token|key|password|secret)[A-Za-z0-9_.-]*["']?\s*(?:=|:)\s*["']?)([^\s"',;}]+)/gim, "$1••••");
 }
 
 const StreamingMarkdownText = memo(function StreamingMarkdownText({ content, activityEvents }: { content: string; activityEvents: ChatAgentActivityEvent[] }): JSX.Element {
@@ -199,8 +234,10 @@ function formatElapsed(totalSeconds: number): string {
 function useStreamingElapsedSeconds(startedAt: string): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const handle = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(handle);
+    const handle = globalThis.setInterval(() => setNow(Date.now()), 1000);
+    const nodeTimer = handle as unknown as { unref?: () => void };
+    nodeTimer.unref?.();
+    return () => globalThis.clearInterval(handle);
   }, []);
   const startMs = new Date(startedAt).getTime();
   return Math.max(0, Math.floor((now - startMs) / 1000));

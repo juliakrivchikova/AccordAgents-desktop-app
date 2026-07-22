@@ -1136,6 +1136,7 @@ export type ChatAgentActivityKind = "tool" | "command" | "file-edit" | "web" | "
 export interface ChatAgentActivityEvent {
   id: string;
   sequence: number;
+  itemId?: string;
   kind: ChatAgentActivityKind;
   label: string;
   detail?: string;
