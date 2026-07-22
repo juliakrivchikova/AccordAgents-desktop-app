@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
-import { FileDiff, FileText } from "lucide-react";
+import { Check, FileDiff, FileText, Pencil, X } from "lucide-react";
 
 import type { ArtifactDraftContent, ArtifactDraftView, ArtifactError, PublishedArtifactReadResult } from "../../../shared/types";
 import { artifactMemberLabel } from "../../../shared/artifacts";
-import { ReviseArtifactForm } from "./artifact-forms";
 import { ArtifactVersionSelector } from "./artifact-version-selector";
 import { ArtifactContentSurface } from "./artifact-content-surface";
 
@@ -105,32 +104,38 @@ export function ArtifactDetailView(props: {
         )}
       </div>
 
-      {props.mode === "revise" ? (
-        <ReviseArtifactForm
-          key={`revise-${detail.summary.id}-${props.reviseBase}`}
-          baseVersion={props.reviseBase}
-          initialContent={detail.version.version === detail.summary.headVersion ? detail.version.content : ""}
-          busy={props.busy}
-          onCancel={props.onCancelForm}
-          onSubmit={props.onSubmitRevise}
-        />
-      ) : (
-        <>
-          <div className="artifact-toolbar">
-            <ArtifactVersionSelector
-              key={detail.summary.id}
-              selectedVersion={selectedDraftId ? undefined : detail.version.version}
-              headVersion={detail.summary.headVersion}
-              history={detail.history ?? []}
-              drafts={props.drafts}
-              selectedDraftId={selectedDraftId}
-              onShowVersion={(version) => {
-                setSelectedDraftId(undefined);
-                props.onShowVersion(version);
-              }}
-              onShowDraft={setSelectedDraftId}
-            />
-            {!selectedDraft && detail.version.version > 1 && (
+      <>
+        <div className="artifact-toolbar">
+          <ArtifactVersionSelector
+            key={detail.summary.id}
+            selectedVersion={selectedDraftId ? undefined : detail.version.version}
+            headVersion={detail.summary.headVersion}
+            history={detail.history ?? []}
+            drafts={props.drafts}
+            selectedDraftId={selectedDraftId}
+            onShowVersion={(version) => {
+              setSelectedDraftId(undefined);
+              props.onShowVersion(version);
+            }}
+            onShowDraft={setSelectedDraftId}
+          />
+          {!selectedDraft && props.mode === "revise" ? (
+            <div className="artifact-diff-segment artifact-edit-segment" role="tablist" aria-label="Artifact edit mode">
+              <button
+                type="button"
+                role="tab"
+                aria-selected="false"
+                disabled={props.busy}
+                onClick={props.onCancelForm}
+              >
+                <FileText size={14} aria-hidden /> View
+              </button>
+              <button type="button" className="is-selected" role="tab" aria-selected="true" disabled>
+                <Pencil size={14} aria-hidden /> Edit
+              </button>
+            </div>
+          ) : (
+            !selectedDraft && detail.version.version > 1 && (
               <div className="artifact-diff-segment" role="tablist" aria-label="Artifact view">
                 <button
                   type="button"
@@ -154,72 +159,120 @@ export function ArtifactDetailView(props: {
                   <FileDiff size={14} aria-hidden /> Diff
                 </button>
               </div>
-            )}
-            {!selectedDraft && props.canSign && !props.alreadySigned && (
-              <button
-                type="button"
-                className="artifact-secondary-action"
-                disabled={props.busy}
-                title={`Sign v${detail.version.version}`}
-                onClick={props.onSign}
-              >
-                Sign v{detail.version.version}
-              </button>
-            )}
-          </div>
-          {props.draftError ? (
-            <div className="artifact-draft-error" role="alert">
-              <span>Drafts could not be loaded: {props.draftError.message}</span>
-              <button type="button" className="artifact-secondary-action" onClick={props.onRetryDrafts}>Retry</button>
-            </div>
-          ) : null}
-          {selectedDraft ? (
-            <>
-              <div className="artifact-draft-author" data-testid="artifact-draft-author">
-                Draft by <strong>{artifactMemberLabel(selectedDraft.author)}</strong>
-              </div>
-              {selectedDraftContent ? (
-                <ArtifactContentSurface
-                  content={selectedDraftContent.content}
-                  testId="artifact-draft-content"
-                />
-              ) : (
-                <div className="artifact-draft-unavailable">Draft content is unavailable.</div>
-              )}
-            </>
-          ) : (
-            <>
-              {props.showDiff ? (
-                props.compare?.diff !== undefined ? (
-                  <pre
-                    className="artifact-diff-pre"
-                    data-testid="artifact-version-diff"
-                    aria-label={`Changes from v${detail.version.version - 1} to v${detail.version.version}`}
-                  >
-                    {props.compare.diff.split("\n").map((line, index) => (
-                      <span key={index} className={diffLineClass(line)}>{line || " "}{"\n"}</span>
-                    ))}
-                  </pre>
-                ) : (
-                  <div className="artifact-diff-loading" role="status">
-                    {props.busy ? "Loading diff…" : "Diff unavailable."}
-                  </div>
-                )
-              ) : (
-                <>
-                  {detail.version.note && <div className="artifact-version-note">Note: {detail.version.note}</div>}
-                  <ArtifactContentSurface
-                    content={detail.version.content}
-                    testId="artifact-version-content"
-                    onRevise={props.canEdit ? props.onStartRevise : undefined}
-                    reviseDisabled={props.busy}
-                  />
-                </>
-              )}
-            </>
+            )
           )}
-        </>
-      )}
+          {!selectedDraft && props.mode !== "revise" && props.canSign && !props.alreadySigned && (
+            <button
+              type="button"
+              className="artifact-secondary-action"
+              disabled={props.busy}
+              title={`Sign v${detail.version.version}`}
+              onClick={props.onSign}
+            >
+              Sign v{detail.version.version}
+            </button>
+          )}
+        </div>
+        {props.draftError ? (
+          <div className="artifact-draft-error" role="alert">
+            <span>Drafts could not be loaded: {props.draftError.message}</span>
+            <button type="button" className="artifact-secondary-action" onClick={props.onRetryDrafts}>Retry</button>
+          </div>
+        ) : null}
+        {selectedDraft ? (
+          <>
+            <div className="artifact-draft-author" data-testid="artifact-draft-author">
+              Draft by <strong>{artifactMemberLabel(selectedDraft.author)}</strong>
+            </div>
+            {selectedDraftContent ? (
+              <ArtifactContentSurface
+                content={selectedDraftContent.content}
+                testId="artifact-draft-content"
+              />
+            ) : (
+              <div className="artifact-draft-unavailable">Draft content is unavailable.</div>
+            )}
+          </>
+        ) : props.mode === "revise" ? (
+          <ArtifactRevisionSurface
+            key={`revise-${detail.summary.id}-${props.reviseBase}`}
+            baseVersion={props.reviseBase}
+            initialContent={detail.version.version === detail.summary.headVersion ? detail.version.content : ""}
+            busy={props.busy}
+            onCancel={props.onCancelForm}
+            onSubmit={props.onSubmitRevise}
+          />
+        ) : (
+          <>
+            {props.showDiff ? (
+              props.compare?.diff !== undefined ? (
+                <pre
+                  className="artifact-diff-pre"
+                  data-testid="artifact-version-diff"
+                  aria-label={`Changes from v${detail.version.version - 1} to v${detail.version.version}`}
+                >
+                  {props.compare.diff.split("\n").map((line, index) => (
+                    <span key={index} className={diffLineClass(line)}>{line || " "}{"\n"}</span>
+                  ))}
+                </pre>
+              ) : (
+                <div className="artifact-diff-loading" role="status">
+                  {props.busy ? "Loading diff…" : "Diff unavailable."}
+                </div>
+              )
+            ) : (
+              <>
+                {detail.version.note && <div className="artifact-version-note">Note: {detail.version.note}</div>}
+                <ArtifactContentSurface
+                  content={detail.version.content}
+                  testId="artifact-version-content"
+                  onRevise={props.canEdit ? props.onStartRevise : undefined}
+                  reviseDisabled={props.busy}
+                />
+              </>
+            )}
+          </>
+        )}
+      </>
+    </div>
+  );
+}
+
+function ArtifactRevisionSurface(props: {
+  baseVersion: number;
+  initialContent: string;
+  busy: boolean;
+  onCancel: () => void;
+  onSubmit: (content: string, note: string | undefined) => void;
+}): JSX.Element {
+  const [content, setContent] = useState(props.initialContent);
+  useEffect(() => {
+    setContent(props.initialContent);
+  }, [props.baseVersion, props.initialContent]);
+  return (
+    <div className="artifact-content-surface artifact-edit-surface" data-testid="artifact-revision-content">
+      <div className="artifact-content-fabs">
+        <button type="button" className="artifact-content-action" aria-label="Cancel editing" title="Cancel" onClick={props.onCancel}>
+          <X size={15} aria-hidden />
+        </button>
+        <button
+          type="button"
+          className="artifact-content-action artifact-edit-save"
+          aria-label={`Save as v${props.baseVersion + 1}`}
+          title={`Save as v${props.baseVersion + 1}`}
+          disabled={props.busy || !content}
+          onClick={() => props.onSubmit(content, undefined)}
+        >
+          <Check size={15} aria-hidden />
+        </button>
+      </div>
+      <textarea
+        id="artifact-revise-content"
+        className="artifact-content-edit-textarea"
+        aria-label={`Artifact content for v${props.baseVersion + 1}`}
+        value={content}
+        onChange={(event) => setContent(event.target.value)}
+      />
     </div>
   );
 }

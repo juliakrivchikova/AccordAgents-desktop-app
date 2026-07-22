@@ -116,42 +116,6 @@ export function CreateArtifactForm(props: {
   );
 }
 
-export function ReviseArtifactForm(props: {
-  baseVersion: number;
-  initialContent: string;
-  busy: boolean;
-  onCancel: () => void;
-  onSubmit: (content: string, note: string | undefined) => void;
-}): JSX.Element {
-  const [content, setContent] = useState(props.initialContent);
-  const [note, setNote] = useState("");
-  return (
-    <div className="artifact-form">
-      <ArtifactMarkdownEditor
-        id="artifact-revise-content"
-        label={`Content (v${props.baseVersion} → v${props.baseVersion + 1})`}
-        value={content}
-        rows={14}
-        onChange={setContent}
-      />
-      <label>Revision note <span className="artifact-hint">optional, shown in history and the chat note</span>
-        <input value={note} onChange={(event) => setNote(event.target.value)} />
-      </label>
-      <div className="artifact-form-actions">
-        <button type="button" className="artifact-secondary-action" onClick={props.onCancel}>Cancel</button>
-        <button
-          type="button"
-          className="artifact-primary-action"
-          disabled={props.busy || !content}
-          onClick={() => props.onSubmit(content, note.trim() ? note : undefined)}
-        >
-          Save as v{props.baseVersion + 1}
-        </button>
-      </div>
-    </div>
-  );
-}
-
 export function AccessArtifactForm(props: {
   summary: ArtifactSummary;
   members: string[];
