@@ -11,16 +11,18 @@ import type {
 import { IconButton } from "../primitives";
 import { ArtifactDetailView, formatArtifactRelativeTimestamp, type ArtifactCompareState } from "./artifact-detail";
 import { ArtifactApprovedMark } from "./artifact-approval-badge";
-import { CreateArtifactForm } from "./artifact-forms";
+import { AccessArtifactForm, CreateArtifactForm } from "./artifact-forms";
+import type { ArtifactAccessValues } from "./artifact-forms";
 import { useArtifactsPanelResize } from "./use-artifacts-panel-resize";
 import { MarkdownText } from "../content/markdown-text";
 import { loadArtifactDetail } from "./artifact-detail-loader";
 import { loadArtifactDiff } from "./artifact-diff-loader";
 import { ArtifactDraftInbox } from "./draft-inbox";
 import { ArtifactsList } from "./artifacts-list";
-type PanelMode = "view" | "create" | "revise" | "access";
+type PanelMode = "view" | "create" | "revise";
 export function ArtifactsPanel(props: {
   conversationId: string;
+  members: string[];
   artifacts: ArtifactSummary[];
   selectedId?: string;
   onSelect: (artifactId: string | undefined) => void;
@@ -42,6 +44,7 @@ export function ArtifactsPanel(props: {
   const [diffBusy, setDiffBusy] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const [accessOpen, setAccessOpen] = useState(false);
   const loadGeneration = useRef(0);
   const compareGeneration = useRef(0);
   const resizeLimits = panelResize.getLimits();
@@ -81,6 +84,7 @@ export function ArtifactsPanel(props: {
     compareGeneration.current += 1;
     setDiffBusy(false);
     setRenaming(false);
+    setAccessOpen(false);
     setDrafts([]);
     setDraftError(undefined);
     clearTransient();
@@ -132,11 +136,13 @@ export function ArtifactsPanel(props: {
       setViewVersion(undefined);
       setReviseBase(head.summary.headVersion);
       clearTransient();
+      setAccessOpen(false);
       setMode("revise");
       return;
     }
     setReviseBase(detail.summary.headVersion);
     clearTransient();
+    setAccessOpen(false);
     setMode("revise");
   }
   async function submitRevise(content: string, note: string | undefined): Promise<void> {
@@ -186,6 +192,19 @@ export function ArtifactsPanel(props: {
       void loadDetail(detail.summary.id, viewVersion);
     }
   }
+  async function submitAccess(values: ArtifactAccessValues): Promise<void> {
+    if (!detail) {
+      return;
+    }
+    const value = await run(() => window.consensus.updateArtifactAccess({
+      conversationId: props.conversationId,
+      artifactId: detail.summary.id,
+      ...values
+    }));
+    if (value) {
+      void loadDetail(detail.summary.id, viewVersion);
+    }
+  }
   const me = ARTIFACT_USER_MEMBER;
   const canEdit = detail ? me === ARTIFACT_USER_MEMBER || detail.summary.owner === me || detail.summary.contributors.includes(me) : false;
   const canManageAccess = detail ? me === ARTIFACT_USER_MEMBER || detail.summary.owner === me : false;
@@ -215,6 +234,7 @@ export function ArtifactsPanel(props: {
             icon={ArrowLeft}
             onClick={() => {
               setMode("view");
+              setAccessOpen(false);
               clearTransient();
               props.onSelect(undefined);
             }}
@@ -260,7 +280,7 @@ export function ArtifactsPanel(props: {
             label="New artifact"
             icon={FilePlus2}
             tooltip="New artifact"
-            onClick={() => { clearTransient(); setMode("create"); }}
+            onClick={() => { clearTransient(); setAccessOpen(false); setMode("create"); }}
           />
         )}
         {props.selectedId && mode !== "create" && canManageAccess && (
@@ -269,11 +289,20 @@ export function ArtifactsPanel(props: {
             icon={UsersRound}
             tooltip="Manage access"
             disabled={!detail || busy}
-            onClick={() => { clearTransient(); setMode("access"); }}
+            pressed={accessOpen}
+            onClick={() => { clearTransient(); setAccessOpen((open) => !open); }}
           />
         )}
         <IconButton label="Close artifacts" icon={X} onClick={props.onClose} />
       </div>
+      {accessOpen && detail ? (
+        <AccessArtifactForm
+          summary={detail.summary}
+          members={props.members}
+          busy={busy}
+          onSubmit={(values) => void submitAccess(values)}
+        />
+      ) : null}
       {!props.selectedId && mode !== "create" && (
         <div className="artifact-list-tabs" role="tablist" aria-label="Artifact status">
           <button type="button" className="artifact-list-tab is-active" role="tab" aria-selected="true">
@@ -363,19 +392,6 @@ export function ArtifactsPanel(props: {
           onSubmitRename={() => void submitRename()}
           onStartRevise={() => void startRevise()}
           onSubmitRevise={(content, note) => void submitRevise(content, note)}
-          onStartAccess={() => { clearTransient(); setMode("access"); }}
-          onSubmitAccess={(values) => {
-            void run(() => window.consensus.updateArtifactAccess({
-              conversationId: props.conversationId,
-              artifactId: detail.summary.id,
-              ...values
-            })).then((value) => {
-              if (value) {
-                setMode("view");
-                void loadDetail(detail.summary.id, viewVersion);
-              }
-            });
-          }}
           onCancelForm={() => { setMode("view"); clearTransient(); }}
           onSign={() => void submitSign()}
           onShowVersion={(version) => {

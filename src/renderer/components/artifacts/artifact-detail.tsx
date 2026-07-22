@@ -3,8 +3,7 @@ import { FileDiff, FileText } from "lucide-react";
 
 import type { ArtifactDraftContent, ArtifactDraftView, ArtifactError, PublishedArtifactReadResult } from "../../../shared/types";
 import { artifactMemberLabel } from "../../../shared/artifacts";
-import { AccessArtifactForm, ReviseArtifactForm } from "./artifact-forms";
-import type { ArtifactAccessValues } from "./artifact-forms";
+import { ReviseArtifactForm } from "./artifact-forms";
 import { ArtifactVersionSelector } from "./artifact-version-selector";
 import { ArtifactContentSurface } from "./artifact-content-surface";
 
@@ -47,7 +46,7 @@ export function ArtifactDetailView(props: {
   detail: PublishedArtifactReadResult;
   drafts: ArtifactDraftView[];
   draftError?: ArtifactError;
-  mode: "view" | "revise" | "access";
+  mode: "view" | "revise";
   busy: boolean;
   canEdit: boolean;
   canSign: boolean;
@@ -63,8 +62,6 @@ export function ArtifactDetailView(props: {
   onSubmitRename: () => void;
   onStartRevise: () => void;
   onSubmitRevise: (content: string, note: string | undefined) => void;
-  onStartAccess: () => void;
-  onSubmitAccess: (values: ArtifactAccessValues) => void;
   onCancelForm: () => void;
   onSign: () => void;
   onShowVersion: (version: number) => void;
@@ -116,13 +113,6 @@ export function ArtifactDetailView(props: {
           busy={props.busy}
           onCancel={props.onCancelForm}
           onSubmit={props.onSubmitRevise}
-        />
-      ) : props.mode === "access" ? (
-        <AccessArtifactForm
-          summary={detail.summary}
-          busy={props.busy}
-          onCancel={props.onCancelForm}
-          onSubmit={props.onSubmitAccess}
         />
       ) : (
         <>

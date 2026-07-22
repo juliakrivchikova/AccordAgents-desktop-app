@@ -10,6 +10,7 @@ import type {
   Conversation,
   RepoFileMention
 } from "../../../shared/types";
+import { artifactMembersForConversation } from "../../../shared/artifacts";
 import { activeRunSummaryForConversation } from "../../../shared/chatActiveRuns";
 import { Avatar } from "../avatar/avatar";
 import { LocalFileLinkContext, LocalFileOpenChooser } from "../content/local-file-link";
@@ -392,6 +393,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
           {showArtifactsPanel && (
             <ArtifactsPanel
               conversationId={props.conversation.id}
+              members={artifactMembersForConversation(props.conversation)}
               artifacts={artifacts.artifacts}
               selectedId={artifacts.selectedId}
               onSelect={artifacts.selectArtifact}
