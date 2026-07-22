@@ -221,6 +221,13 @@ interface CodexAppServerPendingTurn {
   turnId?: string;
   messages: string[];
   streamedText: string;
+  visibleTranscript: string;
+  visibleOutputEnded: boolean;
+  outputItems: Map<string, {
+    raw: string;
+    atLineStart: boolean;
+    finished: boolean;
+  }>;
   completedAgentMessages: string[];
   finalMessage?: string;
   nextAgentMessageStartsBlock: boolean;
@@ -1781,6 +1788,9 @@ export class CliAgentRunner {
             threadId: currentThreadId,
             messages: [],
             streamedText: "",
+            visibleTranscript: "",
+            visibleOutputEnded: false,
+            outputItems: new Map(),
             completedAgentMessages: [],
             nextAgentMessageStartsBlock: false,
             model: activeModel,
@@ -1807,7 +1817,7 @@ export class CliAgentRunner {
             }
           ]
         }, timeoutMs) as CodexAppServerTurnStartResult;
-        if (pendingTurn) {
+        if (pendingTurn && !pendingTurn.turnId) {
           pendingTurn.turnId = turn.turn?.id;
         }
         return resultPromise;
@@ -1991,6 +2001,13 @@ export class CliAgentRunner {
     );
   }
 
+  private codexAppServerThreadId(record: Record<string, unknown>, params: Record<string, unknown>): string | undefined {
+    return (
+      this.findStringField(params, ["threadId", "thread_id"]) ??
+      this.findStringField(record, ["threadId", "thread_id"])
+    );
+  }
+
   private codexAppServerEventNames(record: Record<string, unknown>): string[] {
     const names = new Set<string>();
     const add = (value: unknown): void => {
@@ -2064,7 +2081,19 @@ export class CliAgentRunner {
     }
     this.logCodexAppServerNotificationSummary(method, params, pending);
     const eventTurnId = this.codexAppServerTurnId(record, params);
-    if (pending.turnId && eventTurnId && eventTurnId !== pending.turnId) {
+    const eventThreadId = this.codexAppServerThreadId(record, params);
+    if (eventThreadId && eventThreadId !== pending.threadId) {
+      return;
+    }
+    // Current app-server notifications always identify their thread. Keep the
+    // turn-id fallback for older/experimental events that do not. A goal can
+    // replace the root turn id while continuing in the same thread, whereas a
+    // native subagent runs in a different thread.
+    if (!eventThreadId && pending.turnId && eventTurnId && eventTurnId !== pending.turnId) {
+      return;
+    }
+    if (method === "turn/started") {
+      pending.turnId = eventTurnId ?? pending.turnId;
       return;
     }
     if (method === "item/autoApprovalReview/started") {
@@ -2091,7 +2120,8 @@ export class CliAgentRunner {
       if (summary) {
         this.emitLiveOutput(pending.onOutput, "tool", `${summary.label}\n`, undefined, {
           activityKind: summary.kind,
-          activityStatus: "started"
+          activityStatus: "started",
+          ...(summary.detail ? { activityDetail: summary.detail } : {})
         });
       }
       return;
@@ -2102,27 +2132,83 @@ export class CliAgentRunner {
         pending.messages.push(delta);
         if (pending.nextAgentMessageStartsBlock) {
           pending.streamedText = this.textWithAgentMessageBoundary(pending.streamedText, delta);
-          pending.nextAgentMessageStartsBlock = false;
         }
         pending.streamedText += delta;
-        this.emitLiveOutput(pending.onOutput, "text", delta, pending.streamedText);
+        this.appendCodexAppServerAgentText(pending, delta, pending.nextAgentMessageStartsBlock);
+        pending.nextAgentMessageStartsBlock = false;
+      }
+      return;
+    }
+    if (method === "item/commandExecution/outputDelta" || method === "item/fileChange/outputDelta") {
+      const delta = this.stringField(params, "delta");
+      if (delta) {
+        this.appendCodexAppServerOutput(pending, this.stringField(params, "itemId") ?? method, delta);
+      }
+      return;
+    }
+    if (method === "item/mcpToolCall/progress") {
+      const message = this.stringField(params, "message");
+      if (message) {
+        this.appendCodexAppServerOutput(
+          pending,
+          this.stringField(params, "itemId") ?? method,
+          message.endsWith("\n") ? message : `${message}\n`
+        );
+      }
+      return;
+    }
+    if (method === "item/fileChange/patchUpdated") {
+      const detail = this.codexAppServerFileChangesDetail(params.changes);
+      if (detail) {
+        this.emitLiveOutput(pending.onOutput, "tool", "Updating files\n", undefined, {
+          activityKind: "file-edit",
+          activityStatus: "started",
+          activityDetail: detail
+        });
       }
       return;
     }
     if (method === "item/completed") {
       const item = this.asRecord(params.item);
-      if (this.stringField(item ?? {}, "type") === "agentMessage") {
+      const itemType = this.stringField(item ?? {}, "type");
+      const itemId = this.stringField(item ?? {}, "id") ?? itemType ?? "completed-item";
+      if (itemType === "agentMessage") {
         const text = this.stringField(item ?? {}, "text");
         if (text) {
           pending.finalMessage = text;
           pending.completedAgentMessages.push(text);
+          if (!pending.streamedText.trimEnd().endsWith(text.trimEnd())) {
+            pending.streamedText = this.textWithAgentMessageBoundary(pending.streamedText, text);
+            pending.streamedText += text;
+            this.appendCodexAppServerAgentText(pending, text, true);
+          }
         }
-      } else if (this.stringField(item ?? {}, "type") === "subAgentActivity") {
+      } else if (itemType === "subAgentActivity") {
+        const detail = this.codexAppServerSubagentDetail(item);
         this.emitLiveOutput(pending.onOutput, "tool", "Using subagent\n", undefined, {
           activityKind: "tool",
-          activityStatus: "completed"
+          activityStatus: "completed",
+          ...(detail ? { activityDetail: detail } : {})
         });
       }
+      const output = this.codexAppServerCompletedItemOutput(item);
+      if (output) {
+        const priorOutput = pending.outputItems.get(itemId)?.raw ?? "";
+        let remainingOutput = "";
+        if (output.startsWith(priorOutput)) {
+          remainingOutput = output.slice(priorOutput.length);
+        } else if (!priorOutput.startsWith(output) && priorOutput.trim() !== output.trim()) {
+          remainingOutput = `${priorOutput.endsWith("\n") ? "" : "\n"}${output}`;
+        }
+        if (remainingOutput) {
+          this.appendCodexAppServerOutput(
+            pending,
+            itemId,
+            remainingOutput
+          );
+        }
+      }
+      this.finishCodexAppServerOutput(pending, itemId);
       return;
     }
     if (method === "thread/tokenUsage/updated") {
@@ -2225,6 +2311,187 @@ export class CliAgentRunner {
     return " ";
   }
 
+  private appendCodexAppServerAgentText(
+    pending: CodexAppServerPendingTurn,
+    text: string,
+    startsBlock: boolean
+  ): void {
+    if (!text) {
+      return;
+    }
+    if (startsBlock && pending.visibleTranscript.trim()) {
+      const trimmed = pending.visibleTranscript.trimEnd();
+      pending.visibleTranscript = pending.visibleOutputEnded
+        ? `${trimmed}\n\n`
+        : this.textWithAgentMessageBoundary(trimmed, text);
+    }
+    pending.visibleTranscript += text;
+    pending.visibleOutputEnded = false;
+    this.emitLiveOutput(pending.onOutput, "text", text, pending.visibleTranscript);
+  }
+
+  private appendCodexAppServerOutput(
+    pending: CodexAppServerPendingTurn,
+    itemId: string,
+    output: string
+  ): void {
+    if (!output) {
+      return;
+    }
+    let state = pending.outputItems.get(itemId);
+    if (!state || state.finished) {
+      state = {
+        raw: "",
+        atLineStart: true,
+        finished: false
+      };
+      pending.outputItems.set(itemId, state);
+      if (pending.visibleTranscript.trim()) {
+        pending.visibleTranscript = `${pending.visibleTranscript.trimEnd()}\n\n`;
+      }
+    }
+    let formatted = "";
+    for (const character of output) {
+      if (state.atLineStart) {
+        formatted += "    ";
+        state.atLineStart = false;
+      }
+      formatted += character;
+      if (character === "\n") {
+        state.atLineStart = true;
+      }
+    }
+    state.raw += output;
+    pending.visibleTranscript += formatted;
+    pending.visibleOutputEnded = true;
+    this.emitLiveOutput(pending.onOutput, "text", formatted, pending.visibleTranscript);
+  }
+
+  private finishCodexAppServerOutput(pending: CodexAppServerPendingTurn, itemId: string): void {
+    const state = pending.outputItems.get(itemId);
+    if (!state || state.finished) {
+      return;
+    }
+    state.finished = true;
+    if (!pending.visibleTranscript.endsWith("\n\n")) {
+      const separator = pending.visibleTranscript.endsWith("\n") ? "\n" : "\n\n";
+      pending.visibleTranscript += separator;
+      this.emitLiveOutput(pending.onOutput, "text", separator, pending.visibleTranscript);
+    }
+    pending.visibleOutputEnded = true;
+  }
+
+  private codexAppServerCompletedItemOutput(item: Record<string, unknown> | undefined): string | undefined {
+    if (!item) {
+      return undefined;
+    }
+    const type = this.stringField(item, "type");
+    if (type === "commandExecution") {
+      return this.stringField(item, "aggregatedOutput");
+    }
+    if (type === "fileChange") {
+      return this.codexAppServerFileChangesOutput(item.changes);
+    }
+    if (type === "mcpToolCall") {
+      const error = this.asRecord(item.error);
+      if (error) {
+        return this.stringField(error, "message");
+      }
+      const result = this.asRecord(item.result);
+      return result ? this.codexAppServerOutputContent(result.content) : undefined;
+    }
+    if (type === "dynamicToolCall") {
+      return this.codexAppServerOutputContent(item.contentItems);
+    }
+    if (type === "collabAgentToolCall") {
+      return this.codexAppServerReadableJson(item.agentsStates);
+    }
+    if (type === "imageGeneration") {
+      return this.stringField(item, "result");
+    }
+    return undefined;
+  }
+
+  private codexAppServerOutputContent(value: unknown): string | undefined {
+    if (!Array.isArray(value)) {
+      return this.codexAppServerReadableJson(value);
+    }
+    const parts = value.flatMap((entry): string[] => {
+      if (typeof entry === "string") {
+        return [entry];
+      }
+      const record = this.asRecord(entry);
+      if (!record) {
+        return [];
+      }
+      const text = this.findStringField(record, ["text", "outputText", "output_text"]);
+      if (text) {
+        return [text];
+      }
+      const type = this.stringField(record, "type");
+      if (type && /image|audio/i.test(type)) {
+        return [`[${type} output]`];
+      }
+      return [this.codexAppServerReadableJson(record) ?? ""];
+    }).filter(Boolean);
+    return parts.length > 0 ? parts.join("\n") : undefined;
+  }
+
+  private codexAppServerFileChangesDetail(value: unknown): string | undefined {
+    if (!Array.isArray(value)) {
+      return undefined;
+    }
+    const paths = value.map((entry) => {
+      const record = this.asRecord(entry);
+      const path = this.stringField(record ?? {}, "path");
+      const kind = this.stringField(record ?? {}, "kind");
+      return path ? `${kind ? `${kind}: ` : ""}${path}` : undefined;
+    }).filter((entry): entry is string => Boolean(entry));
+    return paths.length > 0 ? paths.join("\n") : undefined;
+  }
+
+  private codexAppServerFileChangesOutput(value: unknown): string | undefined {
+    if (!Array.isArray(value)) {
+      return undefined;
+    }
+    const diffs = value.map((entry) => {
+      const record = this.asRecord(entry);
+      if (!record) {
+        return undefined;
+      }
+      const diff = this.stringField(record, "diff");
+      const path = this.stringField(record, "path");
+      if (!diff) {
+        return undefined;
+      }
+      return path ? `${path}\n${diff}` : diff;
+    }).filter((entry): entry is string => Boolean(entry));
+    return diffs.length > 0 ? diffs.join("\n\n") : undefined;
+  }
+
+  private codexAppServerSubagentDetail(item: Record<string, unknown> | undefined): string | undefined {
+    if (!item) {
+      return undefined;
+    }
+    const kind = this.stringField(item, "kind");
+    const agentPath = this.stringField(item, "agentPath");
+    return [kind, agentPath].filter(Boolean).join(" · ") || undefined;
+  }
+
+  private codexAppServerReadableJson(value: unknown): string | undefined {
+    if (value === undefined || value === null) {
+      return undefined;
+    }
+    if (typeof value === "string") {
+      return value;
+    }
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  }
+
   private logCodexAppServerNotificationSummary(
     method: string,
     params: Record<string, unknown>,
@@ -2245,30 +2512,50 @@ export class CliAgentRunner {
     });
   }
 
-  private codexAppServerToolSummary(item: Record<string, unknown> | undefined): { label: string; kind: ChatAgentActivityKind } | undefined {
+  private codexAppServerToolSummary(item: Record<string, unknown> | undefined): { label: string; kind: ChatAgentActivityKind; detail?: string } | undefined {
     if (!item) {
       return undefined;
     }
     const type = this.stringField(item, "type");
     if (type === "commandExecution") {
-      return { label: "Running command", kind: "command" };
+      return { label: "Running command", kind: "command", detail: this.stringField(item, "command") };
     }
     if (type === "mcpToolCall") {
       const tool = this.stringField(item, "tool");
-      return { label: tool ? this.toolActivityLabel(tool) : "Using MCP tool", kind: "tool" };
+      return {
+        label: tool ? this.toolActivityLabel(tool) : "Using MCP tool",
+        kind: "tool",
+        detail: this.codexAppServerReadableJson(item.arguments)
+      };
     }
     if (type === "dynamicToolCall") {
       const tool = this.stringField(item, "tool");
-      return { label: tool ? this.toolActivityLabel(tool) : "Using tool", kind: "tool" };
+      return {
+        label: tool ? this.toolActivityLabel(tool) : "Using tool",
+        kind: "tool",
+        detail: this.codexAppServerReadableJson(item.arguments)
+      };
+    }
+    if (type === "collabAgentToolCall") {
+      const tool = this.stringField(item, "tool");
+      const label = tool === "spawnAgent"
+        ? "Spawning subagent"
+        : tool === "sendInput"
+          ? "Messaging subagent"
+          : tool === "wait"
+            ? "Waiting for subagent"
+            : "Using subagent";
+      const detail = this.stringField(item, "prompt") ?? this.codexAppServerReadableJson(item.agentsStates);
+      return { label, kind: "tool", detail };
     }
     if (type === "webSearch") {
-      return { label: "Using web search", kind: "web" };
+      return { label: "Using web search", kind: "web", detail: this.stringField(item, "query") };
     }
     if (type === "imageView") {
-      return { label: "Viewing image", kind: "tool" };
+      return { label: "Viewing image", kind: "tool", detail: this.stringField(item, "path") };
     }
     if (type === "fileChange") {
-      return { label: "Updating files", kind: "file-edit" };
+      return { label: "Updating files", kind: "file-edit", detail: this.codexAppServerFileChangesDetail(item.changes) };
     }
     return undefined;
   }

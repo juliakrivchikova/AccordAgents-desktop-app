@@ -147,16 +147,15 @@ test("processing transcript metadata preserves visible stream text", () => {
   assert.equal(service.processingTranscriptFromContent("   ", NOW), undefined);
 });
 
-test("processing transcript metadata caps oversized streams to the latest text", () => {
+test("processing transcript metadata preserves oversized streams in full", () => {
   const service = testService().service as any;
   const content = `${"a".repeat(100_010)}tail`;
   const transcript = service.processingTranscriptFromContent(content, NOW);
 
-  assert.equal(transcript.content.length, 100_000);
-  assert.equal(transcript.content.endsWith("tail"), true);
+  assert.equal(transcript.content, content);
   assert.equal(transcript.originalLength, content.length);
-  assert.equal(transcript.retainedStart, content.length - 100_000);
-  assert.equal(transcript.truncated, true);
+  assert.equal(transcript.retainedStart, undefined);
+  assert.equal(transcript.truncated, undefined);
 });
 
 test("processing transcript metadata records omitted activity event count", () => {
@@ -1599,8 +1598,19 @@ test("permission resume registers a cancellable chat run controller", async () =
   });
   const { service, storage, tempRoot } = testService({
     conversation,
-    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, signal: AbortSignal | undefined) => {
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, signal: AbortSignal | undefined, runOptions: any) => {
       capturedSignal = signal;
+      runOptions.onOutput?.({
+        kind: "text",
+        text: "Partial reply.",
+        cumulative: "Partial reply."
+      });
+      runOptions.onOutput?.({
+        kind: "tool",
+        text: "Running command\n",
+        activityKind: "command",
+        activityDetail: "npm test"
+      });
       markStarted();
       await new Promise<void>((resolve) => {
         if (signal?.aborted) {
@@ -1644,8 +1654,75 @@ test("permission resume registers a cancellable chat run controller", async () =
   assert.equal(stoppedMessage?.status, "error");
   assert.equal(stoppedMessage?.metadata?.terminalReason, "user-stopped");
   assert.equal(stoppedMessage?.content, "@drew stopped by user.");
+  assert.equal(
+    stoppedMessage?.metadata?.processingTranscript?.content,
+    "Partial reply.\n\n@drew stopped by user."
+  );
+  assert.equal(stoppedMessage?.metadata?.activityEvents?.[0]?.label, "Running command");
+  assert.equal(stoppedMessage?.metadata?.activityEvents?.[0]?.detail, "npm test");
   assert.equal(stoppedMessage?.id, pendingMessageId);
   assert.equal(storage.current.metadata.lastMessageByParticipant?.[participant.id]?.messageId, stoppedMessage?.id);
+});
+
+test("running participant cancellation preserves output in one stopped bubble", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, signal: AbortSignal | undefined, runOptions: any) => {
+      runOptions.onOutput?.({
+        kind: "text",
+        text: "Work in progress.",
+        cumulative: "Work in progress."
+      });
+      markStarted();
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) {
+          resolve();
+          return;
+        }
+        signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return {
+        participant: runParticipant,
+        ok: false,
+        content: "provider cancellation notice",
+        error: "cancelled",
+        durationMs: 1
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "send-run",
+    content: `@${participant.handle} start work`
+  });
+  await started;
+  const pending = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "participant" && message.status === "pending"
+  );
+  assert.ok(pending?.metadata?.runId);
+
+  assert.equal(service.cancelRun(pending.metadata.runId), true);
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.id === pending.id && message.metadata?.terminalReason === "user-stopped"
+  ));
+
+  const stopped = storage.current.messages.find((message: ChatMessage) => message.id === pending.id);
+  assert.equal(stopped?.content, `@${participant.handle} stopped by user.`);
+  assert.equal(
+    stopped?.metadata?.processingTranscript?.content,
+    `Work in progress.\n\n@${participant.handle} stopped by user.`
+  );
+  assert.equal(storage.current.messages.some((message: ChatMessage) =>
+    message.role === "system" && message.content === `@${participant.handle} stopped by user.`
+  ), false);
 });
 
 test("stop from a non-owner instance records a cancel request the owning instance honors", async () => {
@@ -2422,7 +2499,7 @@ test("remote provider activity survives split JSONL and renders before text", as
   assert.equal(replay.providerActivityEvents.length, 1);
 });
 
-test("remote activity accumulator survives restart, dedupes labels, and stays bounded", async () => {
+test("remote activity accumulator survives restart and preserves every activity", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant], {
     remoteRunHandles: {
@@ -2482,12 +2559,12 @@ test("remote activity accumulator survives restart, dedupes labels, and stays bo
 
   const replay = (restarted.storage.current.metadata.remoteRunReplay as any)["remote-run"];
   const message = restarted.storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote");
-  assert.equal(replay.providerActivitySequence, 83);
-  assert.equal(replay.providerActivityEvents.length, 80);
-  assert.equal(replay.providerOmittedActivityEventCount, 3);
-  assert.equal(replay.providerActivityEvents[0].label, "Using tool_2");
+  assert.equal(replay.providerActivitySequence, 84);
+  assert.equal(replay.providerActivityEvents.length, 84);
+  assert.equal(replay.providerOmittedActivityEventCount, 0);
+  assert.equal(replay.providerActivityEvents[0].label, "Using first_tool");
   assert.equal(replay.providerActivityEvents.at(-1).label, "Using tool_81");
-  assert.equal(message?.metadata?.activityEvents?.length, 80);
+  assert.equal(message?.metadata?.activityEvents?.length, 84);
 });
 
 test("stale conversation replay merge does not double-count omitted remote activity", async () => {
@@ -2533,10 +2610,10 @@ test("stale conversation replay merge does not double-count omitted remote activ
 
   const replay = (staleConversation.metadata.remoteRunReplay as any)["remote-run"];
   assert.equal(replay.providerActivitySequence, 150);
-  assert.equal(replay.providerActivityEvents.length, 80);
-  assert.equal(replay.providerActivityEvents[0].sequence, 71);
+  assert.equal(replay.providerActivityEvents.length, 90);
+  assert.equal(replay.providerActivityEvents[0].sequence, 61);
   assert.equal(replay.providerActivityEvents.at(-1).sequence, 150);
-  assert.equal(replay.providerOmittedActivityEventCount, 70);
+  assert.equal(replay.providerOmittedActivityEventCount, 60);
 });
 
 test("remote Assistant result keeps exact content and records preference only after successful terminalization", async () => {

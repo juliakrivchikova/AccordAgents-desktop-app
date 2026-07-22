@@ -103,9 +103,12 @@ export const ChatExpandedProcessingTranscript = memo(function ChatExpandedProces
 function ChatInlineActivityEvent({ event }: { event: ChatAgentActivityEvent }): JSX.Element {
   const Icon = iconForActivityKind(event.kind);
   return (
-    <div className={`chat-inline-activity-event is-${event.kind}`} title={event.detail ?? event.label}>
-      <Icon size={14} aria-hidden />
-      <span>{event.label}</span>
+    <div className={`chat-inline-activity-event is-${event.kind}`}>
+      <div className="chat-inline-activity-heading" title={event.label}>
+        <Icon size={14} aria-hidden />
+        <span>{event.label}</span>
+      </div>
+      {event.detail && <pre className="chat-inline-activity-detail">{event.detail}</pre>}
     </div>
   );
 }

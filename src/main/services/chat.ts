@@ -344,8 +344,6 @@ const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
 const CHAT_SEND_MESSAGE_MAX_CONTENT_LENGTH = 200_000;
 const CHAT_SEND_MESSAGE_MAX_PER_RUN = 12;
 const CHAT_REMOVED_MESSAGE_ID_MAX = 100;
-const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 100_000;
-const CHAT_ACTIVITY_EVENT_MAX_COUNT = 80;
 const WORKFLOW_MANAGER_ROLE_ID = "workflow-manager";
 const ACTIVE_RUN_OWNERS_KEY = "activeRunOwnersByRunId";
 const ACTIVE_RUN_PARTICIPANTS_KEY = "activeRunParticipantIdsByRunId";
@@ -5604,6 +5602,7 @@ export class ChatService {
     await this.withChatMutation(conversation, async () => {
       let threadId: string | undefined;
       let chatThreadRootId: string | undefined;
+      let keptStoppedParticipantMessage = false;
       if (pendingMessageId) {
         const idx = conversation.messages.findIndex((message) => message.id === pendingMessageId);
         if (idx >= 0) {
@@ -5625,6 +5624,13 @@ export class ChatService {
               metadata
             };
           }
+          if (
+            pending.role === "participant" &&
+            pending.status === "error" &&
+            pending.metadata?.terminalReason === "user-stopped"
+          ) {
+            keptStoppedParticipantMessage = true;
+          }
         }
       }
       this.markPendingAppToolApprovalsForRunTerminal(
@@ -5632,12 +5638,14 @@ export class ChatService {
         runId,
         `@${participant.handle} stopped before pending approval was resolved.`
       );
-      conversation.messages.push(this.message(
-        "system",
-        `@${participant.handle} stopped by user.`,
-        undefined,
-        { threadId, chatThreadRootId }
-      ));
+      if (!keptStoppedParticipantMessage) {
+        conversation.messages.push(this.message(
+          "system",
+          `@${participant.handle} stopped by user.`,
+          undefined,
+          { threadId, chatThreadRootId }
+        ));
+      }
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
     });
@@ -6063,19 +6071,23 @@ export class ChatService {
       if (!signal?.aborted && !result.ok && result.error) {
         options.warnings.push(`@${participant.handle}: ${result.error}`);
       }
-      if (!signal?.aborted) {
-        const workedMs = Date.parse(now) - Date.parse(pendingMessage.createdAt);
-        if (Number.isFinite(workedMs) && workedMs >= 0) {
-          pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
-        }
-        const activityEvents = progressSink.activityEvents();
-        if (activityEvents.length > 0) {
-          pendingMessage.metadata = { ...pendingMessage.metadata, activityEvents };
-        }
-        const processingTranscript = progressSink.processingTranscript(now);
-        if (processingTranscript) {
-          pendingMessage.metadata = { ...pendingMessage.metadata, processingTranscript };
-        }
+      const workedMs = Date.parse(now) - Date.parse(pendingMessage.createdAt);
+      if (Number.isFinite(workedMs) && workedMs >= 0) {
+        pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
+      }
+      const activityEvents = progressSink.activityEvents();
+      if (activityEvents.length > 0) {
+        pendingMessage.metadata = { ...pendingMessage.metadata, activityEvents };
+      }
+      let processingTranscript = progressSink.processingTranscript(now);
+      if (processingTranscript && signal?.aborted) {
+        processingTranscript = this.processingTranscriptWithTerminalMessage(
+          processingTranscript,
+          pendingMessage.content
+        );
+      }
+      if (processingTranscript) {
+        pendingMessage.metadata = { ...pendingMessage.metadata, processingTranscript };
       }
       if (!signal?.aborted && result.ok && result.content.trim()) {
         this.commitPromptContextPointerAdvance(conversation, participant.id, preparedPromptContext.pointerAdvance);
@@ -6113,9 +6125,9 @@ export class ChatService {
         }
       }
       // Skip the snapshot push for two cases:
-      //   1. The run was cancelled — caller (`discardStoppedTargetRun`) will drop
-      //      the pending message and emit a clean "stopped by user" note under
-      //      `withChatMutation`.
+      //   1. The run was cancelled — caller (`discardStoppedTargetRun`) will
+      //      preserve a finalized stopped bubble (including captured output),
+      //      or replace a never-started queued bubble with a system note.
       //   2. This run came from `runParticipantBatch` (identified by the
       //      pre-created `existingPendingMessage`) — that caller emits the final
       //      snapshot under `withChatMutation` via `appendCompletedTurn`.
@@ -6211,9 +6223,7 @@ export class ChatService {
 
   private markParticipantMessageStoppedByUser(message: ChatMessage, participant: ChatParticipant): void {
     message.status = "error";
-    if (!message.content.trim()) {
-      message.content = `@${participant.handle} stopped by user.`;
-    }
+    message.content = `@${participant.handle} stopped by user.`;
     message.metadata = {
       ...message.metadata,
       terminalReason: "user-stopped"
@@ -8143,8 +8153,7 @@ export class ChatService {
       });
     }
     return Array.from(byId.values())
-      .sort((left, right) => left.sequence - right.sequence || left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
-      .slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT);
+      .sort((left, right) => left.sequence - right.sequence || left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
   }
 
   private mergeRemoteRunActivityEvents(
@@ -8157,10 +8166,9 @@ export class ChatService {
     }
     const events = Array.from(byId.values())
       .sort((left, right) => left.sequence - right.sequence || left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
-    const dropped = Math.max(0, events.length - CHAT_ACTIVITY_EVENT_MAX_COUNT);
     return {
-      events: dropped > 0 ? events.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT) : events,
-      dropped
+      events,
+      dropped: 0
     };
   }
 
@@ -16766,7 +16774,7 @@ export class ChatService {
     options: { createdAt?: string; afterContentLength?: number } = {}
   ): ChatActivityAccumulator {
     const label = event.text.trim().replace(/\s+/g, " ");
-    if (!label || label === current.label) {
+    if (!label) {
       return current;
     }
     const sequence = current.sequence + 1;
@@ -16780,18 +16788,12 @@ export class ChatService {
       status: event.activityStatus ?? "started",
       afterContentLength: options.afterContentLength
     };
-    let events = [...current.events, nextEvent];
-    let omittedCount = current.omittedCount;
-    if (events.length > CHAT_ACTIVITY_EVENT_MAX_COUNT) {
-      const dropped = events.length - CHAT_ACTIVITY_EVENT_MAX_COUNT;
-      omittedCount += dropped;
-      events = events.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT);
-    }
+    const events = [...current.events, nextEvent];
     return {
       events,
       sequence,
       label,
-      omittedCount
+      omittedCount: current.omittedCount
     };
   }
 
@@ -16948,22 +16950,29 @@ export class ChatService {
     const omittedActivityEventCount = options.omittedActivityEventCount && options.omittedActivityEventCount > 0
       ? options.omittedActivityEventCount
       : undefined;
-    if (originalLength <= CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS) {
-      return {
-        content: normalized,
-        capturedAt,
-        originalLength,
-        ...(omittedActivityEventCount ? { omittedActivityEventCount } : {})
-      };
-    }
-    const retainedStart = originalLength - CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS;
     return {
-      content: normalized.slice(retainedStart),
+      content: normalized,
       capturedAt,
       originalLength,
-      retainedStart,
-      truncated: true,
       ...(omittedActivityEventCount ? { omittedActivityEventCount } : {})
+    };
+  }
+
+  private processingTranscriptWithTerminalMessage(
+    transcript: ChatProcessingTranscript,
+    terminalMessage: string
+  ): ChatProcessingTranscript {
+    const terminal = terminalMessage.replace(/\r\n/g, "\n").trim();
+    if (!terminal || transcript.content.trimEnd().endsWith(terminal)) {
+      return transcript;
+    }
+    const content = `${transcript.content.trimEnd()}\n\n${terminal}`;
+    return {
+      ...transcript,
+      content,
+      originalLength: content.length,
+      retainedStart: undefined,
+      truncated: undefined
     };
   }
 

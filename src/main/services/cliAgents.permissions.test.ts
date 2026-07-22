@@ -9,7 +9,7 @@ function makeRunner(): CliAgentRunner {
   return new CliAgentRunner();
 }
 
-function makeCodexPendingTurn(overrides: Partial<Record<string, unknown>> = {}) {
+function makeCodexPendingTurn(overrides: Partial<Record<string, unknown>> = {}): Record<string, any> {
   const timer = setTimeout(() => undefined, 1);
   clearTimeout(timer);
   return {
@@ -17,6 +17,9 @@ function makeCodexPendingTurn(overrides: Partial<Record<string, unknown>> = {}) 
     threadId: "thread-1",
     messages: [],
     streamedText: "",
+    visibleTranscript: "",
+    visibleOutputEnded: false,
+    outputItems: new Map(),
     completedAgentMessages: [],
     nextAgentMessageStartsBlock: false,
     timer,
@@ -272,7 +275,7 @@ test("codex app-server stream emits completed native subagent activity", () => {
   }]);
 });
 
-test("codex app-server stream ignores child turn completion while parent turn continues", () => {
+test("codex app-server stream ignores child thread completion while parent turn continues", () => {
   const runner = makeRunner() as any;
   const outputs: Array<{ kind: string; cumulative?: string }> = [];
   const resolved: unknown[] = [];
@@ -291,21 +294,154 @@ test("codex app-server stream ignores child turn completion while parent turn co
     fail
   );
 
-  send({ method: "item/started", params: { turnId: "child-turn", item: { type: "agentMessage" } } });
-  send({ method: "item/agentMessage/delta", params: { turnId: "child-turn", delta: "CHILD_RESULT" } });
-  send({ method: "item/completed", params: { turnId: "child-turn", item: { type: "agentMessage", text: "CHILD_RESULT" } } });
-  send({ method: "turn/completed", params: { turn: { id: "child-turn", status: "completed" } } });
+  send({ method: "item/started", params: { threadId: "child-thread", turnId: "child-turn", item: { type: "agentMessage" } } });
+  send({ method: "item/agentMessage/delta", params: { threadId: "child-thread", turnId: "child-turn", delta: "CHILD_RESULT" } });
+  send({ method: "item/completed", params: { threadId: "child-thread", turnId: "child-turn", item: { type: "agentMessage", text: "CHILD_RESULT" } } });
+  send({ method: "turn/completed", params: { threadId: "child-thread", turn: { id: "child-turn", status: "completed" } } });
 
   assert.equal(resolved.length, 0);
   assert.equal(outputs.length, 0);
 
-  send({ method: "item/started", params: { turnId: "parent-turn", item: { type: "agentMessage" } } });
-  send({ method: "item/agentMessage/delta", params: { turnId: "parent-turn", delta: "PARENT_FINAL" } });
-  send({ method: "item/completed", params: { turnId: "parent-turn", item: { type: "agentMessage", text: "PARENT_FINAL" } } });
-  send({ method: "turn/completed", params: { turn: { id: "parent-turn", status: "completed" } } });
+  send({ method: "item/started", params: { threadId: "thread-1", turnId: "parent-turn", item: { type: "agentMessage" } } });
+  send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "parent-turn", delta: "PARENT_FINAL" } });
+  send({ method: "item/completed", params: { threadId: "thread-1", turnId: "parent-turn", item: { type: "agentMessage", text: "PARENT_FINAL" } } });
+  send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "parent-turn", status: "completed" } } });
 
   assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "PARENT_FINAL");
   assert.equal((resolved[0] as { content: string }).content, "PARENT_FINAL");
+});
+
+test("codex app-server stream accepts goal continuation root turn ids in the same thread", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const resolved: unknown[] = [];
+  const pending = makeCodexPendingTurn({
+    turnId: "requested-turn",
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+    record,
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "goal-continuation-turn" } } });
+  send({ method: "item/started", params: { threadId: "thread-1", turnId: "goal-continuation-turn", item: { type: "agentMessage" } } });
+  send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "goal-continuation-turn", delta: "Status: tests are running." } });
+  send({ method: "item/completed", params: { threadId: "thread-1", turnId: "goal-continuation-turn", item: { type: "agentMessage", text: "Status: tests are running." } } });
+  send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "goal-continuation-turn", status: "completed" } } });
+
+  assert.equal(pending.turnId, "goal-continuation-turn");
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "Status: tests are running.");
+  assert.equal((resolved[0] as { content: string }).content, "Status: tests are running.");
+});
+
+test("codex app-server stream captures completed commentary and command output without deltas", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string; activityDetail?: string }> = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: { kind: string; cumulative?: string; activityDetail?: string }) => outputs.push(event)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+    record,
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "message-1", type: "agentMessage", phase: "commentary" }
+    }
+  });
+  send({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "message-1", type: "agentMessage", phase: "commentary", text: "I’ll inspect it." }
+    }
+  });
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "command-1", type: "commandExecution", command: "npm test" }
+    }
+  });
+  send({
+    method: "item/commandExecution/outputDelta",
+    params: { threadId: "thread-1", turnId: "turn-1", itemId: "command-1", delta: "PASS first\n" }
+  });
+  send({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "command-1", type: "commandExecution", aggregatedOutput: "PASS first\nPASS second\n" }
+    }
+  });
+
+  assert.equal(outputs.find((event) => event.activityDetail === "npm test")?.kind, "tool");
+  assert.equal(
+    outputs.filter((event) => event.kind === "text").at(-1)?.cumulative,
+    "I’ll inspect it.\n\n    PASS first\n    PASS second\n\n"
+  );
+});
+
+test("codex app-server stream flushes command output before an interrupted turn rejects", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const rejected: Error[] = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event),
+    reject: (error: Error) => rejected.push(error)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+    record,
+    participant,
+    pending,
+    () => pending,
+    (error: Error) => rejected.push(error)
+  );
+
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "command-1", type: "commandExecution", command: "printf READY; sleep 30" }
+    }
+  });
+  send({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "command-1", type: "commandExecution", aggregatedOutput: "READY\n" }
+    }
+  });
+  send({
+    method: "turn/completed",
+    params: { threadId: "thread-1", turn: { id: "turn-1", status: "interrupted" } }
+  });
+
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "    READY\n\n");
+  assert.equal(rejected.length, 1);
+  assert.match(rejected[0]?.message ?? "", /interrupted/);
 });
 
 test("codex app-server stream keeps parenthetical citation boundaries as paragraph breaks outside final content", () => {
