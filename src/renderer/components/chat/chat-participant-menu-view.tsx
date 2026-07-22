@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ChevronLeft, ChevronRight, Plus, UserPlus, Users } from "lucide-react";
+import { ChevronLeft, ChevronRight, Plus, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -124,7 +124,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
         align="end"
         sideOffset={8}
         data-testid="chat-participants-popover"
-        className="chat-participant-popover w-[min(560px,calc(100vw-32px))] max-h-[min(640px,calc(100vh-96px))] overflow-auto p-3"
+        className="chat-participant-popover w-[min(640px,calc(100vw-32px))] max-h-[min(720px,calc(100vh-96px))] overflow-auto p-2"
       >
         {view === "create" ? (
           <div className="chat-participant-create">
@@ -160,7 +160,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
           </div>
         ) : (
           <>
-            <div className="grid gap-1">
+            <div className="chat-participant-popover-list">
               {props.participants.map((participant) => (
                 <ChatParticipantRosterRow
                   key={participant.id}
@@ -248,11 +248,6 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
               )
             )}
             <div className="chat-participant-footer">
-              <Button variant="outline" size="sm" disabled={props.isRunning} onClick={() => setView("create")}>
-                <UserPlus size={16} />
-                New member
-              </Button>
-              <span className="chat-participant-footer-spacer" />
               <button type="button" className="chat-manage-link" onClick={props.onManageInSettings}>
                 Manage in settings
               </button>

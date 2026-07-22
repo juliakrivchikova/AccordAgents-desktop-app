@@ -3033,6 +3033,43 @@ test("auto-watch runtime update enforces one watcher and clears scheduler state 
   assert.equal(storage.current.metadata.participantWatchers, undefined);
 });
 
+test("permission runtime update with unchanged auto-watch does not schedule a watcher run", async () => {
+  const codex = { ...chatParticipant("codex-cli"), autoWatch: true };
+  const watcherState = {
+    [codex.id]: {
+      lastSeenMessageId: "user-message",
+      wakeChainDepth: 1,
+      updatedAt: NOW
+    }
+  };
+  const conversation = chatConversation([codex], { participantWatchers: watcherState });
+  const { service, storage } = testService({ conversation });
+  const scheduled: Array<{ conversationId: string; reason: string }> = [];
+  (service as any).scheduleAutoWatchEvaluation = (conversationId: string, reason: string) => {
+    scheduled.push({ conversationId, reason });
+  };
+  const permissions = {
+    ...defaultChatAgentPermissions(),
+    repoRead: true,
+    workspaceWrite: true
+  };
+
+  await service.updateParticipantRuntime({
+    conversationId: conversation.id,
+    participantId: codex.id,
+    permissions,
+    autoWatch: true
+  });
+
+  const participants = storage.current.metadata.participants as ChatParticipant[];
+  const updated = participants.find((participant) => participant.id === codex.id);
+  assert.equal(updated?.autoWatch, true);
+  assert.equal(updated?.permissions?.repoRead, true);
+  assert.equal(updated?.permissions?.workspaceWrite, true);
+  assert.deepEqual(storage.current.metadata.participantWatchers, watcherState);
+  assert.deepEqual(scheduled, []);
+});
+
 test("Workflow Manager default-on seeding keeps only one active watcher", async () => {
   const workflowRole: ChatRoleConfig = {
     ...ROLE,
@@ -5865,7 +5902,7 @@ test("removeParticipant clears stale participant state in the same mutation", as
   assert.equal(approvals.find((approval) => approval.id === removedPermissionApproval.id)?.status, "denied");
   assert.equal(approvals.find((approval) => approval.id === removedTargetApproval.id)?.status, "denied");
   assert.equal(approvals.find((approval) => approval.id === unrelatedApproval.id)?.status, "pending");
-  assert.equal(approvals.find((approval) => approval.id === removedPermissionApproval.id)?.error, "Participant was removed from this chat.");
+  assert.equal(approvals.find((approval) => approval.id === removedPermissionApproval.id)?.error, "Member was removed from this chat.");
   assert.deepEqual((saved.metadata.appToolApprovalPolicies as ChatAppToolApprovalPolicy[]).map((policy) => policy.id), []);
 
   const mentionMessage = saved.messages.find((message) => message.id === "mention-message") as ChatMessage;
@@ -5874,7 +5911,7 @@ test("removeParticipant clears stale participant state in the same mutation", as
   const requestBatch = saved.messages.find((message) => message.id === "request-message")?.metadata?.participantRequest;
   assert.equal(requestBatch?.status, "pending_approval");
   assert.equal(requestBatch?.items.find((item) => item.targetParticipantId === removed.id)?.status, "failed");
-  assert.equal(requestBatch?.items.find((item) => item.targetParticipantId === removed.id)?.error, "Participant was removed from this chat.");
+  assert.equal(requestBatch?.items.find((item) => item.targetParticipantId === removed.id)?.error, "Member was removed from this chat.");
   assert.equal(requestBatch?.items.find((item) => item.targetParticipantId === other.id)?.status, "pending_approval");
 });
 
@@ -6040,7 +6077,7 @@ test("stale permission approval for a removed requester fails closed", async () 
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "denied");
   assert.equal(normalizeChatAgentPermissions((storage.current.metadata.participants as ChatParticipant[])[0]?.permissions).webAccess, false);
   assert.equal(storage.current.messages.some((message: ChatMessage) =>
-    message.content.includes("The requesting participant is no longer in this chat.")
+    message.content.includes("The requesting member is no longer in this chat.")
   ), true);
 });
 
@@ -6123,7 +6160,7 @@ test("stale participant-request approval for a removed target fails closed witho
   assert.deepEqual(savedApproval.appliedParticipantIds, []);
   assert.equal(batch?.status, "failed");
   assert.equal(batch?.items[0].status, "failed");
-  assert.equal(batch?.items[0].error, "Target participant is no longer in this chat.");
+  assert.equal(batch?.items[0].error, "Target member is no longer in this chat.");
   assert.deepEqual(storage.current.metadata.appToolApprovalPolicies ?? [], []);
   assert.equal(runCount, 0);
 });
@@ -9283,7 +9320,7 @@ test("participant request chain guard limits one logical request chain", async (
       },
       "mcp"
     ),
-    /participant request chain limit \(24\) reached/
+    /member request chain limit \(24\) reached/
   );
 });
 
@@ -9389,7 +9426,7 @@ test("startAccord creates structured accord skill mention and dispatches only th
   assert.ok(userMessage);
   assert.equal(userMessage.metadata?.skillMentions?.[0]?.frontmatterName, "accord");
   assert.match(userMessage.content, /@codex \/accord/);
-  assert.match(userMessage.content, /Selected accord participants: drew\./);
+  assert.match(userMessage.content, /Selected accord members: drew\./);
   assert.doesNotMatch(userMessage.content, /@drew/);
 
   const facilitatorAfterStart = storage.current.metadata.participants.find((participant: ChatParticipant) => participant.id === facilitator.id);

@@ -363,7 +363,7 @@ function ParticipantManagementReview(props: {
           <AlertTriangle size={14} aria-hidden />
           <span>
             Management escalation: role default {participantRequestPermissionLabel(resolution.roleDefault)}
-            {resolution.participantExplicit ? `, participant override ${participantRequestPermissionLabel(resolution.participantExplicit)}` : ""}
+            {resolution.participantExplicit ? `, member override ${participantRequestPermissionLabel(resolution.participantExplicit)}` : ""}
             {previous && raisesPrevious ? `, previous ${participantRequestPermissionLabel(previous.effective)}` : ""}.
           </span>
         </div>

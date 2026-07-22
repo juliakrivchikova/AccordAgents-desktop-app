@@ -439,6 +439,7 @@ function App(): JSX.Element {
                 repoInfo={state.repoInfo}
                 selectedParticipantIds={state.selectedChatParticipantConfigIds}
                 selectedParticipantRunLocations={state.selectedChatParticipantRunLocations}
+                selectedParticipantRuntimeOverrides={state.selectedChatParticipantRuntimeOverrides}
                 settings={state.settings}
                 summaries={state.summaries}
                 agents={state.agents}
@@ -462,6 +463,7 @@ function App(): JSX.Element {
                 onSelectRepo={() => void conversationActions.selectRepo()}
                 onSelectedParticipantIdsChange={conversationActions.updateSelectedChatParticipantConfigIds}
                 onSelectedParticipantRunLocationsChange={state.setSelectedChatParticipantRunLocations}
+                onSelectedParticipantRuntimeOverridesChange={state.setSelectedChatParticipantRuntimeOverrides}
                 onOpenParticipantsSettings={() => openSettingsSection("participants")}
                 onOpenProviderSettings={() => openSettingsSection("general")}
                 onRefreshAgents={() => conversationActions.refreshAgents({ force: true, trigger: "manual" })}

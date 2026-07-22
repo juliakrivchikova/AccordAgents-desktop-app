@@ -833,7 +833,7 @@ export class RemoteRunService {
             signal: request.signal
           });
           if (!relaunched) {
-            throw new Error("Remote participant session became unavailable.");
+            throw new Error("Remote member session became unavailable.");
           }
           participantSession = relaunched;
           if (relaunched.launched) {
@@ -1338,7 +1338,7 @@ export class RemoteRunService {
         return record.participantId;
       }
     }
-    throw new Error(`Remote run ${runId} has no projected participant yet.`);
+    throw new Error(`Remote run ${runId} has no projected member yet.`);
   }
 
   // Mirror-sync mode. Resolves the per-project mirror path under the worker
@@ -1845,7 +1845,7 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
       idleTimeoutMs: request.idleTimeoutMs
     }, request.signal);
     if (result.ok !== true || (result.status !== "warm" && result.status !== "launched")) {
-      throw new Error(`Remote participant session could not be prepared (${String(result.status ?? "unknown")}).`);
+      throw new Error(`Remote member session could not be prepared (${String(result.status ?? "unknown")}).`);
     }
     return {
       launched: result.status === "launched",
@@ -1863,7 +1863,7 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
   async submitTurn(request: RemoteDetachedWorkerLaunchRequest): Promise<RemoteDetachedWorkerSnapshot> {
     const session = request.participantSession;
     if (!session) {
-      throw new Error("Remote participant session handle is missing.");
+      throw new Error("Remote member session handle is missing.");
     }
     const root = await resolveRemoteRunDir(
       request.worker.sshPath?.trim() || "ssh",
@@ -1904,7 +1904,7 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
       contextSnapshot: request.contextSnapshot ?? null
     }, request.signal);
     if (result.ok !== true) {
-      throw new Error(`Remote participant session rejected the turn (${String(result.status ?? "unknown")}).`);
+      throw new Error(`Remote member session rejected the turn (${String(result.status ?? "unknown")}).`);
     }
     const runStatus = typeof result.runStatus === "string" ? result.runStatus : "accepted";
     if (runStatus === "completed" || runStatus === "failed" || runStatus === "cancelled") {
@@ -2542,7 +2542,7 @@ function workerSettingsFromTarget(worker: RemoteRunWorkerTarget): RemoteParticip
 function targetFromSessionHandle(handle: RemoteParticipantSessionHandle): RemoteRunWorkerTarget {
   const host = handle.worker.host?.trim();
   if (!host) {
-    throw new Error("Remote participant session has no worker host.");
+    throw new Error("Remote member session has no worker host.");
   }
   return { ...handle.worker, host };
 }
@@ -3245,8 +3245,8 @@ async function handleRpcRequest(raw) {
         },
         {
           name: "app_chat_get_participants",
-          title: "Get Chat Participants Snapshot",
-          description: "Read participant data from the run-start context snapshot.",
+          title: "Get Chat Members Snapshot",
+          description: "Read member data from the run-start context snapshot.",
           inputSchema: { type: "object", additionalProperties: false, properties: {} }
         }
       ]

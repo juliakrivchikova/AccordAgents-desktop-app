@@ -2773,7 +2773,7 @@ export class CliAgentRunner {
         // Claude auto, not a different mode under the same label.
         return this.failed(
           participant,
-          new Error("Claude Code in this environment does not support Auto-review (--permission-mode auto). Upgrade Claude Code, or set this participant to Default or Plan mode."),
+          new Error("Claude Code in this environment does not support Auto-review (--permission-mode auto). Upgrade Claude Code, or set this member to Default or Plan mode."),
           Date.now() - startedAt
         );
       }

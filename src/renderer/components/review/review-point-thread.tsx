@@ -160,7 +160,7 @@ function PlanSourceSupport({ finding }: { finding: Finding }): JSX.Element | nul
         ))}
       </div>
       <details className="plan-source-details">
-        <summary>{hasRawPlans ? "Original participant plans" : "Original participant plan items"}</summary>
+        <summary>{hasRawPlans ? "Original member plans" : "Original member plan items"}</summary>
         <div className="plan-source-detail-list">
           {sourceItems.map((item, index) => (
             <article className="plan-source-detail-card" key={`${item.participantId}-detail-${index}`}>

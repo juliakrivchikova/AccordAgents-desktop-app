@@ -160,7 +160,7 @@ const CHAT_AGENT_PERMISSION_INPUT_SCHEMA = {
     manageRolesParticipants: {
       type: "string",
       enum: ["ask", "allow", "deny"],
-      description: "Participant-specific role/member management behavior. Omit to inherit the selected role default."
+      description: "Member-specific role/member management behavior. Omit to inherit the selected role default."
     },
     shell: {
       type: "object",
@@ -1021,7 +1021,7 @@ export class AppMcpService {
         name: APP_CHAT_GET_CONTEXT_TOOL,
         title: "Get Chat Context",
         description:
-          "Return the current chat conversation, requesting participant, active turn metadata, and available context sources. This is read-only and scoped to the issued app token.",
+          "Return the current chat conversation, requesting member, active turn metadata, and available context sources. This is read-only and scoped to the issued app token.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -1036,9 +1036,9 @@ export class AppMcpService {
       },
       {
         name: APP_CHAT_GET_PARTICIPANTS_TOOL,
-        title: "Get Chat Participants",
+        title: "Get Chat Members",
         description:
-          "Return the current chat roster, role labels, provider details, and safe participant capabilities for this chat. This is read-only.",
+          "Return the current chat roster, role labels, provider details, and safe member capabilities for this chat. This is read-only.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -1053,16 +1053,16 @@ export class AppMcpService {
       },
       {
         name: APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
-        title: "Get Participant Request Status",
+        title: "Get Member Request Status",
         description:
-          "Return current status and available replies/errors for a previous participant request. Use this to recover after timeout, interruption, approval delay, or session resume.",
+          "Return current status and available replies/errors for a previous member request. Use this to recover after timeout, interruption, approval delay, or session resume.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
           properties: {
             requestId: {
               type: "string",
-              description: "Optional participant request batch id. If omitted, returns recent requests made by this participant."
+              description: "Optional member request batch id. If omitted, returns recent requests made by this member."
             }
           }
         },
@@ -1174,7 +1174,7 @@ export class AppMcpService {
         name: APP_CHAT_EXPORT_ATTACHMENT_TOOL,
         title: "Export Chat Attachment",
         description:
-          "Copy one visible image attachment into the selected repository using a repository-relative targetPath. Requires workspace write permission for this participant run.",
+          "Copy one visible image attachment into the selected repository using a repository-relative targetPath. Requires workspace write permission for this member run.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -1233,7 +1233,7 @@ export class AppMcpService {
         name: APP_CHAT_SEND_MESSAGE_TOOL,
         title: "Send Chat Message",
         description:
-          "Post a participant message authored by you IMMEDIATELY, so other participants and User can see and react to it before your turn ends, and return its messageId and sequence. Use this ONLY when you need a message visible mid-turn — for example to publish something others will react to during this same turn (a canonical resolution) and you need its messageId now. Do NOT use this for an ordinary answer or reply: your normal turn response is already shared with everyone when your turn ends, so sending it with this tool just duplicates it and leaves your turn with nothing to say. The returned messageId can be passed to app_chat_react. Optional image attachments are imported from sourcePath files inside the selected repository when this run has repoRead; v1 accepts only PNG, JPEG, and WebP images.",
+          "Post a member message authored by you IMMEDIATELY, so other members and User can see and react to it before your turn ends, and return its messageId and sequence. Use this ONLY when you need a message visible mid-turn — for example to publish something others will react to during this same turn (a canonical resolution) and you need its messageId now. Do NOT use this for an ordinary answer or reply: your normal turn response is already shared with everyone when your turn ends, so sending it with this tool just duplicates it and leaves your turn with nothing to say. The returned messageId can be passed to app_chat_react. Optional image attachments are imported from sourcePath files inside the selected repository when this run has repoRead; v1 accepts only PNG, JPEG, and WebP images.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -1311,14 +1311,14 @@ export class AppMcpService {
         name: APP_CHAT_SET_TITLE_TOOL,
         title: "Set Chat Title",
         description:
-          "Set a concise title for this chat. Intended for the first eligible participant turn only; the backend validates eligibility, sanitizes the title, applies the first accepted title, and ignores later or ineligible calls.",
+          "Set a concise title for this chat. Intended for the first eligible member turn only; the backend validates eligibility, sanitizes the title, applies the first accepted title, and ignores later or ineligible calls.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
           properties: {
             title: {
               type: "string",
-              description: "Concise title based on the user's intent. Omit participant handles, slash commands, model/provider names, and generic words like Chat."
+              description: "Concise title based on the user's intent. Omit member handles, slash commands, model/provider names, and generic words like Chat."
             }
           },
           required: ["title"]
@@ -1335,9 +1335,9 @@ export class AppMcpService {
     if (hasChatAppToolCapability(actor.capabilities, "participants.request")) {
       tools.push({
         name: APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
-        title: "Request Chat Participants",
+        title: "Request Chat Members",
         description:
-          "Ask one or more current chat participants to respond to a concrete prompt. The app validates policy, may request User approval, runs approved participants, and either auto-resumes the requester or returns inline replies when requested.",
+          "Ask one or more current chat members to respond to a concrete prompt. The app validates policy, may request User approval, runs approved members, and either auto-resumes the requester or returns inline replies when requested.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -1352,15 +1352,15 @@ export class AppMcpService {
                 properties: {
                   target: {
                     type: "string",
-                    description: "Target participant handle, with or without @."
+                    description: "Target member handle, with or without @."
                   },
                   prompt: {
                     type: "string",
-                    description: "Concrete question or task for the target participant."
+                    description: "Concrete question or task for the target member."
                   },
                   reason: {
                     type: "string",
-                    description: "Optional brief reason this participant input is needed."
+                    description: "Optional brief reason this member input is needed."
                   }
                 },
                 required: ["target", "prompt"]
@@ -1416,7 +1416,7 @@ export class AppMcpService {
         name: APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
         title: "Request Chat Permission Change",
         description:
-          "Request a permission change for this chat participant, or pass a prior requestId to recover its status idempotently. Use portable for repoRead/workspaceWrite/webAccess, shellRules for command-specific shell rules, providerNative for Claude Code allowedTools tokens, or githubApp for GitHub App repository permissions. Provider-native grants are rejected unless the requester is a Claude Code participant. The app validates the request and may return already_granted (the capability is already available for this run) or pending_user_approval for User approval.",
+          "Request a permission change for this chat member, or pass a prior requestId to recover its status idempotently. Use portable for repoRead/workspaceWrite/webAccess, shellRules for command-specific shell rules, providerNative for Claude Code allowedTools tokens, or githubApp for GitHub App repository permissions. Provider-native grants are rejected unless the requester is a Claude Code member. The app validates the request and may return already_granted (the capability is already available for this run) or pending_user_approval for User approval.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -1432,7 +1432,7 @@ export class AppMcpService {
             },
             reason: {
               type: "string",
-              description: "Brief reason the participant needs the requested permission."
+              description: "Brief reason the member needs the requested permission."
             },
             permissions: {
               type: "array",
@@ -1516,7 +1516,7 @@ export class AppMcpService {
           name: APP_ROLES_REQUEST_CHANGE_TOOL,
           title: "Request Role Change",
           description:
-            "Request creation, editing, or deletion of AccordAgents chat roles. Roles are reusable definitions separate from participants. To delete a custom role, send type \"archive_role\" with role.roleConfigId; built-in roles cannot be deleted and a role still used by saved participants cannot be deleted.",
+            "Request creation, editing, or deletion of AccordAgents chat roles. Roles are reusable definitions separate from members. To delete a custom role, send type \"archive_role\" with role.roleConfigId; built-in roles cannot be deleted and a role still used by saved members cannot be deleted.",
           inputSchema: {
             type: "object",
             additionalProperties: false,
@@ -1538,7 +1538,7 @@ export class AppMcpService {
                         roleConfigId: { type: "string", description: "Required for edit_role and archive_role: the id of the existing role." },
                         draftRoleRef: {
                           type: "string",
-                          description: "Temporary role reference for pending grouped-review create_role operations. Use it in a following participant request only when the role request response is pending_user_approval; auto_applied responses return a persisted roleConfigId instead."
+                          description: "Temporary role reference for pending grouped-review create_role operations. Use it in a following member request only when the role request response is pending_user_approval; auto_applied responses return a persisted roleConfigId instead."
                         },
                         label: { type: "string" },
                         instructions: { type: "string" },
@@ -1560,7 +1560,7 @@ export class AppMcpService {
                               enum: ["ask", "allow", "deny"]
                             }
                           },
-                          description: "Default member behavior for participants using this role. manageRolesParticipants controls whether members with this role can manage roles and chat members."
+                          description: "Default member behavior for members using this role. manageRolesParticipants controls whether members with this role can manage roles and chat members."
                         }
                       }
                       // Per-type field requirements (create_role/edit_role need label+instructions;
@@ -1585,9 +1585,9 @@ export class AppMcpService {
         },
         {
           name: APP_PARTICIPANTS_DESCRIBE_OPTIONS_TOOL,
-          title: "Describe Chat Participants",
+          title: "Describe Chat Members",
           description:
-            "Return saved participant presets, current chat participants, available roles, CLI providers, model options, and validation rules. This is read-only.",
+            "Return saved member presets, current chat members, available roles, CLI providers, model options, and validation rules. This is read-only.",
           inputSchema: {
             type: "object",
             additionalProperties: false,
@@ -1602,9 +1602,9 @@ export class AppMcpService {
         },
         {
           name: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
-          title: "Request Participant Change",
+          title: "Request Member Change",
           description:
-            "Request adding a new participant to the current chat, optionally saving it as a reusable preset, or adding an existing saved participant preset to the chat.",
+            "Request adding a new member to the current chat, optionally saving it as a reusable preset, or adding an existing saved member preset to the chat.",
           inputSchema: {
             type: "object",
             additionalProperties: false,
@@ -1810,7 +1810,7 @@ export class AppMcpService {
     }
     if (record.name === APP_TOOL_PERMISSION_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
-        throw new Error("This participant is not allowed to request tool permissions.");
+        throw new Error("This member is not allowed to request tool permissions.");
       }
       if (!this.toolPermissionHandler) {
         throw new Error("Tool permission handling is not available.");
@@ -1825,7 +1825,7 @@ export class AppMcpService {
     }
     if (record.name === APP_CHAT_GET_PARTICIPANTS_TOOL) {
       if (!this.chatParticipantsHandler) {
-        throw new Error("Chat participant discovery is not available.");
+        throw new Error("Chat member discovery is not available.");
       }
       return this.toolTextResult(await this.chatParticipantsHandler(actor));
     }
@@ -1873,16 +1873,16 @@ export class AppMcpService {
     }
     if (record.name === APP_CHAT_REQUEST_PARTICIPANTS_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "participants.request")) {
-        throw new Error("This participant is not allowed to request other participants.");
+        throw new Error("This member is not allowed to request other members.");
       }
       if (!this.chatParticipantRequestHandler) {
-        throw new Error("Chat participant request handling is not available.");
+        throw new Error("Chat member request handling is not available.");
       }
       return this.toolTextResult(await this.chatParticipantRequestHandler(actor, record.arguments));
     }
     if (record.name === APP_CHAT_REQUEST_COMPACTION_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "compaction.request")) {
-        throw new Error("This participant is not allowed to request context compaction.");
+        throw new Error("This member is not allowed to request context compaction.");
       }
       if (!this.chatCompactionRequestHandler) {
         throw new Error("Chat compaction request handling is not available.");
@@ -1891,13 +1891,13 @@ export class AppMcpService {
     }
     if (record.name === APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL) {
       if (!this.chatParticipantRequestStatusHandler) {
-        throw new Error("Chat participant request status is not available.");
+        throw new Error("Chat member request status is not available.");
       }
       return this.toolTextResult(await this.chatParticipantRequestStatusHandler(actor, record.arguments));
     }
     if (record.name === APP_PERMISSIONS_REQUEST_CHANGE_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
-        throw new Error("This participant is not allowed to request permission changes.");
+        throw new Error("This member is not allowed to request permission changes.");
       }
       if (!this.permissionChangeHandler) {
         throw new Error("Permission request handling is not available.");
@@ -1906,7 +1906,7 @@ export class AppMcpService {
     }
     if (record.name === APP_ROSTER_DESCRIBE_OPTIONS_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-        throw new Error("This participant is not allowed to manage chat participants.");
+        throw new Error("This member is not allowed to manage chat members.");
       }
       if (!this.rosterOptionsHandler) {
         throw new Error("Roster option discovery is not available.");
@@ -1915,7 +1915,7 @@ export class AppMcpService {
     }
     if (record.name === APP_ROLES_DESCRIBE_OPTIONS_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-        throw new Error("This participant is not allowed to manage chat participants.");
+        throw new Error("This member is not allowed to manage chat members.");
       }
       if (!this.roleOptionsHandler) {
         throw new Error("Role option discovery is not available.");
@@ -1924,7 +1924,7 @@ export class AppMcpService {
     }
     if (record.name === APP_ROLES_REQUEST_CHANGE_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-        throw new Error("This participant is not allowed to manage chat participants.");
+        throw new Error("This member is not allowed to manage chat members.");
       }
       if (!this.roleChangeHandler) {
         throw new Error("Role management is not available.");
@@ -1933,24 +1933,24 @@ export class AppMcpService {
     }
     if (record.name === APP_PARTICIPANTS_DESCRIBE_OPTIONS_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-        throw new Error("This participant is not allowed to manage chat participants.");
+        throw new Error("This member is not allowed to manage chat members.");
       }
       if (!this.participantOptionsHandler) {
-        throw new Error("Participant option discovery is not available.");
+        throw new Error("Member option discovery is not available.");
       }
       return this.toolTextResult(await this.participantOptionsHandler(actor));
     }
     if (record.name === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-        throw new Error("This participant is not allowed to manage chat participants.");
+        throw new Error("This member is not allowed to manage chat members.");
       }
       if (!this.participantChangeHandler) {
-        throw new Error("Participant management is not available.");
+        throw new Error("Member management is not available.");
       }
       return this.toolTextResult(await this.participantChangeHandler(actor, record.arguments));
     }
     if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-      throw new Error("This participant is not allowed to manage chat participants.");
+      throw new Error("This member is not allowed to manage chat members.");
     }
     if (!this.rosterChangeHandler) {
       throw new Error("Roster management is not available.");
