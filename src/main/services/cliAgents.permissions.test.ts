@@ -246,6 +246,68 @@ test("codex app-server stream rejoins mid-sentence agent messages around tool us
   assert.equal((resolved[0] as { content: string }).content, "Current EUR/RUB is about 1 EUR = 89.88 RUB.");
 });
 
+test("codex app-server stream emits completed native subagent activity", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; text: string; cumulative?: string; activityKind?: string; activityStatus?: string }> = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: { kind: string; text: string; cumulative?: string; activityKind?: string; activityStatus?: string }) => outputs.push(event)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+
+  runner.handleCodexAppServerNotification(
+    { method: "item/completed", params: { item: { type: "subAgentActivity", id: "call-1" } } },
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  assert.deepEqual(outputs, [{
+    kind: "tool",
+    text: "Using subagent\n",
+    cumulative: undefined,
+    activityKind: "tool",
+    activityStatus: "completed"
+  }]);
+});
+
+test("codex app-server stream ignores child turn completion while parent turn continues", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const resolved: unknown[] = [];
+  const pending = makeCodexPendingTurn({
+    turnId: "parent-turn",
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+    record,
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  send({ method: "item/started", params: { turnId: "child-turn", item: { type: "agentMessage" } } });
+  send({ method: "item/agentMessage/delta", params: { turnId: "child-turn", delta: "CHILD_RESULT" } });
+  send({ method: "item/completed", params: { turnId: "child-turn", item: { type: "agentMessage", text: "CHILD_RESULT" } } });
+  send({ method: "turn/completed", params: { turn: { id: "child-turn", status: "completed" } } });
+
+  assert.equal(resolved.length, 0);
+  assert.equal(outputs.length, 0);
+
+  send({ method: "item/started", params: { turnId: "parent-turn", item: { type: "agentMessage" } } });
+  send({ method: "item/agentMessage/delta", params: { turnId: "parent-turn", delta: "PARENT_FINAL" } });
+  send({ method: "item/completed", params: { turnId: "parent-turn", item: { type: "agentMessage", text: "PARENT_FINAL" } } });
+  send({ method: "turn/completed", params: { turn: { id: "parent-turn", status: "completed" } } });
+
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "PARENT_FINAL");
+  assert.equal((resolved[0] as { content: string }).content, "PARENT_FINAL");
+});
+
 test("codex app-server stream keeps parenthetical citation boundaries as paragraph breaks outside final content", () => {
   const runner = makeRunner() as any;
   const outputs: Array<{ kind: string; cumulative?: string }> = [];

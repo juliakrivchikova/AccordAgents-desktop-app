@@ -6,6 +6,54 @@ import test from "node:test";
 import { runCommand } from "./command";
 import { GitService } from "./git";
 
+test("inspectRepo accepts existing folders that are not git repositories", async () => {
+  const repoPath = await mkdtemp(path.join(tmpdir(), "accordagents-plain-folder-"));
+
+  try {
+    const service = new GitService();
+    const info = await service.inspectRepo(repoPath);
+
+    assert.equal(info.repoPath, repoPath);
+    assert.equal(info.isRepo, false);
+    assert.equal(info.error, undefined);
+    assert.deepEqual(info.branches, []);
+    assert.deepEqual(info.statusLines, []);
+  } finally {
+    await rm(repoPath, { recursive: true, force: true });
+  }
+});
+
+test("inspectRepo returns a friendly error for missing folders", async () => {
+  const repoPath = path.join(tmpdir(), `accordagents-missing-${Date.now()}`);
+  const service = new GitService();
+  const info = await service.inspectRepo(repoPath);
+
+  assert.equal(info.repoPath, repoPath);
+  assert.equal(info.isRepo, false);
+  assert.equal(info.error, "Folder does not exist.");
+  assert.deepEqual(info.branches, []);
+  assert.deepEqual(info.statusLines, []);
+});
+
+test("inspectRepo still detects git repositories", async () => {
+  const repoPath = await mkdtemp(path.join(tmpdir(), "accordagents-git-inspect-"));
+
+  try {
+    await runCommand("git", ["init"], { cwd: repoPath, timeoutMs: 8000 });
+    await writeFile(path.join(repoPath, "readme.md"), "# Test\n", "utf8");
+
+    const service = new GitService();
+    const info = await service.inspectRepo(repoPath);
+
+    assert.equal(info.repoPath, repoPath);
+    assert.equal(info.isRepo, true);
+    assert.equal(info.error, undefined);
+    assert.deepEqual(info.statusLines, ["?? readme.md"]);
+  } finally {
+    await rm(repoPath, { recursive: true, force: true });
+  }
+});
+
 test("searchRepoFiles ranks basename matches and refreshes when index mtime is unknown", async () => {
   const repoPath = await mkdtemp(path.join(tmpdir(), "accordagents-git-files-"));
 

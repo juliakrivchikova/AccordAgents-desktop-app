@@ -1986,6 +1986,7 @@ export class CliAgentRunner {
     const turn = this.asRecord(params.turn) ?? this.asRecord(record.turn);
     return (
       this.stringField(turn ?? {}, "id") ??
+      this.findStringField(params, ["turnId", "turn_id"]) ??
       this.findStringField(record, ["turnId", "turn_id"])
     );
   }
@@ -2062,6 +2063,10 @@ export class CliAgentRunner {
       return;
     }
     this.logCodexAppServerNotificationSummary(method, params, pending);
+    const eventTurnId = this.codexAppServerTurnId(record, params);
+    if (pending.turnId && eventTurnId && eventTurnId !== pending.turnId) {
+      return;
+    }
     if (method === "item/autoApprovalReview/started") {
       this.emitLiveOutput(pending.onOutput, "tool", "Auto-reviewing approval request\n", undefined, {
         activityKind: "approval",
@@ -2112,6 +2117,11 @@ export class CliAgentRunner {
           pending.finalMessage = text;
           pending.completedAgentMessages.push(text);
         }
+      } else if (this.stringField(item ?? {}, "type") === "subAgentActivity") {
+        this.emitLiveOutput(pending.onOutput, "tool", "Using subagent\n", undefined, {
+          activityKind: "tool",
+          activityStatus: "completed"
+        });
       }
       return;
     }
@@ -2229,7 +2239,7 @@ export class CliAgentRunner {
       method,
       itemType,
       itemId: this.stringField(item ?? {}, "id"),
-      turnId: this.stringField(turn ?? {}, "id") ?? pending.turnId,
+      turnId: this.stringField(turn ?? {}, "id") ?? this.findStringField(params, ["turnId", "turn_id"]) ?? pending.turnId,
       deltaLength: delta?.length,
       completedTextLength: text?.length
     });
