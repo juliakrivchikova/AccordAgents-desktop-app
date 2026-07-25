@@ -9,6 +9,7 @@ import { validateChatCliAgents } from "./chat-cli-readiness";
 
 const SETTINGS: AppSettings = {
   roundLimitDefault: 2,
+  betaUpdates: false,
   cliAgentRunTimeoutMs: 86_400_000,
   chatParticipantRequestMaxDepth: 2,
   chatParticipantRequestPromptMaxChars: 50_000,

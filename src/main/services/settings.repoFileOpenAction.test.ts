@@ -14,6 +14,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
   let stored = {
     settingsVersion: 1,
     roundLimitDefault: 1,
+    betaUpdates: false,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
     chatParticipantRequestPromptMaxChars: CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
@@ -33,6 +34,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
   };
   service.getPublicSettings = async () => ({
     roundLimitDefault: stored.roundLimitDefault,
+    betaUpdates: service.normalizeBetaUpdates(stored.betaUpdates),
     cliAgentRunTimeoutMs: service.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
     chatParticipantRequestMaxDepth: service.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
     chatParticipantRequestPromptMaxChars: service.normalizeChatParticipantRequestPromptMaxChars(stored.chatParticipantRequestPromptMaxChars),

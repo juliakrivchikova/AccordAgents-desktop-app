@@ -58,6 +58,7 @@ export function GeneralSettingsSection(props: {
   agents: AgentHealth[];
   assistantProviderKind?: ChatProviderKind;
   repoFileOpenAction?: RepoFileOpenAction;
+  betaUpdates: boolean;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
   chatParticipantRequestPromptMaxChars: number;
@@ -67,6 +68,7 @@ export function GeneralSettingsSection(props: {
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
+  setBetaUpdates: (enabled: boolean) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
   setChatParticipantRequestPromptMaxChars: (maxChars: number) => Promise<void>;
@@ -161,6 +163,22 @@ export function GeneralSettingsSection(props: {
               </div>
             </div>
             <FileOpenDropdown action={props.repoFileOpenAction} onChange={props.setRepoFileOpenPreference} />
+          </div>
+          <div className="gen-card-divider" />
+          <div className="gen-row">
+            <div className="gen-row-text">
+              <div className="gen-row-title">Beta updates</div>
+              <div className="gen-row-desc">Receive beta releases. Applies on next restart.</div>
+            </div>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                data-testid="beta-updates-toggle"
+                checked={props.betaUpdates}
+                onChange={(event) => void props.setBetaUpdates(event.target.checked)}
+              />
+              <span />
+            </label>
           </div>
           <div className="gen-card-divider" />
           <div className="gen-row">

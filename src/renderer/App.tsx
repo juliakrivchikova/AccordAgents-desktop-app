@@ -378,6 +378,7 @@ function App(): JSX.Element {
           saveChatParticipantConfig={settingsActions.saveChatParticipantConfig}
           deleteChatParticipantConfig={settingsActions.deleteChatParticipantConfig}
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
+          setBetaUpdates={settingsActions.setBetaUpdates}
           setCliAgentRunTimeoutMs={settingsActions.setCliAgentRunTimeoutMs}
           setChatParticipantRequestMaxDepth={settingsActions.setChatParticipantRequestMaxDepth}
           setChatParticipantRequestPromptMaxChars={settingsActions.setChatParticipantRequestPromptMaxChars}
