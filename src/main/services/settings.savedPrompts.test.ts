@@ -30,6 +30,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
   let stored: {
     settingsVersion: number;
     roundLimitDefault: number;
+    betaUpdates: boolean;
     cliAgentRunTimeoutMs: number;
     chatParticipantRequestMaxDepth: number;
     chatParticipantRequestPromptMaxChars: number;
@@ -43,6 +44,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
   } = {
     settingsVersion: 1,
     roundLimitDefault: 1,
+    betaUpdates: false,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
     chatParticipantRequestPromptMaxChars: CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,

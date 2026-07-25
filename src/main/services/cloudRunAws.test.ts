@@ -34,6 +34,7 @@ class FakeSettings {
 
   async getPublicSettings(): Promise<AppSettings> {
     return {
+      betaUpdates: false,
       cloudRuns: {
         enabled: true,
         mode: this.mode,

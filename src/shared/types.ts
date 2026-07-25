@@ -323,6 +323,7 @@ export interface ChatPromptContextSettings {
 
 export interface AppSettings {
   roundLimitDefault: number;
+  betaUpdates: boolean;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
   chatParticipantRequestPromptMaxChars: number;
@@ -2212,6 +2213,7 @@ export interface AppBridge {
   inspectLocalFile(request: InspectLocalFileRequest): Promise<InspectLocalFileResult>;
   openLocalFile(request: OpenLocalFileRequest): Promise<OpenLocalFileResult>;
   setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<AppSettings>;
+  setBetaUpdates(enabled: boolean): Promise<AppSettings>;
   setCliAgentRunTimeoutMs(timeoutMs: number): Promise<AppSettings>;
   setChatParticipantRequestMaxDepth(maxDepth: number): Promise<AppSettings>;
   setChatParticipantRequestPromptMaxChars(maxChars: number): Promise<AppSettings>;
