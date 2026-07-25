@@ -95,6 +95,11 @@ test("artifact archive tab is backed by archived state and a restore path", () =
   assert.match(panelSource, /archivedArtifacts\s*=\s*props\.artifacts\.filter\(\(artifact\)\s*=>\s*artifact\.archivedAt\)/);
   assert.doesNotMatch(panelSource, /Archived <span>0<\/span>[\s\S]{0,80}disabled/);
   assert.match(panelSource, /Restore artifact/);
+  assert.match(panelSource, /const isArchived = Boolean\(detail\?\.summary\.archivedAt\)/);
+  assert.match(panelSource, /canEdit = detail && !isArchived/);
+  assert.match(panelSource, /canManageAccess = canManageArtifact && !isArchived/);
+  assert.match(panelSource, /mode=\{isArchived \? "view" : mode\}/);
+  assert.match(panelSource, /canSign=\{!isArchived && detail\.summary\.approval\.requiredSigners\.includes\(me\)\}/);
   assert.match(listSource, /emptyMessage/);
 });
 

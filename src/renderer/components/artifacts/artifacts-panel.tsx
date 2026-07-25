@@ -141,6 +141,14 @@ export function ArtifactsPanel(props: {
       }
     }
   }, [selectedSummary, detail, props.selectedId, viewVersion, loadDetail]);
+  useEffect(() => {
+    if (!detail?.summary.archivedAt) {
+      return;
+    }
+    setMode("view");
+    setRenaming(false);
+    setAccessOpen(false);
+  }, [detail?.summary.archivedAt]);
   async function run<T>(action: () => Promise<{ ok: true; value: T } | { ok: false; error: ArtifactError }>): Promise<T | undefined> {
     setBusy(true);
     clearTransient();
@@ -162,7 +170,7 @@ export function ArtifactsPanel(props: {
     }
   }
   async function startRevise(): Promise<void> {
-    if (!detail || detail.lifecycle !== "published") {
+    if (!detail || detail.lifecycle !== "published" || detail.summary.archivedAt) {
       return;
     }
     // Revisions build on the head; if an older version is on screen, load head first.
@@ -184,7 +192,7 @@ export function ArtifactsPanel(props: {
     setMode("revise");
   }
   async function submitRevise(content: string, note: string | undefined): Promise<void> {
-    if (!detail || detail.lifecycle !== "published") {
+    if (!detail || detail.lifecycle !== "published" || detail.summary.archivedAt) {
       return;
     }
     const value = await run(() => window.consensus.reviseArtifact({
@@ -204,7 +212,7 @@ export function ArtifactsPanel(props: {
     }
   }
   async function submitRename(): Promise<void> {
-    if (!detail) {
+    if (!detail || detail.summary.archivedAt) {
       return;
     }
     const value = await run(() => window.consensus.renameArtifact({
@@ -218,7 +226,7 @@ export function ArtifactsPanel(props: {
     }
   }
   async function submitSign(): Promise<void> {
-    if (!detail || detail.lifecycle !== "published") {
+    if (!detail || detail.lifecycle !== "published" || detail.summary.archivedAt) {
       return;
     }
     const value = await run(() => window.consensus.signArtifact({
@@ -231,7 +239,7 @@ export function ArtifactsPanel(props: {
     }
   }
   async function submitAccess(values: ArtifactAccessValues): Promise<boolean> {
-    if (!detail) {
+    if (!detail || detail.summary.archivedAt) {
       return false;
     }
     const value = await run(() => window.consensus.updateArtifactAccess({
@@ -258,13 +266,19 @@ export function ArtifactsPanel(props: {
     }));
     if (value) {
       setListStatus(archived ? "archived" : "active");
+      setMode("view");
+      setRenaming(false);
+      setAccessOpen(false);
+      clearTransient();
       setDetail((current) => current && current.summary.id === value.id ? { ...current, summary: value } : current);
       void loadDetail(detail.summary.id, viewVersion);
     }
   }
   const me = ARTIFACT_USER_MEMBER;
-  const canEdit = detail ? me === ARTIFACT_USER_MEMBER || detail.summary.owner === me || detail.summary.contributors.includes(me) : false;
-  const canManageAccess = detail ? me === ARTIFACT_USER_MEMBER || detail.summary.owner === me : false;
+  const isArchived = Boolean(detail?.summary.archivedAt);
+  const canManageArtifact = detail ? me === ARTIFACT_USER_MEMBER || detail.summary.owner === me : false;
+  const canEdit = detail && !isArchived ? me === ARTIFACT_USER_MEMBER || detail.summary.owner === me || detail.summary.contributors.includes(me) : false;
+  const canManageAccess = canManageArtifact && !isArchived;
   const detailTitle = detail?.summary.name ?? selectedSummary?.name ?? "Artifact";
   const activeArtifacts = props.artifacts.filter((artifact) => !artifact.archivedAt);
   const archivedArtifacts = props.artifacts.filter((artifact) => artifact.archivedAt);
@@ -356,7 +370,7 @@ export function ArtifactsPanel(props: {
             onClick={() => { clearTransient(); setAccessOpen((open) => !open); }}
           />
         )}
-        {props.selectedId && mode !== "create" && canManageAccess && (
+        {props.selectedId && mode !== "create" && canManageArtifact && (
           <IconButton
             label={detail?.summary.archivedAt ? "Restore artifact" : "Archive artifact"}
             icon={detail?.summary.archivedAt ? RotateCcw : Archive}
@@ -464,10 +478,10 @@ export function ArtifactsPanel(props: {
           detail={detail}
           drafts={drafts}
           draftError={draftError}
-          mode={mode}
+          mode={isArchived ? "view" : mode}
           busy={busy || diffBusy}
           canEdit={canEdit}
-          canSign={detail.summary.approval.requiredSigners.includes(me)}
+          canSign={!isArchived && detail.summary.approval.requiredSigners.includes(me)}
           alreadySigned={detail.version.signatures.some((signature) => signature.signer === me)}
           reviseBase={reviseBase}
           compare={compare}

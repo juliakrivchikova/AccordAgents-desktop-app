@@ -496,9 +496,119 @@ test("artifact archive is a reversible soft state that preserves contents and hi
     assert.equal(read.summary.archivedAt, archived.archivedAt);
     assert.equal(read.history?.length, 1);
 
+    assert.match(expectError(await h.service.rename("gera", {
+      conversationId: CONVERSATION_ID,
+      artifactId: id,
+      newName: "Edited Old Plan"
+    }), "invalid_request").message, /Restore "Old Plan" before renaming it/);
+    assert.match(expectError(await h.service.revise("codex", {
+      conversationId: CONVERSATION_ID,
+      artifactId: id,
+      baseVersion: 1,
+      content: "v2 while archived"
+    }), "invalid_request").message, /Restore "Old Plan" before revising it/);
+    assert.match(expectError(await h.service.sign("user", {
+      conversationId: CONVERSATION_ID,
+      artifactId: id
+    }), "invalid_request").message, /Restore "Old Plan" before signing it/);
+    assert.match(expectError(await h.service.updateAccess("user", {
+      conversationId: CONVERSATION_ID,
+      artifactId: id,
+      contributors: ["codex", "drew"]
+    }), "invalid_request").message, /Restore "Old Plan" before changing access/);
+
     const restored = expectOk(await h.service.setArchived("gera", { conversationId: CONVERSATION_ID, artifactId: id, archived: false }));
     assert.equal(restored.archivedAt, undefined);
     assert.equal(expectPublished(expectOk(await h.service.read("user", { conversationId: CONVERSATION_ID, artifactId: id }))).summary.archivedAt, undefined);
+    const revisedAfterRestore = expectPublished(expectOk(await h.service.revise("codex", {
+      conversationId: CONVERSATION_ID,
+      artifactId: id,
+      baseVersion: 1,
+      content: "v2 after restore"
+    })));
+    assert.equal(revisedAfterRestore.summary.headVersion, 2);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("archived collecting artifacts are read-only until restored", async () => {
+  const h = await harness();
+  try {
+    const created = expectOk(await h.service.create("gera", {
+      conversationId: CONVERSATION_ID,
+      name: "Archived Drafts",
+      initialState: "collecting_drafts",
+      allowedDraftAuthors: ["gera", "codex"],
+      requiredDraftAuthors: ["gera"],
+      audiencePolicyByAuthor: {
+        gera: { allowedReaders: ["codex"], requiredReaders: [] },
+        codex: { allowedReaders: ["gera"], requiredReaders: [] }
+      },
+      operationId: "archived-drafts:create"
+    }));
+    assert.equal(created.lifecycle, "collecting_drafts");
+    const draft = expectOk(await h.service.saveDraft("gera", {
+      conversationId: CONVERSATION_ID,
+      artifactId: created.summary.id,
+      expectedEditRevision: 0,
+      content: "draft body",
+      readers: ["codex"],
+      operationId: "archived-drafts:save-before"
+    }));
+
+    expectOk(await h.service.setArchived("user", {
+      conversationId: CONVERSATION_ID,
+      artifactId: created.summary.id,
+      archived: true
+    }));
+
+    assert.match(expectError(await h.service.saveDraft("codex", {
+      conversationId: CONVERSATION_ID,
+      artifactId: created.summary.id,
+      expectedEditRevision: 0,
+      content: "new draft while archived",
+      readers: ["gera"],
+      operationId: "archived-drafts:save-after"
+    }), "invalid_request").message, /Restore "Archived Drafts" before editing drafts/);
+    assert.match(expectError(await h.service.submitDraft("gera", {
+      conversationId: CONVERSATION_ID,
+      artifactId: created.summary.id,
+      draftId: draft.id,
+      expectedEditRevision: draft.editRevision,
+      operationId: "archived-drafts:submit-after"
+    }), "invalid_request").message, /Restore "Archived Drafts" before submitting drafts/);
+    assert.match(expectError(await h.service.updateDraftRoster("gera", {
+      conversationId: CONVERSATION_ID,
+      artifactId: created.summary.id,
+      expectedDraftRosterRevision: created.summary.draftRosterRevision,
+      allowedDraftAuthors: ["gera"],
+      requiredDraftAuthors: ["gera"],
+      audiencePolicyByAuthor: {},
+      operationId: "archived-drafts:roster-after"
+    }), "invalid_request").message, /Restore "Archived Drafts" before changing the draft roster/);
+    assert.match(expectError(await h.service.publish("gera", {
+      conversationId: CONVERSATION_ID,
+      artifactId: created.summary.id,
+      content: "published body",
+      requiredSigners: [],
+      sources: [],
+      operationId: "archived-drafts:publish-after"
+    }), "invalid_request").message, /Restore "Archived Drafts" before publishing it/);
+
+    expectOk(await h.service.setArchived("user", {
+      conversationId: CONVERSATION_ID,
+      artifactId: created.summary.id,
+      archived: false
+    }));
+    const submitted = expectOk(await h.service.submitDraft("gera", {
+      conversationId: CONVERSATION_ID,
+      artifactId: created.summary.id,
+      draftId: draft.id,
+      expectedEditRevision: draft.editRevision,
+      operationId: "archived-drafts:submit-after-restore"
+    }));
+    assert.equal(submitted.state, "submitted");
   } finally {
     await h.cleanup();
   }
