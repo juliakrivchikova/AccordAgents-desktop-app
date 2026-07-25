@@ -44,6 +44,7 @@ import { AppNotices } from "./app/app-notices";
 import { pluginNewChatDraft, pluginNewChatMentions } from "./app/plugin-new-chat";
 import { clearActivityItem, markActivityItemRead } from "./app/activity-item-state";
 import { errorText } from "./components/review/review-conversation-data";
+import { CHAT_SPLIT_WORKSPACE_MIN_WIDTH } from "./lib/chat-split-sizing";
 import "./styles/app.css";
 function App(): JSX.Element {
   const state = useAppState();
@@ -250,6 +251,8 @@ function App(): JSX.Element {
       )}
     </>
   );
+  const chatUsesInlineTopBar = state.railView === "chats" && Boolean(view.activeChatConversation);
+  const chatTopBar = <TopBar leading={topBarLeading} title={topBarTitle} actions={topBarActions} className={isNewChatScreen ? "new-chat-topbar" : undefined} />;
   const conversationPanel = view.hasResultContext ? (
     <ConversationPanel
       state={state}
@@ -262,9 +265,13 @@ function App(): JSX.Element {
       openingConversationDescription={openingConversationDescription}
       accordDisabledReason={accordDisabledReason}
       onOpenAccord={() => setAccordDialogOpen(true)}
+      topBar={chatUsesInlineTopBar ? chatTopBar : undefined}
       artifacts={artifacts}
     />
   ) : undefined;
+  const shellTopBar = state.railView === "settings" || state.railView === "activity" || chatUsesInlineTopBar
+    ? null
+    : chatTopBar;
 
   return (
     <AppShell
@@ -311,6 +318,7 @@ function App(): JSX.Element {
       sidebarHidden={state.railView === "activity"}
       sidebarWidth={state.sidebarWidth}
       onSidebarWidthChange={state.setSidebarWidth}
+      minWorkspaceWidth={view.hasResultContext ? CHAT_SPLIT_WORKSPACE_MIN_WIDTH : undefined}
       className={isNewChatScreen ? "is-new-chat-screen" : undefined}
       sidebar={
         state.railView === "settings" ? (
@@ -339,7 +347,7 @@ function App(): JSX.Element {
           />
         )
       }
-      topBar={state.railView === "settings" || state.railView === "activity" ? null : <TopBar leading={topBarLeading} title={topBarTitle} actions={topBarActions} className={isNewChatScreen ? "new-chat-topbar" : undefined} />}
+      topBar={shellTopBar}
     >
       <AppNotices
         error={state.error}

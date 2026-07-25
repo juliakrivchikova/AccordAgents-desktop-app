@@ -27,6 +27,7 @@ export interface ArtifactRecord {
   headVersion: number;
   createdAt: string;
   updatedAt: string;
+  archivedAt?: string;
 }
 
 export interface ArtifactDraftRecord {
@@ -116,6 +117,7 @@ interface ArtifactRow {
   headVersion: number;
   createdAt: string;
   updatedAt: string;
+  archivedAt: string | null;
 }
 
 interface ArtifactDraftRow {
@@ -199,7 +201,8 @@ const ARTIFACT_SELECT = `
     draft_roster_revision as draftRosterRevision,
     head_version as headVersion,
     created_at as createdAt,
-    updated_at as updatedAt
+    updated_at as updatedAt,
+    archived_at as archivedAt
   from artifacts
 `;
 
@@ -245,7 +248,8 @@ export class ArtifactStore {
         labels_json text not null,
         head_version integer not null,
         created_at text not null,
-        updated_at text not null
+        updated_at text not null,
+        archived_at text
       );
       create unique index if not exists idx_artifacts_conversation_name_key on artifacts(conversation_id, name_key);
       create index if not exists idx_artifacts_conversation_updated on artifacts(conversation_id, updated_at);
@@ -271,7 +275,8 @@ export class ArtifactStore {
       ["allowed_draft_authors_json", "alter table artifacts add column allowed_draft_authors_json text not null default '[]';"],
       ["required_draft_authors_json", "alter table artifacts add column required_draft_authors_json text not null default '[]';"],
       ["audience_policy_json", "alter table artifacts add column audience_policy_json text not null default '{}';"],
-      ["draft_roster_revision", "alter table artifacts add column draft_roster_revision integer not null default 0;"]
+      ["draft_roster_revision", "alter table artifacts add column draft_roster_revision integer not null default 0;"],
+      ["archived_at", "alter table artifacts add column archived_at text;"]
     ] as const;
     for (const [name, sql] of additions) {
       await this.ensureArtifactColumn(name, sql);
@@ -671,6 +676,23 @@ export class ArtifactStore {
   async touch(id: string, updatedAt: string): Promise<void> {
     await this.init();
     await this.runSql(`update artifacts set updated_at = ${sqlString(updatedAt)} where id = ${sqlString(id)};`);
+  }
+
+  async updateArchived(
+    id: string,
+    archivedAt: string | undefined,
+    updatedAt: string,
+    event?: ArtifactEventRecord
+  ): Promise<void> {
+    await this.init();
+    await this.runSql(`
+      begin immediate;
+      update artifacts
+      set archived_at = ${sqlString(archivedAt)}, updated_at = ${sqlString(updatedAt)}
+      where id = ${sqlString(id)};
+      ${event ? this.insertEventSql(event) : ""}
+      commit;
+    `);
   }
 
   async getOperation(
@@ -1187,7 +1209,8 @@ export class ArtifactStore {
         : Number.parseInt(String(row.draftRosterRevision), 10) || 0,
       headVersion: typeof row.headVersion === "number" ? row.headVersion : Number.parseInt(String(row.headVersion), 10) || 0,
       createdAt: row.createdAt,
-      updatedAt: row.updatedAt
+      updatedAt: row.updatedAt,
+      archivedAt: row.archivedAt ?? undefined
     };
   }
 

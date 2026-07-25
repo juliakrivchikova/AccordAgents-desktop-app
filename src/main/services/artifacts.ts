@@ -23,12 +23,14 @@ import type {
   ReplaceArtifactDraftRequest,
   ReviseArtifactRequest,
   SaveArtifactDraftRequest,
+  SetArtifactArchivedRequest,
   SignArtifactRequest,
   SubmitArtifactDraftRequest,
   UpdateArtifactDraftRosterRequest,
   UpdateArtifactAccessRequest,
   WithdrawArtifactDraftRequest
 } from "../../shared/types";
+import { ARTIFACT_USER_MEMBER } from "../../shared/types";
 import {
   ARTIFACT_CONTENT_MAX_BYTES,
   ARTIFACT_LABEL_MAX_LENGTH,
@@ -430,6 +432,10 @@ export class ArtifactService {
       if (accessError) {
         return fail<ArtifactReadResult>(accessError);
       }
+      const archivedError = this.archivedMutationError(record, "revising it");
+      if (archivedError) {
+        return fail<ArtifactReadResult>(archivedError);
+      }
       if (!isVersionNumber(request.baseVersion)) {
         return invalid<ArtifactReadResult>("baseVersion must be the version number your edit is based on.");
       }
@@ -491,6 +497,10 @@ export class ArtifactService {
       if (accessError) {
         return fail<ArtifactSummary>(accessError);
       }
+      const archivedError = this.archivedMutationError(record, "renaming it");
+      if (archivedError) {
+        return fail<ArtifactSummary>(archivedError);
+      }
       const newName = normalizeArtifactName(request.newName);
       const nameError = validateName(newName);
       if (nameError) {
@@ -544,6 +554,10 @@ export class ArtifactService {
           code: "access_denied",
           message: `${artifactMemberLabel(actor)} is not in the required-signer set of "${record.name}" (required: ${record.requiredSigners.map(artifactMemberLabel).join(", ") || "none"}).`
         });
+      }
+      const archivedError = this.archivedMutationError(record, "signing it");
+      if (archivedError) {
+        return fail<ArtifactSummary>(archivedError);
       }
       if (request.version !== undefined && !isVersionNumber(request.version)) {
         return invalid<ArtifactSummary>("version must be a positive integer.");
@@ -606,11 +620,15 @@ export class ArtifactService {
         return resolved;
       }
       const record = resolved.value;
-      if (record.owner !== actor) {
+      if (!this.canManageAccess(record, actor)) {
         return fail<ArtifactSummary>({
           code: "access_denied",
-          message: `Only the owner (${artifactMemberLabel(record.owner)}) can manage owner, contributors, or required signers of "${record.name}".`
+          message: `Only User or the owner (${artifactMemberLabel(record.owner)}) can manage owner, contributors, or required signers of "${record.name}".`
         });
+      }
+      const archivedError = this.archivedMutationError(record, "changing access");
+      if (archivedError) {
+        return fail<ArtifactSummary>(archivedError);
       }
       if (record.lifecycle === "collecting_drafts" && request.requiredSigners !== undefined) {
         return invalid<ArtifactSummary>("Set required signers when publishing v1, not while collecting drafts.");
@@ -648,6 +666,46 @@ export class ArtifactService {
         this.now()
       );
       this.notifyChanged(request.conversationId);
+      return this.summaryResult(record.id);
+    });
+  }
+
+  async setArchived(actorRaw: string, request: SetArtifactArchivedRequest): Promise<ArtifactResult<ArtifactSummary>> {
+    return this.withMutation(request.conversationId, async () => {
+      const context = await this.requireMember(actorRaw, request.conversationId);
+      if (!context.ok) {
+        return context;
+      }
+      const { actor } = context.value;
+      if (typeof request.archived !== "boolean") {
+        return invalid<ArtifactSummary>("archived must be true or false.");
+      }
+      const resolved = await this.resolveArtifact(request.conversationId, request.artifactId, request.name);
+      if (!resolved.ok) {
+        return resolved;
+      }
+      const record = resolved.value;
+      if (!this.canManageAccess(record, actor)) {
+        return fail<ArtifactSummary>({
+          code: "access_denied",
+          message: `Only User or the owner (${artifactMemberLabel(record.owner)}) can archive or restore "${record.name}".`
+        });
+      }
+      const alreadyArchived = Boolean(record.archivedAt);
+      if (request.archived === alreadyArchived) {
+        return this.summaryResult(record.id);
+      }
+      const now = this.now();
+      const event = this.event(
+        record,
+        actor,
+        request.archived ? "archived" : "restored",
+        `${artifactMemberLabel(actor)} ${request.archived ? "archived" : "restored"} artifact ${artifactReference(record.id, record.name)}`,
+        now
+      );
+      await this.deps.store.updateArchived(record.id, request.archived ? now : undefined, now, event);
+      this.notifyChanged(request.conversationId);
+      await this.flushPendingArtifactEvents();
       return this.summaryResult(record.id);
     });
   }
@@ -743,6 +801,10 @@ export class ArtifactService {
         return prior.value.draftId
           ? this.readDraft(actorRaw, { conversationId: request.conversationId, artifactId: artifact.id, draftId: prior.value.draftId })
           : invalid("Stored operation result is invalid.");
+      }
+      const archivedError = this.archivedMutationError(artifact, "editing drafts");
+      if (archivedError) {
+        return fail<ArtifactDraftContent>(archivedError);
       }
       if (artifact.lifecycle !== "collecting_drafts") {
         return invalid("Drafts can only be edited while the artifact is collecting drafts.");
@@ -870,6 +932,10 @@ export class ArtifactService {
           ? this.readDraft(actorRaw, { conversationId: request.conversationId, artifactId: artifact.id, draftId: prior.value.draftId })
           : invalid("Stored operation result is invalid.");
       }
+      const archivedError = this.archivedMutationError(artifact, "submitting drafts");
+      if (archivedError) {
+        return fail<ArtifactDraftContent>(archivedError);
+      }
       if (artifact.lifecycle !== "collecting_drafts") {
         return invalid("Drafts can only be submitted while the artifact is collecting drafts.");
       }
@@ -985,6 +1051,10 @@ export class ArtifactService {
           ? this.readDraft(actorRaw, { conversationId: request.conversationId, artifactId: artifact.id, draftId: prior.value.draftId })
           : invalid("Stored operation result is invalid.");
       }
+      const archivedError = this.archivedMutationError(artifact, "replacing drafts");
+      if (archivedError) {
+        return fail<ArtifactDraftContent>(archivedError);
+      }
       if (artifact.lifecycle !== "collecting_drafts") {
         return invalid("Submitted drafts can only be replaced while collecting.");
       }
@@ -1082,6 +1152,10 @@ export class ArtifactService {
         }
         const priorDraft = await this.deps.store.getDraft(prior.value.draftId);
         return priorDraft ? ok(this.draftSummary(priorDraft, this.canReadDraft(actor, priorDraft))) : fail({ code: "not_found", message: "Draft not found." });
+      }
+      const archivedError = this.archivedMutationError(artifact, "withdrawing drafts");
+      if (archivedError) {
+        return fail<ArtifactDraftSummary>(archivedError);
       }
       if (artifact.lifecycle !== "collecting_drafts") {
         return invalid("Drafts can only be withdrawn while collecting.");
@@ -1186,6 +1260,10 @@ export class ArtifactService {
           return ok(prior.value.value);
         }
         return this.collectingRead(actor, (await this.deps.store.getById(artifact.id)) ?? artifact);
+      }
+      const archivedError = this.archivedMutationError(artifact, "changing the draft roster");
+      if (archivedError) {
+        return fail<CollectingArtifactReadResult>(archivedError);
       }
       if (artifact.lifecycle !== "collecting_drafts") {
         return invalid("The draft roster is immutable after publication.");
@@ -1307,6 +1385,10 @@ export class ArtifactService {
         return priorRead.ok && priorRead.value.lifecycle === "published"
           ? priorRead as ArtifactResult<PublishedArtifactReadResult>
           : invalid("Published artifact could not be read.");
+      }
+      const archivedError = this.archivedMutationError(artifact, "publishing it");
+      if (archivedError) {
+        return fail<PublishedArtifactReadResult>(archivedError);
       }
       if (artifact.lifecycle !== "collecting_drafts") {
         return invalid("Only a collecting artifact can publish its first version.");
@@ -1674,13 +1756,27 @@ export class ArtifactService {
   }
 
   private requireContributor(record: ArtifactRecord, actor: string, action: string): ArtifactError | undefined {
-    if (record.owner === actor || record.contributors.includes(actor)) {
+    if (actor === ARTIFACT_USER_MEMBER || record.owner === actor || record.contributors.includes(actor)) {
       return undefined;
     }
     return {
       code: "access_denied",
-      message: `${artifactMemberLabel(actor)} cannot ${action} "${record.name}": only the owner (${artifactMemberLabel(record.owner)}) and contributors (${record.contributors.map(artifactMemberLabel).join(", ") || "none"}) can.`
+      message: `${artifactMemberLabel(actor)} cannot ${action} "${record.name}": only User, the owner (${artifactMemberLabel(record.owner)}), and contributors (${record.contributors.map(artifactMemberLabel).join(", ") || "none"}) can.`
     };
+  }
+
+  private archivedMutationError(record: ArtifactRecord, action: string): ArtifactError | undefined {
+    if (!record.archivedAt) {
+      return undefined;
+    }
+    return {
+      code: "invalid_request",
+      message: `Restore "${record.name}" before ${action}.`
+    };
+  }
+
+  private canManageAccess(record: ArtifactRecord, actor: string): boolean {
+    return actor === ARTIFACT_USER_MEMBER || record.owner === actor;
   }
 
   private async staleVersionError(record: ArtifactRecord, baseVersion: number): Promise<ArtifactResult<ArtifactReadResult>> {
@@ -1736,6 +1832,7 @@ export class ArtifactService {
       submittedDraftCount: record.requiredDraftAuthors.filter((author) => submittedAuthors.has(author)).length,
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
+      archivedAt: record.archivedAt,
       approval: computeArtifactApproval(
         record.requiredSigners,
         headSignatures.map((signature) => ({ signer: signature.signer, signedAt: signature.signedAt }))

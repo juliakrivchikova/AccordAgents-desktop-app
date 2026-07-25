@@ -1985,6 +1985,7 @@ export interface ArtifactSummary {
   submittedDraftCount: number;
   createdAt: string;
   updatedAt: string;
+  archivedAt?: string;
   approval: ArtifactApproval;
 }
 
@@ -2147,6 +2148,10 @@ export interface ArtifactReferenceRequest {
   name?: string;
 }
 
+export interface SetArtifactArchivedRequest extends ArtifactReferenceRequest {
+  archived: boolean;
+}
+
 export interface ListArtifactDraftsRequest extends ArtifactReferenceRequest {}
 
 export interface ReadArtifactDraftRequest extends ArtifactReferenceRequest {
@@ -2295,6 +2300,7 @@ export interface AppBridge {
   renameArtifact(request: RenameArtifactRequest): Promise<ArtifactResult<ArtifactSummary>>;
   signArtifact(request: SignArtifactRequest): Promise<ArtifactResult<ArtifactSummary>>;
   updateArtifactAccess(request: UpdateArtifactAccessRequest): Promise<ArtifactResult<ArtifactSummary>>;
+  setArtifactArchived(request: SetArtifactArchivedRequest): Promise<ArtifactResult<ArtifactSummary>>;
   listArtifactDrafts(request: ListArtifactDraftsRequest): Promise<ArtifactResult<ArtifactDraftView[]>>;
   readArtifactDraft(request: ReadArtifactDraftRequest): Promise<ArtifactResult<ArtifactDraftContent>>;
   saveArtifactDraft(request: SaveArtifactDraftRequest): Promise<ArtifactResult<ArtifactDraftContent>>;

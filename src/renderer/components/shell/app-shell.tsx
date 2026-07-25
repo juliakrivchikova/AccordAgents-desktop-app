@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 import {
   MAX_APP_SIDEBAR_WIDTH,
   MIN_APP_SIDEBAR_WIDTH,
+  MIN_APP_WORKSPACE_WIDTH,
   maxAppSidebarWidthForContainer,
   normalizeAppSidebarWidth
 } from "../../lib/sidebar-sizing";
@@ -18,6 +19,7 @@ export interface AppShellProps {
   sidebarHidden?: boolean;
   sidebarWidth: number;
   onSidebarWidthChange: (width: number) => void;
+  minWorkspaceWidth?: number;
   className?: string;
 }
 
@@ -31,18 +33,52 @@ export const AppShell = ({
   sidebarHidden = false,
   sidebarWidth,
   onSidebarWidthChange,
+  minWorkspaceWidth = MIN_APP_WORKSPACE_WIDTH,
   className
 }: AppShellProps): JSX.Element => {
   const rootRef = React.useRef<HTMLDivElement>(null);
   const cleanupResizeRef = React.useRef<(() => void) | null>(null);
   const previousSidebarHiddenRef = React.useRef(sidebarHidden);
   const [isResizingSidebar, setIsResizingSidebar] = React.useState(false);
+  const [rootMetrics, setRootMetrics] = React.useState<{ width: number; railWidth: number } | undefined>();
   const normalizedSidebarWidth = normalizeAppSidebarWidth(sidebarWidth);
   const secondarySidebarCollapsed = sidebarCollapsed || sidebarHidden;
   const sidebarVisibilityChanged = previousSidebarHiddenRef.current !== sidebarHidden;
+  const effectiveSidebarMax = rootMetrics
+    ? maxAppSidebarWidthForContainer(rootMetrics.width - rootMetrics.railWidth, minWorkspaceWidth)
+    : MAX_APP_SIDEBAR_WIDTH;
+  const effectiveSidebarWidth = secondarySidebarCollapsed || !rootMetrics
+    ? normalizedSidebarWidth
+    : Math.min(normalizedSidebarWidth, effectiveSidebarMax);
 
   // Tear down any in-flight drag listeners if the shell unmounts mid-resize.
   React.useEffect(() => () => cleanupResizeRef.current?.(), []);
+  React.useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) {
+      return undefined;
+    }
+    const updateMetrics = (): void => {
+      const nextMetrics = {
+        width: root.getBoundingClientRect().width,
+        railWidth: appRailWidth(root)
+      };
+      setRootMetrics((current) => {
+        if (current?.width === nextMetrics.width && current.railWidth === nextMetrics.railWidth) {
+          return current;
+        }
+        return nextMetrics;
+      });
+    };
+    updateMetrics();
+    const resizeObserver = new ResizeObserver(updateMetrics);
+    resizeObserver.observe(root);
+    window.addEventListener("resize", updateMetrics);
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", updateMetrics);
+    };
+  }, []);
   React.useLayoutEffect(() => {
     previousSidebarHiddenRef.current = sidebarHidden;
   }, [sidebarHidden]);
@@ -58,7 +94,7 @@ export const AppShell = ({
     const rect = root.getBoundingClientRect();
     const railWidth = appRailWidth(root);
     const minWidth = MIN_APP_SIDEBAR_WIDTH;
-    const maxWidth = maxAppSidebarWidthForContainer(rect.width - railWidth);
+    const maxWidth = maxAppSidebarWidthForContainer(rect.width - railWidth, minWorkspaceWidth);
 
     const move = (moveEvent: PointerEvent): void => {
       const nextWidth = Math.round(moveEvent.clientX - rect.left - railWidth);
@@ -81,7 +117,7 @@ export const AppShell = ({
       data-sidebar-collapsed={secondarySidebarCollapsed ? "true" : undefined}
       data-sidebar-hidden={sidebarHidden ? "true" : undefined}
       ref={rootRef}
-      style={{ "--app-sidebar-width": `${normalizedSidebarWidth}px` } as React.CSSProperties}
+      style={{ "--app-sidebar-width": `${effectiveSidebarWidth}px` } as React.CSSProperties}
       className={cn(
         "app-shell-root grid h-full min-h-0 text-foreground",
         isResizingSidebar && "resizing-sidebar",
@@ -107,8 +143,8 @@ export const AppShell = ({
           aria-label="Resize sidebar"
           aria-orientation="vertical"
           aria-valuemin={MIN_APP_SIDEBAR_WIDTH}
-          aria-valuemax={MAX_APP_SIDEBAR_WIDTH}
-          aria-valuenow={normalizedSidebarWidth}
+          aria-valuemax={effectiveSidebarMax}
+          aria-valuenow={effectiveSidebarWidth}
           onPointerDown={startSidebarResize}
         />
       )}

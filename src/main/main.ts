@@ -68,6 +68,7 @@ import type {
   ReplaceArtifactDraftRequest,
   ReviseArtifactRequest,
   SaveArtifactDraftRequest,
+  SetArtifactArchivedRequest,
   SignArtifactRequest,
   SubmitArtifactDraftRequest,
   UpdateArtifactDraftRosterRequest,
@@ -99,6 +100,7 @@ import {
   APP_ARTIFACT_READ_TOOL,
   APP_ARTIFACT_RENAME_TOOL,
   APP_ARTIFACT_REVISE_TOOL,
+  APP_ARTIFACT_SET_ARCHIVED_TOOL,
   APP_ARTIFACT_SET_ACCESS_TOOL,
   APP_ARTIFACT_SIGN_TOOL
 } from "./services/appMcp";
@@ -454,6 +456,12 @@ async function dispatchArtifactTool(
         contributors: artifactToolStringArray(args.contributors),
         requiredSigners: artifactToolStringArray(args.requiredSigners),
         labels: artifactToolStringArray(args.labels)
+      });
+    case APP_ARTIFACT_SET_ARCHIVED_TOOL:
+      return artifactService.setArchived(member, {
+        conversationId,
+        ...ref,
+        archived: args.archived as boolean
       });
     default:
       throw new Error(`Unknown artifact tool: ${toolName}.`);
@@ -1238,6 +1246,8 @@ function registerIpc(): void {
     artifactService.sign(ARTIFACT_USER_MEMBER, request));
   ipcMain.handle("artifacts:set-access", (_event, request: UpdateArtifactAccessRequest) =>
     artifactService.updateAccess(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:set-archived", (_event, request: SetArtifactArchivedRequest) =>
+    artifactService.setArchived(ARTIFACT_USER_MEMBER, request));
   ipcMain.handle("artifacts:drafts:list", (_event, request: ListArtifactDraftsRequest) =>
     artifactService.listDrafts(ARTIFACT_USER_MEMBER, request));
   ipcMain.handle("artifacts:drafts:read", (_event, request: ReadArtifactDraftRequest) =>
