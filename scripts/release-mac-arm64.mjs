@@ -220,6 +220,10 @@ function parseArgs() {
   if (!options.releaseRepo) {
     fail(`Could not determine ${releaseChannelForTarget(options.target)} release repo. Set package.json config.${options.target === "beta" ? "betaReleaseRepo" : "releaseRepo"}, RELEASE_REPO, or pass --repo owner/repo.`);
   }
+  const stableReleaseRepo = parseGitHubRepo(configuredReleaseRepo());
+  if (options.target === "beta" && stableReleaseRepo && options.releaseRepo.toLowerCase() === stableReleaseRepo.toLowerCase()) {
+    fail(`Beta releases must not target the stable release repo ${stableReleaseRepo}. Use ${configuredBetaReleaseRepo() || "a beta release repo"} or pass --repo owner/repo for another beta/test repo.`);
+  }
 
   return options;
 }
