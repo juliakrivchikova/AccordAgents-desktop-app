@@ -267,6 +267,12 @@ test("cloud-init and instance spec carry the toolchain and tag", () => {
   const init = buildWorkerCloudInit();
   assert.match(init, /@openai\/codex/);
   assert.match(init, /apparmor_restrict_unprivileged_userns=0/);
+  // MSS clamp so SSH/rsync survive clients on low-MTU VPN tunnels. It must run
+  // in bootcmd (before sshd serves traffic and on every stop/start), not runcmd.
+  assert.match(init, /bootcmd:/);
+  assert.match(init, /TCPMSS --set-mss 1200/);
+  assert.match(init, /cloud-init-per, always, accord-mss-clamp4/);
+  assert.ok(init.indexOf("bootcmd:") < init.indexOf("runcmd:"), "clamp must precede runcmd");
   const spec = buildWorkerInstanceSpec({ imageId: "ami-1", rootDeviceName: "/dev/sda1", keyName: "k", securityGroupId: "sg-1" });
   assert.equal(spec.instanceType, "t3.small");
   assert.equal(spec.rootVolumeSizeGb, 8);

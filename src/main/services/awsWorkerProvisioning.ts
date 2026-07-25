@@ -252,6 +252,17 @@ export function buildWorkerCloudInit(): string {
     "  - curl",
     "  - cloud-guest-utils",
     "  - ec2-instance-connect",
+    // Clamp the TCP MSS the worker advertises so SSH/rsync survive clients on a
+    // low-MTU tunnel (e.g. a full-tunnel VPN pinned at MTU 1280). Without this
+    // the worker replies to the SSH key exchange with a full ~1460B segment that
+    // the tunnel silently drops — PMTUD can't recover because security groups
+    // drop the "fragmentation needed" ICMP — so the client stalls at "banner
+    // exchange". bootcmd runs early (before sshd serves traffic) and, with
+    // cloud-init-per=always, re-applies the in-memory rule on every stop/start.
+    // -C||-A keeps it idempotent within a boot.
+    "bootcmd:",
+    "  - [ cloud-init-per, always, accord-mss-clamp4, bash, -c, \"iptables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200\" ]",
+    "  - [ cloud-init-per, always, accord-mss-clamp6, bash, -c, \"ip6tables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1180 2>/dev/null || ip6tables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1180 || true\" ]",
     "runcmd:",
     "  - [ bash, -lc, \"curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs\" ]",
     "  - [ bash, -lc, \"npm install -g @openai/codex\" ]",
