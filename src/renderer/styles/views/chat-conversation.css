@@ -11,6 +11,8 @@
   overflow: hidden;
   padding: 0;
   background: var(--app-surface);
+  --chat-main-min-width: 320px;
+  --chat-side-panel-min-width: 300px;
   --chat-decision-title-size: 16px;
   --chat-decision-title-weight: 700;
   --chat-decision-title-line-height: 1.25;
@@ -21,15 +23,15 @@
 }
 
 .chat-view.thread-open {
-  grid-template-columns: minmax(0, 1fr) 1px minmax(320px, var(--chat-thread-width, 430px));
+  grid-template-columns: minmax(var(--chat-main-min-width), 1fr) 1px minmax(0, var(--chat-thread-width, 430px));
 }
 
 .chat-view.artifacts-open {
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(var(--chat-main-min-width), 1fr) auto;
 }
 
 .chat-view.thread-open.artifacts-open {
-  grid-template-columns: minmax(0, 1fr) 1px minmax(320px, var(--chat-thread-width, 430px)) auto;
+  grid-template-columns: minmax(var(--chat-main-min-width), 1fr) 1px minmax(0, var(--chat-thread-width, 430px));
 }
 
 .chat-view > [data-shell="topbar"] {

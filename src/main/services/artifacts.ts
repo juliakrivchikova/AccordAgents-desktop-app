@@ -23,6 +23,7 @@ import type {
   ReplaceArtifactDraftRequest,
   ReviseArtifactRequest,
   SaveArtifactDraftRequest,
+  SetArtifactArchivedRequest,
   SignArtifactRequest,
   SubmitArtifactDraftRequest,
   UpdateArtifactDraftRosterRequest,
@@ -649,6 +650,46 @@ export class ArtifactService {
         this.now()
       );
       this.notifyChanged(request.conversationId);
+      return this.summaryResult(record.id);
+    });
+  }
+
+  async setArchived(actorRaw: string, request: SetArtifactArchivedRequest): Promise<ArtifactResult<ArtifactSummary>> {
+    return this.withMutation(request.conversationId, async () => {
+      const context = await this.requireMember(actorRaw, request.conversationId);
+      if (!context.ok) {
+        return context;
+      }
+      const { actor } = context.value;
+      if (typeof request.archived !== "boolean") {
+        return invalid<ArtifactSummary>("archived must be true or false.");
+      }
+      const resolved = await this.resolveArtifact(request.conversationId, request.artifactId, request.name);
+      if (!resolved.ok) {
+        return resolved;
+      }
+      const record = resolved.value;
+      if (!this.canManageAccess(record, actor)) {
+        return fail<ArtifactSummary>({
+          code: "access_denied",
+          message: `Only User or the owner (${artifactMemberLabel(record.owner)}) can archive or restore "${record.name}".`
+        });
+      }
+      const alreadyArchived = Boolean(record.archivedAt);
+      if (request.archived === alreadyArchived) {
+        return this.summaryResult(record.id);
+      }
+      const now = this.now();
+      const event = this.event(
+        record,
+        actor,
+        request.archived ? "archived" : "restored",
+        `${artifactMemberLabel(actor)} ${request.archived ? "archived" : "restored"} artifact ${artifactReference(record.id, record.name)}`,
+        now
+      );
+      await this.deps.store.updateArchived(record.id, request.archived ? now : undefined, now, event);
+      this.notifyChanged(request.conversationId);
+      await this.flushPendingArtifactEvents();
       return this.summaryResult(record.id);
     });
   }
@@ -1741,6 +1782,7 @@ export class ArtifactService {
       submittedDraftCount: record.requiredDraftAuthors.filter((author) => submittedAuthors.has(author)).length,
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
+      archivedAt: record.archivedAt,
       approval: computeArtifactApproval(
         record.requiredSigners,
         headSignatures.map((signature) => ({ signer: signature.signer, signedAt: signature.signedAt }))

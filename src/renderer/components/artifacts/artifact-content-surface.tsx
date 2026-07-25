@@ -1,10 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { CheckCircle2, Copy, Pencil } from "lucide-react";
+import { CheckCircle2, Copy, Info, Pencil } from "lucide-react";
 
 import { MarkdownText } from "../content/markdown-text";
 import { IconButton } from "../primitives/icon-button";
 
-export function ArtifactContentSurface(props: { content: string; testId: string; onRevise?: () => void; reviseDisabled?: boolean }): JSX.Element {
+export function ArtifactContentSurface(props: {
+  content: string;
+  testId: string;
+  note?: string;
+  onRevise?: () => void;
+  reviseDisabled?: boolean;
+}): JSX.Element {
   const [copied, setCopied] = useState(false);
   const resetRef = useRef<number | undefined>(undefined);
 
@@ -50,6 +56,12 @@ export function ArtifactContentSurface(props: { content: string; testId: string;
       </div>
       <div className="artifact-content-markdown">
         <MarkdownText content={props.content} />
+        {props.note ? (
+          <div className="artifact-version-note">
+            <Info size={14} aria-hidden />
+            <span><strong>Note</strong> — {props.note}</span>
+          </div>
+        ) : null}
       </div>
     </div>
   );

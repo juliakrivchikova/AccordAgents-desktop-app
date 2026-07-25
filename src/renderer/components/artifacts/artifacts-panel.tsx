@@ -1,5 +1,5 @@
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, FilePlus2, FileText, Pencil, UsersRound, X } from "lucide-react";
+import { Archive, ArrowLeft, FilePlus2, FileText, Pencil, RotateCcw, UsersRound, X } from "lucide-react";
 import { ARTIFACT_USER_MEMBER } from "../../../shared/types";
 import type {
   ArtifactError,
@@ -20,6 +20,7 @@ import { loadArtifactDiff } from "./artifact-diff-loader";
 import { ArtifactDraftInbox } from "./draft-inbox";
 import { ArtifactsList } from "./artifacts-list";
 type PanelMode = "view" | "create" | "revise";
+type ArtifactListStatus = "active" | "archived";
 export function ArtifactsPanel(props: {
   conversationId: string;
   members: string[];
@@ -45,6 +46,8 @@ export function ArtifactsPanel(props: {
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [accessOpen, setAccessOpen] = useState(false);
+  const [listStatus, setListStatus] = useState<ArtifactListStatus>("active");
+  const accessButtonRef = useRef<HTMLButtonElement>(null);
   const loadGeneration = useRef(0);
   const compareGeneration = useRef(0);
   const resizeLimits = panelResize.getLimits();
@@ -76,6 +79,41 @@ export function ArtifactsPanel(props: {
     });
   }, [props.conversationId]);
   useEffect(() => () => { loadGeneration.current += 1; }, []);
+  useEffect(() => {
+    if (!accessOpen) {
+      return undefined;
+    }
+    const closeAccess = (): void => setAccessOpen(false);
+    const onMouseDown = (event: MouseEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      const popover = panelResize.panelRef.current?.querySelector(".artifact-access-popover");
+      if (popover?.contains(target) || accessButtonRef.current?.contains(target)) {
+        return;
+      }
+      closeAccess();
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        closeAccess();
+      }
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", closeAccess);
+    window.addEventListener("scroll", closeAccess, true);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", closeAccess);
+      window.removeEventListener("scroll", closeAccess, true);
+    };
+  }, [accessOpen, panelResize.panelRef]);
+  useEffect(() => {
+    setAccessOpen(false);
+  }, [props.selectedId]);
   useEffect(() => {
     setMode("view");
     setViewVersion(undefined);
@@ -192,9 +230,9 @@ export function ArtifactsPanel(props: {
       void loadDetail(detail.summary.id, viewVersion);
     }
   }
-  async function submitAccess(values: ArtifactAccessValues): Promise<void> {
+  async function submitAccess(values: ArtifactAccessValues): Promise<boolean> {
     if (!detail) {
-      return;
+      return false;
     }
     const value = await run(() => window.consensus.updateArtifactAccess({
       conversationId: props.conversationId,
@@ -202,6 +240,25 @@ export function ArtifactsPanel(props: {
       ...values
     }));
     if (value) {
+      setDetail((current) => current && current.summary.id === value.id ? { ...current, summary: value } : current);
+      void loadDetail(detail.summary.id, viewVersion);
+      return true;
+    }
+    void loadDetail(detail.summary.id, viewVersion);
+    return false;
+  }
+  async function submitArchived(archived: boolean): Promise<void> {
+    if (!detail) {
+      return;
+    }
+    const value = await run(() => window.consensus.setArtifactArchived({
+      conversationId: props.conversationId,
+      artifactId: detail.summary.id,
+      archived
+    }));
+    if (value) {
+      setListStatus(archived ? "archived" : "active");
+      setDetail((current) => current && current.summary.id === value.id ? { ...current, summary: value } : current);
       void loadDetail(detail.summary.id, viewVersion);
     }
   }
@@ -209,6 +266,9 @@ export function ArtifactsPanel(props: {
   const canEdit = detail ? me === ARTIFACT_USER_MEMBER || detail.summary.owner === me || detail.summary.contributors.includes(me) : false;
   const canManageAccess = detail ? me === ARTIFACT_USER_MEMBER || detail.summary.owner === me : false;
   const detailTitle = detail?.summary.name ?? selectedSummary?.name ?? "Artifact";
+  const activeArtifacts = props.artifacts.filter((artifact) => !artifact.archivedAt);
+  const archivedArtifacts = props.artifacts.filter((artifact) => artifact.archivedAt);
+  const visibleArtifacts = listStatus === "archived" ? archivedArtifacts : activeArtifacts;
   const isListMode = !props.selectedId && mode !== "create";
   return (
     <div ref={panelResize.panelRef} className="artifacts-panel" data-resizing={panelResize.resizing ? "true" : undefined}
@@ -269,7 +329,7 @@ export function ArtifactsPanel(props: {
               </h3>
               {props.selectedId && detail ? (
                 <span className="artifacts-panel-subtitle">
-                  Current version: v{detail.lifecycle === "published" ? detail.version.version : detail.summary.headVersion} · Updated {formatArtifactRelativeTimestamp(detail.summary.updatedAt)}
+                  {detail.summary.archivedAt ? "Archived" : "Current version"}: v{detail.lifecycle === "published" ? detail.version.version : detail.summary.headVersion} · Updated {formatArtifactRelativeTimestamp(detail.summary.updatedAt)}
                 </span>
               ) : null}
             </>
@@ -285,12 +345,24 @@ export function ArtifactsPanel(props: {
         )}
         {props.selectedId && mode !== "create" && canManageAccess && (
           <IconButton
+            ref={accessButtonRef}
             label="Manage access"
             icon={UsersRound}
             tooltip="Manage access"
             disabled={!detail || busy}
             pressed={accessOpen}
+            aria-expanded={accessOpen}
+            data-artifact-access-trigger="true"
             onClick={() => { clearTransient(); setAccessOpen((open) => !open); }}
+          />
+        )}
+        {props.selectedId && mode !== "create" && canManageAccess && (
+          <IconButton
+            label={detail?.summary.archivedAt ? "Restore artifact" : "Archive artifact"}
+            icon={detail?.summary.archivedAt ? RotateCcw : Archive}
+            tooltip={detail?.summary.archivedAt ? "Restore" : "Archive"}
+            disabled={!detail || busy}
+            onClick={() => void submitArchived(!detail?.summary.archivedAt)}
           />
         )}
         <IconButton label="Close artifacts" icon={X} onClick={props.onClose} />
@@ -300,16 +372,28 @@ export function ArtifactsPanel(props: {
           summary={detail.summary}
           members={props.members}
           busy={busy}
-          onSubmit={(values) => void submitAccess(values)}
+          onSubmit={submitAccess}
         />
       ) : null}
       {!props.selectedId && mode !== "create" && (
         <div className="artifact-list-tabs" role="tablist" aria-label="Artifact status">
-          <button type="button" className="artifact-list-tab is-active" role="tab" aria-selected="true">
-            Active <span>{props.artifacts.length}</span>
+          <button
+            type="button"
+            className={`artifact-list-tab${listStatus === "active" ? " is-active" : ""}`}
+            role="tab"
+            aria-selected={listStatus === "active"}
+            onClick={() => setListStatus("active")}
+          >
+            Active <span>{activeArtifacts.length}</span>
           </button>
-          <button type="button" className="artifact-list-tab" role="tab" aria-selected="false" disabled>
-            Archived <span>0</span>
+          <button
+            type="button"
+            className={`artifact-list-tab${listStatus === "archived" ? " is-active" : ""}`}
+            role="tab"
+            aria-selected={listStatus === "archived"}
+            onClick={() => setListStatus("archived")}
+          >
+            Archived <span>{archivedArtifacts.length}</span>
           </button>
         </div>
       )}
@@ -355,7 +439,11 @@ export function ArtifactsPanel(props: {
         />
       ) : !props.selectedId ? (
         <div className="artifacts-panel-body">
-          <ArtifactsList artifacts={props.artifacts} onSelect={props.onSelect} />
+          <ArtifactsList
+            artifacts={visibleArtifacts}
+            onSelect={props.onSelect}
+            emptyMessage={listStatus === "archived" ? "No archived artifacts." : undefined}
+          />
         </div>
       ) : !detail ? (
         <div className="artifacts-panel-body artifacts-empty">Loading artifact…</div>

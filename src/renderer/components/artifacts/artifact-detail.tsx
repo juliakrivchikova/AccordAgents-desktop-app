@@ -99,9 +99,6 @@ export function ArtifactDetailView(props: {
             </span>
           </div>
         )}
-        {detail.summary.labels.length > 0 && (
-          <div className="artifact-labels">{detail.summary.labels.map((label) => <span key={label} className="artifact-label">{label}</span>)}</div>
-        )}
       </div>
 
       <>
@@ -221,15 +218,13 @@ export function ArtifactDetailView(props: {
                 </div>
               )
             ) : (
-              <>
-                {detail.version.note && <div className="artifact-version-note">Note: {detail.version.note}</div>}
-                <ArtifactContentSurface
-                  content={detail.version.content}
-                  testId="artifact-version-content"
-                  onRevise={props.canEdit ? props.onStartRevise : undefined}
-                  reviseDisabled={props.busy}
-                />
-              </>
+              <ArtifactContentSurface
+                content={detail.version.content}
+                testId="artifact-version-content"
+                note={detail.version.note}
+                onRevise={props.canEdit ? props.onStartRevise : undefined}
+                reviseDisabled={props.busy}
+              />
             )}
           </>
         )}
@@ -246,9 +241,7 @@ function ArtifactRevisionSurface(props: {
   onSubmit: (content: string, note: string | undefined) => void;
 }): JSX.Element {
   const [content, setContent] = useState(props.initialContent);
-  useEffect(() => {
-    setContent(props.initialContent);
-  }, [props.baseVersion, props.initialContent]);
+  const [note, setNote] = useState("");
   return (
     <div className="artifact-content-surface artifact-edit-surface" data-testid="artifact-revision-content">
       <div className="artifact-content-fabs">
@@ -261,7 +254,7 @@ function ArtifactRevisionSurface(props: {
           aria-label={`Save as v${props.baseVersion + 1}`}
           title={`Save as v${props.baseVersion + 1}`}
           disabled={props.busy || !content}
-          onClick={() => props.onSubmit(content, undefined)}
+          onClick={() => props.onSubmit(content, note.trim() ? note : undefined)}
         >
           <Check size={15} aria-hidden />
         </button>
@@ -273,6 +266,15 @@ function ArtifactRevisionSurface(props: {
         value={content}
         onChange={(event) => setContent(event.target.value)}
       />
+      <label className="artifact-revision-note">
+        <span>Revision note</span>
+        <input
+          value={note}
+          aria-label="Revision note"
+          placeholder="Optional"
+          onChange={(event) => setNote(event.target.value)}
+        />
+      </label>
     </div>
   );
 }

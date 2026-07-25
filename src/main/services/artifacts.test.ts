@@ -468,6 +468,42 @@ test("human user can always revise and manage artifact access", async () => {
   }
 });
 
+test("artifact archive is a reversible soft state that preserves contents and history", async () => {
+  const h = await harness();
+  try {
+    const created = expectPublished(expectOk(await h.service.create("gera", {
+      conversationId: CONVERSATION_ID,
+      name: "Old Plan",
+      content: "v1",
+      contributors: ["codex"],
+      requiredSigners: ["user"]
+    })));
+    const id = created.summary.id;
+    expectOk(await h.service.sign("user", { conversationId: CONVERSATION_ID, artifactId: id }));
+
+    expectError(await h.service.setArchived("drew", { conversationId: CONVERSATION_ID, artifactId: id, archived: true }), "access_denied");
+
+    const archived = expectOk(await h.service.setArchived("user", { conversationId: CONVERSATION_ID, artifactId: id, archived: true }));
+    assert.equal(typeof archived.archivedAt, "string");
+    assert.equal(archived.approval.state, "approved", "archive must not touch signatures");
+
+    const listed = expectOk(await h.service.list("codex", CONVERSATION_ID));
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].archivedAt, archived.archivedAt);
+
+    const read = expectPublished(expectOk(await h.service.read("codex", { conversationId: CONVERSATION_ID, artifactId: id, includeHistory: true })));
+    assert.equal(read.version.content, "v1");
+    assert.equal(read.summary.archivedAt, archived.archivedAt);
+    assert.equal(read.history?.length, 1);
+
+    const restored = expectOk(await h.service.setArchived("gera", { conversationId: CONVERSATION_ID, artifactId: id, archived: false }));
+    assert.equal(restored.archivedAt, undefined);
+    assert.equal(expectPublished(expectOk(await h.service.read("user", { conversationId: CONVERSATION_ID, artifactId: id }))).summary.archivedAt, undefined);
+  } finally {
+    await h.cleanup();
+  }
+});
+
 // Done-means #8: restart simulation. A brand-new store + service over the same
 // database file must see the full artifact state (nothing lives in memory or
 // in conversation payloads).

@@ -8,11 +8,12 @@ import { formatArtifactRelativeTimestamp } from "./artifact-detail";
 export function ArtifactsList(props: {
   artifacts: ArtifactSummary[];
   onSelect: (artifactId: string) => void;
+  emptyMessage?: string;
 }): JSX.Element {
   if (props.artifacts.length === 0) {
     return (
       <div className="artifacts-empty">
-        No artifacts in this chat yet. Members and agents can create durable, versioned, signable documents here — plans, QA case lists, decisions, todo lists, anything.
+        {props.emptyMessage ?? "No artifacts in this chat yet. Members and agents can create durable, versioned, signable documents here — plans, QA case lists, decisions, todo lists, anything."}
       </div>
     );
   }

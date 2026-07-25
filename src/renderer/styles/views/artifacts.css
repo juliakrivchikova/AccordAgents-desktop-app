@@ -382,11 +382,6 @@
   cursor: default;
 }
 
-.artifact-version-note {
-  font-size: 12px;
-  color: var(--app-muted);
-}
-
 .artifact-draft-author {
   color: var(--app-muted);
   font-size: 12px;
@@ -663,12 +658,13 @@
   z-index: 30;
   top: 48px;
   right: 12px;
-  width: min(300px, calc(100% - 24px));
+  width: 340px;
+  max-width: calc(100vw - 24px);
   padding: 8px;
   border: 1px solid var(--app-border);
   border-radius: 12px;
   background: var(--app-surface);
-  box-shadow: 0 14px 36px -12px color-mix(in srgb, var(--shadow-color) 28%, transparent), 0 0 0 1px var(--app-border);
+  box-shadow: 0 14px 36px -12px var(--app-shadow), 0 0 0 1px var(--app-border);
 }
 
 .aap-head {
@@ -693,11 +689,12 @@
 .aap-list {
   display: flex;
   flex-direction: column;
+  gap: 1px;
 }
 
 .aap-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
   padding: 8px;
@@ -711,7 +708,8 @@
 .aap-name {
   display: flex;
   min-width: 0;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 7px;
   overflow: hidden;
   color: var(--app-text-strong);
@@ -735,15 +733,17 @@
 .aap-perms {
   display: inline-flex;
   flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 4px;
 }
 
 .aap-perm {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-height: 27px;
-  padding: 5px 12px 5px 10px;
+  padding: 5px 9px 5px 8px;
   border: 1px dashed var(--app-border-strong);
   border-radius: 999px;
   background: transparent;
@@ -774,6 +774,38 @@
 .aap-perm:disabled {
   cursor: default;
   opacity: 1;
+}
+
+.aap-fields {
+  display: grid;
+  gap: 8px;
+  padding: 9px 8px 6px;
+  border-top: 1px solid var(--app-border);
+}
+
+.aap-fields label {
+  display: grid;
+  gap: 4px;
+  color: var(--app-text-strong);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.aap-fields input,
+.aap-fields select {
+  width: 100%;
+  height: 31px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 0 9px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.aap-fields .artifact-secondary-action {
+  justify-self: flex-end;
 }
 
 /* Inline artifact reference in chat messages: shares the composer token style. */
@@ -807,11 +839,13 @@
   top: auto;
   right: auto;
   bottom: auto;
+  container-type: inline-size;
   grid-column: 2;
   grid-row: 1;
   align-self: stretch;
   height: 100%;
   min-height: 0;
+  min-width: 0;
   background: var(--app-surface);
   box-shadow: none;
   z-index: 3;
@@ -822,7 +856,7 @@
 }
 
 .chat-view.thread-open.artifacts-open > .artifacts-panel {
-  grid-column: 4;
+  display: none;
 }
 
 .artifacts-panel-header {
@@ -836,7 +870,11 @@
 }
 
 .artifacts-panel-header.is-detail {
-  gap: 10px;
+  height: var(--app-header-height);
+  min-height: var(--app-header-height);
+  flex-basis: var(--app-header-height);
+  gap: 8px;
+  padding: 0 12px 0 14px;
 }
 
 .artifacts-panel-header.is-list {
@@ -870,6 +908,10 @@
   transform: translateY(var(--app-header-title-offset-y));
 }
 
+.artifacts-panel-header.is-detail .artifacts-panel-title {
+  gap: 8px;
+}
+
 .artifacts-panel-title > span:first-child {
   min-width: 0;
   overflow: hidden;
@@ -884,6 +926,30 @@
   border: 0 !important;
   background: transparent !important;
   color: var(--app-muted);
+}
+
+.artifacts-panel-header.is-detail [data-slot="button"],
+.artifacts-panel-header.is-detail [data-slot="tooltip-trigger"] {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  border: 0 !important;
+  background: transparent !important;
+  color: var(--app-muted);
+  box-shadow: none !important;
+}
+
+.artifacts-panel-header.is-detail [data-slot="button"] svg,
+.artifacts-panel-header.is-detail [data-slot="tooltip-trigger"] svg {
+  width: 16px;
+  height: 16px;
+}
+
+.artifacts-panel-header.is-detail .artifacts-panel-title [data-slot="button"],
+.artifacts-panel-header.is-detail .artifacts-panel-title [data-slot="tooltip-trigger"] {
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
 }
 
 .artifacts-panel-title [data-slot="button"]:hover {
@@ -907,6 +973,13 @@
   white-space: nowrap;
 }
 
+.artifacts-panel-header.is-detail .artifacts-panel-subtitle {
+  top: calc(50% + 12px);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
 .artifacts-panel-mark,
 .artifact-list-mark {
   display: inline-grid;
@@ -920,6 +993,18 @@
   width: 34px;
   height: 34px;
   border-radius: 9px;
+}
+
+.artifacts-panel-header.is-detail .artifacts-panel-mark {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--app-accent) 15%, transparent);
+}
+
+.artifacts-panel-header.is-detail .artifacts-panel-mark svg {
+  width: 17px;
+  height: 17px;
 }
 
 .artifact-approved-mark {
@@ -1074,7 +1159,6 @@
 .artifact-detail-head {
   gap: 9px;
   padding: 12px 16px 13px;
-  border-bottom: 1px solid var(--app-border);
 }
 
 .artifact-people-row {
@@ -1091,6 +1175,7 @@
   color: var(--app-muted);
   font-size: 12px;
   font-weight: 500;
+  line-height: 16px;
 }
 
 .artifact-people-value,
@@ -1098,16 +1183,19 @@
   display: inline-flex;
   min-width: 0;
   align-items: center;
-  gap: 5px;
+  gap: 8px;
   color: var(--app-text-strong);
   font-family: var(--font-body);
   font-size: 12.5px;
   font-weight: 500;
+  line-height: 17px;
 }
 
 .artifact-signer span {
   color: var(--app-success);
   font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .artifact-toolbar {
@@ -1120,7 +1208,7 @@
 
 .artifact-version-selector {
   min-width: 0;
-  flex: 1;
+  flex: 1 1 auto;
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -1140,15 +1228,23 @@
   height: 32px;
   border-radius: 9px;
   padding-left: 11px;
+  padding-right: 34px;
   color: var(--app-text-strong);
   font-family: var(--font-body);
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 600;
+}
+
+.artifact-version-selector-control svg {
+  right: 11px;
+  width: 16px;
+  height: 16px;
 }
 
 .artifact-diff-segment {
   display: inline-flex;
   flex: 0 0 auto;
+  height: 32px;
   overflow: hidden;
   border: 1px solid var(--app-border);
   border-radius: 10px;
@@ -1166,8 +1262,9 @@
 
 .artifact-diff-segment button {
   display: inline-flex;
-  height: 32px;
+  height: 30px;
   align-items: center;
+  justify-content: center;
   gap: 7px;
   padding: 0 13px;
   border: 0;
@@ -1175,6 +1272,19 @@
   color: var(--app-muted);
   font-size: 12.5px;
   font-weight: 500;
+}
+
+.artifact-diff-segment button:first-child {
+  flex: 1 1 auto;
+}
+
+.artifact-diff-segment button:last-child {
+  flex: 1 1 auto;
+}
+
+.artifact-diff-segment button svg {
+  width: 14px;
+  height: 14px;
 }
 
 .artifact-diff-segment button + button {
@@ -1214,6 +1324,7 @@
 }
 
 .artifact-edit-surface {
+  flex-direction: column;
   background: var(--app-surface);
   overflow: hidden;
 }
@@ -1234,8 +1345,58 @@
   line-height: 1.55;
 }
 
+.artifact-revision-note {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 13px;
+  border-top: 1px solid var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.artifact-revision-note input {
+  min-width: 0;
+  flex: 1;
+  height: 30px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 0 9px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  font: inherit;
+  font-size: 12px;
+}
+
 .artifact-content-edit-textarea:focus-visible {
   box-shadow: inset 0 0 0 1px var(--app-border-strong), inset 0 0 0 4px var(--app-accent-soft);
+}
+
+.artifact-version-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 24px;
+  border-left: 4px solid var(--app-success);
+  border-radius: 12px;
+  padding: 12px 16px 13px 13px;
+  background: color-mix(in srgb, var(--app-success) 10%, var(--app-surface));
+  color: var(--app-text);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.artifact-version-note svg {
+  flex: 0 0 auto;
+  margin-top: 3px;
+  color: var(--app-success);
+}
+
+.artifact-version-note strong {
+  color: var(--app-text-strong);
+  font-weight: 700;
 }
 
 .artifact-content-fabs {

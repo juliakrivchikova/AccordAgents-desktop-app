@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { ArrowDown } from "lucide-react";
 
@@ -42,6 +42,12 @@ import { useChatConversationViewport } from "./use-chat-conversation-viewport";
 import { useChatLocalFileOpen } from "./use-chat-local-file-open";
 import { useSubmittingIdSet } from "./use-submitting-id-set";
 import { useStableChatMessageActions } from "./use-stable-chat-message-actions";
+import {
+  CHAT_SIDE_PANEL_MIN_WIDTH,
+  CHAT_THREAD_DEFAULT_WIDTH,
+  chatSidePanelWidthLimits,
+  clampChatSidePanelWidth
+} from "../../lib/chat-split-sizing";
 
 export type { ChatMessageFocusRequest } from "./chat-conversation-types";
 
@@ -88,7 +94,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   const artifacts = props.artifacts;
   const [selectedThreadRootId, setSelectedThreadRootId] = useState<string | undefined>();
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
-  const [threadWidth, setThreadWidth] = useState(430);
+  const [threadWidth, setThreadWidth] = useState(CHAT_THREAD_DEFAULT_WIDTH);
   const [isResizingThread, setIsResizingThread] = useState(false);
   const approvalSubmission = useSubmittingIdSet();
   const choiceSubmission = useSubmittingIdSet();
@@ -213,12 +219,14 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     event.currentTarget.setPointerCapture(event.pointerId);
     setIsResizingThread(true);
     const rect = view.getBoundingClientRect();
-    const minThread = 320;
-    const maxThread = Math.max(minThread, Math.min(820, rect.width - 360));
+    const limits = chatSidePanelWidthLimits(rect.width, {
+      reserveWidth: 1,
+      minWidth: CHAT_SIDE_PANEL_MIN_WIDTH
+    });
 
     const move = (moveEvent: PointerEvent): void => {
       const nextWidth = Math.round(rect.right - moveEvent.clientX);
-      setThreadWidth(Math.min(maxThread, Math.max(minThread, nextWidth)));
+      setThreadWidth(clampChatSidePanelWidth(nextWidth, limits));
     };
     const stop = (): void => {
       setIsResizingThread(false);
@@ -228,6 +236,28 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", stop, { once: true });
   }
+
+  useLayoutEffect(() => {
+    const view = viewport.viewRef.current;
+    if (!view || !selectedThreadRoot) {
+      return undefined;
+    }
+    const clampCurrentWidth = (): void => {
+      const limits = chatSidePanelWidthLimits(view.getBoundingClientRect().width, {
+        reserveWidth: 1,
+        minWidth: CHAT_SIDE_PANEL_MIN_WIDTH
+      });
+      setThreadWidth((current) => clampChatSidePanelWidth(current, limits));
+    };
+    clampCurrentWidth();
+    const resizeObserver = new ResizeObserver(clampCurrentWidth);
+    resizeObserver.observe(view);
+    window.addEventListener("resize", clampCurrentWidth);
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", clampCurrentWidth);
+    };
+  }, [selectedThreadRoot, viewport.viewRef]);
 
   useEffect(() => {
     setSelectedThreadRootId(undefined);

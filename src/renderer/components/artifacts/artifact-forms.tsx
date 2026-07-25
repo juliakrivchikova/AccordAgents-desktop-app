@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Eye, FileText, Pencil } from "lucide-react";
+import { BadgeCheck, Eye, FileText, Pencil } from "lucide-react";
 
 import { artifactMemberLabel, normalizeArtifactMember } from "../../../shared/artifacts";
 import { ARTIFACT_USER_MEMBER } from "../../../shared/types";
@@ -16,7 +16,10 @@ export interface ArtifactCreateValues {
 }
 
 export interface ArtifactAccessValues {
-  contributors: string[];
+  owner?: string;
+  contributors?: string[];
+  requiredSigners?: string[];
+  labels?: string[];
 }
 
 export function splitMemberList(value: string): string[] {
@@ -120,28 +123,78 @@ export function AccessArtifactForm(props: {
   summary: ArtifactSummary;
   members: string[];
   busy: boolean;
-  onSubmit: (values: ArtifactAccessValues) => void;
+  onSubmit: (values: ArtifactAccessValues) => Promise<boolean>;
 }): JSX.Element {
+  const [owner, setOwner] = useState(props.summary.owner);
   const [contributors, setContributors] = useState(props.summary.contributors);
-  const ownerMember = props.summary.owner;
-  const signerMembers = props.summary.approval.requiredSigners;
+  const [signerMembers, setSignerMembers] = useState(props.summary.approval.requiredSigners);
+  const [labels, setLabels] = useState(props.summary.labels.join(", "));
+  const savedOwnerMember = props.summary.owner;
+  const selectedOwnerMember = normalizeArtifactMember(owner) || savedOwnerMember;
+  const canEditSigners = props.summary.lifecycle === "published";
   const memberRows = [
-    ...new Set([ARTIFACT_USER_MEMBER, ownerMember, ...props.members, ...contributors, ...signerMembers].map(normalizeArtifactMember).filter(Boolean))
+    ...new Set([ARTIFACT_USER_MEMBER, savedOwnerMember, selectedOwnerMember, ...props.members, ...contributors, ...signerMembers].map(normalizeArtifactMember).filter(Boolean))
   ];
   useEffect(() => {
+    setOwner(props.summary.owner);
     setContributors(props.summary.contributors);
-  }, [props.summary.id, props.summary.contributors]);
+    setSignerMembers(props.summary.approval.requiredSigners);
+    setLabels(props.summary.labels.join(", "));
+  }, [props.summary.id, props.summary.owner, props.summary.contributors, props.summary.approval.requiredSigners, props.summary.labels]);
 
-  function toggleContributor(member: string): void {
-    if (props.busy || member === ARTIFACT_USER_MEMBER || member === ownerMember) {
+  function savedContributorValues(nextContributors: string[]): string[] {
+    return normalizeMemberList(nextContributors).filter((entry) => (
+      entry !== ARTIFACT_USER_MEMBER && entry !== savedOwnerMember
+    ));
+  }
+
+  function accessValues(): ArtifactAccessValues {
+    const nextOwner = selectedOwnerMember;
+    const nextContributors = normalizeMemberList(contributors).filter((entry) => (
+      entry !== ARTIFACT_USER_MEMBER && entry !== nextOwner
+    ));
+    const values: ArtifactAccessValues = {
+      owner: nextOwner,
+      contributors: nextContributors,
+      labels: splitMemberList(labels)
+    };
+    if (canEditSigners) {
+      values.requiredSigners = normalizeMemberList(signerMembers);
+    }
+    return values;
+  }
+
+  async function toggleContributor(member: string): Promise<void> {
+    if (props.busy || member === ARTIFACT_USER_MEMBER || member === savedOwnerMember) {
       return;
     }
+    const previous = contributors;
     const nextContributors = contributors.includes(member)
       ? contributors.filter((entry) => entry !== member)
       : [...contributors, member];
-    const normalized = nextContributors.filter((entry) => entry !== ARTIFACT_USER_MEMBER && entry !== ownerMember);
+    const normalized = savedContributorValues(nextContributors);
     setContributors(normalized);
-    props.onSubmit({ contributors: normalized });
+    if (!await props.onSubmit({ contributors: normalized })) {
+      setContributors(previous);
+    }
+  }
+
+  async function toggleSigner(member: string): Promise<void> {
+    if (props.busy || !canEditSigners) {
+      return;
+    }
+    const previous = signerMembers;
+    const normalized = signerMembers.includes(member)
+      ? signerMembers.filter((entry) => entry !== member)
+      : [...signerMembers, member];
+    setSignerMembers(normalized);
+    if (!await props.onSubmit({ requiredSigners: normalizeMemberList(normalized) })) {
+      setSignerMembers(previous);
+    }
+  }
+
+  async function saveDetails(): Promise<void> {
+    await props.onSubmit(accessValues());
   }
 
   return (
@@ -152,7 +205,7 @@ export function AccessArtifactForm(props: {
       </div>
       <div className="aap-list">
         {memberRows.map((member) => {
-          const isOwner = member === ownerMember;
+          const isOwner = member === savedOwnerMember;
           const isUser = member === ARTIFACT_USER_MEMBER;
           const canWrite = isUser || isOwner || contributors.includes(member);
           const tags = [
@@ -176,16 +229,67 @@ export function AccessArtifactForm(props: {
                   className={`aap-perm${canWrite ? " on" : ""}`}
                   aria-pressed={canWrite}
                   disabled={props.busy || isUser || isOwner}
+                  data-testid={`artifact-access-write-${member}`}
                   title={isUser ? "User always keeps write permission" : isOwner ? "Owner can always write" : undefined}
-                  onClick={() => toggleContributor(member)}
+                  onClick={() => void toggleContributor(member)}
                 >
                   <Pencil size={13} aria-hidden /> Write
                 </button>
+                {canEditSigners && (
+                  <button
+                    type="button"
+                    className={`aap-perm${signerMembers.includes(member) ? " on" : ""}`}
+                    aria-pressed={signerMembers.includes(member)}
+                    disabled={props.busy}
+                    data-testid={`artifact-access-sign-${member}`}
+                    onClick={() => void toggleSigner(member)}
+                  >
+                    <BadgeCheck size={13} aria-hidden /> Sign
+                  </button>
+                )}
               </div>
             </div>
           );
         })}
       </div>
+      <div className="aap-fields">
+        <label>
+          <span>Owner</span>
+          <select
+            value={selectedOwnerMember}
+            disabled={props.busy}
+            data-testid="artifact-access-owner"
+            onChange={(event) => setOwner(event.currentTarget.value)}
+          >
+            {memberRows.map((member) => (
+              <option key={member} value={member}>{artifactMemberLabel(member)}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>Labels</span>
+          <input
+            value={labels}
+            disabled={props.busy}
+            placeholder="plan, v1"
+            data-testid="artifact-access-labels"
+            onChange={(event) => setLabels(event.currentTarget.value)}
+          />
+        </label>
+        <button
+          type="button"
+          className="artifact-secondary-action"
+          disabled={props.busy}
+          data-testid="artifact-access-save-details"
+          onClick={() => void saveDetails()}
+        >
+          Save details
+        </button>
+      </div>
     </div>
   );
+}
+
+function normalizeMemberList(values: string[]): string[] {
+  return [...new Set(values.map(normalizeArtifactMember).filter(Boolean))];
 }

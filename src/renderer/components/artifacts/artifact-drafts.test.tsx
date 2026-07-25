@@ -15,6 +15,7 @@ import type {
 } from "../../../shared/types";
 import { artifactSummaryStatusLabel } from "../../../shared/artifacts";
 import { loadArtifactDetail } from "./artifact-detail-loader";
+import { AccessArtifactForm } from "./artifact-forms";
 import { ArtifactVersionSelector } from "./artifact-version-selector";
 
 const NOW = "2026-07-13T12:00:00.000Z";
@@ -85,6 +86,18 @@ test("published artifact selector keeps initial draft content available", () => 
   assert.match(styles, /\.artifact-detail\s*\{[^}]*overflow-y:\s*auto/s);
 });
 
+test("artifact archive tab is backed by archived state and a restore path", () => {
+  const panelSource = readFileSync(resolve("src/renderer/components/artifacts/artifacts-panel.tsx"), "utf8");
+  const listSource = readFileSync(resolve("src/renderer/components/artifacts/artifacts-list.tsx"), "utf8");
+
+  assert.match(panelSource, /setArtifactArchived/);
+  assert.match(panelSource, /activeArtifacts\s*=\s*props\.artifacts\.filter\(\(artifact\)\s*=>\s*!artifact\.archivedAt\)/);
+  assert.match(panelSource, /archivedArtifacts\s*=\s*props\.artifacts\.filter\(\(artifact\)\s*=>\s*artifact\.archivedAt\)/);
+  assert.doesNotMatch(panelSource, /Archived <span>0<\/span>[\s\S]{0,80}disabled/);
+  assert.match(panelSource, /Restore artifact/);
+  assert.match(listSource, /emptyMessage/);
+});
+
 test("the detail surface renders one selected version or one selected draft", () => {
   const detailSource = readFileSync(resolve("src/renderer/components/artifacts/artifact-detail.tsx"), "utf8");
   assert.match(detailSource, /selectedDraft \? \([\s\S]*content=\{selectedDraftContent\.content\}/);
@@ -102,6 +115,95 @@ test("show diff toggle replaces version content instead of adding a comparison p
   assert.doesNotMatch(detailSource, /Compare with v|Comparison v/);
   assert.match(panelSource, /detail\.version\.version - 1/);
   assert.match(panelSource, /generation === compareGeneration\.current/);
+});
+
+test("inline revision keeps notes and does not reset typed content from detail refreshes", () => {
+  const detailSource = readFileSync(resolve("src/renderer/components/artifacts/artifact-detail.tsx"), "utf8");
+  const surfaceSource = readFileSync(resolve("src/renderer/components/artifacts/artifact-content-surface.tsx"), "utf8");
+  assert.match(detailSource, /const \[note, setNote\] = useState\(""\)/);
+  assert.match(detailSource, /props\.onSubmit\(content, note\.trim\(\) \? note : undefined\)/);
+  assert.match(detailSource, /note=\{detail\.version\.note\}/);
+  assert.match(surfaceSource, /artifact-version-note/);
+  assert.doesNotMatch(detailSource, /useEffect\(\(\) => \{\s*setContent\(props\.initialContent\);?\s*\}/s);
+  assert.doesNotMatch(detailSource, /<div className="artifact-version-note">/);
+});
+
+test("access popover restores owner, signer, label updates and rolls back failed write toggles", async () => {
+  const summary = publishedDetail("artifact-a", "Artifact A", "BODY", false).summary;
+  summary.owner = "owner";
+  summary.contributors = ["drew"];
+  summary.labels = ["plan"];
+  summary.approval = { state: "unsigned", requiredSigners: ["owner"], signedCurrent: [] };
+  const calls: unknown[] = [];
+  let succeeds = false;
+  const renderer = create(<AccessArtifactForm
+    summary={summary}
+    members={["owner", "drew", "taylor"]}
+    busy={false}
+    onSubmit={async (values) => {
+      calls.push(values);
+      return succeeds;
+    }}
+  />);
+
+  await act(async () => {
+    await renderer.root.findByProps({ "data-testid": "artifact-access-write-taylor" }).props.onClick();
+  });
+  assert.deepEqual(calls.at(-1), {
+    contributors: ["drew", "taylor"]
+  });
+  assert.equal(renderer.root.findByProps({ "data-testid": "artifact-access-write-taylor" }).props["aria-pressed"], false);
+
+  succeeds = true;
+  await act(async () => {
+    await renderer.root.findByProps({ "data-testid": "artifact-access-sign-taylor" }).props.onClick();
+  });
+  assert.deepEqual(calls.at(-1), {
+    requiredSigners: ["owner", "taylor"]
+  });
+
+  act(() => {
+    renderer.root.findByProps({ "data-testid": "artifact-access-owner" }).props.onChange({ currentTarget: { value: "taylor" } });
+    renderer.root.findByProps({ "data-testid": "artifact-access-labels" }).props.onChange({ currentTarget: { value: "plan, qa" } });
+  });
+  await act(async () => {
+    await renderer.root.findByProps({ "data-testid": "artifact-access-save-details" }).props.onClick();
+  });
+  assert.deepEqual(calls.at(-1), {
+    owner: "taylor",
+    contributors: ["drew"],
+    requiredSigners: ["owner", "taylor"],
+    labels: ["plan", "qa"]
+  });
+});
+
+test("access toggles do not commit unsaved owner or label edits", async () => {
+  const summary = publishedDetail("artifact-a", "Artifact A", "BODY", false).summary;
+  summary.owner = "owner";
+  summary.contributors = ["drew"];
+  summary.labels = ["plan"];
+  summary.approval = { state: "unsigned", requiredSigners: ["owner"], signedCurrent: [] };
+  const calls: unknown[] = [];
+  const renderer = create(<AccessArtifactForm
+    summary={summary}
+    members={["owner", "drew", "taylor"]}
+    busy={false}
+    onSubmit={async (values) => {
+      calls.push(values);
+      return true;
+    }}
+  />);
+
+  act(() => {
+    renderer.root.findByProps({ "data-testid": "artifact-access-owner" }).props.onChange({ currentTarget: { value: "taylor" } });
+    renderer.root.findByProps({ "data-testid": "artifact-access-labels" }).props.onChange({ currentTarget: { value: "plan, qa" } });
+  });
+  await act(async () => {
+    await renderer.root.findByProps({ "data-testid": "artifact-access-write-taylor" }).props.onClick();
+  });
+  assert.deepEqual(calls.at(-1), {
+    contributors: ["drew", "taylor"]
+  });
 });
 
 test("artifact content has an attached copy action and no copy-reference action", () => {

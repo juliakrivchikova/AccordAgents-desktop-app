@@ -34,6 +34,7 @@ export const APP_ARTIFACT_REVISE_TOOL = "app_artifact_revise";
 export const APP_ARTIFACT_RENAME_TOOL = "app_artifact_rename";
 export const APP_ARTIFACT_SIGN_TOOL = "app_artifact_sign";
 export const APP_ARTIFACT_SET_ACCESS_TOOL = "app_artifact_set_access";
+export const APP_ARTIFACT_SET_ARCHIVED_TOOL = "app_artifact_set_archived";
 export const APP_ARTIFACT_DRAFT_LIST_TOOL = "app_artifact_draft_list";
 export const APP_ARTIFACT_DRAFT_READ_TOOL = "app_artifact_draft_read";
 export const APP_ARTIFACT_DRAFT_SAVE_TOOL = "app_artifact_draft_save";
@@ -52,6 +53,7 @@ export const APP_ARTIFACT_TOOL_NAMES = [
   APP_ARTIFACT_RENAME_TOOL,
   APP_ARTIFACT_SIGN_TOOL,
   APP_ARTIFACT_SET_ACCESS_TOOL,
+  APP_ARTIFACT_SET_ARCHIVED_TOOL,
   APP_ARTIFACT_DRAFT_LIST_TOOL,
   APP_ARTIFACT_DRAFT_READ_TOOL,
   APP_ARTIFACT_DRAFT_SAVE_TOOL,
@@ -358,6 +360,22 @@ export function artifactToolDefinitions(): unknown[] {
         }
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+    },
+    {
+      name: APP_ARTIFACT_SET_ARCHIVED_TOOL,
+      title: "Archive Artifact",
+      description:
+        "Archive or restore one artifact without deleting versions, drafts, signatures, or stable links. Archived artifacts stay readable and appear under the Archived tab. User or owner only.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ...ARTIFACT_REF_PROPERTIES,
+          archived: { type: "boolean", description: "true archives the artifact; false restores it to Active." }
+        },
+        required: ["archived"]
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
     {
       name: APP_ARTIFACT_DRAFT_LIST_TOOL,
