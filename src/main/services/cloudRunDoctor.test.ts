@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CloudRunDoctorService } from "./cloudRunDoctor";
+import { CloudRunDoctorService, isTransientSshError, runWithSshRetries } from "./cloudRunDoctor";
 import type { CloudRunSshExecRequest } from "./cloudRunDoctor";
+import { CommandError } from "./command";
+
+function commandError(fields: { stderr?: string; exitCode?: number | null; timedOut?: boolean; message?: string }): CommandError {
+  return new CommandError(fields.message ?? "command failed", {
+    command: "ssh",
+    args: [],
+    stdout: "",
+    stderr: fields.stderr ?? "",
+    exitCode: fields.exitCode ?? 255,
+    timedOut: fields.timedOut ?? false
+  });
+}
 
 const WORKER = { host: "worker.example", user: "ubuntu", identityFile: "/tmp/key.pem" };
 
@@ -186,4 +198,58 @@ test("setup without sudo skips installs and reports remaining gaps", async () =>
   const report = await service.setup(WORKER);
   assert.doesNotMatch(commands.join("\n"), /apt-get install/);
   assert.equal(report.checks.find((check) => check.id === "rsync")?.status, "fail");
+});
+
+test("isTransientSshError retries connection failures but not auth/command failures", () => {
+  assert.equal(isTransientSshError(commandError({ stderr: "kex_exchange_identification: Connection timed out" })), true);
+  assert.equal(isTransientSshError(commandError({ stderr: "ssh: connect to host x port 22: Connection refused" })), true);
+  assert.equal(isTransientSshError(commandError({ timedOut: true })), true);
+  assert.equal(isTransientSshError(commandError({ stderr: "client_loop: send disconnect: Broken pipe" })), true);
+  // Non-transient: a real auth failure or command error must NOT be retried.
+  assert.equal(isTransientSshError(commandError({ stderr: "Permission denied (publickey)." })), false);
+  assert.equal(isTransientSshError(commandError({ stderr: "sudo: a password is required", exitCode: 1 })), false);
+  assert.equal(isTransientSshError(new Error("boom")), false);
+});
+
+test("runWithSshRetries retries a transient failure then succeeds", async () => {
+  let calls = 0;
+  const delays: number[] = [];
+  const result = await runWithSshRetries(async () => {
+    calls += 1;
+    if (calls < 3) throw commandError({ stderr: "Connection timed out during banner exchange" });
+    return "ok";
+  }, { baseDelayMs: 1, sleep: async (ms) => { delays.push(ms); } });
+  assert.equal(result, "ok");
+  assert.equal(calls, 3);
+  assert.equal(delays.length, 2);
+});
+
+test("runWithSshRetries gives up after the attempt cap and rethrows", async () => {
+  let calls = 0;
+  await assert.rejects(
+    () => runWithSshRetries(async () => { calls += 1; throw commandError({ stderr: "banner exchange", message: "banner exchange" }); },
+      { attempts: 4, sleep: async () => {} }),
+    /banner exchange/
+  );
+  assert.equal(calls, 4);
+});
+
+test("runWithSshRetries does not retry a non-transient failure", async () => {
+  let calls = 0;
+  await assert.rejects(
+    () => runWithSshRetries(async () => { calls += 1; throw commandError({ stderr: "Permission denied (publickey).", message: "Permission denied (publickey)." }); },
+      { sleep: async () => {} }),
+    /Permission denied/
+  );
+  assert.equal(calls, 1);
+});
+
+test("runWithSshRetries stops when the signal is already aborted", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+  await assert.rejects(
+    () => runWithSshRetries(async () => { calls += 1; return "unreached"; }, { signal: controller.signal, sleep: async () => {} })
+  );
+  assert.equal(calls, 0);
 });
