@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CloudRunDoctorService, isTransientSshError, runWithSshRetries } from "./cloudRunDoctor";
+import { CloudRunDoctorService } from "./cloudRunDoctor";
 import type { CloudRunSshExecRequest } from "./cloudRunDoctor";
+import { isTransientSshError, runWithSshRetries } from "./sshRetry";
 import { CommandError } from "./command";
 
 function commandError(fields: { stderr?: string; exitCode?: number | null; timedOut?: boolean; message?: string }): CommandError {

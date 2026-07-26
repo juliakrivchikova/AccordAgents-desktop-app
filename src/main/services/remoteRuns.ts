@@ -19,6 +19,7 @@ import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
 import type { ChatAppToolApprovalDecisionEvent, ChatService } from "./chat";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs } from "./cloudRunWorkers";
 import { CommandError, commandEnvironment, runCommand } from "./command";
+import { runWithSshRetries } from "./sshRetry";
 import {
   CODEX_APP_SERVER_MCP_TOKEN_ENV,
   buildCodexExecInvocation,
@@ -2664,12 +2665,20 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
     const sshPath = worker.sshPath?.trim() || "ssh";
     const sshBaseArgs = remoteSshBaseArgs(worker, remoteSshTarget(worker));
     const command = `node ${shellQuote(`${root}/session-control.js`)} ${shellQuote(root)} ${shellQuote(action)}`;
+    const invoke = () => runCommand(sshPath, [...sshBaseArgs, command], {
+      input: JSON.stringify(payload),
+      timeoutMs: 30_000,
+      signal
+    });
     try {
-      const result = await runCommand(sshPath, [...sshBaseArgs, command], {
-        input: JSON.stringify(payload),
-        timeoutMs: 30_000,
-        signal
-      });
+      // "submit" is not idempotent — a retry could double-submit a turn. Every
+      // other control action (ensure/inspect/list/stop/lease/cancel) is safe to
+      // re-run, so retry them past a transient connection drop instead of failing
+      // the warm-session check and needlessly cold-launching. A real session-level
+      // error (non-transient) still surfaces immediately below.
+      const result = action === "submit"
+        ? await invoke()
+        : await runWithSshRetries(invoke, { signal });
       return JSON.parse(result.stdout || "{}") as Record<string, unknown>;
     } catch (error) {
       if (error instanceof CommandError) {
@@ -2865,10 +2874,14 @@ async function resolveRemoteRunDir(
   const command = homeRelative
     ? `printf '%s' "$HOME"/${shellQuote(homeRelative)}`
     : `printf '%s' "$HOME"`;
-  const result = await runCommand(sshPath, [...sshBaseArgs, command], {
-    timeoutMs: 30_000,
-    signal
-  });
+  // Read-only path resolution: safe to retry past a transient connection drop.
+  const result = await runWithSshRetries(
+    () => runCommand(sshPath, [...sshBaseArgs, command], {
+      timeoutMs: 30_000,
+      signal
+    }),
+    { signal }
+  );
   const resolved = result.stdout.trim();
   if (!resolved.startsWith("/")) {
     throw new Error(`Remote worker path did not resolve to an absolute path: ${remotePath}`);

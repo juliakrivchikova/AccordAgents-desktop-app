@@ -52,7 +52,16 @@ export function cloudRunSshOptionArgs(
     "-o",
     "BatchMode=yes",
     "-o",
-    "StrictHostKeyChecking=accept-new"
+    "StrictHostKeyChecking=accept-new",
+    // Fail fast instead of hanging on a lossy link: bound the TCP/banner phase
+    // and drop a stalled established session within ~24s so callers can retry or
+    // fall back promptly (e.g. the warm-session check must not block on a blip).
+    "-o",
+    "ConnectTimeout=15",
+    "-o",
+    "ServerAliveInterval=8",
+    "-o",
+    "ServerAliveCountMax=3"
   ];
   if (worker.identityFile?.trim()) {
     args.push("-i", worker.identityFile.trim());
