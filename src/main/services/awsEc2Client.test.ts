@@ -122,6 +122,16 @@ test("describeInstance translates InvalidInstanceID.NotFound to absence", async 
   assert.equal(await client.describeInstance("i-gone"), undefined);
 });
 
+test("terminateInstance treats InvalidInstanceID.NotFound as an idempotent success", async () => {
+  const ec2 = fakeClient(async () => {
+    const error = new Error("The instance ID 'i-gone' does not exist");
+    error.name = "InvalidInstanceID.NotFound";
+    throw error;
+  });
+  const client = new SdkEc2Client(ec2 as EC2Client, fakeClient(async () => ({})) as EC2InstanceConnectClient, "us-east-1");
+  await assert.doesNotReject(() => client.terminateInstance("i-gone"));
+});
+
 test("device ingress replacement revokes only this device's stale rule", async () => {
   const calls: Array<{ name: string; input: any }> = [];
   const ec2 = fakeClient(async (command) => {

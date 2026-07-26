@@ -358,7 +358,18 @@ export class SdkEc2Client implements Ec2Client {
   }
 
   async terminateInstance(instanceId: string): Promise<void> {
-    await this.client.send(new TerminateInstancesCommand({ InstanceIds: [instanceId] }));
+    try {
+      await this.client.send(new TerminateInstancesCommand({ InstanceIds: [instanceId] }));
+    } catch (error) {
+      // An instance that no longer exists is already in the desired end state;
+      // treat NotFound as a successful teardown (like deleteKeyPair /
+      // deleteSecurityGroup) so delete stays idempotent and the caller still
+      // clears local settings and the key pair / security group instead of
+      // stranding a stale handle the user can no longer delete.
+      if (!isAwsError(error, "InvalidInstanceID.NotFound")) {
+        throw error;
+      }
+    }
   }
 
   private async mapInstance(instance: Instance): Promise<AwsWorkerInstanceInfo | undefined> {
