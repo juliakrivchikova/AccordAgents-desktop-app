@@ -252,18 +252,39 @@ export function buildWorkerCloudInit(): string {
     "  - curl",
     "  - cloud-guest-utils",
     "  - ec2-instance-connect",
-    // Clamp the TCP MSS the worker advertises so SSH/rsync survive clients on a
-    // low-MTU tunnel (e.g. a full-tunnel VPN pinned at MTU 1280). Without this
-    // the worker replies to the SSH key exchange with a full ~1460B segment that
-    // the tunnel silently drops — PMTUD can't recover because security groups
-    // drop the "fragmentation needed" ICMP — so the client stalls at "banner
-    // exchange". bootcmd runs early (before sshd serves traffic) and, with
-    // cloud-init-per=always, re-applies the in-memory rule on every stop/start.
-    // -C||-A keeps it idempotent within a boot.
-    "bootcmd:",
-    "  - [ cloud-init-per, always, accord-mss-clamp4, bash, -c, \"iptables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200\" ]",
-    "  - [ cloud-init-per, always, accord-mss-clamp6, bash, -c, \"ip6tables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1180 2>/dev/null || ip6tables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1180 || true\" ]",
+    // A full-tunnel VPN pinned at a low MTU (e.g. 1280) on the operator's machine
+    // black-holes the large SSH/rsync key-exchange packets the worker SENDS — the
+    // worker's NIC is a 9001 jumbo interface, so its segments (sized by the
+    // client's advertised MSS, ~1240) exceed what the tunnel actually carries and
+    // the client stalls at "banner exchange". PMTUD can't recover because
+    // security groups drop the "fragmentation needed" ICMP. Lower the worker's
+    // primary NIC MTU so every segment it sends AND the MSS it advertises stay
+    // small enough for a low-MTU client tunnel (fixes BOTH directions from the
+    // worker side). A oneshot unit ordered after the network re-applies on every
+    // boot (survives stop/start) and resolves the default-route interface by name
+    // so it stays AMI/instance-type agnostic.
+    "write_files:",
+    "  - path: /usr/local/sbin/accordagents-mtu.sh",
+    "    permissions: '0755'",
+    "    content: |",
+    "      #!/usr/bin/env bash",
+    "      IF=$(ip route show default 2>/dev/null | awk '{print $5; exit}')",
+    "      [ -n \"$IF\" ] && ip link set dev \"$IF\" mtu 1200",
+    "  - path: /etc/systemd/system/accordagents-mtu.service",
+    "    permissions: '0644'",
+    "    content: |",
+    "      [Unit]",
+    "      Description=Lower primary NIC MTU so SSH/rsync fit low-MTU VPN client tunnels",
+    "      After=network-online.target",
+    "      Wants=network-online.target",
+    "      [Service]",
+    "      Type=oneshot",
+    "      RemainAfterExit=yes",
+    "      ExecStart=/usr/local/sbin/accordagents-mtu.sh",
+    "      [Install]",
+    "      WantedBy=multi-user.target",
     "runcmd:",
+    "  - [ bash, -lc, \"systemctl daemon-reload && systemctl enable --now accordagents-mtu.service\" ]",
     "  - [ bash, -lc, \"curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs\" ]",
     "  - [ bash, -lc, \"npm install -g @openai/codex\" ]",
     "  - [ bash, -lc, \"type gh >/dev/null 2>&1 || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' > /etc/apt/sources.list.d/github-cli.list && apt-get update && apt-get install -y gh)\" ]",

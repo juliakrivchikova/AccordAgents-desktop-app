@@ -267,12 +267,14 @@ test("cloud-init and instance spec carry the toolchain and tag", () => {
   const init = buildWorkerCloudInit();
   assert.match(init, /@openai\/codex/);
   assert.match(init, /apparmor_restrict_unprivileged_userns=0/);
-  // MSS clamp so SSH/rsync survive clients on low-MTU VPN tunnels. It must run
-  // in bootcmd (before sshd serves traffic and on every stop/start), not runcmd.
-  assert.match(init, /bootcmd:/);
-  assert.match(init, /TCPMSS --set-mss 1200/);
-  assert.match(init, /cloud-init-per, always, accord-mss-clamp4/);
-  assert.ok(init.indexOf("bootcmd:") < init.indexOf("runcmd:"), "clamp must precede runcmd");
+  // Lower the worker NIC MTU so SSH/rsync survive clients on low-MTU VPN tunnels.
+  // The unit file must be written before runcmd enables it, and it resolves the
+  // interface by name (not a hardcoded ens5) so it stays instance-type agnostic.
+  assert.match(init, /accordagents-mtu\.service/);
+  assert.match(init, /ip link set dev "\$IF" mtu 1200/);
+  assert.match(init, /ip route show default/);
+  assert.match(init, /systemctl enable --now accordagents-mtu\.service/);
+  assert.ok(init.indexOf("write_files:") < init.indexOf("runcmd:"), "unit file must be written before runcmd enables it");
   const spec = buildWorkerInstanceSpec({ imageId: "ami-1", rootDeviceName: "/dev/sda1", keyName: "k", securityGroupId: "sg-1" });
   assert.equal(spec.instanceType, "t3.small");
   assert.equal(spec.rootVolumeSizeGb, 8);
