@@ -350,9 +350,17 @@ async function defaultSshExec(request: CloudRunSshExecRequest): Promise<string> 
   // Some networks (e.g. a client behind a lossy VPN to a distant region) drop
   // packets during SSH's multi-round-trip key exchange, so a single attempt
   // fails at "banner exchange" ~half the time even though a fresh attempt
-  // usually succeeds. Retry transient connection failures. Streaming/interactive
-  // commands (device-auth) opt out — re-running them mid-flow is not safe.
-  const attempts = request.onStdout ? 1 : SSH_CONNECT_ATTEMPTS;
+  // usually succeeds. Retry transient connection failures. For streaming /
+  // interactive commands (device-auth) it is only safe to retry if nothing was
+  // emitted yet — a drop before the login prints its URL is just a failed
+  // connect, but re-running after output would double-prompt.
+  let producedOutput = false;
+  const onStdout = request.onStdout
+    ? (chunk: string) => {
+        producedOutput = true;
+        request.onStdout?.(chunk);
+      }
+    : undefined;
   const result = await runWithSshRetries(
     () => runCommand("ssh", [
       "-o",
@@ -366,9 +374,9 @@ async function defaultSshExec(request: CloudRunSshExecRequest): Promise<string> 
       request.command
     ], {
       timeoutMs: request.timeoutMs,
-      onStdout: request.onStdout
+      onStdout
     }),
-    { attempts }
+    { isTransient: (error) => !producedOutput && isTransientSshError(error) }
   );
   return result.stdout;
 }

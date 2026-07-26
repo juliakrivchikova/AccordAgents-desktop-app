@@ -253,3 +253,15 @@ test("runWithSshRetries stops when the signal is already aborted", async () => {
   );
   assert.equal(calls, 0);
 });
+
+test("runWithSshRetries can stop retrying once output is produced (device-auth safety)", async () => {
+  let produced = false;
+  let calls = 0;
+  await assert.rejects(() => runWithSshRetries(async () => {
+    calls += 1;
+    if (calls === 1) throw commandError({ stderr: "banner exchange", message: "banner exchange" }); // pre-output drop -> retry
+    produced = true; // second attempt emits output, then the connection dies
+    throw commandError({ stderr: "banner exchange", message: "banner exchange" });
+  }, { sleep: async () => {}, isTransient: (e) => !produced && isTransientSshError(e) }));
+  assert.equal(calls, 2); // retried the pre-output failure once, did not retry after output
+});
