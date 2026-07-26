@@ -63,6 +63,12 @@ const DEFAULT_APPLY_LIMIT = 200;
 const DEFAULT_REMOTE_RUN_TIMEOUT_MS = 24 * 60 * 60_000;
 const DEFAULT_DETACHED_MAX_RUNTIME_MS = 24 * 60 * 60_000;
 const REMOTE_WARM_SESSION_PREPARE_TIMEOUT_MS = 60_000;
+// Per-attempt timeout for session-control + path-resolution SSH. These are all
+// fast supervisor ops (ensure spawns detached and returns; submit/inspect/list
+// just hand off/read), so a stalled attempt is a lossy-link KEX black hole, not
+// slow work. Keep it short so a stall is abandoned and retried quickly (more
+// retries fit inside the 60s warm-prepare budget) instead of burning ~30s each.
+const REMOTE_SESSION_SSH_TIMEOUT_MS = 15_000;
 const MIRROR_SYNC_STATE_FILENAME = "mirror-sync-state.json";
 
 // v1 env forwarding: remote runs get the same environment local runs inherit
@@ -2667,7 +2673,7 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
     const command = `node ${shellQuote(`${root}/session-control.js`)} ${shellQuote(root)} ${shellQuote(action)}`;
     const invoke = () => runCommand(sshPath, [...sshBaseArgs, command], {
       input: JSON.stringify(payload),
-      timeoutMs: 30_000,
+      timeoutMs: REMOTE_SESSION_SSH_TIMEOUT_MS,
       signal
     });
     try {
@@ -2877,7 +2883,7 @@ async function resolveRemoteRunDir(
   // Read-only path resolution: safe to retry past a transient connection drop.
   const result = await runWithSshRetries(
     () => runCommand(sshPath, [...sshBaseArgs, command], {
-      timeoutMs: 30_000,
+      timeoutMs: REMOTE_SESSION_SSH_TIMEOUT_MS,
       signal
     }),
     { signal }
