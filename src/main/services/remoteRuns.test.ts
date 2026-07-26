@@ -26,7 +26,13 @@ import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
 import { ChatService } from "./chat";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, validateCloudRunSshWorkerFields } from "./cloudRunWorkers";
 import { CommandError } from "./command";
-import { normalizeMirrorSyncError, remoteMirrorPath, remoteMirrorSlug } from "./remoteMirrorSync";
+import {
+  computeLocalMirrorFingerprint,
+  DEFAULT_MIRROR_EXCLUDES,
+  normalizeMirrorSyncError,
+  remoteMirrorPath,
+  remoteMirrorSlug
+} from "./remoteMirrorSync";
 import type { RemoteMirrorSyncRequest, RemoteMirrorSyncRunner } from "./remoteMirrorSync";
 import { forwardedDesktopEnvironment, RemoteRunService } from "./remoteRuns";
 import { RemoteRunCoordinator } from "./remoteRunCoordinator";
@@ -954,6 +960,38 @@ test("mirror path derivation is deterministic and collision-resistant", () => {
   );
 });
 
+test("mirror fingerprint tracks every working-dir file, git-free (ignores .gitignore)", async () => {
+  const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-fingerprint-"));
+  // A .gitignore entry must NOT hide a file from the fingerprint: sync copies the
+  // whole working dir, so an edit to a "gitignored" file still has to trigger a resync.
+  await writeFile(path.join(localDir, ".gitignore"), "ignored.txt\n", "utf8");
+  await writeFile(path.join(localDir, "ignored.txt"), "first\n", "utf8");
+
+  const first = await computeLocalMirrorFingerprint(localDir);
+  await writeFile(path.join(localDir, "ignored.txt"), "second-longer\n", "utf8");
+  const second = await computeLocalMirrorFingerprint(localDir);
+
+  assert.notEqual(first.digest, second.digest);
+});
+
+test("mirror fingerprint ignores default heavy/build directories", async () => {
+  const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-excludes-"));
+  await writeFile(path.join(localDir, "src.ts"), "export const x = 1;\n", "utf8");
+  const before = await computeLocalMirrorFingerprint(localDir);
+  // Adding content under excluded dirs must not change the fingerprint.
+  for (const dir of ["node_modules", "out", "dist"]) {
+    assert.ok(DEFAULT_MIRROR_EXCLUDES.includes(dir));
+    await mkdir(path.join(localDir, dir), { recursive: true });
+    await writeFile(path.join(localDir, dir, "heavy.bin"), "x".repeat(10_000), "utf8");
+  }
+  const after = await computeLocalMirrorFingerprint(localDir);
+  assert.equal(after.digest, before.digest);
+  // A real source edit still changes it.
+  await writeFile(path.join(localDir, "src.ts"), "export const x = 2;\n", "utf8");
+  const edited = await computeLocalMirrorFingerprint(localDir);
+  assert.notEqual(edited.digest, before.digest);
+});
+
 test("mirror sync normalizes worker disk space failures to an actionable message", () => {
   const error = normalizeMirrorSyncError(
     new CommandError("rsync exited with code 11", {
@@ -1012,6 +1050,7 @@ test("mirror-sync detached run up-syncs before launch and runs codex in the mirr
   assert.deepEqual(order, ["sync-up", "launch"]);
   assert.deepEqual(phases, [
     "Checking remote environment",
+    "Checking project files",
     "Syncing project files",
     "Project files synced",
     "Preparing remote sandbox",
@@ -1026,6 +1065,87 @@ test("mirror-sync detached run up-syncs before launch and runs codex in the mirr
   assert.equal(args[cdIndex + 1], expectedMirror);
   assert.ok(args.includes("sandbox_workspace_write.network_access=true"));
   assert.ok(args.some((arg) => arg === `sandbox_workspace_write.writable_roots=["${expectedMirror}/.git"]`));
+});
+
+test("mirror-sync skips rsync for an unchanged project after durable state survives restart", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-src-"));
+  await writeFile(path.join(localDir, "file.txt"), "hello", "utf8");
+  const mirrorSync = new FakeMirrorSync();
+  const firstWorker = new FakeDetachedWorkerTransport();
+  const first = await testRemoteRun({ conversation, detachedWorkerTransport: firstWorker, mirrorSync });
+  const target = { host: "worker.example", workerRoot: "/srv/worker" };
+
+  await first.remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "mirror-skip-first",
+    participant: participantConfig(participant),
+    prompt: "First remote turn.",
+    worker: target,
+    sync: { localPath: localDir }
+  });
+
+  const secondWorker = new FakeDetachedWorkerTransport();
+  const afterRestart = new RemoteRunService(first.service, {
+    spoolRoot: first.root,
+    detachedWorkerTransport: secondWorker,
+    mirrorSync
+  });
+  const phases: string[] = [];
+  await afterRestart.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "mirror-skip-second",
+    participant: participantConfig(participant),
+    prompt: "Second remote turn.",
+    worker: target,
+    sync: { localPath: localDir },
+    onPhase: (status) => phases.push(status.label)
+  });
+
+  assert.equal(mirrorSync.calls.filter((call) => call.kind === "up").length, 1);
+  assert.ok(phases.includes("Project files up to date"));
+});
+
+test("mirror-sync resyncs after the local project fingerprint changes", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-src-"));
+  await writeFile(path.join(localDir, "file.txt"), "hello", "utf8");
+  const mirrorSync = new FakeMirrorSync();
+  const firstWorker = new FakeDetachedWorkerTransport();
+  const first = await testRemoteRun({ conversation, detachedWorkerTransport: firstWorker, mirrorSync });
+  const target = { host: "worker.example", workerRoot: "/srv/worker" };
+
+  await first.remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "mirror-changed-first",
+    participant: participantConfig(participant),
+    prompt: "First remote turn.",
+    worker: target,
+    sync: { localPath: localDir }
+  });
+  await writeFile(path.join(localDir, "file.txt"), "changed", "utf8");
+
+  const secondWorker = new FakeDetachedWorkerTransport();
+  const afterRestart = new RemoteRunService(first.service, {
+    spoolRoot: first.root,
+    detachedWorkerTransport: secondWorker,
+    mirrorSync
+  });
+  const phases: string[] = [];
+  await afterRestart.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "mirror-changed-second",
+    participant: participantConfig(participant),
+    prompt: "Second remote turn.",
+    worker: target,
+    sync: { localPath: localDir },
+    onPhase: (status) => phases.push(status.label)
+  });
+
+  assert.equal(mirrorSync.calls.filter((call) => call.kind === "up").length, 2);
+  assert.ok(phases.includes("Syncing project files"));
 });
 
 test("warm participant session launches once, reuses the supervisor, and resumes the provider session", async () => {
@@ -1063,6 +1183,38 @@ test("warm participant session launches once, reuses the supervisor, and resumes
   assert.ok(worker.submissions[1].invocation.args.includes("resume"));
   assert.ok(worker.submissions[1].invocation.args.includes("01900000-0000-7000-8000-000000000001"));
   assert.equal(worker.submissions[0].participantSession?.sessionKey, worker.submissions[1].participantSession?.sessionKey);
+});
+
+test("warm participant session prepare failure falls back to cold detached launch", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  class FailingWarmTransport extends FakeWarmSessionTransport {
+    override async ensureParticipantSession(
+      request: RemoteParticipantSessionEnsureRequest
+    ): Promise<RemoteParticipantSessionEnsureResult> {
+      this.ensureCalls += 1;
+      throw new Error(`session-control unavailable for ${request.participantId}`);
+    }
+  }
+  const worker = new FailingWarmTransport();
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+  const phases: string[] = [];
+
+  const state = await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "warm-prepare-fallback",
+    participant: participantConfig(participant),
+    prompt: "Fallback turn.",
+    worker: { host: "worker.example", workerRoot: "/srv/worker" },
+    onPhase: (status) => phases.push(status.label)
+  });
+
+  assert.equal(state.status, "running");
+  assert.equal(worker.ensureCalls, 1);
+  assert.equal(worker.submissions.length, 0);
+  assert.equal(worker.launches, 1);
+  assert.ok(phases.includes("Warm remote session unavailable; launching remote run"));
+  assert.ok(phases.includes("Launching remote session"));
 });
 
 test("stale warm participant session relaunches transparently and submits the same run once", async () => {
@@ -1325,8 +1477,9 @@ test("terminal state releases the mirror without ever writing back automatically
 
   assert.equal(mirrorSync.calls.filter((call) => call.kind === "down").length, 0);
 
-  // The finished run no longer counts toward mirror busyness: a new run on the
-  // same project up-syncs again instead of being skipped.
+  // The finished run no longer counts toward mirror busyness: a changed project
+  // up-syncs again instead of being skipped as an active mirror.
+  await writeFile(path.join(localDir, "changed.txt"), "changed", "utf8");
   await remote.startDetachedRun({
     conversationId: conversation.id,
     runId: "mirror-terminal-run-2",

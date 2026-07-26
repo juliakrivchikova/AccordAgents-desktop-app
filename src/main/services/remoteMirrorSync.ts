@@ -7,11 +7,22 @@ import type { RemoteRunWorkerTarget } from "./remoteRuns";
 
 export const REMOTE_MIRROR_DIRNAME = "mirrors";
 export const REMOTE_MIRROR_SYNC_TIMEOUT_MS = 15 * 60_000;
-// node_modules is excluded both ways: local installs are platform-specific and
-// useless on the Linux worker, and a worker-side npm install must never land back
-// in the local project. rsync --delete does not remove excluded paths, so a
-// worker-side node_modules survives future up-syncs.
-const UP_SYNC_EXCLUDES = ["node_modules", ".DS_Store"];
+export const REMOTE_MIRROR_FINGERPRINT_VERSION = "mirror-sync-v2";
+// Default heavy/build/dependency directories excluded from the mirror. They are
+// regenerated on the worker (node_modules via install, build outputs via build),
+// platform-specific, or huge (Electron's packaged out/ can be ~500MB) — shipping
+// them dominates sync time for no benefit. rsync --delete does not remove
+// excluded paths, so a worker-side node_modules survives future up-syncs. The
+// fingerprint uses this SAME set, so "unchanged" reflects exactly what is copied.
+// (Change detection is git-free — a plain working-dir copy; a future settings UI
+// will let users add/remove entries and preview what gets copied.)
+export const DEFAULT_MIRROR_EXCLUDES = [
+  "node_modules", ".DS_Store", "out", "dist", "build",
+  ".next", ".nuxt", ".svelte-kit", ".turbo", ".gradle",
+  "target", ".venv", "venv", "__pycache__", ".pytest_cache",
+  ".mypy_cache", "coverage", ".cache"
+];
+const UP_SYNC_EXCLUDES = DEFAULT_MIRROR_EXCLUDES;
 const MIRROR_SYNC_SPACE_BUFFER_BYTES = 512 * 1024 * 1024;
 // Mirror sync is ONE-WAY (local → worker). syncDown exists only for the
 // explicit user-initiated "pull changes" action; it is never run
@@ -26,11 +37,23 @@ export interface RemoteMirrorSyncRequest {
   remotePath: string;
   signal?: AbortSignal;
   timeoutMs?: number;
+  onProgress?: (progress: RemoteMirrorSyncProgress) => void | Promise<void>;
 }
 
 export interface RemoteMirrorSyncRunner {
   syncUp(request: RemoteMirrorSyncRequest): Promise<void>;
   syncDown(request: RemoteMirrorSyncRequest): Promise<void>;
+}
+
+export interface RemoteMirrorSyncProgress {
+  percent: number;
+}
+
+export interface LocalMirrorFingerprint {
+  version: typeof REMOTE_MIRROR_FINGERPRINT_VERSION;
+  digest: string;
+  fileCount: number;
+  totalBytes: number;
 }
 
 export function remoteMirrorSlug(localPath: string): string {
@@ -53,11 +76,49 @@ export function localProjectHasGitDir(localPath: string): boolean {
   }
 }
 
+export async function computeLocalMirrorFingerprint(
+  localPath: string,
+  options: { signal?: AbortSignal } = {}
+): Promise<LocalMirrorFingerprint> {
+  const localDir = assertLocalDir(localPath);
+  const hash = createHash("sha256");
+  const stats = { fileCount: 0, totalBytes: 0 };
+
+  hash.update(`${REMOTE_MIRROR_FINGERPRINT_VERSION}\0`);
+  await hashMirrorTree(localDir, "", hash, stats, options.signal);
+
+  return {
+    version: REMOTE_MIRROR_FINGERPRINT_VERSION,
+    digest: hash.digest("hex"),
+    fileCount: stats.fileCount,
+    totalBytes: stats.totalBytes
+  };
+}
+
 export const defaultRemoteMirrorSync: RemoteMirrorSyncRunner = {
   async syncUp(request: RemoteMirrorSyncRequest): Promise<void> {
     const localDir = assertLocalDir(request.localPath);
     const target = buildCloudRunSshTarget(request.worker);
     const sshArgs = cloudRunSshOptionArgs(request.worker);
+    const progressArgs = await rsyncProgressArgs();
+    const pendingProgress: Promise<unknown>[] = [];
+    let progressBuffer = "";
+    let lastPercent = -1;
+    const emitProgress = (chunk: string): void => {
+      if (!request.onProgress) {
+        return;
+      }
+      progressBuffer = `${progressBuffer}${chunk}`.slice(-4096);
+      const percent = parseLastRsyncProgressPercent(progressBuffer);
+      if (percent === undefined || percent === lastPercent) {
+        return;
+      }
+      lastPercent = percent;
+      const progress = request.onProgress({ percent });
+      if (progress) {
+        pendingProgress.push(Promise.resolve(progress).catch(() => undefined));
+      }
+    };
     try {
       await runCommand("ssh", [
         ...sshArgs,
@@ -71,6 +132,7 @@ export const defaultRemoteMirrorSync: RemoteMirrorSyncRunner = {
       await runCommand("rsync", [
         "-az",
         "--delete",
+        ...progressArgs,
         ...UP_SYNC_EXCLUDES.map((entry) => `--exclude=${entry}`),
         "-e",
         rsyncRshCommand(sshArgs),
@@ -78,9 +140,13 @@ export const defaultRemoteMirrorSync: RemoteMirrorSyncRunner = {
         `${target}:${escapeRemoteRsyncPath(request.remotePath)}/`
       ], {
         timeoutMs: request.timeoutMs ?? REMOTE_MIRROR_SYNC_TIMEOUT_MS,
-        signal: request.signal
+        signal: request.signal,
+        onStdout: emitProgress,
+        onStderr: emitProgress
       });
+      await Promise.allSettled(pendingProgress);
     } catch (error) {
+      await Promise.allSettled(pendingProgress);
       throw normalizeMirrorSyncError(error, request.remotePath);
     }
   },
@@ -102,6 +168,75 @@ export const defaultRemoteMirrorSync: RemoteMirrorSyncRunner = {
     });
   }
 };
+
+// Git-free change detection: a plain walk of the working dir hashing each
+// entry's relative path + size + mtime + mode (no file-content reads, no git).
+// This is the same quick-check signal rsync uses to decide what to transfer, so
+// an unchanged tree yields a stable digest (=> skip) and any edit changes it
+// (=> resync). rsync still catches the rare same-size+same-mtime edit on the
+// next real sync. Unreadable/vanished entries are skipped rather than aborting
+// the whole fingerprint (which would silently fall back to a full sync forever,
+// e.g. on a packaged out/app.asar).
+async function hashMirrorTree(
+  root: string,
+  relativeDir: string,
+  hash: ReturnType<typeof createHash>,
+  totals: { fileCount: number; totalBytes: number },
+  signal: AbortSignal | undefined
+): Promise<void> {
+  throwIfAborted(signal);
+  const absoluteDir = relativeDir ? path.join(root, relativeDir) : root;
+  let entries: fs.Dirent[];
+  try {
+    entries = await fs.promises.readdir(absoluteDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of entries) {
+    throwIfAborted(signal);
+    if (UP_SYNC_EXCLUDES.includes(entry.name)) {
+      continue;
+    }
+    const relativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+    if (relativePath === ".git/index") {
+      // Churns on routine git commands (git status, etc.) without meaning a
+      // real content change; skip so it does not force needless resyncs.
+      continue;
+    }
+    const absolutePath = path.join(root, relativePath);
+    let stats: fs.Stats;
+    try {
+      stats = await fs.promises.lstat(absolutePath);
+    } catch {
+      continue;
+    }
+    if (stats.isDirectory()) {
+      hash.update(`dir\0${relativePath}\0`);
+      await hashMirrorTree(root, relativePath, hash, totals, signal);
+      continue;
+    }
+    totals.fileCount += 1;
+    totals.totalBytes += stats.size;
+    if (stats.isSymbolicLink()) {
+      let target = "";
+      try {
+        target = await fs.promises.readlink(absolutePath);
+      } catch {
+        target = "";
+      }
+      hash.update(`symlink\0${relativePath}\0${target}\0`);
+      continue;
+    }
+    hash.update(`file\0${relativePath}\0${stats.size}\0${Math.trunc(stats.mtimeMs)}\0${stats.mode & 0o7777}\0`);
+  }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new Error("Mirror fingerprinting was cancelled.");
+  }
+}
 
 function assertLocalDir(localPath: string): string {
   const resolved = path.resolve(localPath);
@@ -195,6 +330,40 @@ async function queryRemoteMirrorUsage(
   } catch {
     return undefined;
   }
+}
+
+async function rsyncProgressArgs(): Promise<string[]> {
+  try {
+    const result = await runCommand("rsync", ["--version"], {
+      timeoutMs: 5000
+    });
+    return rsyncSupportsInfoProgress2(result.stdout) ? ["--info=progress2"] : ["--progress"];
+  } catch {
+    return ["--progress"];
+  }
+}
+
+function rsyncSupportsInfoProgress2(versionOutput: string): boolean {
+  const match = versionOutput.match(/version\s+(\d+)\.(\d+)(?:\.(\d+))?/i);
+  if (!match) {
+    return false;
+  }
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 3 || (major === 3 && minor >= 1);
+}
+
+function parseLastRsyncProgressPercent(buffer: string): number | undefined {
+  const matches = [...buffer.matchAll(/(?:^|[\r\n])\s*[\d,.]+\s+(\d{1,3})%/g)];
+  const match = matches.at(-1);
+  if (!match) {
+    return undefined;
+  }
+  const percent = Number(match[1]);
+  if (!Number.isFinite(percent)) {
+    return undefined;
+  }
+  return Math.max(0, Math.min(100, Math.floor(percent)));
 }
 
 function numberFromOutput(output: string, key: string): number | undefined {

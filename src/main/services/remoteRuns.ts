@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { app } from "electron";
 import type {
@@ -28,8 +28,14 @@ import {
   extractCodexText
 } from "./codexExec";
 import type { CodexExecOptions, CodexExecInvocation, CodexExecRemoteSandboxOptions } from "./codexExec";
-import { defaultRemoteMirrorSync, localProjectHasGitDir, remoteMirrorPath } from "./remoteMirrorSync";
-import type { RemoteMirrorSyncRunner } from "./remoteMirrorSync";
+import {
+  REMOTE_MIRROR_FINGERPRINT_VERSION,
+  computeLocalMirrorFingerprint,
+  defaultRemoteMirrorSync,
+  localProjectHasGitDir,
+  remoteMirrorPath
+} from "./remoteMirrorSync";
+import type { LocalMirrorFingerprint, RemoteMirrorSyncRunner } from "./remoteMirrorSync";
 import {
   detectRepoToolchainRequirements,
   formatToolchainAdvisoryIssues,
@@ -55,6 +61,8 @@ import {
 const DEFAULT_APPLY_LIMIT = 200;
 const DEFAULT_REMOTE_RUN_TIMEOUT_MS = 24 * 60 * 60_000;
 const DEFAULT_DETACHED_MAX_RUNTIME_MS = 24 * 60 * 60_000;
+const REMOTE_WARM_SESSION_PREPARE_TIMEOUT_MS = 60_000;
+const MIRROR_SYNC_STATE_FILENAME = "mirror-sync-state.json";
 
 // v1 env forwarding: remote runs get the same environment local runs inherit
 // (process env + login-shell env), minus machine-specific vars that would
@@ -199,6 +207,23 @@ type RemoteRunRecordInputWithOverrides = RemoteRunRecordInput & {
   workerSeq?: number;
   createdAt?: string;
 };
+
+interface MirrorSyncStateFile {
+  version: 1;
+  mirrors: Record<string, MirrorSyncStateEntry>;
+}
+
+interface MirrorSyncStateEntry {
+  key: string;
+  workerIdentity: Record<string, string | number | undefined>;
+  remotePath: string;
+  localPath: string;
+  fingerprintVersion: typeof REMOTE_MIRROR_FINGERPRINT_VERSION;
+  fingerprintDigest: string;
+  fileCount: number;
+  totalBytes: number;
+  updatedAt: string;
+}
 
 export interface RemoteRunApplyRecordResult {
   applied: boolean;
@@ -565,6 +590,7 @@ export class RemoteRunService {
   private readonly remoteGitDirProbe: (worker: RemoteRunWorkerTarget, gitDirPath: string, signal?: AbortSignal) => Promise<boolean>;
   private readonly detachedSyncByRun = new Map<string, RemoteRunSyncInfo>();
   private readonly mirrorOpChainByPath = new Map<string, Promise<void>>();
+  private mirrorSyncStateChain: Promise<unknown> = Promise.resolve();
   private readonly activeRunsByMirror = new Map<string, Set<string>>();
   private readonly sessionIdleTimeoutMs: number;
   private readonly toolchainPreflightCache = new Map<string, ToolchainPreflightIssue[]>();
@@ -735,18 +761,7 @@ export class RemoteRunService {
     });
     let participantSession: RemoteParticipantSessionEnsureResult | undefined;
     if (this.detachedWorkerTransport.ensureParticipantSession) {
-      await this.emitDetachedPhase(runId, request, "preparing-worker", "Checking warm remote session");
-      participantSession = await this.detachedWorkerTransport.ensureParticipantSession({
-        conversationId: request.conversationId,
-        participantId: request.participant.id,
-        worker: request.worker,
-        runtimeFingerprint,
-        idleTimeoutMs: this.sessionIdleTimeoutMs,
-        signal: request.signal
-      });
-      if (participantSession.launched) {
-        await this.emitDetachedPhase(runId, request, "launching-session", "Launching remote session");
-      }
+      participantSession = await this.prepareWarmParticipantSession(runId, request, runtimeFingerprint);
     } else {
       await this.emitDetachedPhase(runId, request, "launching-session", "Checking remote environment");
     }
@@ -823,26 +838,46 @@ export class RemoteRunService {
       if (participantSession && this.detachedWorkerTransport.submitTurn) {
         try {
           snapshot = await this.detachedWorkerTransport.submitTurn(launchRequest);
-        } catch {
-          const relaunched = await this.detachedWorkerTransport.ensureParticipantSession?.({
-            conversationId: request.conversationId,
-            participantId: request.participant.id,
-            worker: request.worker,
-            runtimeFingerprint,
-            idleTimeoutMs: this.sessionIdleTimeoutMs,
-            signal: request.signal
-          });
-          if (!relaunched) {
-            throw new Error("Remote member session became unavailable.");
+        } catch (error) {
+          try {
+            const relaunched = await this.detachedWorkerTransport.ensureParticipantSession?.({
+              conversationId: request.conversationId,
+              participantId: request.participant.id,
+              worker: request.worker,
+              runtimeFingerprint,
+              idleTimeoutMs: this.sessionIdleTimeoutMs,
+              signal: request.signal
+            });
+            if (!relaunched) {
+              throw new Error("Remote member session became unavailable.");
+            }
+            participantSession = relaunched;
+            if (relaunched.launched) {
+              await this.emitDetachedPhase(runId, request, "launching-session", "Relaunching stale remote session");
+            }
+            snapshot = await this.detachedWorkerTransport.submitTurn({
+              ...launchRequest,
+              participantSession: relaunched.handle
+            });
+          } catch (fallbackError) {
+            if (request.signal?.aborted) {
+              throw fallbackError;
+            }
+            const detail = errorMessage(fallbackError) || errorMessage(error);
+            this.syncLogger?.("remote-run.session.warm-submit.fallback", { runId, message: detail });
+            await this.emitDetachedPhase(
+              runId,
+              request,
+              "launching-session",
+              "Warm remote session unavailable; launching remote run",
+              detail
+            );
+            participantSession = undefined;
+            snapshot = await this.detachedWorkerTransport.launch({
+              ...launchRequest,
+              participantSession: undefined
+            });
           }
-          participantSession = relaunched;
-          if (relaunched.launched) {
-            await this.emitDetachedPhase(runId, request, "launching-session", "Relaunching stale remote session");
-          }
-          snapshot = await this.detachedWorkerTransport.submitTurn({
-            ...launchRequest,
-            participantSession: relaunched.handle
-          });
         }
       } else {
         snapshot = await this.detachedWorkerTransport.launch(launchRequest);
@@ -858,6 +893,47 @@ export class RemoteRunService {
       ? { ...snapshot.state, remoteSession: participantSession.handle }
       : snapshot.state;
     return sync ? { ...state, sync } : state;
+  }
+
+  private async prepareWarmParticipantSession(
+    runId: string,
+    request: RemoteRunDetachedStartRequest,
+    runtimeFingerprint: string
+  ): Promise<RemoteParticipantSessionEnsureResult | undefined> {
+    await this.emitDetachedPhase(runId, request, "preparing-worker", "Checking warm remote session");
+    try {
+      const participantSession = await runWithTimeoutSignal(
+        (signal) => this.detachedWorkerTransport.ensureParticipantSession?.({
+          conversationId: request.conversationId,
+          participantId: request.participant.id,
+          worker: request.worker,
+          runtimeFingerprint,
+          idleTimeoutMs: this.sessionIdleTimeoutMs,
+          signal
+        }) ?? Promise.resolve(undefined),
+        REMOTE_WARM_SESSION_PREPARE_TIMEOUT_MS,
+        "Warm remote session setup timed out.",
+        request.signal
+      );
+      if (participantSession?.launched) {
+        await this.emitDetachedPhase(runId, request, "launching-session", "Launching remote session");
+      }
+      return participantSession;
+    } catch (error) {
+      if (request.signal?.aborted) {
+        throw error;
+      }
+      const detail = errorMessage(error);
+      this.syncLogger?.("remote-run.session.warm-prepare.fallback", { runId, message: detail });
+      await this.emitDetachedPhase(
+        runId,
+        request,
+        "launching-session",
+        "Warm remote session unavailable; launching remote run",
+        detail
+      );
+      return undefined;
+    }
   }
 
   async inspectParticipantSession(handle: RemoteParticipantSessionHandle): Promise<RemoteParticipantSessionInspectResult> {
@@ -1372,18 +1448,140 @@ export class RemoteRunService {
       this.registerRunSync(runId, sync);
       return sync;
     }
-    const startedAt = Date.now();
-    await this.emitDetachedPhase(runId, request, "syncing-files", "Syncing project files");
-    await this.chainMirrorOp(remotePath, () => this.mirrorSync.syncUp({
-      worker: request.worker,
-      localPath: sync.localPath,
-      remotePath,
-      signal: request.signal
-    }));
-    this.syncLogger?.("remote-run.sync.up", { runId, remotePath, durationMs: Date.now() - startedAt });
-    await this.emitDetachedPhase(runId, request, "syncing-files", "Project files synced");
+    await this.emitDetachedPhase(runId, request, "syncing-files", "Checking project files");
+    const fingerprint = await this.computeMirrorFingerprintForSync(runId, sync.localPath, remotePath, request.signal);
+    await this.chainMirrorOp(remotePath, async () => {
+      if (fingerprint && await this.isMirrorSyncStateCurrent(request.worker, remotePath, fingerprint)) {
+        this.syncLogger?.("remote-run.sync.up.skipped-current", { runId, remotePath });
+        await this.emitDetachedPhase(runId, request, "syncing-files", "Project files up to date");
+        return;
+      }
+      const startedAt = Date.now();
+      let lastProgress = -1;
+      await this.emitDetachedPhase(runId, request, "syncing-files", "Syncing project files");
+      await this.mirrorSync.syncUp({
+        worker: request.worker,
+        localPath: sync.localPath,
+        remotePath,
+        signal: request.signal,
+        onProgress: async ({ percent }) => {
+          if (percent === lastProgress || percent < 0 || percent > 100) {
+            return;
+          }
+          lastProgress = percent;
+          await this.emitDetachedPhase(runId, request, "syncing-files", `Syncing project files (${percent}%)`);
+        }
+      });
+      if (fingerprint) {
+        await this.persistMirrorSyncState(request.worker, remotePath, sync.localPath, fingerprint).catch((error) => {
+          this.syncLogger?.("remote-run.sync.state.write.error", {
+            runId,
+            remotePath,
+            message: errorMessage(error)
+          });
+        });
+      }
+      this.syncLogger?.("remote-run.sync.up", { runId, remotePath, durationMs: Date.now() - startedAt });
+      await this.emitDetachedPhase(runId, request, "syncing-files", "Project files synced");
+    });
     this.registerRunSync(runId, sync);
     return sync;
+  }
+
+  private async computeMirrorFingerprintForSync(
+    runId: string,
+    localPath: string,
+    remotePath: string,
+    signal: AbortSignal | undefined
+  ): Promise<LocalMirrorFingerprint | undefined> {
+    try {
+      return await computeLocalMirrorFingerprint(localPath, { signal });
+    } catch (error) {
+      if (signal?.aborted) {
+        throw error;
+      }
+      this.syncLogger?.("remote-run.sync.fingerprint.error", {
+        runId,
+        remotePath,
+        message: errorMessage(error)
+      });
+      return undefined;
+    }
+  }
+
+  private async isMirrorSyncStateCurrent(
+    worker: RemoteRunWorkerTarget,
+    remotePath: string,
+    fingerprint: LocalMirrorFingerprint
+  ): Promise<boolean> {
+    await this.mirrorSyncStateChain.catch(() => undefined);
+    const state = await this.readMirrorSyncState();
+    const entry = state.mirrors[this.mirrorSyncStateKey(worker, remotePath)];
+    return entry?.fingerprintVersion === fingerprint.version &&
+      entry.fingerprintDigest === fingerprint.digest &&
+      entry.remotePath === remotePath;
+  }
+
+  private async persistMirrorSyncState(
+    worker: RemoteRunWorkerTarget,
+    remotePath: string,
+    localPath: string,
+    fingerprint: LocalMirrorFingerprint
+  ): Promise<void> {
+    const key = this.mirrorSyncStateKey(worker, remotePath);
+    const entry: MirrorSyncStateEntry = {
+      key,
+      workerIdentity: mirrorSyncWorkerIdentity(worker),
+      remotePath,
+      localPath,
+      fingerprintVersion: fingerprint.version,
+      fingerprintDigest: fingerprint.digest,
+      fileCount: fingerprint.fileCount,
+      totalBytes: fingerprint.totalBytes,
+      updatedAt: new Date().toISOString()
+    };
+    await this.withMirrorSyncStateWrite(async () => {
+      const state = await this.readMirrorSyncState();
+      state.mirrors[key] = entry;
+      await this.writeMirrorSyncState(state);
+    });
+  }
+
+  private async readMirrorSyncState(): Promise<MirrorSyncStateFile> {
+    try {
+      const parsed = JSON.parse(await readFile(this.mirrorSyncStatePath(), "utf8")) as Partial<MirrorSyncStateFile>;
+      if (parsed.version !== 1 || !parsed.mirrors || typeof parsed.mirrors !== "object" || Array.isArray(parsed.mirrors)) {
+        return { version: 1, mirrors: {} };
+      }
+      return { version: 1, mirrors: parsed.mirrors as Record<string, MirrorSyncStateEntry> };
+    } catch {
+      return { version: 1, mirrors: {} };
+    }
+  }
+
+  private async writeMirrorSyncState(state: MirrorSyncStateFile): Promise<void> {
+    await mkdir(this.spoolRoot, { recursive: true });
+    const target = this.mirrorSyncStatePath();
+    const temp = path.join(this.spoolRoot, `.${MIRROR_SYNC_STATE_FILENAME}.${randomUUID()}.tmp`);
+    await writeFile(temp, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    await rename(temp, target);
+  }
+
+  private async withMirrorSyncStateWrite<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = this.mirrorSyncStateChain;
+    const next = previous.catch(() => undefined).then(fn);
+    this.mirrorSyncStateChain = next.then(() => undefined, () => undefined);
+    return next;
+  }
+
+  private mirrorSyncStatePath(): string {
+    return path.join(this.spoolRoot, MIRROR_SYNC_STATE_FILENAME);
+  }
+
+  private mirrorSyncStateKey(worker: RemoteRunWorkerTarget, remotePath: string): string {
+    return createHash("sha256")
+      .update(JSON.stringify({ worker: mirrorSyncWorkerIdentity(worker), remotePath }))
+      .digest("hex");
   }
 
   private remoteRunPhase(
@@ -2495,6 +2693,53 @@ class RemoteSessionControlError extends Error {
   constructor(readonly status: string, readonly result: Record<string, unknown>) {
     super(`Remote session control failed: ${status}`);
   }
+}
+
+function mirrorSyncWorkerIdentity(worker: RemoteRunWorkerTarget): Record<string, string | number | undefined> {
+  return {
+    host: worker.host,
+    user: worker.user,
+    port: worker.port,
+    identityFile: worker.identityFile,
+    hostKeyAlias: worker.hostKeyAlias,
+    sshPath: worker.sshPath,
+    workerRoot: worker.workerRoot,
+    remoteCwd: worker.remoteCwd
+  };
+}
+
+async function runWithTimeoutSignal<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: string,
+  parentSignal: AbortSignal | undefined
+): Promise<T> {
+  if (parentSignal?.aborted) {
+    throw new Error("Remote run was cancelled.");
+  }
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  parentSignal?.addEventListener("abort", abort, { once: true });
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+    timer.unref();
+  });
+  try {
+    return await Promise.race([operation(controller.signal), timeout]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+    parentSignal?.removeEventListener("abort", abort);
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function defaultRemoteCodexExecutor(
