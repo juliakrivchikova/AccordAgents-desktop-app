@@ -65,7 +65,12 @@ export function remoteMirrorSlug(localPath: string): string {
 
 export function remoteMirrorPath(resolvedWorkerRoot: string, localPath: string): string {
   const root = resolvedWorkerRoot.replace(/\/+$/g, "");
-  return `${root}/${REMOTE_MIRROR_DIRNAME}/${remoteMirrorSlug(localPath)}`;
+  // The repo lives under a per-project container dir (".../<slug>/repo") so the
+  // container can be a writable sandbox root: a remote agent can then create
+  // sibling worktrees ("git worktree add ../feature" -> ".../<slug>/feature")
+  // scoped to this project, without exposing other projects' mirrors. rsync only
+  // targets the /repo subdir, so worktrees outside it survive re-syncs.
+  return `${root}/${REMOTE_MIRROR_DIRNAME}/${remoteMirrorSlug(localPath)}/repo`;
 }
 
 export function localProjectHasGitDir(localPath: string): boolean {

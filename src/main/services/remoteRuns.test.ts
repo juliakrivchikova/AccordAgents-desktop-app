@@ -956,7 +956,7 @@ test("mirror path derivation is deterministic and collision-resistant", () => {
   assert.match(first, /^myapp-[0-9a-f]{10}$/);
   assert.equal(
     remoteMirrorPath("/srv/worker", "/Users/dev/projects/myapp"),
-    `/srv/worker/mirrors/${first}`
+    `/srv/worker/mirrors/${first}/repo`
   );
 });
 
@@ -1064,7 +1064,9 @@ test("mirror-sync detached run up-syncs before launch and runs codex in the mirr
   assert.ok(cdIndex >= 0);
   assert.equal(args[cdIndex + 1], expectedMirror);
   assert.ok(args.includes("sandbox_workspace_write.network_access=true"));
-  assert.ok(args.some((arg) => arg === `sandbox_workspace_write.writable_roots=["${expectedMirror}/.git"]`));
+  // Mirror mode makes the per-project container (parent of /repo) writable, so
+  // the agent can create sibling worktrees scoped to this project + write .git.
+  assert.ok(args.some((arg) => arg === `sandbox_workspace_write.writable_roots=["${path.posix.dirname(expectedMirror)}"]`));
 });
 
 test("mirror-sync skips rsync for an unchanged project after durable state survives restart", async () => {

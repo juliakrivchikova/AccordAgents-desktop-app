@@ -1634,15 +1634,27 @@ export class RemoteRunService {
     if (!effectiveRepoPath) {
       return { networkAccess: true };
     }
-    let hasGitDir = false;
     if (sync) {
-      hasGitDir = localProjectHasGitDir(sync.localPath);
-    } else {
-      try {
-        hasGitDir = await this.remoteGitDirProbe(request.worker, `${effectiveRepoPath}/.git`, request.signal);
-      } catch {
-        hasGitDir = false;
-      }
+      // Mirror mode: the repo is nested under a per-project container
+      // (".../<slug>/repo"). Make the container the writable root so the agent
+      // can create sibling worktrees ("git worktree add ../feature") scoped to
+      // this project, and so .git (mounted read-only under workspace-write) is
+      // writable for commits. The container holds only this project's repo +
+      // its worktrees, so widening it does not expose other mirrors.
+      const hasGitDir = localProjectHasGitDir(sync.localPath);
+      const container = path.posix.dirname(effectiveRepoPath);
+      return {
+        networkAccess: true,
+        gitWritableRoot: hasGitDir ? container : undefined
+      };
+    }
+    // Pre-provisioned repo on a user-managed box: stay conservative and only
+    // open .git — we don't own the parent directory layout there.
+    let hasGitDir = false;
+    try {
+      hasGitDir = await this.remoteGitDirProbe(request.worker, `${effectiveRepoPath}/.git`, request.signal);
+    } catch {
+      hasGitDir = false;
     }
     return {
       networkAccess: true,
