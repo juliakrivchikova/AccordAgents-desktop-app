@@ -211,16 +211,6 @@ export function ParticipantEditorDialog(props: {
                 onSelect={(value) => patchDraft({ remoteExecution: normalizeChatRunLocation(value) })}
               />
             )}
-            {draft.kind === "codex-cli" && normalizeChatRunLocation(draft.remoteExecution) === "remote" && (
-              <ChatParticipantSpecRow label="Preflight">
-                <ParticipantEditorSwitch
-                  label="Skip toolchain preflight"
-                  description="Bypass repository toolchain checks when detection is wrong."
-                  checked={draft.skipToolchainPreflight}
-                  onChange={(checked) => patchDraft({ skipToolchainPreflight: checked })}
-                />
-              </ChatParticipantSpecRow>
-            )}
             <ChatParticipantInlineModelRow
               kind={draft.kind}
               model={draft.model}

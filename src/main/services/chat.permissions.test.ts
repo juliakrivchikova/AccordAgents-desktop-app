@@ -4059,10 +4059,12 @@ test("explicit remote launch rejection fails the participant bubble instead of f
   assert.equal(localRuns, 0);
 });
 
-test("remote chat launch passes user-reachable toolchain preflight skip flag", async () => {
+test("remote chat launch auto-decides toolchain preflight and ignores the legacy member skip flag", async () => {
   const participant = {
     ...chatParticipant("codex-cli"),
     remoteExecution: "remote" as const,
+    // Legacy field: the per-member preflight toggle was removed. It must no
+    // longer force a skip — the run service decides automatically.
     skipToolchainPreflight: true
   };
   const conversation = chatConversation([participant]);
@@ -4098,8 +4100,10 @@ test("remote chat launch passes user-reachable toolchain preflight skip flag", a
 
   await service.sendMessage({ conversationId: conversation.id, content: "@codex run remote", runId: "remote-skip-preflight" });
 
-  await waitFor(() => observedPreflight?.skip === true);
-  assert.equal(observedPreflight.skip, true);
+  await waitFor(() => launchedRunId !== "");
+  // Preflight is always handed to the run service for its automatic decision,
+  // and the legacy per-member skip flag is NOT forwarded as a forced skip.
+  assert.notEqual(observedPreflight?.skip, true);
   assert.equal((storage.current.metadata.remoteRunHandles as any)[launchedRunId]?.status, "running");
 });
 

@@ -215,21 +215,6 @@ export function ParticipantRuntimeControls(props: {
               onChange={(checked) => update({ autoWatch: checked })}
             />
           </span>
-          {runLocation === "remote" && participant.kind === "codex-cli" && (
-            <>
-              <span className="chat-rt-dot" aria-hidden />
-              <span className="chat-rt-toggleinline">
-                <span className="chat-rt-toggle-label">Preflight:</span>
-                <PopoverSwitch
-                  checked={participant.skipToolchainPreflight !== true}
-                  disabled={controlsDisabled}
-                  ariaLabel="Check toolchain preflight"
-                  tooltip="Check repository toolchain readiness before running remotely."
-                  onChange={(checked) => update({ skipToolchainPreflight: !checked })}
-                />
-              </span>
-            </>
-          )}
         </div>
       </div>
     </div>

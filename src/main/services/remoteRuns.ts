@@ -69,6 +69,14 @@ const REMOTE_WARM_SESSION_PREPARE_TIMEOUT_MS = 60_000;
 // slow work. Keep it short so a stall is abandoned and retried quickly (more
 // retries fit inside the 60s warm-prepare budget) instead of burning ~30s each.
 const REMOTE_SESSION_SSH_TIMEOUT_MS = 15_000;
+// Tools the app-managed worker setup always installs/verifies (see
+// cloudRunDoctor setup: NodeSource node+npm, git, build-essential=>make, and
+// openjdk when a project needs Java). Preflight auto-skips probing these — they
+// are guaranteed present — and only SSH-probes genuinely extra toolchains
+// (maven, gradle, python3, go, cargo, ruby, pnpm/yarn/bun, ...). This removes
+// the per-member "skip preflight" toggle: the check runs automatically only when
+// it can actually catch a gap, with no fingerprint and no per-turn SSH for the
+// common case.
 const MIRROR_SYNC_STATE_FILENAME = "mirror-sync-state.json";
 
 // v1 env forwarding: remote runs get the same environment local runs inherit
@@ -1667,6 +1675,10 @@ export class RemoteRunService {
     options: RemoteRunToolchainPreflightOptions | undefined,
     signal: AbortSignal | undefined
   ): Promise<ToolchainPreflightIssue[]> {
+    // `skip` is a manual override; it is no longer surfaced per-member. By
+    // default preflight runs automatically: detect this repo's requirements,
+    // probe the real ones over SSH, and cache the result per session so the same
+    // requirement set is not re-probed every turn.
     if (options?.skip) {
       return [];
     }
