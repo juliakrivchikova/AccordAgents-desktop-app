@@ -1855,6 +1855,53 @@ test("preflight infrastructure failures are not reported as missing tooling", as
   );
 });
 
+test("preflight auto-skips a repo with no toolchain manifests (nothing to probe)", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await repoFixture({ "README.md": "hello", "notes.txt": "no manifests here" });
+  const worker = new FakeDetachedWorkerTransport();
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker, mirrorSync: new FakeMirrorSync() });
+
+  const state = await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "no-manifest-run",
+    participant: participantConfig(participant),
+    prompt: "No toolchain here.",
+    worker: { host: "worker.example", workerRoot: "/srv/worker" },
+    sync: { localPath: localDir },
+    toolchainPreflight: { localRepoPath: localDir }
+  });
+
+  assert.equal(state.status, "running");
+  assert.deepEqual(worker.preflightRequirements, []); // auto-skip: nothing to check, no SSH probe
+  assert.equal(worker.launches, 1);
+});
+
+test("preflight probes an unchanged requirement set only once per session (cache)", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await repoFixture({ "pom.xml": "<project />" });
+  const worker = new FakeDetachedWorkerTransport(); // java + maven present, so runs launch
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker, mirrorSync: new FakeMirrorSync() });
+
+  for (const runId of ["cache-run-1", "cache-run-2"]) {
+    await remote.startDetachedRun({
+      conversationId: conversation.id,
+      runId,
+      participant: participantConfig(participant),
+      prompt: "Java project.",
+      worker: { host: "worker.example", workerRoot: "/srv/worker" },
+      sync: { localPath: localDir },
+      toolchainPreflight: { localRepoPath: localDir }
+    });
+  }
+
+  // First run probes [java, maven]; the second reuses the cached result -> no
+  // second SSH probe, but the run still launches.
+  assert.deepEqual(worker.preflightRequirements, [["java", "maven"]]);
+  assert.equal(worker.launches, 2);
+});
+
 test("real remote run gates preflight before invoking Codex", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant]);
