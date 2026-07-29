@@ -18,8 +18,7 @@ function makeCodexPendingTurn(overrides: Partial<Record<string, unknown>> = {}):
     messages: [],
     streamedText: "",
     visibleTranscript: "",
-    visibleOutputEnded: false,
-    outputItems: new Map(),
+    activityItems: new Map(),
     completedAgentMessages: [],
     nextAgentMessageStartsBlock: false,
     timer,
@@ -342,11 +341,20 @@ test("codex app-server stream accepts goal continuation root turn ids in the sam
   assert.equal((resolved[0] as { content: string }).content, "Status: tests are running.");
 });
 
-test("codex app-server stream captures completed commentary and command output without deltas", () => {
+test("codex app-server stream keeps raw tool output out of agent text and completes bounded activities", () => {
   const runner = makeRunner() as any;
-  const outputs: Array<{ kind: string; cumulative?: string; activityDetail?: string }> = [];
+  const outputs: Array<{
+    kind: string;
+    text?: string;
+    cumulative?: string;
+    activityStatus?: string;
+    activityItemId?: string;
+    activityDetail?: string;
+  }> = [];
+  const resolved: unknown[] = [];
   const pending = makeCodexPendingTurn({
-    onOutput: (event: { kind: string; cumulative?: string; activityDetail?: string }) => outputs.push(event)
+    onOutput: (event: typeof outputs[number]) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
   });
   const participant = { id: "p1", label: "Agent" };
   const fail = (error: Error): never => { throw error; };
@@ -384,108 +392,170 @@ test("codex app-server stream captures completed commentary and command output w
   });
   send({
     method: "item/commandExecution/outputDelta",
-    params: { threadId: "thread-1", turnId: "turn-1", itemId: "command-1", delta: "PASS first\n" }
+    params: { threadId: "thread-1", turnId: "turn-1", itemId: "command-1", delta: "RAW_COMMAND_DELTA\n" }
   });
   send({
     method: "item/completed",
     params: {
       threadId: "thread-1",
       turnId: "turn-1",
-      item: { id: "command-1", type: "commandExecution", aggregatedOutput: "PASS first\nPASS second\n" }
+      item: {
+        id: "command-1",
+        type: "commandExecution",
+        command: "npm test",
+        aggregatedOutput: "COMMAND_OUTPUT_FIRST\nCOMMAND_OUTPUT_LAST\n"
+      }
     }
   });
-
-  assert.equal(outputs.find((event) => event.activityDetail === "npm test")?.kind, "tool");
-  assert.equal(
-    outputs.filter((event) => event.kind === "text").at(-1)?.cumulative,
-    "I’ll inspect it.\n\n    PASS first\n    PASS second\n\n"
-  );
-});
-
-test("codex app-server stream normalizes CRLF deltas and aggregate before remainder comparison", () => {
-  const runner = makeRunner() as any;
-  const outputs: Array<{ kind: string; cumulative?: string }> = [];
-  const pending = makeCodexPendingTurn({
-    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event)
-  });
-  const participant = { id: "p1", label: "Agent" };
-  const fail = (error: Error): never => { throw error; };
-  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
-    record,
-    participant,
-    pending,
-    () => pending,
-    fail
-  );
-
-  send({ method: "item/started", params: { threadId: "thread-1", item: { id: "command-1", type: "commandExecution", command: "printf" } } });
-  send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", itemId: "command-1", delta: "one\r" } });
-  send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", itemId: "command-1", delta: "\ntwo\r" } });
-  send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", itemId: "command-1", delta: "\n" } });
-  send({ method: "item/completed", params: { threadId: "thread-1", item: { id: "command-1", type: "commandExecution", aggregatedOutput: "one\r\ntwo\r\nthree\r\n" } } });
-
-  assert.equal(pending.outputItems.get("command-1")?.raw, "one\ntwo\nthree\n");
-  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "    one\n    two\n    three\n\n");
-});
-
-test("codex app-server stream skips genuinely diverged aggregate output", () => {
-  const logs: Array<{ event: string; payload: Record<string, unknown> }> = [];
-  const runner = new CliAgentRunner({
-    write: async (event: string, payload: Record<string, unknown>) => {
-      logs.push({ event, payload });
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        id: "file-1",
+        type: "fileChange",
+        changes: [{ kind: "update", path: "src/example.ts", diff: "RAW_FULL_DIFF" }]
+      }
     }
-  } as any) as any;
-  const outputs: Array<{ kind: string; cumulative?: string }> = [];
-  const pending = makeCodexPendingTurn({
-    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event)
   });
-  const participant = { id: "p1", label: "Agent" };
-  const fail = (error: Error): never => { throw error; };
-  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
-    record,
-    participant,
-    pending,
-    () => pending,
-    fail
+  send({
+    method: "item/fileChange/outputDelta",
+    params: { threadId: "thread-1", turnId: "turn-1", itemId: "file-1", delta: "RAW_FILE_DELTA\n" }
+  });
+  send({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        id: "file-1",
+        type: "fileChange",
+        changes: [{ kind: "update", path: "src/example.ts", diff: "RAW_FULL_DIFF" }]
+      }
+    }
+  });
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        id: "mcp-1",
+        type: "mcpToolCall",
+        tool: "app_roles_describe_options",
+        arguments: { role: "engineer" }
+      }
+    }
+  });
+  send({
+    method: "item/mcpToolCall/progress",
+    params: { threadId: "thread-1", turnId: "turn-1", itemId: "mcp-1", message: "RAW_MCP_PROGRESS" }
+  });
+  send({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        id: "mcp-1",
+        type: "mcpToolCall",
+        result: { content: [{ type: "text", text: "MCP_RESULT_LAST" }] }
+      }
+    }
+  });
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "message-2", type: "agentMessage", phase: "final_answer" }
+    }
+  });
+  send({
+    method: "item/agentMessage/delta",
+    params: { threadId: "thread-1", turnId: "turn-1", delta: "Done." }
+  });
+  send({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "message-2", type: "agentMessage", phase: "final_answer", text: "Done." }
+    }
+  });
+  send({
+    method: "turn/completed",
+    params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } }
+  });
+
+  const commandEvents = outputs.filter((event) => event.activityItemId === "command-1");
+  assert.deepEqual(commandEvents.map((event) => event.activityStatus), ["started", "completed"]);
+  assert.match(commandEvents.at(-1)?.activityDetail ?? "", /^npm test\n\nOutput tail:/);
+  assert.match(commandEvents.at(-1)?.activityDetail ?? "", /COMMAND_OUTPUT_LAST/);
+
+  const fileEvents = outputs.filter((event) => event.activityItemId === "file-1");
+  assert.deepEqual(fileEvents.map((event) => event.activityStatus), ["started", "completed"]);
+  assert.equal(fileEvents.at(-1)?.activityDetail, "update: src/example.ts");
+  assert.doesNotMatch(fileEvents.at(-1)?.activityDetail ?? "", /RAW_FULL_DIFF/);
+
+  const mcpEvents = outputs.filter((event) => event.activityItemId === "mcp-1");
+  assert.deepEqual(mcpEvents.map((event) => event.activityStatus), ["started", "completed"]);
+  assert.equal(mcpEvents[1]?.text, mcpEvents[0]?.text);
+  assert.match(mcpEvents.at(-1)?.activityDetail ?? "", /"role": "engineer"/);
+  assert.match(mcpEvents.at(-1)?.activityDetail ?? "", /MCP_RESULT_LAST/);
+
+  const visibleTranscript = outputs.filter((event) => event.kind === "text").at(-1)?.cumulative ?? "";
+  assert.equal(visibleTranscript, "I’ll inspect it.\n\nDone.");
+  assert.doesNotMatch(
+    visibleTranscript,
+    /RAW_COMMAND_DELTA|COMMAND_OUTPUT_FIRST|RAW_FILE_DELTA|RAW_FULL_DIFF|RAW_MCP_PROGRESS|MCP_RESULT_LAST/
   );
-
-  send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", itemId: "command-1", delta: "streamed\n" } });
-  send({ method: "item/completed", params: { threadId: "thread-1", item: { id: "command-1", type: "commandExecution", aggregatedOutput: "different\n" } } });
-
-  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "    streamed\n\n");
-  assert.equal(logs.some((entry) => entry.event === "cli.codex-app-server.completed-output-diverged"), true);
-  assert.deepEqual(logs.find((entry) => entry.event === "cli.codex-app-server.completed-output-diverged")?.payload, {
-    itemId: "command-1",
-    completedItemId: "command-1",
-    itemType: "commandExecution",
-    priorLength: "streamed\n".length,
-    outputLength: "different\n".length,
-    reason: "completed-output-does-not-prefix-extend-streamed-output"
-  });
+  assert.equal((resolved[0] as { content: string }).content, "Done.");
 });
 
-test("codex app-server stream dedupes completed output against single unfinished delta item without id", () => {
+test("codex app-server completed activity output keeps only a marked 20-line 2,000-character tail", () => {
   const runner = makeRunner() as any;
-  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const outputs: Array<{
+    kind: string;
+    activityStatus?: string;
+    activityDetail?: string;
+  }> = [];
   const pending = makeCodexPendingTurn({
-    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event)
+    onOutput: (event: typeof outputs[number]) => outputs.push(event)
   });
-  const participant = { id: "p1", label: "Agent" };
-  const fail = (error: Error): never => { throw error; };
-  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
-    record,
-    participant,
+  const aggregatedOutput = Array.from(
+    { length: 30 },
+    (_, index) => `line-${index.toString().padStart(2, "0")}:${"x".repeat(150)}`
+  ).join("\r\n");
+
+  runner.handleCodexAppServerNotification(
+    {
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        item: {
+          id: "command-1",
+          type: "commandExecution",
+          command: "generate lots of output",
+          aggregatedOutput
+        }
+      }
+    },
+    { id: "p1", label: "Agent" },
     pending,
     () => pending,
-    fail
+    (error: Error): never => { throw error; }
   );
 
-  send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", delta: "part\n" } });
-  send({ method: "item/completed", params: { threadId: "thread-1", item: { id: "command-1", type: "commandExecution", aggregatedOutput: "part\nrest\n" } } });
-
-  assert.equal(pending.outputItems.size, 1);
-  assert.equal(pending.outputItems.get("item/commandExecution/outputDelta")?.raw, "part\nrest\n");
-  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "    part\n    rest\n\n");
+  const detail = outputs.find((event) => event.activityStatus === "completed")?.activityDetail ?? "";
+  const preview = detail.split("Output tail:\n")[1] ?? "";
+  assert.match(detail, /^generate lots of output\n\nOutput tail:/);
+  assert.ok(preview.length <= 2_000);
+  assert.match(preview, /earlier lines/);
+  assert.match(preview, /chars omitted/);
+  assert.doesNotMatch(preview, /line-00:/);
+  assert.match(preview, /line-29:/);
 });
 
 test("codex app-server stream ignores same-thread completion for a different tracked turn", () => {
@@ -523,12 +593,17 @@ test("codex app-server stream ignores same-thread completion for a different tra
   assert.equal((resolved[0] as { content: string }).content, "final");
 });
 
-test("codex app-server stream flushes command output before an interrupted turn rejects", () => {
+test("codex app-server stream keeps command output out of agent text when a turn is interrupted", () => {
   const runner = makeRunner() as any;
-  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const outputs: Array<{
+    kind: string;
+    cumulative?: string;
+    activityStatus?: string;
+    activityDetail?: string;
+  }> = [];
   const rejected: Error[] = [];
   const pending = makeCodexPendingTurn({
-    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event),
+    onOutput: (event: typeof outputs[number]) => outputs.push(event),
     reject: (error: Error) => rejected.push(error)
   });
   const participant = { id: "p1", label: "Agent" };
@@ -561,7 +636,11 @@ test("codex app-server stream flushes command output before an interrupted turn 
     params: { threadId: "thread-1", turn: { id: "turn-1", status: "interrupted" } }
   });
 
-  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "    READY\n\n");
+  assert.equal(outputs.filter((event) => event.kind === "text").length, 0);
+  assert.match(
+    outputs.find((event) => event.activityStatus === "completed")?.activityDetail ?? "",
+    /^printf READY; sleep 30\n\nOutput tail:\nREADY$/
+  );
   assert.equal(rejected.length, 1);
   assert.match(rejected[0]?.message ?? "", /interrupted/);
 });

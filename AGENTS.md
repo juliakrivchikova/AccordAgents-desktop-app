@@ -1,5 +1,13 @@
 # Repository Guidelines
 
+## NON-NEGOTIABLE PRODUCT INVARIANT: DEDICATED CLI PARITY
+
+**WORKING WITH ONE SPECIFIC PARTICIPANT IN ACCORDAGENTS CHAT MUST FEEL LIKE WORKING WITH THAT AGENT THROUGH ITS REGULAR, DEDICATED CLI.**
+
+Before every product, architecture, implementation, UI, and commit decision, explicitly check that this invariant still holds. AccordAgents must mirror the current CLI behavior at the time a feature is implemented, including output rendering and streaming, permissions and approvals, sandboxing, model selection, sessions and resume behavior, compaction, goals, skills and rules, MCPs and tools, cancellation, errors, warnings, and user controls. The user should not need to learn different single-agent behavior merely because the agent is running inside AccordAgents.
+
+Treat the dedicated CLI as the source of truth. Do not invent app-specific semantics for a single participant when the CLI already defines them. If multi-participant coordination inherently requires a difference, keep the divergence as narrow as possible, make it visible to the user, document why it exists, and add verification for both the parity path and the divergence. CLI behavior can evolve; verify the current behavior when implementing or revisiting a feature rather than relying on an old assumption. Any unexplained mismatch is a product correctness bug.
+
 ## Project Structure & Module Organization
 
 This is an Electron desktop app built with TypeScript, React, and Vite. Main-process code lives in `src/main`, with service classes under `src/main/services`. The preload bridge is in `src/preload`, shared types and utilities are in `src/shared`, and the React renderer is in `src/renderer`. Renderer assets belong in `src/renderer/assets`. The app-wide style entrypoint is `src/renderer/styles/app.css`, which imports foundation/theme files and view-specific CSS under `src/renderer/styles/views`. Build output goes to `dist`; do not edit generated files by hand.

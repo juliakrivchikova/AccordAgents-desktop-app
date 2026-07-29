@@ -62,6 +62,8 @@ const MODEL_CATALOG_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_TIMEOUT_MS = 8_000;
 const CODEX_APP_SERVER_DISABLED_ENV = "ACCORD_AGENTS_CODEX_APP_SERVER";
 const CODEX_APP_SERVER_MCP_TOKEN_ENV = "ACCORD_AGENTS_MCP_TOKEN";
+const CODEX_ACTIVITY_OUTPUT_MAX_LINES = 20;
+const CODEX_ACTIVITY_OUTPUT_MAX_CHARS = 2_000;
 const CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
@@ -223,12 +225,10 @@ interface CodexAppServerPendingTurn {
   messages: string[];
   streamedText: string;
   visibleTranscript: string;
-  visibleOutputEnded: boolean;
-  outputItems: Map<string, {
-    raw: string;
-    atLineStart: boolean;
-    finished: boolean;
-    pendingCarriageReturn?: boolean;
+  activityItems: Map<string, {
+    label: string;
+    kind: ChatAgentActivityKind;
+    detail?: string;
   }>;
   agentTextPendingCarriageReturn?: boolean;
   completedAgentMessages: string[];
@@ -1792,8 +1792,7 @@ export class CliAgentRunner {
             messages: [],
             streamedText: "",
             visibleTranscript: "",
-            visibleOutputEnded: false,
-            outputItems: new Map(),
+            activityItems: new Map(),
             completedAgentMessages: [],
             nextAgentMessageStartsBlock: false,
             model: activeModel,
@@ -2130,6 +2129,12 @@ export class CliAgentRunner {
       const summary = this.codexAppServerToolSummary(item);
       const activityItemId = this.stringField(item ?? {}, "id");
       if (summary) {
+        if (
+          activityItemId &&
+          (itemType === "commandExecution" || itemType === "mcpToolCall" || itemType === "fileChange")
+        ) {
+          pending.activityItems.set(activityItemId, summary);
+        }
         this.emitLiveOutput(pending.onOutput, "tool", `${summary.label}\n`, undefined, {
           activityKind: summary.kind,
           activityStatus: "started",
@@ -2146,28 +2151,26 @@ export class CliAgentRunner {
       }
       return;
     }
-    if (method === "item/commandExecution/outputDelta" || method === "item/fileChange/outputDelta") {
-      const delta = this.stringField(params, "delta");
-      if (delta) {
-        this.appendCodexAppServerOutput(pending, this.stringField(params, "itemId") ?? method, delta);
-      }
-      return;
-    }
-    if (method === "item/mcpToolCall/progress") {
-      const message = this.stringField(params, "message");
-      if (message) {
-        this.appendCodexAppServerOutput(
-          pending,
-          this.stringField(params, "itemId") ?? method,
-          message.endsWith("\n") ? message : `${message}\n`
-        );
-      }
+    if (
+      method === "item/commandExecution/outputDelta" ||
+      method === "item/fileChange/outputDelta" ||
+      method === "item/mcpToolCall/progress"
+    ) {
+      // The dedicated Codex CLI keeps raw tool output out of the assistant
+      // transcript. Item activity carries the user-visible tool state instead.
       return;
     }
     if (method === "item/fileChange/patchUpdated") {
       const detail = this.codexAppServerFileChangesDetail(params.changes);
       if (detail) {
         const activityItemId = this.stringField(params, "itemId");
+        if (activityItemId) {
+          pending.activityItems.set(activityItemId, {
+            label: "Updating files",
+            kind: "file-edit",
+            detail
+          });
+        }
         this.emitLiveOutput(pending.onOutput, "tool", "Updating files\n", undefined, {
           activityKind: "file-edit",
           activityStatus: "started",
@@ -2180,7 +2183,7 @@ export class CliAgentRunner {
     if (method === "item/completed") {
       const item = this.asRecord(params.item);
       const itemType = this.stringField(item ?? {}, "type");
-      const itemId = this.stringField(item ?? {}, "id") ?? itemType ?? "completed-item";
+      const itemId = this.stringField(item ?? {}, "id");
       if (itemType === "agentMessage") {
         this.flushCodexAppServerAgentText(pending);
         const text = this.stringField(item ?? {}, "text");
@@ -2202,39 +2205,39 @@ export class CliAgentRunner {
           ...(itemId ? { activityItemId: itemId } : {}),
           ...(detail ? { activityDetail: detail } : {})
         });
-      }
-      const outputItemId = this.codexAppServerOutputItemIdForCompletion(pending, itemId);
-      const output = this.codexAppServerCompletedItemOutput(item);
-      if (output) {
-        const normalizedOutput = this.normalizeCodexAppServerCompleteText(output);
-        const outputState = pending.outputItems.get(outputItemId);
-        const priorOutput = outputState?.raw ?? "";
-        let remainingOutput = "";
-        if (normalizedOutput.startsWith(priorOutput)) {
-          if (outputState) {
-            outputState.pendingCarriageReturn = false;
+      } else if (
+        itemType === "commandExecution" ||
+        itemType === "mcpToolCall" ||
+        itemType === "fileChange"
+      ) {
+        const priorSummary = itemId ? pending.activityItems.get(itemId) : undefined;
+        const completedSummary = this.codexAppServerToolSummary(item);
+        const summary = completedSummary
+          ? {
+            ...completedSummary,
+            label: priorSummary?.label ?? completedSummary.label,
+            kind: priorSummary?.kind ?? completedSummary.kind
           }
-          remainingOutput = normalizedOutput.slice(priorOutput.length);
-        } else if (!priorOutput.startsWith(normalizedOutput) && priorOutput.trim() !== normalizedOutput.trim()) {
-          void this.debugLogs?.write("cli.codex-app-server.completed-output-diverged", {
-            itemId: outputItemId,
-            completedItemId: itemId,
-            itemType,
-            priorLength: priorOutput.length,
-            outputLength: normalizedOutput.length,
-            reason: "completed-output-does-not-prefix-extend-streamed-output"
+          : priorSummary;
+        if (summary) {
+          const invocation = completedSummary?.detail ?? priorSummary?.detail;
+          const detail = itemType === "fileChange"
+            ? invocation
+            : this.codexAppServerCompletedActivityDetail(
+              invocation,
+              this.codexAppServerCompletedActivityOutput(item)
+            );
+          this.emitLiveOutput(pending.onOutput, "tool", `${summary.label}\n`, undefined, {
+            activityKind: summary.kind,
+            activityStatus: "completed",
+            ...(itemId ? { activityItemId: itemId } : {}),
+            ...(detail ? { activityDetail: detail } : {})
           });
         }
-        if (remainingOutput) {
-          this.appendCodexAppServerOutput(
-            pending,
-            outputItemId,
-            remainingOutput,
-            { normalized: true }
-          );
+        if (itemId) {
+          pending.activityItems.delete(itemId);
         }
       }
-      this.finishCodexAppServerOutput(pending, outputItemId);
       return;
     }
     if (method === "thread/tokenUsage/updated") {
@@ -2261,7 +2264,6 @@ export class CliAgentRunner {
     }
     const status = this.stringField(turn ?? {}, "status");
     this.flushCodexAppServerAgentText(pending);
-    this.flushCodexAppServerOutputCarries(pending);
     const current = cleanupPending();
     if (!current) {
       return;
@@ -2358,12 +2360,9 @@ export class CliAgentRunner {
     }
     if (startsBlock && pending.visibleTranscript.trim()) {
       const trimmed = pending.visibleTranscript.trimEnd();
-      pending.visibleTranscript = pending.visibleOutputEnded
-        ? `${trimmed}\n\n`
-        : this.textWithAgentMessageBoundary(trimmed, text);
+      pending.visibleTranscript = this.textWithAgentMessageBoundary(trimmed, text);
     }
     pending.visibleTranscript += text;
-    pending.visibleOutputEnded = false;
     this.emitLiveOutput(pending.onOutput, "text", text, pending.visibleTranscript);
   }
 
@@ -2400,98 +2399,6 @@ export class CliAgentRunner {
     pending.nextAgentMessageStartsBlock = false;
   }
 
-  private appendCodexAppServerOutput(
-    pending: CodexAppServerPendingTurn,
-    itemId: string,
-    output: string,
-    options: { normalized?: boolean } = {}
-  ): void {
-    if (!output) {
-      return;
-    }
-    let state = pending.outputItems.get(itemId);
-    if (!state || state.finished) {
-      state = {
-        raw: "",
-        atLineStart: true,
-        finished: false
-      };
-      pending.outputItems.set(itemId, state);
-    }
-    const normalizedOutput = options.normalized
-      ? output
-      : this.normalizeCodexAppServerTextChunk(output, state.pendingCarriageReturn === true);
-    const text = typeof normalizedOutput === "string" ? normalizedOutput : normalizedOutput.text;
-    if (typeof normalizedOutput !== "string") {
-      state.pendingCarriageReturn = normalizedOutput.pendingCarriageReturn;
-    }
-    if (!text) {
-      return;
-    }
-    if (state.raw.length === 0 && state.atLineStart && pending.visibleTranscript.trim()) {
-      pending.visibleTranscript = `${pending.visibleTranscript.trimEnd()}\n\n`;
-    }
-    if (options.normalized) {
-      state.pendingCarriageReturn = false;
-    }
-    let formatted = "";
-    for (const character of text) {
-      if (state.atLineStart) {
-        formatted += "    ";
-        state.atLineStart = false;
-      }
-      formatted += character;
-      if (character === "\n") {
-        state.atLineStart = true;
-      }
-    }
-    state.raw += text;
-    pending.visibleTranscript += formatted;
-    pending.visibleOutputEnded = true;
-    this.emitLiveOutput(pending.onOutput, "text", formatted, pending.visibleTranscript);
-  }
-
-  private finishCodexAppServerOutput(pending: CodexAppServerPendingTurn, itemId: string): void {
-    const state = pending.outputItems.get(itemId);
-    if (!state || state.finished) {
-      return;
-    }
-    this.flushCodexAppServerOutputCarry(pending, itemId);
-    state.finished = true;
-    if (!pending.visibleTranscript.endsWith("\n\n")) {
-      const separator = pending.visibleTranscript.endsWith("\n") ? "\n" : "\n\n";
-      pending.visibleTranscript += separator;
-      this.emitLiveOutput(pending.onOutput, "text", separator, pending.visibleTranscript);
-    }
-    pending.visibleOutputEnded = true;
-  }
-
-  private flushCodexAppServerOutputCarries(pending: CodexAppServerPendingTurn): void {
-    for (const [itemId, state] of pending.outputItems) {
-      if (!state.finished) {
-        this.flushCodexAppServerOutputCarry(pending, itemId);
-      }
-    }
-  }
-
-  private flushCodexAppServerOutputCarry(pending: CodexAppServerPendingTurn, itemId: string): void {
-    const state = pending.outputItems.get(itemId);
-    if (!state?.pendingCarriageReturn) {
-      return;
-    }
-    state.pendingCarriageReturn = false;
-    this.appendCodexAppServerOutput(pending, itemId, "\r", { normalized: true });
-  }
-
-  private codexAppServerOutputItemIdForCompletion(pending: CodexAppServerPendingTurn, itemId: string): string {
-    if (pending.outputItems.has(itemId)) {
-      return itemId;
-    }
-    const unfinished = Array.from(pending.outputItems.entries())
-      .filter(([, state]) => !state.finished);
-    return unfinished.length === 1 ? unfinished[0][0] : itemId;
-  }
-
   private normalizeCodexAppServerCompleteText(text: string): string {
     return this.normalizeCodexAppServerTextChunk(text, false, { final: true }).text;
   }
@@ -2523,16 +2430,13 @@ export class CliAgentRunner {
     };
   }
 
-  private codexAppServerCompletedItemOutput(item: Record<string, unknown> | undefined): string | undefined {
+  private codexAppServerCompletedActivityOutput(item: Record<string, unknown> | undefined): string | undefined {
     if (!item) {
       return undefined;
     }
     const type = this.stringField(item, "type");
     if (type === "commandExecution") {
       return this.stringField(item, "aggregatedOutput");
-    }
-    if (type === "fileChange") {
-      return this.codexAppServerFileChangesOutput(item.changes);
     }
     if (type === "mcpToolCall") {
       const error = this.asRecord(item.error);
@@ -2542,16 +2446,50 @@ export class CliAgentRunner {
       const result = this.asRecord(item.result);
       return result ? this.codexAppServerOutputContent(result.content) : undefined;
     }
-    if (type === "dynamicToolCall") {
-      return this.codexAppServerOutputContent(item.contentItems);
-    }
-    if (type === "collabAgentToolCall") {
-      return this.codexAppServerReadableJson(item.agentsStates);
-    }
-    if (type === "imageGeneration") {
-      return this.stringField(item, "result");
-    }
     return undefined;
+  }
+
+  private codexAppServerCompletedActivityDetail(
+    invocation: string | undefined,
+    output: string | undefined
+  ): string | undefined {
+    const preview = this.codexAppServerBoundedOutputTail(output);
+    return [
+      invocation,
+      preview ? `Output tail:\n${preview}` : undefined
+    ].filter((part): part is string => Boolean(part)).join("\n\n") || undefined;
+  }
+
+  private codexAppServerBoundedOutputTail(output: string | undefined): string | undefined {
+    if (!output) {
+      return undefined;
+    }
+    const normalized = this.normalizeCodexAppServerCompleteText(output).trimEnd();
+    if (!normalized) {
+      return undefined;
+    }
+    const lines = normalized.split("\n");
+    const omittedLines = Math.max(0, lines.length - CODEX_ACTIVITY_OUTPUT_MAX_LINES);
+    let tail = lines.slice(-CODEX_ACTIVITY_OUTPUT_MAX_LINES).join("\n");
+    let marker = "";
+    for (let iteration = 0; iteration < 5; iteration += 1) {
+      const omittedChars = Math.max(0, normalized.length - tail.length);
+      marker = omittedLines > 0 || omittedChars > 0
+        ? `… [${[
+          omittedLines > 0 ? `${omittedLines} earlier lines` : undefined,
+          omittedChars > 0 ? `${omittedChars} chars omitted` : undefined
+        ].filter(Boolean).join("; ")}]`
+        : "";
+      const availableTailChars = Math.max(
+        0,
+        CODEX_ACTIVITY_OUTPUT_MAX_CHARS - marker.length - (marker ? 1 : 0)
+      );
+      if (tail.length <= availableTailChars) {
+        break;
+      }
+      tail = tail.slice(-availableTailChars);
+    }
+    return marker ? `${marker}\n${tail}` : tail;
   }
 
   private codexAppServerOutputContent(value: unknown): string | undefined {
@@ -2590,25 +2528,6 @@ export class CliAgentRunner {
       return path ? `${kind ? `${kind}: ` : ""}${path}` : undefined;
     }).filter((entry): entry is string => Boolean(entry));
     return paths.length > 0 ? paths.join("\n") : undefined;
-  }
-
-  private codexAppServerFileChangesOutput(value: unknown): string | undefined {
-    if (!Array.isArray(value)) {
-      return undefined;
-    }
-    const diffs = value.map((entry) => {
-      const record = this.asRecord(entry);
-      if (!record) {
-        return undefined;
-      }
-      const diff = this.stringField(record, "diff");
-      const path = this.stringField(record, "path");
-      if (!diff) {
-        return undefined;
-      }
-      return path ? `${path}\n${diff}` : diff;
-    }).filter((entry): entry is string => Boolean(entry));
-    return diffs.length > 0 ? diffs.join("\n\n") : undefined;
   }
 
   private codexAppServerSubagentDetail(item: Record<string, unknown> | undefined): string | undefined {
