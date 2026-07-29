@@ -5898,10 +5898,10 @@ export class ChatService {
             kind: "chat",
             repoPath: worker.remoteCwd,
             sync: remoteSyncLocalPath ? { localPath: remoteSyncLocalPath } : undefined,
-            // Preflight is decided automatically in the run flow (detect this
-            // repo's toolchain requirements, probe the real ones, cache the
-            // result per session); there is no per-member skip toggle to pass.
-            toolchainPreflight: { localRepoPath: remoteToolchainLocalPath },
+            toolchainPreflight: {
+              localRepoPath: remoteToolchainLocalPath,
+              skip: participant.skipToolchainPreflight === true
+            },
             onToolchainAdvisory: (message) => {
               options.warnings.push(`@${participant.handle}: ${message}`);
             },

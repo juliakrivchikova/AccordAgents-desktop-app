@@ -47,6 +47,8 @@ export interface CloudRunSshExecRequest {
   command: string;
   timeoutMs: number;
   onStdout?: (chunk: string) => void;
+  retryAttempts?: number;
+  keepAlive?: "default" | "none";
 }
 
 export interface CloudRunDoctorServiceOptions {
@@ -80,7 +82,12 @@ export class CloudRunDoctorService {
     }
     let output: string;
     try {
-      output = await this.sshExec({ worker, command: probeScript(worker), timeoutMs: PROBE_TIMEOUT_MS });
+      output = await this.sshExec({
+        worker,
+        command: probeScript(worker),
+        timeoutMs: PROBE_TIMEOUT_MS,
+        retryAttempts: 1
+      });
     } catch (error) {
       return failedReport("connect", sshConnectionFailureDetail(errorMessage(error)));
     }
@@ -207,6 +214,7 @@ export class CloudRunDoctorService {
         worker,
         command: `${shellQuotePosix(codexPath)} login --device-auth < /dev/null 2>&1`,
         timeoutMs: DEVICE_AUTH_TIMEOUT_MS,
+        keepAlive: "none",
         onStdout: (chunk) => {
           buffered += chunk;
           const visible = stripAnsi(buffered);
@@ -362,24 +370,40 @@ async function defaultSshExec(request: CloudRunSshExecRequest): Promise<string> 
         request.onStdout?.(chunk);
       }
     : undefined;
+  const sshArgs = request.keepAlive === "none"
+    ? withoutServerAliveOptions(cloudRunSshOptionArgs(request.worker))
+    : cloudRunSshOptionArgs(request.worker);
   const result = await runWithSshRetries(
     () => runCommand("ssh", [
-      "-o",
-      "ConnectTimeout=10",
-      "-o",
-      "ServerAliveInterval=8",
-      "-o",
-      "ServerAliveCountMax=3",
-      ...cloudRunSshOptionArgs(request.worker),
+      ...sshArgs,
       target,
       request.command
     ], {
       timeoutMs: request.timeoutMs,
       onStdout
     }),
-    { isTransient: (error) => !producedOutput && isTransientSshError(error) }
+    {
+      attempts: request.retryAttempts,
+      isTransient: (error) => !producedOutput && isTransientSshError(error)
+    }
   );
   return result.stdout;
+}
+
+function withoutServerAliveOptions(args: string[]): string[] {
+  const next: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (
+      args[index] === "-o" &&
+      (args[index + 1]?.startsWith("ServerAliveInterval=") ||
+        args[index + 1]?.startsWith("ServerAliveCountMax="))
+    ) {
+      index += 1;
+      continue;
+    }
+    next.push(args[index]);
+  }
+  return next;
 }
 
 async function defaultLocalGitIdentity(): Promise<{ name?: string; email?: string }> {

@@ -108,7 +108,7 @@ import { AppSkillsService } from "./services/appSkills";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { bootstrapAppUpdater } from "./services/appUpdater";
 import { ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
-import { buildCloudRunSshTarget, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
+import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { CloudRunDoctorService } from "./services/cloudRunDoctor";
 import { CloudRunAwsService } from "./services/cloudRunAws";
 import { AwsWorkerSetupService } from "./services/awsWorkerSetup";
@@ -572,18 +572,10 @@ async function testCloudRunWorker(worker: CloudRunWorkerSettings): Promise<{ ok:
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
   const args = [
-    "-o",
-    "BatchMode=yes",
-    "-o",
-    "ConnectTimeout=10"
+    ...cloudRunSshOptionArgs(normalized as CloudRunWorkerSettings & { host: string }),
+    target,
+    "command -v codex >/dev/null && printf ok"
   ];
-  if (normalized.identityFile) {
-    args.push("-i", normalized.identityFile);
-  }
-  if (typeof normalized.port === "number" && Number.isFinite(normalized.port)) {
-    args.push("-p", String(normalized.port));
-  }
-  args.push(target, "command -v codex >/dev/null && printf ok");
   try {
     const result = await runCommand("ssh", args, { timeoutMs: 20_000 });
     return result.stdout.trim() === "ok"
@@ -667,19 +659,28 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:save-cloud-runs", (_event, update: CloudRunsSettingsUpdate) => settingsService.saveCloudRunsSettings(update));
   ipcMain.handle("cloud-runs:test-worker", async (_event, request?: CloudRunWorkerSettings) => {
-    return withCloudRunWorker(request, testCloudRunWorker);
+    const result = await withCloudRunWorker(request, testCloudRunWorker);
+    remoteRunService.clearToolchainPreflightCache();
+    await remoteRunService.clearMirrorSyncState();
+    return result;
   });
   ipcMain.handle("cloud-runs:diagnose-worker", async (_event, request?: CloudRunWorkerSettings) => {
     const managedAws = !request && (await settingsService.getPublicSettings()).cloudRuns.mode === "aws";
-    return withCloudRunWorker(request, (worker) => cloudRunDoctorService.diagnose(worker, {
+    const result = await withCloudRunWorker(request, (worker) => cloudRunDoctorService.diagnose(worker, {
       requirePersistentStorage: managedAws
     }));
+    remoteRunService.clearToolchainPreflightCache();
+    await remoteRunService.clearMirrorSyncState();
+    return result;
   });
   ipcMain.handle("cloud-runs:setup-worker", async (_event, request?: CloudRunWorkerSettings) => {
     const managedAws = !request && (await settingsService.getPublicSettings()).cloudRuns.mode === "aws";
-    return withCloudRunWorker(request, (worker) => cloudRunDoctorService.setup(worker, (progress) => {
+    const result = await withCloudRunWorker(request, (worker) => cloudRunDoctorService.setup(worker, (progress) => {
       mainWindow?.webContents.send("cloud-runs:setup-progress", progress);
     }, { requirePersistentStorage: managedAws }));
+    remoteRunService.clearToolchainPreflightCache();
+    await remoteRunService.clearMirrorSyncState();
+    return result;
   });
   ipcMain.handle("cloud-runs:aws-bootstrap-command", (_event, region: string) =>
     cloudRunAwsService.bootstrapCommand(String(region ?? "").trim() || "us-east-1"));

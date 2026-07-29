@@ -19,7 +19,7 @@ import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
 import type { ChatAppToolApprovalDecisionEvent, ChatService } from "./chat";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs } from "./cloudRunWorkers";
 import { CommandError, commandEnvironment, runCommand } from "./command";
-import { runWithSshRetries } from "./sshRetry";
+import { runWithSshRetries, sshRetryWorstCaseMs } from "./sshRetry";
 import {
   CODEX_APP_SERVER_MCP_TOKEN_ENV,
   buildCodexExecInvocation,
@@ -30,19 +30,24 @@ import {
 } from "./codexExec";
 import type { CodexExecOptions, CodexExecInvocation, CodexExecRemoteSandboxOptions } from "./codexExec";
 import {
+  REMOTE_MIRROR_DIRNAME,
   REMOTE_MIRROR_FINGERPRINT_VERSION,
   computeLocalMirrorFingerprint,
   defaultRemoteMirrorSync,
   localProjectHasGitDir,
+  planWorkerMirrorReclaim,
   remoteMirrorPath
 } from "./remoteMirrorSync";
-import type { LocalMirrorFingerprint, RemoteMirrorSyncRunner } from "./remoteMirrorSync";
+import type {
+  LocalMirrorFingerprint,
+  RemoteMirrorSyncRunner,
+  WorkerMirrorContainerSnapshot
+} from "./remoteMirrorSync";
 import {
   detectRepoToolchainRequirements,
   formatToolchainAdvisoryIssues,
   issueFromRequirement,
-  RemoteRunPreflightError,
-  RemoteRunPreflightInfrastructureError
+  RemoteRunPreflightError
 } from "./toolchainRequirements";
 import type { ToolchainIssueCategory, ToolchainPreflightIssue, ToolchainRequirement } from "./toolchainRequirements";
 import {
@@ -62,22 +67,30 @@ import {
 const DEFAULT_APPLY_LIMIT = 200;
 const DEFAULT_REMOTE_RUN_TIMEOUT_MS = 24 * 60 * 60_000;
 const DEFAULT_DETACHED_MAX_RUNTIME_MS = 24 * 60 * 60_000;
-const REMOTE_WARM_SESSION_PREPARE_TIMEOUT_MS = 60_000;
 // Per-attempt timeout for session-control + path-resolution SSH. These are all
 // fast supervisor ops (ensure spawns detached and returns; submit/inspect/list
 // just hand off/read), so a stalled attempt is a lossy-link KEX black hole, not
-// slow work. Keep it short so a stall is abandoned and retried quickly (more
-// retries fit inside the 60s warm-prepare budget) instead of burning ~30s each.
-const REMOTE_SESSION_SSH_TIMEOUT_MS = 15_000;
-// Tools the app-managed worker setup always installs/verifies (see
-// cloudRunDoctor setup: NodeSource node+npm, git, build-essential=>make, and
-// openjdk when a project needs Java). Preflight auto-skips probing these — they
-// are guaranteed present — and only SSH-probes genuinely extra toolchains
-// (maven, gradle, python3, go, cargo, ruby, pnpm/yarn/bun, ...). This removes
-// the per-member "skip preflight" toggle: the check runs automatically only when
-// it can actually catch a gap, with no fingerprint and no per-turn SSH for the
-// common case.
+// slow work. Keep it short so a stall is abandoned and retried quickly instead
+// of burning ~30s each.
+export const REMOTE_SESSION_SSH_TIMEOUT_MS = 15_000;
+export const REMOTE_SESSION_SSH_RETRY_ATTEMPTS = 3;
+// Single-shot read of the worker's session protocol.json during warm prepare.
+const REMOTE_SESSION_PROTOCOL_READ_TIMEOUT_MS = 30_000;
+// Warm-session prepare runs, worst case, two retried SSH ops (resolve run dir +
+// ensure session) plus one single-shot protocol read, in sequence. Derive the
+// wall from that schedule (P1-7) so a lossy link can exhaust its retries instead
+// of being cut off mid-schedule and forced into an avoidable cold launch. The
+// old flat 60s could be blown past by a single retried op (~47s) alone.
+export const REMOTE_WARM_SESSION_PREPARE_TIMEOUT_MS =
+  2 * sshRetryWorstCaseMs(REMOTE_SESSION_SSH_RETRY_ATTEMPTS, REMOTE_SESSION_SSH_TIMEOUT_MS) +
+  REMOTE_SESSION_PROTOCOL_READ_TIMEOUT_MS +
+  5_000;
+export const MAX_MIRROR_SYNC_STATE_ENTRIES = 200;
 const MIRROR_SYNC_STATE_FILENAME = "mirror-sync-state.json";
+// Upper bound on paths a single opportunistic worker-mirror reclaim pass will
+// delete, so a worker that has accumulated many orphans is drained gradually
+// over several runs rather than in one large blocking rm.
+const MAX_WORKER_MIRROR_RECLAIM_PER_PASS = 25;
 
 // v1 env forwarding: remote runs get the same environment local runs inherit
 // (process env + login-shell env), minus machine-specific vars that would
@@ -223,12 +236,12 @@ type RemoteRunRecordInputWithOverrides = RemoteRunRecordInput & {
   createdAt?: string;
 };
 
-interface MirrorSyncStateFile {
+export interface MirrorSyncStateFile {
   version: 1;
   mirrors: Record<string, MirrorSyncStateEntry>;
 }
 
-interface MirrorSyncStateEntry {
+export interface MirrorSyncStateEntry {
   key: string;
   workerIdentity: Record<string, string | number | undefined>;
   remotePath: string;
@@ -256,6 +269,17 @@ export interface RemoteRunServiceOptions {
   mirrorSync?: RemoteMirrorSyncRunner;
   syncLogger?: (event: string, payload: Record<string, unknown>) => void;
   remoteGitDirProbe?: (worker: RemoteRunWorkerTarget, gitDirPath: string, signal?: AbortSignal) => Promise<boolean>;
+  remoteMirrorProbe?: (worker: RemoteRunWorkerTarget, remotePath: string, expectGit: boolean, signal?: AbortSignal) => Promise<boolean>;
+  enumerateWorkerMirrors?: (
+    worker: RemoteRunWorkerTarget,
+    mirrorsDir: string,
+    signal?: AbortSignal
+  ) => Promise<WorkerMirrorContainerSnapshot[]>;
+  removeWorkerMirrorPaths?: (
+    worker: RemoteRunWorkerTarget,
+    paths: string[],
+    signal?: AbortSignal
+  ) => Promise<void>;
   sessionIdleTimeoutMs?: number;
 }
 
@@ -603,6 +627,17 @@ export class RemoteRunService {
   private readonly mirrorSync: RemoteMirrorSyncRunner;
   private readonly syncLogger?: (event: string, payload: Record<string, unknown>) => void;
   private readonly remoteGitDirProbe: (worker: RemoteRunWorkerTarget, gitDirPath: string, signal?: AbortSignal) => Promise<boolean>;
+  private readonly remoteMirrorProbe: (worker: RemoteRunWorkerTarget, remotePath: string, expectGit: boolean, signal?: AbortSignal) => Promise<boolean>;
+  private readonly enumerateWorkerMirrors: (
+    worker: RemoteRunWorkerTarget,
+    mirrorsDir: string,
+    signal?: AbortSignal
+  ) => Promise<WorkerMirrorContainerSnapshot[]>;
+  private readonly removeWorkerMirrorPaths: (
+    worker: RemoteRunWorkerTarget,
+    paths: string[],
+    signal?: AbortSignal
+  ) => Promise<void>;
   private readonly detachedSyncByRun = new Map<string, RemoteRunSyncInfo>();
   private readonly mirrorOpChainByPath = new Map<string, Promise<void>>();
   private mirrorSyncStateChain: Promise<unknown> = Promise.resolve();
@@ -621,6 +656,17 @@ export class RemoteRunService {
     this.mirrorSync = options.mirrorSync ?? defaultRemoteMirrorSync;
     this.syncLogger = options.syncLogger;
     this.remoteGitDirProbe = options.remoteGitDirProbe ?? defaultRemoteGitDirProbe;
+    this.remoteMirrorProbe = options.remoteMirrorProbe ?? defaultRemoteMirrorProbe;
+    this.enumerateWorkerMirrors = options.enumerateWorkerMirrors ?? ((worker, mirrorsDir, signal) => {
+      const sshPath = worker.sshPath?.trim() || "ssh";
+      const sshBaseArgs = remoteSshBaseArgs(worker, buildCloudRunSshTarget(worker));
+      return enumerateWorkerMirrorContainers(sshPath, sshBaseArgs, mirrorsDir, signal);
+    });
+    this.removeWorkerMirrorPaths = options.removeWorkerMirrorPaths ?? ((worker, paths, signal) => {
+      const sshPath = worker.sshPath?.trim() || "ssh";
+      const sshBaseArgs = remoteSshBaseArgs(worker, buildCloudRunSshTarget(worker));
+      return removeRemoteWorkerPaths(sshPath, sshBaseArgs, paths, signal);
+    });
     this.sessionIdleTimeoutMs = Math.max(1, Math.floor(options.sessionIdleTimeoutMs ?? REMOTE_SESSION_IDLE_TIMEOUT_MS));
     this.chat.onAppToolApprovalDecision((event) => this.appendPermissionDecision(event));
   }
@@ -887,11 +933,16 @@ export class RemoteRunService {
               "Warm remote session unavailable; launching remote run",
               detail
             );
-            participantSession = undefined;
-            snapshot = await this.detachedWorkerTransport.launch({
-              ...launchRequest,
-              participantSession: undefined
-            });
+            const recovered = await this.recoverSubmittedWarmRun(launchRequest, participantSession?.handle);
+            if (recovered) {
+              snapshot = recovered;
+            } else {
+              participantSession = undefined;
+              snapshot = await this.detachedWorkerTransport.launch({
+                ...launchRequest,
+                participantSession: undefined
+              });
+            }
           }
         }
       } else {
@@ -951,6 +1002,80 @@ export class RemoteRunService {
     }
   }
 
+  private async recoverSubmittedWarmRun(
+    request: RemoteDetachedWorkerLaunchRequest,
+    handle: RemoteParticipantSessionHandle | undefined
+  ): Promise<RemoteDetachedWorkerSnapshot | undefined> {
+    if (handle && this.detachedWorkerTransport.inspectParticipantSession) {
+      try {
+        const inspected = await this.detachedWorkerTransport.inspectParticipantSession({
+          handle,
+          signal: request.signal
+        });
+        if (
+          inspected.activeRunId === request.runId ||
+          (inspected.queuedRunIds ?? []).includes(request.runId)
+        ) {
+          this.syncLogger?.("remote-run.session.warm-submit.recovered", {
+            runId: request.runId,
+            status: inspected.activeRunId === request.runId ? "active" : "queued"
+          });
+          return await this.pollSubmittedRunOrRunningSnapshot(request);
+        }
+      } catch (error) {
+        this.syncLogger?.("remote-run.session.warm-submit.inspect.error", {
+          runId: request.runId,
+          message: errorMessage(error)
+        });
+      }
+    }
+    try {
+      const snapshot = await this.detachedWorkerTransport.poll({
+        runId: request.runId,
+        worker: request.worker,
+        afterWorkerSeq: 0,
+        signal: request.signal
+      });
+      if (snapshot.state.status !== "unknown" || snapshot.events.length > 0) {
+        this.syncLogger?.("remote-run.session.warm-submit.recovered", {
+          runId: request.runId,
+          status: snapshot.state.status
+        });
+        return snapshot;
+      }
+    } catch (error) {
+      this.syncLogger?.("remote-run.session.warm-submit.poll.error", {
+        runId: request.runId,
+        message: errorMessage(error)
+      });
+    }
+    return undefined;
+  }
+
+  private async pollSubmittedRunOrRunningSnapshot(
+    request: RemoteDetachedWorkerLaunchRequest
+  ): Promise<RemoteDetachedWorkerSnapshot> {
+    const snapshot = await this.detachedWorkerTransport.poll({
+      runId: request.runId,
+      worker: request.worker,
+      afterWorkerSeq: 0,
+      signal: request.signal
+    });
+    if (snapshot.state.status !== "unknown" || snapshot.events.length > 0) {
+      return snapshot;
+    }
+    return {
+      state: {
+        runId: request.runId,
+        conversationId: request.conversationId,
+        participantId: request.participant.id,
+        status: "running",
+        acceptedAt: new Date().toISOString()
+      },
+      events: []
+    };
+  }
+
   async inspectParticipantSession(handle: RemoteParticipantSessionHandle): Promise<RemoteParticipantSessionInspectResult> {
     if (!this.detachedWorkerTransport.inspectParticipantSession) {
       return { status: "unknown" };
@@ -971,6 +1096,16 @@ export class RemoteRunService {
       return false;
     }
     return this.detachedWorkerTransport.stopParticipantSessionIfIdle({ handle, remove, ...cleanup });
+  }
+
+  clearToolchainPreflightCache(): void {
+    this.toolchainPreflightCache.clear();
+  }
+
+  async clearMirrorSyncState(): Promise<void> {
+    await this.withMirrorSyncStateWrite(async () => {
+      await this.writeMirrorSyncState({ version: 1, mirrors: {} });
+    });
   }
 
   async authorizeAutomaticWorkerStop(worker: RemoteRunWorkerTarget, ownerId: string): Promise<RemoteWorkerStopAuthorization> {
@@ -1464,9 +1599,14 @@ export class RemoteRunService {
       return sync;
     }
     await this.emitDetachedPhase(runId, request, "syncing-files", "Checking project files");
-    const fingerprint = await this.computeMirrorFingerprintForSync(runId, sync.localPath, remotePath, request.signal);
     await this.chainMirrorOp(remotePath, async () => {
-      if (fingerprint && await this.isMirrorSyncStateCurrent(request.worker, remotePath, fingerprint)) {
+      if ((this.activeRunsByMirror.get(remotePath)?.size ?? 0) > 0) {
+        this.syncLogger?.("remote-run.sync.up.skipped-busy-after-wait", { runId, remotePath });
+        await this.emitDetachedPhase(runId, request, "syncing-files", "Using active project mirror");
+        return;
+      }
+      const fingerprint = await this.computeMirrorFingerprintForSync(runId, sync.localPath, remotePath, request.signal);
+      if (fingerprint && await this.isMirrorSyncStateCurrent(request.worker, remotePath, sync.localPath, fingerprint, request.signal)) {
         this.syncLogger?.("remote-run.sync.up.skipped-current", { runId, remotePath });
         await this.emitDetachedPhase(runId, request, "syncing-files", "Project files up to date");
         return;
@@ -1503,6 +1643,49 @@ export class RemoteRunService {
     return sync;
   }
 
+  // Documented, bounded maintenance cleanup for accumulated worker-side mirror
+  // storage (P1-8): pre-`/repo` old-layout containers and ORPHANED linked
+  // worktrees a mirror repo no longer registers. Conservative by construction —
+  // never deletes an active mirror, a live/registered worktree, or a non-worktree
+  // sibling dir (see planWorkerMirrorReclaim), and only ever removes paths under
+  // `${root}/mirrors/`. This is an explicit maintenance entry point, NOT wired to
+  // auto-run on the per-turn sync path: the whole point of the surrounding work is
+  // to avoid deleting remote-only git state (P0-2), so worker-side deletion stays
+  // a deliberate action rather than a hot-path side effect.
+  async reclaimWorkerMirrorStorage(
+    worker: RemoteRunWorkerTarget,
+    signal: AbortSignal | undefined
+  ): Promise<{ reclaimed: string[]; skipped: number }> {
+    try {
+      const sshPath = worker.sshPath?.trim() || "ssh";
+      const target = buildCloudRunSshTarget(worker);
+      const sshBaseArgs = remoteSshBaseArgs(worker, target);
+      const resolvedRoot = await resolveRemoteRunDir(
+        sshPath,
+        sshBaseArgs,
+        remoteWorkerRootForTarget(worker),
+        signal
+      );
+      const mirrorsDir = `${resolvedRoot.replace(/\/+$/g, "")}/${REMOTE_MIRROR_DIRNAME}`;
+      const containers = await this.enumerateWorkerMirrors(worker, mirrorsDir, signal);
+      const plan = planWorkerMirrorReclaim(containers, new Set(this.activeRunsByMirror.keys()));
+      const safe = plan.reclaim.filter((candidate) => candidate.startsWith(`${mirrorsDir}/`));
+      if (safe.length === 0) {
+        return { reclaimed: [], skipped: 0 };
+      }
+      const bounded = safe.slice(0, MAX_WORKER_MIRROR_RECLAIM_PER_PASS);
+      await this.removeWorkerMirrorPaths(worker, bounded, signal);
+      this.syncLogger?.("remote-run.mirror.reclaim", {
+        removed: bounded.length,
+        skipped: safe.length - bounded.length
+      });
+      return { reclaimed: bounded, skipped: safe.length - bounded.length };
+    } catch (error) {
+      this.syncLogger?.("remote-run.mirror.reclaim.error", { message: errorMessage(error) });
+      return { reclaimed: [], skipped: 0 };
+    }
+  }
+
   private async computeMirrorFingerprintForSync(
     runId: string,
     localPath: string,
@@ -1527,14 +1710,19 @@ export class RemoteRunService {
   private async isMirrorSyncStateCurrent(
     worker: RemoteRunWorkerTarget,
     remotePath: string,
-    fingerprint: LocalMirrorFingerprint
+    localPath: string,
+    fingerprint: LocalMirrorFingerprint,
+    signal: AbortSignal | undefined
   ): Promise<boolean> {
     await this.mirrorSyncStateChain.catch(() => undefined);
     const state = await this.readMirrorSyncState();
     const entry = state.mirrors[this.mirrorSyncStateKey(worker, remotePath)];
-    return entry?.fingerprintVersion === fingerprint.version &&
+    if (!(entry?.fingerprintVersion === fingerprint.version &&
       entry.fingerprintDigest === fingerprint.digest &&
-      entry.remotePath === remotePath;
+      entry.remotePath === remotePath)) {
+      return false;
+    }
+    return this.remoteMirrorLooksCurrent(worker, remotePath, localProjectHasGitDir(localPath), signal);
   }
 
   private async persistMirrorSyncState(
@@ -1558,8 +1746,26 @@ export class RemoteRunService {
     await this.withMirrorSyncStateWrite(async () => {
       const state = await this.readMirrorSyncState();
       state.mirrors[key] = entry;
+      pruneMirrorSyncState(state);
       await this.writeMirrorSyncState(state);
     });
+  }
+
+  private async remoteMirrorLooksCurrent(
+    worker: RemoteRunWorkerTarget,
+    remotePath: string,
+    expectGit: boolean,
+    signal: AbortSignal | undefined
+  ): Promise<boolean> {
+    try {
+      return await this.remoteMirrorProbe(worker, remotePath, expectGit, signal);
+    } catch (error) {
+      this.syncLogger?.("remote-run.sync.remote-check.error", {
+        remotePath,
+        message: errorMessage(error)
+      });
+      return false;
+    }
   }
 
   private async readMirrorSyncState(): Promise<MirrorSyncStateFile> {
@@ -1675,10 +1881,10 @@ export class RemoteRunService {
     options: RemoteRunToolchainPreflightOptions | undefined,
     signal: AbortSignal | undefined
   ): Promise<ToolchainPreflightIssue[]> {
-    // `skip` is a manual override; it is no longer surfaced per-member. By
-    // default preflight runs automatically: detect this repo's requirements,
-    // probe the real ones over SSH, and cache the result per session so the same
-    // requirement set is not re-probed every turn.
+    // `skip` is an intentional legacy/manual override. By default preflight
+    // detects this repo's requirements, probes the real ones over SSH, and
+    // caches the result per worker/toolchain set so the same requirement set is
+    // not re-probed every turn.
     if (options?.skip) {
       return [];
     }
@@ -1693,7 +1899,7 @@ export class RemoteRunService {
     let remoteIssues: ToolchainPreflightIssue[] = [];
     if (probeRequirements.length > 0) {
       const cacheKey = JSON.stringify({
-        worker: [worker.host, worker.user, worker.port, worker.codexPath],
+        worker: mirrorSyncWorkerIdentity(worker),
         requirements: probeRequirements
       });
       const cached = this.toolchainPreflightCache.get(cacheKey);
@@ -1704,7 +1910,18 @@ export class RemoteRunService {
           remoteIssues = await this.detachedWorkerTransport.preflight({ worker, requirements: probeRequirements, signal });
           this.toolchainPreflightCache.set(cacheKey, remoteIssues);
         } catch (error) {
-          throw new RemoteRunPreflightInfrastructureError(error instanceof Error ? error.message : String(error));
+          remoteIssues = [{
+            tool: "remote-preflight",
+            label: "Remote environment preflight",
+            severity: "advisory",
+            category: "probe",
+            detail: `Could not verify worker tooling: ${errorMessage(error)}`,
+            sources: [],
+            remediation: {
+              kind: "manual",
+              message: "The run will continue; use Cloud Runs setup/check if tooling errors appear."
+            }
+          }];
         }
       }
     }
@@ -2051,10 +2268,13 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
     const sshPath = request.worker.sshPath?.trim() || "ssh";
     const target = remoteSshTarget(request.worker);
     const sshBaseArgs = remoteSshBaseArgs(request.worker, target);
-    const result = await runCommand(sshPath, [...sshBaseArgs, toolchainProbeScript(request.requirements)], {
-      timeoutMs: 30_000,
-      signal: request.signal
-    });
+    const result = await runWithSshRetries(
+      () => runCommand(sshPath, [...sshBaseArgs, toolchainProbeScript(request.requirements)], {
+        timeoutMs: 30_000,
+        signal: request.signal
+      }),
+      { signal: request.signal }
+    );
     return parseToolchainProbeOutput(request.requirements, result.stdout);
   }
 
@@ -2250,10 +2470,12 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
     ownerId: string
   ): Promise<RemoteWorkerStopAuthorization> {
     const root = await this.ensureSessionProtocol(worker, undefined);
+    const leaseId = randomUUID();
     try {
       const result = await this.runSessionControl(worker, root, "authorize-stop", {
         protocolVersion: REMOTE_SESSION_PROTOCOL_VERSION,
         ownerId,
+        leaseId,
         ttlMs: REMOTE_STOP_DRAIN_LEASE_MS
       }, undefined);
       const lease = result.lease && typeof result.lease === "object"
@@ -2708,7 +2930,7 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
       // error (non-transient) still surfaces immediately below.
       const result = action === "submit"
         ? await invoke()
-        : await runWithSshRetries(invoke, { signal });
+        : await runWithSshRetries(invoke, { signal, attempts: REMOTE_SESSION_SSH_RETRY_ATTEMPTS });
       return JSON.parse(result.stdout || "{}") as Record<string, unknown>;
     } catch (error) {
       if (error instanceof CommandError) {
@@ -2735,8 +2957,9 @@ class RemoteSessionControlError extends Error {
 }
 
 function mirrorSyncWorkerIdentity(worker: RemoteRunWorkerTarget): Record<string, string | number | undefined> {
+  const stableHost = worker.hostKeyAlias?.trim() || worker.host;
   return {
-    host: worker.host,
+    host: stableHost,
     user: worker.user,
     port: worker.port,
     identityFile: worker.identityFile,
@@ -2745,6 +2968,19 @@ function mirrorSyncWorkerIdentity(worker: RemoteRunWorkerTarget): Record<string,
     workerRoot: worker.workerRoot,
     remoteCwd: worker.remoteCwd
   };
+}
+
+export function pruneMirrorSyncState(state: MirrorSyncStateFile): void {
+  const entries = Object.entries(state.mirrors);
+  if (entries.length <= MAX_MIRROR_SYNC_STATE_ENTRIES) {
+    return;
+  }
+  entries
+    .sort((a, b) => a[1].updatedAt < b[1].updatedAt ? -1 : a[1].updatedAt > b[1].updatedAt ? 1 : 0)
+    .slice(0, entries.length - MAX_MIRROR_SYNC_STATE_ENTRIES)
+    .forEach(([key]) => {
+      delete state.mirrors[key];
+    });
 }
 
 async function runWithTimeoutSignal<T>(
@@ -2817,6 +3053,7 @@ function workerSettingsFromTarget(worker: RemoteRunWorkerTarget): RemoteParticip
     user: worker.user,
     port: worker.port,
     identityFile: worker.identityFile,
+    hostKeyAlias: worker.hostKeyAlias,
     workerRoot: worker.workerRoot,
     remoteCwd: worker.remoteCwd,
     codexPath: worker.codexPath
@@ -2910,7 +3147,7 @@ async function resolveRemoteRunDir(
       timeoutMs: REMOTE_SESSION_SSH_TIMEOUT_MS,
       signal
     }),
-    { signal }
+    { signal, attempts: REMOTE_SESSION_SSH_RETRY_ATTEMPTS }
   );
   const resolved = result.stdout.trim();
   if (!resolved.startsWith("/")) {
@@ -3111,6 +3348,26 @@ async function defaultRemoteGitDirProbe(
   return result.stdout.trim() === "yes";
 }
 
+async function defaultRemoteMirrorProbe(
+  worker: RemoteRunWorkerTarget,
+  remotePath: string,
+  expectGit: boolean,
+  signal?: AbortSignal
+): Promise<boolean> {
+  const sshPath = worker.sshPath?.trim() || "ssh";
+  const target = buildCloudRunSshTarget(worker);
+  const sshBaseArgs = remoteSshBaseArgs(worker, target);
+  const gitCheck = expectGit ? ` && test -e ${shellQuote(`${remotePath}/.git`)}` : "";
+  const result = await runCommand(sshPath, [
+    ...sshBaseArgs,
+    `test -d ${shellQuote(remotePath)}${gitCheck} && printf yes || printf no`
+  ], {
+    timeoutMs: REMOTE_SESSION_SSH_TIMEOUT_MS,
+    signal
+  });
+  return result.stdout.trim() === "yes";
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -3180,6 +3437,87 @@ async function readRemoteFinalMessage(
   } catch {
     return "";
   }
+}
+
+// Snapshot every project-container dir under `${root}/mirrors/` in one round
+// trip: for each container report whether it has the current `repo/` layout and
+// a direct `.git`, then list its non-repo child dirs marking real linked
+// worktrees (a `.git` FILE) and whether the mirror repo still registers each.
+// Output is TSV: `C\t<hasRepo>\t<hasGit>\t<containerPath>` and
+// `W\t<isWorktree>\t<registered>\t<worktreePath>`.
+async function enumerateWorkerMirrorContainers(
+  sshPath: string,
+  sshBaseArgs: string[],
+  mirrorsDir: string,
+  signal: AbortSignal | undefined
+): Promise<WorkerMirrorContainerSnapshot[]> {
+  const quotedDir = shellQuote(mirrorsDir);
+  const script = [
+    `MIR=${quotedDir}`,
+    `[ -d "$MIR" ] || exit 0`,
+    `for c in "$MIR"/*/; do`,
+    `  [ -d "$c" ] || continue`,
+    `  c=\${c%/}`,
+    `  hasrepo=0; [ -d "$c/repo" ] && hasrepo=1`,
+    `  hasgit=0; [ -d "$c/.git" ] && hasgit=1`,
+    `  printf 'C\\t%s\\t%s\\t%s\\n' "$hasrepo" "$hasgit" "$c"`,
+    `  for w in "$c"/*/; do`,
+    `    [ -d "$w" ] || continue`,
+    `    w=\${w%/}`,
+    `    base=\${w##*/}`,
+    `    [ "$base" = repo ] && continue`,
+    `    iswt=0; [ -f "$w/.git" ] && iswt=1`,
+    `    reg=0; [ -e "$c/repo/.git/worktrees/$base" ] && reg=1`,
+    `    printf 'W\\t%s\\t%s\\t%s\\n' "$iswt" "$reg" "$w"`,
+    `  done`,
+    `done`
+  ].join("\n");
+  const result = await runCommand(sshPath, [...sshBaseArgs, script], {
+    timeoutMs: 30_000,
+    signal
+  });
+  const byPath = new Map<string, WorkerMirrorContainerSnapshot>();
+  let current: WorkerMirrorContainerSnapshot | undefined;
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const fields = line.split("\t");
+    if (fields[0] === "C" && fields.length === 4 && fields[3].startsWith("/")) {
+      current = {
+        path: fields[3],
+        hasRepoSubdir: fields[1] === "1",
+        hasDirectGitDir: fields[2] === "1",
+        worktrees: []
+      };
+      byPath.set(current.path, current);
+    } else if (fields[0] === "W" && fields.length === 4 && current && fields[3].startsWith("/")) {
+      current.worktrees.push({
+        path: fields[3],
+        isWorktree: fields[1] === "1",
+        registered: fields[2] === "1"
+      });
+    }
+  }
+  return [...byPath.values()];
+}
+
+// Delete a bounded set of reclaimed mirror paths. Every path is re-verified to
+// sit under `${mirrorsDir}/` before removal as defense-in-depth against a
+// parsing slip ever turning into an `rm -rf` outside the mirror tree.
+async function removeRemoteWorkerPaths(
+  sshPath: string,
+  sshBaseArgs: string[],
+  paths: string[],
+  signal: AbortSignal | undefined
+): Promise<void> {
+  const targets = paths.filter((candidate) => candidate.startsWith("/") && !candidate.includes(".."));
+  if (targets.length === 0) {
+    return;
+  }
+  const command = `rm -rf ${targets.map((candidate) => shellQuote(candidate)).join(" ")}`;
+  await runCommand(sshPath, [...sshBaseArgs, command], {
+    timeoutMs: 60_000,
+    signal,
+    primeLoginShellEnv: false
+  }).catch(() => undefined);
 }
 
 async function cleanupRemoteFiles(

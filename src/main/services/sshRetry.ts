@@ -40,6 +40,25 @@ export function isTransientSshError(error: unknown): boolean {
 
 export const SSH_CONNECT_ATTEMPTS = 5;
 
+// Worst-case wall-clock for a single runWithSshRetries schedule: every attempt
+// times out and the full linear backoff runs between them. Used to size outer
+// timeouts that must be able to contain a whole retry schedule rather than cut
+// it off mid-flight (see REMOTE_WARM_SESSION_PREPARE_TIMEOUT_MS). Defaults mirror
+// runWithSshRetries so the two stay in step.
+export function sshRetryWorstCaseMs(
+  attempts: number,
+  perAttemptTimeoutMs: number,
+  baseDelayMs = 800,
+  maxDelayMs = 4_000
+): number {
+  const total = Math.max(1, attempts);
+  let worstCase = total * Math.max(0, perAttemptTimeoutMs);
+  for (let attempt = 1; attempt < total; attempt += 1) {
+    worstCase += Math.min(maxDelayMs, baseDelayMs * attempt);
+  }
+  return worstCase;
+}
+
 export interface SshRetryOptions {
   attempts?: number;
   baseDelayMs?: number;

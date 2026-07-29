@@ -180,6 +180,15 @@ export class SdkEc2Client implements Ec2Client {
   }
 
   async deleteKeyPair(name: string): Promise<void> {
+    // A scoped worker key can only DeleteKeyPair by matching the key-pair ARN.
+    // If the key is already gone, a delete-by-name can't resolve to an ARN and
+    // IAM answers UnauthorizedOperation (not InvalidKeyPair.NotFound), which
+    // would otherwise turn a completed teardown into a false "cleanup failed".
+    // Skip the doomed call when the key no longer exists; DescribeKeyPairs is
+    // region-wide and always permitted, so this never masks a real perms gap.
+    if (!(await this.keyPairExists(name))) {
+      return;
+    }
     try {
       await this.client.send(new DeleteKeyPairCommand({ KeyName: name }));
     } catch (error) {

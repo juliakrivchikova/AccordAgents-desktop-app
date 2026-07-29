@@ -125,6 +125,18 @@ test("diagnose keeps generic connection errors generic", async () => {
   assert.doesNotMatch(report.message, /Delete and recreate/);
 });
 
+test("diagnose caps connection-check retries", async () => {
+  let observedAttempts: number | undefined;
+  const { service } = doctorWith(async (request) => {
+    observedAttempts = request.retryAttempts;
+    return FULLY_PROVISIONED;
+  });
+
+  await service.diagnose(WORKER);
+
+  assert.equal(observedAttempts, 1);
+});
+
 test("setup installs only the missing pieces and re-diagnoses", async () => {
   let probes = 0;
   const { service, commands } = doctorWith(async (request) => {
@@ -167,6 +179,7 @@ test("setup drives codex device-auth and surfaces url + code to the user", async
           : FULLY_PROVISIONED;
       }
       if (request.command.includes("login --device-auth")) {
+        assert.equal(request.keepAlive, "none");
         request.onStdout?.("Open \u001b[94mhttps://auth.openai.com/codex/device\u001b[0m\n");
         request.onStdout?.("Enter this one-time code\n   \u001b[94mKIAK-7ETT8\u001b[0m\n");
         return "";
