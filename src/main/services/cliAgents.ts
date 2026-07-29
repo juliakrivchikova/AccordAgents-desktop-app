@@ -62,6 +62,7 @@ const MODEL_CATALOG_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_TIMEOUT_MS = 8_000;
 const CODEX_APP_SERVER_DISABLED_ENV = "ACCORD_AGENTS_CODEX_APP_SERVER";
 const CODEX_APP_SERVER_MCP_TOKEN_ENV = "ACCORD_AGENTS_MCP_TOKEN";
+const CODEX_ACTIVITY_INVOCATION_MAX_CHARS = 1_800;
 const CODEX_ACTIVITY_OUTPUT_MAX_LINES = 20;
 const CODEX_ACTIVITY_OUTPUT_MAX_CHARS = 2_000;
 const CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS = [
@@ -2202,7 +2203,7 @@ export class CliAgentRunner {
         this.emitLiveOutput(pending.onOutput, "tool", "Using subagent\n", undefined, {
           activityKind: "tool",
           activityStatus: "completed",
-          ...(itemId ? { activityItemId: itemId } : {}),
+          activityItemId: itemId ?? "subAgentActivity",
           ...(detail ? { activityDetail: detail } : {})
         });
       } else if (
@@ -2341,7 +2342,10 @@ export class CliAgentRunner {
     if (!previous.trim() || !next) {
       return "";
     }
-    if (chatTextEndsAtSentenceOrParagraphBoundary(previous)) {
+    if (
+      chatTextEndsAtSentenceOrParagraphBoundary(previous) ||
+      /(?:^|\n)```[ \t]*$/.test(previous.trimEnd())
+    ) {
       return "\n\n";
     }
     if (/^\s|^[,.;:!?)]/.test(next)) {
@@ -2458,6 +2462,22 @@ export class CliAgentRunner {
       invocation,
       preview ? `Output tail:\n${preview}` : undefined
     ].filter((part): part is string => Boolean(part)).join("\n\n") || undefined;
+  }
+
+  private codexAppServerBoundedInvocationSummary(invocation: string | undefined): string | undefined {
+    const normalized = invocation?.trimEnd();
+    if (!normalized || normalized.length <= CODEX_ACTIVITY_INVOCATION_MAX_CHARS) {
+      return normalized || undefined;
+    }
+    let keep = CODEX_ACTIVITY_INVOCATION_MAX_CHARS;
+    let omitted = normalized.length - keep;
+    let marker = `… [+${omitted} chars omitted]`;
+    while (keep + marker.length > CODEX_ACTIVITY_INVOCATION_MAX_CHARS) {
+      keep = Math.max(0, CODEX_ACTIVITY_INVOCATION_MAX_CHARS - marker.length);
+      omitted = normalized.length - keep;
+      marker = `… [+${omitted} chars omitted]`;
+    }
+    return `${normalized.slice(0, keep)}${marker}`;
   }
 
   private codexAppServerBoundedOutputTail(output: string | undefined): string | undefined {
@@ -2579,14 +2599,20 @@ export class CliAgentRunner {
     }
     const type = this.stringField(item, "type");
     if (type === "commandExecution") {
-      return { label: "Running command", kind: "command", detail: this.stringField(item, "command") };
+      return {
+        label: "Running command",
+        kind: "command",
+        detail: this.codexAppServerBoundedInvocationSummary(this.stringField(item, "command"))
+      };
     }
     if (type === "mcpToolCall") {
       const tool = this.stringField(item, "tool");
       return {
         label: tool ? this.toolActivityLabel(tool) : "Using MCP tool",
         kind: "tool",
-        detail: this.codexAppServerReadableJson(item.arguments)
+        detail: this.codexAppServerBoundedInvocationSummary(
+          this.codexAppServerReadableJson(item.arguments)
+        )
       };
     }
     if (type === "dynamicToolCall") {
@@ -2594,7 +2620,9 @@ export class CliAgentRunner {
       return {
         label: tool ? this.toolActivityLabel(tool) : "Using tool",
         kind: "tool",
-        detail: this.codexAppServerReadableJson(item.arguments)
+        detail: this.codexAppServerBoundedInvocationSummary(
+          this.codexAppServerReadableJson(item.arguments)
+        )
       };
     }
     if (type === "collabAgentToolCall") {

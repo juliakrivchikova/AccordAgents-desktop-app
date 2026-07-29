@@ -558,6 +558,120 @@ test("codex app-server completed activity output keeps only a marked 20-line 2,0
   assert.match(preview, /line-29:/);
 });
 
+test("codex app-server bounds MCP and dynamic tool invocation summaries without starving output tails", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{
+    kind: string;
+    cumulative?: string;
+    activityStatus?: string;
+    activityItemId?: string;
+    activityDetail?: string;
+  }> = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: typeof outputs[number]) => outputs.push(event)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+    record,
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+  const argumentsPayload = {
+    path: "src/large.ts",
+    content: `INVOCATION_START_${"x".repeat(5_000)}_RAW_ARGUMENT_END`
+  };
+
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      item: {
+        id: "mcp-large",
+        type: "mcpToolCall",
+        tool: "write_file",
+        arguments: argumentsPayload
+      }
+    }
+  });
+  send({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      item: {
+        id: "mcp-large",
+        type: "mcpToolCall",
+        result: { content: [{ type: "text", text: "MCP_RESULT_LAST" }] }
+      }
+    }
+  });
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      item: {
+        id: "dynamic-large",
+        type: "dynamicToolCall",
+        tool: "write_file",
+        arguments: argumentsPayload
+      }
+    }
+  });
+
+  const mcpEvents = outputs.filter((event) => event.activityItemId === "mcp-large");
+  const startedDetail = mcpEvents[0]?.activityDetail ?? "";
+  const completedDetail = mcpEvents[1]?.activityDetail ?? "";
+  assert.ok(startedDetail.length <= 1_800);
+  assert.match(startedDetail, /"path": "src\/large\.ts"/);
+  assert.match(startedDetail, /INVOCATION_START/);
+  assert.match(startedDetail, /chars omitted/);
+  assert.doesNotMatch(startedDetail, /RAW_ARGUMENT_END/);
+  assert.ok(completedDetail.length < 4_000);
+  assert.match(completedDetail, /INVOCATION_START/);
+  assert.match(completedDetail, /Output tail:\nMCP_RESULT_LAST$/);
+
+  const dynamicDetail = outputs.find((event) => event.activityItemId === "dynamic-large")?.activityDetail ?? "";
+  assert.ok(dynamicDetail.length <= 1_800);
+  assert.match(dynamicDetail, /chars omitted/);
+  assert.doesNotMatch(dynamicDetail, /RAW_ARGUMENT_END/);
+  assert.equal(outputs.filter((event) => event.kind === "text").length, 0);
+});
+
+test("codex app-server keeps a stable fallback identity for no-id subagent completion", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{
+    kind: string;
+    activityStatus?: string;
+    activityItemId?: string;
+    activityDetail?: string;
+  }> = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: typeof outputs[number]) => outputs.push(event)
+  });
+  const send = (kind: string): void => runner.handleCodexAppServerNotification(
+    {
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        item: { type: "subAgentActivity", kind }
+      }
+    },
+    { id: "p1", label: "Agent" },
+    pending,
+    () => pending,
+    (error: Error): never => { throw error; }
+  );
+
+  send("thinking");
+  send("done");
+
+  assert.deepEqual(outputs.map((event) => event.activityStatus), ["completed", "completed"]);
+  assert.deepEqual(outputs.map((event) => event.activityItemId), ["subAgentActivity", "subAgentActivity"]);
+  assert.deepEqual(outputs.map((event) => event.activityDetail), ["thinking", "done"]);
+});
+
 test("codex app-server stream ignores same-thread completion for a different tracked turn", () => {
   const runner = makeRunner() as any;
   const resolved: unknown[] = [];
@@ -742,6 +856,125 @@ test("codex app-server keeps internal multi-paragraph final item complete", () =
   );
 
   assert.equal((resolved[0] as { content: string }).content, final);
+});
+
+test("codex app-server keeps a fenced commentary block separate from a multi-paragraph final answer", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const resolved: unknown[] = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const commentary = [
+    "I’ll preserve the exact block.",
+    "```ts",
+    "const first = 1;",
+    "",
+    "const second = 2;",
+    "```"
+  ].join("\n");
+  const final = [
+    "The code block remains intact.",
+    "",
+    "The final answer keeps both paragraphs."
+  ].join("\n");
+  const sendAgentItem = (id: string, phase: string, text: string): void => {
+    runner.handleCodexAppServerNotification(
+      { method: "item/started", params: { item: { id, type: "agentMessage", phase } } },
+      participant,
+      pending,
+      () => pending,
+      fail
+    );
+    const splitAt = Math.floor(text.length / 2);
+    for (const delta of [text.slice(0, splitAt), text.slice(splitAt)]) {
+      runner.handleCodexAppServerNotification(
+        { method: "item/agentMessage/delta", params: { itemId: id, delta } },
+        participant,
+        pending,
+        () => pending,
+        fail
+      );
+    }
+    runner.handleCodexAppServerNotification(
+      { method: "item/completed", params: { item: { id, type: "agentMessage", phase, text } } },
+      participant,
+      pending,
+      () => pending,
+      fail
+    );
+  };
+
+  sendAgentItem("commentary-1", "commentary", commentary);
+  sendAgentItem("final-1", "final_answer", final);
+  runner.handleCodexAppServerNotification(
+    { method: "turn/completed", params: { turn: { status: "completed" } } },
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, `${commentary}\n\n${final}`);
+  assert.equal((resolved[0] as { content: string }).content, final);
+});
+
+test("codex app-server normalizes agent CRLF split across deltas and flushes a final carriage return", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const resolved: unknown[] = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+
+  runner.handleCodexAppServerNotification(
+    { method: "item/started", params: { item: { id: "message-1", type: "agentMessage" } } },
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+  for (const delta of ["First line\r", "\nSecond line\r"]) {
+    runner.handleCodexAppServerNotification(
+      { method: "item/agentMessage/delta", params: { itemId: "message-1", delta } },
+      participant,
+      pending,
+      () => pending,
+      fail
+    );
+  }
+  runner.handleCodexAppServerNotification(
+    {
+      method: "item/completed",
+      params: {
+        item: {
+          id: "message-1",
+          type: "agentMessage",
+          text: "First line\r\nSecond line\r"
+        }
+      }
+    },
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+  runner.handleCodexAppServerNotification(
+    { method: "turn/completed", params: { turn: { status: "completed" } } },
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "First line\nSecond line\r");
+  assert.equal((resolved[0] as { content: string }).content, "First line\nSecond line");
 });
 
 test("codex app-server falls back to trailing paragraph when completions are missing", () => {
