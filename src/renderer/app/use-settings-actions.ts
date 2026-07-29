@@ -19,6 +19,7 @@ export interface SettingsActions {
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean; model?: string }) => Promise<void>;
   setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
+  setBetaUpdates: (enabled: boolean) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
   setChatParticipantRequestPromptMaxChars: (maxChars: number) => Promise<void>;
@@ -71,6 +72,10 @@ export function useSettingsActions(state: AppState): SettingsActions {
 
   async function setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<void> {
     await updateSettings(() => window.consensus.setRepoFileOpenPreference(action));
+  }
+
+  async function setBetaUpdates(enabled: boolean): Promise<void> {
+    await updateSettings(() => window.consensus.setBetaUpdates(enabled));
   }
 
   async function setCliAgentRunTimeoutMs(timeoutMs: number): Promise<void> {
@@ -210,6 +215,7 @@ export function useSettingsActions(state: AppState): SettingsActions {
     updateProvider,
     setAssistantProviderKind,
     setRepoFileOpenPreference,
+    setBetaUpdates,
     setCliAgentRunTimeoutMs,
     setChatParticipantRequestMaxDepth,
     setChatParticipantRequestPromptMaxChars,

@@ -23,6 +23,7 @@
     "test:file-opener": "npm run build:main && node --test dist/main/main/services/intellijLauncher.test.js dist/main/main/services/localFileOpener.test.js dist/main/main/services/settings.repoFileOpenAction.test.js",
     "test:links": "npm run build:main && node --test dist/main/main/services/externalLinks.test.js dist/main/main/services/markdownInline.test.js",
     "test:settings": "npm run build:main && node --test dist/main/main/services/settings.behaviorRules.test.js dist/main/main/services/settings.roleArchive.test.js dist/main/main/services/settings.savedPrompts.test.js dist/main/main/services/settings.agentEnvironment.test.js dist/main/main/services/slashSuggestions.test.js",
+    "test:beta-updates": "npm run build:main && node --test dist/main/main/services/settings.behaviorRules.test.js dist/main/main/services/appUpdater.test.js && node --test scripts/release-mac-arm64.dry-run.test.mjs",
     "test:agent-env": "npm run build:main && node --test dist/main/main/services/settings.agentEnvironment.test.js dist/main/main/services/toolchainRequirements.test.js dist/main/main/services/remoteRuns.test.js dist/main/main/services/cliAgents.permissions.test.js",
     "test:storage": "npm run build:main && node --test dist/main/main/services/storage.messages.test.js",
     "test:artifacts": "npm run build:main && node --test dist/main/main/services/artifacts.test.js dist/main/main/services/appMcp.artifacts.test.js dist/main/main/services/chat.rename.test.js && node --test scripts/artifact-boundary-guard.test.mjs",
@@ -46,6 +47,7 @@
     "lint:renderer-unused:locals": "tsc --noEmit -p tsconfig.renderer.json --noUnusedLocals --noUnusedParameters false",
     "typecheck": "tsc --noEmit -p tsconfig.renderer.json && tsc --noEmit -p tsconfig.main.json",
     "release:patch": "node scripts/release-mac-arm64.mjs patch",
+    "release:beta": "node scripts/release-mac-arm64.mjs beta",
     "release:minor": "node scripts/release-mac-arm64.mjs minor",
     "release:major": "node scripts/release-mac-arm64.mjs major",
     "bump:patch": "node scripts/bump-version.mjs patch",
@@ -100,6 +102,7 @@
   },
   "config": {
     "forge": "./forge.config.ts",
-    "releaseRepo": "juliakrivchikova/AccordAgents-Releases"
+    "releaseRepo": "juliakrivchikova/AccordAgents-Releases",
+    "betaReleaseRepo": "juliakrivchikova/AccordAgents-Beta-Releases"
   }
 }

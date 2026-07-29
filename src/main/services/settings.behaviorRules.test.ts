@@ -55,6 +55,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
   let stored = {
     settingsVersion: 1,
     roundLimitDefault: 1,
+    betaUpdates: false,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
     chatParticipantRequestPromptMaxChars: CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
@@ -76,6 +77,7 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
   };
   service.getPublicSettings = async () => ({
     roundLimitDefault: stored.roundLimitDefault,
+    betaUpdates: service.normalizeBetaUpdates(stored.betaUpdates),
     cliAgentRunTimeoutMs: service.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
     chatParticipantRequestMaxDepth: service.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
     chatParticipantRequestPromptMaxChars: service.normalizeChatParticipantRequestPromptMaxChars(stored.chatParticipantRequestPromptMaxChars),
@@ -149,6 +151,7 @@ test("saveChatBehaviorRuleConfig rejects oversized behavior rules", async () => 
   service.readStored = async () => ({
     settingsVersion: 1,
     roundLimitDefault: 1,
+    betaUpdates: false,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
     chatParticipantRequestPromptMaxChars: CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
@@ -163,6 +166,7 @@ test("saveChatBehaviorRuleConfig rejects oversized behavior rules", async () => 
   };
   service.getPublicSettings = async () => ({
     roundLimitDefault: 1,
+    betaUpdates: false,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
     chatParticipantRequestPromptMaxChars: CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
@@ -206,6 +210,50 @@ test("CLI agent run timeout defaults to 24 hours and persists bounded values", a
   await service.setCliAgentRunTimeoutMs(5_000);
 
   assert.equal(stored().cliAgentRunTimeoutMs, CLI_AGENT_RUN_TIMEOUT_MIN_MS);
+});
+
+test("beta updates default to false and only boolean true enables beta", async () => {
+  const { service } = settingsServiceWithStoredSettings({
+    betaUpdates: undefined
+  } as Partial<AppSettings>);
+
+  assert.equal(await service.getBetaUpdatesEnabled(), false);
+  assert.equal((await service.getPublicSettings()).betaUpdates, false);
+
+  const invalidValues = [false, "true", 1, null, undefined];
+  for (const value of invalidValues) {
+    const invalid = settingsServiceWithStoredSettings({
+      betaUpdates: value as boolean
+    } as Partial<AppSettings>);
+    assert.equal(await invalid.service.getBetaUpdatesEnabled(), false);
+  }
+
+  const enabled = settingsServiceWithStoredSettings({
+    betaUpdates: true
+  });
+  assert.equal(await enabled.service.getBetaUpdatesEnabled(), true);
+});
+
+test("beta updates persist through settings reload", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accordagents-settings-beta-"));
+  const settingsPath = path.join(dir, "settings.json");
+  const service = Object.create(SettingsService.prototype) as any;
+  service.settingsPath = settingsPath;
+  service.storedWriteQueue = Promise.resolve();
+
+  await service.writeStored(service.mergeDefaults({
+    settingsVersion: 1,
+    roundLimitDefault: 1,
+    providers: [],
+    betaUpdates: true
+  }));
+
+  const reloaded = Object.create(SettingsService.prototype) as any;
+  reloaded.settingsPath = settingsPath;
+  reloaded.storedWriteQueue = Promise.resolve();
+
+  assert.equal(await reloaded.getBetaUpdatesEnabled(), true);
+  assert.equal((await reloaded.getPublicSettings()).betaUpdates, true);
 });
 
 test("last successful chat provider persists idempotently", async () => {

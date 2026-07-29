@@ -41,6 +41,7 @@ function settingsServiceWith(
   let stored = {
     settingsVersion: 1,
     roundLimitDefault: 1,
+    betaUpdates: false,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
     chatAutoWatchWakeLimit: CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
@@ -71,6 +72,7 @@ function settingsServiceWith(
   };
   service.getPublicSettings = async (): Promise<AppSettings> => ({
     roundLimitDefault: stored.roundLimitDefault,
+    betaUpdates: service.normalizeBetaUpdates(stored.betaUpdates),
     cliAgentRunTimeoutMs: stored.cliAgentRunTimeoutMs,
     chatAutoWatchWakeLimit: service.normalizeChatAutoWatchWakeLimit(stored.chatAutoWatchWakeLimit),
     chatParticipantRequestMaxDepth: stored.chatParticipantRequestMaxDepth,

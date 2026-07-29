@@ -127,24 +127,32 @@ The DMG is for direct user downloads. The ZIP is required by
 
 ## Release to GitHub
 
-Release artifacts are published to the public release repository configured in
-`package.json` as `config.releaseRepo`:
+Stable release artifacts are published to the public release repository
+configured in `package.json` as `config.releaseRepo`:
 
 ```text
 juliakrivchikova/AccordAgents-Releases
 ```
 
-The release repository must be public before `update.electronjs.org` can
-discover new releases. The source repository and the release repository are
+Beta release artifacts are published to the separate public release repository
+configured as `config.betaReleaseRepo`:
+
+```text
+juliakrivchikova/AccordAgents-Beta-Releases
+```
+
+Both release repositories must be public before `update.electronjs.org` can
+discover new releases. The source repository and release repositories are
 separate; release artifacts are never published to the source repository.
 
 Run releases from the source repo's release branch, normally `main`, with a
 clean worktree. The active GitHub CLI account must have write access to
-`juliakrivchikova/AccordAgents-Releases`:
+the target release repository:
 
 ```bash
 gh auth switch --user <your-github-username>
 npm run release:patch
+npm run release:beta
 npm run release:minor
 npm run release:major
 ```
@@ -152,7 +160,7 @@ npm run release:major
 The release script bumps the version, commits and pushes the bump to the source
 repo, creates and pushes source tag `v<version>`, runs `npm run
 signed:mac-arm64`, then creates or updates the GitHub Release in
-`juliakrivchikova/AccordAgents-Releases` with:
+the selected release repository with:
 
 ```text
 AccordAgents-<version>-arm64.dmg
@@ -164,6 +172,17 @@ AccordAgents-<version>-darwin-arm64.zip.sha256
 Use `--draft` or `--prerelease` only for manual inspection releases. Drafts and
 prereleases are ignored by the public update service, so normal app updates need
 a published, non-prerelease release.
+
+`npm run release:beta` always targets `config.betaReleaseRepo` by default,
+calculates the next version as `x.y.(z+1)-beta.1` from a stable version, and
+publishes an ordinary GitHub Release. Do not pass `--draft` or `--prerelease`
+for beta releases; beta users only receive updates that
+`update.electronjs.org` can see.
+
+When a beta cycle graduates to stable, publish the final stable build to the beta
+release repository too. That lets users who left `Beta updates` enabled converge
+automatically. The manual fallback is to turn `Beta updates` off in Settings and
+restart the app so the stable feed is checked on next launch.
 
 ## Verify Auto-Updates
 

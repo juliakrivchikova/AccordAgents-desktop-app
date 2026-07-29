@@ -101,6 +101,7 @@ interface StoredAgentEnvironmentSettings {
 interface StoredSettings {
   settingsVersion?: number;
   roundLimitDefault: number;
+  betaUpdates?: boolean;
   cliAgentRunTimeoutMs?: number;
   chatParticipantRequestMaxDepth?: number;
   chatParticipantRequestPromptMaxChars?: number;
@@ -1750,6 +1751,7 @@ export class SettingsService {
     const stored = await this.readStored();
     return {
       roundLimitDefault: stored.roundLimitDefault,
+      betaUpdates: this.normalizeBetaUpdates(stored.betaUpdates),
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
       chatParticipantRequestPromptMaxChars: this.normalizeChatParticipantRequestPromptMaxChars(stored.chatParticipantRequestPromptMaxChars),
@@ -2465,6 +2467,18 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  async getBetaUpdatesEnabled(): Promise<boolean> {
+    const stored = await this.readStored();
+    return this.normalizeBetaUpdates(stored.betaUpdates);
+  }
+
+  async setBetaUpdates(enabled: boolean): Promise<AppSettings> {
+    const stored = await this.readStored();
+    stored.betaUpdates = this.normalizeBetaUpdates(enabled);
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
   async getCliAgentRunTimeoutMs(): Promise<number> {
     const stored = await this.readStored();
     return this.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs);
@@ -2681,6 +2695,7 @@ export class SettingsService {
     return {
       settingsVersion: 1,
       roundLimitDefault: this.defaultRoundLimit(settings),
+      betaUpdates: this.normalizeBetaUpdates(settings.betaUpdates),
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(settings.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(settings.chatParticipantRequestMaxDepth),
       chatParticipantRequestPromptMaxChars: this.normalizeChatParticipantRequestPromptMaxChars(settings.chatParticipantRequestPromptMaxChars),
@@ -2830,6 +2845,10 @@ export class SettingsService {
 
   private normalizeRepoFileOpenAction(action: unknown): RepoFileOpenAction | undefined {
     return action === "open" || action === "reveal" || action === "intellij-idea" ? action : undefined;
+  }
+
+  private normalizeBetaUpdates(value: unknown): boolean {
+    return value === true;
   }
 
   private normalizeAgentEnvironmentVariables(value: unknown): StoredAgentEnvironmentVariable[] {

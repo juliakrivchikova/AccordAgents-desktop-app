@@ -7,7 +7,8 @@ import process from "node:process";
 
 const rootDir = process.cwd();
 const signedDir = path.join(rootDir, "signed");
-const validTargets = new Set(["patch", "minor", "major"]);
+const stableTargets = new Set(["patch", "minor", "major"]);
+const validTargets = new Set([...stableTargets, "beta"]);
 const packageJsonPath = path.join(rootDir, "package.json");
 
 function fail(message) {
@@ -16,7 +17,7 @@ function fail(message) {
 }
 
 function printHelp() {
-  console.log(`Usage: npm run release:<patch|minor|major> [-- options]
+  console.log(`Usage: npm run release:<patch|minor|major|beta> [-- options]
 
 Creates a macOS arm64 release:
   1. bumps package.json/package-lock.json,
@@ -27,7 +28,8 @@ Creates a macOS arm64 release:
   6. checks update.electronjs.org for the ZIP asset.
 
 Options:
-  --repo owner/repo              Public GitHub release repo. Defaults to RELEASE_REPO or package.json config.releaseRepo.
+  --repo owner/repo              Public GitHub release repo. Defaults to RELEASE_REPO, package.json config.releaseRepo for stable,
+                                 or package.json config.betaReleaseRepo for beta.
   --branch name                  Source branch to release from. Defaults to origin HEAD, usually main.
   --draft                        Create a draft GitHub Release. Auto-update check is skipped.
   --prerelease                   Mark the GitHub Release as a prerelease. Auto-update check is skipped.
@@ -39,6 +41,7 @@ Options:
 Examples:
   gh auth switch --user <your-github-username>
   npm run release:patch
+  npm run release:beta
   npm run release:minor
 `);
 }
@@ -82,6 +85,22 @@ function configuredReleaseRepo() {
   return "";
 }
 
+function configuredBetaReleaseRepo() {
+  const config = packageJson().config;
+  if (config && typeof config.betaReleaseRepo === "string") {
+    return config.betaReleaseRepo;
+  }
+  return "";
+}
+
+function releaseChannelForTarget(target) {
+  return target === "beta" ? "beta" : "stable";
+}
+
+function defaultReleaseRepoForTarget(target) {
+  return target === "beta" ? configuredBetaReleaseRepo() : configuredReleaseRepo();
+}
+
 function parseGitHubRepo(value) {
   const text = String(value || "").trim();
   if (!text) {
@@ -101,6 +120,14 @@ function parseGitHubRepo(value) {
   return "";
 }
 
+function parseRequiredGitHubRepo(value, source) {
+  const repo = parseGitHubRepo(value);
+  if (!repo) {
+    fail(`Invalid GitHub repo for ${source}: ${value}`);
+  }
+  return repo;
+}
+
 function readOptionValue(args, index, optionName) {
   const value = args[index + 1];
   if (!value || value.startsWith("-")) {
@@ -110,9 +137,11 @@ function readOptionValue(args, index, optionName) {
 }
 
 function parseArgs() {
+  const envReleaseRepoValue = process.env.RELEASE_REPO?.trim() || "";
+  const envReleaseRepo = envReleaseRepoValue ? parseRequiredGitHubRepo(envReleaseRepoValue, "RELEASE_REPO") : "";
   const options = {
     target: "current",
-    releaseRepo: parseGitHubRepo(process.env.RELEASE_REPO || configuredReleaseRepo()),
+    releaseRepo: envReleaseRepo,
     sourceBranch: process.env.RELEASE_BRANCH || "",
     draft: false,
     prerelease: false,
@@ -130,12 +159,12 @@ function parseArgs() {
       process.exit(0);
     }
     if (arg === "--repo") {
-      options.releaseRepo = parseGitHubRepo(readOptionValue(args, index, arg));
+      options.releaseRepo = parseRequiredGitHubRepo(readOptionValue(args, index, arg), arg);
       index += 1;
       continue;
     }
     if (arg.startsWith("--repo=")) {
-      options.releaseRepo = parseGitHubRepo(arg.slice("--repo=".length));
+      options.releaseRepo = parseRequiredGitHubRepo(arg.slice("--repo=".length), "--repo");
       continue;
     }
     if (arg === "--branch") {
@@ -180,10 +209,20 @@ function parseArgs() {
     options.target = positionalTarget;
   }
   if (!validTargets.has(options.target)) {
-    fail(`Invalid release target: ${options.target}. Use patch, minor, or major.`);
+    fail(`Invalid release target: ${options.target}. Use patch, minor, major, or beta.`);
+  }
+  if (options.target === "beta" && (options.draft || options.prerelease)) {
+    fail("Beta releases must be ordinary published GitHub Releases in the beta repo. Do not pass --draft or --prerelease.");
   }
   if (!options.releaseRepo) {
-    fail("Could not determine release repo. Set package.json config.releaseRepo, RELEASE_REPO, or pass --repo owner/repo.");
+    options.releaseRepo = parseGitHubRepo(defaultReleaseRepoForTarget(options.target));
+  }
+  if (!options.releaseRepo) {
+    fail(`Could not determine ${releaseChannelForTarget(options.target)} release repo. Set package.json config.${options.target === "beta" ? "betaReleaseRepo" : "releaseRepo"}, RELEASE_REPO, or pass --repo owner/repo.`);
+  }
+  const stableReleaseRepo = parseGitHubRepo(configuredReleaseRepo());
+  if (options.target === "beta" && stableReleaseRepo && options.releaseRepo.toLowerCase() === stableReleaseRepo.toLowerCase()) {
+    fail(`Beta releases must not target the stable release repo ${stableReleaseRepo}. Use ${configuredBetaReleaseRepo() || "a beta release repo"} or pass --repo owner/repo for another beta/test repo.`);
   }
 
   return options;
@@ -196,6 +235,14 @@ function requireCommand(command, args = ["--version"]) {
 }
 
 function originDefaultBranch() {
+  try {
+    const localHead = run("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).trim();
+    if (localHead.startsWith("origin/")) {
+      return localHead.slice("origin/".length);
+    }
+  } catch {
+    // Fall through to remote inspection.
+  }
   try {
     const remote = run("git", ["remote", "show", "origin"]);
     const match = remote.match(/HEAD branch:\s*(\S+)/);
@@ -237,6 +284,52 @@ function currentVersion() {
   return packageJson().version;
 }
 
+function parseSemver(version) {
+  const match = String(version).match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+)\.(\d+))?$/);
+  if (!match) {
+    fail(`Unsupported package version for release calculation: ${version}`);
+  }
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prereleaseName: match[4] || "",
+    prereleaseNumber: match[5] ? Number(match[5]) : undefined
+  };
+}
+
+function nextStableVersion(version, target) {
+  const current = parseSemver(version);
+  if (target === "patch" && current.prereleaseName) {
+    return `${current.major}.${current.minor}.${current.patch}`;
+  }
+  if (target === "patch") {
+    return `${current.major}.${current.minor}.${current.patch + 1}`;
+  }
+  if (target === "minor") {
+    return `${current.major}.${current.minor + 1}.0`;
+  }
+  if (target === "major") {
+    return `${current.major + 1}.0.0`;
+  }
+  fail(`Unsupported stable release target: ${target}`);
+}
+
+function nextBetaVersion(version) {
+  const current = parseSemver(version);
+  if (current.prereleaseName === "beta" && typeof current.prereleaseNumber === "number") {
+    return `${current.major}.${current.minor}.${current.patch}-beta.${current.prereleaseNumber + 1}`;
+  }
+  if (current.prereleaseName) {
+    fail(`Cannot calculate beta release from unsupported prerelease version: ${version}`);
+  }
+  return `${current.major}.${current.minor}.${current.patch + 1}-beta.1`;
+}
+
+function nextVersionForTarget(target, version) {
+  return target === "beta" ? nextBetaVersion(version) : nextStableVersion(version, target);
+}
+
 function productName() {
   const currentPackageJson = packageJson();
   return currentPackageJson.productName || currentPackageJson.name;
@@ -245,7 +338,8 @@ function productName() {
 function bumpVersion(target, sourceBranch) {
   const beforeVersion = currentVersion();
   console.log(`\n==> Bumping ${target} version from ${beforeVersion}`);
-  runInherited("npm", ["version", target, "--no-git-tag-version"]);
+  const versionTarget = target === "beta" ? nextBetaVersion(beforeVersion) : target;
+  runInherited("npm", ["version", versionTarget, "--no-git-tag-version"]);
 
   const afterVersion = currentVersion();
   runInherited("git", ["add", "package.json", "package-lock.json"]);
@@ -442,12 +536,17 @@ const options = parseArgs();
 const sourceBranch = options.sourceBranch || originDefaultBranch();
 
 if (options.dryRun) {
+  const fromVersion = currentVersion();
+  const nextVersion = nextVersionForTarget(options.target, fromVersion);
   console.log(`Release target: ${options.target}`);
+  console.log(`Release channel: ${releaseChannelForTarget(options.target)}`);
   console.log(`Source branch: ${sourceBranch}`);
   console.log(`Release repo: ${options.releaseRepo}`);
-  console.log(`Current version: ${currentVersion()}`);
+  console.log(`Current version: ${fromVersion}`);
+  console.log(`Next version: ${nextVersion}`);
   console.log("Build: npm run signed:mac-arm64");
   console.log(`GitHub Release state: ${options.draft ? "draft" : options.prerelease ? "prerelease" : "published"}`);
+  console.log(`Update check: ${options.skipUpdateCheck || options.draft || options.prerelease ? "skipped" : "enabled against release repo"}`);
   process.exit(0);
 }
 

@@ -640,6 +640,9 @@ function registerIpc(): void {
   ipcMain.handle("app:open-local-file", (_event, request: OpenLocalFileRequest) => localFileOpenerService.openLocalFile(request));
   ipcMain.handle("settings:get", () => settingsService.getPublicSettings());
   ipcMain.handle("settings:set-repo-file-open-preference", (_event, action: unknown) => localFileOpenerService.setOpenPreference(action));
+  ipcMain.handle("settings:set-beta-updates", (_event, enabled: boolean) => {
+    return settingsService.setBetaUpdates(enabled);
+  });
   ipcMain.handle("settings:set-cli-agent-run-timeout", async (_event, timeoutMs: number) => {
     const next = await settingsService.setCliAgentRunTimeoutMs(timeoutMs);
     cliAgentRunner.setRunTimeoutMs(next.cliAgentRunTimeoutMs);
@@ -1336,7 +1339,15 @@ async function resolvePluginListRequest(request?: PluginListRequest): Promise<{
 
 void app.whenReady().then(async () => {
   registerIpc();
-  bootstrapAppUpdater(debugLogService);
+  let betaUpdates = false;
+  try {
+    betaUpdates = await settingsService.getBetaUpdatesEnabled();
+  } catch (error) {
+    void debugLogService.write("app-updater-settings-read-error", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+  bootstrapAppUpdater(debugLogService, betaUpdates);
   await appMcpService.start();
   await storageService.init();
   await artifactService.flushPendingArtifactEvents().catch((error) => {

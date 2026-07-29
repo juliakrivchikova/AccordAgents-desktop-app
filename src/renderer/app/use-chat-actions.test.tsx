@@ -375,6 +375,7 @@ function readyAgent(kind: AgentHealth["kind"] = "claude-code"): AgentHealth {
 function settings(): AppSettings {
   return {
     roundLimitDefault: 2,
+    betaUpdates: false,
     cliAgentRunTimeoutMs: 86_400_000,
     chatParticipantRequestMaxDepth: 2,
     chatParticipantRequestPromptMaxChars: 50_000,

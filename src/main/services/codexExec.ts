@@ -1,4 +1,6 @@
 import type {
+  ChatAgentActivityEvent,
+  ChatAgentActivityKind,
   ChatAgentMode,
   ChatAgentPermissions,
   ChatProviderKind,
@@ -18,6 +20,9 @@ export interface CodexLiveOutputEvent {
   kind: CodexLiveOutputKind;
   text: string;
   cumulative?: string;
+  activityKind?: ChatAgentActivityKind;
+  activityStatus?: ChatAgentActivityEvent["status"];
+  activityItemId?: string;
 }
 
 export type CodexLiveOutputCallback = (event: CodexLiveOutputEvent) => void;
@@ -239,7 +244,11 @@ export function emitCodexLiveOutput(
     }
     const toolSummary = codexToolSummary(event);
     if (toolSummary) {
-      emitLiveOutput(onOutput, "tool", `${toolSummary}\n`);
+      emitLiveOutput(onOutput, "tool", `${toolSummary.label}\n`, undefined, {
+        activityKind: toolSummary.kind,
+        activityStatus: "started",
+        ...(toolSummary.itemId ? { activityItemId: toolSummary.itemId } : {})
+      });
     }
   } catch {
     // Ignore non-JSON CLI output in live rendering; raw output is still spooled.
@@ -304,44 +313,50 @@ function emitLiveOutput(
   onOutput: CodexLiveOutputCallback | undefined,
   kind: CodexLiveOutputKind,
   text: string,
-  cumulative?: string
+  cumulative?: string,
+  activity?: {
+    activityKind?: ChatAgentActivityKind;
+    activityStatus?: ChatAgentActivityEvent["status"];
+    activityItemId?: string;
+  }
 ): void {
   const clean = cleanLiveOutputText(text);
   if (!onOutput || !clean) {
     return;
   }
   const cleanCumulative = cumulative !== undefined ? cleanLiveOutputText(cumulative) : undefined;
-  onOutput({ kind, text: clean, cumulative: cleanCumulative });
+  onOutput({ kind, text: clean, cumulative: cleanCumulative, ...activity });
 }
 
 function cleanLiveOutputText(text: string): string {
   return text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
-function codexToolSummary(event: unknown): string | undefined {
+function codexToolSummary(event: unknown): { label: string; kind: ChatAgentActivityKind; itemId?: string } | undefined {
   const record = asRecord(event);
   if (!record) {
     return undefined;
   }
   const method = stringField(record, "method");
   if (method === "item/autoApprovalReview/started") {
-    return "Auto-reviewing approval request";
+    return { label: "Auto-reviewing approval request", kind: "approval" };
   }
   if (method === "item/autoApprovalReview/completed") {
-    return "Auto-review completed";
+    return { label: "Auto-review completed", kind: "approval" };
   }
   const item = asRecord(record.item) ?? record;
+  const itemId = stringField(item, "id") ?? stringField(record, "itemId");
   const type = `${stringField(record, "type") ?? ""} ${stringField(item, "type") ?? ""}`.toLowerCase();
   const name = stringField(item, "name") ?? stringField(item, "tool_name");
   const command = stringField(item, "command") ?? stringField(item, "cmd");
   if (command && /command|exec|shell|bash/.test(type)) {
-    return "Running command";
+    return { label: "Running command", kind: "command", itemId };
   }
   if (name && /tool|function|call/.test(type)) {
-    return toolActivityLabel(name);
+    return { label: toolActivityLabel(name), kind: "tool", itemId };
   }
   if (/read|grep|glob|ls/.test(type) && name) {
-    return toolActivityLabel(name);
+    return { label: toolActivityLabel(name), kind: "tool", itemId };
   }
   return undefined;
 }

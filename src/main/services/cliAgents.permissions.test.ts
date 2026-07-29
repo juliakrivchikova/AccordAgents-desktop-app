@@ -251,9 +251,9 @@ test("codex app-server stream rejoins mid-sentence agent messages around tool us
 
 test("codex app-server stream emits completed native subagent activity", () => {
   const runner = makeRunner() as any;
-  const outputs: Array<{ kind: string; text: string; cumulative?: string; activityKind?: string; activityStatus?: string }> = [];
+  const outputs: Array<{ kind: string; text: string; cumulative?: string; activityKind?: string; activityStatus?: string; activityItemId?: string }> = [];
   const pending = makeCodexPendingTurn({
-    onOutput: (event: { kind: string; text: string; cumulative?: string; activityKind?: string; activityStatus?: string }) => outputs.push(event)
+    onOutput: (event: { kind: string; text: string; cumulative?: string; activityKind?: string; activityStatus?: string; activityItemId?: string }) => outputs.push(event)
   });
   const participant = { id: "p1", label: "Agent" };
   const fail = (error: Error): never => { throw error; };
@@ -271,7 +271,8 @@ test("codex app-server stream emits completed native subagent activity", () => {
     text: "Using subagent\n",
     cumulative: undefined,
     activityKind: "tool",
-    activityStatus: "completed"
+    activityStatus: "completed",
+    activityItemId: "call-1"
   }]);
 });
 
@@ -399,6 +400,127 @@ test("codex app-server stream captures completed commentary and command output w
     outputs.filter((event) => event.kind === "text").at(-1)?.cumulative,
     "I’ll inspect it.\n\n    PASS first\n    PASS second\n\n"
   );
+});
+
+test("codex app-server stream normalizes CRLF deltas and aggregate before remainder comparison", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+    record,
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  send({ method: "item/started", params: { threadId: "thread-1", item: { id: "command-1", type: "commandExecution", command: "printf" } } });
+  send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", itemId: "command-1", delta: "one\r" } });
+  send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", itemId: "command-1", delta: "\ntwo\r" } });
+  send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", itemId: "command-1", delta: "\n" } });
+  send({ method: "item/completed", params: { threadId: "thread-1", item: { id: "command-1", type: "commandExecution", aggregatedOutput: "one\r\ntwo\r\nthree\r\n" } } });
+
+  assert.equal(pending.outputItems.get("command-1")?.raw, "one\ntwo\nthree\n");
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "    one\n    two\n    three\n\n");
+});
+
+test("codex app-server stream skips genuinely diverged aggregate output", () => {
+  const logs: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const runner = new CliAgentRunner({
+    write: async (event: string, payload: Record<string, unknown>) => {
+      logs.push({ event, payload });
+    }
+  } as any) as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+    record,
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", itemId: "command-1", delta: "streamed\n" } });
+  send({ method: "item/completed", params: { threadId: "thread-1", item: { id: "command-1", type: "commandExecution", aggregatedOutput: "different\n" } } });
+
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "    streamed\n\n");
+  assert.equal(logs.some((entry) => entry.event === "cli.codex-app-server.completed-output-diverged"), true);
+  assert.deepEqual(logs.find((entry) => entry.event === "cli.codex-app-server.completed-output-diverged")?.payload, {
+    itemId: "command-1",
+    completedItemId: "command-1",
+    itemType: "commandExecution",
+    priorLength: "streamed\n".length,
+    outputLength: "different\n".length,
+    reason: "completed-output-does-not-prefix-extend-streamed-output"
+  });
+});
+
+test("codex app-server stream dedupes completed output against single unfinished delta item without id", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+    record,
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", delta: "part\n" } });
+  send({ method: "item/completed", params: { threadId: "thread-1", item: { id: "command-1", type: "commandExecution", aggregatedOutput: "part\nrest\n" } } });
+
+  assert.equal(pending.outputItems.size, 1);
+  assert.equal(pending.outputItems.get("item/commandExecution/outputDelta")?.raw, "part\nrest\n");
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "    part\n    rest\n\n");
+});
+
+test("codex app-server stream ignores same-thread completion for a different tracked turn", () => {
+  const runner = makeRunner() as any;
+  const resolved: unknown[] = [];
+  let cleanupCount = 0;
+  const pending = makeCodexPendingTurn({
+    turnId: "root-turn",
+    streamedText: "final",
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const cleanup = (): typeof pending => {
+    cleanupCount += 1;
+    return pending;
+  };
+
+  runner.handleCodexAppServerNotification(
+    { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "other-turn", status: "completed" } } },
+    participant,
+    pending,
+    cleanup,
+    fail
+  );
+  runner.handleCodexAppServerNotification(
+    { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "root-turn", status: "completed" } } },
+    participant,
+    pending,
+    cleanup,
+    fail
+  );
+
+  assert.equal(cleanupCount, 1);
+  assert.equal((resolved[0] as { content: string }).content, "final");
 });
 
 test("codex app-server stream flushes command output before an interrupted turn rejects", () => {
