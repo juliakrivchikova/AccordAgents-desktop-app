@@ -1011,6 +1011,55 @@ test("codex app-server falls back to trailing paragraph when completions are mis
   assert.equal((resolved[0] as { content: string }).content, "Final answer.");
 });
 
+test("agent message fence boundaries remain opt-in for Codex", () => {
+  const runner = makeRunner() as any;
+  const previous = "Here is the helper:\n```ts\nconst value = 1;\n```";
+  const next = "Done — tests pass.";
+
+  assert.equal(runner.agentMessageBoundarySeparator(previous, next), " ");
+  assert.equal(
+    runner.agentMessageBoundarySeparator(previous, next, { fencedBlockEndsBlock: true }),
+    "\n\n"
+  );
+});
+
+test("claude warm stream and final content preserve the shipped fence boundary", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const resolved: unknown[] = [];
+  const pending = makeClaudeWarmPendingTurn({
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event),
+    participant,
+    {},
+    undefined,
+    pending,
+    () => pending,
+    fail
+  );
+  const fencedBlock = "Here is the helper:\n```ts\nconst value = 1;\n```";
+  const continuation = "Done — tests pass.";
+  const expected = `${fencedBlock} ${continuation}`;
+
+  send({ type: "stream_event", event: { type: "content_block_start", content_block: { type: "text" } } });
+  send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: fencedBlock } } });
+  send({ type: "stream_event", event: { type: "content_block_start", content_block: { type: "text" } } });
+  send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: continuation } } });
+  // This intentionally pins shipped Claude behavior until a dedicated CLI-parity
+  // change establishes the correct fence composition with current CLI evidence.
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: fencedBlock }] } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: continuation }] } });
+  send({ type: "result" });
+
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, expected);
+  assert.equal((resolved[0] as { content: string }).content, expected);
+});
+
 test("claude warm stream rejoins mid-sentence text blocks", () => {
   const runner = makeRunner() as any;
   const outputs: Array<{ kind: string; cumulative?: string }> = [];

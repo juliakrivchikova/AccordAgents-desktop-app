@@ -2193,7 +2193,11 @@ export class CliAgentRunner {
           pending.finalMessage = normalizedText;
           pending.completedAgentMessages.push(normalizedText);
           if (!pending.streamedText.trimEnd().endsWith(normalizedText.trimEnd())) {
-            pending.streamedText = this.textWithAgentMessageBoundary(pending.streamedText, normalizedText);
+            pending.streamedText = this.textWithAgentMessageBoundary(
+              pending.streamedText,
+              normalizedText,
+              { fencedBlockEndsBlock: true }
+            );
             pending.streamedText += normalizedText;
             this.appendCodexAppServerAgentText(pending, normalizedText, true);
           }
@@ -2289,7 +2293,7 @@ export class CliAgentRunner {
   private codexAppServerFinalContent(turn: CodexAppServerPendingTurn): string {
     const completedMessages = this.completedAgentMessagesForFinal(turn.completedAgentMessages, turn.finalMessage);
     if (completedMessages.length > 0) {
-      return this.finalTextFromMessageItems(completedMessages);
+      return this.finalTextFromMessageItems(completedMessages, { fencedBlockEndsBlock: true });
     }
     return this.trailingTextBlock(turn.streamedText || turn.messages.join(""));
   }
@@ -2302,12 +2306,19 @@ export class CliAgentRunner {
     return messages;
   }
 
-  private finalTextFromMessageItems(messages: string[]): string {
+  private finalTextFromMessageItems(
+    messages: string[],
+    options: { fencedBlockEndsBlock?: boolean } = {}
+  ): string {
     let currentIndex = messages.length - 1;
     let finalText = messages[currentIndex] ?? "";
     while (currentIndex > 0) {
       const previous = messages[currentIndex - 1] ?? "";
-      const separator = this.agentMessageBoundarySeparator(previous, messages[currentIndex] ?? finalText);
+      const separator = this.agentMessageBoundarySeparator(
+        previous,
+        messages[currentIndex] ?? finalText,
+        options
+      );
       if (separator === "\n\n") {
         break;
       }
@@ -2330,21 +2341,32 @@ export class CliAgentRunner {
     return normalized.slice(start).trim();
   }
 
-  private textWithAgentMessageBoundary(previous: string, next: string): string {
+  private textWithAgentMessageBoundary(
+    previous: string,
+    next: string,
+    options: { fencedBlockEndsBlock?: boolean } = {}
+  ): string {
     const trimmedPrevious = previous.trimEnd();
     if (!trimmedPrevious) {
       return previous;
     }
-    return `${trimmedPrevious}${this.agentMessageBoundarySeparator(trimmedPrevious, next)}`;
+    return `${trimmedPrevious}${this.agentMessageBoundarySeparator(trimmedPrevious, next, options)}`;
   }
 
-  private agentMessageBoundarySeparator(previous: string, next: string): string {
+  private agentMessageBoundarySeparator(
+    previous: string,
+    next: string,
+    options: { fencedBlockEndsBlock?: boolean } = {}
+  ): string {
     if (!previous.trim() || !next) {
       return "";
     }
     if (
       chatTextEndsAtSentenceOrParagraphBoundary(previous) ||
-      /(?:^|\n)```[ \t]*$/.test(previous.trimEnd())
+      (
+        options.fencedBlockEndsBlock === true &&
+        /(?:^|\n)```[ \t]*$/.test(previous.trimEnd())
+      )
     ) {
       return "\n\n";
     }
@@ -2364,7 +2386,9 @@ export class CliAgentRunner {
     }
     if (startsBlock && pending.visibleTranscript.trim()) {
       const trimmed = pending.visibleTranscript.trimEnd();
-      pending.visibleTranscript = this.textWithAgentMessageBoundary(trimmed, text);
+      pending.visibleTranscript = this.textWithAgentMessageBoundary(trimmed, text, {
+        fencedBlockEndsBlock: true
+      });
     }
     pending.visibleTranscript += text;
     this.emitLiveOutput(pending.onOutput, "text", text, pending.visibleTranscript);
@@ -2381,7 +2405,11 @@ export class CliAgentRunner {
     }
     pending.messages.push(normalized.text);
     if (pending.nextAgentMessageStartsBlock) {
-      pending.streamedText = this.textWithAgentMessageBoundary(pending.streamedText, normalized.text);
+      pending.streamedText = this.textWithAgentMessageBoundary(
+        pending.streamedText,
+        normalized.text,
+        { fencedBlockEndsBlock: true }
+      );
     }
     pending.streamedText += normalized.text;
     this.appendCodexAppServerAgentText(pending, normalized.text, pending.nextAgentMessageStartsBlock);
@@ -2396,7 +2424,11 @@ export class CliAgentRunner {
     const text = "\r";
     pending.messages.push(text);
     if (pending.nextAgentMessageStartsBlock) {
-      pending.streamedText = this.textWithAgentMessageBoundary(pending.streamedText, text);
+      pending.streamedText = this.textWithAgentMessageBoundary(
+        pending.streamedText,
+        text,
+        { fencedBlockEndsBlock: true }
+      );
     }
     pending.streamedText += text;
     this.appendCodexAppServerAgentText(pending, text, pending.nextAgentMessageStartsBlock);
