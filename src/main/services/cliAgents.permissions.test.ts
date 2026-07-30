@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CliAgentRunner, parseClaudeModelPickerOutput } from "./cliAgents";
+import { CliAgentRunner, parseClaudeModelPickerOutput, resolveCodexCompactTimeoutMs } from "./cliAgents";
 import { CommandError } from "./command";
 import { CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
@@ -1905,6 +1905,12 @@ test("codex app-server compact instructions become a scoped compact_prompt overr
   assert.equal(params.threadId, "session-1");
   assert.match(params.config.compact_prompt, /Compact the conversation context/);
   assert.match(params.config.compact_prompt, /keep focus on parser and CLI protocol details/);
+});
+
+test("codex app-server compact ignores the unbounded native-goal turn timeout", () => {
+  assert.equal(resolveCodexCompactTimeoutMs(0), 5 * 60_000);
+  assert.equal(resolveCodexCompactTimeoutMs(undefined), 5 * 60_000);
+  assert.equal(resolveCodexCompactTimeoutMs(42_000), 42_000);
 });
 
 test("codex app-server does not override compact_prompt unless compact instructions are scoped", () => {

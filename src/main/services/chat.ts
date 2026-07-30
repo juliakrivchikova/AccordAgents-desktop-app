@@ -130,6 +130,7 @@ import {
   resolveChatManageRolesParticipantsPermission
 } from "../../shared/agentPermissions";
 import { normalizeAgentContextUsage } from "../../shared/agentContext";
+import { parseNativeGoalCommand } from "../../shared/nativeGoalCommand";
 import {
   chatAppToolCapabilitiesEqual,
   hasChatAppToolCapability,
@@ -4855,6 +4856,13 @@ export class ChatService {
           replyContext
         );
         dispatch = { ...dispatch, targets: skillValidation.targets };
+        const nativeGoal = parseNativeGoalCommand(content);
+        if (nativeGoal.kind === "invalid") {
+          throw new Error(nativeGoal.error);
+        }
+        if (nativeGoal.kind === "valid" && dispatch.targets.length !== 1) {
+          throw new Error("/goal requires exactly one resolved chat member.");
+        }
         const settings = await this.settings.getPublicSettings();
         this.assertParticipantProvidersEnabled(dispatch.targets, settings.providers ?? []);
       } catch (error) {
@@ -5677,15 +5685,29 @@ export class ChatService {
   ): Promise<ChatMessage[]> {
     const sessionState = await this.sessionForParticipant(conversation, participant);
     const session = sessionState.session;
-    const promptConversation = options.promptConversation ?? conversation;
+    const sourcePromptConversation = options.promptConversation ?? conversation;
+    const nativeGoal = triggerMessage.role === "user"
+      ? parseNativeGoalCommand(triggerMessage.content)
+      : { kind: "none" as const };
+    const promptTriggerMessage = nativeGoal.kind === "valid"
+      ? { ...triggerMessage, content: nativeGoal.contentWithoutCommand }
+      : triggerMessage;
+    const promptConversation = nativeGoal.kind === "valid"
+      ? {
+          ...sourcePromptConversation,
+          messages: sourcePromptConversation.messages.map((message) =>
+            message.id === triggerMessage.id ? promptTriggerMessage : message
+          )
+        }
+      : sourcePromptConversation;
     const workspacePath = options.workspacePath ?? await this.ensureHistoryFiles(promptConversation);
     const isResumingSession = Boolean(session.sessionId);
     const preparedPromptContext = await this.preparePromptContextForRun(
       conversation,
       promptConversation,
       participant,
-      triggerMessage,
-      options.promptContextScope ?? this.promptContextScopeForTrigger(triggerMessage),
+      promptTriggerMessage,
+      options.promptContextScope ?? this.promptContextScopeForTrigger(promptTriggerMessage),
       isResumingSession
     );
     const agentMode = this.agentModeForSession(session, participant);
@@ -5701,21 +5723,21 @@ export class ChatService {
     const usePromptRole = session.roleRuntime === "prompt-fallback";
     const includeRefreshedRoleInstructions = isResumingSession && sessionState.instructionsRefreshed;
     const primaryIncludeRoleInstructions = (usePromptRole && !isResumingSession) || includeRefreshedRoleInstructions;
-    const primary = this.buildPromptParts(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+    const primary = this.buildPromptParts(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: primaryIncludeRoleInstructions,
       agentMode,
       permissions,
       promptContextBlock: preparedPromptContext.block
     });
     const prompt = primary.prompt;
-    const promptFallbackPrompt = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+    const promptFallbackPrompt = this.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: true,
       agentMode,
       permissions,
       promptContextBlock: preparedPromptContext.block
     });
     const resumeFallbackPrompt = isResumingSession
-      ? this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+      ? this.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
           includeRoleInstructions: usePromptRole || includeRefreshedRoleInstructions,
           agentMode,
           permissions,
@@ -5844,6 +5866,13 @@ export class ChatService {
     try {
       progressSink.beginAttempt();
       const participantRunsRemotely = this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution) === "remote";
+      if (nativeGoal.kind === "valid" && participantRunsRemotely) {
+        const message = `@${participant.handle} native /goal requires the local dedicated CLI transport; remote execution does not expose the provider's native goal protocol.`;
+        pendingMessage.status = "error";
+        pendingMessage.content = message;
+        options.warnings.push(message);
+        return [pendingMessage];
+      }
       if (participantRunsRemotely) {
         const preparingRemoteStatus = this.remoteRunStatus("preparing-worker", "Preparing remote worker");
         this.emitRemoteRunPhase(runId, progress, participant, pendingMessage.id, preparingRemoteStatus);
@@ -6041,6 +6070,7 @@ export class ChatService {
         agentEnvKey: agentEnvironment.version,
         agentMode,
         permissions,
+        nativeGoal: nativeGoal.kind === "valid",
         onOutput: progressSink.emit,
         onSessionId: persistSessionId,
         warm: {

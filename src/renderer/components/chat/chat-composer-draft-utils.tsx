@@ -29,7 +29,7 @@ export const CHAT_COMPOSER_TEXTAREA_STYLE: CSSProperties = {
 };
 
 export interface SlashCommandOption {
-  id: "compact";
+  id: "compact" | "goal";
   label: string;
   description: string;
 }
@@ -87,6 +87,20 @@ export function compactCommandOption(query: string | undefined, target: UserSkil
     id: "compact",
     label: "/compact",
     description: "Compact the mentioned member context"
+  };
+}
+
+export function goalCommandOption(query: string | undefined, target: UserSkillTargetSummary | undefined): SlashCommandOption | undefined {
+  if (query === undefined || !target?.hasClearTargets || target.participantIds.length !== 1) {
+    return undefined;
+  }
+  if (!"goal".startsWith(query.toLowerCase())) {
+    return undefined;
+  }
+  return {
+    id: "goal",
+    label: "/goal",
+    description: "Run the mentioned member until the goal is finished"
   };
 }
 

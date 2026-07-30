@@ -158,6 +158,15 @@ test("timed-out process-group run leaves no helper process", async (t) => {
   assert.equal(processExists(helperPid), false, `helper process ${helperPid} survived timeout`);
 });
 
+test("runCommand treats timeoutMs 0 as no wall-clock deadline", async () => {
+  const result = await runCommand("sh", ["-c", "sleep 0.05; printf done"], {
+    timeoutMs: 0,
+    primeLoginShellEnv: false
+  });
+  assert.equal(result.stdout, "done");
+  assert.equal(result.timedOut, false);
+});
+
 test("aborted process-group run leaves no helper process", async (t) => {
   if (process.platform === "win32") {
     t.skip("POSIX process groups are not available on Windows");

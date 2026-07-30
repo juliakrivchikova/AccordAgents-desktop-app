@@ -150,7 +150,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
           artifactOptions={mentions.visibleArtifactOptions}
           fileIndex={mentions.fileIndex}
           insertArtifactMention={mentions.insertArtifactMention}
-          insertCompactCommand={mentions.insertCompactCommand}
+          insertCommand={mentions.insertCommand}
           insertFileMention={mentions.insertFileMention}
           insertMention={mentions.insertMention}
           insertSavedPrompt={mentions.insertSavedPrompt}

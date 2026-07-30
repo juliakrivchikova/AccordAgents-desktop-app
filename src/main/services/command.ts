@@ -172,12 +172,14 @@ export async function runCommand(command: string, args: string[], options: Comma
       }, 1500).unref();
     };
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      terminate("SIGTERM");
-      scheduleForceKill();
-    }, timeoutMs);
-    timer.unref();
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          terminate("SIGTERM");
+          scheduleForceKill();
+        }, timeoutMs)
+      : undefined;
+    timer?.unref();
 
     const abort = () => {
       terminate("SIGTERM");
@@ -213,7 +215,9 @@ export async function runCommand(command: string, args: string[], options: Comma
     });
 
     child.on("error", (error) => {
-      clearTimeout(timer);
+      if (timer) {
+        clearTimeout(timer);
+      }
       options.signal?.removeEventListener("abort", abort);
       settled = true;
       const result: CommandResult = { command, args, stdout, stderr: stderr || error.message, exitCode: null, timedOut };
@@ -221,7 +225,9 @@ export async function runCommand(command: string, args: string[], options: Comma
     });
 
     child.on("close", (exitCode) => {
-      clearTimeout(timer);
+      if (timer) {
+        clearTimeout(timer);
+      }
       options.signal?.removeEventListener("abort", abort);
       settled = true;
       const result: CommandResult = { command, args, stdout, stderr: stderr || stdinError?.message || "", exitCode, timedOut };

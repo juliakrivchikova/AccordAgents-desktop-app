@@ -279,6 +279,9 @@ function renderInlineNode(node: MarkdownInlineNode, key: string): ReactNode {
     }
     return <code key={key}>{node.text}</code>;
   }
+  if (node.type === "command") {
+    return <span key={key} className="chat-command-token">/{node.command}</span>;
+  }
   if (node.type === "mention") {
     return <Mention key={key} handle={node.handle} />;
   }

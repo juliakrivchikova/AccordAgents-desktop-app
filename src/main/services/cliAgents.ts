@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Dirent } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -42,6 +42,7 @@ import {
 } from "./codexExec";
 import {
   buildGeminiExecInvocation,
+  buildGeminiInteractiveGoalInvocation,
   extractGeminiLogConversationId,
   geminiTranscriptPathForConversation,
   isGeminiResumeMissText,
@@ -60,6 +61,7 @@ const SESSION_LOG_RETRIES = 4;
 const MODEL_CATALOG_CACHE_MS = 5 * 60_000;
 const MODEL_CATALOG_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_TIMEOUT_MS = 8_000;
+const NATIVE_GOAL_IDLE_WARNING_MS = 5 * 60_000;
 const CODEX_APP_SERVER_DISABLED_ENV = "ACCORD_AGENTS_CODEX_APP_SERVER";
 const CODEX_APP_SERVER_MCP_TOKEN_ENV = "ACCORD_AGENTS_MCP_TOKEN";
 const CODEX_ACTIVITY_INVOCATION_MAX_CHARS = 1_800;
@@ -82,6 +84,53 @@ const GEMINI_MCP_PROXY_ARG = "--accordagents-gemini-mcp-proxy";
 const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 const APP_TOOL_PERMISSION_TOOL = "app_tool_permission";
 const APP_TOOL_PERMISSION_MCP_TOOL = `mcp__accord_agents__${APP_TOOL_PERMISSION_TOOL}`;
+const ANTIGRAVITY_GOAL_ENV = "ACCORD_AGENTS_NATIVE_GOAL_PROMPT";
+const ANTIGRAVITY_GOAL_ARG_COUNT_ENV = "ACCORD_AGENTS_NATIVE_GOAL_ARG_COUNT";
+const ANTIGRAVITY_GOAL_ARG_ENV_PREFIX = "ACCORD_AGENTS_NATIVE_GOAL_ARG_";
+const ANTIGRAVITY_EXPECT_PATH = "/usr/bin/expect";
+const ANTIGRAVITY_GOAL_FINAL_DEBOUNCE_MS = 900;
+const ANTIGRAVITY_GOAL_CANCEL_GRACE_MS = 2_500;
+const ANTIGRAVITY_CONVERSATION_RE = /agy --conversation=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+// eslint-disable-next-line no-control-regex
+const ANSI_ESCAPE_RE = /[\u001b\u009b][[\]()#;?]*(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*)?\u0007|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
+const ANTIGRAVITY_EXPECT_PROGRAM = `
+  set timeout -1
+  set goal $env(${ANTIGRAVITY_GOAL_ENV})
+  set args {}
+  for {set i 0} {$i < $env(${ANTIGRAVITY_GOAL_ARG_COUNT_ENV})} {incr i} {
+    set key "${ANTIGRAVITY_GOAL_ARG_ENV_PREFIX}$i"
+    lappend args $env($key)
+  }
+  set stty_init "rows 40 columns 120"
+  spawn -noecho agy {*}$args -i $goal
+  set child $spawn_id
+  log_user 0
+  fconfigure stdin -translation binary -encoding binary -blocking 0
+  fconfigure stdout -translation binary -encoding binary -buffering none
+  proc forward_input {} {
+    global child
+    set data [read stdin 4096]
+    if {[string length $data] > 0} {
+      send -i $child -raw -- $data
+    }
+  }
+  fileevent stdin readable forward_input
+  expect {
+    -i $child -re {(.|\\r|\\n)+} {
+      puts -nonewline stdout $expect_out(buffer)
+      exp_continue
+    }
+    -i $child eof {}
+  }
+  set result [wait -i $child]
+  exit [lindex $result 3]
+`;
+
+export function resolveCodexCompactTimeoutMs(requestedTimeoutMs: number | undefined): number {
+  return typeof requestedTimeoutMs === "number" && requestedTimeoutMs > 0
+    ? requestedTimeoutMs
+    : CLI_AGENT_COMPACT_TIMEOUT_MS;
+}
 
 export interface CliAgentRunOptions {
   persistSession?: boolean;
@@ -101,6 +150,8 @@ export interface CliAgentRunOptions {
   permissions?: ChatAgentPermissions;
   timeoutMs?: number;
   allowEmptyContent?: boolean;
+  nativeGoal?: boolean;
+  onProviderActivity?: () => void;
 }
 
 export type CliAgentOutputKind = "tool" | "text";
@@ -184,7 +235,14 @@ interface WarmAgentEntry {
   scopeKey: string;
   providerKind: ParticipantConfig["kind"];
   process: ChildProcessWithoutNullStreams;
-  run: (prompt: string, signal?: AbortSignal, onOutput?: CliAgentOutputCallback, onSessionId?: CliAgentSessionIdCallback, timeoutMs?: number) => Promise<ParticipantRunResult>;
+  run: (
+    prompt: string,
+    signal?: AbortSignal,
+    onOutput?: CliAgentOutputCallback,
+    onSessionId?: CliAgentSessionIdCallback,
+    timeoutMs?: number,
+    nativeGoal?: boolean
+  ) => Promise<ParticipantRunResult>;
   compact?: (instructions?: string, signal?: AbortSignal, onSessionId?: CliAgentSessionIdCallback) => Promise<CliAgentCompactResult>;
   queue: Promise<void>;
   idleTimer?: NodeJS.Timeout;
@@ -237,7 +295,7 @@ interface CodexAppServerPendingTurn {
   nextAgentMessageStartsBlock: boolean;
   model?: string;
   contextUsage?: AgentContextUsage;
-  timer: NodeJS.Timeout;
+  timer?: NodeJS.Timeout;
   abort?: () => void;
   onOutput?: CliAgentOutputCallback;
   resolve: (result: ParticipantRunResult) => void;
@@ -513,16 +571,34 @@ export class CliAgentRunner {
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
     const effectiveRepoPath = this.repoPathForRun(repoPath, diffMode, kind);
-    if (participant.kind === "codex-cli") {
-      return this.runCodex(participant, prompt, effectiveRepoPath, diffMode, kind, signal, options);
+    const idleMonitor = options.nativeGoal
+      ? this.createNativeGoalIdleMonitor(participant, options.onOutput)
+      : undefined;
+    const effectiveOptions: CliAgentRunOptions = idleMonitor
+      ? {
+          ...options,
+          timeoutMs: 0,
+          onProviderActivity: idleMonitor.touch,
+          onOutput: (event) => {
+            idleMonitor.touch();
+            options.onOutput?.(event);
+          }
+        }
+      : options;
+    try {
+      if (participant.kind === "codex-cli") {
+        return await this.runCodex(participant, prompt, effectiveRepoPath, diffMode, kind, signal, effectiveOptions);
+      }
+      if (participant.kind === "claude-code") {
+        return await this.runClaude(participant, prompt, effectiveRepoPath, kind, signal, effectiveOptions);
+      }
+      if (participant.kind === "gemini-cli") {
+        return await this.runGemini(participant, prompt, effectiveRepoPath, kind, signal, effectiveOptions);
+      }
+      return { participant, ok: false, content: "", error: `${participant.label} is not a CLI agent.` };
+    } finally {
+      idleMonitor?.close();
     }
-    if (participant.kind === "claude-code") {
-      return this.runClaude(participant, prompt, effectiveRepoPath, kind, signal, options);
-    }
-    if (participant.kind === "gemini-cli") {
-      return this.runGemini(participant, prompt, effectiveRepoPath, kind, signal, options);
-    }
-    return { participant, ok: false, content: "", error: `${participant.label} is not a CLI agent.` };
   }
 
   async compactSession(
@@ -915,9 +991,224 @@ export class CliAgentRunner {
     signal?: AbortSignal,
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
+    if (options.nativeGoal) {
+      return this.runGeminiNativeGoal(participant, prompt, repoPath, kind, signal, this.withoutWarm(options));
+    }
     // Antigravity has no warm stdio protocol; print-mode one-shots with
     // `--conversation <id>` resume carry the session across turns.
     return this.runGeminiOneShot(participant, prompt, repoPath, kind, signal, this.withoutWarm(options));
+  }
+
+  private async runGeminiNativeGoal(
+    participant: ParticipantConfig,
+    prompt: string,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    signal?: AbortSignal,
+    options: CliAgentRunOptions = {}
+  ): Promise<ParticipantRunResult> {
+    const startedAt = Date.now();
+    const warnings: string[] = [];
+    if (process.platform !== "darwin") {
+      return this.failed(participant, new Error("Antigravity native /goal currently requires the macOS Expect PTY transport."));
+    }
+    if (options.appMcp) {
+      const mcpConfigError = await this.ensureGeminiMcpConfig();
+      if (mcpConfigError) {
+        warnings.push(
+          `${participant.label}: app tools may be unavailable; failed to update the Antigravity MCP config (${mcpConfigError}).`
+        );
+      }
+    }
+    const usesRolePromptFallback = Boolean(options.role && !options.sessionId);
+    const effectivePrompt = usesRolePromptFallback ? (options.role as CliAgentRoleOptions).promptFallbackPrompt : prompt;
+    let logDir: string | undefined;
+    let child: ChildProcessWithoutNullStreams | undefined;
+    let tail: { stop: () => void; sessionId: () => string | undefined } | undefined;
+    const cleanupTimers = new Set<NodeJS.Timeout>();
+    try {
+      logDir = await mkdtemp(path.join(tmpdir(), "accordagents-gemini-goal-"));
+      const logFilePath = path.join(logDir, "run.log");
+      const invocation = buildGeminiInteractiveGoalInvocation({
+        participant,
+        prompt: effectivePrompt,
+        repoPath,
+        kind,
+        logFilePath,
+        options: {
+          sessionId: options.sessionId,
+          extraReadableDirs: options.extraReadableDirs,
+          appMcp: options.appMcp,
+          agentMode: options.agentMode,
+          permissions: options.permissions,
+          extraEnv: this.agentRunEnv(options)
+        }
+      });
+      const initialTranscriptLines = options.sessionId
+        ? this.completeLineCount(await this.readOptionalFile(
+            geminiTranscriptPathForConversation(homedir(), options.sessionId)
+          ))
+        : 0;
+      const env = commandEnvironment({
+        ...invocation.env,
+        [ANTIGRAVITY_GOAL_ENV]: invocation.goalPrompt,
+        [ANTIGRAVITY_GOAL_ARG_COUNT_ENV]: String(invocation.args.length),
+        ...Object.fromEntries(
+          invocation.args.map((argument, index) => [`${ANTIGRAVITY_GOAL_ARG_ENV_PREFIX}${index}`, argument])
+        ),
+        TERM: "xterm-256color"
+      });
+      child = spawn(ANTIGRAVITY_EXPECT_PATH, ["-c", ANTIGRAVITY_EXPECT_PROGRAM], {
+        cwd: repoPath,
+        env,
+        stdio: ["pipe", "pipe", "pipe"]
+      });
+      const broker = child;
+      let cleanTranscript = "";
+      let finalResponse: string | undefined;
+      let cleanExitRequested = false;
+      let aborted = signal?.aborted === true;
+      const terminalReplies = new Set<string>();
+      const writeIfOpen = (value: string): void => {
+        if (broker.exitCode === null && !broker.killed && broker.stdin.writable) {
+          broker.stdin.write(value);
+        }
+      };
+      const scheduleWrite = (value: string, delayMs: number): void => {
+        const timer = setTimeout(() => {
+          cleanupTimers.delete(timer);
+          writeIfOpen(value);
+        }, delayMs);
+        cleanupTimers.add(timer);
+        timer.unref();
+      };
+      const requestCleanExit = (): void => {
+        if (cleanExitRequested || aborted) {
+          return;
+        }
+        cleanExitRequested = true;
+        writeIfOpen("\u0004");
+        scheduleWrite("\u0004", 650);
+        scheduleWrite("\u0004", 1_400);
+      };
+      const handleOutput = (chunk: Buffer | string): void => {
+        options.onProviderActivity?.();
+        const raw = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
+        cleanTranscript += raw.replace(ANSI_ESCAPE_RE, "").replace(/\u0000/g, "");
+        if (cleanTranscript.length > 300_000) {
+          cleanTranscript = cleanTranscript.slice(-180_000);
+        }
+        for (const [query, response] of [
+          ["\u001b[?2026$p", "\u001b[?2026;2$y"],
+          ["\u001b[?2027$p", "\u001b[?2027;2$y"],
+          ["\u001b[?u", "\u001b[?0u"]
+        ] as const) {
+          if (raw.includes(query) && !terminalReplies.has(query)) {
+            terminalReplies.add(query);
+            writeIfOpen(response);
+          }
+        }
+        const sessionMatch = cleanTranscript.match(ANTIGRAVITY_CONVERSATION_RE);
+        if (sessionMatch?.[1]) {
+          this.reportSessionId(options.onSessionId, sessionMatch[1].toLowerCase());
+        }
+      };
+      broker.stdout.on("data", handleOutput);
+      broker.stderr.on("data", handleOutput);
+      broker.stdin.on("error", () => undefined);
+      tail = this.startGeminiGoalRunTail(
+        logFilePath,
+        options.sessionId,
+        initialTranscriptLines,
+        options,
+        (response) => {
+          finalResponse = response;
+          requestCleanExit();
+        }
+      );
+      if (options.sessionId) {
+        this.reportSessionId(options.onSessionId, options.sessionId);
+      }
+      const abort = (): void => {
+        aborted = true;
+        writeIfOpen("\u001b");
+        const toolPids = this.antigravityToolDescendantPids(broker.pid);
+        const terminateTimer = setTimeout(() => {
+          cleanupTimers.delete(terminateTimer);
+          this.terminateProcessIds(toolPids, "SIGTERM");
+          writeIfOpen("\u0004");
+        }, 250);
+        cleanupTimers.add(terminateTimer);
+        terminateTimer.unref();
+        scheduleWrite("\u0004", 900);
+        const killTimer = setTimeout(() => {
+          cleanupTimers.delete(killTimer);
+          this.terminateProcessIds(this.antigravityDescendantPids(broker.pid), "SIGKILL");
+          if (broker.exitCode === null) {
+            broker.kill("SIGTERM");
+          }
+        }, ANTIGRAVITY_GOAL_CANCEL_GRACE_MS);
+        cleanupTimers.add(killTimer);
+        killTimer.unref();
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) {
+        abort();
+      }
+      const exit = await new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+        broker.once("error", reject);
+        broker.once("close", (exitCode, exitSignal) => resolve({ exitCode, signal: exitSignal }));
+      });
+      signal?.removeEventListener("abort", abort);
+      const detectedSessionId = tail.sessionId();
+      tail.stop();
+      tail = undefined;
+      for (const timer of cleanupTimers) {
+        clearTimeout(timer);
+      }
+      cleanupTimers.clear();
+      const sessionId = detectedSessionId ??
+        cleanTranscript.match(ANTIGRAVITY_CONVERSATION_RE)?.[1]?.toLowerCase() ??
+        options.sessionId;
+      this.reportSessionId(options.onSessionId, sessionId);
+      if (aborted || signal?.aborted) {
+        throw new Error("Antigravity native goal was cancelled.");
+      }
+      if (exit.exitCode !== 0 || exit.signal) {
+        const detail = this.truncateText(cleanTranscript.trim(), MAX_CLI_ERROR_CHARS);
+        throw new Error(`Antigravity native goal PTY exited unexpectedly${exit.exitCode === null ? "" : ` with code ${exit.exitCode}`}${detail ? `: ${detail}` : "."}`);
+      }
+      const content = finalResponse?.trim() ?? "";
+      if (!content && !options.allowEmptyContent) {
+        throw new Error("Antigravity native goal completed without response content.");
+      }
+      const runResult = this.withAppMcpClientStatus({
+        participant,
+        ok: true,
+        content,
+        durationMs: Date.now() - startedAt,
+        sessionId,
+        roleRuntime: usesRolePromptFallback ? "prompt-fallback" : undefined
+      }, participant, options);
+      return warnings.length > 0
+        ? { ...runResult, warnings: [...(runResult.warnings ?? []), ...warnings] }
+        : runResult;
+    } catch (error) {
+      const failed = this.failed(participant, error, Date.now() - startedAt);
+      return warnings.length > 0 ? { ...failed, warnings: [...(failed.warnings ?? []), ...warnings] } : failed;
+    } finally {
+      tail?.stop();
+      for (const timer of cleanupTimers) {
+        clearTimeout(timer);
+      }
+      if (child && child.exitCode === null && !child.killed) {
+        this.terminateProcessIds(this.antigravityDescendantPids(child.pid), "SIGKILL");
+        child.kill("SIGKILL");
+      }
+      if (logDir) {
+        await rm(logDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
   }
 
   private async runGeminiOneShot(
@@ -1137,6 +1428,185 @@ export class CliAgentRunner {
     };
   }
 
+  private startGeminiGoalRunTail(
+    logFilePath: string,
+    initialSessionId: string | undefined,
+    initialTranscriptLines: number,
+    options: CliAgentRunOptions,
+    onFinalResponse: (content: string) => void
+  ): { stop: () => void; sessionId: () => string | undefined } {
+    let sessionId = initialSessionId;
+    let transcriptPath = initialSessionId
+      ? geminiTranscriptPathForConversation(homedir(), initialSessionId)
+      : undefined;
+    let transcriptLinesSeen = initialSessionId ? initialTranscriptLines : 0;
+    let scanning = false;
+    let stopped = false;
+    let finalDelivered = false;
+    let candidate: { content: string; unchangedSince: number } | undefined;
+
+    const adoptSessionId = (id: string): void => {
+      const normalized = id.toLowerCase();
+      if (sessionId === normalized) {
+        return;
+      }
+      sessionId = normalized;
+      transcriptPath = geminiTranscriptPathForConversation(homedir(), normalized);
+      transcriptLinesSeen = 0;
+      candidate = undefined;
+      this.reportSessionId(options.onSessionId, normalized);
+    };
+    if (initialSessionId) {
+      this.reportSessionId(options.onSessionId, initialSessionId);
+    }
+
+    const scan = async (): Promise<void> => {
+      if (scanning || stopped || finalDelivered) {
+        return;
+      }
+      scanning = true;
+      try {
+        const found = extractGeminiLogConversationId(await this.readOptionalFile(logFilePath));
+        if (found) {
+          adoptSessionId(found);
+        }
+        if (!transcriptPath) {
+          return;
+        }
+        const content = await this.readOptionalFile(transcriptPath);
+        if (!content) {
+          return;
+        }
+        const lines = content.split("\n");
+        const completeCount = Math.max(lines.length - 1, 0);
+        for (let index = transcriptLinesSeen; index < completeCount; index += 1) {
+          const line = lines[index] ?? "";
+          const activity = parseGeminiTranscriptActivity(line);
+          if (activity) {
+            candidate = undefined;
+            this.emitLiveOutput(options.onOutput, "tool", `${activity.label}\n`, undefined, {
+              activityKind: activity.kind,
+              activityStatus: "started"
+            });
+          }
+          const record = this.parseJsonRecord(line);
+          if (!record) {
+            continue;
+          }
+          if (
+            record.type === "PLANNER_RESPONSE" &&
+            record.status === "DONE" &&
+            typeof record.content === "string" &&
+            record.content.trim()
+          ) {
+            candidate = { content: record.content.trim(), unchangedSince: Date.now() };
+          } else if (
+            candidate &&
+            record.type !== "CHECKPOINT" &&
+            record.type !== "CONVERSATION_HISTORY"
+          ) {
+            candidate = undefined;
+          }
+        }
+        transcriptLinesSeen = Math.max(transcriptLinesSeen, completeCount);
+        if (
+          candidate &&
+          Date.now() - candidate.unchangedSince >= ANTIGRAVITY_GOAL_FINAL_DEBOUNCE_MS
+        ) {
+          finalDelivered = true;
+          this.emitLiveOutput(options.onOutput, "text", `${candidate.content}\n`, candidate.content);
+          onFinalResponse(candidate.content);
+        }
+      } finally {
+        scanning = false;
+      }
+    };
+
+    const interval = setInterval(() => {
+      void scan();
+    }, 250);
+    interval.unref();
+    void scan();
+    return {
+      stop: (): void => {
+        stopped = true;
+        clearInterval(interval);
+      },
+      sessionId: (): string | undefined => sessionId
+    };
+  }
+
+  private completeLineCount(content: string): number {
+    if (!content) {
+      return 0;
+    }
+    const lines = content.split("\n");
+    return Math.max(lines.length - 1, 0);
+  }
+
+  private parseJsonRecord(line: string): Record<string, unknown> | undefined {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) {
+      return undefined;
+    }
+    try {
+      const parsed = JSON.parse(trimmed);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private antigravityDescendantPids(rootPid: number | undefined): number[] {
+    if (!rootPid) {
+      return [];
+    }
+    try {
+      const rows = execFileSync("/bin/ps", ["-axo", "pid=,ppid="], { encoding: "utf8" })
+        .split("\n")
+        .map((line) => line.trim().match(/^(\d+)\s+(\d+)$/))
+        .filter((match): match is RegExpMatchArray => Boolean(match))
+        .map((match) => ({ pid: Number(match[1]), ppid: Number(match[2]) }));
+      const descendants: number[] = [];
+      const queue = [rootPid];
+      while (queue.length > 0) {
+        const parent = queue.shift() as number;
+        for (const row of rows) {
+          if (row.ppid === parent && !descendants.includes(row.pid)) {
+            descendants.push(row.pid);
+            queue.push(row.pid);
+          }
+        }
+      }
+      return descendants.reverse();
+    } catch {
+      return [];
+    }
+  }
+
+  private antigravityToolDescendantPids(rootPid: number | undefined): number[] {
+    const descendants = this.antigravityDescendantPids(rootPid);
+    return descendants.length > 1 ? descendants.slice(0, -1) : [];
+  }
+
+  private terminateProcessIds(pids: number[], signal: NodeJS.Signals): void {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, signal);
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "ESRCH") {
+          void this.writeDebugLog("cli-agent-native-goal-process-cleanup-error", {
+            pid,
+            signal,
+            error: this.errorText(error)
+          });
+        }
+      }
+    }
+  }
+
   private async compactGeminiSession(
     participant: ParticipantConfig,
     repoPath: string | undefined,
@@ -1266,10 +1736,65 @@ export class CliAgentRunner {
     signal?: AbortSignal,
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
+    if (options.nativeGoal) {
+      if (kind !== "chat") {
+        return {
+          participant,
+          ok: false,
+          content: "",
+          error: "Native /goal is available only in Chat."
+        };
+      }
+      if (!options.warm) {
+        return this.runCodexNativeGoalOneOff(participant, prompt, repoPath, diffMode, kind, signal, options);
+      }
+      return this.runCodexAppServerWarmOrOneShot(participant, prompt, repoPath, diffMode, kind, signal, options);
+    }
     if (options.warm && kind === "chat") {
       return this.runCodexAppServerWarmOrOneShot(participant, prompt, repoPath, diffMode, kind, signal, options);
     }
     return this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, options);
+  }
+
+  private async runCodexNativeGoalOneOff(
+    participant: ParticipantConfig,
+    prompt: string,
+    repoPath: string | undefined,
+    diffMode: GitDiffMode | undefined,
+    kind: ConversationKind,
+    signal: AbortSignal | undefined,
+    options: CliAgentRunOptions
+  ): Promise<ParticipantRunResult> {
+    if (process.env[CODEX_APP_SERVER_DISABLED_ENV] === "0") {
+      return this.failed(participant, new Error("Native /goal requires the Codex app-server transport; it is disabled."));
+    }
+    try {
+      await ensureLoginShellEnvPrimed();
+      const entry = this.createCodexAppServerWarmAgent(
+        `native-goal:${randomUUID()}`,
+        `native-goal:${participant.id}`,
+        participant,
+        repoPath,
+        diffMode,
+        kind,
+        this.withoutWarm(options)
+      );
+      try {
+        const result = await entry.run(
+          prompt,
+          signal,
+          options.onOutput,
+          options.onSessionId,
+          options.timeoutMs,
+          true
+        );
+        return this.withAppMcpClientStatus(result, participant, options);
+      } finally {
+        await this.closeWarmAgent(entry, "native-goal-complete");
+      }
+    } catch (error) {
+      return this.failed(participant, error);
+    }
   }
 
   private async compactCodexSession(
@@ -1354,6 +1879,13 @@ export class CliAgentRunner {
   ): Promise<ParticipantRunResult> {
     const warm = options.warm;
     if (!warm || process.env[CODEX_APP_SERVER_DISABLED_ENV] === "0") {
+      if (options.nativeGoal) {
+        return this.failed(participant, new Error(
+          process.env[CODEX_APP_SERVER_DISABLED_ENV] === "0"
+            ? "Native /goal requires the Codex app-server transport; it is disabled."
+            : "Native /goal requires a Codex app-server session."
+        ));
+      }
       return this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
     }
     const key = this.warmAgentKey(participant, repoPath, kind, options);
@@ -1383,7 +1915,9 @@ export class CliAgentRunner {
           runtime: "codex-app-server",
           error: this.errorText(error)
         });
-        return this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
+        return options.nativeGoal
+          ? this.failed(participant, error)
+          : this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
       }
     }
 
@@ -1391,7 +1925,14 @@ export class CliAgentRunner {
       this.clearWarmIdleTimer(entry as WarmAgentEntry);
       try {
         const result = this.withAppMcpClientStatus(
-          await (entry as WarmAgentEntry).run(prompt, signal, options.onOutput, options.onSessionId, options.timeoutMs),
+          await (entry as WarmAgentEntry).run(
+            prompt,
+            signal,
+            options.onOutput,
+            options.onSessionId,
+            options.timeoutMs,
+            options.nativeGoal
+          ),
           participant,
           options
         );
@@ -1415,7 +1956,9 @@ export class CliAgentRunner {
           runtime: "codex-app-server",
           error: this.errorText(error)
         });
-        return this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
+        return options.nativeGoal
+          ? this.failed(participant, error)
+          : this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
       }
     });
   }
@@ -1455,7 +1998,9 @@ export class CliAgentRunner {
       if (!current) {
         return undefined;
       }
-      clearTimeout(current.timer);
+      if (current.timer) {
+        clearTimeout(current.timer);
+      }
       if (current.abort) {
         current.abort();
       }
@@ -1672,7 +2217,10 @@ export class CliAgentRunner {
         signal?: AbortSignal,
         onSessionId?: CliAgentSessionIdCallback
       ): Promise<CliAgentCompactResult> => {
-        const timeoutMs = options.timeoutMs ?? CLI_AGENT_COMPACT_TIMEOUT_MS;
+        // A native goal deliberately gives its turn an unbounded timeout. Warm
+        // app-server entries can be reused by later slash workflows, but that
+        // turn-specific zero must never become an immediate compact timeout.
+        const timeoutMs = resolveCodexCompactTimeoutMs(options.timeoutMs);
         const currentThreadId = await ensureThread(timeoutMs);
         const compactOptions: CliAgentRunOptions = {
           ...options,
@@ -1769,16 +2317,19 @@ export class CliAgentRunner {
         signal?: AbortSignal,
         onOutput?: CliAgentOutputCallback,
         onSessionId?: CliAgentSessionIdCallback,
-        timeoutMsOverride?: number
+        timeoutMsOverride?: number,
+        nativeGoal?: boolean
       ): Promise<ParticipantRunResult> => {
-        const timeoutMs = timeoutMsOverride ?? this.runTimeoutMs;
+        const timeoutMs = nativeGoal ? 0 : (timeoutMsOverride ?? this.runTimeoutMs);
         const currentThreadId = await ensureThread(timeoutMs);
         this.reportSessionId(onSessionId, currentThreadId);
         const startedAt = Date.now();
-        const timer = setTimeout(() => {
-          rejectPendingTurn(new Error(`codex app-server timed out after ${timeoutMs}ms`));
-        }, timeoutMs);
-        timer.unref();
+        const timer = timeoutMs > 0
+          ? setTimeout(() => {
+              rejectPendingTurn(new Error(`codex app-server timed out after ${timeoutMs}ms`));
+            }, timeoutMs)
+          : undefined;
+        timer?.unref();
         const abort = (): void => {
           const current = pendingTurn;
           if (current?.turnId) {
@@ -1809,13 +2360,22 @@ export class CliAgentRunner {
           return resultPromise;
         }
         signal?.addEventListener("abort", abort, { once: true });
+        const codexTurnPrompt = this.codexPrompt(turnPrompt, repoPath, diffMode, kind, options);
+        if (nativeGoal) {
+          await sendRequest("thread/goal/set", {
+            threadId: currentThreadId,
+            objective: codexTurnPrompt,
+            status: "active",
+            tokenBudget: null
+          });
+        }
         const turn = await sendRequest("turn/start", {
           threadId: currentThreadId,
           effort: this.codexReasoningEffort(participant.reasoningEffort) ?? null,
           input: [
             {
               type: "text",
-              text: this.codexPrompt(turnPrompt, repoPath, diffMode, kind, options),
+              text: codexTurnPrompt,
               text_elements: []
             }
           ]
@@ -2794,6 +3354,9 @@ export class CliAgentRunner {
     signal?: AbortSignal,
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
+    if (options.nativeGoal) {
+      return this.runClaudeOneShot(participant, prompt, repoPath, kind, signal, this.withoutWarm(options));
+    }
     if (options.warm && kind === "chat") {
       return this.runClaudeWarmOrOneShot(participant, prompt, repoPath, kind, signal, options);
     }
@@ -2864,11 +3427,13 @@ export class CliAgentRunner {
         args,
         {
           cwd: repoPath,
-          input: prompt,
+          input: options.nativeGoal ? `/goal ${prompt}` : prompt,
           timeoutMs: options.timeoutMs ?? this.runTimeoutMs,
           env: this.agentRunEnv(options),
           envOptions: CLAUDE_CODE_COMMAND_ENV_OPTIONS,
-          signal
+          signal,
+          onStdout: () => options.onProviderActivity?.(),
+          onStderr: () => options.onProviderActivity?.()
         }
       );
       const sessionId = this.extractClaudeSessionId(result.stdout) ?? newSessionId ?? options.sessionId;
@@ -2912,7 +3477,13 @@ export class CliAgentRunner {
             agentMode: options.agentMode,
             permissions: options.permissions,
             appMcp: options.appMcp,
-            onSessionId: options.onSessionId
+            agentEnv: options.agentEnv,
+            agentEnvKey: options.agentEnvKey,
+            onOutput: options.onOutput,
+            onSessionId: options.onSessionId,
+            timeoutMs: options.timeoutMs,
+            nativeGoal: options.nativeGoal,
+            onProviderActivity: options.onProviderActivity
           }
         );
         return {
@@ -2932,7 +3503,13 @@ export class CliAgentRunner {
           agentMode: options.agentMode,
           permissions: options.permissions,
           appMcp: options.appMcp,
-          onSessionId: options.onSessionId
+          agentEnv: options.agentEnv,
+          agentEnvKey: options.agentEnvKey,
+          onOutput: options.onOutput,
+          onSessionId: options.onSessionId,
+          timeoutMs: options.timeoutMs,
+          nativeGoal: options.nativeGoal,
+          onProviderActivity: options.onProviderActivity
         });
         return { ...restarted, sessionRestarted: true };
       }
@@ -3446,6 +4023,57 @@ export class CliAgentRunner {
       void this.closeWarmAgent(entry, "idle-timeout");
     }, idleTimeoutMs);
     entry.idleTimer.unref();
+  }
+
+  private createNativeGoalIdleMonitor(
+    participant: ParticipantConfig,
+    onOutput: CliAgentOutputCallback | undefined
+  ): { touch: () => void; close: () => void } {
+    let timer: NodeJS.Timeout | undefined;
+    let closed = false;
+    const schedule = (): void => {
+      if (closed) {
+        return;
+      }
+      if (timer) {
+        clearTimeout(timer);
+      }
+      timer = setTimeout(() => {
+        timer = undefined;
+        if (closed) {
+          return;
+        }
+        const text = `${participant.label} has produced no provider output for 5 minutes. The native goal is still running and can be stopped.`;
+        onOutput?.({
+          kind: "tool",
+          text: `${text}\n`,
+          activityKind: "status",
+          activityStatus: "started",
+          activityDetail: text
+        });
+        void this.writeDebugLog("cli-agent-native-goal-idle-warning", {
+          providerKind: participant.kind,
+          participantId: participant.id,
+          idleMs: NATIVE_GOAL_IDLE_WARNING_MS
+        });
+        schedule();
+      }, NATIVE_GOAL_IDLE_WARNING_MS);
+      timer.unref();
+    };
+    const touch = (): void => {
+      schedule();
+    };
+    schedule();
+    return {
+      touch,
+      close: (): void => {
+        closed = true;
+        if (timer) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+      }
+    };
   }
 
   private clearWarmIdleTimer(entry: WarmAgentEntry): void {
