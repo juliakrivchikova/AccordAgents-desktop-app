@@ -122,6 +122,115 @@ test("listChatActivity uses the payload fallback when body_json is empty", async
   }
 });
 
+test("listChatActivity skips a malformed conversation body and keeps remaining activity", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-activity-"));
+  const storage = Object.create(StorageService.prototype) as any;
+  storage.dbPath = path.join(directory, "accordagents.sqlite3");
+  storage.initialized = true;
+  const goodChat = conversation("good-chat", "Good chat");
+  goodChat.messages = [participantMessage("good-choice", {
+    metadata: {
+      pendingChoice: {
+        id: "good-choice",
+        title: "Choose",
+        question: "Continue?",
+        options: [{ id: "yes", label: "Yes" }],
+        status: "pending"
+      }
+    }
+  })];
+  const badChat = conversation("bad-chat", "Bad chat");
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...values: unknown[]) => {
+    warnings.push(values.map(String).join(" "));
+  };
+
+  try {
+    await storage.runSql(`
+      create table conversations (
+        id text primary key, title text not null, kind text not null, created_at text not null,
+        updated_at text not null, repo_path text, body_json text, payload_json text not null
+      );
+      create table conversation_messages (
+        conversation_id text not null, sequence integer not null, message_id text not null,
+        created_at text not null, payload_json text not null,
+        primary key (conversation_id, sequence), unique (conversation_id, message_id)
+      );
+    `);
+    await storage.saveConversation(goodChat);
+    await storage.saveConversation(badChat);
+    await storage.runSql("update conversations set body_json = '{oops' where id = 'bad-chat';");
+
+    const result = await storage.listChatActivity();
+
+    assert.equal(result.items.length, 1);
+    assert.equal(result.items[0]?.conversationId, "good-chat");
+    assert.equal(result.items[0]?.target.messageId, "good-choice");
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /Skipping invalid chat activity conversation bad-chat: Invalid JSON/);
+  } finally {
+    console.warn = originalWarn;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("listChatActivity transports every full JSON result through hex projections", async () => {
+  const bodyQueries: string[] = [];
+  const bodyStorage = fakeStorage(async (sql) => {
+    bodyQueries.push(sql);
+    return [];
+  });
+
+  await bodyStorage.listChatActivity();
+
+  assert.equal(bodyQueries.length, 1);
+  const bodySelect = bodyQueries[0].match(/\bselect\b[\s\S]*?\bfrom\b/i)?.[0] ?? "";
+  assert.match(bodySelect, /hex\(coalesce\(nullif\(body_json[\s\S]*\)\) as bodyHex/i);
+  assert.doesNotMatch(bodySelect, /\bbody_json\s+as\s+bodyJson\b/i);
+
+  const messageQueries: string[] = [];
+  const pending = participantMessage("pending", {
+    metadata: {
+      pendingChoice: {
+        id: "choice",
+        title: "Choose",
+        question: "Continue?",
+        options: [{ id: "yes", label: "Yes" }],
+        status: "pending"
+      },
+      sourceMessageId: "source-message"
+    }
+  });
+  const messageStorage = fakeStorage(async (sql) => {
+    messageQueries.push(sql);
+    if (sql.includes("$.metadata.pendingChoice.status")) {
+      return [{ conversationId: "chat-1", sequence: 1, payloadJson: JSON.stringify(pending) }];
+    }
+    return [];
+  });
+
+  await (messageStorage as any).activityMessageRows(
+    ["chat-1"],
+    40,
+    ["chat-1"],
+    [["chat-1", "approval-trigger"]]
+  );
+
+  assert.equal(messageQueries.length, 6);
+  for (const sql of messageQueries) {
+    const outerSelect = sql.match(/\bselect\b[\s\S]*?\bfrom\b/i)?.[0] ?? "";
+    assert.match(
+      outerSelect,
+      /select\s+(?:conversation_id as conversationId|conversationId),\s*sequence,\s*hex\((?:payload_json|payloadJson)\) as payloadHex/i
+    );
+    assert.doesNotMatch(
+      outerSelect,
+      /(?:payload_json|payloadJson)\s+as\s+payloadJson/i
+    );
+  }
+});
+
 test("listChatActivity finds pending participant messages outside the recent participant preview limit", async () => {
   const chat = conversation("chat-1", "Activity chat");
   const pendingParticipant = participantMessage("pending-run-message", {

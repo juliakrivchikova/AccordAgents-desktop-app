@@ -322,7 +322,17 @@ export class StorageService {
 
     const conversationsById = new Map<string, Conversation>();
     for (const row of rows) {
-      const conversation = parseHexJson<Conversation>(row.bodyHex, `conversation ${row.id}`);
+      let conversation: Conversation;
+      try {
+        conversation = parseHexJson<Conversation>(row.bodyHex, `conversation ${row.id}`);
+      } catch (error) {
+        console.warn(
+          `[StorageService] Skipping invalid chat activity conversation ${row.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+        continue;
+      }
       conversation.metadata = clearLegacyAccordState(conversation.metadata);
       conversation.messages = [];
       sanitizeConversationWarnings(conversation);
