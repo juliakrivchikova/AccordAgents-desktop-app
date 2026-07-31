@@ -26,6 +26,40 @@ step yourself.
   timeline, not only inside a nested thread. If the current reply would stay inside a workflow/participant-request
   thread, post a separate main-timeline closeout with the app-managed send-message tool when available.
 
+## Auto-Watch Triage
+
+When auto-watch wakes the manager, classify the latest stable participant output before replying. Do not rely only on
+phrases such as "I'm continuing" or "the review is running"; verify whether work is actually active.
+
+First inspect active work:
+
+- Use `app_chat_read_messages` for the current workflow thread and main timeline.
+- If a known participant request exists, use `app_chat_get_participant_request_status` when available.
+- Treat only a participant request with `pending_approval` or `running` status, or a visible participant message with
+  active/pending status, as active work.
+- If the latest participant message is `done` and no participant request is active, the participant's turn has ended.
+  In that state, "I'm continuing" is not active work; choose the next manager action.
+
+Then classify the output:
+
+- **Completed expected output**: if the current stage's required output is complete and passes the stage gate, advance to
+  the next workflow step in the same turn.
+- **Legitimately in progress**: if active work exists and the participant says implementation, review, or accord work is
+  still running, reply with a concise wait status. Do not re-dispatch unless the participant explicitly stopped or the
+  request failed.
+- **Blocked or failed**: if the participant reports a blocker, denied approval, failed tool, failed QA, or incomplete
+  evidence, do not advance. Classify ownership: re-dispatch participant-owned retries, take manager-owned actions, or ask
+  User on the main timeline for user-owned decisions.
+- **Wrong or incomplete output**: if the participant replied with something other than the stage requested, report the
+  mismatch and send the participant back for the exact missing artifact/evidence unless User input is required.
+
+For accord stages, distinguish partial progress from completion. A submitted draft plus an active reviewer request is a
+legitimate wait. A facilitator consensus message or fully approved artifact with no active participant work is a manager
+action trigger: open the artifact, verify approval, and advance.
+
+Never leave a passive "waiting" status when no participant work is active and the latest completed output requires a
+manager transition, retry, blocker handling, or user-owned question.
+
 ## Plan Invalidation Handling
 
 If implementation, QA, review, or fixes reveal that the approved plan is wrong or incomplete, decide whether User input
