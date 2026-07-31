@@ -1,12 +1,37 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { StorageService } from "./storage";
 import type { ChatAppToolApproval, ChatMessage, Conversation } from "../../shared/types";
 
+function hexText(value: string): string {
+  return Buffer.from(value, "utf8").toString("hex").toUpperCase();
+}
+
 function fakeStorage(queryJson: (sql: string) => Promise<unknown[]>): StorageService {
   const storage = Object.create(StorageService.prototype) as any;
   storage.init = async () => {};
-  storage.queryJson = queryJson;
+  storage.queryJson = async (sql: string) => {
+    const rows = await queryJson(sql);
+    return rows.map((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return value;
+      }
+      const row = value as Record<string, unknown>;
+      const encoded = { ...row };
+      if (typeof row.bodyJson === "string") {
+        encoded.bodyHex = hexText(row.bodyJson);
+        delete encoded.bodyJson;
+      }
+      if (typeof row.payloadJson === "string") {
+        encoded.payloadHex = hexText(row.payloadJson);
+        delete encoded.payloadJson;
+      }
+      return encoded;
+    });
+  };
   return storage as StorageService;
 }
 
@@ -48,7 +73,53 @@ test("listChatActivity finds pending messages outside the recent participant win
   assert.equal(result.items[0].kind, "choice");
   assert.equal(result.items[0].target.messageId, "old-choice");
   assert.equal(queries.length, 4);
+  assert.match(queries[0], /hex\(coalesce\(nullif\(body_json/);
+  assert.match(queries[1], /hex\(payload_json\) as payloadHex/);
   assert.ok(queries[1].includes("conversation_id in ('chat-1')"));
+});
+
+test("listChatActivity uses the payload fallback when body_json is empty", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-activity-"));
+  const storage = Object.create(StorageService.prototype) as any;
+  storage.dbPath = path.join(directory, "accordagents.sqlite3");
+  storage.initialized = true;
+  const chat = conversation("fallback-chat", "Fallback chat");
+  chat.messages = [participantMessage("fallback-choice", {
+    content: "Choose \"one\"\nline two\t\u001f🙂",
+    metadata: {
+      pendingChoice: {
+        id: "fallback-choice",
+        title: "Choose",
+        question: "Continue?",
+        options: [{ id: "yes", label: "Yes" }],
+        status: "pending"
+      }
+    }
+  })];
+
+  try {
+    await storage.runSql(`
+      create table conversations (
+        id text primary key, title text not null, kind text not null, created_at text not null,
+        updated_at text not null, repo_path text, body_json text, payload_json text not null
+      );
+      create table conversation_messages (
+        conversation_id text not null, sequence integer not null, message_id text not null,
+        created_at text not null, payload_json text not null,
+        primary key (conversation_id, sequence), unique (conversation_id, message_id)
+      );
+    `);
+    await storage.saveConversation(chat);
+    await storage.runSql("update conversations set body_json = '' where id = 'fallback-chat';");
+
+    const result = await storage.listChatActivity();
+
+    assert.equal(result.items.length, 1);
+    assert.equal(result.items[0]?.kind, "choice");
+    assert.equal(result.items[0]?.target.messageId, "fallback-choice");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("listChatActivity finds pending participant messages outside the recent participant preview limit", async () => {
