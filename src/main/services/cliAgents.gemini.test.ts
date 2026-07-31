@@ -4,9 +4,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { ParticipantConfig } from "../../shared/types";
-import { CliAgentRunner, geminiMcpProxyLaunchArgs, syncGeminiMcpConfig } from "./cliAgents";
+import {
+  antigravityInteractiveGoalAtPrompt,
+  antigravityInteractivePermissionPrompt,
+  CliAgentRunner,
+  geminiMcpProxyLaunchArgs,
+  syncGeminiMcpConfig
+} from "./cliAgents";
 import {
   buildGeminiExecInvocation,
+  buildGeminiInteractiveGoalInvocation,
   extractGeminiLogConversationId,
   geminiTranscriptPathForConversation,
   isGeminiResumeMissText,
@@ -118,6 +125,50 @@ test("buildGeminiExecInvocation: app MCP url/token travel through the process en
   });
   assert.equal(invocation.env?.ACCORD_AGENTS_MCP_URL, "http://127.0.0.1:5123/mcp");
   assert.equal(invocation.env?.ACCORD_AGENTS_MCP_TOKEN, "secret-token");
+});
+
+test("buildGeminiInteractiveGoalInvocation preserves native /goal and print-mode permission parity", () => {
+  const invocation = buildGeminiInteractiveGoalInvocation({
+    participant,
+    prompt: "Finish the task",
+    repoPath: "/repo/project",
+    kind: "chat",
+    logFilePath: "/tmp/run/goal.log",
+    options: {
+      sessionId: "11111111-2222-4333-8444-555555555555",
+      agentMode: "auto",
+      extraReadableDirs: ["/extra/history"]
+    }
+  });
+  assert.match(invocation.goalPrompt, /^\/goal /);
+  assert.match(invocation.goalPrompt, /Finish the task/);
+  assert.equal(flagValue(invocation.args, "--conversation"), "11111111-2222-4333-8444-555555555555");
+  assert.equal(flagValue(invocation.args, "--log-file"), "/tmp/run/goal.log");
+  assert.equal(invocation.args.includes("--print"), false);
+  assert.equal(invocation.args.includes("--dangerously-skip-permissions"), true);
+  assert.equal(invocation.args.includes("--model"), false);
+});
+
+test("Antigravity native goal waits for the returned interactive prompt", () => {
+  const initial = "? for shortcuts\n> /goal do work\nGenerating...";
+  assert.equal(antigravityInteractiveGoalAtPrompt("? for shortcuts"), false);
+  assert.equal(antigravityInteractiveGoalAtPrompt(initial), false);
+  assert.equal(antigravityInteractiveGoalAtPrompt(`${initial}\nFINAL\n? for shortcuts`), true);
+});
+
+test("Antigravity native goal recognizes the read-only TUI permission dialog", () => {
+  assert.equal(antigravityInteractivePermissionPrompt("Requesting permission for:\n pwd"), false);
+  assert.equal(
+    antigravityInteractivePermissionPrompt("Requesting permission for:\n pwd\nDo you want to proceed?"),
+    true
+  );
+});
+
+test("extractGeminiLogConversationId reads interactive PTY conversation creation", () => {
+  assert.equal(
+    extractGeminiLogConversationId("I0731 server.go:1007] Created conversation a092be41-dd4a-4577-b8d7-995c16cb8961"),
+    "a092be41-dd4a-4577-b8d7-995c16cb8961"
+  );
 });
 
 test("parseGeminiExecResult: parses the real success payload including usage", () => {

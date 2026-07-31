@@ -40,6 +40,10 @@ export interface GeminiExecInvocation {
   env?: NodeJS.ProcessEnv;
 }
 
+export interface GeminiInteractiveGoalInvocation extends GeminiExecInvocation {
+  goalPrompt: string;
+}
+
 export interface BuildGeminiExecInvocationRequest {
   participant: ParticipantConfig;
   prompt: string;
@@ -106,6 +110,40 @@ export function buildGeminiExecInvocation(request: BuildGeminiExecInvocationRequ
   return {
     args,
     env: geminiInvocationEnv(options)
+  };
+}
+
+export function buildGeminiInteractiveGoalInvocation(
+  request: BuildGeminiExecInvocationRequest
+): GeminiInteractiveGoalInvocation {
+  const options = request.options ?? {};
+  const mode = agentModeForRun(request.kind, options);
+  const permissions = permissionsForRun("gemini-cli", mode, options);
+  const args: string[] = [];
+  if (options.sessionId) {
+    args.push("--conversation", options.sessionId);
+  }
+  if (request.logFilePath) {
+    args.push("--log-file", request.logFilePath);
+  }
+  if (request.participant.model && !options.sessionId) {
+    args.push("--model", request.participant.model);
+  }
+  if (request.repoPath) {
+    args.push("--add-dir", request.repoPath);
+  }
+  for (const dir of normalizedExtraReadableDirs(options.extraReadableDirs)) {
+    args.push("--add-dir", dir);
+  }
+  if (mode === "auto" || permissions.workspaceWrite) {
+    args.push("--dangerously-skip-permissions");
+  } else {
+    args.push("--sandbox");
+  }
+  return {
+    args,
+    env: geminiInvocationEnv(options),
+    goalPrompt: `/goal ${geminiPrompt(request.prompt, request.repoPath, request.kind, mode, permissions)}`
   };
 }
 
@@ -177,6 +215,7 @@ const GEMINI_UUID_PATTERN = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-
 const GEMINI_LOG_CONVERSATION_PATTERNS: RegExp[] = [
   new RegExp(`Print mode: conversation=(${GEMINI_UUID_PATTERN})`),
   new RegExp(`Print mode: resuming conversation (${GEMINI_UUID_PATTERN})`),
+  new RegExp(`Created conversation (${GEMINI_UUID_PATTERN})`),
   new RegExp(`Stream goroutine exited for (${GEMINI_UUID_PATTERN})`)
 ];
 

@@ -331,7 +331,10 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 {hasProcessingTranscript && processingTranscriptOpen && processingTranscriptView ? (
                   <ChatExpandedProcessingTranscript view={processingTranscriptView} activityEvents={activityEvents} />
                 ) : (
-                  <MarkdownText content={displayContent} />
+                  <MarkdownText
+                    content={displayContent}
+                    recognizedCommand={message.role === "user" ? message.metadata?.nativeCommand?.name : undefined}
+                  />
                 )}
               </>
             )}

@@ -351,7 +351,7 @@ export function NewChatScreen(props: {
         <div className={["new-chat-input-wrap", mentions.showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")}>
           <ChatComposerMenus
             fileIndex={mentions.fileIndex}
-            insertCompactCommand={mentions.insertCompactCommand}
+            insertCommand={mentions.insertCommand}
             insertFileMention={mentions.insertFileMention}
             insertMention={mentions.insertMention}
             insertSavedPrompt={mentions.insertSavedPrompt}

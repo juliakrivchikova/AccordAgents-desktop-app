@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { useState } from "react";
 import { act, create, type ReactTestInstance } from "react-test-renderer";
 
 import type {
@@ -201,6 +202,50 @@ test("complete controlled New Chat draft survives unmount and is submitted intac
   restored.unmount();
 });
 
+test("New Chat suggests /goal for one clear target and selection inserts /goal space", async () => {
+  let searchCalls = 0;
+  installWindowBridge({
+    searchUserSkills: async () => {
+      searchCalls += 1;
+      return {
+        target: {
+          participantIds: ["assistant-preview"],
+          providerKinds: ["codex-cli"],
+          hasClearTargets: true
+        },
+        skills: []
+      };
+    }
+  });
+  let renderer!: ReturnType<typeof create>;
+  await act(async () => {
+    renderer = create(<GoalCommandHarness />);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+  const textarea = renderer.root.findByProps({ "data-testid": "new-chat-prompt" });
+  await act(async () => {
+    textarea.props.onChange({ target: { value: "/go" } });
+    await new Promise((resolve) => setTimeout(resolve, 450));
+  });
+  assert.equal(searchCalls, 1);
+  const goalOption = renderer.root.findAllByType("button").find((button) => textOf(button).includes("/goal"));
+  assert.ok(goalOption, textOf(renderer.root));
+  await act(async () => {
+    goalOption.props.onMouseDown({ preventDefault: () => undefined });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+  assert.equal(renderer.root.findByProps({ "data-testid": "new-chat-prompt" }).props.value, "/goal ");
+  renderer.unmount();
+});
+
+function GoalCommandHarness(): JSX.Element {
+  const [prompt, setPrompt] = useState("");
+  return <NewChatScreen {...baseProps(readyAgents(), {
+    prompt,
+    onPromptChange: setPrompt
+  })} />;
+}
+
 function baseProps(agents: AgentHealth[], patch: Record<string, unknown> = {}) {
   return {
     prompt: "Draft",
@@ -253,14 +298,15 @@ function readyAgent(kind: AgentHealth["kind"]): AgentHealth {
   };
 }
 
-function installWindowBridge(): void {
+function installWindowBridge(consensusPatch: Record<string, unknown> = {}): void {
   (globalThis as any).window = {
     consensus: {
       searchRepoFiles: async () => [],
       searchUserSkills: async () => ({ target: { participantIds: [], providerKinds: [], hasClearTargets: false }, skills: [] }),
       listPlugins: async () => ({ plugins: [], diagnostics: { checkedSources: [], errors: [], updatedAt: "" } }),
       openTerminal: async () => undefined,
-      openExternal: async () => undefined
+      openExternal: async () => undefined,
+      ...consensusPatch
     },
     setTimeout,
     clearTimeout,

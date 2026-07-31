@@ -3,7 +3,14 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { CommandError, commandExists, commandEnvironment, parseLoginShellEnvOutput, runCommand } from "./command";
+import {
+  CommandError,
+  commandExists,
+  commandEnvironment,
+  parseLoginShellEnvOutput,
+  resolveCommandTimeoutMs,
+  runCommand
+} from "./command";
 
 test("parseLoginShellEnvOutput extracts valid env lines between sentinels", () => {
   const env = parseLoginShellEnvOutput([
@@ -156,6 +163,24 @@ test("timed-out process-group run leaves no helper process", async (t) => {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   assert.equal(processExists(helperPid), false, `helper process ${helperPid} survived timeout`);
+});
+
+test("runCommand treats timeoutMs 0 as no wall-clock deadline", async () => {
+  const result = await runCommand("sh", ["-c", "sleep 0.05; printf done"], {
+    timeoutMs: 0,
+    allowNoTimeout: true,
+    primeLoginShellEnv: false
+  });
+  assert.equal(result.stdout, "done");
+  assert.equal(result.timedOut, false);
+});
+
+test("runCommand requires an explicit opt-in for an unbounded deadline", () => {
+  assert.equal(resolveCommandTimeoutMs(0), 30_000);
+  assert.equal(resolveCommandTimeoutMs(-1), 30_000);
+  assert.equal(resolveCommandTimeoutMs(0, true), 0);
+  assert.equal(resolveCommandTimeoutMs(-1, true), 30_000);
+  assert.equal(resolveCommandTimeoutMs(250), 250);
 });
 
 test("aborted process-group run leaves no helper process", async (t) => {
