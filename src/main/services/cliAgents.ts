@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import type { Dirent } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { constants, type Dirent } from "node:fs";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import type {
@@ -88,7 +88,6 @@ const ANTIGRAVITY_GOAL_ENV = "ACCORD_AGENTS_NATIVE_GOAL_PROMPT";
 const ANTIGRAVITY_GOAL_ARG_COUNT_ENV = "ACCORD_AGENTS_NATIVE_GOAL_ARG_COUNT";
 const ANTIGRAVITY_GOAL_ARG_ENV_PREFIX = "ACCORD_AGENTS_NATIVE_GOAL_ARG_";
 const ANTIGRAVITY_EXPECT_PATH = "/usr/bin/expect";
-const ANTIGRAVITY_GOAL_FINAL_DEBOUNCE_MS = 900;
 const ANTIGRAVITY_GOAL_CANCEL_GRACE_MS = 2_500;
 const ANTIGRAVITY_CONVERSATION_RE = /agy --conversation=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 // eslint-disable-next-line no-control-regex
@@ -132,6 +131,15 @@ export function resolveCodexCompactTimeoutMs(requestedTimeoutMs: number | undefi
     : CLI_AGENT_COMPACT_TIMEOUT_MS;
 }
 
+export function antigravityInteractiveGoalAtPrompt(transcript: string): boolean {
+  const generating = transcript.lastIndexOf("Generating");
+  return generating >= 0 && transcript.lastIndexOf("? for shortcuts") > generating;
+}
+
+export function antigravityInteractivePermissionPrompt(transcript: string): boolean {
+  return transcript.includes("Requesting permission for:") && transcript.includes("Do you want to proceed?");
+}
+
 export interface CliAgentRunOptions {
   persistSession?: boolean;
   sessionId?: string;
@@ -150,8 +158,13 @@ export interface CliAgentRunOptions {
   permissions?: ChatAgentPermissions;
   timeoutMs?: number;
   allowEmptyContent?: boolean;
-  nativeGoal?: boolean;
+  nativeGoal?: NativeGoalRun;
   onProviderActivity?: () => void;
+}
+
+export interface NativeGoalRun {
+  name: "goal";
+  objective: string;
 }
 
 export type CliAgentOutputKind = "tool" | "text";
@@ -241,7 +254,7 @@ interface WarmAgentEntry {
     onOutput?: CliAgentOutputCallback,
     onSessionId?: CliAgentSessionIdCallback,
     timeoutMs?: number,
-    nativeGoal?: boolean
+    nativeGoal?: NativeGoalRun
   ) => Promise<ParticipantRunResult>;
   compact?: (instructions?: string, signal?: AbortSignal, onSessionId?: CliAgentSessionIdCallback) => Promise<CliAgentCompactResult>;
   queue: Promise<void>;
@@ -264,6 +277,19 @@ interface ClaudeWarmPendingTurn {
   onSessionId?: CliAgentSessionIdCallback;
   resolve: (result: ParticipantRunResult) => void;
   reject: (error: Error) => void;
+}
+
+interface ClaudeOneShotStreamState {
+  buffer: string;
+  streamedText: string;
+  messages: string[];
+  nextTextBlockStartsBlock: boolean;
+  resultEvent?: unknown;
+  error?: string;
+  sessionId?: string;
+  model?: string;
+  usedTokens?: number;
+  contextWindowTokens?: number;
 }
 
 interface CodexAppServerPendingRequest {
@@ -295,12 +321,24 @@ interface CodexAppServerPendingTurn {
   nextAgentMessageStartsBlock: boolean;
   model?: string;
   contextUsage?: AgentContextUsage;
+  nativeGoal?: {
+    status?: CodexNativeGoalStatus | "cleared";
+    turnCompleted: boolean;
+  };
   timer?: NodeJS.Timeout;
   abort?: () => void;
   onOutput?: CliAgentOutputCallback;
   resolve: (result: ParticipantRunResult) => void;
   reject: (error: Error) => void;
 }
+
+type CodexNativeGoalStatus =
+  | "active"
+  | "paused"
+  | "blocked"
+  | "usageLimited"
+  | "budgetLimited"
+  | "complete";
 
 interface CodexAppServerPendingCompact {
   threadId: string;
@@ -1012,6 +1050,14 @@ export class CliAgentRunner {
     if (process.platform !== "darwin") {
       return this.failed(participant, new Error("Antigravity native /goal currently requires the macOS Expect PTY transport."));
     }
+    try {
+      await access(ANTIGRAVITY_EXPECT_PATH, constants.X_OK);
+    } catch {
+      return this.failed(
+        participant,
+        new Error(`Antigravity native /goal requires executable ${ANTIGRAVITY_EXPECT_PATH} on macOS. Install the system Expect tool or use the dedicated Antigravity CLI.`)
+      );
+    }
     if (options.appMcp) {
       const mcpConfigError = await this.ensureGeminiMcpConfig();
       if (mcpConfigError) {
@@ -1066,6 +1112,8 @@ export class CliAgentRunner {
       const broker = child;
       let cleanTranscript = "";
       let finalResponse: string | undefined;
+      let candidateResponse: string | undefined;
+      let permissionFailure: string | undefined;
       let cleanExitRequested = false;
       let aborted = signal?.aborted === true;
       const terminalReplies = new Set<string>();
@@ -1091,12 +1139,30 @@ export class CliAgentRunner {
         scheduleWrite("\u0004", 650);
         scheduleWrite("\u0004", 1_400);
       };
+      const maybeFinishGoal = (): void => {
+        if (
+          candidateResponse &&
+          antigravityInteractiveGoalAtPrompt(cleanTranscript)
+        ) {
+          finalResponse = candidateResponse;
+          requestCleanExit();
+        }
+      };
       const handleOutput = (chunk: Buffer | string): void => {
         options.onProviderActivity?.();
         const raw = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
         cleanTranscript += raw.replace(ANSI_ESCAPE_RE, "").replace(/\u0000/g, "");
         if (cleanTranscript.length > 300_000) {
           cleanTranscript = cleanTranscript.slice(-180_000);
+        }
+        if (
+          !permissionFailure &&
+          antigravityInteractivePermissionPrompt(cleanTranscript)
+        ) {
+          permissionFailure = "Antigravity requested interactive tool permission during native /goal. AccordAgents cannot safely proxy this TUI approval yet; retry in Auto-review or grant the required write/shell permission before starting the goal.";
+          writeIfOpen("4\r");
+          scheduleWrite("\u0004", 300);
+          scheduleWrite("\u0004", 950);
         }
         for (const [query, response] of [
           ["\u001b[?2026$p", "\u001b[?2026;2$y"],
@@ -1112,6 +1178,7 @@ export class CliAgentRunner {
         if (sessionMatch?.[1]) {
           this.reportSessionId(options.onSessionId, sessionMatch[1].toLowerCase());
         }
+        maybeFinishGoal();
       };
       broker.stdout.on("data", handleOutput);
       broker.stderr.on("data", handleOutput);
@@ -1122,8 +1189,8 @@ export class CliAgentRunner {
         initialTranscriptLines,
         options,
         (response) => {
-          finalResponse = response;
-          requestCleanExit();
+          candidateResponse = response;
+          maybeFinishGoal();
         }
       );
       if (options.sessionId) {
@@ -1173,6 +1240,9 @@ export class CliAgentRunner {
       this.reportSessionId(options.onSessionId, sessionId);
       if (aborted || signal?.aborted) {
         throw new Error("Antigravity native goal was cancelled.");
+      }
+      if (permissionFailure) {
+        throw new Error(permissionFailure);
       }
       if (exit.exitCode !== 0 || exit.signal) {
         const detail = this.truncateText(cleanTranscript.trim(), MAX_CLI_ERROR_CHARS);
@@ -1442,8 +1512,9 @@ export class CliAgentRunner {
     let transcriptLinesSeen = initialSessionId ? initialTranscriptLines : 0;
     let scanning = false;
     let stopped = false;
-    let finalDelivered = false;
-    let candidate: { content: string; unchangedSince: number } | undefined;
+    let candidate: string | undefined;
+    let lastEmittedCandidate = "";
+    let emittedText = "";
 
     const adoptSessionId = (id: string): void => {
       const normalized = id.toLowerCase();
@@ -1454,6 +1525,7 @@ export class CliAgentRunner {
       transcriptPath = geminiTranscriptPathForConversation(homedir(), normalized);
       transcriptLinesSeen = 0;
       candidate = undefined;
+      lastEmittedCandidate = "";
       this.reportSessionId(options.onSessionId, normalized);
     };
     if (initialSessionId) {
@@ -1461,7 +1533,7 @@ export class CliAgentRunner {
     }
 
     const scan = async (): Promise<void> => {
-      if (scanning || stopped || finalDelivered) {
+      if (scanning || stopped) {
         return;
       }
       scanning = true;
@@ -1483,7 +1555,6 @@ export class CliAgentRunner {
           const line = lines[index] ?? "";
           const activity = parseGeminiTranscriptActivity(line);
           if (activity) {
-            candidate = undefined;
             this.emitLiveOutput(options.onOutput, "tool", `${activity.label}\n`, undefined, {
               activityKind: activity.kind,
               activityStatus: "started"
@@ -1499,24 +1570,18 @@ export class CliAgentRunner {
             typeof record.content === "string" &&
             record.content.trim()
           ) {
-            candidate = { content: record.content.trim(), unchangedSince: Date.now() };
-          } else if (
-            candidate &&
-            record.type !== "CHECKPOINT" &&
-            record.type !== "CONVERSATION_HISTORY"
-          ) {
-            candidate = undefined;
+            candidate = record.content.trim();
+            if (candidate !== lastEmittedCandidate) {
+              lastEmittedCandidate = candidate;
+              emittedText = emittedText
+                ? this.textWithAgentMessageBoundary(emittedText, candidate)
+                : candidate;
+              this.emitLiveOutput(options.onOutput, "text", `${candidate}\n`, emittedText);
+            }
+            onFinalResponse(candidate);
           }
         }
         transcriptLinesSeen = Math.max(transcriptLinesSeen, completeCount);
-        if (
-          candidate &&
-          Date.now() - candidate.unchangedSince >= ANTIGRAVITY_GOAL_FINAL_DEBOUNCE_MS
-        ) {
-          finalDelivered = true;
-          this.emitLiveOutput(options.onOutput, "text", `${candidate.content}\n`, candidate.content);
-          onFinalResponse(candidate.content);
-        }
       } finally {
         scanning = false;
       }
@@ -1786,7 +1851,7 @@ export class CliAgentRunner {
           options.onOutput,
           options.onSessionId,
           options.timeoutMs,
-          true
+          options.nativeGoal
         );
         return this.withAppMcpClientStatus(result, participant, options);
       } finally {
@@ -2318,7 +2383,7 @@ export class CliAgentRunner {
         onOutput?: CliAgentOutputCallback,
         onSessionId?: CliAgentSessionIdCallback,
         timeoutMsOverride?: number,
-        nativeGoal?: boolean
+        nativeGoal?: NativeGoalRun
       ): Promise<ParticipantRunResult> => {
         const timeoutMs = nativeGoal ? 0 : (timeoutMsOverride ?? this.runTimeoutMs);
         const currentThreadId = await ensureThread(timeoutMs);
@@ -2348,6 +2413,7 @@ export class CliAgentRunner {
             completedAgentMessages: [],
             nextAgentMessageStartsBlock: false,
             model: activeModel,
+            nativeGoal: nativeGoal ? { turnCompleted: false } : undefined,
             timer,
             abort: signal ? () => signal.removeEventListener("abort", abort) : undefined,
             onOutput,
@@ -2361,27 +2427,31 @@ export class CliAgentRunner {
         }
         signal?.addEventListener("abort", abort, { once: true });
         const codexTurnPrompt = this.codexPrompt(turnPrompt, repoPath, diffMode, kind, options);
-        if (nativeGoal) {
-          await sendRequest("thread/goal/set", {
+        try {
+          if (nativeGoal) {
+            await sendRequest("thread/goal/set", {
+              threadId: currentThreadId,
+              objective: nativeGoal.objective,
+              status: "active",
+              tokenBudget: null
+            });
+          }
+          const turn = await sendRequest("turn/start", {
             threadId: currentThreadId,
-            objective: codexTurnPrompt,
-            status: "active",
-            tokenBudget: null
-          });
-        }
-        const turn = await sendRequest("turn/start", {
-          threadId: currentThreadId,
-          effort: this.codexReasoningEffort(participant.reasoningEffort) ?? null,
-          input: [
-            {
-              type: "text",
-              text: codexTurnPrompt,
-              text_elements: []
-            }
-          ]
-        }, timeoutMs) as CodexAppServerTurnStartResult;
-        if (pendingTurn && !pendingTurn.turnId) {
-          pendingTurn.turnId = turn.turn?.id;
+            effort: this.codexReasoningEffort(participant.reasoningEffort) ?? null,
+            input: [
+              {
+                type: "text",
+                text: codexTurnPrompt,
+                text_elements: []
+              }
+            ]
+          }, timeoutMs) as CodexAppServerTurnStartResult;
+          if (pendingTurn && !pendingTurn.turnId) {
+            pendingTurn.turnId = turn.turn?.id;
+          }
+        } catch (error) {
+          rejectPendingTurn(error instanceof Error ? error : new Error(String(error)));
         }
         return resultPromise;
       }
@@ -2660,11 +2730,39 @@ export class CliAgentRunner {
     // turn-id fallback for older/experimental events that do not. A goal can
     // replace the root turn id while continuing in the same thread, whereas a
     // native subagent runs in a different thread.
-    if (!eventThreadId && pending.turnId && eventTurnId && eventTurnId !== pending.turnId) {
+    if (!eventThreadId && !pending.nativeGoal && pending.turnId && eventTurnId && eventTurnId !== pending.turnId) {
       return;
     }
     if (method === "turn/started") {
       pending.turnId = eventTurnId ?? pending.turnId;
+      if (pending.nativeGoal) {
+        pending.nativeGoal.turnCompleted = false;
+      }
+      return;
+    }
+    if (method === "thread/goal/updated" && pending.nativeGoal) {
+      const goal = this.asRecord(params.goal);
+      const status = this.codexNativeGoalStatus(this.stringField(goal ?? {}, "status"));
+      if (status) {
+        pending.nativeGoal.status = status;
+        if (status !== "active") {
+          this.emitLiveOutput(pending.onOutput, "tool", `Native goal ${this.codexNativeGoalStatusLabel(status)}\n`, undefined, {
+            activityKind: "status",
+            activityStatus: status === "complete" ? "completed" : "failed",
+            activityDetail: `Codex native goal status: ${status}`
+          });
+        }
+      }
+      if (pending.nativeGoal.turnCompleted && status && status !== "active") {
+        this.settleCodexNativeGoal(participant, cleanupPending, status);
+      }
+      return;
+    }
+    if (method === "thread/goal/cleared" && pending.nativeGoal) {
+      pending.nativeGoal.status = "cleared";
+      if (pending.nativeGoal.turnCompleted) {
+        this.settleCodexNativeGoal(participant, cleanupPending, "cleared");
+      }
       return;
     }
     if (method === "item/autoApprovalReview/started") {
@@ -2819,7 +2917,7 @@ export class CliAgentRunner {
     }
     const turn = this.asRecord(params.turn);
     const completedTurnId = this.stringField(turn ?? {}, "id") ?? eventTurnId;
-    if (completedTurnId && pending.turnId && completedTurnId !== pending.turnId) {
+    if (!pending.nativeGoal && completedTurnId && pending.turnId && completedTurnId !== pending.turnId) {
       void this.debugLogs?.write("cli.codex-app-server.turn-completed-ignored", {
         threadId: pending.threadId,
         expectedTurnId: pending.turnId,
@@ -2829,13 +2927,24 @@ export class CliAgentRunner {
     }
     const status = this.stringField(turn ?? {}, "status");
     this.flushCodexAppServerAgentText(pending);
-    const current = cleanupPending();
-    if (!current) {
-      return;
-    }
     if (status !== "completed") {
+      const current = cleanupPending();
+      if (!current) {
+        return;
+      }
       const error = this.asRecord(turn?.error);
       current.reject(new Error(this.stringField(error ?? {}, "message") ?? `codex app-server turn ${status ?? "failed"}`));
+      return;
+    }
+    if (pending.nativeGoal) {
+      pending.nativeGoal.turnCompleted = true;
+      if (pending.nativeGoal.status && pending.nativeGoal.status !== "active") {
+        this.settleCodexNativeGoal(participant, cleanupPending, pending.nativeGoal.status);
+      }
+      return;
+    }
+    const current = cleanupPending();
+    if (!current) {
       return;
     }
     const content = this.codexAppServerFinalContent(current);
@@ -2843,6 +2952,62 @@ export class CliAgentRunner {
       participant,
       ok: true,
       content,
+      durationMs: Date.now() - current.startedAt,
+      sessionId: current.threadId,
+      roleRuntime: undefined,
+      contextUsage: current.contextUsage
+    });
+  }
+
+  private codexNativeGoalStatus(status: string | undefined): CodexNativeGoalStatus | undefined {
+    return status === "active" ||
+      status === "paused" ||
+      status === "blocked" ||
+      status === "usageLimited" ||
+      status === "budgetLimited" ||
+      status === "complete"
+      ? status
+      : undefined;
+  }
+
+  private codexNativeGoalStatusLabel(status: CodexNativeGoalStatus): string {
+    if (status === "usageLimited") {
+      return "usage limited";
+    }
+    if (status === "budgetLimited") {
+      return "budget limited";
+    }
+    return status;
+  }
+
+  private settleCodexNativeGoal(
+    participant: ParticipantConfig,
+    cleanupPending: () => CodexAppServerPendingTurn | undefined,
+    status: Exclude<CodexNativeGoalStatus, "active"> | "cleared"
+  ): void {
+    const current = cleanupPending();
+    if (!current) {
+      return;
+    }
+    const content = this.codexAppServerFinalContent(current);
+    if (status === "complete" || status === "cleared") {
+      current.resolve({
+        participant,
+        ok: true,
+        content,
+        durationMs: Date.now() - current.startedAt,
+        sessionId: current.threadId,
+        roleRuntime: undefined,
+        contextUsage: current.contextUsage
+      });
+      return;
+    }
+    const label = this.codexNativeGoalStatusLabel(status);
+    current.resolve({
+      participant,
+      ok: false,
+      content,
+      error: `Codex native goal is ${label}.`,
       durationMs: Date.now() - current.startedAt,
       sessionId: current.threadId,
       roleRuntime: undefined,
@@ -3416,11 +3581,28 @@ export class CliAgentRunner {
         options,
         toolConfig,
         extraReadableDirs,
-        "one-shot",
+        options.nativeGoal ? "one-shot-stream" : "one-shot",
         newSessionId
       );
-      this.logClaudeLaunch(participant, repoPath, kind, options, args, toolConfig, extraReadableDirs, "one-shot");
+      this.logClaudeLaunch(
+        participant,
+        repoPath,
+        kind,
+        options,
+        args,
+        toolConfig,
+        extraReadableDirs,
+        options.nativeGoal ? "one-shot-stream" : "one-shot"
+      );
       this.reportSessionId(options.onSessionId, newSessionId);
+      const streamState: ClaudeOneShotStreamState | undefined = options.nativeGoal
+        ? {
+            buffer: "",
+            streamedText: "",
+            messages: [],
+            nextTextBlockStartsBlock: false
+          }
+        : undefined;
 
       const result = await runCommand(
         "claude",
@@ -3429,16 +3611,37 @@ export class CliAgentRunner {
           cwd: repoPath,
           input: options.nativeGoal ? `/goal ${prompt}` : prompt,
           timeoutMs: options.timeoutMs ?? this.runTimeoutMs,
+          allowNoTimeout: Boolean(options.nativeGoal),
           env: this.agentRunEnv(options),
           envOptions: CLAUDE_CODE_COMMAND_ENV_OPTIONS,
           signal,
-          onStdout: () => options.onProviderActivity?.(),
+          onStdout: (chunk) => {
+            options.onProviderActivity?.();
+            if (streamState) {
+              this.handleClaudeOneShotStreamChunk(chunk, streamState, participant, options);
+            }
+          },
           onStderr: () => options.onProviderActivity?.()
         }
       );
-      const sessionId = this.extractClaudeSessionId(result.stdout) ?? newSessionId ?? options.sessionId;
+      if (streamState?.buffer.trim()) {
+        this.handleClaudeOneShotStreamLine(streamState.buffer, streamState, participant, options);
+        streamState.buffer = "";
+      }
+      if (streamState?.error) {
+        throw new Error(streamState.error);
+      }
+      const sessionId = streamState?.sessionId ?? this.extractClaudeSessionId(result.stdout) ?? newSessionId ?? options.sessionId;
       this.reportSessionId(options.onSessionId, sessionId);
-      const content = this.extractClaudeText(result.stdout).trim();
+      const content = (
+        streamState
+          ? this.extractClaudeWarmResultText(streamState.resultEvent) ?? (
+              streamState.messages.length > 0
+                ? this.finalTextFromMessageItems(streamState.messages)
+                : this.trailingTextBlock(streamState.streamedText)
+            )
+          : this.extractClaudeText(result.stdout)
+      ).trim();
       if (!content && !options.allowEmptyContent) {
         throw new Error("Claude Code completed without response content.");
       }
@@ -3450,9 +3653,16 @@ export class CliAgentRunner {
         sessionId,
         roleRuntime: options.role && !options.sessionId ? "claude-agent" : undefined,
         contextUsage:
-          this.extractClaudeContextUsage(result.stdout, participant) ??
+          (streamState
+            ? buildAgentContextUsage({
+                usedTokens: streamState.usedTokens,
+                contextWindowTokens: streamState.contextWindowTokens ?? contextWindowForModel(participant.kind, streamState.model),
+                source: "claude-code",
+                model: streamState.model
+              })
+            : this.extractClaudeContextUsage(result.stdout, participant)) ??
           await this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant)
-      }, participant, options), result.stdout, participant, "one-shot");
+      }, participant, options), streamState?.resultEvent ?? result.stdout, participant, options.nativeGoal ? "one-shot-stream" : "one-shot");
     } catch (error) {
       if (this.agentModeForRun(kind, options) === "auto" && this.isClaudePermissionModeUnsupported(error)) {
         // Fail loudly instead of silently downgrading: Auto-review must run as native
@@ -3745,7 +3955,7 @@ export class CliAgentRunner {
     options: CliAgentRunOptions,
     toolConfig: ClaudeToolConfig,
     extraReadableDirs: string[],
-    transport: "one-shot" | "warm",
+    transport: "one-shot" | "one-shot-stream" | "warm",
     newSessionId?: string
   ): string[] {
     const args = transport === "warm"
@@ -3760,7 +3970,17 @@ export class CliAgentRunner {
           "--permission-mode",
           toolConfig.permissionMode
         ]
-      : [
+      : transport === "one-shot-stream"
+        ? [
+            "-p",
+            "--verbose",
+            "--include-partial-messages",
+            "--output-format",
+            "stream-json",
+            "--permission-mode",
+            toolConfig.permissionMode
+          ]
+        : [
           "-p",
           "--output-format",
           "json",
@@ -3892,6 +4112,71 @@ export class CliAgentRunner {
     void this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant)
       .then((logUsage) => current.resolve({ ...result, contextUsage: logUsage }))
       .catch(() => current.resolve(result));
+  }
+
+  private handleClaudeOneShotStreamChunk(
+    chunk: string,
+    state: ClaudeOneShotStreamState,
+    participant: ParticipantConfig,
+    options: CliAgentRunOptions
+  ): void {
+    state.buffer += chunk;
+    let newline = state.buffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = state.buffer.slice(0, newline).trimEnd();
+      state.buffer = state.buffer.slice(newline + 1);
+      if (line.trim()) {
+        this.handleClaudeOneShotStreamLine(line, state, participant, options);
+      }
+      newline = state.buffer.indexOf("\n");
+    }
+  }
+
+  private handleClaudeOneShotStreamLine(
+    line: string,
+    state: ClaudeOneShotStreamState,
+    participant: ParticipantConfig,
+    options: CliAgentRunOptions
+  ): void {
+    let event: unknown;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      state.error = `claude native goal emitted invalid JSON: ${line.slice(0, 120)}`;
+      return;
+    }
+    state.sessionId = this.findSessionId(event) ?? state.sessionId;
+    this.reportSessionId(options.onSessionId, state.sessionId);
+    state.model = this.findModelId(event) ?? state.model ?? participant.model;
+    state.usedTokens = this.findContextUsedTokens(event) ?? state.usedTokens;
+    state.contextWindowTokens = this.findContextWindowTokens(event) ?? state.contextWindowTokens;
+    state.error = this.claudeWarmStreamError(event) ?? state.error;
+    const toolSummary = this.claudeWarmToolSummary(event);
+    if (toolSummary) {
+      this.emitLiveOutput(options.onOutput, "tool", `${toolSummary.label}\n`, undefined, {
+        activityKind: toolSummary.kind,
+        activityStatus: "started"
+      });
+    }
+    if (this.claudeWarmTextBlockStarted(event) && state.streamedText.trim()) {
+      state.nextTextBlockStartsBlock = true;
+    }
+    const streamDelta = this.extractClaudeStreamEventTextDelta(event);
+    if (streamDelta) {
+      if (state.nextTextBlockStartsBlock) {
+        state.streamedText = this.textWithAgentMessageBoundary(state.streamedText, streamDelta);
+        state.nextTextBlockStartsBlock = false;
+      }
+      state.streamedText += streamDelta;
+      this.emitLiveOutput(options.onOutput, "text", streamDelta, state.streamedText);
+    }
+    const assistantText = this.extractClaudeWarmAssistantText(event);
+    if (assistantText) {
+      state.messages.push(assistantText);
+    }
+    if (this.isClaudeWarmResult(event)) {
+      state.resultEvent = event;
+    }
   }
 
   private claudeWarmUserMessage(prompt: string): Record<string, unknown> {
@@ -4027,7 +4312,8 @@ export class CliAgentRunner {
 
   private createNativeGoalIdleMonitor(
     participant: ParticipantConfig,
-    onOutput: CliAgentOutputCallback | undefined
+    onOutput: CliAgentOutputCallback | undefined,
+    warningMs = NATIVE_GOAL_IDLE_WARNING_MS
   ): { touch: () => void; close: () => void } {
     let timer: NodeJS.Timeout | undefined;
     let closed = false;
@@ -4048,16 +4334,14 @@ export class CliAgentRunner {
           kind: "tool",
           text: `${text}\n`,
           activityKind: "status",
-          activityStatus: "started",
-          activityDetail: text
+          activityStatus: "started"
         });
         void this.writeDebugLog("cli-agent-native-goal-idle-warning", {
           providerKind: participant.kind,
           participantId: participant.id,
-          idleMs: NATIVE_GOAL_IDLE_WARNING_MS
+          idleMs: warningMs
         });
-        schedule();
-      }, NATIVE_GOAL_IDLE_WARNING_MS);
+      }, warningMs);
       timer.unref();
     };
     const touch = (): void => {
@@ -4461,7 +4745,7 @@ export class CliAgentRunner {
     args: string[],
     toolConfig: ClaudeToolConfig,
     extraReadableDirs: string[],
-    transport: "one-shot" | "warm"
+    transport: "one-shot" | "one-shot-stream" | "warm"
   ): void {
     if (!this.debugLogs) {
       return;
@@ -4536,7 +4820,7 @@ export class CliAgentRunner {
     result: ParticipantRunResult,
     raw: unknown,
     participant: ParticipantConfig,
-    transport: "one-shot" | "warm"
+    transport: "one-shot" | "one-shot-stream" | "warm"
   ): ParticipantRunResult {
     const denials = this.claudePermissionDenials(raw);
     if (denials.length === 0) {

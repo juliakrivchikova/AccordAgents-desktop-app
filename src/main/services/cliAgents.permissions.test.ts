@@ -317,6 +317,7 @@ test("codex app-server stream accepts goal continuation root turn ids in the sam
   const resolved: unknown[] = [];
   const pending = makeCodexPendingTurn({
     turnId: "requested-turn",
+    nativeGoal: { status: "active", turnCompleted: false },
     onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event),
     resolve: (result: unknown) => resolved.push(result)
   });
@@ -330,15 +331,49 @@ test("codex app-server stream accepts goal continuation root turn ids in the sam
     fail
   );
 
+  send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "requested-turn", status: "completed" } } });
+  assert.equal(resolved.length, 0);
+
   send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "goal-continuation-turn" } } });
   send({ method: "item/started", params: { threadId: "thread-1", turnId: "goal-continuation-turn", item: { type: "agentMessage" } } });
   send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "goal-continuation-turn", delta: "Status: tests are running." } });
   send({ method: "item/completed", params: { threadId: "thread-1", turnId: "goal-continuation-turn", item: { type: "agentMessage", text: "Status: tests are running." } } });
   send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "goal-continuation-turn", status: "completed" } } });
+  assert.equal(resolved.length, 0);
+  send({
+    method: "thread/goal/updated",
+    params: {
+      threadId: "thread-1",
+      turnId: "goal-continuation-turn",
+      goal: { status: "complete", objective: "finish the task" }
+    }
+  });
 
   assert.equal(pending.turnId, "goal-continuation-turn");
   assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "Status: tests are running.");
   assert.equal((resolved[0] as { content: string }).content, "Status: tests are running.");
+});
+
+test("codex app-server surfaces non-success native goal terminal states", () => {
+  const runner = makeRunner() as any;
+  const resolved: unknown[] = [];
+  const pending = makeCodexPendingTurn({
+    nativeGoal: { status: "active", turnCompleted: false },
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+    record,
+    { id: "p1", label: "Agent" },
+    pending,
+    () => pending,
+    (error: Error) => { throw error; }
+  );
+
+  send({ method: "turn/completed", params: { threadId: "thread-1", turn: { status: "completed" } } });
+  send({ method: "thread/goal/updated", params: { threadId: "thread-1", goal: { status: "usageLimited" } } });
+
+  assert.equal((resolved[0] as { ok: boolean }).ok, false);
+  assert.match((resolved[0] as { error: string }).error, /usage limited/);
 });
 
 test("codex app-server stream keeps raw tool output out of agent text and completes bounded activities", () => {
@@ -1672,6 +1707,50 @@ test("claude outside-directory parity fixture adds no app path denial or writabl
   assert.equal(serialized.includes("/outside/explicit-target.txt"), false);
   assert.equal(serialized.includes("sandbox.filesystem.allowWrite"), false);
   assert.equal(serialized.includes("writable_roots"), false);
+});
+
+test("claude native goal uses one streaming print invocation", () => {
+  const runner = makeRunner() as any;
+  const options = {
+    ...chatOptions({
+      agentMode: "auto",
+      workspaceWrite: true,
+      webAccess: true
+    }),
+    nativeGoal: { name: "goal", objective: "finish the task" }
+  };
+  const config = runner.claudeToolConfig("chat", "/repo", [], options);
+  const args = runner.claudeLaunchArgs(
+    { id: "claude-1", kind: "claude-code", label: "@claude" },
+    "chat",
+    options,
+    config,
+    [],
+    "one-shot-stream",
+    "session-1"
+  ) as string[];
+
+  assert.equal(args.filter((value) => value === "-p").length, 1);
+  assert.equal(args.includes("--include-partial-messages"), true);
+  assert.equal(args[args.indexOf("--output-format") + 1], "stream-json");
+  assert.equal(args.includes("--input-format"), false);
+});
+
+test("native goal idle detector warns once per idle episode and rearms on activity", async () => {
+  const runner = makeRunner() as any;
+  const outputs: unknown[] = [];
+  const monitor = runner.createNativeGoalIdleMonitor(
+    { id: "p1", kind: "claude-code", label: "Claude" },
+    (event: unknown) => outputs.push(event),
+    15
+  );
+  await new Promise((resolve) => setTimeout(resolve, 45));
+  assert.equal(outputs.length, 1);
+  assert.equal((outputs[0] as { activityDetail?: string }).activityDetail, undefined);
+  monitor.touch();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(outputs.length, 2);
+  monitor.close();
 });
 
 test("claude auto chat without app MCP still omits allowedTools", () => {

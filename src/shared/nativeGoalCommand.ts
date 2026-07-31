@@ -12,7 +12,7 @@ export function parseNativeGoalCommand(content: string): NativeGoalCommandParseR
     return { kind: "none" };
   }
   if (tokens.length > 1) {
-    return { kind: "invalid", error: "Use /goal only once in a message." };
+    return { kind: "none" };
   }
 
   const start = tokens[0];
@@ -22,7 +22,7 @@ export function parseNativeGoalCommand(content: string): NativeGoalCommandParseR
   const leading = prefix.replace(TARGET_MENTION_RE, "").trim() === "";
   const trailing = suffix.trim() === "";
   if (!leading && !trailing) {
-    return { kind: "invalid", error: "Put /goal at the beginning or end of the message." };
+    return { kind: "none" };
   }
 
   const contentWithoutCommand = removeGoalToken(content, start, end, leading);
@@ -30,6 +30,16 @@ export function parseNativeGoalCommand(content: string): NativeGoalCommandParseR
     return { kind: "invalid", error: "Add a goal after /goal or before a trailing /goal." };
   }
   return { kind: "valid", contentWithoutCommand };
+}
+
+export function nativeGoalObjective(contentWithoutCommand: string, targetHandle: string): string {
+  const escapedHandle = targetHandle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const targetMention = new RegExp(`(^|\\s)@${escapedHandle}(?=\\s|$)`, "i");
+  return contentWithoutCommand
+    .replace(targetMention, "$1")
+    .replace(/[ \t]+(?=\n|$)/g, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
 }
 
 function nativeGoalTokenOffsets(content: string): number[] {

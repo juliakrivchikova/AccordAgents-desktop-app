@@ -1224,14 +1224,18 @@ test("chat native /goal preserves the posted message while enabling the provider
   await service.sendMessage({ conversationId: conversation.id, runId: "native-goal-run", content });
   await waitFor(() => runs.length === 1);
 
-  assert.equal(runs[0].options.nativeGoal, true);
+  assert.deepEqual(runs[0].options.nativeGoal, { name: "goal", objective: "finish the implementation" });
   assert.match(runs[0].prompt, /@codex finish the implementation/);
   assert.doesNotMatch(runs[0].prompt, /finish the implementation \/goal/);
   const posted = storage.current.messages.filter((message: ChatMessage) => message.role === "user").at(-1);
   assert.equal(posted?.content, content);
+  assert.deepEqual(posted?.metadata?.nativeCommand, {
+    name: "goal",
+    objective: "finish the implementation"
+  });
 });
 
-test("chat native /goal requires one target and a non-empty edge command", async () => {
+test("chat native /goal requires one target and a non-empty edge command while middle/repeated tokens stay prose", async () => {
   const codex = chatParticipant("codex-cli");
   const claude = chatParticipant("claude-code");
   const conversation = chatConversation([codex, claude]);
@@ -1253,14 +1257,16 @@ test("chat native /goal requires one target and a non-empty edge command", async
     }),
     /Add a goal/
   );
-  await assert.rejects(
-    () => service.sendMessage({
-      conversationId: conversation.id,
-      runId: "native-goal-middle",
-      content: "@codex finish /goal this"
-    }),
-    /beginning or end/
-  );
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "native-goal-middle",
+    content: "@codex finish /goal this"
+  });
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "native-goal-repeated",
+    content: "@codex /goal finish /goal"
+  });
 });
 
 test("chat does not activate native /goal from inline code", async () => {
@@ -1282,7 +1288,7 @@ test("chat does not activate native /goal from inline code", async () => {
     content: "@codex explain `/goal`"
   });
   await waitFor(() => runs.length === 1);
-  assert.equal(runs[0].options.nativeGoal, false);
+  assert.equal(runs[0].options.nativeGoal, undefined);
 });
 
 test("reported provider session id is persisted even if the first turn fails", async () => {
@@ -7640,6 +7646,27 @@ test("app_chat_send_message publishes a participant message and lets the author 
   });
   assert.equal(reacted.status, "added");
   assert.equal(storage.current.messages[1].metadata.reactions["✅"][0].actorLabel, "@codex");
+});
+
+test("app_chat_send_message keeps participant /goal prose ordinary", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: [],
+    snapshotMaxSequence: 0,
+    runId: "participant-goal-prose",
+    triggerThreadId: "user-message"
+  };
+
+  await service.sendChatMessageFromTool(actor, { content: "/goal this is participant prose" });
+
+  assert.equal(storage.current.messages[1].role, "participant");
+  assert.equal(storage.current.messages[1].metadata.nativeCommand, undefined);
 });
 
 test("app_chat_send_message imports image attachments and exposes them in the same run", async () => {

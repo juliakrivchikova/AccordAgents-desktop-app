@@ -130,7 +130,7 @@ import {
   resolveChatManageRolesParticipantsPermission
 } from "../../shared/agentPermissions";
 import { normalizeAgentContextUsage } from "../../shared/agentContext";
-import { parseNativeGoalCommand } from "../../shared/nativeGoalCommand";
+import { nativeGoalObjective, parseNativeGoalCommand } from "../../shared/nativeGoalCommand";
 import {
   chatAppToolCapabilitiesEqual,
   hasChatAppToolCapability,
@@ -4839,6 +4839,7 @@ export class ChatService {
       let repoFileMentions: RepoFileMention[];
       let dispatch: { targets: ChatParticipant[]; unknownHandles: string[] };
       let skillValidation: { skillMentions: ChatSkillMention[]; targets: ChatParticipant[]; blocks: string[] };
+      let nativeGoal: ReturnType<typeof parseNativeGoalCommand> = { kind: "none" };
       const chatThreadRootId = request.chatThreadRootId?.trim() || undefined;
       const replyContext: ChatDispatchReplyContext = {
         parentMessageId: request.parentMessageId,
@@ -4856,7 +4857,7 @@ export class ChatService {
           replyContext
         );
         dispatch = { ...dispatch, targets: skillValidation.targets };
-        const nativeGoal = parseNativeGoalCommand(content);
+        nativeGoal = parseNativeGoalCommand(content);
         if (nativeGoal.kind === "invalid") {
           throw new Error(nativeGoal.error);
         }
@@ -4880,6 +4881,15 @@ export class ChatService {
         ...(repoFileMentions.length > 0 ? { repoFileMentions } : {}),
         ...(preparedImages.attachments.length > 0 ? { imageAttachments: preparedImages.attachments } : {})
       });
+      if (nativeGoal.kind === "valid") {
+        userMessage.metadata = {
+          ...userMessage.metadata,
+          nativeCommand: {
+            name: "goal",
+            objective: nativeGoalObjective(nativeGoal.contentWithoutCommand, dispatch.targets[0].handle)
+          }
+        };
+      }
       if (!request.threadId?.trim()) {
         userMessage.metadata = { ...userMessage.metadata, threadId: userMessage.id };
       }
@@ -5686,13 +5696,14 @@ export class ChatService {
     const sessionState = await this.sessionForParticipant(conversation, participant);
     const session = sessionState.session;
     const sourcePromptConversation = options.promptConversation ?? conversation;
-    const nativeGoal = triggerMessage.role === "user"
-      ? parseNativeGoalCommand(triggerMessage.content)
-      : { kind: "none" as const };
-    const promptTriggerMessage = nativeGoal.kind === "valid"
-      ? { ...triggerMessage, content: nativeGoal.contentWithoutCommand }
+    const nativeGoal = triggerMessage.role === "user" && triggerMessage.metadata?.nativeCommand?.name === "goal"
+      ? triggerMessage.metadata.nativeCommand
+      : undefined;
+    const parsedTrigger = nativeGoal ? parseNativeGoalCommand(triggerMessage.content) : { kind: "none" as const };
+    const promptTriggerMessage = parsedTrigger.kind === "valid"
+      ? { ...triggerMessage, content: parsedTrigger.contentWithoutCommand }
       : triggerMessage;
-    const promptConversation = nativeGoal.kind === "valid"
+    const promptConversation = parsedTrigger.kind === "valid"
       ? {
           ...sourcePromptConversation,
           messages: sourcePromptConversation.messages.map((message) =>
@@ -5866,7 +5877,7 @@ export class ChatService {
     try {
       progressSink.beginAttempt();
       const participantRunsRemotely = this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution) === "remote";
-      if (nativeGoal.kind === "valid" && participantRunsRemotely) {
+      if (nativeGoal && participantRunsRemotely) {
         const message = `@${participant.handle} native /goal requires the local dedicated CLI transport; remote execution does not expose the provider's native goal protocol.`;
         pendingMessage.status = "error";
         pendingMessage.content = message;
@@ -6070,7 +6081,7 @@ export class ChatService {
         agentEnvKey: agentEnvironment.version,
         agentMode,
         permissions,
-        nativeGoal: nativeGoal.kind === "valid",
+        nativeGoal,
         onOutput: progressSink.emit,
         onSessionId: persistSessionId,
         warm: {

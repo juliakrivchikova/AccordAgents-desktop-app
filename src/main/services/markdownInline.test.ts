@@ -186,10 +186,11 @@ test("parseMarkdownInline keeps inline code as code for renderer-side linkificat
   ]);
 });
 
-test("parseMarkdownInline recognizes posted /goal tokens outside code", () => {
-  assert.deepEqual(commands(parseMarkdownInline("@drew finish it /goal")), ["goal"]);
-  assert.deepEqual(commands(parseMarkdownInline("**/goal** finish it")), ["goal"]);
-  assert.deepEqual(commands(parseMarkdownInline("Use `/goal` as text")), []);
-  assert.deepEqual(commands(parseMarkdownInline("/goalkeeper is not a command")), []);
-  assert.deepEqual(commands(parseMarkdownInline("/Goal is not the native command")), []);
+test("parseMarkdownInline recognizes /goal only when message metadata enables it", () => {
+  assert.deepEqual(commands(parseMarkdownInline("@drew finish it /goal")), []);
+  assert.deepEqual(commands(parseMarkdownInline("@drew finish it /goal", { recognizedCommand: "goal" })), ["goal"]);
+  assert.deepEqual(commands(parseMarkdownInline("**/goal** finish it", { recognizedCommand: "goal" })), ["goal"]);
+  assert.deepEqual(commands(parseMarkdownInline("Use `/goal` as text", { recognizedCommand: "goal" })), []);
+  assert.deepEqual(commands(parseMarkdownInline("/goalkeeper is not a command", { recognizedCommand: "goal" })), []);
+  assert.deepEqual(commands(parseMarkdownInline("/Goal is not the native command", { recognizedCommand: "goal" })), []);
 });

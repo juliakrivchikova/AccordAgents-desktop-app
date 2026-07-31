@@ -1093,6 +1093,10 @@ export interface ChatMessageMetadata {
   approvedContinuation?: boolean;
   syncedThroughMessageId?: string;
   runId?: string;
+  nativeCommand?: {
+    name: "goal";
+    objective: string;
+  };
   compaction?: {
     triggeredBy: "user" | "agent";
     participantId: string;

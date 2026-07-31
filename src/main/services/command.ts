@@ -25,6 +25,7 @@ export interface CommandOptions {
   cwd?: string;
   input?: string;
   timeoutMs?: number;
+  allowNoTimeout?: boolean;
   env?: NodeJS.ProcessEnv;
   envOptions?: CommandEnvironmentOptions;
   primeLoginShellEnv?: boolean;
@@ -115,11 +116,19 @@ export class CommandError extends Error {
   }
 }
 
+export function resolveCommandTimeoutMs(requestedTimeoutMs: number | undefined, allowNoTimeout = false): number {
+  const requested = requestedTimeoutMs ?? 30_000;
+  if (requested > 0) {
+    return requested;
+  }
+  return requested === 0 && allowNoTimeout ? 0 : 30_000;
+}
+
 export async function runCommand(command: string, args: string[], options: CommandOptions = {}): Promise<CommandResult> {
   if (options.primeLoginShellEnv !== false) {
     await ensureLoginShellEnvPrimed();
   }
-  const timeoutMs = options.timeoutMs ?? 30_000;
+  const timeoutMs = resolveCommandTimeoutMs(options.timeoutMs, options.allowNoTimeout === true);
 
   return new Promise((resolve, reject) => {
     const useProcessGroup = options.killProcessGroup === true && process.platform !== "win32";

@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { ParticipantConfig } from "../../shared/types";
-import { CliAgentRunner, geminiMcpProxyLaunchArgs, syncGeminiMcpConfig } from "./cliAgents";
+import {
+  antigravityInteractiveGoalAtPrompt,
+  antigravityInteractivePermissionPrompt,
+  CliAgentRunner,
+  geminiMcpProxyLaunchArgs,
+  syncGeminiMcpConfig
+} from "./cliAgents";
 import {
   buildGeminiExecInvocation,
   buildGeminiInteractiveGoalInvocation,
@@ -141,6 +147,21 @@ test("buildGeminiInteractiveGoalInvocation preserves native /goal and print-mode
   assert.equal(invocation.args.includes("--print"), false);
   assert.equal(invocation.args.includes("--dangerously-skip-permissions"), true);
   assert.equal(invocation.args.includes("--model"), false);
+});
+
+test("Antigravity native goal waits for the returned interactive prompt", () => {
+  const initial = "? for shortcuts\n> /goal do work\nGenerating...";
+  assert.equal(antigravityInteractiveGoalAtPrompt("? for shortcuts"), false);
+  assert.equal(antigravityInteractiveGoalAtPrompt(initial), false);
+  assert.equal(antigravityInteractiveGoalAtPrompt(`${initial}\nFINAL\n? for shortcuts`), true);
+});
+
+test("Antigravity native goal recognizes the read-only TUI permission dialog", () => {
+  assert.equal(antigravityInteractivePermissionPrompt("Requesting permission for:\n pwd"), false);
+  assert.equal(
+    antigravityInteractivePermissionPrompt("Requesting permission for:\n pwd\nDo you want to proceed?"),
+    true
+  );
 });
 
 test("extractGeminiLogConversationId reads interactive PTY conversation creation", () => {
