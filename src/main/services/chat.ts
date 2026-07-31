@@ -6369,7 +6369,7 @@ export class ChatService {
       staticEnvelope = [
         `You are @${participant.handle}. Continue the same chat session.`,
         `Role: ${session.roleLabel}.`,
-        this.promptFallbackStaticInstructions(session),
+        this.promptFallbackStaticInstructions(participant, session),
         dynamicHeader,
         `App MCP is the source of truth for chat context. History files at ${historyMarkdownPath} and ${historyJsonPath} are debug-only fallbacks.`
       ].join("\n");
@@ -6675,20 +6675,32 @@ export class ChatService {
       "Role instructions:",
       session.roleInstructions,
       "",
-      this.staticChatInstructions(session)
+      this.staticChatInstructions(
+        session,
+        this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution) !== "remote"
+      )
     ].join("\n");
   }
 
-  private promptFallbackStaticInstructions(session: ChatParticipantSession): string {
+  private promptFallbackStaticInstructions(
+    participant: ChatParticipant,
+    session: ChatParticipantSession
+  ): string {
     return [
       "Role instructions:",
       session.roleInstructions,
       "",
-      this.staticChatInstructions(session)
+      this.staticChatInstructions(
+        session,
+        this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution) !== "remote"
+      )
     ].join("\n");
   }
 
-  private staticChatInstructions(session: ChatParticipantSession): string {
+  private staticChatInstructions(
+    session: ChatParticipantSession,
+    includeParticipantActivityTool = true
+  ): string {
     return [
       "Chat participant boundaries:",
       "- You are one participant in a multi-participant chat.",
@@ -6697,7 +6709,7 @@ export class ChatService {
       "- Do not ask another participant for user-owned clarification.",
       "",
       "App MCP policy:",
-      this.appToolPromptPolicy(session),
+      this.appToolPromptPolicy(session, includeParticipantActivityTool),
       "",
       "Response rules:",
       "- The user strongly prefers concise replies. Do not repeat accepted context or restate proposals when a short verdict, blocker, or delta is enough.",
@@ -6717,7 +6729,10 @@ export class ChatService {
     ].join("\n");
   }
 
-  private appToolPromptPolicy(session: ChatParticipantSession): string {
+  private appToolPromptPolicy(
+    session: ChatParticipantSession,
+    includeParticipantActivityTool = true
+  ): string {
     const agentMode = normalizeChatAgentMode(session.participantAgentMode);
     const canRequestPermissions = this.canRequestPermissionChanges(session);
     const canRequestCompaction = normalizeChatParticipantRequestPermission(
@@ -6743,9 +6758,17 @@ export class ChatService {
       : [
           "Permission changes are not directly available to this participant. If the current task needs a blocked capability, explain the specific capability needed before refusing."
         ];
+    const readOnlyChatTools = [
+      "app_chat_get_context",
+      "app_chat_get_participants",
+      ...(includeParticipantActivityTool ? [APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL] : []),
+      "app_chat_read_messages",
+      "app_chat_list_attachments",
+      "app_chat_read_attachment"
+    ];
     const lines = [
       "App MCP tools: use the connected `accord_agents` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
-      `Read-only chat MCP tools: \`app_chat_get_context\`, \`app_chat_get_participants\`, \`${APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL}\`, \`app_chat_read_messages\`, \`app_chat_list_attachments\`, and \`app_chat_read_attachment\`. Prefer them over history files for roster, authoritative member activity, thread, messages, and screenshots.`,
+      `Read-only chat MCP tools: ${readOnlyChatTools.map((tool) => `\`${tool}\``).join(", ")}. Prefer them over history files for roster, authoritative member activity, thread, messages, and screenshots.`,
       "Reaction MCP tool: `app_chat_react` adds or toggles an emoji reaction on a specific message. To react, call it with the message `id` from `app_chat_read_messages` and an allowed emoji.",
       "Send-message MCP tool: `app_chat_send_message` posts immediately and returns `messageId`; use only for mid-turn visibility, not normal replies. It can attach PNG/JPEG/WebP with `attachments: [{ \"kind\": \"image\", \"sourcePath\": \"path.png\" }]` from image paths inside the selected repository when repoRead is granted.",
       "If a message lists attached images, call `app_chat_read_attachment` with the attachment ID before reasoning about visual details.",

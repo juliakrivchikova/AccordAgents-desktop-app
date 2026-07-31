@@ -9,6 +9,7 @@ import type {
   ChatParticipant,
   ChatParticipantActiveWork,
   ChatParticipantActivitySnapshot,
+  ChatParticipantRequestStatus,
   Conversation,
   RemoteRunHandle
 } from "./types";
@@ -31,6 +32,9 @@ export function buildChatParticipantActivitySnapshot(
   const activeWorkByParticipantId = new Map<string, ChatParticipantActiveWork[]>(
     participants.map((participant) => [participant.id, []])
   );
+  const terminalRequestWorkByParticipantId = new Map<string, ChatParticipantActiveWork[]>(
+    participants.map((participant) => [participant.id, []])
+  );
   const activeRuns = activeRunSummaryForConversation(conversation);
   const liveRunIds = new Set(activeRuns.runIds);
   const compactions = readParticipantCompactions(conversation.metadata);
@@ -44,6 +48,9 @@ export function buildChatParticipantActivitySnapshot(
     }
     compactionRunIds.add(compaction.runId);
     const message = newestMessageForRun(conversation.messages, compaction.runId, participantId);
+    const remoteRun = remoteRuns[compaction.runId];
+    const owner = runOwners[compaction.runId];
+    const remoteStatus = message?.metadata?.remoteRunStatus;
     addActiveWork(activeWorkByParticipantId, participantId, {
       kind: "compaction",
       status: "running",
@@ -53,6 +60,10 @@ export function buildChatParticipantActivitySnapshot(
       startedAt: compaction.startedAt,
       lastActivityAt: latestTimestamp([
         compaction.startedAt,
+        remoteRun?.updatedAt,
+        remoteRun?.lastPolledAt,
+        remoteStatus?.updatedAt,
+        owner?.updatedAt,
         ...messageActivityTimestamps(message)
       ], compaction.startedAt)
     });
@@ -111,14 +122,12 @@ export function buildChatParticipantActivitySnapshot(
     if (!batch) {
       continue;
     }
+    const batchHasActiveItems = batch.status === "pending_approval" || batch.status === "running";
     for (const item of batch.items) {
-      if (
-        !participantIds.has(item.targetParticipantId) ||
-        (item.status !== "pending_approval" && item.status !== "running")
-      ) {
+      if (!participantIds.has(item.targetParticipantId)) {
         continue;
       }
-      addActiveWork(activeWorkByParticipantId, item.targetParticipantId, {
+      const work: ChatParticipantActiveWork = {
         kind: "participant_request",
         status: item.status,
         requestId: batch.id,
@@ -134,7 +143,12 @@ export function buildChatParticipantActivitySnapshot(
               } as const
             }
           : {})
-      });
+      };
+      if (item.status === "pending_approval" || item.status === "running") {
+        addActiveWork(activeWorkByParticipantId, item.targetParticipantId, work);
+      } else if (batchHasActiveItems && isTerminalParticipantRequestStatus(item.status)) {
+        addActiveWork(terminalRequestWorkByParticipantId, item.targetParticipantId, work);
+      }
     }
   }
 
@@ -192,13 +206,20 @@ export function buildChatParticipantActivitySnapshot(
         startedAt: message.createdAt,
         lastActivityAt: message.createdAt,
         approvalDependency: {
-          type: "participant",
-          participantId: mention.targetParticipantId,
-          handle: mention.targetHandle,
+          type: "user",
           summary: `Approval required to notify @${mention.targetHandle}.`
         }
       });
     }
+  }
+
+  for (const participant of participants) {
+    const status = statuses.get(participant.id) ?? "idle";
+    const activeWork = activeWorkByParticipantId.get(participant.id) ?? [];
+    if (!ACTIVE_ROSTER_STATUSES.has(status) || activeWork.length === 0) {
+      continue;
+    }
+    activeWork.push(...(terminalRequestWorkByParticipantId.get(participant.id) ?? []));
   }
 
   const statusCounts: Record<ChatParticipantRosterStatus, number> = {
@@ -429,10 +450,34 @@ function sortActiveWork(work: ChatParticipantActiveWork[]): ChatParticipantActiv
   return [...work].sort((left, right) =>
     left.startedAt.localeCompare(right.startedAt)
     || left.kind.localeCompare(right.kind)
-    || cleanString("runId" in left ? left.runId : "requestId" in left ? left.requestId : "").localeCompare(
-      cleanString("runId" in right ? right.runId : "requestId" in right ? right.requestId : "")
-    )
+    || activeWorkOperationId(left).localeCompare(activeWorkOperationId(right))
+    || cleanString(left.messageId).localeCompare(cleanString(right.messageId))
+    || activeWorkFinalDiscriminator(left).localeCompare(activeWorkFinalDiscriminator(right))
   );
+}
+
+function activeWorkOperationId(work: ChatParticipantActiveWork): string {
+  return cleanString("runId" in work ? work.runId : "requestId" in work ? work.requestId : "");
+}
+
+function activeWorkFinalDiscriminator(work: ChatParticipantActiveWork): string {
+  if (work.kind !== "approval") {
+    return work.status;
+  }
+  return [
+    work.approvalType,
+    cleanString(work.approvalDependency?.summary)
+  ].join(":");
+}
+
+function isTerminalParticipantRequestStatus(
+  status: ChatParticipantRequestStatus
+): boolean {
+  return status === "answered"
+    || status === "completed"
+    || status === "failed"
+    || status === "denied"
+    || status === "interrupted";
 }
 
 function earliestTimestamp(values: Array<string | undefined>, fallback: string): string {
