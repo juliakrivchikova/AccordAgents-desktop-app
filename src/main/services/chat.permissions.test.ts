@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   APP_ARTIFACT_CREATE_TOOL,
   APP_CHAT_EXPORT_ATTACHMENT_TOOL,
+  APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL,
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
   APP_CHAT_LIST_ATTACHMENTS_TOOL,
   APP_CHAT_READ_ATTACHMENT_TOOL,
@@ -8703,6 +8704,7 @@ test("app MCP advertises attachment and reaction tools to chat participants", ()
   const listTool = tools.find((tool) => tool.name === APP_CHAT_LIST_ATTACHMENTS_TOOL);
   const readTool = tools.find((tool) => tool.name === APP_CHAT_READ_ATTACHMENT_TOOL);
   const reactionTool = tools.find((tool) => tool.name === APP_CHAT_REACT_TOOL);
+  const participantActivityTool = tools.find((tool) => tool.name === APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL);
   const exportTool = tools.find((tool) => tool.name === APP_CHAT_EXPORT_ATTACHMENT_TOOL);
   const titleTool = tools.find((tool) => tool.name === APP_CHAT_SET_TITLE_TOOL);
 
@@ -8718,6 +8720,10 @@ test("app MCP advertises attachment and reaction tools to chat participants", ()
   assert.ok(readTool.inputSchema?.properties?.attachmentId);
   assert.deepEqual(readTool.inputSchema?.required, ["attachmentId"]);
   assert.ok(reactionTool);
+  assert.ok(participantActivityTool);
+  assert.equal(participantActivityTool.annotations?.readOnlyHint, true);
+  assert.equal(participantActivityTool.annotations?.destructiveHint, false);
+  assert.deepEqual(participantActivityTool.inputSchema?.properties, {});
   assert.ok(reactionTool.inputSchema?.properties?.messageId);
   assert.ok(reactionTool.inputSchema?.properties?.emoji);
   assert.ok(exportTool);
@@ -8743,6 +8749,7 @@ test("appMcpToolNames exposes request tools only with their capabilities", () =>
   assert.ok(defaultTools.includes(APP_CHAT_READ_ATTACHMENT_TOOL));
   assert.ok(defaultTools.includes(APP_CHAT_SET_TITLE_TOOL));
   assert.ok(defaultTools.includes(APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL));
+  assert.ok(defaultTools.includes(APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL));
   assert.ok(requestTools.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL));
   assert.ok(compactionTools.includes(APP_CHAT_REQUEST_COMPACTION_TOOL));
   assert.ok(requestTools.includes(APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL));

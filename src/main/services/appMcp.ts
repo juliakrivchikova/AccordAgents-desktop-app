@@ -19,6 +19,7 @@ export const APP_CHAT_REQUEST_COMPACTION_TOOL = "app_chat_request_compaction";
 export const APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL = "app_chat_get_participant_request_status";
 export const APP_CHAT_GET_CONTEXT_TOOL = "app_chat_get_context";
 export const APP_CHAT_GET_PARTICIPANTS_TOOL = "app_chat_get_participants";
+export const APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL = "app_chat_get_participant_activity";
 export const APP_CHAT_READ_MESSAGES_TOOL = "app_chat_read_messages";
 export const APP_CHAT_LIST_ATTACHMENTS_TOOL = "app_chat_list_attachments";
 export const APP_CHAT_READ_ATTACHMENT_TOOL = "app_chat_read_attachment";
@@ -79,6 +80,7 @@ export interface AppMcpToolPolicy {
 export const APP_MCP_TOOL_POLICIES: readonly AppMcpToolPolicy[] = [
   { name: APP_CHAT_GET_CONTEXT_TOOL, effect: "app-managed" },
   { name: APP_CHAT_GET_PARTICIPANTS_TOOL, effect: "app-managed" },
+  { name: APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL, effect: "app-managed" },
   { name: APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL, effect: "app-managed" },
   { name: APP_CHAT_READ_MESSAGES_TOOL, effect: "app-managed" },
   { name: APP_CHAT_LIST_ATTACHMENTS_TOOL, effect: "app-managed" },
@@ -586,6 +588,7 @@ type AppPermissionChangeHandler = (actor: AppMcpActor, request: unknown) => Prom
 type AppToolPermissionHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatContextHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppChatParticipantsHandler = (actor: AppMcpActor) => Promise<unknown>;
+type AppChatParticipantActivityHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppChatMessagesHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatAttachmentListHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatAttachmentReadHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
@@ -633,6 +636,7 @@ export class AppMcpService {
   private toolPermissionHandler?: AppToolPermissionHandler;
   private chatContextHandler?: AppChatContextHandler;
   private chatParticipantsHandler?: AppChatParticipantsHandler;
+  private chatParticipantActivityHandler?: AppChatParticipantActivityHandler;
   private chatMessagesHandler?: AppChatMessagesHandler;
   private chatAttachmentListHandler?: AppChatAttachmentListHandler;
   private chatAttachmentReadHandler?: AppChatAttachmentReadHandler;
@@ -685,6 +689,10 @@ export class AppMcpService {
 
   setChatParticipantsHandler(handler: AppChatParticipantsHandler): void {
     this.chatParticipantsHandler = handler;
+  }
+
+  setChatParticipantActivityHandler(handler: AppChatParticipantActivityHandler): void {
+    this.chatParticipantActivityHandler = handler;
   }
 
   setChatMessagesHandler(handler: AppChatMessagesHandler): void {
@@ -1057,6 +1065,23 @@ export class AppMcpService {
         title: "Get Chat Members",
         description:
           "Return the current chat roster, role labels, provider details, and safe member capabilities for this chat. This is read-only.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {}
+        },
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false
+        }
+      },
+      {
+        name: APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL,
+        title: "Get Chat Member Activity",
+        description:
+          "Return one authoritative snapshot of every current chat member's roster status, active app-managed work, and latest finished message. This is read-only.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -1816,6 +1841,7 @@ export class AppMcpService {
       record.name !== APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL &&
       record.name !== APP_CHAT_GET_CONTEXT_TOOL &&
       record.name !== APP_CHAT_GET_PARTICIPANTS_TOOL &&
+      record.name !== APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL &&
       record.name !== APP_CHAT_READ_MESSAGES_TOOL &&
       record.name !== APP_CHAT_LIST_ATTACHMENTS_TOOL &&
       record.name !== APP_CHAT_READ_ATTACHMENT_TOOL &&
@@ -1846,6 +1872,12 @@ export class AppMcpService {
         throw new Error("Chat member discovery is not available.");
       }
       return this.toolTextResult(await this.chatParticipantsHandler(actor));
+    }
+    if (record.name === APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL) {
+      if (!this.chatParticipantActivityHandler) {
+        throw new Error("Chat member activity is not available.");
+      }
+      return this.toolTextResult(await this.chatParticipantActivityHandler(actor));
     }
     if (record.name === APP_CHAT_READ_MESSAGES_TOOL) {
       if (!this.chatMessagesHandler) {

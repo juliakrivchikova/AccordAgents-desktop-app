@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -125,6 +128,70 @@ test("buildGeminiExecInvocation: app MCP url/token travel through the process en
   });
   assert.equal(invocation.env?.ACCORD_AGENTS_MCP_URL, "http://127.0.0.1:5123/mcp");
   assert.equal(invocation.env?.ACCORD_AGENTS_MCP_TOKEN, "secret-token");
+});
+
+test("Gemini MCP proxy generically forwards the participant activity tool", async () => {
+  let forwardedBody = "";
+  let forwardedAuthorization = "";
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      forwardedBody = Buffer.concat(chunks).toString("utf8");
+      forwardedAuthorization = String(request.headers.authorization ?? "");
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        jsonrpc: "2.0",
+        id: 7,
+        result: { content: [{ type: "text", text: "forwarded" }] }
+      }));
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as { port: number };
+  const child = spawn(process.execPath, [path.join(__dirname, "geminiMcpProxy.js")], {
+    env: {
+      ...process.env,
+      ACCORD_AGENTS_MCP_URL: `http://127.0.0.1:${address.port}/mcp`,
+      ACCORD_AGENTS_MCP_TOKEN: "proxy-test-token"
+    },
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+  try {
+    child.stdout.setEncoding("utf8");
+    const response = new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Timed out waiting for Gemini MCP proxy response.")), 5_000);
+      child.stdout.once("data", (chunk: string) => {
+        clearTimeout(timeout);
+        resolve(chunk);
+      });
+      child.once("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+    });
+    child.stdin.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: {
+        name: "app_chat_get_participant_activity",
+        arguments: {}
+      }
+    })}\n`);
+
+    assert.deepEqual(JSON.parse(await response), {
+      jsonrpc: "2.0",
+      id: 7,
+      result: { content: [{ type: "text", text: "forwarded" }] }
+    });
+    assert.equal(forwardedAuthorization, "Bearer proxy-test-token");
+    assert.equal(JSON.parse(forwardedBody).params.name, "app_chat_get_participant_activity");
+  } finally {
+    child.kill();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });
 
 test("buildGeminiInteractiveGoalInvocation preserves native /goal and print-mode permission parity", () => {

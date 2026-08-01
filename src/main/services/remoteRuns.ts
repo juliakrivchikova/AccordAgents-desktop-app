@@ -3538,7 +3538,7 @@ async function cleanupRemoteFiles(
   }).catch(() => undefined);
 }
 
-function detachedWorkerScript(): string {
+export function detachedWorkerScript(): string {
   return String.raw`const fs = require("node:fs");
 const cp = require("node:child_process");
 const crypto = require("node:crypto");

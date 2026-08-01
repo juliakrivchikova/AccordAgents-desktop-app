@@ -1542,6 +1542,7 @@ test("claude auto chat preauthorizes the eligible exposed app MCP inventory only
   const eligibleAppTools = [
     "mcp__accord_agents__app_chat_get_context",
     "mcp__accord_agents__app_chat_get_participants",
+    "mcp__accord_agents__app_chat_get_participant_activity",
     "mcp__accord_agents__app_chat_get_participant_request_status",
     "mcp__accord_agents__app_chat_read_messages",
     "mcp__accord_agents__app_chat_list_attachments",
@@ -1559,6 +1560,7 @@ test("claude auto chat preauthorizes the eligible exposed app MCP inventory only
     appToolNames: [
       "app_chat_get_context",
       "app_chat_get_participants",
+      "app_chat_get_participant_activity",
       "app_chat_get_participant_request_status",
       "app_chat_read_messages",
       "app_chat_list_attachments",

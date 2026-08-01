@@ -27,6 +27,7 @@ import type {
   ChatMessageMetadata,
   ChatMessageReactions,
   ChatParticipant,
+  ChatParticipantActivitySnapshot,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
   ChatParticipantInput,
@@ -137,6 +138,7 @@ import {
   normalizeChatAppToolCapabilities
 } from "../../shared/appTools";
 import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
+import { buildChatParticipantActivitySnapshot } from "../../shared/chatParticipantActivity";
 import { CliAgentRunner } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type { CliAgentOutputEvent, CliAgentRoleOptions } from "./cliAgents";
@@ -154,6 +156,7 @@ import {
   APP_CHAT_EXPORT_ATTACHMENT_TOOL,
   APP_CHAT_GET_CONTEXT_TOOL,
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
+  APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL,
   APP_CHAT_GET_PARTICIPANTS_TOOL,
   APP_CHAT_LIST_ATTACHMENTS_TOOL,
   APP_CHAT_REACT_TOOL,
@@ -3742,6 +3745,7 @@ export class ChatService {
         preferredAttachmentListTool: APP_CHAT_LIST_ATTACHMENTS_TOOL,
         preferredAttachmentReadTool: APP_CHAT_READ_ATTACHMENT_TOOL,
         preferredParticipantTool: APP_CHAT_GET_PARTICIPANTS_TOOL,
+        preferredParticipantActivityTool: APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL,
         currentContextTool: APP_CHAT_GET_CONTEXT_TOOL,
         fallbackHistoryFiles: {
           markdownPath: historyFiles.markdownPath,
@@ -3839,6 +3843,17 @@ export class ChatService {
       }),
       providers
     };
+  }
+
+  async describeChatParticipantActivityForTool(actor: ChatAppMcpActor): Promise<ChatParticipantActivitySnapshot> {
+    await this.waitForQueuedSave(actor.conversationId);
+    const conversation = await this.requireChat(actor.conversationId);
+    const requester = this.chatParticipants(conversation)
+      .find((participant) => participant.id === actor.participantId);
+    if (!requester) {
+      throw new Error("The requesting member is no longer in this chat.");
+    }
+    return buildChatParticipantActivitySnapshot(conversation);
   }
 
   async readChatMessagesForTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
@@ -6354,7 +6369,7 @@ export class ChatService {
       staticEnvelope = [
         `You are @${participant.handle}. Continue the same chat session.`,
         `Role: ${session.roleLabel}.`,
-        this.promptFallbackStaticInstructions(session),
+        this.promptFallbackStaticInstructions(participant, session),
         dynamicHeader,
         `App MCP is the source of truth for chat context. History files at ${historyMarkdownPath} and ${historyJsonPath} are debug-only fallbacks.`
       ].join("\n");
@@ -6660,20 +6675,32 @@ export class ChatService {
       "Role instructions:",
       session.roleInstructions,
       "",
-      this.staticChatInstructions(session)
+      this.staticChatInstructions(
+        session,
+        this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution) !== "remote"
+      )
     ].join("\n");
   }
 
-  private promptFallbackStaticInstructions(session: ChatParticipantSession): string {
+  private promptFallbackStaticInstructions(
+    participant: ChatParticipant,
+    session: ChatParticipantSession
+  ): string {
     return [
       "Role instructions:",
       session.roleInstructions,
       "",
-      this.staticChatInstructions(session)
+      this.staticChatInstructions(
+        session,
+        this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution) !== "remote"
+      )
     ].join("\n");
   }
 
-  private staticChatInstructions(session: ChatParticipantSession): string {
+  private staticChatInstructions(
+    session: ChatParticipantSession,
+    includeParticipantActivityTool = true
+  ): string {
     return [
       "Chat participant boundaries:",
       "- You are one participant in a multi-participant chat.",
@@ -6682,7 +6709,7 @@ export class ChatService {
       "- Do not ask another participant for user-owned clarification.",
       "",
       "App MCP policy:",
-      this.appToolPromptPolicy(session),
+      this.appToolPromptPolicy(session, includeParticipantActivityTool),
       "",
       "Response rules:",
       "- The user strongly prefers concise replies. Do not repeat accepted context or restate proposals when a short verdict, blocker, or delta is enough.",
@@ -6702,7 +6729,10 @@ export class ChatService {
     ].join("\n");
   }
 
-  private appToolPromptPolicy(session: ChatParticipantSession): string {
+  private appToolPromptPolicy(
+    session: ChatParticipantSession,
+    includeParticipantActivityTool = true
+  ): string {
     const agentMode = normalizeChatAgentMode(session.participantAgentMode);
     const canRequestPermissions = this.canRequestPermissionChanges(session);
     const canRequestCompaction = normalizeChatParticipantRequestPermission(
@@ -6728,9 +6758,17 @@ export class ChatService {
       : [
           "Permission changes are not directly available to this participant. If the current task needs a blocked capability, explain the specific capability needed before refusing."
         ];
+    const readOnlyChatTools = [
+      "app_chat_get_context",
+      "app_chat_get_participants",
+      ...(includeParticipantActivityTool ? [APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL] : []),
+      "app_chat_read_messages",
+      "app_chat_list_attachments",
+      "app_chat_read_attachment"
+    ];
     const lines = [
       "App MCP tools: use the connected `accord_agents` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
-      "Read-only chat MCP tools: `app_chat_get_context`, `app_chat_get_participants`, `app_chat_read_messages`, `app_chat_list_attachments`, and `app_chat_read_attachment`. Prefer them over history files for roster, thread, messages, and screenshots.",
+      `Read-only chat MCP tools: ${readOnlyChatTools.map((tool) => `\`${tool}\``).join(", ")}. Prefer them over history files for roster, authoritative member activity, thread, messages, and screenshots.`,
       "Reaction MCP tool: `app_chat_react` adds or toggles an emoji reaction on a specific message. To react, call it with the message `id` from `app_chat_read_messages` and an allowed emoji.",
       "Send-message MCP tool: `app_chat_send_message` posts immediately and returns `messageId`; use only for mid-turn visibility, not normal replies. It can attach PNG/JPEG/WebP with `attachments: [{ \"kind\": \"image\", \"sourcePath\": \"path.png\" }]` from image paths inside the selected repository when repoRead is granted.",
       "If a message lists attached images, call `app_chat_read_attachment` with the attachment ID before reasoning about visual details.",
