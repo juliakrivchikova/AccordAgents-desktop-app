@@ -44,6 +44,7 @@ import { AppNotices } from "./app/app-notices";
 import { pluginNewChatDraft, pluginNewChatMentions } from "./app/plugin-new-chat";
 import { clearActivityItem, markActivityItemRead } from "./app/activity-item-state";
 import { errorText } from "./components/review/review-conversation-data";
+import { isCodexActivityApprovalItem } from "../shared/chatActivity";
 import { CHAT_SPLIT_WORKSPACE_MIN_WIDTH } from "./lib/chat-split-sizing";
 import "./styles/app.css";
 function App(): JSX.Element {
@@ -125,6 +126,9 @@ function App(): JSX.Element {
     state.setError(undefined);
     try {
       if (item.kind === "approval" && item.target.approvalId) {
+        if (isCodexActivityApprovalItem(item)) {
+          throw new Error("Open this Codex approval in chat and select one of its offered decisions.");
+        }
         const conversation = await window.consensus.respondToChatAppToolApproval({
           conversationId: item.conversationId,
           approvalId: item.target.approvalId,
@@ -412,6 +416,15 @@ function App(): JSX.Element {
             {conversationPanel ?? <AppLoadingState title="Loading chat" description={openingConversationDescription} />}
           </div>}
           onSelect={(item) => {
+            if (isCodexActivityApprovalItem(item)) {
+              state.setRailView("chats");
+              state.setSidebarCollapsed(false);
+              state.setSelectedActivityItem(undefined);
+              window.requestAnimationFrame(() => {
+                void conversationActions.openConversationAndFocusActivityItem(item);
+              });
+              return;
+            }
             // Selecting an activity item never marks anything read: unread state only
             // clears through the explicit "Mark read" action (or by opening the chat
             // itself in the chats view). markViewed: false keeps the detail open from

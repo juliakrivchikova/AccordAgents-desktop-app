@@ -19,6 +19,7 @@ export interface ChatMessageFocusRequest {
   conversationId?: string;
   messageId: string;
   threadRootId?: string;
+  approvalId?: string;
   nonce: number;
   pending?: boolean;
 }

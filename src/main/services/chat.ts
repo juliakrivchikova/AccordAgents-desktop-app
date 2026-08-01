@@ -118,7 +118,7 @@ import {
   limitChatBehaviorRulePromptText
 } from "../../shared/chatBehaviorRules";
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../shared/reasoningEffort";
-import { CODEX_APPROVAL_TOOL_NAME, prepareCodexApproval } from "./codexApprovals";
+import { CODEX_APPROVAL_TOOL_NAME, codexApprovalCancellationResult, prepareCodexApproval } from "./codexApprovals";
 import {
   CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH,
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
@@ -334,6 +334,9 @@ const CHAT_PARTICIPANT_REQUEST_RATE_LIMIT = 8;
 const CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS = 120_000;
 const CHAT_PARTICIPANT_REQUEST_WAIT_MAX_MS = 300_000;
 const CHAT_TOOL_PERMISSION_WAIT_MS = 30 * 60_000;
+// Mirrors the dedicated CLI's bounded human approval wait. The provider turn
+// timer is paused separately while a direct callback is outstanding.
+const CHAT_CODEX_APPROVAL_WAIT_MS = 30 * 60_000;
 const CHAT_AUTO_WATCH_EVALUATION_DEBOUNCE_MS = 75;
 const CHAT_GITHUB_APP_REPOSITORY_MAX_LENGTH = 200;
 const CHAT_GITHUB_APP_PERMISSION_MAX_LENGTH = 80;
@@ -514,6 +517,9 @@ interface CodexApprovalResolver {
   conversationId: string;
   runId: string;
   responseByOptionId: ReadonlyMap<string, unknown>;
+  responseDelivered: Promise<void>;
+  submitted: boolean;
+  timer?: NodeJS.Timeout;
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
   cleanup: () => void;
@@ -642,6 +648,7 @@ export class ChatService {
   private remoteRunCoordinator?: RemoteRunCoordinatorControl;
   private cloudRunAws?: CloudRunAwsResolver;
   private artifactCleanup?: (conversationId: string) => Promise<void>;
+  private codexApprovalWaitMs = CHAT_CODEX_APPROVAL_WAIT_MS;
 
   constructor(
     private readonly storage: StorageService,
@@ -676,6 +683,10 @@ export class ChatService {
 
   setArtifactCleanup(handler: (conversationId: string) => Promise<void>): void {
     this.artifactCleanup = handler;
+  }
+
+  setCodexApprovalWaitMsForTests(timeoutMs: number): void {
+    this.codexApprovalWaitMs = Math.max(1, Math.floor(timeoutMs));
   }
 
   onAppToolApprovalDecision(listener: (event: ChatAppToolApprovalDecisionEvent) => Promise<void> | void): () => void {
@@ -4753,6 +4764,7 @@ export class ChatService {
     }
     const prepared = prepareCodexApproval(request);
     const now = new Date().toISOString();
+    const guardianTimedOut = prepared.request.method === "item/autoApprovalReview/timedOut";
     const approval: ChatAppToolApproval = {
       id: randomUUID(),
       conversationId: conversation.id,
@@ -4761,7 +4773,7 @@ export class ChatService {
       requesterRoleConfigId: session.roleConfigId,
       toolName: CODEX_APPROVAL_TOOL_NAME,
       capability: "permissions.request",
-      status: "pending",
+      status: guardianTimedOut ? "expired" : "pending",
       request: prepared.request,
       summary: this.codexApprovalSummary(prepared.request),
       createdAt: now,
@@ -4769,8 +4781,19 @@ export class ChatService {
       resumeContext: {
         runId,
         triggerMessageId
-      }
+      },
+      error: guardianTimedOut ? "Codex Auto Review timed out. The action remains denied and cannot be retried from this card." : undefined
     };
+
+    if (guardianTimedOut) {
+      await this.withChatMutation(conversation, async () => {
+        this.upsertAppToolApproval(conversation, approval);
+        conversation.updatedAt = now;
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+      });
+      return codexApprovalCancellationResult(prepared.request.method);
+    }
 
     let resolveDecision!: (result: unknown) => void;
     let rejectDecision!: (error: Error) => void;
@@ -4778,14 +4801,19 @@ export class ChatService {
       resolveDecision = resolve;
       rejectDecision = reject;
     });
-    let settled = false;
+    // A connection, Stop, compaction, or next-turn invalidation can arrive while
+    // the durable card mutation is still awaiting storage. Attach a handler
+    // immediately so early cancellation cannot surface as a process-level
+    // unhandled rejection; callers still observe the original promise below.
+    void decisionPromise.catch(() => undefined);
+    let finished = false;
+    let resolver!: CodexApprovalResolver;
     const onAbort = (): void => {
-      if (settled) {
+      if (finished || resolver.submitted) {
         return;
       }
-      settled = true;
       const reason = this.abortReasonError(request.signal, "Codex approval request was cancelled.");
-      this.codexApprovalResolvers.delete(approval.id);
+      resolver.cleanup();
       rejectDecision(reason);
       void this.markCodexApprovalTerminal(
         conversation,
@@ -4796,21 +4824,49 @@ export class ChatService {
     };
     request.signal.addEventListener("abort", onAbort, { once: true });
     const cleanup = (): void => {
-      if (settled) {
+      if (finished) {
         return;
       }
-      settled = true;
+      finished = true;
+      if (resolver.timer) clearTimeout(resolver.timer);
       request.signal.removeEventListener("abort", onAbort);
       this.codexApprovalResolvers.delete(approval.id);
     };
-    this.codexApprovalResolvers.set(approval.id, {
+    resolver = {
       conversationId: conversation.id,
       runId,
       responseByOptionId: prepared.responseByOptionId,
+      responseDelivered: request.responseDelivered,
+      submitted: false,
       resolve: resolveDecision,
       reject: rejectDecision,
       cleanup
-    });
+    };
+    resolver.timer = setTimeout(() => {
+      if (finished || resolver.submitted) return;
+      resolver.submitted = true;
+      resolveDecision(codexApprovalCancellationResult(prepared.request.method));
+      void resolver.responseDelivered
+        .catch((error) => {
+          void this.debugLogs.write("chat.codex-approval.timeout-delivery-failed", {
+            conversationId: conversation.id,
+            runId,
+            approvalId: approval.id,
+            message: error instanceof Error ? error.message : String(error)
+          });
+        })
+        .finally(() => {
+          resolver.cleanup();
+          void this.markCodexApprovalTerminal(
+            conversation,
+            approval.id,
+            "Timed out waiting for User approval. Codex received the method-supported refusal.",
+            "expired"
+          );
+        });
+    }, this.codexApprovalWaitMs);
+    resolver.timer.unref();
+    this.codexApprovalResolvers.set(approval.id, resolver);
 
     try {
       await this.withChatMutation(conversation, async () => {
@@ -4839,7 +4895,7 @@ export class ChatService {
     conversation: Conversation,
     request: RespondToChatAppToolApprovalRequest
   ): Promise<Conversation> {
-    return this.withChatMutation(conversation, async () => {
+    const selected = await this.withChatMutation(conversation, async () => {
       const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === request.approvalId);
       if (!approval || !this.isCodexApprovalRequest(approval.request)) {
         throw new Error("Codex approval request was not found.");
@@ -4859,39 +4915,59 @@ export class ChatService {
         conversation.updatedAt = now;
         await this.saveConversation(conversation);
         this.queueSnapshot(conversation);
-        return conversation;
+        throw new Error("The Codex app-server connection that requested this approval is no longer active.");
       }
-      const decisionId = request.codexDecisionId?.trim() || (!request.approve
-        ? approval.request.options.find((item) => item.outcome === "cancel")?.id ??
-          approval.request.options.find((item) => item.outcome === "deny")?.id
-        : undefined);
+      if (resolver.submitted) {
+        throw new Error("Codex approval request has already been answered.");
+      }
+      const decisionId = request.codexDecisionId?.trim();
       const option = approval.request.options.find((item) => item.id === decisionId);
       const response = decisionId ? resolver.responseByOptionId.get(decisionId) : undefined;
       if (!option || response === undefined) {
         throw new Error("Select one of the decisions offered by this Codex approval request.");
       }
-      const now = new Date().toISOString();
+      if (request.approve !== (option.outcome === "approve")) {
+        throw new Error("The selected Codex decision does not match the approval outcome.");
+      }
       const status: ChatAppToolApproval["status"] = option.outcome === "approve"
         ? "approved"
         : option.outcome === "cancel"
           ? "cancelled"
           : "denied";
-      this.upsertAppToolApproval(conversation, {
-        ...approval,
-        status,
-        updatedAt: now
-      });
+      resolver.submitted = true;
+      if (resolver.timer) {
+        clearTimeout(resolver.timer);
+        resolver.timer = undefined;
+      }
+      return { approval, option, response, resolver, status };
+    });
+    selected.resolver.resolve(selected.response);
+    try {
+      await selected.resolver.responseDelivered;
+    } catch (error) {
+      selected.resolver.cleanup();
+      const message = `Codex could not receive this decision: ${error instanceof Error ? error.message : String(error)}`;
+      await this.markCodexApprovalTerminal(conversation, selected.approval.id, message, "expired");
+      throw new Error(message);
+    }
+    selected.resolver.cleanup();
+    return this.withChatMutation(conversation, async () => {
+      const current = this.chatAppToolApprovals(conversation).find((item) => item.id === selected.approval.id);
+      if (!current || current.status !== "pending" || !this.isCodexApprovalRequest(current.request)) {
+        throw new Error("Codex approval request is no longer active.");
+      }
+      const now = new Date().toISOString();
+      const completed = { ...current, status: selected.status, updatedAt: now };
+      this.upsertAppToolApproval(conversation, completed);
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
       this.queueSnapshot(conversation);
-      resolver.cleanup();
-      resolver.resolve(response);
       void this.debugLogs.write("chat.codex-approval.responded", {
         conversationId: conversation.id,
-        runId: resolver.runId,
-        approvalId: approval.id,
-        method: approval.request.method,
-        outcome: option.outcome
+        runId: selected.resolver.runId,
+        approvalId: current.id,
+        method: current.request.method,
+        outcome: selected.option.outcome
       });
       return conversation;
     });
@@ -4922,6 +4998,15 @@ export class ChatService {
   }
 
   private codexApprovalSummary(request: ChatCodexApprovalRequest): string {
+    if (request.method === "item/autoApprovalReview/denied") {
+      return request.command
+        ? `Codex Auto Review denied: ${request.command}`
+        : request.networkTarget
+          ? `Codex Auto Review denied network access to ${request.networkTarget}.`
+          : request.mcpToolName
+            ? `Codex Auto Review denied the MCP tool ${request.mcpToolName}.`
+            : "Codex Auto Review denied a protected action.";
+    }
     if (request.action === "command") {
       return request.command ? `Codex wants to run: ${request.command}` : "Codex wants to run a protected command.";
     }
@@ -15849,16 +15934,25 @@ export class ChatService {
         method === "item/commandExecution/requestApproval" ||
         method === "item/fileChange/requestApproval" ||
         method === "item/permissions/requestApproval" ||
+        method === "item/autoApprovalReview/denied" ||
+        method === "item/autoApprovalReview/timedOut" ||
         method === "applyPatchApproval" ||
         method === "execCommandApproval"
       ) &&
       (typeof candidate.requestId === "string" || typeof candidate.requestId === "number") &&
-      (candidate.action === "command" || candidate.action === "fileChange" || candidate.action === "permissions") &&
+      (
+        candidate.action === "command" ||
+        candidate.action === "fileChange" ||
+        candidate.action === "permissions" ||
+        candidate.action === "network" ||
+        candidate.action === "mcpToolCall"
+      ) &&
       Array.isArray(candidate.options) &&
-      candidate.options.length > 0 &&
+      (method === "item/autoApprovalReview/timedOut" ? candidate.options.length === 0 : candidate.options.length > 0) &&
       candidate.options.every((option) =>
         typeof option?.id === "string" &&
         typeof option.label === "string" &&
+        (option.detail === undefined || typeof option.detail === "string") &&
         (option.outcome === "approve" || option.outcome === "deny" || option.outcome === "cancel")
       )
     );

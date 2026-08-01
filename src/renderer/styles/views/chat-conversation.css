@@ -224,9 +224,7 @@
   border-radius: 16px !important;
   background: var(--app-surface) !important;
   color: var(--app-text) !important;
-  box-shadow:
-    0 16px 48px -12px rgba(18, 24, 40, 0.24),
-    0 4px 12px -4px rgba(18, 24, 40, 0.12) !important;
+  box-shadow: var(--shadow-lg) !important;
   font-family: var(--font-body);
 }
 
@@ -555,8 +553,8 @@
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 2px rgba(18, 24, 40, 0.3);
+  background: var(--app-on-dark);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--shadow-color) 30%, transparent);
   transition: left 0.18s ease;
 }
 
@@ -1085,8 +1083,28 @@
   max-width: min(680px, 100%);
 }
 
+.chat-message-embedded-approvals {
+  margin-top: 10px;
+}
+
+.chat-message-embedded-approvals .chat-app-tool-approval-card.is-embedded {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 100%;
+}
+
+.chat-message-embedded-approvals .chat-app-tool-approval-card.is-embedded > .chat-app-tool-approval-avatar,
+.chat-message-embedded-approvals .chat-app-tool-approval-card.is-embedded .chat-app-tool-approval-meta {
+  display: none;
+}
+
 .chat-app-tool-approval-card:focus-visible {
   outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-app-tool-approval-card.approval-focused {
+  outline: none;
+  border-radius: var(--radius-lg);
   box-shadow: var(--focus-ring);
 }
 
@@ -2541,6 +2559,29 @@
   overflow-wrap: anywhere;
 }
 
+.chat-codex-approval-actions {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chat-codex-approval-actions li {
+  display: grid;
+  grid-template-columns: minmax(80px, max-content) minmax(0, 1fr);
+  gap: 8px;
+  font-size: 12px;
+}
+
+.chat-codex-approval-actions span {
+  color: var(--app-muted);
+}
+
+.chat-codex-approval-actions code {
+  overflow-wrap: anywhere;
+}
+
 /* Numbered options listbox + Submit footer (design handoff §8). */
 .chat-approval-options {
   grid-column: 1;
@@ -2607,6 +2648,18 @@
 
 .chat-approval-option-label {
   min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-approval-option-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.chat-approval-option-detail {
+  color: var(--app-muted);
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 

@@ -4,6 +4,9 @@ import type {
   AgentContextUsage,
   AgentRunProgress,
   AppSettings,
+  ChatAppToolApproval,
+  ChatAppToolApprovalRequest,
+  ChatAppToolApprovalScope,
   ChatImageInput,
   ChatParticipant,
   ChatParticipantRequestBatch,
@@ -56,6 +59,15 @@ export function ChatThreadPanel(props: {
   onStopRun?: (runId: string) => void;
   continuedMentionRequestIds: Set<string>;
   inferredParticipantRequestsByTrigger: Map<string, ChatParticipantRequestBatch[]>;
+  approvalsByMessageId: ReadonlyMap<string, ChatAppToolApproval[]>;
+  submittingApprovalIds: ReadonlySet<string>;
+  onRespondToAppToolApproval: (
+    approvalId: string,
+    approve: boolean,
+    scope?: ChatAppToolApprovalScope,
+    draftOverride?: ChatAppToolApprovalRequest,
+    codexDecisionId?: string
+  ) => Promise<void>;
 }): JSX.Element {
   const mentionDirectory = chatMentionDirectory(props.participants, props.settings.chatRoleConfigs, props.sessionsByParticipant, props.contextUsageByParticipant);
   const replyLabel = `${props.replies.length} ${props.replies.length === 1 ? "reply" : "replies"}`;
@@ -85,12 +97,17 @@ export function ChatThreadPanel(props: {
           hasContinuationReply={props.continuedMentionRequestIds.has(props.rootMessage.id)}
           inferredParticipantRequests={props.inferredParticipantRequestsByTrigger.get(props.rootMessage.id)}
           liveProgress={props.liveProgressById.get(props.rootMessage.id)}
+          appToolApprovals={props.approvalsByMessageId.get(props.rootMessage.id)}
+          savedParticipants={props.settings.chatParticipantConfigs}
+          roles={props.settings.chatRoleConfigs}
+          submittingApprovalIds={props.submittingApprovalIds}
           onApproveMentions={props.onApproveMentions}
           onRejectMentions={props.onRejectMentions}
           onRespondToChoice={props.onRespondToChoice}
           onToggleReaction={props.onToggleReaction}
           onCompactParticipant={props.onCompactParticipant}
           onStopRun={props.onStopRun}
+          onRespondToAppToolApproval={props.onRespondToAppToolApproval}
         />
         {props.replies.length > 0 && (
           <div className="chat-thread-replies">
@@ -111,12 +128,17 @@ export function ChatThreadPanel(props: {
                 hasContinuationReply={props.continuedMentionRequestIds.has(message.id)}
                 inferredParticipantRequests={props.inferredParticipantRequestsByTrigger.get(message.id)}
                 liveProgress={props.liveProgressById.get(message.id)}
+                appToolApprovals={props.approvalsByMessageId.get(message.id)}
+                savedParticipants={props.settings.chatParticipantConfigs}
+                roles={props.settings.chatRoleConfigs}
+                submittingApprovalIds={props.submittingApprovalIds}
                 onApproveMentions={props.onApproveMentions}
                 onRejectMentions={props.onRejectMentions}
                 onRespondToChoice={props.onRespondToChoice}
                 onToggleReaction={props.onToggleReaction}
                 onCompactParticipant={props.onCompactParticipant}
                 onStopRun={props.onStopRun}
+                onRespondToAppToolApproval={props.onRespondToAppToolApproval}
                 key={message.id}
               />
             ))}

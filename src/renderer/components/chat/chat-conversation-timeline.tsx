@@ -55,6 +55,7 @@ export function ChatConversationTimeline(props: {
   onToggleReaction: (messageId: string, emoji: string) => void;
   participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
   participants: ChatParticipant[];
+  approvalsByMessageId: ReadonlyMap<string, ChatAppToolApproval[]>;
   pendingApprovalRows: ChatAppToolApproval[];
   rows: ChatTimelineRow[];
   selectedThreadRootId?: string;
@@ -133,6 +134,10 @@ export function ChatConversationTimeline(props: {
                   hasContinuationReply={props.continuedMentionRequestIds.has(row.message.id)}
                   inferredParticipantRequests={props.inferredParticipantRequestsByTrigger.get(row.message.id)}
                   liveProgress={props.liveProgressById.get(row.message.id)}
+                  appToolApprovals={props.approvalsByMessageId.get(row.message.id)}
+                  savedParticipants={props.settings.chatParticipantConfigs}
+                  roles={props.settings.chatRoleConfigs}
+                  submittingApprovalIds={props.submittingApprovalIds}
                   onOpenThread={props.onOpenThread}
                   onApproveMentions={props.onApproveMentions}
                   onRejectMentions={props.onRejectMentions}
@@ -140,6 +145,7 @@ export function ChatConversationTimeline(props: {
                   onToggleReaction={props.onToggleReaction}
                   onCompactParticipant={props.onCompactParticipant}
                   onStopRun={props.onStopRun}
+                  onRespondToAppToolApproval={props.onRespondToAppToolApproval}
                 />
               )}
             </div>

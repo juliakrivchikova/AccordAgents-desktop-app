@@ -119,6 +119,7 @@
   --app-shadow: color-mix(in srgb, var(--shadow-color) 10%, transparent);
   --highlight-color: rgb(255 255 255);
   --app-on-dark: #ffffff;
+  --plugin-brand-color: var(--app-accent);
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;

@@ -9,7 +9,7 @@ import {
   type ChatProcessingTranscriptView,
   type ChatTranscriptSegment
 } from "../../../shared/processingTranscript";
-import type { ChatThinkingRow } from "./chat-conversation-data";
+import type { ChatThinkingRow } from "./chat-conversation-progress";
 
 export const ChatThinkingRowItem = memo(function ChatThinkingRowItem({ row }: { row: ChatThinkingRow }): JSX.Element {
   return (

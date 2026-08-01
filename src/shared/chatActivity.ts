@@ -201,6 +201,13 @@ export function resolveSelectedChatActivityItem(
   return items.find((item) => item.id === selectedItem.id) ?? selectedItem;
 }
 
+export function isCodexActivityApprovalItem(item: ChatActivityItem): boolean {
+  return item.kind === "approval" &&
+    item.status === "pending" &&
+    item.target.approvalKind === "codex" &&
+    Boolean(item.target.approvalId?.trim());
+}
+
 export function mergeChatActivityItems(
   current: ChatActivityItem[],
   incoming: ChatActivityItem[],
@@ -317,6 +324,9 @@ function pendingApprovalItems(
       participant,
       target: {
         approvalId: approval.id,
+        ...("kind" in approval.request && approval.request.kind === "codexApproval"
+          ? { approvalKind: "codex" as const }
+          : {}),
         runId: approval.resumeContext?.runId,
         messageId,
         threadRootId: threadRootIdForMessage(targetMessage) || messageId

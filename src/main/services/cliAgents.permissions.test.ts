@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { CliAgentRunner, parseClaudeModelPickerOutput, resolveCodexCompactTimeoutMs } from "./cliAgents";
+import { CliAgentRunner, CodexAppServerRunError, parseClaudeModelPickerOutput, resolveCodexCompactTimeoutMs } from "./cliAgents";
 import { CommandError } from "./command";
-import { CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
+import { buildCodexExecInvocation, CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 
 function makeRunner(): CliAgentRunner {
@@ -167,6 +170,31 @@ test("codex app-server stream keeps token deltas joined inside one agent message
   );
 
   assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "hello");
+});
+
+test("codex app-server records provider acceptance from turn and item evidence", () => {
+  const runner = makeRunner() as any;
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const started = makeCodexPendingTurn();
+  runner.handleCodexAppServerNotification(
+    { method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } },
+    participant,
+    started,
+    () => started,
+    fail
+  );
+  assert.equal(started.acceptedByProvider, true);
+
+  const itemEvidence = makeCodexPendingTurn();
+  runner.handleCodexAppServerNotification(
+    { method: "item/started", params: { threadId: "thread-1", turnId: "turn-2", item: { id: "item-1", type: "commandExecution" } } },
+    participant,
+    itemEvidence,
+    () => itemEvidence,
+    fail
+  );
+  assert.equal(itemEvidence.acceptedByProvider, true);
 });
 
 test("codex app-server stream excludes paragraph-separated preamble from final content", () => {
@@ -1856,6 +1884,766 @@ test("codex app-server auto mode applies workspace-write web preset and native a
   assert.equal(params.sandbox, "workspace-write");
   assert.equal(params.config.web_search, "live");
   assert.equal(params.config.model_reasoning_effort, "xhigh");
+});
+
+test("Codex model catalog handles server requests and rejects external-token refresh contract drift", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-model-catalog-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+let initializeId;
+let modelListId;
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    if (message.params?.capabilities?.requestAttestation !== false) process.exit(61);
+    initializeId = message.id;
+    send({ id: "current-time", method: "currentTime/read", params: {} });
+  } else if (message.id === "current-time") {
+    if (typeof message.result?.currentTimeAt !== "number") process.exit(62);
+    send({ id: initializeId, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "model/list") {
+    modelListId = message.id;
+    send({ id: "token-refresh", method: "account/chatgptAuthTokens/refresh", params: { reason: "unauthorized", previousAccountId: null } });
+  } else if (message.id === "token-refresh") {
+    if (message.error?.code !== -32601 || !String(message.error?.message).includes("never supplies external ChatGPT tokens")) process.exit(63);
+    send({ id: modelListId, result: { data: [{ id: "gpt-fixture", displayName: "Fixture", isDefault: true }], nextCursor: null } });
+  } else if (message.method === "account/login/start") {
+    process.exit(64);
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath);
+  try {
+    const catalog = await runner.listModelCatalog("codex-cli");
+    assert.equal(catalog.authoritative, true, catalog.error);
+    assert.equal(catalog.models[0]?.id, "gpt-fixture");
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("every non-interactive Codex exec path explicitly disables approvals", () => {
+  for (const options of [
+    { agentMode: "default" as const },
+    { agentMode: "plan" as const, sessionId: "session-1" },
+    { agentMode: "auto" as const, remoteSandbox: { networkAccess: true, gitWritableRoot: "/tmp/repo" } }
+  ]) {
+    const invocation = buildCodexExecInvocation({
+      participant: { id: "participant", kind: "codex-cli", label: "Codex" },
+      prompt: "Prompt",
+      outputPath: "/tmp/output",
+      repoPath: "/tmp/repo",
+      kind: "chat",
+      options
+    });
+    assert.equal(invocation.args.includes('approval_policy="never"'), true, invocation.args.join(" "));
+  }
+});
+
+test("codex app-server production transport round-trips an approval and acknowledges delivery", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-app-server-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    if (message.params?.capabilities?.requestAttestation !== false) process.exit(21);
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+    return;
+  }
+  if (message.method === "thread/start" || message.method === "thread/resume") {
+    send({ id: message.id, result: { thread: { id: "thread-fixture" }, model: "gpt-5" } });
+    return;
+  }
+  if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-fixture" } } });
+    send({ method: "turn/started", params: { threadId: "thread-fixture", turn: { id: "turn-fixture" } } });
+    send({
+      id: "approval-fixture",
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "thread-fixture",
+        turnId: "turn-fixture",
+        itemId: "item-fixture",
+        startedAtMs: 1,
+        environmentId: null,
+        command: "git push origin scratch",
+        cwd: process.cwd(),
+        availableDecisions: ["accept", "decline"]
+      }
+    });
+    return;
+  }
+  if (message.id === "approval-fixture") {
+    if (message.result?.decision !== "accept") process.exit(22);
+    send({ method: "item/agentMessage/delta", params: { threadId: "thread-fixture", turnId: "turn-fixture", itemId: "agent-fixture", delta: "Approval delivered." } });
+    send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { id: "agent-fixture", type: "agentMessage", text: "Approval delivered." } } });
+    send({ method: "turn/completed", params: { threadId: "thread-fixture", turn: { id: "turn-fixture", status: "completed" } } });
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  let delivered = false;
+  try {
+    const result = await runner.runCodexAppServerWarmOrOneShot(
+      { id: "participant-fixture", kind: "codex-cli", label: "Codex" },
+      "Run the protected command.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      {
+        agentMode: "auto",
+        warm: {
+          conversationId: "conversation-fixture",
+          participantId: "participant-fixture",
+          contextKey: "context-fixture",
+          idleTimeoutMs: 60_000
+        },
+        onCodexServerRequest: async (request: { method: string; responseDelivered: Promise<void> }) => {
+          assert.equal(request.method, "item/commandExecution/requestApproval");
+          void request.responseDelivered.then(() => { delivered = true; });
+          return { decision: "accept" };
+        }
+      }
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.match(result.content, /Approval delivered/);
+    assert.equal(delivered, true);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("codex app-server production transport returns method-specific results for every direct approval method", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-direct-methods-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+const permissions = { network: { enabled: true }, fileSystem: null };
+const approvals = [
+  { id: "direct-command", method: "item/commandExecution/requestApproval", params: {
+    threadId: "thread-methods", turnId: "turn-methods", itemId: "item-command", startedAtMs: 1,
+    approvalId: "callback-a", environmentId: null, command: "git status", cwd: process.cwd(), availableDecisions: ["acceptForSession"]
+  }, expected: { decision: "acceptForSession" } },
+  { id: "direct-command-b", method: "item/commandExecution/requestApproval", params: {
+    threadId: "thread-methods", turnId: "turn-methods", itemId: "item-command", startedAtMs: 1,
+    approvalId: "callback-b", environmentId: null, command: "git status", cwd: process.cwd(), availableDecisions: ["decline"]
+  }, expected: { decision: "decline" } },
+  { id: "direct-file", method: "item/fileChange/requestApproval", params: {
+    threadId: "thread-methods", turnId: "turn-methods", itemId: "item-file", startedAtMs: 2,
+    reason: null, grantRoot: null
+  }, expected: { decision: "accept" } },
+  { id: "direct-permissions", method: "item/permissions/requestApproval", params: {
+    threadId: "thread-methods", turnId: "turn-methods", itemId: "item-permissions", environmentId: null,
+    startedAtMs: 3, cwd: process.cwd(), reason: "Need network", permissions
+  }, expected: { permissions, scope: "turn" } },
+  { id: "legacy-command", method: "execCommandApproval", params: {
+    conversationId: "thread-methods", callId: "call-command", approvalId: "subcommand-1",
+    command: ["printf", "two words"], cwd: process.cwd(), reason: null, parsedCmd: []
+  }, expected: { decision: "approved_for_session" } },
+  { id: "legacy-file", method: "applyPatchApproval", params: {
+    conversationId: "thread-methods", callId: "call-file",
+    fileChanges: { "scratch.txt": { type: "add", content: "safe" } }, reason: null, grantRoot: null
+  }, expected: { decision: "approved" } }
+];
+let next = 0;
+const sendNext = () => {
+  if (approvals[next].id === "direct-file") {
+    send({ method: "item/fileChange/patchUpdated", params: {
+      threadId: "thread-methods", turnId: "turn-methods", itemId: "item-file",
+      changes: [{ path: "scratch.txt", kind: { type: "update" } }]
+    } });
+  }
+  send(approvals[next]);
+};
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    if (message.params?.capabilities?.requestAttestation !== false) process.exit(31);
+    if (message.method === "account/login/start") process.exit(32);
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "thread/start") {
+    send({ id: message.id, result: { thread: { id: "thread-methods" }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-methods" } } });
+    send({ method: "turn/started", params: { threadId: "thread-methods", turn: { id: "turn-methods" } } });
+    sendNext();
+  } else if (next < approvals.length && message.id === approvals[next].id) {
+    if (JSON.stringify(message.result) !== JSON.stringify(approvals[next].expected)) process.exit(33 + next);
+    next += 1;
+    if (next < approvals.length) {
+      sendNext();
+    } else {
+      send({ method: "item/agentMessage/delta", params: { threadId: "thread-methods", turnId: "turn-methods", itemId: "agent-methods", delta: "All method-specific results delivered." } });
+      send({ method: "item/completed", params: { threadId: "thread-methods", turnId: "turn-methods", item: { id: "agent-methods", type: "agentMessage", text: "All method-specific results delivered." } } });
+      send({ method: "turn/completed", params: { threadId: "thread-methods", turn: { id: "turn-methods", status: "completed" } } });
+    }
+  } else if (message.method === "account/login/start") {
+    process.exit(38);
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  const seen: string[] = [];
+  try {
+    const result = await runner.runCodexAppServerWarmOrOneShot(
+      { id: "participant-methods", kind: "codex-cli", label: "Codex" },
+      "Exercise direct approvals.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      {
+        agentMode: "auto",
+        warm: {
+          conversationId: "conversation-methods",
+          participantId: "participant-methods",
+          contextKey: "context-methods",
+          idleTimeoutMs: 60_000
+        },
+        onCodexServerRequest: async (request: { method: string; params?: Record<string, unknown> }) => {
+          seen.push(request.method);
+          if (request.method === "item/commandExecution/requestApproval") {
+            return seen.filter((method) => method === request.method).length === 1
+              ? { decision: "acceptForSession" }
+              : { decision: "decline" };
+          }
+          if (request.method === "item/fileChange/requestApproval") {
+            assert.deepEqual(request.params?.fileChanges, [{ path: "scratch.txt", kind: { type: "update" } }]);
+            return { decision: "accept" };
+          }
+          if (request.method === "item/permissions/requestApproval") return { permissions: { network: { enabled: true }, fileSystem: null }, scope: "turn" };
+          if (request.method === "execCommandApproval") return { decision: "approved_for_session" };
+          return { decision: "approved" };
+        }
+      }
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(seen, [
+      "item/commandExecution/requestApproval",
+      "item/commandExecution/requestApproval",
+      "item/fileChange/requestApproval",
+      "item/permissions/requestApproval",
+      "execCommandApproval",
+      "applyPatchApproval"
+    ]);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("codex app-server production transport sends the exact same-session Guardian override", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-guardian-override-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "thread/start") {
+    send({ id: message.id, result: { thread: { id: "thread-guardian" }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-guardian" } } });
+    send({ method: "turn/started", params: { threadId: "thread-guardian", turn: { id: "turn-guardian" } } });
+    send({ method: "item/autoApprovalReview/completed", params: {
+      threadId: "thread-guardian", turnId: "turn-guardian", startedAtMs: 10, completedAtMs: 20,
+      reviewId: "review-guardian", targetItemId: "item-guardian", decisionSource: "agent",
+      review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: "Protected action" },
+      action: { type: "command", source: "unifiedExec", command: "git push origin scratch", cwd: process.cwd() }
+    } });
+    send({ method: "item/completed", params: { threadId: "thread-guardian", turnId: "turn-guardian", item: {
+      id: "item-guardian", type: "commandExecution", status: "failed", command: "git push origin scratch"
+    } } });
+    send({ method: "item/agentMessage/delta", params: {
+      threadId: "thread-guardian", turnId: "turn-guardian", itemId: "agent-guardian", delta: "Guardian denial recorded."
+    } });
+    send({ method: "item/completed", params: { threadId: "thread-guardian", turnId: "turn-guardian", item: {
+      id: "agent-guardian", type: "agentMessage", text: "Guardian denial recorded."
+    } } });
+    send({ method: "turn/completed", params: {
+      threadId: "thread-guardian", turn: { id: "turn-guardian", status: "completed" }
+    } });
+  } else if (message.method === "thread/approveGuardianDeniedAction") {
+    const event = message.params?.event;
+    if (message.params?.threadId !== "thread-guardian" || event?.type !== "guardian_assessment" ||
+      event?.id !== "review-guardian" || event?.target_item_id !== "item-guardian" || event?.turn_id !== "turn-guardian" ||
+      event?.action?.type !== "command" || event?.action?.source !== "unified_exec") process.exit(51);
+    send({ id: message.id, result: {} });
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  let deliveryAcknowledged = false;
+  let guardianSignal: AbortSignal | undefined;
+  let resolveDecision!: () => void;
+  let resolveDelivery!: () => void;
+  let rejectDelivery!: (error: unknown) => void;
+  const delivery = new Promise<void>((resolve, reject) => {
+    resolveDelivery = resolve;
+    rejectDelivery = reject;
+  });
+  void delivery.catch(() => undefined);
+  try {
+    const result = await runner.runCodexAppServerWarmOrOneShot(
+      { id: "participant-guardian", kind: "codex-cli", label: "Codex" },
+      "Retry the protected command.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      {
+        agentMode: "auto",
+        warm: {
+          conversationId: "conversation-guardian",
+          participantId: "participant-guardian",
+          contextKey: "context-guardian",
+          idleTimeoutMs: 60_000
+        },
+        onCodexServerRequest: (request: { method: string; signal: AbortSignal; responseDelivered: Promise<void> }) => {
+          assert.equal(request.method, "item/autoApprovalReview/denied");
+          guardianSignal = request.signal;
+          void request.responseDelivered.then(() => {
+            deliveryAcknowledged = true;
+            resolveDelivery();
+          }, rejectDelivery);
+          return new Promise((resolve, reject) => {
+            resolveDecision = () => resolve({ decision: "approveRetry" });
+            request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+          });
+        }
+      }
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.match(result.content, /Guardian denial recorded/);
+    assert.equal(guardianSignal?.aborted, false);
+    assert.equal(deliveryAcknowledged, false);
+    resolveDecision();
+    await Promise.race([
+      delivery,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Guardian override was not acknowledged")), 1_500))
+    ]);
+    assert.equal(deliveryAcknowledged, true);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("codex app-server expires a completed-turn Guardian denial before the next turn starts", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-guardian-next-turn-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+let turn = 0;
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "thread/start") {
+    send({ id: message.id, result: { thread: { id: "thread-guardian-next" }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    turn += 1;
+    const turnId = "turn-guardian-" + turn;
+    send({ id: message.id, result: { turn: { id: turnId } } });
+    send({ method: "turn/started", params: { threadId: "thread-guardian-next", turn: { id: turnId } } });
+    if (turn === 1) {
+      send({ method: "item/autoApprovalReview/completed", params: {
+        threadId: "thread-guardian-next", turnId, startedAtMs: 10, completedAtMs: 20,
+        reviewId: "review-guardian-next", targetItemId: "item-guardian-next", decisionSource: "agent",
+        review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: "Protected action" },
+        action: { type: "command", source: "unifiedExec", command: "git push origin scratch", cwd: process.cwd() }
+      } });
+      send({ method: "item/completed", params: { threadId: "thread-guardian-next", turnId, item: {
+        id: "item-guardian-next", type: "commandExecution", status: "failed", command: "git push origin scratch"
+      } } });
+    }
+    const text = turn === 1 ? "First turn completed." : "Second turn completed.";
+    send({ method: "item/agentMessage/delta", params: { threadId: "thread-guardian-next", turnId, itemId: "agent-" + turn, delta: text } });
+    send({ method: "item/completed", params: { threadId: "thread-guardian-next", turnId, item: { id: "agent-" + turn, type: "agentMessage", text } } });
+    send({ method: "turn/completed", params: { threadId: "thread-guardian-next", turn: { id: turnId, status: "completed" } } });
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  const participant = { id: "participant-guardian-next", kind: "codex-cli", label: "Codex" } as const;
+  const warm = {
+    conversationId: "conversation-guardian-next",
+    participantId: "participant-guardian-next",
+    contextKey: "context-guardian-next",
+    idleTimeoutMs: 60_000
+  };
+  let approvalAborted = false;
+  let guardianSignal: AbortSignal | undefined;
+  try {
+    const first = await runner.runCodexAppServerWarmOrOneShot(
+      participant,
+      "Attempt the protected command.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      {
+        agentMode: "auto",
+        warm,
+        onCodexServerRequest: (request: { signal: AbortSignal; responseDelivered: Promise<void> }) => {
+          guardianSignal = request.signal;
+          void request.responseDelivered.catch(() => undefined);
+          return new Promise((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => {
+              approvalAborted = true;
+              reject(request.signal.reason);
+            }, { once: true });
+          });
+        }
+      }
+    );
+    assert.equal(first.ok, true, JSON.stringify(first));
+    assert.match(first.content, /First turn completed/);
+    assert.equal(guardianSignal?.aborted, false);
+
+    const second = await runner.runCodexAppServerWarmOrOneShot(
+      participant,
+      "Start a fresh turn.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      { agentMode: "auto", warm }
+    );
+    assert.equal(second.ok, true, JSON.stringify(second));
+    assert.match(second.content, /Second turn completed/);
+    assert.equal(approvalAborted, true);
+    assert.equal(guardianSignal?.aborted, true);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("codex app-server expires a completed-turn Guardian denial before compaction", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-guardian-compact-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "thread/start" || message.method === "thread/resume") {
+    send({ id: message.id, result: { thread: { id: "thread-guardian-compact" }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-guardian-compact" } } });
+    send({ method: "turn/started", params: { threadId: "thread-guardian-compact", turn: { id: "turn-guardian-compact" } } });
+    send({ method: "item/autoApprovalReview/completed", params: {
+      threadId: "thread-guardian-compact", turnId: "turn-guardian-compact", startedAtMs: 10, completedAtMs: 20,
+      reviewId: "review-guardian-compact", targetItemId: "item-guardian-compact", decisionSource: "agent",
+      review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: "Protected action" },
+      action: { type: "command", source: "unifiedExec", command: "git push origin scratch", cwd: process.cwd() }
+    } });
+    send({ method: "item/completed", params: { threadId: "thread-guardian-compact", turnId: "turn-guardian-compact", item: {
+      id: "item-guardian-compact", type: "commandExecution", status: "failed", command: "git push origin scratch"
+    } } });
+    send({ method: "item/agentMessage/delta", params: { threadId: "thread-guardian-compact", turnId: "turn-guardian-compact", itemId: "agent-guardian-compact", delta: "Guardian denial recorded." } });
+    send({ method: "item/completed", params: { threadId: "thread-guardian-compact", turnId: "turn-guardian-compact", item: { id: "agent-guardian-compact", type: "agentMessage", text: "Guardian denial recorded." } } });
+    send({ method: "turn/completed", params: { threadId: "thread-guardian-compact", turn: { id: "turn-guardian-compact", status: "completed" } } });
+  } else if (message.method === "thread/compact/start") {
+    send({ id: message.id, result: {} });
+    send({ method: "turn/started", params: { threadId: "thread-guardian-compact", turn: { id: "compact-turn" } } });
+    send({ method: "turn/completed", params: { threadId: "thread-guardian-compact", turn: { id: "compact-turn", status: "completed" } } });
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  const participant = { id: "participant-guardian-compact", kind: "codex-cli", label: "Codex" } as const;
+  const warm = {
+    conversationId: "conversation-guardian-compact",
+    participantId: "participant-guardian-compact",
+    contextKey: "context-guardian-compact",
+    idleTimeoutMs: 60_000
+  };
+  let approvalAborted = false;
+  try {
+    const first = await runner.runCodexAppServerWarmOrOneShot(
+      participant,
+      "Attempt the protected command.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      {
+        agentMode: "auto",
+        warm,
+        onCodexServerRequest: (request: { signal: AbortSignal; responseDelivered: Promise<void> }) => {
+          void request.responseDelivered.catch(() => undefined);
+          return new Promise((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => {
+              approvalAborted = true;
+              reject(request.signal.reason);
+            }, { once: true });
+          });
+        }
+      }
+    );
+    assert.equal(first.ok, true, JSON.stringify(first));
+    assert.equal(approvalAborted, false);
+
+    const compact = await runner.compactSession(
+      participant,
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      { agentMode: "auto", sessionId: first.sessionId, warm }
+    );
+    assert.equal(compact.ok, true, JSON.stringify(compact));
+    assert.equal(approvalAborted, true);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("Codex Stop still terminates the turn when the approval refusal pipe is dead", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-dead-pipe-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "thread/start") {
+    send({ id: message.id, result: { thread: { id: "thread-dead-pipe" }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-dead-pipe" } } });
+    send({ method: "turn/started", params: { threadId: "thread-dead-pipe", turn: { id: "turn-dead-pipe" } } });
+    send({ id: "approval-dead-pipe", method: "item/fileChange/requestApproval", params: {
+      threadId: "thread-dead-pipe", turnId: "turn-dead-pipe", itemId: "item-dead-pipe", startedAtMs: 1, reason: null, grantRoot: null
+    } });
+    require("node:fs").closeSync(0);
+    setInterval(() => {}, 1000);
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  const controller = new AbortController();
+  let requestSeen!: () => void;
+  let approvalAborted = false;
+  const seen = new Promise<void>((resolve) => { requestSeen = resolve; });
+  try {
+    const run = runner.runCodexAppServerWarmOrOneShot(
+      { id: "participant-dead-pipe", kind: "codex-cli", label: "Codex" },
+      "Apply the protected change.",
+      fixtureDir,
+      undefined,
+      "chat",
+      controller.signal,
+      {
+        agentMode: "auto",
+        warm: {
+          conversationId: "conversation-dead-pipe",
+          participantId: "participant-dead-pipe",
+          contextKey: "context-dead-pipe",
+          idleTimeoutMs: 60_000
+        },
+        onCodexServerRequest: (request: { signal: AbortSignal }) => {
+          requestSeen();
+          return new Promise((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => {
+              approvalAborted = true;
+              reject(request.signal.reason);
+            }, { once: true });
+          });
+        }
+      }
+    );
+    await seen;
+    controller.abort(new Error("Stopped by user."));
+    const result = await Promise.race([
+      run,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Stop hung after dead approval pipe")), 1_500))
+    ]);
+    assert.equal(result.ok, false);
+    assert.equal(approvalAborted, true);
+    assert.match(result.error ?? "", /cancelled|Stopped by user|EPIPE/i);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("Codex ignores cross-thread resolution and retires approval when its item completes", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-retire-approval-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "thread/start") {
+    send({ id: message.id, result: { thread: { id: "thread-retire" }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-retire" } } });
+    send({ method: "turn/started", params: { threadId: "thread-retire", turn: { id: "turn-retire" } } });
+    send({ id: "approval-retire", method: "item/commandExecution/requestApproval", params: {
+      threadId: "thread-retire", turnId: "turn-retire", itemId: "item-retire", startedAtMs: 1,
+      environmentId: null, command: "git status", cwd: process.cwd(), availableDecisions: ["accept", "decline"]
+    } });
+    send({ method: "serverRequest/resolved", params: { threadId: "thread-other", requestId: "approval-retire" } });
+    setTimeout(() => {
+      send({ method: "item/completed", params: { threadId: "thread-retire", turnId: "turn-retire", item: {
+        id: "item-retire", type: "commandExecution", status: "completed", command: "git status"
+      } } });
+      send({ method: "turn/completed", params: { threadId: "thread-retire", turn: { id: "turn-retire", status: "completed" } } });
+    }, 75);
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  let aborted = false;
+  const output: string[] = [];
+  try {
+    const result = await runner.runCodexAppServerWarmOrOneShot(
+      { id: "participant-retire", kind: "codex-cli", label: "Codex" },
+      "Run the protected command.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      {
+        agentMode: "auto",
+        warm: {
+          conversationId: "conversation-retire",
+          participantId: "participant-retire",
+          contextKey: "context-retire",
+          idleTimeoutMs: 60_000
+        },
+        onOutput: (event: { text?: string }) => { if (event.text) output.push(event.text); },
+        onCodexServerRequest: (request: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+          request.signal.addEventListener("abort", () => {
+            aborted = true;
+            reject(request.signal.reason);
+          }, { once: true });
+        })
+      }
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(aborted, true);
+    assert.match(output.join(""), /Ignored serverRequest\/resolved for thread thread-other/);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("codex app-server never replays a prompt after the provider accepted the turn", async () => {
+  const runner = makeRunner() as any;
+  let oneShotRuns = 0;
+  runner.createCodexAppServerWarmAgent = () => ({
+    key: "warm-key",
+    scopeKey: "conversation-1:participant-1",
+    providerKind: "codex-cli",
+    process: { exitCode: null },
+    queue: Promise.resolve(),
+    closed: false,
+    run: async () => {
+      throw new CodexAppServerRunError(new Error("app-server disconnected"), true);
+    }
+  });
+  runner.closeWarmAgent = async () => undefined;
+  runner.runCodexOneShot = async () => {
+    oneShotRuns += 1;
+    return { ok: true, content: "REPLAYED" };
+  };
+
+  const result = await runner.runCodexAppServerWarmOrOneShot(
+    { id: "participant-1", kind: "codex-cli", label: "Codex" },
+    "ONE_SHOT_PROMPT",
+    "/tmp/repo",
+    undefined,
+    "chat",
+    undefined,
+    {
+      warm: {
+        conversationId: "conversation-1",
+        participantId: "participant-1",
+        contextKey: "context-1",
+        idleTimeoutMs: 60_000
+      }
+    }
+  );
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /app-server disconnected/);
+  assert.equal(oneShotRuns, 0);
+});
+
+test("codex app-server retains one-shot fallback only before provider turn acceptance", async () => {
+  const runner = makeRunner() as any;
+  let oneShotRuns = 0;
+  runner.createCodexAppServerWarmAgent = () => ({
+    key: "warm-key",
+    scopeKey: "conversation-1:participant-1",
+    providerKind: "codex-cli",
+    process: { exitCode: null },
+    queue: Promise.resolve(),
+    closed: false,
+    run: async () => {
+      throw new CodexAppServerRunError(new Error("initialize failed"), false);
+    }
+  });
+  runner.closeWarmAgent = async () => undefined;
+  runner.runCodexOneShot = async () => {
+    oneShotRuns += 1;
+    return { ok: true, content: "FALLBACK" };
+  };
+
+  const result = await runner.runCodexAppServerWarmOrOneShot(
+    { id: "participant-1", kind: "codex-cli", label: "Codex" },
+    "PROMPT",
+    "/tmp/repo",
+    undefined,
+    "chat",
+    undefined,
+    {
+      warm: {
+        conversationId: "conversation-1",
+        participantId: "participant-1",
+        contextKey: "context-1",
+        idleTimeoutMs: 60_000
+      }
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.content, "FALLBACK");
+  assert.equal(oneShotRuns, 1);
 });
 
 test("reasoning effort mapping is provider-specific", () => {

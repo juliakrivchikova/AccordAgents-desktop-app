@@ -9861,11 +9861,14 @@ test("Codex session approval resolves the blocked callback without creating a ch
         threadId: "codex-thread-1",
         turnId: "turn-1",
         itemId: "item-1",
+        startedAtMs: 1,
+        environmentId: null,
         command: "git push origin main",
         cwd: "/tmp/scratch",
         availableDecisions: ["accept", "acceptForSession", "decline", "cancel"]
       },
-      signal: controller.signal
+      signal: controller.signal,
+      responseDelivered: Promise.resolve()
     }
   );
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -9886,6 +9889,413 @@ test("Codex session approval resolves the blocked callback without creating a ch
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
   assert.deepEqual(storage.current.metadata.appToolApprovalPolicies ?? [], []);
   assert.equal(storage.current.messages.length, 1);
+});
+
+test("Codex approval stays pending until the provider acknowledges the selected response", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "codex-thread-ack",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  };
+  let acknowledge!: () => void;
+  const responseDelivered = new Promise<void>((resolve) => { acknowledge = resolve; });
+  const decision = (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    "run-codex-ack",
+    "user-message",
+    {
+      id: 78,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "codex-thread-ack",
+        turnId: "turn-ack",
+        itemId: "item-ack",
+        startedAtMs: 1,
+        environmentId: null,
+        command: "git push origin scratch",
+        availableDecisions: ["accept", "decline"]
+      },
+      signal: new AbortController().signal,
+      responseDelivered
+    }
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+  const response = service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: true,
+    codexDecisionId: "accept"
+  });
+  assert.deepEqual(await decision, { decision: "accept" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
+  acknowledge();
+  await response;
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+});
+
+test("Codex approval expires when the provider cannot receive the selected response", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "codex-thread-delivery-failure",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  };
+  let rejectDelivery!: (error: Error) => void;
+  const responseDelivered = new Promise<void>((_resolve, reject) => { rejectDelivery = reject; });
+  void responseDelivered.catch(() => undefined);
+  const decision = (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    "run-codex-delivery-failure",
+    "user-message",
+    {
+      id: 79,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "codex-thread-delivery-failure",
+        turnId: "turn-delivery-failure",
+        itemId: "item-delivery-failure",
+        startedAtMs: 1,
+        environmentId: null,
+        command: "git push origin scratch",
+        availableDecisions: ["accept", "decline"]
+      },
+      signal: new AbortController().signal,
+      responseDelivered
+    }
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+  const response = service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: true,
+    codexDecisionId: "accept"
+  });
+  assert.deepEqual(await decision, { decision: "accept" });
+  rejectDelivery(new Error("stdin closed"));
+  await assert.rejects(response, /could not receive this decision.*stdin closed/);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "expired");
+  assert.match(storage.current.metadata.pendingAppToolApprovals[0].error ?? "", /stdin closed/);
+});
+
+test("Codex approval rejects a tampered approve flag", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const session = {
+    participantId: participant.id,
+    sessionId: "codex-thread-tampered",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  } satisfies ChatParticipantSession;
+  const controller = new AbortController();
+  const decision = (service as any).requestCodexApprovalFromCli(conversation, participant, session, "run-tampered", "user-message", {
+    id: 80,
+    method: "item/commandExecution/requestApproval",
+    params: {
+      threadId: "codex-thread-tampered",
+      turnId: "turn-tampered",
+      itemId: "item-tampered",
+      startedAtMs: 1,
+      environmentId: null,
+      availableDecisions: ["decline"]
+    },
+    signal: controller.signal,
+    responseDelivered: Promise.resolve()
+  });
+  void decision.catch(() => undefined);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+  await assert.rejects(() => service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: true,
+    codexDecisionId: "decline"
+  }), /does not match the approval outcome/);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
+  controller.abort(new Error("Stopped by user."));
+  await assert.rejects(decision, /Stopped by user/);
+});
+
+test("Codex approval requires an explicit decision id and keeps deny distinct from cancel", async () => {
+  const participant = chatParticipant("codex-cli");
+  participant.agentMode = "auto";
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const session = {
+    participantId: participant.id,
+    sessionId: "codex-thread-explicit-decisions",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  } satisfies ChatParticipantSession;
+  const requestApproval = (id: number, itemId: string) => (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    `run-${itemId}`,
+    "user-message",
+    {
+      id,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: session.sessionId,
+        turnId: `turn-${itemId}`,
+        itemId,
+        startedAtMs: 1,
+        environmentId: null,
+        command: "git push scratch main",
+        availableDecisions: ["decline", "cancel"]
+      },
+      signal: new AbortController().signal,
+      responseDelivered: Promise.resolve()
+    }
+  );
+
+  const denyDecision = requestApproval(82, "deny-item");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const denyApproval = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])
+    .find((item) => item.status === "pending");
+  assert.ok(denyApproval);
+  let denySettled = false;
+  void denyDecision.finally(() => { denySettled = true; });
+
+  await assert.rejects(() => service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: denyApproval.id,
+    approve: false
+  }), /Select one of the decisions offered/);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(denySettled, false);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals.find((item: ChatAppToolApproval) => item.id === denyApproval.id)?.status, "pending");
+  assert.equal((service as any).codexApprovalResolvers.get(denyApproval.id)?.submitted, false);
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: denyApproval.id,
+    approve: false,
+    codexDecisionId: "decline"
+  });
+  assert.deepEqual(await denyDecision, { decision: "decline" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals.find((item: ChatAppToolApproval) => item.id === denyApproval.id)?.status, "denied");
+
+  const cancelDecision = requestApproval(83, "cancel-item");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const cancelApproval = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])
+    .find((item) => item.status === "pending");
+  assert.ok(cancelApproval);
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: cancelApproval.id,
+    approve: false,
+    codexDecisionId: "cancel"
+  });
+  assert.deepEqual(await cancelDecision, { decision: "cancel" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals.find((item: ChatAppToolApproval) => item.id === cancelApproval.id)?.status, "cancelled");
+});
+
+test("Codex human-decision timeout sends the method refusal and expires the card", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  service.setCodexApprovalWaitMsForTests(5);
+  const session = {
+    participantId: participant.id,
+    sessionId: "codex-thread-timeout",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  } satisfies ChatParticipantSession;
+  let acknowledge!: () => void;
+  const responseDelivered = new Promise<void>((resolve) => { acknowledge = resolve; });
+  const decision = (service as any).requestCodexApprovalFromCli(conversation, participant, session, "run-timeout", "user-message", {
+    id: 81,
+    method: "item/permissions/requestApproval",
+    params: {
+      threadId: "codex-thread-timeout",
+      turnId: "turn-timeout",
+      itemId: "item-timeout",
+      environmentId: null,
+      startedAtMs: 1,
+      cwd: "/tmp",
+      reason: null,
+      permissions: { network: { enabled: true }, fileSystem: null }
+    },
+    signal: new AbortController().signal,
+    responseDelivered
+  });
+  const [refusal] = await Promise.all([
+    decision,
+    new Promise<void>((resolve) => setTimeout(resolve, 10))
+  ]);
+  assert.deepEqual(refusal, { permissions: {}, scope: "turn" });
+  acknowledge();
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "expired");
+  assert.match(storage.current.metadata.pendingAppToolApprovals[0].error ?? "", /method-supported refusal/);
+});
+
+test("Guardian timeout creates a durable terminal card without a resolver", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const session = {
+    participantId: participant.id,
+    sessionId: "codex-thread-guardian-timeout",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  } satisfies ChatParticipantSession;
+  const result = await (service as any).requestCodexApprovalFromCli(conversation, participant, session, "run-guardian-timeout", "user-message", {
+    id: "guardian-timeout:review-1",
+    method: "item/autoApprovalReview/timedOut",
+    params: {
+      threadId: "codex-thread-guardian-timeout",
+      turnId: "turn-timeout",
+      startedAtMs: 1,
+      completedAtMs: 2,
+      reviewId: "review-timeout",
+      targetItemId: null,
+      decisionSource: "agent",
+      review: { status: "timedOut", riskLevel: "high", userAuthorization: "low", rationale: "Review timed out" },
+      action: { type: "command", source: "unifiedExec", command: "git push origin scratch", cwd: "/tmp" }
+    },
+    signal: new AbortController().signal,
+    responseDelivered: Promise.resolve()
+  });
+  assert.deepEqual(result, { decision: "keepDenied" });
+  const approval = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+  assert.equal(approval.status, "expired");
+  assert.deepEqual((approval.request as { options: unknown[] }).options, []);
+  assert.match(approval.error ?? "", /remains denied/);
+});
+
+test("Guardian denial approval keeps the exact event out of storage and resolves one retry", async () => {
+  const participant = chatParticipant("codex-cli");
+  participant.agentMode = "auto";
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "codex-thread-1",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  };
+  const controller = new AbortController();
+  let acknowledge!: () => void;
+  const responseDelivered = new Promise<void>((resolve) => { acknowledge = resolve; });
+  const decision = (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    "run-guardian-approval",
+    "user-message",
+    {
+      id: "guardian:review-1",
+      method: "item/autoApprovalReview/denied",
+      params: {
+        threadId: "codex-thread-1",
+        turnId: "turn-1",
+        startedAtMs: 100,
+        completedAtMs: 200,
+        reviewId: "review-1",
+        targetItemId: "item-1",
+        decisionSource: "agent",
+        review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: "Not authorized" },
+        action: { type: "command", source: "unifiedExec", command: "git push origin main", cwd: "/tmp/scratch" }
+      },
+      signal: controller.signal,
+      responseDelivered
+    }
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+
+  assert.equal(pending.status, "pending");
+  assert.deepEqual((pending.request as { options: Array<{ label: string }> }).options.map((option) => option.label), [
+    "Approve one retry",
+    "Keep denied"
+  ]);
+  assert.equal(JSON.stringify(pending.request).includes("guardian_assessment"), false);
+  assert.equal(JSON.stringify(pending.request).includes("startedAtMs"), false);
+
+  const response = service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: true,
+    codexDecisionId: "approveRetry"
+  });
+
+  assert.deepEqual(await decision, { decision: "approveRetry" });
+  await assert.rejects(() => service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: true,
+    codexDecisionId: "approveRetry"
+  }), /already been answered/);
+  acknowledge();
+  await response;
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+  assert.deepEqual(storage.current.metadata.appToolApprovalPolicies ?? [], []);
 });
 
 test("Codex approval becomes non-actionable when its app-server request is cancelled", async () => {
@@ -9919,12 +10329,13 @@ test("Codex approval becomes non-actionable when its app-server request is cance
         threadId: "codex-thread-1",
         turnId: "turn-1",
         itemId: "item-file",
+        startedAtMs: 1,
         grantRoot: "/tmp/scratch"
       },
-      signal: controller.signal
+      signal: controller.signal,
+      responseDelivered: Promise.resolve()
     }
   );
-  await new Promise<void>((resolve) => setImmediate(resolve));
   controller.abort(new Error("Stopped by user."));
   await assert.rejects(decision, /Stopped by user/);
   await new Promise<void>((resolve) => setImmediate(resolve));

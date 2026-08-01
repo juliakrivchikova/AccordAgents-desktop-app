@@ -21,6 +21,7 @@ import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatComposer } from "./chat-composer";
 import {
   chatAppToolApprovals,
+  chatApprovalPlacement,
   chatContinuedMentionRequestIds,
   chatContextUsageByParticipant,
   chatInferredParticipantRequestBatchesByTrigger,
@@ -134,6 +135,14 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     : undefined;
   const selectedThreadSummary = selectedThreadRoot ? threadSummaries.get(selectedThreadRoot.id) : undefined;
   const hasThread = Boolean(selectedThreadRoot);
+  const visibleApprovalMessages = useMemo(
+    () => [...topLevelMessages, ...(selectedThreadSummary?.replies ?? [])],
+    [selectedThreadSummary?.replies, topLevelMessages]
+  );
+  const approvalPlacement = useMemo(
+    () => chatApprovalPlacement(pendingAppToolApprovals, visibleApprovalMessages),
+    [pendingAppToolApprovals, visibleApprovalMessages]
+  );
   const chatTimelineRows = useMemo(() => {
     const rows = [];
     if (props.hasOlderMessages || props.olderMessagesLoading) {
@@ -342,7 +351,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               onToggleReaction={chatMessageActions.onToggleReaction}
               participantStatusById={props.participantStatusById}
               participants={participants}
-              pendingApprovalRows={pendingAppToolApprovals}
+              approvalsByMessageId={approvalPlacement.byMessageId}
+              pendingApprovalRows={approvalPlacement.unanchored}
               rows={chatTimelineRows}
               selectedThreadRootId={selectedThreadRoot?.id}
               sessionsByParticipant={sessionsByParticipant}
@@ -423,6 +433,9 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               onStopRun={props.onStopRun ? chatMessageActions.onStopRun : undefined}
               continuedMentionRequestIds={continuedMentionRequestIds}
               inferredParticipantRequestsByTrigger={inferredParticipantRequestsByTrigger}
+              approvalsByMessageId={approvalPlacement.byMessageId}
+              submittingApprovalIds={approvalSubmission.submittingIds}
+              onRespondToAppToolApproval={handleAppToolApproval}
             />
           )}
           {showArtifactsPanel && (

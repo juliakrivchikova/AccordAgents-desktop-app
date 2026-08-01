@@ -1,6 +1,5 @@
 import type {
   ChatAppToolApproval,
-  ChatCodexApprovalRequest,
   ChatParticipantChangeRequest,
   ChatParticipantRequestApprovalRequest,
   ChatParticipantRequestBatch,
@@ -14,6 +13,16 @@ import type {
   Conversation
 } from "../../../shared/types";
 import { chatParticipantReference } from "../conversation/conversation-display";
+import { CODEX_APPROVAL_TOOL_NAME, chatCodexApprovalRequest } from "./chat-codex-approval-presentation";
+
+export {
+  CODEX_APPROVAL_TOOL_NAME,
+  chatApprovalKeyboardAction,
+  chatApprovalPlacement,
+  chatApprovalShowsGenericSkip,
+  chatCodexApprovalRequest
+} from "./chat-codex-approval-presentation";
+export type { ChatApprovalKeyboardAction, ChatApprovalPlacement } from "./chat-codex-approval-presentation";
 
 export const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 export const APP_TOOL_PERMISSION_TOOL = "app_tool_permission";
@@ -22,7 +31,6 @@ export const APP_ROLES_REQUEST_CHANGE_TOOL = "app_roles_request_change";
 export const APP_PARTICIPANTS_REQUEST_CHANGE_TOOL = "app_participants_request_change";
 export const APP_CHAT_REQUEST_PARTICIPANTS_TOOL = "app_chat_request_participants";
 export const APP_CHAT_REQUEST_COMPACTION_TOOL = "app_chat_request_compaction";
-export const CODEX_APPROVAL_TOOL_NAME = "codex_auto_review_approval";
 export const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 
 export function chatAppToolApprovals(conversation: Conversation | undefined): ChatAppToolApproval[] {
@@ -69,24 +77,6 @@ export function chatAppToolApprovals(conversation: Conversation | undefined): Ch
       (isRosterRequest || isRoleRequest || isParticipantChangeRequest || isPermissionRequest || isToolPermissionRequest || isParticipantRequest || isSelfCompactionRequest || isCodexApprovalRequest)
     );
   });
-}
-
-export function chatCodexApprovalRequest(approval: ChatAppToolApproval): ChatCodexApprovalRequest | undefined {
-  if (approval.toolName !== CODEX_APPROVAL_TOOL_NAME) {
-    return undefined;
-  }
-  const request = approval.request as Partial<ChatCodexApprovalRequest>;
-  return request.kind === "codexApproval" &&
-    (typeof request.requestId === "string" || typeof request.requestId === "number") &&
-    (request.action === "command" || request.action === "fileChange" || request.action === "permissions") &&
-    Array.isArray(request.options) &&
-    request.options.every((option) =>
-      typeof option?.id === "string" &&
-      typeof option.label === "string" &&
-      (option.outcome === "approve" || option.outcome === "deny" || option.outcome === "cancel")
-    )
-    ? request as ChatCodexApprovalRequest
-    : undefined;
 }
 
 export function chatSelfCompactionRequest(approval: ChatAppToolApproval): ChatSelfCompactionRequest | undefined {

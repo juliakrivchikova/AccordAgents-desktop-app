@@ -41,8 +41,13 @@ import {
   extractCodexText as extractCodexExecText
 } from "./codexExec";
 import {
+  CODEX_GUARDIAN_DENIED_APPROVAL_METHOD,
+  CODEX_GUARDIAN_TIMED_OUT_APPROVAL_METHOD,
+  codexGuardianAssessmentEvent,
   codexApprovalCancellationResult,
   isCodexApprovalMethod,
+  validateCodexApprovalCorrelation,
+  type CodexApprovalCorrelation,
   type CodexInboundServerRequest
 } from "./codexApprovals";
 import {
@@ -326,6 +331,16 @@ interface CodexAppServerPendingInboundRequest {
   controller: AbortController;
   turn: CodexAppServerPendingTurn;
   answered: boolean;
+  correlation: CodexApprovalCorrelation;
+}
+
+interface CodexAppServerPendingGuardianApproval {
+  key: string;
+  controller: AbortController;
+  threadId: string;
+  turnId: string;
+  reviewId: string;
+  targetItemId: string | null;
 }
 
 interface CachedModelCatalog {
@@ -337,6 +352,7 @@ interface CodexAppServerPendingTurn {
   startedAt: number;
   threadId: string;
   turnId?: string;
+  acceptedByProvider?: boolean;
   messages: string[];
   streamedText: string;
   visibleTranscript: string;
@@ -364,6 +380,16 @@ interface CodexAppServerPendingTurn {
   onCodexServerRequest?: CliAgentCodexServerRequestCallback;
   resolve: (result: ParticipantRunResult) => void;
   reject: (error: Error) => void;
+}
+
+export class CodexAppServerRunError extends Error {
+  readonly turnAccepted: boolean;
+
+  constructor(cause: Error, turnAccepted: boolean) {
+    super(cause.message, { cause });
+    this.name = "CodexAppServerRunError";
+    this.turnAccepted = turnAccepted;
+  }
 }
 
 type CodexNativeGoalStatus =
@@ -562,7 +588,8 @@ export class CliAgentRunner {
 
   constructor(
     private readonly debugLogs?: CliAgentDebugLogger,
-    manualReadinessEnvironment?: () => Promise<{ env: NodeJS.ProcessEnv }>
+    manualReadinessEnvironment?: () => Promise<{ env: NodeJS.ProcessEnv }>,
+    private readonly codexExecutable = "codex"
   ) {
     this.readiness = new CliReadinessService(debugLogs, {
       manualEnvironment: async () => (await manualReadinessEnvironment?.())?.env ?? {}
@@ -724,7 +751,7 @@ export class CliAgentRunner {
 
   private async listCodexModelCatalog(fetchedAt: string): Promise<ProviderModelCatalog> {
     await ensureLoginShellEnvPrimed();
-    const child = spawn("codex", ["app-server", "--listen", "stdio://"], {
+    const child = spawn(this.codexExecutable, ["app-server", "--listen", "stdio://"], {
       env: commandEnvironment(),
       stdio: ["pipe", "pipe", "pipe"]
     });
@@ -769,6 +796,10 @@ export class CliAgentRunner {
       });
     };
 
+    const writeServerMessage = (message: Record<string, unknown>): Promise<void> => new Promise<void>((resolve, reject) => {
+      child.stdin.write(`${JSON.stringify(message)}\n`, (error) => error ? reject(error) : resolve());
+    });
+
     const handleResponse = (record: Record<string, unknown>): void => {
       const id = typeof record.id === "number" ? record.id : undefined;
       if (id === undefined) {
@@ -798,7 +829,21 @@ export class CliAgentRunner {
             const event = JSON.parse(line) as unknown;
             const record = this.asRecord(event);
             if (record) {
-              handleResponse(record);
+              const kind = codexAppServerMessageKind(record);
+              if (kind === "server-request") {
+                const id = typeof record.id === "string" || typeof record.id === "number" ? record.id : undefined;
+                const method = this.stringField(record, "method");
+                if (id !== undefined && method === "currentTime/read") {
+                  void writeServerMessage({ id, result: { currentTimeAt: Math.floor(Date.now() / 1_000) } }).catch(cleanup);
+                } else if (id !== undefined && method) {
+                  const message = method === "account/chatgptAuthTokens/refresh"
+                    ? "The model catalog uses Codex CLI-managed authentication and never supplies external ChatGPT tokens. A refresh callback indicates an unsupported authentication contract."
+                    : `The model catalog does not support the Codex client request ${method}.`;
+                  void writeServerMessage({ id, error: { code: -32601, message } }).catch(cleanup);
+                }
+              } else if (kind === "response") {
+                handleResponse(record);
+              }
             }
           } catch {
             // Ignore non-JSON status output.
@@ -826,6 +871,7 @@ export class CliAgentRunner {
         },
         capabilities: {
           experimentalApi: true,
+          requestAttestation: false,
           optOutNotificationMethods: []
         }
       });
@@ -2050,6 +2096,16 @@ export class CliAgentRunner {
         if (signal?.aborted) {
           return this.failed(participant, error);
         }
+        if (error instanceof CodexAppServerRunError && error.turnAccepted) {
+          void this.writeDebugLog("cli-agent-warm-terminal-after-turn-accepted", {
+            providerKind: participant.kind,
+            participantId: participant.id,
+            conversationId: warm.conversationId,
+            runtime: "codex-app-server",
+            error: this.errorText(error)
+          });
+          return this.failed(participant, error);
+        }
         void this.writeDebugLog("cli-agent-warm-fallback", {
           providerKind: participant.kind,
           participantId: participant.id,
@@ -2073,7 +2129,7 @@ export class CliAgentRunner {
     kind: ConversationKind,
     options: CliAgentRunOptions
   ): WarmAgentEntry {
-    const child = spawn("codex", ["app-server", "--listen", "stdio://"], {
+    const child = spawn(this.codexExecutable, ["app-server", "--listen", "stdio://"], {
       cwd: repoPath,
       env: commandEnvironment(this.agentRunEnv(options)),
       stdio: ["pipe", "pipe", "pipe"]
@@ -2092,6 +2148,9 @@ export class CliAgentRunner {
     let activeModel = participant.model;
     const pendingRequests = new Map<number, CodexAppServerPendingRequest>();
     const pendingInboundRequests = new Map<string, CodexAppServerPendingInboundRequest>();
+    const pendingGuardianApprovals = new Map<string, CodexAppServerPendingGuardianApproval>();
+    const pendingFileChangeSummaries = new Map<string, Array<Record<string, unknown>>>();
+    const seenGuardianReviewKeys = new Set<string>();
     let pendingTurn: CodexAppServerPendingTurn | undefined;
     let pendingCompact: CodexAppServerPendingCompact | undefined;
 
@@ -2113,6 +2172,10 @@ export class CliAgentRunner {
         pendingInboundRequests.delete(requestKey);
         request.controller.abort(new Error("Codex turn ended before the approval was answered."));
       }
+      const turnPrefix = current.turnId ? `${current.threadId}:${current.turnId}:` : `${current.threadId}:`;
+      for (const key of pendingFileChangeSummaries.keys()) {
+        if (key.startsWith(turnPrefix)) pendingFileChangeSummaries.delete(key);
+      }
       current.outstandingServerRequestIds.clear();
       pendingTurn = undefined;
       return current;
@@ -2120,7 +2183,12 @@ export class CliAgentRunner {
 
     const rejectPendingTurn = (error: Error): void => {
       const current = cleanupPendingTurn();
-      current?.reject(error);
+      if (!current) {
+        return;
+      }
+      current.reject(error instanceof CodexAppServerRunError
+        ? error
+        : new CodexAppServerRunError(error, current.acceptedByProvider === true));
     };
 
     const cleanupPendingCompact = (): CodexAppServerPendingCompact | undefined => {
@@ -2241,6 +2309,7 @@ export class CliAgentRunner {
     };
 
     const inboundRequestKey = (id: string | number): string => `${typeof id}:${String(id)}`;
+    const itemCorrelationKey = (thread: string, turn: string, item: string): string => `${thread}:${turn}:${item}`;
 
     const writeServerMessage = (message: Record<string, unknown>): Promise<void> => {
       if (closed || child.exitCode !== null || child.killed) {
@@ -2249,6 +2318,13 @@ export class CliAgentRunner {
       return new Promise<void>((resolve, reject) => {
         child.stdin.write(`${JSON.stringify(message)}\n`, (error) => error ? reject(error) : resolve());
       });
+    };
+
+    const rejectPendingGuardianApprovals = (error: Error): void => {
+      for (const approval of pendingGuardianApprovals.values()) {
+        approval.controller.abort(error);
+      }
+      pendingGuardianApprovals.clear();
     };
 
     let cancelPendingInboundApprovals: (turn: CodexAppServerPendingTurn, reason: string) => Promise<void>;
@@ -2264,7 +2340,10 @@ export class CliAgentRunner {
       turn.timeoutDeadline = Date.now() + delayMs;
       turn.timer = setTimeout(() => {
         void cancelPendingInboundApprovals(turn, "Codex approval expired because the turn timed out.")
-          .finally(() => rejectPendingTurn(new Error(`codex app-server timed out after ${delayMs}ms`)));
+          .finally(() => {
+            rejectPendingGuardianApprovals(new Error("Codex Guardian approval expired because the provider turn timed out."));
+            rejectPendingTurn(new Error(`codex app-server timed out after ${delayMs}ms`));
+          });
       }, delayMs);
       turn.timer.unref();
     };
@@ -2321,15 +2400,21 @@ export class CliAgentRunner {
 
     cancelPendingInboundApprovals = async (turn: CodexAppServerPendingTurn, reason: string): Promise<void> => {
       const requests = [...pendingInboundRequests.values()].filter((request) => request.turn === turn);
+      const failures: Error[] = [];
       for (const request of requests) {
         if (!isCodexApprovalMethod(request.method)) {
           continue;
         }
         try {
           await answerPendingInboundRequest(request, codexApprovalCancellationResult(request.method));
+        } catch (error) {
+          failures.push(error instanceof Error ? error : new Error(String(error)));
         } finally {
           request.controller.abort(new Error(reason));
         }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(failures, "One or more Codex approval refusal frames could not be written.");
       }
     };
 
@@ -2338,14 +2423,24 @@ export class CliAgentRunner {
         return false;
       }
       const params = this.asRecord(record.params);
+      const notificationThreadId = this.stringField(params ?? {}, "threadId");
       const id = params && (typeof params.requestId === "string" || typeof params.requestId === "number")
         ? params.requestId
         : undefined;
-      if (id === undefined) {
+      if (id === undefined || !notificationThreadId) {
         return true;
       }
       const request = pendingInboundRequests.get(inboundRequestKey(id));
       if (!request) {
+        return true;
+      }
+      if (notificationThreadId !== request.correlation.threadId) {
+        const message = `Ignored serverRequest/resolved for thread ${notificationThreadId}; request ${String(id)} belongs to ${request.correlation.threadId}.`;
+        this.emitLiveOutput(request.turn.onOutput, "tool", `${message}\n`, undefined, {
+          activityKind: "approval",
+          activityStatus: "failed",
+          activityDetail: message
+        });
         return true;
       }
       pendingInboundRequests.delete(request.key);
@@ -2368,8 +2463,13 @@ export class CliAgentRunner {
         return;
       }
       if (!isCodexApprovalMethod(method)) {
+        // Codex 0.146's account/read contract says managed authentication uses
+        // the CLI's normal refresh-token flow; this callback belongs to clients
+        // that supplied external chatgptAuthTokens through account/login/start.
+        // AccordAgents never performs that login variant, so receiving it is
+        // authentication-contract drift rather than a recoverable refresh ask.
         const message = method === "account/chatgptAuthTokens/refresh"
-          ? "AccordAgents cannot refresh ChatGPT subscription tokens through this app-server connection. Re-authenticate Codex and retry."
+          ? "This app-server was launched with Codex CLI-managed authentication, but Codex requested a client-managed token refresh. AccordAgents did not supply external ChatGPT tokens; re-authenticate the Codex CLI and retry."
           : `AccordAgents does not support the Codex client request ${method}.`;
         this.emitLiveOutput(pendingTurn?.onOutput, "tool", `${message}\n`, undefined, {
           activityKind: "status",
@@ -2387,6 +2487,22 @@ export class CliAgentRunner {
           .catch((error) => rejectPendingTurn(error instanceof Error ? error : new Error(String(error))));
         return;
       }
+      let correlation: CodexApprovalCorrelation;
+      try {
+        correlation = validateCodexApprovalCorrelation(method, record.params, turn.threadId, turn.turnId);
+      } catch (error) {
+        const message = this.errorText(error);
+        void writeServerMessage({ id, error: { code: -32602, message: this.truncateText(message, MAX_CLI_ERROR_CHARS) } })
+          .catch((writeError) => rejectPendingTurn(writeError instanceof Error ? writeError : new Error(String(writeError))));
+        this.emitLiveOutput(turn.onOutput, "tool", `Rejected malformed Codex approval request: ${message}\n`, undefined, {
+          activityKind: "approval",
+          activityStatus: "failed",
+          activityDetail: message
+        });
+        return;
+      }
+      if (!turn.turnId && correlation.turnId) turn.turnId = correlation.turnId;
+      turn.acceptedByProvider = true;
       const key = inboundRequestKey(id);
       if (pendingInboundRequests.has(key)) {
         const message = `Codex reused an active JSON-RPC request id (${String(id)}).`;
@@ -2401,14 +2517,41 @@ export class CliAgentRunner {
         method,
         controller,
         turn,
-        answered: false
+        answered: false,
+        correlation
       };
       pendingInboundRequests.set(key, request);
       turn.outstandingServerRequestIds.add(key);
       pausePendingTurnTimer(turn);
-      void turn.onCodexServerRequest({ id, method, params: record.params, signal: controller.signal })
-        .then((result) => answerPendingInboundRequest(request, result))
+      let resolveDelivery!: () => void;
+      let rejectDelivery!: (error: Error) => void;
+      const responseDelivered = new Promise<void>((resolve, reject) => {
+        resolveDelivery = resolve;
+        rejectDelivery = reject;
+      });
+      void responseDelivered.catch(() => undefined);
+      const correlatedParams = method === "item/fileChange/requestApproval" && correlation.turnId
+        ? {
+            ...(this.asRecord(record.params) ?? {}),
+            fileChanges: pendingFileChangeSummaries.get(itemCorrelationKey(correlation.threadId, correlation.turnId, correlation.itemId))
+          }
+        : record.params;
+      void turn.onCodexServerRequest({ id, method, params: correlatedParams, signal: controller.signal, responseDelivered })
+        .then(async (result) => {
+          try {
+            const delivered = await answerPendingInboundRequest(request, result);
+            if (!delivered) {
+              throw new Error("The Codex approval request was resolved before this decision could be delivered.");
+            }
+            resolveDelivery();
+          } catch (error) {
+            const deliveryError = error instanceof Error ? error : new Error(String(error));
+            rejectDelivery(deliveryError);
+            throw deliveryError;
+          }
+        })
         .catch((error) => {
+          rejectDelivery(error instanceof Error ? error : new Error(String(error)));
           if (!pendingInboundRequests.has(key)) {
             return;
           }
@@ -2416,6 +2559,215 @@ export class CliAgentRunner {
           return rejectPendingInboundRequest(request, -32000, message);
         })
         .catch((error) => rejectPendingTurn(error instanceof Error ? error : new Error(String(error))));
+    };
+
+    const handleFileChangePatchUpdated = (record: Record<string, unknown>): boolean => {
+      if (this.stringField(record, "method") !== "item/fileChange/patchUpdated") return false;
+      const params = this.asRecord(record.params);
+      const notificationThreadId = this.stringField(params ?? {}, "threadId");
+      const notificationTurnId = this.stringField(params ?? {}, "turnId");
+      const itemId = this.stringField(params ?? {}, "itemId");
+      const turn = pendingTurn;
+      if (
+        !params || !notificationThreadId || !notificationTurnId || !itemId || !Array.isArray(params.changes) ||
+        !turn || notificationThreadId !== turn.threadId || (turn.turnId && notificationTurnId !== turn.turnId)
+      ) {
+        return true;
+      }
+      if (!turn.turnId) turn.turnId = notificationTurnId;
+      const summaries = params.changes.flatMap((value): Array<Record<string, unknown>> => {
+        const change = this.asRecord(value);
+        const pathValue = this.stringField(change ?? {}, "path");
+        const kind = this.asRecord(change?.kind);
+        const kindType = this.stringField(kind ?? {}, "type");
+        if (!pathValue || (kindType !== "add" && kindType !== "delete" && kindType !== "update")) return [];
+        return [{ path: pathValue, kind: { type: kindType } }];
+      });
+      if (summaries.length !== params.changes.length) {
+        const message = "Ignored malformed item/fileChange/patchUpdated notification.";
+        this.emitLiveOutput(turn.onOutput, "tool", `${message}\n`, undefined, {
+          activityKind: "approval",
+          activityStatus: "failed",
+          activityDetail: message
+        });
+        return true;
+      }
+      pendingFileChangeSummaries.set(itemCorrelationKey(notificationThreadId, notificationTurnId, itemId), summaries);
+      return true;
+    };
+
+    const handleItemCompletedApprovalRetirement = (record: Record<string, unknown>): boolean => {
+      if (this.stringField(record, "method") !== "item/completed") return false;
+      const params = this.asRecord(record.params);
+      const item = this.asRecord(params?.item);
+      const notificationThreadId = this.stringField(params ?? {}, "threadId");
+      const notificationTurnId = this.stringField(params ?? {}, "turnId");
+      const itemId = this.stringField(item ?? {}, "id");
+      if (!notificationThreadId || !notificationTurnId || !itemId) return true;
+      for (const [requestKey, request] of pendingInboundRequests) {
+        if (
+          request.correlation.threadId !== notificationThreadId ||
+          request.correlation.turnId !== notificationTurnId ||
+          request.correlation.itemId !== itemId
+        ) {
+          continue;
+        }
+        pendingInboundRequests.delete(requestKey);
+        request.answered = true;
+        request.turn.outstandingServerRequestIds.delete(request.key);
+        request.controller.abort(new Error("Codex completed the item before the approval was answered."));
+        resumePendingTurnTimer(request.turn);
+      }
+      pendingFileChangeSummaries.delete(itemCorrelationKey(notificationThreadId, notificationTurnId, itemId));
+      return true;
+    };
+
+    const handleGuardianReviewCompleted = (record: Record<string, unknown>): void => {
+      if (this.stringField(record, "method") !== "item/autoApprovalReview/completed") {
+        return;
+      }
+      const params = this.asRecord(record.params);
+      const review = this.asRecord(params?.review);
+      const reviewId = this.stringField(params ?? {}, "reviewId");
+      const notificationThreadId = this.stringField(params ?? {}, "threadId");
+      const notificationTurnId = this.stringField(params ?? {}, "turnId");
+      const status = this.stringField(review ?? {}, "status");
+      const targetItemId = params?.targetItemId === null
+        ? null
+        : this.stringField(params ?? {}, "targetItemId");
+      if (
+        !params || !review || !reviewId || !notificationThreadId || !notificationTurnId ||
+        (params.targetItemId !== null && !targetItemId) ||
+        (status !== "denied" && status !== "timedOut" && status !== "approved" && status !== "aborted")
+      ) {
+        return;
+      }
+      const turn = pendingTurn;
+      if (
+        !turn?.onCodexServerRequest ||
+        notificationThreadId !== turn.threadId ||
+        (turn.turnId && notificationTurnId !== turn.turnId)
+      ) {
+        return;
+      }
+      if (!turn.turnId) turn.turnId = notificationTurnId;
+      const key = `${notificationThreadId}:${notificationTurnId}:${reviewId}:${targetItemId ?? "<none>"}`;
+      if (seenGuardianReviewKeys.has(key)) return;
+      if (seenGuardianReviewKeys.size >= 512) {
+        const oldest = seenGuardianReviewKeys.values().next().value;
+        if (typeof oldest === "string") seenGuardianReviewKeys.delete(oldest);
+      }
+      seenGuardianReviewKeys.add(key);
+      turn.acceptedByProvider = true;
+      if (status === "approved" || status === "aborted") return;
+      if (status === "timedOut") {
+        void turn.onCodexServerRequest({
+          id: `guardian-timeout:${reviewId}`,
+          method: CODEX_GUARDIAN_TIMED_OUT_APPROVAL_METHOD,
+          params,
+          signal: new AbortController().signal,
+          responseDelivered: Promise.resolve()
+        }).catch((error) => {
+          void this.debugLogs?.write("cli.codex-app-server.guardian-timeout-projection-failed", {
+            threadId: notificationThreadId,
+            turnId: notificationTurnId,
+            reviewId,
+            message: this.errorText(error)
+          });
+        });
+        return;
+      }
+      let event: Record<string, unknown>;
+      try {
+        event = codexGuardianAssessmentEvent(params);
+      } catch (error) {
+        const message = `Codex Auto Review denial could not be prepared for approval: ${this.errorText(error)}`;
+        this.emitLiveOutput(turn.onOutput, "tool", `${message}\n`, undefined, {
+          activityKind: "approval",
+          activityStatus: "failed",
+          activityDetail: message
+        });
+        void this.debugLogs?.write("cli.codex-app-server.guardian-approval-invalid", {
+          threadId: notificationThreadId,
+          turnId: notificationTurnId,
+          reviewId,
+          message: this.errorText(error)
+        });
+        return;
+      }
+      const controller = new AbortController();
+      const approval: CodexAppServerPendingGuardianApproval = {
+        key,
+        controller,
+        threadId: notificationThreadId,
+        turnId: notificationTurnId,
+        reviewId,
+        targetItemId: targetItemId ?? null
+      };
+      pendingGuardianApprovals.set(key, approval);
+      let resolveDelivery!: () => void;
+      let rejectDelivery!: (error: Error) => void;
+      const responseDelivered = new Promise<void>((resolve, reject) => {
+        resolveDelivery = resolve;
+        rejectDelivery = reject;
+      });
+      void responseDelivered.catch(() => undefined);
+      void turn.onCodexServerRequest({
+        id: `guardian:${reviewId}`,
+        method: CODEX_GUARDIAN_DENIED_APPROVAL_METHOD,
+        params,
+        signal: controller.signal,
+        responseDelivered
+      }).then(async (result) => {
+        if (pendingGuardianApprovals.get(key) !== approval || controller.signal.aborted) {
+          throw new Error("The Guardian approval is no longer active.");
+        }
+        const decision = this.stringField(this.asRecord(result) ?? {}, "decision");
+        if (decision !== "approveRetry") {
+          resolveDelivery();
+          return;
+        }
+        if (closed || child.exitCode !== null || child.killed || threadId !== notificationThreadId) {
+          throw new Error("The Codex app-server session for this Guardian denial is no longer active.");
+        }
+        await sendRequest("thread/approveGuardianDeniedAction", {
+          threadId: notificationThreadId,
+          event
+        }, 10_000);
+        void this.debugLogs?.write("cli.codex-app-server.guardian-approval-sent", {
+          threadId: notificationThreadId,
+          turnId: notificationTurnId,
+          reviewId
+        });
+        this.emitLiveOutput(turn.onOutput, "tool", "Approved one retry for the Auto Review denial\n", undefined, {
+          activityKind: "approval",
+          activityStatus: "completed",
+          activityDetail: "Codex will retry the denied action once; the retry remains subject to Auto Review."
+        });
+        resolveDelivery();
+      }).catch((error) => {
+        const deliveryError = error instanceof Error ? error : new Error(String(error));
+        rejectDelivery(deliveryError);
+        if (controller.signal.aborted) {
+          return;
+        }
+        const message = this.errorText(deliveryError);
+        this.emitLiveOutput(turn.onOutput, "tool", `Could not approve the Auto Review retry: ${message}\n`, undefined, {
+          activityKind: "approval",
+          activityStatus: "failed",
+          activityDetail: message
+        });
+        void this.debugLogs?.write("cli.codex-app-server.guardian-approval-failed", {
+          threadId: notificationThreadId,
+          turnId: notificationTurnId,
+          reviewId,
+          message
+        });
+      }).finally(() => {
+        if (pendingGuardianApprovals.get(key) === approval) {
+          pendingGuardianApprovals.delete(key);
+        }
+      });
     };
 
     const handleLine = (line: string): void => {
@@ -2441,10 +2793,20 @@ export class CliAgentRunner {
       if (handleServerRequestResolved(record)) {
         return;
       }
+      handleFileChangePatchUpdated(record);
+      handleItemCompletedApprovalRetirement(record);
       if (this.handleCodexAppServerCompactNotification(record, participant, pendingCompact, cleanupPendingCompact, rejectPendingCompact)) {
         return;
       }
-      this.handleCodexAppServerNotification(record, participant, pendingTurn, cleanupPendingTurn, rejectPendingTurn);
+      handleGuardianReviewCompleted(record);
+      this.handleCodexAppServerNotification(
+        record,
+        participant,
+        pendingTurn,
+        cleanupPendingTurn,
+        rejectPendingTurn,
+        rejectPendingGuardianApprovals
+      );
     };
 
     const handleData = (chunk: string, stream: "stdout" | "stderr"): void => {
@@ -2477,6 +2839,7 @@ export class CliAgentRunner {
       closed = true;
       rejectPendingTurn(error);
       rejectPendingCompact(error);
+      rejectPendingGuardianApprovals(error);
       for (const pending of pendingRequests.values()) {
         pending.reject(error);
       }
@@ -2486,16 +2849,23 @@ export class CliAgentRunner {
       closed = true;
       rejectPendingTurn(error);
       rejectPendingCompact(error);
+      rejectPendingGuardianApprovals(error);
       for (const pending of pendingRequests.values()) {
         pending.reject(error);
       }
       pendingRequests.clear();
     });
-    child.on("close", (exitCode) => {
+    child.on("close", (exitCode, signal) => {
       closed = true;
-      const error = new Error(`codex app-server process exited${exitCode === null ? "" : ` with code ${exitCode}`}${stderr ? `: ${stderr}` : ""}`);
+      const exitDetail = signal
+        ? ` after signal ${signal}`
+        : exitCode === null
+          ? ""
+          : ` with code ${exitCode}`;
+      const error = new Error(`codex app-server process exited${exitDetail}${!signal && stderr ? `: ${stderr}` : ""}`);
       rejectPendingTurn(error);
       rejectPendingCompact(error);
+      rejectPendingGuardianApprovals(error);
       for (const pending of pendingRequests.values()) {
         pending.reject(error);
       }
@@ -2514,6 +2884,7 @@ export class CliAgentRunner {
         signal?: AbortSignal,
         onSessionId?: CliAgentSessionIdCallback
       ): Promise<CliAgentCompactResult> => {
+        rejectPendingGuardianApprovals(new Error("Codex Guardian approval expired because context compaction started."));
         // A native goal deliberately gives its turn an unbounded timeout. Warm
         // app-server entries can be reused by later slash workflows, but that
         // turn-specific zero must never become an immediate compact timeout.
@@ -2618,6 +2989,7 @@ export class CliAgentRunner {
         nativeGoal?: NativeGoalRun,
         onCodexServerRequest?: CliAgentCodexServerRequestCallback
       ): Promise<ParticipantRunResult> => {
+        rejectPendingGuardianApprovals(new Error("Codex Guardian approval expired because a new turn started."));
         const timeoutMs = nativeGoal ? 0 : (timeoutMsOverride ?? this.runTimeoutMs);
         const currentThreadId = await ensureThread(timeoutMs);
         this.reportSessionId(onSessionId, currentThreadId);
@@ -2633,12 +3005,26 @@ export class CliAgentRunner {
             return;
           }
           void (async () => {
-            await cancelPendingInboundApprovals(current, "Stopped by user.");
-            if (current.turnId) {
-              await sendRequest("turn/interrupt", { threadId: current.threadId, turnId: current.turnId }).catch(() => undefined);
+            try {
+              await cancelPendingInboundApprovals(current, "Stopped by user.");
+            } catch (error) {
+              void this.debugLogs?.write("cli.codex-app-server.stop-refusal-write-failed", {
+                threadId: current.threadId,
+                turnId: current.turnId,
+                message: this.errorText(error)
+              });
             }
-            rejectPendingTurn(new Error("codex app-server turn was cancelled"));
-          })();
+            rejectPendingGuardianApprovals(new Error("Stopped by user."));
+            try {
+              if (current.turnId) {
+                await sendRequest("turn/interrupt", { threadId: current.threadId, turnId: current.turnId }).catch(() => undefined);
+              }
+            } finally {
+              rejectPendingTurn(new Error("codex app-server turn was cancelled"));
+            }
+          })().catch((error) => {
+            rejectPendingTurn(error instanceof Error ? error : new Error(String(error)));
+          });
         };
         const resultPromise = new Promise<ParticipantRunResult>((resolve, reject) => {
           pendingTurn = {
@@ -2690,8 +3076,11 @@ export class CliAgentRunner {
               }
             ]
           }, timeoutMs) as CodexAppServerTurnStartResult;
-          if (pendingTurn && !pendingTurn.turnId) {
-            pendingTurn.turnId = turn.turn?.id;
+          if (pendingTurn) {
+            pendingTurn.acceptedByProvider = true;
+            if (!pendingTurn.turnId) {
+              pendingTurn.turnId = turn.turn?.id;
+            }
           }
         } catch (error) {
           rejectPendingTurn(error instanceof Error ? error : new Error(String(error)));
@@ -2945,7 +3334,8 @@ export class CliAgentRunner {
     participant: ParticipantConfig,
     pending: CodexAppServerPendingTurn | undefined,
     cleanupPending: () => CodexAppServerPendingTurn | undefined,
-    rejectPending: (error: Error) => void
+    rejectPending: (error: Error) => void,
+    rejectPendingGuardianApprovals: (error: Error) => void = () => undefined
   ): void {
     if (!pending) {
       return;
@@ -2975,6 +3365,9 @@ export class CliAgentRunner {
     // native subagent runs in a different thread.
     if (!eventThreadId && !pending.nativeGoal && pending.turnId && eventTurnId && eventTurnId !== pending.turnId) {
       return;
+    }
+    if (method === "turn/started" || method === "turn/completed" || method.startsWith("item/")) {
+      pending.acceptedByProvider = true;
     }
     if (method === "turn/started") {
       pending.turnId = eventTurnId ?? pending.turnId;
@@ -3016,9 +3409,21 @@ export class CliAgentRunner {
       return;
     }
     if (method === "item/autoApprovalReview/completed") {
-      this.emitLiveOutput(pending.onOutput, "tool", "Auto-review completed\n", undefined, {
+      const review = this.asRecord(params.review);
+      const status = this.stringField(review ?? {}, "status");
+      const label = status === "approved"
+        ? "Auto Review approved the request"
+        : status === "denied"
+          ? "Auto Review denied the request"
+          : status === "timedOut"
+            ? "Auto Review timed out"
+            : status === "aborted"
+              ? "Auto Review stopped"
+              : "Auto Review completed";
+      this.emitLiveOutput(pending.onOutput, "tool", `${label}\n`, undefined, {
         activityKind: "approval",
-        activityStatus: "completed"
+        activityStatus: status === "approved" ? "completed" : "failed",
+        ...(this.stringField(review ?? {}, "rationale") ? { activityDetail: this.stringField(review ?? {}, "rationale") } : {})
       });
       return;
     }
@@ -3152,7 +3557,9 @@ export class CliAgentRunner {
     }
     if (method === "error") {
       const error = this.asRecord(params.error);
-      rejectPending(new Error(this.stringField(error ?? {}, "message") ?? "codex app-server reported an error"));
+      const failure = new Error(this.stringField(error ?? {}, "message") ?? "codex app-server reported an error");
+      rejectPendingGuardianApprovals(failure);
+      rejectPending(failure);
       return;
     }
     if (method !== "turn/completed") {
@@ -3171,6 +3578,7 @@ export class CliAgentRunner {
     const status = this.stringField(turn ?? {}, "status");
     this.flushCodexAppServerAgentText(pending);
     if (status !== "completed") {
+      rejectPendingGuardianApprovals(new Error(`Codex Guardian approval expired because the provider turn ${status ?? "failed"}.`));
       const current = cleanupPending();
       if (!current) {
         return;
@@ -3659,9 +4067,7 @@ export class CliAgentRunner {
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
     const startedAt = Date.now();
-    const nonInteractiveApprovalWarning = this.agentModeForRun(kind, options) === "auto"
-      ? "Codex is using non-interactive exec mode, so protected actions that require approval are refused. Run this member locally in Chat for an interactive approval card."
-      : undefined;
+    const nonInteractiveApprovalWarning = "Codex is using non-interactive exec mode, so protected actions that require approval are refused. Run this member locally in Chat for an interactive approval card.";
     let outputDir: string | undefined;
     try {
       outputDir = await mkdtemp(path.join(tmpdir(), "accordagents-codex-"));
@@ -3703,7 +4109,7 @@ export class CliAgentRunner {
         contextUsage:
           this.extractCodexContextUsage(result.stdout, participant) ??
           await this.extractCodexSessionLogContextUsageWithRetry(sessionId, participant),
-        warnings: nonInteractiveApprovalWarning ? [nonInteractiveApprovalWarning] : undefined
+        warnings: [nonInteractiveApprovalWarning]
       }, participant, options);
     } catch (error) {
       if (options.role && this.isCodexDeveloperInstructionsUnsupported(error)) {
@@ -3751,9 +4157,7 @@ export class CliAgentRunner {
         return { ...restarted, sessionRestarted: true };
       }
       const failed = this.failed(participant, error, Date.now() - startedAt);
-      return nonInteractiveApprovalWarning
-        ? { ...failed, warnings: [...(failed.warnings ?? []), nonInteractiveApprovalWarning] }
-        : failed;
+      return { ...failed, warnings: [...(failed.warnings ?? []), nonInteractiveApprovalWarning] };
     } finally {
       if (outputDir) {
         await rm(outputDir, { recursive: true, force: true }).catch(() => undefined);

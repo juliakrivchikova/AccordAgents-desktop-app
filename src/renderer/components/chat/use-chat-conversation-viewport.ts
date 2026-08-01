@@ -213,6 +213,46 @@ export function useChatConversationViewport(props: {
       .find((candidate) => candidate.dataset.messageId === messageId);
   }
 
+  function renderedApprovalElement(approvalId: string): HTMLElement | undefined {
+    return Array.from(viewRef.current?.querySelectorAll<HTMLElement>("[data-app-tool-approval-id]") ?? [])
+      .find((candidate) => candidate.dataset.appToolApprovalId === approvalId);
+  }
+
+  function focusRenderedApproval(approvalId: string): boolean {
+    const approval = renderedApprovalElement(approvalId);
+    if (!approval) {
+      return false;
+    }
+    viewRef.current?.querySelectorAll<HTMLElement>(".approval-focused").forEach((element) => {
+      element.classList.remove("approval-focused");
+    });
+    approval.classList.add("approval-focused");
+    approval.focus({ preventScroll: true });
+    return alignRenderedMessageElementToTimelineStart(approval);
+  }
+
+  function scheduleFocusRenderedApproval(approvalId: string): void {
+    const generation = focusAttemptGenerationRef.current;
+    let focused = false;
+    const focus = (): boolean => {
+      if (focusAttemptGenerationRef.current !== generation) {
+        return true;
+      }
+      if (!focused) {
+        focused = focusRenderedApproval(approvalId);
+      }
+      return focused;
+    };
+    window.requestAnimationFrame(() => {
+      if (focus()) return;
+      window.requestAnimationFrame(focus);
+      window.setTimeout(focus, 80);
+      window.setTimeout(focus, 180);
+      window.setTimeout(focus, 320);
+      window.setTimeout(focus, 640);
+    });
+  }
+
   function alignRenderedMessageToTimelineStart(messageId: string): boolean {
     if (!focusRenderedMessage(viewRef.current, messageId, { scroll: false })) {
       return false;
@@ -353,7 +393,8 @@ export function useChatConversationViewport(props: {
 
   function dismissMessageFocus(target?: EventTarget | null): boolean {
     const view = viewRef.current;
-    const focused = view?.querySelector<HTMLElement>(".message-focused");
+    const focused = view?.querySelector<HTMLElement>(".approval-focused")
+      ?? view?.querySelector<HTMLElement>(".message-focused");
     if (!view || !focused) {
       return false;
     }
@@ -371,8 +412,8 @@ export function useChatConversationViewport(props: {
     if (request) {
       handledFocusNonceRef.current = request.nonce;
     }
-    view.querySelectorAll<HTMLElement>(".message-focused").forEach((element) => {
-      element.classList.remove("message-focused", "message-flash");
+    view.querySelectorAll<HTMLElement>(".message-focused, .approval-focused").forEach((element) => {
+      element.classList.remove("message-focused", "message-flash", "approval-focused");
     });
     return true;
   }
@@ -417,9 +458,12 @@ export function useChatConversationViewport(props: {
       return;
     }
     if (focusChatMessage(request.messageId, request.threadRootId)) {
+      if (request.approvalId) {
+        scheduleFocusRenderedApproval(request.approvalId);
+      }
       focusNavigation.revealWhenStable(request.messageId, request.nonce);
     }
-  }, [props.messageFocusRequest?.nonce, props.messageFocusRequest?.pending]);
+  }, [props.messageFocusRequest?.nonce, props.messageFocusRequest?.pending, props.messageFocusRequest?.approvalId]);
 
   useLayoutEffect(() => {
     if (hasUnconsumedFocusIntent()) {

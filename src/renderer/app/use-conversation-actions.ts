@@ -206,6 +206,7 @@ export function useConversationActions(state: AppState): ConversationActions {
       conversationId: item.conversationId,
       messageId: initialTarget.messageId,
       threadRootId: initialTarget.threadRootId,
+      approvalId: initialTarget.approvalId,
       nonce: pendingFocusNonce,
       pending: true
     });
@@ -240,6 +241,7 @@ export function useConversationActions(state: AppState): ConversationActions {
           conversationId: item.conversationId,
           messageId: target.messageId,
           threadRootId: target.threadRootId,
+          approvalId: target.approvalId,
           nonce: pendingFocusNonce
         });
       },
@@ -253,13 +255,16 @@ export function useConversationActions(state: AppState): ConversationActions {
   function activityFocusTarget(
     item: ChatActivityItem,
     options: { timelineOnly?: boolean }
-  ): { messageId: string; threadRootId?: string } {
+  ): { messageId: string; threadRootId?: string; approvalId?: string } {
     const messageId = item.target.messageId?.trim() ?? "";
     const threadRootId = item.target.threadRootId?.trim() || undefined;
+    const approvalId = item.target.approvalKind === "codex"
+      ? item.target.approvalId?.trim() || undefined
+      : undefined;
     if (options.timelineOnly && threadRootId) {
-      return { messageId: threadRootId };
+      return { messageId: threadRootId, approvalId };
     }
-    return { messageId, threadRootId };
+    return { messageId, threadRootId, approvalId };
   }
 
   function clearChatMessageFocus(): void {
