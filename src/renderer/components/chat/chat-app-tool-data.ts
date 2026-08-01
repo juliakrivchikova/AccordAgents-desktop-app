@@ -1,5 +1,6 @@
 import type {
   ChatAppToolApproval,
+  ChatCodexApprovalRequest,
   ChatParticipantChangeRequest,
   ChatParticipantRequestApprovalRequest,
   ChatParticipantRequestBatch,
@@ -21,6 +22,7 @@ export const APP_ROLES_REQUEST_CHANGE_TOOL = "app_roles_request_change";
 export const APP_PARTICIPANTS_REQUEST_CHANGE_TOOL = "app_participants_request_change";
 export const APP_CHAT_REQUEST_PARTICIPANTS_TOOL = "app_chat_request_participants";
 export const APP_CHAT_REQUEST_COMPACTION_TOOL = "app_chat_request_compaction";
+export const CODEX_APPROVAL_TOOL_NAME = "codex_auto_review_approval";
 export const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 
 export function chatAppToolApprovals(conversation: Conversation | undefined): ChatAppToolApproval[] {
@@ -56,14 +58,35 @@ export function chatAppToolApprovals(conversation: Conversation | undefined): Ch
     const isSelfCompactionRequest =
       approval.toolName === APP_CHAT_REQUEST_COMPACTION_TOOL &&
       Boolean(chatSelfCompactionRequest(approval as ChatAppToolApproval));
+    const isCodexApprovalRequest =
+      approval.toolName === CODEX_APPROVAL_TOOL_NAME &&
+      Boolean(chatCodexApprovalRequest(approval as ChatAppToolApproval));
     return (
       typeof approval.id === "string" &&
       typeof approval.requesterHandle === "string" &&
       typeof approval.summary === "string" &&
-      (approval.status === "pending" || approval.status === "approved" || approval.status === "denied" || approval.status === "auto-applied") &&
-      (isRosterRequest || isRoleRequest || isParticipantChangeRequest || isPermissionRequest || isToolPermissionRequest || isParticipantRequest || isSelfCompactionRequest)
+      (approval.status === "pending" || approval.status === "approved" || approval.status === "denied" || approval.status === "cancelled" || approval.status === "expired" || approval.status === "auto-applied") &&
+      (isRosterRequest || isRoleRequest || isParticipantChangeRequest || isPermissionRequest || isToolPermissionRequest || isParticipantRequest || isSelfCompactionRequest || isCodexApprovalRequest)
     );
   });
+}
+
+export function chatCodexApprovalRequest(approval: ChatAppToolApproval): ChatCodexApprovalRequest | undefined {
+  if (approval.toolName !== CODEX_APPROVAL_TOOL_NAME) {
+    return undefined;
+  }
+  const request = approval.request as Partial<ChatCodexApprovalRequest>;
+  return request.kind === "codexApproval" &&
+    (typeof request.requestId === "string" || typeof request.requestId === "number") &&
+    (request.action === "command" || request.action === "fileChange" || request.action === "permissions") &&
+    Array.isArray(request.options) &&
+    request.options.every((option) =>
+      typeof option?.id === "string" &&
+      typeof option.label === "string" &&
+      (option.outcome === "approve" || option.outcome === "deny" || option.outcome === "cancel")
+    )
+    ? request as ChatCodexApprovalRequest
+    : undefined;
 }
 
 export function chatSelfCompactionRequest(approval: ChatAppToolApproval): ChatSelfCompactionRequest | undefined {

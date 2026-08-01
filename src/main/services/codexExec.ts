@@ -12,8 +12,6 @@ import type {
 import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 
 export const CODEX_APP_SERVER_MCP_TOKEN_ENV = "ACCORD_AGENTS_MCP_TOKEN";
-export const CODEX_AUTO_APPROVALS_REVIEWER = "guardian_subagent";
-
 export type CodexLiveOutputKind = "tool" | "text";
 
 export interface CodexLiveOutputEvent {
@@ -156,9 +154,7 @@ export function buildCodexExecInvocation(request: BuildCodexExecInvocationReques
       args,
       resuming,
       "-c",
-      `approval_policy=${tomlString("on-request")}`,
-      "-c",
-      `approvals_reviewer=${tomlString(CODEX_AUTO_APPROVALS_REVIEWER)}`
+      `approval_policy=${tomlString("never")}`
     );
   }
   if (options.role) {

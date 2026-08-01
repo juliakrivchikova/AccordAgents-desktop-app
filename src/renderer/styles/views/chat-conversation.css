@@ -2482,6 +2482,65 @@
   gap: 8px;
 }
 
+.chat-codex-approval-operation {
+  display: grid;
+  gap: 10px;
+}
+
+.chat-codex-approval-command {
+  max-height: 180px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--app-border-subtle);
+  border-radius: 8px;
+  background: var(--app-surface-subtle);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-codex-approval-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.chat-codex-approval-facts dt {
+  color: var(--app-muted);
+}
+
+.chat-codex-approval-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-codex-approval-files {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chat-codex-approval-files li {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 8px;
+  font-size: 12px;
+}
+
+.chat-codex-approval-files span {
+  color: var(--app-muted);
+  text-transform: capitalize;
+}
+
+.chat-codex-approval-files code {
+  overflow-wrap: anywhere;
+}
+
 /* Numbered options listbox + Submit footer (design handoff §8). */
 .chat-approval-options {
   grid-column: 1;

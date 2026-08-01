@@ -1832,7 +1832,7 @@ test("claude non-chat keeps strict app MCP config and explicit tools", () => {
   assert.deepEqual(runner.claudeToolsArgs("code-review", config, options).slice(0, 1), ["--tools"]);
 });
 
-test("codex app-server auto mode applies workspace-write web preset and guardian reviewer", () => {
+test("codex app-server auto mode applies workspace-write web preset and native auto reviewer", () => {
   const runner = makeRunner() as any;
   const participant = {
     kind: "codex-cli",
@@ -1852,7 +1852,7 @@ test("codex app-server auto mode applies workspace-write web preset and guardian
   );
 
   assert.equal(params.approvalPolicy, "on-request");
-  assert.equal(params.approvalsReviewer, "guardian_subagent");
+  assert.equal(params.approvalsReviewer, "auto_review");
   assert.equal(params.sandbox, "workspace-write");
   assert.equal(params.config.web_search, "live");
   assert.equal(params.config.model_reasoning_effort, "xhigh");
@@ -1890,7 +1890,7 @@ test("codex app-server resume re-asserts the auto preset so a mode switch applie
   // so switching to auto mid-chat takes effect without dropping the session.
   assert.equal(params.threadId, "session-1");
   assert.equal(params.approvalPolicy, "on-request");
-  assert.equal(params.approvalsReviewer, "guardian_subagent");
+  assert.equal(params.approvalsReviewer, "auto_review");
   assert.equal(params.sandbox, "workspace-write");
   assert.equal(params.config.web_search, "live");
 });

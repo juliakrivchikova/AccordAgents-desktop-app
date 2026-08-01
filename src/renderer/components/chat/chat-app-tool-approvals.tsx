@@ -18,7 +18,8 @@ export function ChatAppToolApprovalList(props: {
     approvalId: string,
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
-    draftOverride?: ChatAppToolApprovalRequest
+    draftOverride?: ChatAppToolApprovalRequest,
+    codexDecisionId?: string
   ) => Promise<void>;
 }): JSX.Element {
   return (
@@ -37,4 +38,3 @@ export function ChatAppToolApprovalList(props: {
     </div>
   );
 }
-

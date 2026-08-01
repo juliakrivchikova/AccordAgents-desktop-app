@@ -998,7 +998,7 @@ export interface ChatRosterAvailableOptions {
   };
 }
 
-export type ChatAppToolApprovalStatus = "pending" | "approved" | "denied" | "auto-applied";
+export type ChatAppToolApprovalStatus = "pending" | "approved" | "denied" | "cancelled" | "expired" | "auto-applied";
 
 export type ChatAppToolApprovalScope = "once" | "chat";
 
@@ -1029,7 +1029,50 @@ export type ChatAppToolApprovalRequest =
   | ChatPermissionChangeRequest
   | ChatToolPermissionRequest
   | ChatParticipantRequestApprovalRequest
-  | ChatSelfCompactionRequest;
+  | ChatSelfCompactionRequest
+  | ChatCodexApprovalRequest;
+
+export type ChatCodexApprovalMethod =
+  | "item/commandExecution/requestApproval"
+  | "item/fileChange/requestApproval"
+  | "item/permissions/requestApproval"
+  | "applyPatchApproval"
+  | "execCommandApproval";
+
+export interface ChatCodexApprovalOption {
+  id: string;
+  label: string;
+  outcome: "approve" | "deny" | "cancel";
+}
+
+export interface ChatCodexPermissionSummary {
+  network?: boolean;
+  readPaths?: string[];
+  writePaths?: string[];
+}
+
+export interface ChatCodexFileChangeSummary {
+  path: string;
+  change: "add" | "delete" | "update" | "unknown";
+}
+
+export interface ChatCodexApprovalRequest {
+  kind: "codexApproval";
+  method: ChatCodexApprovalMethod;
+  requestId: string | number;
+  threadId?: string;
+  turnId?: string;
+  itemId?: string;
+  approvalId?: string;
+  action: "command" | "fileChange" | "permissions";
+  command?: string;
+  cwd?: string;
+  reason?: string;
+  grantRoot?: string;
+  fileChanges?: ChatCodexFileChangeSummary[];
+  permissions?: ChatCodexPermissionSummary;
+  options: ChatCodexApprovalOption[];
+}
 
 export interface ChatSelfCompactionRequest {
   type: "self_compaction";
@@ -1435,6 +1478,7 @@ export interface RespondToChatAppToolApprovalRequest {
   approve: boolean;
   scope?: ChatAppToolApprovalScope;
   draftOverride?: ChatAppToolApprovalRequest;
+  codexDecisionId?: string;
 }
 
 export interface ProviderSettingsUpdate {

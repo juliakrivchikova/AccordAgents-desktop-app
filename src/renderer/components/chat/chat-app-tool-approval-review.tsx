@@ -89,10 +89,14 @@ export function ChatAppToolReviewStatus({ approval }: { approval: ChatAppToolApp
   const label = approval.status === "approved"
     ? "Approved"
     : approval.status === "denied"
-      ? "Cancelled"
-      : approval.status === "auto-applied"
-        ? "Applied"
-        : "Pending";
+      ? "Denied"
+      : approval.status === "cancelled"
+        ? "Cancelled"
+        : approval.status === "expired"
+          ? "Expired"
+          : approval.status === "auto-applied"
+            ? "Applied"
+            : "Pending";
   return (
     <div className={`chat-app-tool-review-status is-${approval.status}`}>
       {label}{approval.error ? `: ${approval.error}` : ""}

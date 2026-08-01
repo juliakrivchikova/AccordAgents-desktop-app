@@ -62,7 +62,11 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
       chatAppToolApprovals(props.conversation).filter(
         (approval) =>
           approval.status !== "pending" &&
-          (approval.toolName === "app_roles_request_change" || approval.toolName === "app_participants_request_change")
+          (
+            approval.toolName === "app_roles_request_change" ||
+            approval.toolName === "app_participants_request_change" ||
+            approval.toolName === "codex_auto_review_approval"
+          )
       ),
     [props.conversation.metadata]
   );
@@ -202,11 +206,12 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     approvalId: string,
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
-    draftOverride?: ChatAppToolApprovalRequest
+    draftOverride?: ChatAppToolApprovalRequest,
+    codexDecisionId?: string
   ): Promise<void> {
     return approvalSubmission.runWithSubmittingId(
       approvalId,
-      () => props.onRespondToAppToolApproval(approvalId, approve, scope, draftOverride)
+      () => props.onRespondToAppToolApproval(approvalId, approve, scope, draftOverride, codexDecisionId)
     );
   }
 

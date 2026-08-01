@@ -18,12 +18,13 @@ import { chatParticipantDisplayName, chatParticipantReference } from "../convers
 import { MarkdownText } from "../content/markdown-text";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { formatChatTime } from "./chat-format";
-import { APP_ROSTER_REQUEST_CHANGE_TOOL, chatParticipantChangeRequest, chatParticipantRequestApprovalRequest, chatPermissionChangeRequest, chatRoleChangeRequest, chatRoleParticipantChangeRequest, chatSelfCompactionRequest, chatToolPermissionRequest, participantProviderLabel } from "./chat-conversation-data";
+import { APP_ROSTER_REQUEST_CHANGE_TOOL, chatCodexApprovalRequest, chatParticipantChangeRequest, chatParticipantRequestApprovalRequest, chatPermissionChangeRequest, chatRoleChangeRequest, chatRoleParticipantChangeRequest, chatSelfCompactionRequest, chatToolPermissionRequest, participantProviderLabel } from "./chat-conversation-data";
 import { approvalOptions, approvalQuestion, approvalReason, ChatAppToolReviewFooter, ChatAppToolReviewResult, ChatAppToolReviewStatus, participantReviewChipLabel, reviewPrimaryLabel, roleReviewChipLabel, temporaryRolesForReview } from "./chat-app-tool-approval-review";
 import { ChatAppToolPermissionOperation, ChatAppToolParticipantRequestOperation, ChatAppToolPermissionPromptOperation } from "./chat-app-tool-permission-operations";
 import { ChatAppToolRosterOperation, ChatAppToolRosterPermissionEnvelope, RosterApprovalTitle, rosterApprovalQuestion } from "./chat-app-tool-roster";
 import { ChatAppToolRoleChangeOperation } from "./chat-app-tool-role-operation";
 import { ChatAppToolParticipantChangeOperation } from "./chat-app-tool-participant-operation";
+import { ChatCodexApprovalOperation } from "./chat-codex-approval-operation";
 
 export function ChatAppToolApprovalCard(props: {
   approval: ChatAppToolApproval;
@@ -35,7 +36,8 @@ export function ChatAppToolApprovalCard(props: {
     approvalId: string,
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
-    draftOverride?: ChatAppToolApprovalRequest
+    draftOverride?: ChatAppToolApprovalRequest,
+    codexDecisionId?: string
   ) => Promise<void>;
 }): JSX.Element {
   const permissionRequest = chatPermissionChangeRequest(props.approval);
@@ -45,6 +47,7 @@ export function ChatAppToolApprovalCard(props: {
   const participantChange = chatParticipantChangeRequest(props.approval);
   const participantRequest = chatParticipantRequestApprovalRequest(props.approval);
   const selfCompactionRequest = chatSelfCompactionRequest(props.approval);
+  const codexRequest = chatCodexApprovalRequest(props.approval);
   const inferredParticipantRequest = participantRequest?.source === "inferred";
   const preferOnceApproval = Boolean(permissionRequest && permissionRequest.kind !== "portable");
   const added = props.approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL && "operations" in props.approval.request
@@ -65,7 +68,20 @@ export function ChatAppToolApprovalCard(props: {
   const effectiveParticipantChange = effectiveCombinedRequest?.participantRequest ?? (participantChange ? participantDraft ?? participantChange : undefined);
   const reviewChange = Boolean(effectiveCombinedRequest || effectiveRoleRequest || effectiveParticipantChange);
   const readOnly = props.approval.status !== "pending";
-  const options = approvalOptions(
+  const options: Array<{
+    key: string;
+    label: string;
+    approve: boolean;
+    scope?: ChatAppToolApprovalScope;
+    codexDecisionId?: string;
+  }> = codexRequest
+    ? codexRequest.options.map((option) => ({
+        key: option.id,
+        label: option.label,
+        approve: option.outcome === "approve",
+        codexDecisionId: option.id
+      }))
+    : approvalOptions(
     props.approval,
     permissionRequest,
     effectiveRoleRequest,
@@ -75,17 +91,19 @@ export function ChatAppToolApprovalCard(props: {
     toolPermissionRequest,
     added,
     inferredParticipantRequest
-  );
-  const defaultIndex = rosterApproval || preferOnceApproval || inferredParticipantRequest ? 0 : Math.min(1, options.length - 1);
+    );
+  const defaultIndex = codexRequest || rosterApproval || preferOnceApproval || inferredParticipantRequest ? 0 : Math.min(1, options.length - 1);
   const [selectedIndex, setSelectedIndex] = useState(defaultIndex);
   const requester = props.participants.find((participant) => participant.id === props.approval.requesterParticipantId);
   const requesterLabel = requester ? chatParticipantDisplayName(requester) : chatParticipantReference(props.approval.requesterHandle);
   const requesterAvatar = requester
     ? avatarForChatParticipant(requester, requesterLabel)
     : avatarForParticipant(requesterLabel, props.approval.requesterParticipantId);
-  const approvalPrompt = effectiveCombinedRequest
-    ? `${chatParticipantReference(props.approval.requesterHandle)} wants to create a role and add a member`
-    : approvalQuestion(props.approval, permissionRequest, effectiveRoleRequest, effectiveParticipantChange, participantRequest, selfCompactionRequest, toolPermissionRequest);
+  const approvalPrompt = codexRequest
+    ? `${chatParticipantReference(props.approval.requesterHandle)} needs approval before Codex can continue`
+    : effectiveCombinedRequest
+      ? `${chatParticipantReference(props.approval.requesterHandle)} wants to create a role and add a member`
+      : approvalQuestion(props.approval, permissionRequest, effectiveRoleRequest, effectiveParticipantChange, participantRequest, selfCompactionRequest, toolPermissionRequest);
   const displayPrompt = rosterApproval ? rosterApprovalQuestion(props.approval, added) : approvalPrompt;
 
   if (reviewChange && readOnly) {
@@ -119,7 +137,7 @@ export function ChatAppToolApprovalCard(props: {
       const draftOverride = option.approve
         ? effectiveCombinedRequest ?? effectiveRoleRequest ?? effectiveParticipantChange
         : undefined;
-      void props.onRespond(props.approval.id, option.approve, option.scope, draftOverride);
+      void props.onRespond(props.approval.id, option.approve, option.scope, draftOverride, option.codexDecisionId);
     }
   }
 
@@ -183,7 +201,9 @@ export function ChatAppToolApprovalCard(props: {
           {!reviewChange && <h3>{rosterApproval ? <RosterApprovalTitle requesterHandle={props.approval.requesterHandle} added={added} /> : displayPrompt}</h3>}
           {readOnly && <ChatAppToolReviewStatus approval={props.approval} />}
           <fieldset className="chat-app-tool-review-fieldset" disabled={props.submitting}>
-          {permissionRequest ? (
+          {codexRequest ? (
+            <ChatCodexApprovalOperation request={codexRequest} />
+          ) : permissionRequest ? (
             <ChatAppToolPermissionOperation request={permissionRequest} />
           ) : toolPermissionRequest ? (
             <ChatAppToolPermissionPromptOperation request={toolPermissionRequest} />
@@ -246,7 +266,7 @@ export function ChatAppToolApprovalCard(props: {
             </div>
           )}
           </fieldset>
-          {approvalReason(props.approval, effectiveCombinedRequest) && !effectiveRoleRequest && (
+          {approvalReason(props.approval, effectiveCombinedRequest) && !effectiveRoleRequest && !codexRequest && (
             <div className="chat-app-tool-approval-reason">
               <MarkdownText content={approvalReason(props.approval, effectiveCombinedRequest) ?? ""} />
             </div>
@@ -272,7 +292,12 @@ export function ChatAppToolApprovalCard(props: {
               Allow once queues this compaction only. Chat approval allows future compaction requests from {requesterLabel} without another approval.
             </p>
           )}
-          {reviewChange && readOnly ? null : reviewChange ? (
+          {codexRequest && (
+            <p className="chat-app-tool-scope-note">
+              This decision applies only to the blocked Codex callback. Session options stay inside this Codex session and do not create a chat-wide grant.
+            </p>
+          )}
+          {readOnly ? null : reviewChange ? (
             <ChatAppToolReviewFooter
               primaryLabel={reviewPrimaryLabel(effectiveRoleRequest, effectiveParticipantChange, effectiveCombinedRequest)}
               submitting={props.submitting}
@@ -314,9 +339,13 @@ export function ChatAppToolApprovalCard(props: {
                   type="button"
                   className="chat-approval-skip"
                   disabled={props.submitting}
-                  onClick={() => void props.onRespond(props.approval.id, false)}
+                  onClick={() => {
+                    const refusal = codexRequest?.options.find((option) => option.outcome === "cancel") ??
+                      codexRequest?.options.find((option) => option.outcome === "deny");
+                    void props.onRespond(props.approval.id, false, undefined, undefined, refusal?.id);
+                  }}
                 >
-                  Skip
+                  {codexRequest ? "Cancel" : "Skip"}
                 </button>
                 <Button variant="default" size="sm" className="chat-approval-submit" disabled={props.submitting} onClick={submit}>
                   <span>Submit</span>

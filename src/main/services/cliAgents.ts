@@ -41,6 +41,11 @@ import {
   extractCodexText as extractCodexExecText
 } from "./codexExec";
 import {
+  codexApprovalCancellationResult,
+  isCodexApprovalMethod,
+  type CodexInboundServerRequest
+} from "./codexApprovals";
+import {
   buildGeminiExecInvocation,
   buildGeminiInteractiveGoalInvocation,
   extractGeminiLogConversationId,
@@ -76,7 +81,7 @@ const CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS = [
 const CLAUDE_CODE_COMMAND_ENV_OPTIONS: CommandEnvironmentOptions = {
   dropProcessEnvKeysAbsentFromLoginShell: CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS
 };
-const CODEX_AUTO_APPROVALS_REVIEWER = "guardian_subagent";
+const CODEX_AUTO_APPROVALS_REVIEWER = "auto_review";
 // Gemini 3.x models served through Antigravity share a 1M-token context window;
 // used when no model is configured so the context indicator still renders.
 const GEMINI_DEFAULT_CONTEXT_WINDOW_TOKENS = 1_048_576;
@@ -131,6 +136,16 @@ export function resolveCodexCompactTimeoutMs(requestedTimeoutMs: number | undefi
     : CLI_AGENT_COMPACT_TIMEOUT_MS;
 }
 
+export function codexAppServerMessageKind(
+  record: Record<string, unknown>
+): "server-request" | "response" | "notification" {
+  const hasId = typeof record.id === "string" || typeof record.id === "number";
+  if (hasId && typeof record.method === "string") {
+    return "server-request";
+  }
+  return hasId ? "response" : "notification";
+}
+
 export function antigravityInteractiveGoalAtPrompt(transcript: string): boolean {
   const generating = transcript.lastIndexOf("Generating");
   return generating >= 0 && transcript.lastIndexOf("? for shortcuts") > generating;
@@ -160,6 +175,7 @@ export interface CliAgentRunOptions {
   allowEmptyContent?: boolean;
   nativeGoal?: NativeGoalRun;
   onProviderActivity?: () => void;
+  onCodexServerRequest?: CliAgentCodexServerRequestCallback;
 }
 
 export interface NativeGoalRun {
@@ -182,6 +198,10 @@ export interface CliAgentOutputEvent {
 export type CliAgentOutputCallback = (event: CliAgentOutputEvent) => void;
 
 export type CliAgentSessionIdCallback = (sessionId: string) => void;
+
+export type CliAgentCodexServerRequest = CodexInboundServerRequest;
+
+export type CliAgentCodexServerRequestCallback = (request: CliAgentCodexServerRequest) => Promise<unknown>;
 
 export interface CliAgentWarmOptions {
   conversationId: string;
@@ -254,7 +274,8 @@ interface WarmAgentEntry {
     onOutput?: CliAgentOutputCallback,
     onSessionId?: CliAgentSessionIdCallback,
     timeoutMs?: number,
-    nativeGoal?: NativeGoalRun
+    nativeGoal?: NativeGoalRun,
+    onCodexServerRequest?: CliAgentCodexServerRequestCallback
   ) => Promise<ParticipantRunResult>;
   compact?: (instructions?: string, signal?: AbortSignal, onSessionId?: CliAgentSessionIdCallback) => Promise<CliAgentCompactResult>;
   queue: Promise<void>;
@@ -298,6 +319,15 @@ interface CodexAppServerPendingRequest {
   reject: (error: Error) => void;
 }
 
+interface CodexAppServerPendingInboundRequest {
+  id: string | number;
+  key: string;
+  method: string;
+  controller: AbortController;
+  turn: CodexAppServerPendingTurn;
+  answered: boolean;
+}
+
 interface CachedModelCatalog {
   catalog: ProviderModelCatalog;
   expiresAt: number;
@@ -326,8 +356,12 @@ interface CodexAppServerPendingTurn {
     turnCompleted: boolean;
   };
   timer?: NodeJS.Timeout;
+  timeoutRemainingMs?: number;
+  timeoutDeadline?: number;
+  outstandingServerRequestIds: Set<string>;
   abort?: () => void;
   onOutput?: CliAgentOutputCallback;
+  onCodexServerRequest?: CliAgentCodexServerRequestCallback;
   resolve: (result: ParticipantRunResult) => void;
   reject: (error: Error) => void;
 }
@@ -1851,7 +1885,8 @@ export class CliAgentRunner {
           options.onOutput,
           options.onSessionId,
           options.timeoutMs,
-          options.nativeGoal
+          options.nativeGoal,
+          options.onCodexServerRequest
         );
         return this.withAppMcpClientStatus(result, participant, options);
       } finally {
@@ -1996,7 +2031,8 @@ export class CliAgentRunner {
             options.onOutput,
             options.onSessionId,
             options.timeoutMs,
-            options.nativeGoal
+            options.nativeGoal,
+            options.onCodexServerRequest
           ),
           participant,
           options
@@ -2055,6 +2091,7 @@ export class CliAgentRunner {
     let initialized = false;
     let activeModel = participant.model;
     const pendingRequests = new Map<number, CodexAppServerPendingRequest>();
+    const pendingInboundRequests = new Map<string, CodexAppServerPendingInboundRequest>();
     let pendingTurn: CodexAppServerPendingTurn | undefined;
     let pendingCompact: CodexAppServerPendingCompact | undefined;
 
@@ -2069,6 +2106,14 @@ export class CliAgentRunner {
       if (current.abort) {
         current.abort();
       }
+      for (const [requestKey, request] of pendingInboundRequests) {
+        if (request.turn !== current) {
+          continue;
+        }
+        pendingInboundRequests.delete(requestKey);
+        request.controller.abort(new Error("Codex turn ended before the approval was answered."));
+      }
+      current.outstandingServerRequestIds.clear();
       pendingTurn = undefined;
       return current;
     };
@@ -2145,6 +2190,7 @@ export class CliAgentRunner {
         },
         capabilities: {
           experimentalApi: true,
+          requestAttestation: false,
           optOutNotificationMethods: []
         }
       }, timeoutMs);
@@ -2194,6 +2240,184 @@ export class CliAgentRunner {
       pending.resolve(record.result);
     };
 
+    const inboundRequestKey = (id: string | number): string => `${typeof id}:${String(id)}`;
+
+    const writeServerMessage = (message: Record<string, unknown>): Promise<void> => {
+      if (closed || child.exitCode !== null || child.killed) {
+        return Promise.reject(new Error("codex app-server process is not running"));
+      }
+      return new Promise<void>((resolve, reject) => {
+        child.stdin.write(`${JSON.stringify(message)}\n`, (error) => error ? reject(error) : resolve());
+      });
+    };
+
+    let cancelPendingInboundApprovals: (turn: CodexAppServerPendingTurn, reason: string) => Promise<void>;
+
+    const armPendingTurnTimer = (turn: CodexAppServerPendingTurn, delayMs: number): void => {
+      if (delayMs <= 0 || pendingTurn !== turn) {
+        return;
+      }
+      if (turn.timer) {
+        clearTimeout(turn.timer);
+      }
+      turn.timeoutRemainingMs = delayMs;
+      turn.timeoutDeadline = Date.now() + delayMs;
+      turn.timer = setTimeout(() => {
+        void cancelPendingInboundApprovals(turn, "Codex approval expired because the turn timed out.")
+          .finally(() => rejectPendingTurn(new Error(`codex app-server timed out after ${delayMs}ms`)));
+      }, delayMs);
+      turn.timer.unref();
+    };
+
+    const pausePendingTurnTimer = (turn: CodexAppServerPendingTurn): void => {
+      if (!turn.timer) {
+        return;
+      }
+      clearTimeout(turn.timer);
+      turn.timer = undefined;
+      turn.timeoutRemainingMs = Math.max(1, (turn.timeoutDeadline ?? Date.now()) - Date.now());
+      turn.timeoutDeadline = undefined;
+    };
+
+    const resumePendingTurnTimer = (turn: CodexAppServerPendingTurn): void => {
+      if (turn.outstandingServerRequestIds.size > 0 || turn.timer || !turn.timeoutRemainingMs) {
+        return;
+      }
+      armPendingTurnTimer(turn, turn.timeoutRemainingMs);
+    };
+
+    const finishPendingInboundRequest = async (
+      request: CodexAppServerPendingInboundRequest,
+      message: Record<string, unknown>
+    ): Promise<boolean> => {
+      const current = pendingInboundRequests.get(request.key);
+      if (!current || current !== request || request.answered) {
+        return false;
+      }
+      request.answered = true;
+      pendingInboundRequests.delete(request.key);
+      request.turn.outstandingServerRequestIds.delete(request.key);
+      try {
+        await writeServerMessage(message);
+      } finally {
+        resumePendingTurnTimer(request.turn);
+      }
+      return true;
+    };
+
+    const answerPendingInboundRequest = (
+      request: CodexAppServerPendingInboundRequest,
+      result: unknown
+    ): Promise<boolean> => finishPendingInboundRequest(request, { id: request.id, result });
+
+    const rejectPendingInboundRequest = (
+      request: CodexAppServerPendingInboundRequest,
+      code: number,
+      message: string
+    ): Promise<boolean> => finishPendingInboundRequest(request, {
+      id: request.id,
+      error: { code, message: this.truncateText(message, MAX_CLI_ERROR_CHARS) }
+    });
+
+    cancelPendingInboundApprovals = async (turn: CodexAppServerPendingTurn, reason: string): Promise<void> => {
+      const requests = [...pendingInboundRequests.values()].filter((request) => request.turn === turn);
+      for (const request of requests) {
+        if (!isCodexApprovalMethod(request.method)) {
+          continue;
+        }
+        try {
+          await answerPendingInboundRequest(request, codexApprovalCancellationResult(request.method));
+        } finally {
+          request.controller.abort(new Error(reason));
+        }
+      }
+    };
+
+    const handleServerRequestResolved = (record: Record<string, unknown>): boolean => {
+      if (this.stringField(record, "method") !== "serverRequest/resolved") {
+        return false;
+      }
+      const params = this.asRecord(record.params);
+      const id = params && (typeof params.requestId === "string" || typeof params.requestId === "number")
+        ? params.requestId
+        : undefined;
+      if (id === undefined) {
+        return true;
+      }
+      const request = pendingInboundRequests.get(inboundRequestKey(id));
+      if (!request) {
+        return true;
+      }
+      pendingInboundRequests.delete(request.key);
+      request.answered = true;
+      request.turn.outstandingServerRequestIds.delete(request.key);
+      request.controller.abort(new Error("Codex resolved this approval request before the user answered."));
+      resumePendingTurnTimer(request.turn);
+      return true;
+    };
+
+    const handleServerRequest = (record: Record<string, unknown>): void => {
+      const id = typeof record.id === "string" || typeof record.id === "number" ? record.id : undefined;
+      const method = this.stringField(record, "method");
+      if (id === undefined || !method) {
+        return;
+      }
+      if (method === "currentTime/read") {
+        void writeServerMessage({ id, result: { currentTimeAt: Math.floor(Date.now() / 1_000) } })
+          .catch((error) => rejectPendingTurn(error instanceof Error ? error : new Error(String(error))));
+        return;
+      }
+      if (!isCodexApprovalMethod(method)) {
+        const message = method === "account/chatgptAuthTokens/refresh"
+          ? "AccordAgents cannot refresh ChatGPT subscription tokens through this app-server connection. Re-authenticate Codex and retry."
+          : `AccordAgents does not support the Codex client request ${method}.`;
+        this.emitLiveOutput(pendingTurn?.onOutput, "tool", `${message}\n`, undefined, {
+          activityKind: "status",
+          activityStatus: "failed",
+          activityDetail: message
+        });
+        void writeServerMessage({ id, error: { code: method === "account/chatgptAuthTokens/refresh" ? -32001 : -32601, message } })
+          .catch((error) => rejectPendingTurn(error instanceof Error ? error : new Error(String(error))));
+        return;
+      }
+      const turn = pendingTurn;
+      if (!turn?.onCodexServerRequest) {
+        const message = "This Codex transport cannot present interactive approvals.";
+        void writeServerMessage({ id, error: { code: -32601, message } })
+          .catch((error) => rejectPendingTurn(error instanceof Error ? error : new Error(String(error))));
+        return;
+      }
+      const key = inboundRequestKey(id);
+      if (pendingInboundRequests.has(key)) {
+        const message = `Codex reused an active JSON-RPC request id (${String(id)}).`;
+        void writeServerMessage({ id, error: { code: -32600, message } })
+          .catch((error) => rejectPendingTurn(error instanceof Error ? error : new Error(String(error))));
+        return;
+      }
+      const controller = new AbortController();
+      const request: CodexAppServerPendingInboundRequest = {
+        id,
+        key,
+        method,
+        controller,
+        turn,
+        answered: false
+      };
+      pendingInboundRequests.set(key, request);
+      turn.outstandingServerRequestIds.add(key);
+      pausePendingTurnTimer(turn);
+      void turn.onCodexServerRequest({ id, method, params: record.params, signal: controller.signal })
+        .then((result) => answerPendingInboundRequest(request, result))
+        .catch((error) => {
+          if (!pendingInboundRequests.has(key)) {
+            return;
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          return rejectPendingInboundRequest(request, -32000, message);
+        })
+        .catch((error) => rejectPendingTurn(error instanceof Error ? error : new Error(String(error))));
+    };
+
     const handleLine = (line: string): void => {
       let event: unknown;
       try {
@@ -2205,8 +2429,16 @@ export class CliAgentRunner {
       if (!record) {
         return;
       }
-      if ("id" in record) {
+      const messageKind = codexAppServerMessageKind(record);
+      if (messageKind === "server-request") {
+        handleServerRequest(record);
+        return;
+      }
+      if (messageKind === "response") {
         handleResponse(record);
+        return;
+      }
+      if (handleServerRequestResolved(record)) {
         return;
       }
       if (this.handleCodexAppServerCompactNotification(record, participant, pendingCompact, cleanupPendingCompact, rejectPendingCompact)) {
@@ -2383,24 +2615,30 @@ export class CliAgentRunner {
         onOutput?: CliAgentOutputCallback,
         onSessionId?: CliAgentSessionIdCallback,
         timeoutMsOverride?: number,
-        nativeGoal?: NativeGoalRun
+        nativeGoal?: NativeGoalRun,
+        onCodexServerRequest?: CliAgentCodexServerRequestCallback
       ): Promise<ParticipantRunResult> => {
         const timeoutMs = nativeGoal ? 0 : (timeoutMsOverride ?? this.runTimeoutMs);
         const currentThreadId = await ensureThread(timeoutMs);
         this.reportSessionId(onSessionId, currentThreadId);
         const startedAt = Date.now();
-        const timer = timeoutMs > 0
-          ? setTimeout(() => {
-              rejectPendingTurn(new Error(`codex app-server timed out after ${timeoutMs}ms`));
-            }, timeoutMs)
-          : undefined;
-        timer?.unref();
+        let aborting = false;
         const abort = (): void => {
-          const current = pendingTurn;
-          if (current?.turnId) {
-            void sendRequest("turn/interrupt", { threadId: current.threadId, turnId: current.turnId }).catch(() => undefined);
+          if (aborting) {
+            return;
           }
-          rejectPendingTurn(new Error("codex app-server turn was cancelled"));
+          aborting = true;
+          const current = pendingTurn;
+          if (!current) {
+            return;
+          }
+          void (async () => {
+            await cancelPendingInboundApprovals(current, "Stopped by user.");
+            if (current.turnId) {
+              await sendRequest("turn/interrupt", { threadId: current.threadId, turnId: current.turnId }).catch(() => undefined);
+            }
+            rejectPendingTurn(new Error("codex app-server turn was cancelled"));
+          })();
         };
         const resultPromise = new Promise<ParticipantRunResult>((resolve, reject) => {
           pendingTurn = {
@@ -2414,13 +2652,18 @@ export class CliAgentRunner {
             nextAgentMessageStartsBlock: false,
             model: activeModel,
             nativeGoal: nativeGoal ? { turnCompleted: false } : undefined,
-            timer,
+            timeoutRemainingMs: timeoutMs > 0 ? timeoutMs : undefined,
+            outstandingServerRequestIds: new Set(),
             abort: signal ? () => signal.removeEventListener("abort", abort) : undefined,
             onOutput,
+            onCodexServerRequest,
             resolve,
             reject
           };
         });
+        if (pendingTurn && timeoutMs > 0) {
+          armPendingTurnTimer(pendingTurn, timeoutMs);
+        }
         if (signal?.aborted) {
           abort();
           return resultPromise;
@@ -3416,6 +3659,9 @@ export class CliAgentRunner {
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
     const startedAt = Date.now();
+    const nonInteractiveApprovalWarning = this.agentModeForRun(kind, options) === "auto"
+      ? "Codex is using non-interactive exec mode, so protected actions that require approval are refused. Run this member locally in Chat for an interactive approval card."
+      : undefined;
     let outputDir: string | undefined;
     try {
       outputDir = await mkdtemp(path.join(tmpdir(), "accordagents-codex-"));
@@ -3456,7 +3702,8 @@ export class CliAgentRunner {
         roleRuntime: options.role ? "codex-developer-instructions" : undefined,
         contextUsage:
           this.extractCodexContextUsage(result.stdout, participant) ??
-          await this.extractCodexSessionLogContextUsageWithRetry(sessionId, participant)
+          await this.extractCodexSessionLogContextUsageWithRetry(sessionId, participant),
+        warnings: nonInteractiveApprovalWarning ? [nonInteractiveApprovalWarning] : undefined
       }, participant, options);
     } catch (error) {
       if (options.role && this.isCodexDeveloperInstructionsUnsupported(error)) {
@@ -3503,7 +3750,10 @@ export class CliAgentRunner {
         });
         return { ...restarted, sessionRestarted: true };
       }
-      return this.failed(participant, error, Date.now() - startedAt);
+      const failed = this.failed(participant, error, Date.now() - startedAt);
+      return nonInteractiveApprovalWarning
+        ? { ...failed, warnings: [...(failed.warnings ?? []), nonInteractiveApprovalWarning] }
+        : failed;
     } finally {
       if (outputDir) {
         await rm(outputDir, { recursive: true, force: true }).catch(() => undefined);

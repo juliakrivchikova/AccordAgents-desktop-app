@@ -17,6 +17,7 @@ import type {
   ChatBehaviorRuleSnapshot,
   ChatAppToolCapability,
   ChatChoiceOption,
+  ChatCodexApprovalRequest,
   ChatAccordResolutionMetadata,
   ChatAgentActivityEvent,
   ChatImageAttachment,
@@ -117,6 +118,7 @@ import {
   limitChatBehaviorRulePromptText
 } from "../../shared/chatBehaviorRules";
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../shared/reasoningEffort";
+import { CODEX_APPROVAL_TOOL_NAME, prepareCodexApproval } from "./codexApprovals";
 import {
   CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH,
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
@@ -139,9 +141,8 @@ import {
 } from "../../shared/appTools";
 import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
 import { buildChatParticipantActivitySnapshot } from "../../shared/chatParticipantActivity";
-import { CliAgentRunner } from "./cliAgents";
+import { CliAgentRunner, type CliAgentCodexServerRequest, type CliAgentOutputEvent, type CliAgentRoleOptions } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
-import type { CliAgentOutputEvent, CliAgentRoleOptions } from "./cliAgents";
 import type {
   RemoteDetachedRunState,
   RemoteRunApplyRecordResult,
@@ -509,6 +510,15 @@ interface ToolPermissionDecision {
   source: "user" | "policy" | "timeout" | "abort";
 }
 
+interface CodexApprovalResolver {
+  conversationId: string;
+  runId: string;
+  responseByOptionId: ReadonlyMap<string, unknown>;
+  resolve: (result: unknown) => void;
+  reject: (error: Error) => void;
+  cleanup: () => void;
+}
+
 export interface ChatAppToolApprovalDecisionEvent {
   conversationId: string;
   approval: ChatAppToolApproval;
@@ -614,6 +624,7 @@ export class ChatService {
   private readonly participantRequestAutoResumes = new Set<string>();
   private readonly permissionApprovalAutoResumes = new Set<string>();
   private readonly toolPermissionResolvers = new Map<string, (decision: ToolPermissionDecision) => void>();
+  private readonly codexApprovalResolvers = new Map<string, CodexApprovalResolver>();
   private readonly participantTurnQueues = new Map<string, Promise<void>>();
   private readonly chatRunControllers = new Map<string, Set<AbortController>>();
   private readonly chatRunMeta = new Map<string, { conversationId: string; participantId: string; participantHandle: string; pendingMessageId?: string }>();
@@ -737,6 +748,7 @@ export class ChatService {
       for (const requestMessageId of terminalRemoteRunsReconciled.autoResumeRequestMessageIds) {
         autoResumeRequestMessageIds.add(requestMessageId);
       }
+      const orphanedCodexApprovalsExpired = this.expireOrphanedCodexApprovals(conversation);
       const recoveredRunState = this.recoverStaleChatRun(conversation);
       const interruptedRequests = this.markOrphanedParticipantRequestsInterrupted(conversation);
       const usageUpdates = nextUsage ? this.contextUsageUpdatesAfterRefresh(conversation, existingUsage, nextUsage) : undefined;
@@ -744,7 +756,7 @@ export class ChatService {
       // Heal pointer maps left stale by the pre-fix index-ordering so roster jump targets
       // the participant's true latest message even before they post again.
       const pointersHealed = this.rebuildLastMessagesByParticipantIfChanged(conversation);
-      if (!usageUpdates && !interruptedRequests && !recoveredRunState && !participantsSynced && !pointersHealed && !terminalRemoteRunsReconciled.changed) {
+      if (!usageUpdates && !interruptedRequests && !recoveredRunState && !participantsSynced && !pointersHealed && !terminalRemoteRunsReconciled.changed && !orphanedCodexApprovalsExpired) {
         hydrated = conversation;
         return;
       }
@@ -757,7 +769,7 @@ export class ChatService {
           }
         };
       }
-      if (interruptedRequests || recoveredRunState || terminalRemoteRunsReconciled.changed) {
+      if (interruptedRequests || recoveredRunState || terminalRemoteRunsReconciled.changed || orphanedCodexApprovalsExpired) {
         conversation.updatedAt = new Date().toISOString();
       }
       await this.saveConversation(conversation);
@@ -4368,6 +4380,9 @@ export class ChatService {
     if (approval.status !== "pending") {
       throw new Error("App tool approval request has already been answered.");
     }
+    if (approval.toolName === CODEX_APPROVAL_TOOL_NAME && this.isCodexApprovalRequest(approval.request)) {
+      return this.respondToCodexApproval(conversation, request);
+    }
     const now = new Date().toISOString();
     if (!request.approve) {
       if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && this.isParticipantRequestApprovalRequest(approval.request)) {
@@ -4723,6 +4738,206 @@ export class ChatService {
       });
     }
     return conversation;
+  }
+
+  private async requestCodexApprovalFromCli(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    session: ChatParticipantSession,
+    runId: string,
+    triggerMessageId: string,
+    request: CliAgentCodexServerRequest
+  ): Promise<unknown> {
+    if (request.signal.aborted) {
+      throw this.abortReasonError(request.signal, "Codex approval request was cancelled.");
+    }
+    const prepared = prepareCodexApproval(request);
+    const now = new Date().toISOString();
+    const approval: ChatAppToolApproval = {
+      id: randomUUID(),
+      conversationId: conversation.id,
+      requesterParticipantId: participant.id,
+      requesterHandle: participant.handle,
+      requesterRoleConfigId: session.roleConfigId,
+      toolName: CODEX_APPROVAL_TOOL_NAME,
+      capability: "permissions.request",
+      status: "pending",
+      request: prepared.request,
+      summary: this.codexApprovalSummary(prepared.request),
+      createdAt: now,
+      updatedAt: now,
+      resumeContext: {
+        runId,
+        triggerMessageId
+      }
+    };
+
+    let resolveDecision!: (result: unknown) => void;
+    let rejectDecision!: (error: Error) => void;
+    const decisionPromise = new Promise<unknown>((resolve, reject) => {
+      resolveDecision = resolve;
+      rejectDecision = reject;
+    });
+    let settled = false;
+    const onAbort = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      const reason = this.abortReasonError(request.signal, "Codex approval request was cancelled.");
+      this.codexApprovalResolvers.delete(approval.id);
+      rejectDecision(reason);
+      void this.markCodexApprovalTerminal(
+        conversation,
+        approval.id,
+        reason.message,
+        reason.message === "Stopped by user." ? "cancelled" : "expired"
+      );
+    };
+    request.signal.addEventListener("abort", onAbort, { once: true });
+    const cleanup = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      request.signal.removeEventListener("abort", onAbort);
+      this.codexApprovalResolvers.delete(approval.id);
+    };
+    this.codexApprovalResolvers.set(approval.id, {
+      conversationId: conversation.id,
+      runId,
+      responseByOptionId: prepared.responseByOptionId,
+      resolve: resolveDecision,
+      reject: rejectDecision,
+      cleanup
+    });
+
+    try {
+      await this.withChatMutation(conversation, async () => {
+        this.upsertAppToolApproval(conversation, approval);
+        conversation.updatedAt = now;
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+      });
+      void this.debugLogs.write("chat.codex-approval.requested", {
+        conversationId: conversation.id,
+        participantId: participant.id,
+        runId,
+        approvalId: approval.id,
+        method: prepared.request.method,
+        itemId: prepared.request.itemId,
+        callbackApprovalId: prepared.request.approvalId
+      });
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+    return decisionPromise;
+  }
+
+  private async respondToCodexApproval(
+    conversation: Conversation,
+    request: RespondToChatAppToolApprovalRequest
+  ): Promise<Conversation> {
+    return this.withChatMutation(conversation, async () => {
+      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === request.approvalId);
+      if (!approval || !this.isCodexApprovalRequest(approval.request)) {
+        throw new Error("Codex approval request was not found.");
+      }
+      if (approval.status !== "pending") {
+        throw new Error("Codex approval request has already been answered.");
+      }
+      const resolver = this.codexApprovalResolvers.get(approval.id);
+      if (!resolver || resolver.conversationId !== conversation.id) {
+        const now = new Date().toISOString();
+        this.upsertAppToolApproval(conversation, {
+          ...approval,
+          status: "expired",
+          updatedAt: now,
+          error: "The Codex app-server connection that requested this approval is no longer active."
+        });
+        conversation.updatedAt = now;
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+        return conversation;
+      }
+      const decisionId = request.codexDecisionId?.trim() || (!request.approve
+        ? approval.request.options.find((item) => item.outcome === "cancel")?.id ??
+          approval.request.options.find((item) => item.outcome === "deny")?.id
+        : undefined);
+      const option = approval.request.options.find((item) => item.id === decisionId);
+      const response = decisionId ? resolver.responseByOptionId.get(decisionId) : undefined;
+      if (!option || response === undefined) {
+        throw new Error("Select one of the decisions offered by this Codex approval request.");
+      }
+      const now = new Date().toISOString();
+      const status: ChatAppToolApproval["status"] = option.outcome === "approve"
+        ? "approved"
+        : option.outcome === "cancel"
+          ? "cancelled"
+          : "denied";
+      this.upsertAppToolApproval(conversation, {
+        ...approval,
+        status,
+        updatedAt: now
+      });
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+      resolver.cleanup();
+      resolver.resolve(response);
+      void this.debugLogs.write("chat.codex-approval.responded", {
+        conversationId: conversation.id,
+        runId: resolver.runId,
+        approvalId: approval.id,
+        method: approval.request.method,
+        outcome: option.outcome
+      });
+      return conversation;
+    });
+  }
+
+  private async markCodexApprovalTerminal(
+    conversation: Conversation,
+    approvalId: string,
+    reason: string,
+    status: Extract<ChatAppToolApproval["status"], "cancelled" | "expired">
+  ): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
+      if (!approval || approval.status !== "pending" || !this.isCodexApprovalRequest(approval.request)) {
+        return;
+      }
+      const now = new Date().toISOString();
+      this.upsertAppToolApproval(conversation, {
+        ...approval,
+        status,
+        updatedAt: now,
+        error: reason
+      });
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+    });
+  }
+
+  private codexApprovalSummary(request: ChatCodexApprovalRequest): string {
+    if (request.action === "command") {
+      return request.command ? `Codex wants to run: ${request.command}` : "Codex wants to run a protected command.";
+    }
+    if (request.action === "permissions") {
+      return "Codex is requesting additional filesystem or network permissions.";
+    }
+    const count = request.fileChanges?.length ?? 0;
+    return count > 0
+      ? `Codex wants to apply ${count} protected file ${count === 1 ? "change" : "changes"}.`
+      : "Codex wants to apply protected file changes.";
+  }
+
+  private abortReasonError(signal: AbortSignal, fallback: string): Error {
+    return signal.reason instanceof Error
+      ? signal.reason
+      : new Error(typeof signal.reason === "string" && signal.reason.trim() ? signal.reason : fallback);
   }
 
   async startAccord(
@@ -6099,6 +6314,14 @@ export class ChatService {
         nativeGoal,
         onOutput: progressSink.emit,
         onSessionId: persistSessionId,
+        onCodexServerRequest: (request) => this.requestCodexApprovalFromCli(
+          conversation,
+          participant,
+          session,
+          runId,
+          triggerMessage.id,
+          request
+        ),
         warm: {
           conversationId: conversation.id,
           participantId: participant.id,
@@ -8510,7 +8733,7 @@ export class ChatService {
   }
 
   private isTerminalAppToolApprovalStatus(status: string): boolean {
-    return status === "approved" || status === "denied" || status === "auto-applied";
+    return status === "approved" || status === "denied" || status === "cancelled" || status === "expired" || status === "auto-applied";
   }
 
   private metadataStringKey(item: Record<string, unknown>, key: string): string | undefined {
@@ -12395,9 +12618,56 @@ export class ChatService {
           reason
         });
       }
+      if (approval.toolName === CODEX_APPROVAL_TOOL_NAME && this.isCodexApprovalRequest(approval.request)) {
+        const resolver = this.codexApprovalResolvers.get(approval.id);
+        if (resolver) {
+          resolver.cleanup();
+          resolver.reject(new Error(reason));
+        }
+        return {
+          ...approval,
+          status: /stop|cancel/i.test(reason) ? "cancelled" as const : "expired" as const,
+          error: reason,
+          updatedAt: now
+        };
+      }
       return {
         ...approval,
         status: "denied" as const,
+        error: reason,
+        updatedAt: now
+      };
+    });
+    if (!changed) {
+      return false;
+    }
+    conversation.metadata = {
+      ...conversation.metadata,
+      pendingAppToolApprovals: nextApprovals
+    };
+    return true;
+  }
+
+  private expireOrphanedCodexApprovals(
+    conversation: Conversation,
+    reason = "The Codex app-server connection that requested this approval is no longer active."
+  ): boolean {
+    const approvals = this.chatAppToolApprovals(conversation);
+    const now = new Date().toISOString();
+    let changed = false;
+    const nextApprovals = approvals.map((approval) => {
+      if (
+        approval.status !== "pending" ||
+        approval.toolName !== CODEX_APPROVAL_TOOL_NAME ||
+        !this.isCodexApprovalRequest(approval.request) ||
+        this.codexApprovalResolvers.has(approval.id)
+      ) {
+        return approval;
+      }
+      changed = true;
+      return {
+        ...approval,
+        status: "expired" as const,
         error: reason,
         updatedAt: now
       };
@@ -12947,16 +13217,30 @@ export class ChatService {
 
   private cleanupRemovedParticipantState(conversation: Conversation, participant: ChatParticipant, now: string): void {
     const removalError = "Member was removed from this chat.";
-    const approvals = this.chatAppToolApprovals(conversation).map((approval) =>
-      approval.status === "pending" && this.appToolApprovalReferencesParticipant(conversation, approval, participant)
-        ? {
-            ...approval,
-            status: "denied" as const,
-            updatedAt: now,
-            error: removalError
-          }
-        : approval
-    );
+    const approvals = this.chatAppToolApprovals(conversation).map((approval) => {
+      if (approval.status !== "pending" || !this.appToolApprovalReferencesParticipant(conversation, approval, participant)) {
+        return approval;
+      }
+      if (approval.toolName === CODEX_APPROVAL_TOOL_NAME && this.isCodexApprovalRequest(approval.request)) {
+        const resolver = this.codexApprovalResolvers.get(approval.id);
+        if (resolver) {
+          resolver.cleanup();
+          resolver.reject(new Error(removalError));
+        }
+        return {
+          ...approval,
+          status: "expired" as const,
+          updatedAt: now,
+          error: removalError
+        };
+      }
+      return {
+        ...approval,
+        status: "denied" as const,
+        updatedAt: now,
+        error: removalError
+      };
+    });
     const policies = this.chatAppToolApprovalPolicies(conversation).filter((policy) =>
       policy.participantId !== participant.id && policy.targetParticipantId !== participant.id
     );
@@ -15535,17 +15819,48 @@ export class ChatService {
       approval.toolName === APP_CHAT_REQUEST_COMPACTION_TOOL &&
       approval.capability === "compaction.request" &&
       this.isSelfCompactionRequest(approval.request);
+    const isCodexApproval =
+      approval.toolName === CODEX_APPROVAL_TOOL_NAME &&
+      approval.capability === "permissions.request" &&
+      this.isCodexApprovalRequest(approval.request);
     return (
       typeof approval.id === "string" &&
       typeof approval.conversationId === "string" &&
       typeof approval.requesterParticipantId === "string" &&
       typeof approval.requesterHandle === "string" &&
       typeof approval.requesterRoleConfigId === "string" &&
-      (isRosterApproval || isRoleApproval || isParticipantChangeApproval || isPermissionApproval || isToolPermissionApproval || isParticipantRequestApproval || isSelfCompactionApproval) &&
-      (approval.status === "pending" || approval.status === "approved" || approval.status === "denied" || approval.status === "auto-applied") &&
+      (isRosterApproval || isRoleApproval || isParticipantChangeApproval || isPermissionApproval || isToolPermissionApproval || isParticipantRequestApproval || isSelfCompactionApproval || isCodexApproval) &&
+      (approval.status === "pending" || approval.status === "approved" || approval.status === "denied" || approval.status === "cancelled" || approval.status === "expired" || approval.status === "auto-applied") &&
       typeof approval.summary === "string" &&
       typeof approval.createdAt === "string" &&
       typeof approval.updatedAt === "string"
+    );
+  }
+
+  private isCodexApprovalRequest(request: unknown): request is ChatCodexApprovalRequest {
+    const candidate = request as Partial<ChatCodexApprovalRequest>;
+    const method = candidate.method;
+    return Boolean(
+      request &&
+      typeof request === "object" &&
+      !Array.isArray(request) &&
+      candidate.kind === "codexApproval" &&
+      (
+        method === "item/commandExecution/requestApproval" ||
+        method === "item/fileChange/requestApproval" ||
+        method === "item/permissions/requestApproval" ||
+        method === "applyPatchApproval" ||
+        method === "execCommandApproval"
+      ) &&
+      (typeof candidate.requestId === "string" || typeof candidate.requestId === "number") &&
+      (candidate.action === "command" || candidate.action === "fileChange" || candidate.action === "permissions") &&
+      Array.isArray(candidate.options) &&
+      candidate.options.length > 0 &&
+      candidate.options.every((option) =>
+        typeof option?.id === "string" &&
+        typeof option.label === "string" &&
+        (option.outcome === "approve" || option.outcome === "deny" || option.outcome === "cancel")
+      )
     );
   }
 

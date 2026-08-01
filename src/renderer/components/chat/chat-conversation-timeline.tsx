@@ -45,7 +45,8 @@ export function ChatConversationTimeline(props: {
     approvalId: string,
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
-    draftOverride?: ChatAppToolApprovalRequest
+    draftOverride?: ChatAppToolApprovalRequest,
+    codexDecisionId?: string
   ) => Promise<void>;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void | Promise<void>;
   onScroll: () => void;

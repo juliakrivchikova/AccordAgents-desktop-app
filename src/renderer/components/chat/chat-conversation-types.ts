@@ -61,7 +61,8 @@ export interface ChatConversationViewProps {
     approvalId: string,
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
-    draftOverride?: ChatAppToolApprovalRequest
+    draftOverride?: ChatAppToolApprovalRequest,
+    codexDecisionId?: string
   ) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   onCompactParticipant: ParticipantCompactHandler;
