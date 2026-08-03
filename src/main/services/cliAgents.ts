@@ -2739,10 +2739,10 @@ export class CliAgentRunner {
           turnId: notificationTurnId,
           reviewId
         });
-        this.emitLiveOutput(turn.onOutput, "tool", "Approved one retry for the Auto Review denial\n", undefined, {
+        this.emitLiveOutput(turn.onOutput, "tool", "Recorded User approval for the Auto Review denial\n", undefined, {
           activityKind: "approval",
           activityStatus: "completed",
-          activityDetail: "Codex will retry the denied action once; the retry remains subject to Auto Review."
+          activityDetail: "The User approved one retry. AccordAgents will continue the participant if the original response has ended."
         });
         resolveDelivery();
       }).catch((error) => {

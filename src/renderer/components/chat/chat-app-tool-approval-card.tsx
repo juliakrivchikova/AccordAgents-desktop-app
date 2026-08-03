@@ -19,7 +19,9 @@ import { MarkdownText } from "../content/markdown-text";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { formatChatTime } from "./chat-format";
 import { APP_ROSTER_REQUEST_CHANGE_TOOL, chatApprovalKeyboardAction, chatApprovalShowsGenericSkip, chatCodexApprovalRequest, chatParticipantChangeRequest, chatParticipantRequestApprovalRequest, chatPermissionChangeRequest, chatRoleChangeRequest, chatRoleParticipantChangeRequest, chatSelfCompactionRequest, chatToolPermissionRequest, participantProviderLabel } from "./chat-conversation-data";
+import { chatCodexApprovalShowsCompactResult } from "./chat-codex-approval-presentation";
 import { approvalOptions, approvalQuestion, approvalReason, ChatAppToolReviewFooter, ChatAppToolReviewResult, ChatAppToolReviewStatus, participantReviewChipLabel, reviewPrimaryLabel, roleReviewChipLabel, temporaryRolesForReview } from "./chat-app-tool-approval-review";
+import { ChatCodexApprovalResult } from "./chat-codex-approval-result";
 import { ChatAppToolPermissionOperation, ChatAppToolParticipantRequestOperation, ChatAppToolPermissionPromptOperation } from "./chat-app-tool-permission-operations";
 import { ChatAppToolRosterOperation, ChatAppToolRosterPermissionEnvelope, RosterApprovalTitle, rosterApprovalQuestion } from "./chat-app-tool-roster";
 import { ChatAppToolRoleChangeOperation } from "./chat-app-tool-role-operation";
@@ -133,6 +135,27 @@ export function ChatAppToolApprovalCard(props: {
             combinedRequest={combinedRequest}
             savedParticipants={props.savedParticipants}
           />
+        </div>
+      </section>
+    );
+  }
+
+  if (chatCodexApprovalShowsCompactResult(props.approval)) {
+    return (
+      <section
+        className={`chat-app-tool-approval-card is-compact-result is-${props.approval.status}`}
+        aria-label={displayPrompt}
+        data-app-tool-approval-id={props.approval.id}
+        tabIndex={-1}
+      >
+        <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+        <div className="chat-app-tool-approval-body">
+          <div className="chat-app-tool-approval-meta">
+            <strong>{requesterLabel}</strong>
+            {requester && <span className="message-provider">{participantProviderLabel(requester.kind)}</span>}
+            <span className="message-when">{formatChatTime(props.approval.createdAt)}</span>
+          </div>
+          <ChatCodexApprovalResult approval={props.approval} />
         </div>
       </section>
     );

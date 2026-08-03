@@ -12,6 +12,10 @@ export function chatApprovalShowsGenericSkip(codexRequest: ChatCodexApprovalRequ
   return codexRequest === undefined;
 }
 
+export function chatCodexApprovalShowsCompactResult(approval: ChatAppToolApproval): boolean {
+  return approval.status !== "pending" && chatCodexApprovalRequest(approval) !== undefined;
+}
+
 export function chatActivityShowsGenericCancel(item: ChatActivityItem): boolean {
   if (item.status !== "pending") return false;
   if (item.kind === "approval") {

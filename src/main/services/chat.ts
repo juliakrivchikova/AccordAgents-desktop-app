@@ -17,6 +17,7 @@ import type {
   ChatBehaviorRuleSnapshot,
   ChatAppToolCapability,
   ChatChoiceOption,
+  ChatCodexApprovalOption,
   ChatCodexApprovalRequest,
   ChatAccordResolutionMetadata,
   ChatAgentActivityEvent,
@@ -118,7 +119,7 @@ import {
   limitChatBehaviorRulePromptText
 } from "../../shared/chatBehaviorRules";
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../shared/reasoningEffort";
-import { CODEX_APPROVAL_TOOL_NAME, codexApprovalCancellationResult, prepareCodexApproval } from "./codexApprovals";
+import { CODEX_APPROVAL_TOOL_NAME, CODEX_GUARDIAN_DENIED_APPROVAL_METHOD, codexApprovalCancellationResult, prepareCodexApproval } from "./codexApprovals";
 import {
   CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH,
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
@@ -337,6 +338,8 @@ const CHAT_TOOL_PERMISSION_WAIT_MS = 30 * 60_000;
 // Mirrors the dedicated CLI's bounded human approval wait. The provider turn
 // timer is paused separately while a direct callback is outstanding.
 const CHAT_CODEX_APPROVAL_WAIT_MS = 30 * 60_000;
+const CHAT_CODEX_APPROVAL_CONTROL_APPROVE = "[AccordAgents approval control] Retry exactly the action I just approved, once. If it succeeds, continue the unfinished work from my original request that directly depends on it. Do not broaden the approved action or start unrelated work. If the retry cannot run, clearly explain why.";
+const CHAT_CODEX_APPROVAL_CONTROL_DENY = "[AccordAgents approval control] Do not retry the action I just denied. Continue the unfinished work from my original request without it. If you cannot continue, clearly explain why.";
 const CHAT_AUTO_WATCH_EVALUATION_DEBOUNCE_MS = 75;
 const CHAT_GITHUB_APP_REPOSITORY_MAX_LENGTH = 200;
 const CHAT_GITHUB_APP_PERMISSION_MAX_LENGTH = 80;
@@ -629,6 +632,7 @@ export class ChatService {
   private readonly participantRequestRunners = new Map<string, Promise<ParticipantRequestRunResult>>();
   private readonly participantRequestAutoResumes = new Set<string>();
   private readonly permissionApprovalAutoResumes = new Set<string>();
+  private readonly codexApprovalContinuations = new Set<string>();
   private readonly toolPermissionResolvers = new Map<string, (decision: ToolPermissionDecision) => void>();
   private readonly codexApprovalResolvers = new Map<string, CodexApprovalResolver>();
   private readonly participantTurnQueues = new Map<string, Promise<void>>();
@@ -4392,7 +4396,7 @@ export class ChatService {
       throw new Error("App tool approval request has already been answered.");
     }
     if (approval.toolName === CODEX_APPROVAL_TOOL_NAME && this.isCodexApprovalRequest(approval.request)) {
-      return this.respondToCodexApproval(conversation, request);
+      return this.respondToCodexApproval(conversation, request, progress);
     }
     const now = new Date().toISOString();
     if (!request.approve) {
@@ -4893,7 +4897,8 @@ export class ChatService {
 
   private async respondToCodexApproval(
     conversation: Conversation,
-    request: RespondToChatAppToolApprovalRequest
+    request: RespondToChatAppToolApprovalRequest,
+    progress?: ProgressCallback
   ): Promise<Conversation> {
     const selected = await this.withChatMutation(conversation, async () => {
       const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === request.approvalId);
@@ -4939,37 +4944,280 @@ export class ChatService {
         clearTimeout(resolver.timer);
         resolver.timer = undefined;
       }
-      return { approval, option, response, resolver, status };
-    });
-    selected.resolver.resolve(selected.response);
-    try {
-      await selected.resolver.responseDelivered;
-    } catch (error) {
-      selected.resolver.cleanup();
-      const message = `Codex could not receive this decision: ${error instanceof Error ? error.message : String(error)}`;
-      await this.markCodexApprovalTerminal(conversation, selected.approval.id, message, "expired");
-      throw new Error(message);
-    }
-    selected.resolver.cleanup();
-    return this.withChatMutation(conversation, async () => {
-      const current = this.chatAppToolApprovals(conversation).find((item) => item.id === selected.approval.id);
-      if (!current || current.status !== "pending" || !this.isCodexApprovalRequest(current.request)) {
-        throw new Error("Codex approval request is no longer active.");
-      }
       const now = new Date().toISOString();
-      const completed = { ...current, status: selected.status, updatedAt: now };
+      const completed: ChatAppToolApproval = { ...approval, status, updatedAt: now };
       this.upsertAppToolApproval(conversation, completed);
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
       this.queueSnapshot(conversation);
-      void this.debugLogs.write("chat.codex-approval.responded", {
+      return { approval: completed, option, response, resolver, method: approval.request.method };
+    });
+    selected.resolver.resolve(selected.response);
+    void this.finishCodexApprovalDecision(
+      conversation.id,
+      selected.approval,
+      selected.option.outcome,
+      selected.resolver,
+      progress
+    ).catch((error) => {
+      void this.debugLogs.write("chat.codex-approval.completion.error", {
         conversationId: conversation.id,
         runId: selected.resolver.runId,
-        approvalId: current.id,
-        method: current.request.method,
-        outcome: selected.option.outcome
+        approvalId: selected.approval.id,
+        message: error instanceof Error ? error.message : String(error)
       });
-      return conversation;
+    });
+    void this.debugLogs.write("chat.codex-approval.responded", {
+      conversationId: conversation.id,
+      runId: selected.resolver.runId,
+      approvalId: selected.approval.id,
+      method: selected.method,
+      outcome: selected.option.outcome
+    });
+    return conversation;
+  }
+
+  private async finishCodexApprovalDecision(
+    conversationId: string,
+    approval: ChatAppToolApproval,
+    outcome: ChatCodexApprovalOption["outcome"],
+    resolver: CodexApprovalResolver,
+    progress?: ProgressCallback
+  ): Promise<void> {
+    try {
+      await resolver.responseDelivered;
+    } catch (error) {
+      resolver.cleanup();
+      const message = `Codex could not receive this decision: ${error instanceof Error ? error.message : String(error)}`;
+      if (this.isEndedTurnGuardianApproval(approval)) {
+        await this.appendCodexContinuationStartFailure(conversationId, approval, message);
+      } else {
+        this.emitProgress(resolver.runId, progress, "error", message);
+      }
+      void this.debugLogs.write("chat.codex-approval.delivery-failed", {
+        conversationId,
+        runId: resolver.runId,
+        approvalId: approval.id,
+        message
+      });
+      return;
+    }
+    resolver.cleanup();
+    if (!this.isEndedTurnGuardianApproval(approval) || (outcome !== "approve" && outcome !== "deny")) {
+      return;
+    }
+    try {
+      await this.autoResumeCodexGuardianDecision(conversationId, approval.id, progress);
+    } catch (error) {
+      const message = `Codex could not start the continuation: ${error instanceof Error ? error.message : String(error)}`;
+      await this.appendCodexContinuationStartFailure(conversationId, approval, message);
+      void this.debugLogs.write("chat.codex-approval.continuation-start-failed", {
+        conversationId,
+        runId: resolver.runId,
+        approvalId: approval.id,
+        message
+      });
+    }
+  }
+
+  private isEndedTurnGuardianApproval(approval: ChatAppToolApproval): boolean {
+    return this.isCodexApprovalRequest(approval.request) && approval.request.method === CODEX_GUARDIAN_DENIED_APPROVAL_METHOD;
+  }
+
+  private async autoResumeCodexGuardianDecision(
+    conversationId: string,
+    approvalId: string,
+    progress?: ProgressCallback
+  ): Promise<void> {
+    if (this.codexApprovalContinuations.has(approvalId)) {
+      return;
+    }
+    this.codexApprovalContinuations.add(approvalId);
+    let backgroundStarted = false;
+    let releaseReservation: (() => void) | undefined;
+    try {
+      const ingest = await this.withChatRunLock(conversationId, async () => {
+        const conversation = await this.requireChat(conversationId);
+        const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
+        if (
+          !approval ||
+          (approval.status !== "approved" && approval.status !== "denied") ||
+          !this.isEndedTurnGuardianApproval(approval) ||
+          !approval.resumeContext
+        ) {
+          return;
+        }
+        const participant = this.chatParticipants(conversation).find((item) => item.id === approval.requesterParticipantId);
+        const trigger = conversation.messages.find((message) => message.id === approval.resumeContext?.triggerMessageId);
+        if (!participant) {
+          throw new Error("The participant that requested this decision is no longer in the chat.");
+        }
+        if (!trigger) {
+          throw new Error("The original request for this decision is no longer available.");
+        }
+        const instruction = approval.status === "approved"
+          ? CHAT_CODEX_APPROVAL_CONTROL_APPROVE
+          : CHAT_CODEX_APPROVAL_CONTROL_DENY;
+        const controlMessage = this.message("user", instruction, undefined, {
+          threadId: trigger.metadata?.threadId ?? trigger.id,
+          parentMessageId: trigger.id,
+          chatThreadRootId: trigger.metadata?.chatThreadRootId,
+          sourceMessageId: trigger.id,
+          hiddenFromTimeline: true
+        });
+        const resumeRunId = randomUUID();
+        const turnReservation = this.reserveParticipantTurn(conversation.id, participant.id);
+        releaseReservation = turnReservation.release;
+        const pendingMessage = this.message(
+          "participant",
+          "",
+          { id: participant.id, kind: participant.kind, label: `@${participant.handle}`, model: participant.model },
+          {
+            threadId: controlMessage.metadata?.threadId ?? controlMessage.id,
+            parentMessageId: controlMessage.id,
+            chatThreadRootId: controlMessage.metadata?.chatThreadRootId,
+            sourceMessageId: controlMessage.id,
+            approvedContinuation: true,
+            runId: resumeRunId,
+            queuedBehind: turnReservation.queued ? { handle: participant.handle } : undefined
+          },
+          "pending"
+        );
+        this.setTargetRunPendingMessageId(resumeRunId, pendingMessage.id);
+        await this.beginChatRun(conversation, resumeRunId);
+        try {
+          await this.withChatMutation(conversation, async () => {
+            conversation.messages.push(controlMessage, pendingMessage);
+            this.recordLastMessageByParticipant(conversation, pendingMessage);
+            conversation.updatedAt = new Date().toISOString();
+            this.queueSnapshot(conversation);
+          });
+          await this.waitForQueuedSave(conversation.id);
+        } catch (error) {
+          await this.endChatRun(conversation, resumeRunId);
+          throw error;
+        }
+        return { conversation, approval, participant, controlMessage, pendingMessage, resumeRunId, turnReservation };
+      });
+      if (!ingest) {
+        return;
+      }
+      backgroundStarted = true;
+      releaseReservation = undefined;
+      void this.runCodexGuardianDecisionContinuation(
+        ingest.conversation,
+        ingest.participant,
+        ingest.controlMessage,
+        ingest.pendingMessage,
+        ingest.resumeRunId,
+        ingest.turnReservation,
+        approvalId,
+        progress
+      )
+        .catch((error) => {
+          void this.debugLogs.write("chat.codex-approval.continuation.background.error", {
+            conversationId,
+            runId: ingest.resumeRunId,
+            approvalId,
+            message: error instanceof Error ? error.message : String(error)
+          });
+        })
+        .finally(() => {
+          this.codexApprovalContinuations.delete(approvalId);
+        });
+    } finally {
+      if (!backgroundStarted) {
+        releaseReservation?.();
+        this.codexApprovalContinuations.delete(approvalId);
+      }
+    }
+  }
+
+  private async runCodexGuardianDecisionContinuation(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    controlMessage: ChatMessage,
+    pendingMessage: ChatMessage,
+    resumeRunId: string,
+    turnReservation: ParticipantTurnReservation,
+    approvalId: string,
+    progress?: ProgressCallback
+  ): Promise<void> {
+    try {
+      const messages = await this.runParticipantTurnSerialized(
+        conversation,
+        participant,
+        controlMessage,
+        resumeRunId,
+        undefined,
+        progress,
+        {
+          continuation: true,
+          warnings: [],
+          existingPendingMessage: pendingMessage,
+          turnReservation
+        }
+      );
+      await this.refreshStoredChatState(conversation);
+      const participantRequestsToRun = await this.appendParticipantTurnMessages(conversation, participant, messages);
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+      this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
+      await this.ensureHistoryFiles(conversation);
+      this.emitProgress(resumeRunId, progress, "done", "Codex approval continuation finished.");
+    } catch (error) {
+      await this.finalizeFailedPrecreatedPendingMessage(conversation, pendingMessage.id, participant, error);
+      await this.withChatMutation(conversation, async () => {
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+      this.emitChatRunFailure(resumeRunId, progress, error);
+      void this.debugLogs.write("chat.codex-approval.continuation.error", {
+        conversationId: conversation.id,
+        runId: resumeRunId,
+        approvalId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      await this.endChatRun(conversation, resumeRunId);
+    }
+  }
+
+  private async appendCodexContinuationStartFailure(
+    conversationId: string,
+    approvalSnapshot: ChatAppToolApproval,
+    message: string
+  ): Promise<void> {
+    await this.withChatRunLock(conversationId, async () => {
+      const conversation = await this.requireChat(conversationId);
+      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalSnapshot.id) ?? approvalSnapshot;
+      const participant = this.chatParticipants(conversation).find((item) => item.id === approval.requesterParticipantId);
+      const trigger = conversation.messages.find((item) => item.id === approval.resumeContext?.triggerMessageId);
+      const content = `@${approval.requesterHandle} could not continue after this ${approval.status === "approved" ? "approval" : "denial"}: ${sanitizeWarningText(message)}`;
+      const failure = participant
+        ? this.message(
+            "participant",
+            content,
+            { id: participant.id, kind: participant.kind, label: `@${participant.handle}`, model: participant.model },
+            {
+              threadId: trigger?.metadata?.threadId ?? trigger?.id ?? "system",
+              parentMessageId: trigger?.id,
+              chatThreadRootId: trigger?.metadata?.chatThreadRootId,
+              sourceMessageId: trigger?.id,
+              runId: randomUUID()
+            },
+            "error"
+          )
+        : this.message("system", content, undefined, { threadId: trigger?.metadata?.threadId ?? "system" });
+      await this.withChatMutation(conversation, async () => {
+        conversation.messages.push(failure);
+        if (participant) {
+          this.recordLastMessageByParticipant(conversation, failure);
+        }
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+      });
     });
   }
 

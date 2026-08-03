@@ -8,9 +8,11 @@ import {
   chatApprovalKeyboardAction,
   chatApprovalPlacement,
   chatApprovalShowsGenericSkip,
+  chatCodexApprovalShowsCompactResult,
   chatCodexApprovalRequest
 } from "./chat-codex-approval-presentation";
 import { ChatCodexApprovalOperation } from "./chat-codex-approval-operation";
+import { ChatCodexApprovalResult } from "./chat-codex-approval-result";
 
 const NOW = "2026-08-01T05:00:00.000Z";
 
@@ -93,6 +95,21 @@ test("Activity hides generic cancellation for Codex while preserving ordinary ap
   const ordinaryItem = activityApproval("activity-ordinary", "approval-ordinary");
   assert.equal(chatActivityShowsGenericCancel(codexItem), false);
   assert.equal(chatActivityShowsGenericCancel(ordinaryItem), true);
+});
+
+test("submitted Codex decisions use the existing compact result card with no controls", () => {
+  for (const status of ["approved", "denied"] as const) {
+    const approval = codexApproval(`approval-${status}`, "participant", "run");
+    approval.status = status;
+    assert.equal(chatCodexApprovalShowsCompactResult(approval), true);
+    const renderer = create(<ChatCodexApprovalResult approval={approval} />);
+    const root = renderer.toJSON() as { props?: { className?: string }; children?: unknown[] };
+    const text = textContent(root);
+    assert.match(root.props?.className ?? "", /chat-app-tool-result-card/);
+    assert.match(text, status === "approved" ? /Approved/ : /Denied/);
+    assert.doesNotMatch(text, /Submit|Approve one retry|Keep denied/);
+    renderer.unmount();
+  }
 });
 
 function participantMessage(id: string, participantId: string, runId: string): ChatMessage {

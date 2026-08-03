@@ -9891,7 +9891,7 @@ test("Codex session approval resolves the blocked callback without creating a ch
   assert.equal(storage.current.messages.length, 1);
 });
 
-test("Codex approval stays pending until the provider acknowledges the selected response", async () => {
+test("Codex approval compacts immediately while the provider receives the selected response", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
   const { service, storage } = testService({ conversation });
@@ -9941,14 +9941,14 @@ test("Codex approval stays pending until the provider acknowledges the selected 
     codexDecisionId: "accept"
   });
   assert.deepEqual(await decision, { decision: "accept" });
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
-  acknowledge();
   await response;
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+  acknowledge();
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
 });
 
-test("Codex approval expires when the provider cannot receive the selected response", async () => {
+test("Codex approval keeps the compact decision and reports provider delivery failure through run progress", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
   const { service, storage } = testService({ conversation });
@@ -9992,17 +9992,21 @@ test("Codex approval expires when the provider cannot receive the selected respo
   );
   await new Promise<void>((resolve) => setImmediate(resolve));
   const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
-  const response = service.respondToAppToolApproval({
+  const progressEvents: Array<{ phase: string; message: string }> = [];
+  await service.respondToAppToolApproval({
     conversationId: conversation.id,
     approvalId: pending.id,
     approve: true,
     codexDecisionId: "accept"
+  }, (progress) => {
+    progressEvents.push(progress);
   });
   assert.deepEqual(await decision, { decision: "accept" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
   rejectDelivery(new Error("stdin closed"));
-  await assert.rejects(response, /could not receive this decision.*stdin closed/);
-  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "expired");
-  assert.match(storage.current.metadata.pendingAppToolApprovals[0].error ?? "", /stdin closed/);
+  await waitFor(() => progressEvents.some((event) => event.phase === "error" && /could not receive this decision.*stdin closed/i.test(event.message)));
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].error, undefined);
 });
 
 test("Codex approval rejects a tampered approve flag", async () => {
@@ -10222,11 +10226,9 @@ test("Guardian timeout creates a durable terminal card without a resolver", asyn
   assert.match(approval.error ?? "", /remains denied/);
 });
 
-test("Guardian denial approval keeps the exact event out of storage and resolves one retry", async () => {
+test("Guardian approval compacts immediately and starts one hidden same-session continuation after delivery", async () => {
   const participant = chatParticipant("codex-cli");
   participant.agentMode = "auto";
-  const conversation = chatConversation([participant]);
-  const { service, storage } = testService({ conversation });
   const session: ChatParticipantSession = {
     participantId: participant.id,
     sessionId: "codex-thread-1",
@@ -10240,6 +10242,16 @@ test("Guardian denial approval keeps the exact event out of storage and resolves
     participantPermissions: participant.permissions,
     updatedAt: NOW
   };
+  const runs: Array<{ prompt: string; sessionId?: string }> = [];
+  const conversation = chatConversation([participant], { participantSessions: [session] });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      runs.push({ prompt, sessionId: options?.sessionId });
+      return { participant: runParticipant, ok: true, content: "Continuation complete.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
   const controller = new AbortController();
   let acknowledge!: () => void;
   const responseDelivered = new Promise<void>((resolve) => { acknowledge = resolve; });
@@ -10278,7 +10290,7 @@ test("Guardian denial approval keeps the exact event out of storage and resolves
   assert.equal(JSON.stringify(pending.request).includes("guardian_assessment"), false);
   assert.equal(JSON.stringify(pending.request).includes("startedAtMs"), false);
 
-  const response = service.respondToAppToolApproval({
+  await service.respondToAppToolApproval({
     conversationId: conversation.id,
     approvalId: pending.id,
     approve: true,
@@ -10286,6 +10298,7 @@ test("Guardian denial approval keeps the exact event out of storage and resolves
   });
 
   assert.deepEqual(await decision, { decision: "approveRetry" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
   await assert.rejects(() => service.respondToAppToolApproval({
     conversationId: conversation.id,
     approvalId: pending.id,
@@ -10293,9 +10306,177 @@ test("Guardian denial approval keeps the exact event out of storage and resolves
     codexDecisionId: "approveRetry"
   }), /already been answered/);
   acknowledge();
-  await response;
+  await waitFor(() => runs.length === 1);
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.role === "participant" && message.content === "Continuation complete." && message.status === "done"
+  ));
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
   assert.deepEqual(storage.current.metadata.appToolApprovalPolicies ?? [], []);
+  assert.equal(runs[0].sessionId, "codex-thread-1");
+  assert.match(runs[0].prompt, /Retry exactly the action I just approved, once/);
+  const hiddenControl = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "user" && message.content.includes("Retry exactly the action I just approved, once")
+  );
+  assert.equal(hiddenControl?.metadata?.hiddenFromTimeline, true);
+  assert.equal(storage.current.messages.filter((message: ChatMessage) => message.metadata?.approvedContinuation).length, 1);
+});
+
+test("Guardian Keep denied compacts and starts the decision-specific continuation", async () => {
+  const participant = chatParticipant("codex-cli");
+  participant.agentMode = "auto";
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "codex-thread-deny",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  };
+  const prompts: string[] = [];
+  const conversation = chatConversation([participant], { participantSessions: [session] });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, prompt) => {
+      prompts.push(prompt);
+      return { participant: runParticipant, ok: true, content: "Continued without the action.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const decision = (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    "run-guardian-deny",
+    "user-message",
+    guardianDeniedRequest("codex-thread-deny", Promise.resolve())
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: false,
+    codexDecisionId: "keepDenied"
+  });
+
+  assert.deepEqual(await decision, { decision: "keepDenied" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "denied");
+  await waitFor(() => prompts.length === 1);
+  assert.match(prompts[0], /Do not retry the action I just denied/);
+  assert.equal(storage.current.messages.filter((message: ChatMessage) => message.metadata?.approvedContinuation).length, 1);
+});
+
+test("Guardian decision queues one continuation while the original run finishes", async () => {
+  const participant = chatParticipant("codex-cli");
+  participant.agentMode = "auto";
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "codex-thread-active",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  };
+  const conversation = chatConversation([participant], { participantSessions: [session] });
+  let runCount = 0;
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => {
+      runCount += 1;
+      return { participant: runParticipant, ok: true, content: "Continued once.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  (service as any).rememberActiveChatRun(conversation.id, "run-guardian-active");
+  const decision = (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    "run-guardian-active",
+    "user-message",
+    guardianDeniedRequest("codex-thread-active", Promise.resolve())
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: true,
+    codexDecisionId: "approveRetry"
+  });
+  assert.deepEqual(await decision, { decision: "approveRetry" });
+  await waitFor(() => runCount === 1);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(runCount, 1);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+  (service as any).forgetActiveChatRun(conversation.id, "run-guardian-active");
+});
+
+test("Guardian delivery failure keeps the compact decision and creates an explicit participant error", async () => {
+  const participant = chatParticipant("codex-cli");
+  participant.agentMode = "auto";
+  const conversation = chatConversation([participant]);
+  let runCount = 0;
+  const { service, storage } = testService({
+    conversation,
+    run: async (runParticipant) => {
+      runCount += 1;
+      return { participant: runParticipant, ok: true, content: "Unexpected.", durationMs: 1 };
+    }
+  });
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "codex-thread-failed-delivery",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  };
+  let rejectDelivery!: (error: Error) => void;
+  const delivery = new Promise<void>((_resolve, reject) => { rejectDelivery = reject; });
+  void delivery.catch(() => undefined);
+  const decision = (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    "run-guardian-failed-delivery",
+    "user-message",
+    guardianDeniedRequest("codex-thread-failed-delivery", delivery)
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: true,
+    codexDecisionId: "approveRetry"
+  });
+  assert.deepEqual(await decision, { decision: "approveRetry" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+  rejectDelivery(new Error("app-server pipe closed"));
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.role === "participant" && message.status === "error" && /could not continue/i.test(message.content)
+  ));
+  assert.equal(runCount, 0);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
 });
 
 test("Codex approval becomes non-actionable when its app-server request is cancelled", async () => {
@@ -10676,6 +10857,32 @@ function testService(options: {
     storage,
     settingsState,
     tempRoot
+  };
+}
+
+function guardianDeniedRequest(threadId: string, responseDelivered: Promise<void>): {
+  id: string;
+  method: "item/autoApprovalReview/denied";
+  params: Record<string, unknown>;
+  signal: AbortSignal;
+  responseDelivered: Promise<void>;
+} {
+  return {
+    id: `guardian:${threadId}`,
+    method: "item/autoApprovalReview/denied",
+    params: {
+      threadId,
+      turnId: `turn:${threadId}`,
+      startedAtMs: 100,
+      completedAtMs: 200,
+      reviewId: `review:${threadId}`,
+      targetItemId: `item:${threadId}`,
+      decisionSource: "agent",
+      review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: "Not authorized" },
+      action: { type: "command", source: "unifiedExec", command: "git push origin main", cwd: "/tmp/scratch" }
+    },
+    signal: new AbortController().signal,
+    responseDelivered
   };
 }
 
