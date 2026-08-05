@@ -434,7 +434,7 @@ export class StorageService {
     }
     const rows = await this.queryJson<{ sequence: number; payloadJson: string }>(
       `
-        select sequence, payload_json as payloadJson
+        select sequence, hex(payload_json) as payloadJson
         from conversation_messages
         where conversation_id = ${sqlString(request.conversationId)}${sequenceClause}
         order by sequence desc
@@ -446,7 +446,7 @@ export class StorageService {
       `select count(*) as totalMessages from conversation_messages where conversation_id = ${sqlString(request.conversationId)};`
     );
     return {
-      messages: selectedRows.map((row) => JSON.parse(row.payloadJson) as ChatMessage),
+      messages: selectedRows.map((row) => JSON.parse(Buffer.from(row.payloadJson, "hex").toString("utf8")) as ChatMessage),
       oldestSequence: selectedRows[0]?.sequence,
       newestSequence: selectedRows[selectedRows.length - 1]?.sequence,
       hasMoreBefore: rows.length > limit,

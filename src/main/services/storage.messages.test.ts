@@ -25,11 +25,11 @@ test("openConversation returns a message window consistent with messagePage", as
     metadata: {}
   });
   storage.queryJson = async (sql: string) => {
-    if (sql.includes("payload_json as payloadJson")) {
+    if (sql.includes("payloadJson")) {
       // newest-first; limit+1 rows so hasMoreBefore is true
       return [4, 3, 2].map((sequence) => ({
         sequence,
-        payloadJson: JSON.stringify({ id: `m-${sequence}`, role: "user", content: `m${sequence}`, createdAt: "2026-01-01T00:00:0" + sequence + ".000Z" })
+        payloadJson: Buffer.from(JSON.stringify({ id: `m-${sequence}`, role: "user", content: `m${sequence}`, createdAt: "2026-01-01T00:00:0" + sequence + ".000Z" })).toString("hex")
       }));
     }
     if (sql.includes("count(*) as totalMessages")) {
@@ -48,6 +48,34 @@ test("openConversation returns a message window consistent with messagePage", as
   assert.equal(result!.messagePage.oldestSequence, 3);
 });
 
+test("listConversationMessages decodes an escape-heavy message recipe", async () => {
+  const [sequence, quoteCount, backslashCount] = [32, 36_182, 66_535];
+  const count = (value: string, character: string) => value.length - value.replaceAll(character, "").length;
+  const generateData = (): string => {
+    const start = "{\"id\":\"x\",\"role\":\"participant\",\"content\":\"";
+    const end = "\",\"createdAt\":\"2026-01-01T00:00:00.000Z\"}";
+    const contentQuotes = quoteCount - count(start + end, "\"");
+    const remainingBackslashes = backslashCount - contentQuotes;
+    return start + "\\\"".repeat(contentQuotes)
+      + "\\\\".repeat(Math.floor(remainingBackslashes / 2))
+      + (remainingBackslashes % 2 ? "\\n" : "") + end;
+  };
+  const payloadJson = generateData();
+
+  assert.equal(count(payloadJson, "\""), quoteCount);
+  assert.equal(count(payloadJson, "\\"), backslashCount);
+
+  const storage = fakeStorage(async (sql) => sql.includes("payloadJson")
+    ? [{
+        sequence,
+        payloadJson: Buffer.from(payloadJson, "utf8").toString("hex")
+      }]
+    : [{ totalMessages: 1 }]);
+  const page = await storage.listConversationMessages({ conversationId: "redacted-conversation", limit: 1 });
+
+  assert.deepEqual(page.messages, [JSON.parse(payloadJson) as ChatMessage]);
+});
+
 test("listConversationMessages can page around a target message id", async () => {
   const queries: string[] = [];
   const storage = fakeStorage(async (sql) => {
@@ -55,11 +83,11 @@ test("listConversationMessages can page around a target message id", async () =>
     if (sql.includes("select sequence") && sql.includes("message_id")) {
       return [{ sequence: 3 }];
     }
-    if (sql.includes("payload_json as payloadJson")) {
+    if (sql.includes("payloadJson")) {
       return [
-        { sequence: 3, payloadJson: JSON.stringify({ id: "target", role: "user", content: "target", createdAt: "2026-01-01T00:00:03.000Z" }) },
-        { sequence: 2, payloadJson: JSON.stringify({ id: "before", role: "user", content: "before", createdAt: "2026-01-01T00:00:02.000Z" }) },
-        { sequence: 1, payloadJson: JSON.stringify({ id: "older", role: "user", content: "older", createdAt: "2026-01-01T00:00:01.000Z" }) }
+        { sequence: 3, payloadJson: Buffer.from(JSON.stringify({ id: "target", role: "user", content: "target", createdAt: "2026-01-01T00:00:03.000Z" })).toString("hex") },
+        { sequence: 2, payloadJson: Buffer.from(JSON.stringify({ id: "before", role: "user", content: "before", createdAt: "2026-01-01T00:00:02.000Z" })).toString("hex") },
+        { sequence: 1, payloadJson: Buffer.from(JSON.stringify({ id: "older", role: "user", content: "older", createdAt: "2026-01-01T00:00:01.000Z" })).toString("hex") }
       ];
     }
     if (sql.includes("count(*) as totalMessages")) {
