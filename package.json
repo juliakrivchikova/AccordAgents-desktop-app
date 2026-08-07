@@ -31,7 +31,7 @@
     "test:mobile-shell": "node --test scripts/mobile-shell-contract.test.mjs",
     "test:mobile-control": "npm run build:main && node --test dist/main/main/services/mobilePairing.test.js dist/main/main/services/chatDeviceCapabilities.test.js && npm run test:mobile-shell",
     "test:mailbox": "npm run build:main && node --test dist/main/main/services/mailboxSyncClient.test.js dist/main/main/services/mailboxSyncService.test.js && node --test scripts/mailbox-reference-server.test.mjs",
-    "test:leases": "npm run build:main && node --test dist/main/main/services/chatExecutionLeases.test.js",
+    "test:leases": "npm run build:main && node --test dist/main/main/services/chatExecutionLeases.test.js dist/main/main/services/hostProviderCapabilities.test.js",
     "test:artifacts": "npm run build:main && node --test dist/main/main/services/artifacts.test.js dist/main/main/services/appMcp.artifacts.test.js dist/main/main/services/chat.rename.test.js && node --test scripts/artifact-boundary-guard.test.mjs",
     "test:activity": "npm run build:main && node --test dist/main/main/services/activityItemState.test.js dist/main/main/services/chatActivity.test.js dist/main/main/services/chatActivityFocus.test.js dist/main/main/services/storage.activity.test.js && node --test scripts/activity-focus-contract.test.mjs",
     "test:sidebar-widths": "npm run build:main && node --test dist/main/main/services/sidebarWidths.test.js",
