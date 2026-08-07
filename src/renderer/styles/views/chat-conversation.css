@@ -4818,3 +4818,79 @@
   max-width: 100%;
   height: auto;
 }
+
+.chat-mobile-pairing-dialog {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.chat-mobile-pairing-head {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.chat-mobile-pairing-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 180px;
+  align-items: start;
+  gap: 18px;
+}
+
+.chat-mobile-pairing-fields {
+  display: grid;
+  gap: 8px;
+}
+
+.chat-mobile-pairing-fields input {
+  width: 100%;
+}
+
+.chat-mobile-pairing-qr {
+  display: grid;
+  min-height: 180px;
+  align-content: center;
+  justify-items: center;
+  gap: 10px;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface-subtle);
+  color: var(--app-muted);
+}
+
+.chat-mobile-pairing-qr img {
+  display: block;
+  width: 156px;
+  height: 156px;
+}
+
+.chat-mobile-pairing-qr code {
+  max-width: 156px;
+  overflow-wrap: anywhere;
+  color: var(--app-muted);
+  font-size: 10px;
+  line-height: 1.35;
+  text-align: center;
+  white-space: normal;
+}
+
+.chat-mobile-pairing-error {
+  overflow-wrap: anywhere;
+  color: var(--app-danger);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.chat-mobile-pairing-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 620px) {
+  .chat-mobile-pairing-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
