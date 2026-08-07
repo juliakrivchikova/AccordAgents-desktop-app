@@ -86,6 +86,8 @@ import { ChatEventLogService } from "./services/chatEventLog";
 import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "./services/chatEventMirror";
 import { ChatService } from "./services/chat";
 import { MobilePairingService } from "./services/mobilePairing";
+import { MobileRelayControlService } from "./services/mobileRelayControl";
+import type { MobilePairingPackage } from "../shared/mobilePairing";
 import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
@@ -178,6 +180,7 @@ const consensusService = new ConsensusService(gitService, storageService, provid
 const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
 }, userSkillsService, (progress) => mainWindow?.webContents.send("conversations:review-progress", progress), chatEventMirrorService);
+const mobileRelayControls = new Map<string, MobileRelayControlService>();
 const remoteRunService = new RemoteRunService(chatService, {
   syncLogger: (event, payload) => {
     void debugLogService.write(event, payload);
@@ -645,6 +648,27 @@ async function withCloudRunWorker<T>(
   });
 }
 
+async function startMobileRelayControlForPairing(pairing: MobilePairingPackage): Promise<void> {
+  if (!pairing.relayUrl) {
+    return;
+  }
+  mobileRelayControls.get(pairing.rendezvousId)?.close();
+  const control = new MobileRelayControlService(
+    {
+      relayUrl: pairing.relayUrl,
+      rendezvousId: pairing.rendezvousId,
+      relayCapability: pairing.fingerprint,
+      relaySealKeyBase64: pairing.relaySealKeyBase64,
+      conversationId: pairing.capabilities[0].conversationId,
+      streamId: `${pairing.stableRoutingId}:phone`
+    },
+    chatService,
+    (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+  );
+  await control.connect();
+  mobileRelayControls.set(pairing.rendezvousId, control);
+}
+
 function registerIpc(): void {
   ipcMain.handle("app:get-version", () => app.getVersion());
   ipcMain.handle("app:open-external", (_event, url: unknown) => openExternalUrl(url));
@@ -1071,7 +1095,9 @@ function registerIpc(): void {
     );
   });
   ipcMain.handle("mobile:create-pairing", async (_event, request: CreateMobilePairingRequest) => {
-    return mobilePairingService.createPairing(request);
+    const result = await mobilePairingService.createPairing(request);
+    await startMobileRelayControlForPairing(result.package);
+    return result;
   });
   ipcMain.handle("conversations:start-review", async (_event, request: ReviewRequest) => {
     const runId = request.runId ?? randomUUID();

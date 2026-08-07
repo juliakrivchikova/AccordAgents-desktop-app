@@ -64,7 +64,7 @@ test("parseMobilePairingPayload rejects expired and unsafe URL packages", async 
     const service = new MobilePairingService(new ChatEventLogService(storage, fixedClock()), fixedClock());
     const result = await service.createPairing({
       conversationId: "conversation-1",
-      relayUrl: "https://relay.example.test",
+      relayUrl: "wss://relay.example.test",
       ttlMinutes: 1
     });
 
@@ -83,6 +83,12 @@ test("parseMobilePairingPayload rejects expired and unsafe URL packages", async 
     assert.throws(
       () => parseMobilePairingPayload(JSON.stringify(unsafe), new Date("2026-08-06T00:00:10.000Z")),
       /outboxUrl must use https/
+    );
+    unsafe.outboxUrl = "https://mailbox.example.test/v1/mailbox/events";
+    unsafe.relayUrl = "https://relay.example.test";
+    assert.throws(
+      () => parseMobilePairingPayload(JSON.stringify(unsafe), new Date("2026-08-06T00:00:10.000Z")),
+      /relayUrl must use wss/
     );
   } finally {
     await cleanup();

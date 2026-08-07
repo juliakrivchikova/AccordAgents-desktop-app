@@ -24,7 +24,7 @@ export class MobilePairingService {
     if (!conversationId) {
       throw new Error("Mobile pairing requires a conversationId.");
     }
-    const relayUrl = normalizedOptionalUrl(request.relayUrl, ["https:", "wss:"], "relayUrl");
+    const relayUrl = normalizedOptionalUrl(request.relayUrl, ["wss:"], "relayUrl");
     const mailboxUrl = normalizedOptionalUrl(request.mailboxUrl, ["https:"], "mailboxUrl");
     const outboxUrl = normalizedOptionalUrl(request.outboxUrl, ["https:"], "outboxUrl");
     const staticOriginUrl = normalizedOptionalUrl(request.staticOriginUrl, ["https:"], "staticOriginUrl");

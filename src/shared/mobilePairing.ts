@@ -112,7 +112,7 @@ export function assertMobilePairingPackage(value: unknown, now?: Date): asserts 
     throw new Error("Mobile pairing package is expired.");
   }
   if (typeof value.relayUrl === "string") {
-    assertHttpsOrWssUrl(value.relayUrl, "relayUrl");
+    assertWssUrl(value.relayUrl, "relayUrl");
   }
   if (typeof value.mailboxUrl === "string") {
     assertHttpsUrl(value.mailboxUrl, "mailboxUrl");
@@ -175,10 +175,10 @@ function assertBase64Url(value: string, label: string): void {
   }
 }
 
-function assertHttpsOrWssUrl(value: string, label: string): void {
+function assertWssUrl(value: string, label: string): void {
   const parsed = new URL(value);
-  if (parsed.protocol !== "https:" && parsed.protocol !== "wss:") {
-    throw new Error(`Mobile pairing ${label} must use https or wss.`);
+  if (parsed.protocol !== "wss:") {
+    throw new Error(`Mobile pairing ${label} must use wss.`);
   }
 }
 
