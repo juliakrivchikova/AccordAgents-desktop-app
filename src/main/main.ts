@@ -81,6 +81,8 @@ import { normalizeExternalUrlForOpen } from "../shared/externalLinks";
 import { ArtifactService } from "./services/artifacts";
 import { ArtifactStore } from "./services/artifactStore";
 import { validateArtifactCreateToolRequest } from "./services/artifactToolRequest";
+import { ChatEventLogService } from "./services/chatEventLog";
+import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "./services/chatEventMirror";
 import { ChatService } from "./services/chat";
 import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
@@ -160,12 +162,19 @@ const appSkillsService = new AppSkillsService({
   debugLogs: debugLogService
 });
 const appMcpService = new AppMcpService(debugLogService);
+const chatEventLogService = new ChatEventLogService(storageService);
+const chatEventMirrorService = new ChatEventMirrorService(
+  storageService,
+  chatEventLogService,
+  debugLogService,
+  chatEventMirrorOptionsFromEnv()
+);
 const consensusService = new ConsensusService(gitService, storageService, providerRunner, cliAgentRunner, debugLogService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
 });
 const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
-}, userSkillsService, (progress) => mainWindow?.webContents.send("conversations:review-progress", progress));
+}, userSkillsService, (progress) => mainWindow?.webContents.send("conversations:review-progress", progress), chatEventMirrorService);
 const remoteRunService = new RemoteRunService(chatService, {
   syncLogger: (event, payload) => {
     void debugLogService.write(event, payload);

@@ -148,6 +148,7 @@ import {
   resolveChatDeliveryTargets,
   resolveChatMentionTargets
 } from "../../shared/chatDeliveryPolicy";
+import type { ChatEventMirrorService } from "./chatEventMirror";
 import { CliAgentRunner, type CliAgentCodexServerRequest, type CliAgentOutputEvent, type CliAgentRoleOptions } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type {
@@ -672,7 +673,8 @@ export class ChatService {
     private readonly appMcp?: ChatAppMcpGateway,
     private readonly onConversationSnapshot?: (conversation: Conversation) => void,
     private readonly userSkills?: UserSkillsService,
-    private readonly onReviewProgress?: ProgressCallback
+    private readonly onReviewProgress?: ProgressCallback,
+    private readonly chatEventMirror?: ChatEventMirrorService
   ) {}
 
   private async manualAgentEnvironmentForRun(): Promise<{ env: NodeJS.ProcessEnv; version: string }> {
@@ -16539,7 +16541,7 @@ export class ChatService {
     const previous = this.saveQueues.get(conversation.id) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
-      .then(() => this.storage.saveConversation(snapshot))
+      .then(() => this.persistConversationSnapshot(snapshot))
       .catch((error) => {
         void this.debugLogs.write("chat.persistence.error", {
           conversationId: conversation.id,
@@ -17234,8 +17236,18 @@ export class ChatService {
       await pending.catch(() => undefined);
     }
     const snapshot = this.clone(conversation);
-    await this.storage.saveConversation(snapshot);
+    await this.persistConversationSnapshot(snapshot);
     this.onConversationSnapshot?.(snapshot);
+  }
+
+  private async persistConversationSnapshot(snapshot: Conversation): Promise<void> {
+    if (!this.chatEventMirror?.isEnabled()) {
+      await this.storage.saveConversation(snapshot);
+      return;
+    }
+    const previous = await this.storage.getConversation(snapshot.id);
+    await this.storage.saveConversation(snapshot);
+    await this.chatEventMirror.mirrorSavedConversation(previous, snapshot);
   }
 
   private clone(conversation: Conversation): Conversation {

@@ -3,6 +3,7 @@ import type { ChatMessage, Conversation } from "./types";
 
 export type ChatConversationEventKind =
   | "conversation.imported"
+  | "conversation.snapshot.replaced"
   | "message.created"
   | "message.updated"
   | "conversation.metadata.updated";
@@ -11,6 +12,12 @@ export interface ChatConversationImportedPayload {
   conversation: Conversation;
   importedAt: string;
   source: "legacy-storage";
+}
+
+export interface ChatConversationSnapshotReplacedPayload {
+  conversation: Conversation;
+  replacedAt: string;
+  source: "legacy-dual-write";
 }
 
 export interface ChatMessageCreatedPayload {
@@ -28,6 +35,7 @@ export interface ChatConversationMetadataUpdatedPayload {
 
 export type ChatConversationEventPayload =
   | ChatConversationImportedPayload
+  | ChatConversationSnapshotReplacedPayload
   | ChatMessageCreatedPayload
   | ChatMessageUpdatedPayload
   | ChatConversationMetadataUpdatedPayload;
@@ -75,6 +83,11 @@ export function foldChatConversationEvents(
   const appliedEventIds: string[] = [];
   for (const event of ordered) {
     if (event.kind === "conversation.imported" && isConversationImportedPayload(event.payload)) {
+      conversation = cloneConversation(event.payload.conversation);
+      appliedEventIds.push(event.eventId);
+      continue;
+    }
+    if (event.kind === "conversation.snapshot.replaced" && isConversationSnapshotReplacedPayload(event.payload)) {
       conversation = cloneConversation(event.payload.conversation);
       appliedEventIds.push(event.eventId);
       continue;
@@ -192,6 +205,17 @@ function isConversationImportedPayload(value: unknown): value is ChatConversatio
       (value as { source?: unknown }).source === "legacy-storage" &&
       (value as { conversation?: unknown }).conversation &&
       typeof (value as { importedAt?: unknown }).importedAt === "string"
+  );
+}
+
+function isConversationSnapshotReplacedPayload(value: unknown): value is ChatConversationSnapshotReplacedPayload {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      (value as { source?: unknown }).source === "legacy-dual-write" &&
+      (value as { conversation?: unknown }).conversation &&
+      typeof (value as { replacedAt?: unknown }).replacedAt === "string"
   );
 }
 
