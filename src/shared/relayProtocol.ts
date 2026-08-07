@@ -4,6 +4,7 @@ export interface RelayCapabilityManifest {
   maxLogicalMessageBytes: number;
   idleTimeoutMs?: number;
   hardConnectionDurationMs?: number;
+  oversizeCloseCode?: number;
   binaryFrames: boolean;
   textFrames: boolean;
   providerHistory: "none" | "disabled" | "ignored-for-correctness";
@@ -26,15 +27,66 @@ export type RelayReassemblyResult =
   | { status: "conflict"; reason: string };
 
 export const RELAY_PROTOCOL_MIN_FRAME_BYTES = 10_240;
+export const RELAY_PROTOCOL_DEFAULT_LOGICAL_MESSAGE_BYTES = 10 * 1024 * 1024;
 
-export const PUSHER_SIZED_RELAY_FLOOR: RelayCapabilityManifest = {
-  provider: "pusher-sized-floor",
+export const SELF_HOSTED_REFERENCE_RELAY_MANIFEST: RelayCapabilityManifest = {
+  provider: "self-hosted-reference",
   maxFrameBytes: RELAY_PROTOCOL_MIN_FRAME_BYTES,
-  maxLogicalMessageBytes: 10 * 1024 * 1024,
+  maxLogicalMessageBytes: RELAY_PROTOCOL_DEFAULT_LOGICAL_MESSAGE_BYTES,
+  oversizeCloseCode: 1009,
+  binaryFrames: false,
+  textFrames: true,
+  providerHistory: "none"
+};
+
+export const AWS_API_GATEWAY_WEBSOCKET_RELAY_MANIFEST: RelayCapabilityManifest = {
+  provider: "aws-api-gateway-websocket",
+  maxFrameBytes: 32 * 1024,
+  maxLogicalMessageBytes: 128 * 1024,
+  idleTimeoutMs: 10 * 60 * 1000,
+  hardConnectionDurationMs: 2 * 60 * 60 * 1000,
+  oversizeCloseCode: 1009,
+  binaryFrames: false,
+  textFrames: true,
+  providerHistory: "disabled"
+};
+
+export const ABLY_LOWER_TIER_RELAY_MANIFEST: RelayCapabilityManifest = {
+  provider: "ably-lower-tier",
+  maxFrameBytes: 64 * 1024,
+  maxLogicalMessageBytes: RELAY_PROTOCOL_DEFAULT_LOGICAL_MESSAGE_BYTES,
   binaryFrames: false,
   textFrames: true,
   providerHistory: "ignored-for-correctness"
 };
+
+export const ABLY_HIGHER_TIER_RELAY_MANIFEST: RelayCapabilityManifest = {
+  provider: "ably-higher-tier",
+  maxFrameBytes: 256 * 1024,
+  maxLogicalMessageBytes: RELAY_PROTOCOL_DEFAULT_LOGICAL_MESSAGE_BYTES,
+  binaryFrames: false,
+  textFrames: true,
+  providerHistory: "ignored-for-correctness"
+};
+
+export const PUSHER_CHANNELS_RELAY_MANIFEST: RelayCapabilityManifest = {
+  provider: "pusher-channels",
+  maxFrameBytes: RELAY_PROTOCOL_MIN_FRAME_BYTES,
+  maxLogicalMessageBytes: RELAY_PROTOCOL_DEFAULT_LOGICAL_MESSAGE_BYTES,
+  binaryFrames: false,
+  textFrames: true,
+  providerHistory: "ignored-for-correctness"
+};
+
+export const PUSHER_SIZED_RELAY_FLOOR: RelayCapabilityManifest = PUSHER_CHANNELS_RELAY_MANIFEST;
+
+export const KNOWN_RELAY_PROVIDER_MANIFESTS: RelayCapabilityManifest[] = [
+  SELF_HOSTED_REFERENCE_RELAY_MANIFEST,
+  AWS_API_GATEWAY_WEBSOCKET_RELAY_MANIFEST,
+  ABLY_LOWER_TIER_RELAY_MANIFEST,
+  ABLY_HIGHER_TIER_RELAY_MANIFEST,
+  PUSHER_CHANNELS_RELAY_MANIFEST
+];
 
 const RELAY_FRAME_OVERHEAD_BYTES = 512;
 
@@ -59,6 +111,25 @@ export function assertRelayCapabilityManifest(manifest: RelayCapabilityManifest)
     manifest.providerHistory !== "ignored-for-correctness") {
     throw new Error(`Relay provider ${manifest.provider} has an invalid history policy.`);
   }
+  for (const [field, value] of [
+    ["idleTimeoutMs", manifest.idleTimeoutMs],
+    ["hardConnectionDurationMs", manifest.hardConnectionDurationMs],
+    ["oversizeCloseCode", manifest.oversizeCloseCode]
+  ] as const) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
+      throw new Error(`Relay provider ${manifest.provider} ${field} is invalid.`);
+    }
+  }
+}
+
+export function smallestRelayFrameFloor(manifests: RelayCapabilityManifest[]): number {
+  if (manifests.length === 0) {
+    throw new Error("Relay frame floor requires at least one provider manifest.");
+  }
+  for (const manifest of manifests) {
+    assertRelayCapabilityManifest(manifest);
+  }
+  return Math.min(...manifests.map((manifest) => manifest.maxFrameBytes));
 }
 
 export function chunkRelayCiphertext(request: {

@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  AWS_API_GATEWAY_WEBSOCKET_RELAY_MANIFEST,
+  KNOWN_RELAY_PROVIDER_MANIFESTS,
   PUSHER_SIZED_RELAY_FLOOR,
   assertRelayCapabilityManifest,
   chunkRelayCiphertext,
-  reassembleRelayCiphertext
+  reassembleRelayCiphertext,
+  smallestRelayFrameFloor
 } from "../../shared/relayProtocol";
 
 test("chunkRelayCiphertext fits every frame under the Pusher-sized floor", () => {
@@ -85,4 +88,33 @@ test("assertRelayCapabilityManifest rejects providers below the protocol floor",
     }),
     /frame size is below the protocol floor/
   );
+});
+
+test("known relay provider manifests declare numerical floors and reconnect constraints", () => {
+  for (const manifest of KNOWN_RELAY_PROVIDER_MANIFESTS) {
+    assert.doesNotThrow(() => assertRelayCapabilityManifest(manifest));
+  }
+
+  assert.equal(smallestRelayFrameFloor(KNOWN_RELAY_PROVIDER_MANIFESTS), 10_240);
+  assert.equal(AWS_API_GATEWAY_WEBSOCKET_RELAY_MANIFEST.maxFrameBytes, 32 * 1024);
+  assert.equal(AWS_API_GATEWAY_WEBSOCKET_RELAY_MANIFEST.maxLogicalMessageBytes, 128 * 1024);
+  assert.equal(AWS_API_GATEWAY_WEBSOCKET_RELAY_MANIFEST.idleTimeoutMs, 10 * 60 * 1000);
+  assert.equal(AWS_API_GATEWAY_WEBSOCKET_RELAY_MANIFEST.hardConnectionDurationMs, 2 * 60 * 60 * 1000);
+  assert.equal(AWS_API_GATEWAY_WEBSOCKET_RELAY_MANIFEST.oversizeCloseCode, 1009);
+});
+
+test("relay chunking remains valid at the smallest known provider frame floor", () => {
+  const frames = chunkRelayCiphertext({
+    streamId: "desktop-phone",
+    logicalMessageId: "provider-floor-message",
+    ciphertext: "x".repeat(80_000),
+    manifest: {
+      ...PUSHER_SIZED_RELAY_FLOOR,
+      maxFrameBytes: smallestRelayFrameFloor(KNOWN_RELAY_PROVIDER_MANIFESTS)
+    }
+  });
+
+  assert.ok(frames.length > 1);
+  assert.ok(frames.every((frame) => Buffer.byteLength(JSON.stringify(frame), "utf8") <= 10_240));
+  assert.equal(reassembleRelayCiphertext(frames).status, "complete");
 });
