@@ -29,7 +29,7 @@
     "test:storage": "npm run build:main && node --test dist/main/main/services/storage.messages.test.js dist/main/main/services/chatEventProjection.test.js dist/main/main/services/chatEventLog.test.js dist/main/main/services/chatEventMigration.test.js dist/main/main/services/chatEventMirror.test.js dist/main/main/services/chatEventResidency.test.js dist/main/main/services/stableJson.test.js",
     "test:relay": "npm run build:main && node --test dist/main/main/services/relayProtocol.test.js && node --test scripts/relay-reference-server.test.mjs scripts/relay-tunnel-client.test.mjs",
     "test:mobile-shell": "node --test scripts/mobile-shell-contract.test.mjs",
-    "test:mobile-control": "npm run build:main && node --test dist/main/main/services/mobilePairing.test.js && npm run test:mobile-shell",
+    "test:mobile-control": "npm run build:main && node --test dist/main/main/services/mobilePairing.test.js dist/main/main/services/chatDeviceCapabilities.test.js && npm run test:mobile-shell",
     "test:mailbox": "npm run build:main && node --test dist/main/main/services/mailboxSyncClient.test.js dist/main/main/services/mailboxSyncService.test.js && node --test scripts/mailbox-reference-server.test.mjs",
     "test:leases": "npm run build:main && node --test dist/main/main/services/chatExecutionLeases.test.js",
     "test:artifacts": "npm run build:main && node --test dist/main/main/services/artifacts.test.js dist/main/main/services/appMcp.artifacts.test.js dist/main/main/services/chat.rename.test.js && node --test scripts/artifact-boundary-guard.test.mjs",
