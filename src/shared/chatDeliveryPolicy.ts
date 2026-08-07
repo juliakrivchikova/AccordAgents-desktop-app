@@ -19,10 +19,28 @@ export interface ChatDeliveryPolicyInput {
   options: ChatDeliveryPolicyOptions;
 }
 
+export interface ChatDeliveryPolicySnapshot {
+  version: 1;
+  conversationId: string;
+  policyVersion: string;
+  participants: ChatParticipant[];
+  options: ChatDeliveryPolicyOptions;
+  createdAt: string;
+}
+
 export interface ChatDeliveryPolicyResult {
   targets: ChatParticipant[];
   unknownHandles: string[];
 }
+
+export type ChatDeliveryPolicySnapshotResult =
+  | { status: "ready"; result: ChatDeliveryPolicyResult }
+  | {
+      status: "waiting-for-policy-sync";
+      requiredPolicyVersion?: string;
+      availablePolicyVersion?: string;
+      reason: "missing-snapshot" | "stale-snapshot" | "conversation-mismatch";
+    };
 
 export function resolveChatDeliveryTargets(input: ChatDeliveryPolicyInput): ChatDeliveryPolicyResult {
   let dispatch = resolveChatMentionTargets(input.participants, input.content, input.options);
@@ -34,6 +52,68 @@ export function resolveChatDeliveryTargets(input: ChatDeliveryPolicyInput): Chat
     }
   }
   return dispatch;
+}
+
+export function createChatDeliveryPolicySnapshot(input: {
+  conversationId: string;
+  policyVersion: string;
+  participants: ChatParticipant[];
+  options: ChatDeliveryPolicyOptions;
+  createdAt: string;
+}): ChatDeliveryPolicySnapshot {
+  if (!input.conversationId.trim() || !input.policyVersion.trim() || !input.createdAt.trim()) {
+    throw new Error("Chat delivery policy snapshot requires conversationId, policyVersion, and createdAt.");
+  }
+  return {
+    version: 1,
+    conversationId: input.conversationId,
+    policyVersion: input.policyVersion,
+    participants: clone(input.participants),
+    options: clone(input.options),
+    createdAt: input.createdAt
+  };
+}
+
+export function resolveChatDeliveryTargetsFromSnapshot(input: {
+  conversation: Conversation;
+  content: string;
+  context?: ChatDispatchReplyContext;
+  snapshot?: ChatDeliveryPolicySnapshot;
+  requiredPolicyVersion?: string;
+}): ChatDeliveryPolicySnapshotResult {
+  if (!input.snapshot) {
+    return {
+      status: "waiting-for-policy-sync",
+      requiredPolicyVersion: input.requiredPolicyVersion,
+      reason: "missing-snapshot"
+    };
+  }
+  if (input.snapshot.conversationId !== input.conversation.id) {
+    return {
+      status: "waiting-for-policy-sync",
+      requiredPolicyVersion: input.requiredPolicyVersion,
+      availablePolicyVersion: input.snapshot.policyVersion,
+      reason: "conversation-mismatch"
+    };
+  }
+  if (input.requiredPolicyVersion && input.snapshot.policyVersion !== input.requiredPolicyVersion) {
+    return {
+      status: "waiting-for-policy-sync",
+      requiredPolicyVersion: input.requiredPolicyVersion,
+      availablePolicyVersion: input.snapshot.policyVersion,
+      reason: "stale-snapshot"
+    };
+  }
+  return {
+    status: "ready",
+    result: resolveChatDeliveryTargets({
+      conversation: input.conversation,
+      participants: input.snapshot.participants,
+      content: input.content,
+      context: input.context,
+      options: input.snapshot.options
+    })
+  };
 }
 
 export function resolveChatMentionTargets(
@@ -158,4 +238,8 @@ function messageIsVisibleTopLevelChatParticipant(message: ChatMessage): boolean 
 
 function withoutFencedCode(content: string): string {
   return content.replace(/```[\s\S]*?```/g, "");
+}
+
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
