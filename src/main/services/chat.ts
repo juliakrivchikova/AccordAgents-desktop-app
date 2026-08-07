@@ -141,6 +141,13 @@ import {
 } from "../../shared/appTools";
 import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
 import { buildChatParticipantActivitySnapshot } from "../../shared/chatParticipantActivity";
+import {
+  chatParticipantForMentionHandle,
+  extractChatMentions,
+  mentionHandlesForChatParticipant,
+  resolveChatDeliveryTargets,
+  resolveChatMentionTargets
+} from "../../shared/chatDeliveryPolicy";
 import { CliAgentRunner, type CliAgentCodexServerRequest, type CliAgentOutputEvent, type CliAgentRoleOptions } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type {
@@ -346,6 +353,13 @@ const PARTICIPANT_REQUEST_SCRUTINY_APPENDIX =
   "Review for blockers, incorrect assumptions, missing edge cases, or simpler alternatives. If none, reply with only `No objections.` Do not restate the proposal.";
 const CHAT_CONTEXT_READ_DEFAULT_LIMIT = 50;
 const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
+
+function chatDeliveryPolicyOptions() {
+  return {
+    administratorRoleId: CHAT_ADMINISTRATOR_ROLE_ID,
+    administratorHandles: [CHAT_ADMINISTRATOR_HANDLE, CHAT_LEGACY_ADMINISTRATOR_HANDLE]
+  };
+}
 const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 2_000_000;
 const CHAT_ACTIVITY_EVENT_MAX_COUNT = 500;
 const CHAT_ACTIVITY_DETAIL_MAX_CHARS = 4_000;
@@ -9503,15 +9517,13 @@ export class ChatService {
     content: string,
     context?: ChatDispatchReplyContext
   ): { targets: ChatParticipant[]; unknownHandles: string[] } {
-    let dispatch = this.resolveMentionTargets(conversation, content);
-    if (dispatch.targets.length === 0 && dispatch.unknownHandles.length === 0) {
-      const fallback = this.resolveLastSenderTarget(conversation, context)
-        ?? this.defaultAdministratorDispatchTarget(conversation);
-      if (fallback) {
-        dispatch = { ...dispatch, targets: [fallback] };
-      }
-    }
-    return dispatch;
+    return resolveChatDeliveryTargets({
+      conversation,
+      participants: this.chatParticipants(conversation),
+      content,
+      context,
+      options: chatDeliveryPolicyOptions()
+    });
   }
 
   private replyContextFromMessage(message: ChatMessage): ChatDispatchReplyContext {
@@ -14061,51 +14073,19 @@ export class ChatService {
   }
 
   private resolveMentionTargets(conversation: Conversation, content: string): { targets: ChatParticipant[]; unknownHandles: string[] } {
-    const participants = this.chatParticipants(conversation);
-    const targets = new Map<string, ChatParticipant>();
-    const unknownHandles: string[] = [];
-    for (const handle of this.extractMentions(content)) {
-      const participant = this.participantForMentionHandle(participants, handle);
-      if (participant) {
-        targets.set(participant.id, participant);
-      } else if (!unknownHandles.some((item) => item.toLowerCase() === handle.toLowerCase())) {
-        unknownHandles.push(handle);
-      }
-    }
-    return { targets: Array.from(targets.values()), unknownHandles };
+    return resolveChatMentionTargets(this.chatParticipants(conversation), content, chatDeliveryPolicyOptions());
   }
 
   private participantForMentionHandle(participants: ChatParticipant[], handle: string): ChatParticipant | undefined {
-    const normalized = handle.trim().replace(/^@/, "").toLowerCase();
-    const exact = participants.find((item) => item.handle.toLowerCase() === normalized);
-    if (exact) {
-      return exact;
-    }
-    if (normalized === CHAT_ADMINISTRATOR_HANDLE || normalized === CHAT_LEGACY_ADMINISTRATOR_HANDLE) {
-      return participants.find((item) => item.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID);
-    }
-    return undefined;
+    return chatParticipantForMentionHandle(participants, handle, chatDeliveryPolicyOptions());
   }
 
   private mentionHandlesForParticipant(participant: ChatParticipant): string[] {
-    const handles = [participant.handle];
-    if (participant.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID) {
-      handles.push(CHAT_ADMINISTRATOR_HANDLE, CHAT_LEGACY_ADMINISTRATOR_HANDLE);
-    }
-    const seen = new Set<string>();
-    return handles.filter((handle) => {
-      const normalized = handle.toLowerCase();
-      if (seen.has(normalized)) {
-        return false;
-      }
-      seen.add(normalized);
-      return true;
-    });
+    return mentionHandlesForChatParticipant(participant, chatDeliveryPolicyOptions());
   }
 
   private extractMentions(content: string): string[] {
-    const matches = this.withoutFencedCode(content).matchAll(/@([A-Za-z0-9_-]{1,32})/g);
-    return Array.from(matches, (match) => match[1]);
+    return extractChatMentions(content);
   }
 
   private withoutFencedCode(content: string): string {

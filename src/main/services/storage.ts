@@ -3,6 +3,11 @@ import path from "node:path";
 import { app } from "electron";
 import { runCommand } from "./command";
 import type {
+  ChatEventAppendResult,
+  ChatEventEnvelope,
+  ChatEventProjectionRow
+} from "../../shared/chatEvents";
+import type {
   ChatMessage,
   Conversation,
   ConversationMessagePage,
@@ -32,6 +37,10 @@ const SQLITE_BUSY_TIMEOUT_MS = 30_000;
 const SQLITE_COMMAND_TIMEOUT_MS = 45_000;
 const SQLITE_MIGRATION_TIMEOUT_MS = 120_000;
 const SCHEMA_META_COMPLETE = "complete";
+export const SUPPORTED_STORAGE_SCHEMA_VERSION = 1;
+export const STORAGE_SCHEMA_VERSION_META_KEY = "storage-schema-version";
+export const CHAT_EVENT_PROJECTION_VERSION = 1;
+const CHAT_EVENT_DEVICE_IDENTITY_META_KEY = "chat-event-device-identity-v1";
 const INFERRED_REQUEST_THREAD_MIGRATION_KEY = "inferred-participant-request-threads-v1";
 const RUN_CANCEL_REQUEST_MAX_AGE_MS = 60 * 60_000;
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
@@ -68,6 +77,51 @@ function parseHexJson<T>(value: unknown, context: string): T {
   } catch {
     throw new Error(`Invalid JSON returned for ${context}.`);
   }
+}
+
+function parseHexText(value: unknown, context: string): string {
+  if (typeof value !== "string" || value.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(value)) {
+    throw new Error(`Invalid hexadecimal text returned for ${context}.`);
+  }
+  try {
+    return UTF8_DECODER.decode(Buffer.from(value, "hex"));
+  } catch {
+    throw new Error(`Invalid UTF-8 text returned for ${context}.`);
+  }
+}
+
+function parseStorageSchemaVersion(value: string | undefined): number | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error("This chat database has an invalid storage schema version. Restore a backup or update AccordAgents.");
+  }
+  return Number.parseInt(trimmed, 10);
+}
+
+export class UnsupportedStorageSchemaVersionError extends Error {
+  constructor(storedVersion: number, supportedVersion: number) {
+    super(
+      `This chat database was written by a newer version of AccordAgents. Update to open it. ` +
+        `Database schema ${storedVersion}, supported schema ${supportedVersion}.`
+    );
+    this.name = "UnsupportedStorageSchemaVersionError";
+  }
+}
+
+export interface ChatEventDeviceIdentityRecord {
+  originId: string;
+  keyId: string;
+  publicKeyDerBase64: string;
+  privateKeyDerBase64: string;
+  createdAt: string;
+}
+
+export interface ChatEventSequenceBasis {
+  originSeq: number;
+  prevHash?: string;
 }
 
 function clearLegacyAccordState(metadata: Conversation["metadata"]): Conversation["metadata"] {
@@ -161,6 +215,9 @@ export class StorageService {
     }
 
     await mkdir(path.dirname(this.dbPath), { recursive: true });
+    await this.ensureSchemaMetaTable();
+    await this.assertSupportedSchemaVersion();
+    await this.configureSqliteRuntime();
     await this.runSql(`
       create table if not exists conversations (
         id text primary key,
@@ -192,10 +249,41 @@ export class StorageService {
         conversation_id text not null,
         requested_at text not null
       );
+      create table if not exists chat_events (
+        event_id text primary key,
+        conversation_id text not null,
+        log_scope_id text not null,
+        origin_id text not null,
+        origin_seq integer not null,
+        logical_ts text not null,
+        kind text not null,
+        payload_json text not null,
+        payload_hash text not null,
+        event_hash text not null,
+        prev_hash text,
+        signature text,
+        key_id text,
+        envelope_json text not null,
+        received_at text not null,
+        unique(origin_id, log_scope_id, origin_seq)
+      );
+      create index if not exists idx_chat_events_conversation_scope_origin
+        on chat_events(conversation_id, log_scope_id, origin_id, origin_seq);
+      create index if not exists idx_chat_events_received_at on chat_events(received_at);
+      create table if not exists chat_event_projections (
+        conversation_id text not null,
+        projection_key text not null,
+        version integer not null,
+        last_event_id text,
+        payload_json text not null,
+        updated_at text not null,
+        primary key (conversation_id, projection_key)
+      );
     `);
     await this.pruneStaleRunCancelRequests();
     await this.ensureColumn("conversations", "body_json", "text");
     await this.backfillConversationBodiesAndMessages();
+    await this.setSchemaMeta(STORAGE_SCHEMA_VERSION_META_KEY, String(SUPPORTED_STORAGE_SCHEMA_VERSION));
     this.initialized = true;
     await this.normalizeInferredParticipantRequestThreads();
     await this.clearInterruptedRuns();
@@ -516,6 +604,213 @@ export class StorageService {
     `);
   }
 
+  async appendChatEvent(event: ChatEventEnvelope): Promise<ChatEventAppendResult> {
+    return (await this.appendChatEvents([event]))[0];
+  }
+
+  async appendChatEvents(events: ChatEventEnvelope[]): Promise<ChatEventAppendResult[]> {
+    await this.init();
+    if (events.length === 0) {
+      return [];
+    }
+    const envelopeJsonByEventId = new Map<string, string>();
+    const receivedAt = new Date().toISOString();
+    const valuesSql = events.map((event) => {
+      this.assertValidChatEventEnvelope(event);
+      const envelopeJson = JSON.stringify(event);
+      envelopeJsonByEventId.set(event.eventId, envelopeJson);
+      return this.chatEventInsertValuesSql(event, envelopeJson, receivedAt);
+    }).join(",\n");
+    const inserted = await this.queryJson<{ eventId: string }>(
+      `
+        insert or ignore into chat_events (
+          event_id,
+          conversation_id,
+          log_scope_id,
+          origin_id,
+          origin_seq,
+          logical_ts,
+          kind,
+          payload_json,
+          payload_hash,
+          event_hash,
+          prev_hash,
+          signature,
+          key_id,
+          envelope_json,
+          received_at
+        )
+        values ${valuesSql}
+        returning event_id as eventId;
+      `
+    );
+    const insertedIds = new Set(inserted.map((row) => row.eventId));
+    const results: ChatEventAppendResult[] = [];
+    for (const event of events) {
+      if (insertedIds.has(event.eventId)) {
+        results.push({ status: "appended", eventId: event.eventId });
+        continue;
+      }
+      const envelopeJson = envelopeJsonByEventId.get(event.eventId) ?? JSON.stringify(event);
+      const conflict = await this.readChatEventConflictRecord(event);
+      if (conflict?.source === "event-id" && conflict.envelopeJson === envelopeJson) {
+        results.push({ status: "duplicate", eventId: event.eventId });
+        continue;
+      }
+      results.push({
+        status: "conflict",
+        eventId: event.eventId,
+        existingEventId: conflict?.eventId,
+        conflictReason: conflict?.source === "origin-sequence" ? "origin-sequence-conflict" : "event-id-conflict"
+      });
+    }
+    return results;
+  }
+
+  async listChatEvents(conversationId: string, logScopeId: string): Promise<ChatEventEnvelope[]> {
+    await this.init();
+    const rows = await this.queryJson<{ envelopeHex: string }>(
+      `
+        select hex(envelope_json) as envelopeHex
+        from chat_events
+        where conversation_id = ${sqlString(conversationId)}
+          and log_scope_id = ${sqlString(logScopeId)}
+        order by origin_id, origin_seq;
+      `
+    );
+    return rows.map((row) => parseHexJson<ChatEventEnvelope>(row.envelopeHex, `chat event ${conversationId}:${logScopeId}`));
+  }
+
+  async saveChatEventProjection(row: ChatEventProjectionRow): Promise<void> {
+    await this.init();
+    if (!row.conversationId.trim() || !row.projectionKey.trim()) {
+      throw new Error("Chat event projection requires conversationId and projectionKey.");
+    }
+    if (!Number.isInteger(row.version) || row.version <= 0) {
+      throw new Error("Chat event projection version must be a positive integer.");
+    }
+    await this.runSql(`
+      insert into chat_event_projections (
+        conversation_id,
+        projection_key,
+        version,
+        last_event_id,
+        payload_json,
+        updated_at
+      )
+      values (
+        ${sqlString(row.conversationId)},
+        ${sqlString(row.projectionKey)},
+        ${Math.floor(row.version)},
+        ${sqlString(row.lastEventId)},
+        ${sqlString(JSON.stringify(row.payload))},
+        ${sqlString(row.updatedAt)}
+      )
+      on conflict(conversation_id, projection_key) do update set
+        version = excluded.version,
+        last_event_id = excluded.last_event_id,
+        payload_json = excluded.payload_json,
+        updated_at = excluded.updated_at;
+    `);
+  }
+
+  async getChatEventProjection<Projection = unknown>(
+    conversationId: string,
+    projectionKey: string
+  ): Promise<ChatEventProjectionRow<Projection> | undefined> {
+    await this.init();
+    const rows = await this.queryJson<{
+      conversationId: string;
+      projectionKey: string;
+      version: number;
+      lastEventId?: string | null;
+      payloadHex: string;
+      updatedAt: string;
+    }>(
+      `
+        select
+          conversation_id as conversationId,
+          projection_key as projectionKey,
+          version,
+          last_event_id as lastEventId,
+          hex(payload_json) as payloadHex,
+          updated_at as updatedAt
+        from chat_event_projections
+        where conversation_id = ${sqlString(conversationId)}
+          and projection_key = ${sqlString(projectionKey)}
+        limit 1;
+      `
+    );
+    const row = rows[0];
+    return row ? {
+      conversationId: row.conversationId,
+      projectionKey: row.projectionKey,
+      version: row.version,
+      lastEventId: row.lastEventId ?? undefined,
+      payload: parseHexJson<Projection>(row.payloadHex, `chat event projection ${conversationId}:${projectionKey}`),
+      updatedAt: row.updatedAt
+    } : undefined;
+  }
+
+  async getChatEventDeviceIdentityRecord(): Promise<ChatEventDeviceIdentityRecord | undefined> {
+    await this.init();
+    const raw = await this.getSchemaMeta(CHAT_EVENT_DEVICE_IDENTITY_META_KEY);
+    if (!raw) {
+      return undefined;
+    }
+    const parsed = JSON.parse(raw) as ChatEventDeviceIdentityRecord;
+    this.assertValidChatEventDeviceIdentityRecord(parsed);
+    return parsed;
+  }
+
+  async saveChatEventDeviceIdentityRecord(record: ChatEventDeviceIdentityRecord): Promise<void> {
+    await this.init();
+    this.assertValidChatEventDeviceIdentityRecord(record);
+    await this.setSchemaMeta(CHAT_EVENT_DEVICE_IDENTITY_META_KEY, JSON.stringify(record));
+  }
+
+  async getChatEventSequenceBasis(originId: string, logScopeId: string): Promise<ChatEventSequenceBasis> {
+    await this.init();
+    if (!originId.trim() || !logScopeId.trim()) {
+      throw new Error("Chat event sequence basis requires originId and logScopeId.");
+    }
+    const rows = await this.queryJson<{ originSeq?: number | string | null; eventHash?: string | null }>(
+      `
+        select origin_seq as originSeq, event_hash as eventHash
+        from chat_events
+        where origin_id = ${sqlString(originId)}
+          and log_scope_id = ${sqlString(logScopeId)}
+        order by origin_seq desc
+        limit 1;
+      `
+    );
+    const latest = rows[0];
+    if (!latest) {
+      return { originSeq: 1 };
+    }
+    const latestSeq = typeof latest.originSeq === "string"
+      ? Number.parseInt(latest.originSeq, 10)
+      : latest.originSeq;
+    if (latestSeq === undefined || latestSeq === null || !Number.isSafeInteger(latestSeq) || latestSeq < 1) {
+      throw new Error("Stored chat event sequence is invalid.");
+    }
+    return {
+      originSeq: latestSeq + 1,
+      prevHash: typeof latest.eventHash === "string" && latest.eventHash.trim() ? latest.eventHash : undefined
+    };
+  }
+
+  async createPreMigrationBackup(label: string): Promise<string> {
+    await this.init();
+    const safeLabel = label.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!safeLabel) {
+      throw new Error("Pre-migration backup label is required.");
+    }
+    const backupPath = `${this.dbPath}.${safeLabel}.bak`;
+    await this.runSql(`vacuum into ${sqlString(backupPath)};`, SQLITE_MIGRATION_TIMEOUT_MS);
+    return backupPath;
+  }
+
   async deleteConversation(id: string): Promise<boolean> {
     await this.init();
     const exists = await this.queryText(
@@ -539,6 +834,125 @@ export class StorageService {
       return;
     }
     await this.runSql(`alter table ${table} add column ${column} ${definition};`);
+  }
+
+  private async ensureSchemaMetaTable(): Promise<void> {
+    await this.runSql(`
+      create table if not exists schema_meta (
+        key text primary key,
+        value text not null
+      );
+    `);
+  }
+
+  private async configureSqliteRuntime(): Promise<void> {
+    const journalMode = (await this.queryText("pragma journal_mode = wal;")).toLowerCase();
+    if (journalMode && journalMode !== "wal") {
+      console.warn(`[StorageService] SQLite journal_mode=wal requested, got ${journalMode}.`);
+    }
+  }
+
+  private async assertSupportedSchemaVersion(): Promise<void> {
+    const storedVersion = parseStorageSchemaVersion(await this.getSchemaMeta(STORAGE_SCHEMA_VERSION_META_KEY));
+    if (storedVersion !== undefined && storedVersion > SUPPORTED_STORAGE_SCHEMA_VERSION) {
+      throw new UnsupportedStorageSchemaVersionError(storedVersion, SUPPORTED_STORAGE_SCHEMA_VERSION);
+    }
+  }
+
+  private assertValidChatEventEnvelope(event: ChatEventEnvelope): void {
+    const requiredStrings = [
+      ["eventId", event.eventId],
+      ["conversationId", event.conversationId],
+      ["logScopeId", event.logScopeId],
+      ["originId", event.originId],
+      ["logicalTs", event.logicalTs],
+      ["kind", event.kind],
+      ["payloadHash", event.payloadHash],
+      ["eventHash", event.eventHash],
+      ["createdAt", event.createdAt]
+    ] as const;
+    for (const [field, value] of requiredStrings) {
+      if (typeof value !== "string" || !value.trim()) {
+        throw new Error(`Chat event requires ${field}.`);
+      }
+    }
+    if (!Number.isSafeInteger(event.originSeq) || event.originSeq <= 0) {
+      throw new Error("Chat event originSeq must be a positive safe integer.");
+    }
+  }
+
+  private assertValidChatEventDeviceIdentityRecord(record: ChatEventDeviceIdentityRecord): void {
+    const requiredStrings = [
+      ["originId", record.originId],
+      ["keyId", record.keyId],
+      ["publicKeyDerBase64", record.publicKeyDerBase64],
+      ["privateKeyDerBase64", record.privateKeyDerBase64],
+      ["createdAt", record.createdAt]
+    ] as const;
+    for (const [field, value] of requiredStrings) {
+      if (typeof value !== "string" || !value.trim()) {
+        throw new Error(`Chat event device identity requires ${field}.`);
+      }
+    }
+  }
+
+  private chatEventInsertValuesSql(event: ChatEventEnvelope, envelopeJson: string, receivedAt: string): string {
+    return `(
+      ${sqlString(event.eventId)},
+      ${sqlString(event.conversationId)},
+      ${sqlString(event.logScopeId)},
+      ${sqlString(event.originId)},
+      ${Math.floor(event.originSeq)},
+      ${sqlString(event.logicalTs)},
+      ${sqlString(event.kind)},
+      ${sqlString(JSON.stringify(event.payload))},
+      ${sqlString(event.payloadHash)},
+      ${sqlString(event.eventHash)},
+      ${sqlString(event.prevHash)},
+      ${sqlString(event.signature)},
+      ${sqlString(event.keyId)},
+      ${sqlString(envelopeJson)},
+      ${sqlString(receivedAt)}
+    )`;
+  }
+
+  private async readChatEventConflictRecord(event: ChatEventEnvelope): Promise<{
+    source: "event-id" | "origin-sequence";
+    eventId: string;
+    envelopeJson: string;
+  } | undefined> {
+    const rows = await this.queryJson<{ source: "event-id" | "origin-sequence"; eventId: string; envelopeHex: string }>(
+      `
+        select source, eventId, envelopeHex
+        from (
+          select
+            0 as sortOrder,
+            'event-id' as source,
+            event_id as eventId,
+            hex(envelope_json) as envelopeHex
+          from chat_events
+          where event_id = ${sqlString(event.eventId)}
+          union all
+          select
+            1 as sortOrder,
+            'origin-sequence' as source,
+            event_id as eventId,
+            hex(envelope_json) as envelopeHex
+          from chat_events
+          where origin_id = ${sqlString(event.originId)}
+            and log_scope_id = ${sqlString(event.logScopeId)}
+            and origin_seq = ${Math.floor(event.originSeq)}
+        )
+        order by sortOrder
+        limit 1;
+      `
+    );
+    const row = rows[0];
+    return row ? {
+      source: row.source,
+      eventId: row.eventId,
+      envelopeJson: parseHexText(row.envelopeHex, `chat event conflict ${event.eventId}`)
+    } : undefined;
   }
 
   private async backfillConversationBodiesAndMessages(): Promise<void> {
@@ -837,7 +1251,13 @@ export class StorageService {
   }
 
   private sqliteArgs(args: string[]): string[] {
-    return ["-cmd", `.timeout ${SQLITE_BUSY_TIMEOUT_MS}`, ...args];
+    return [
+      "-cmd",
+      `.timeout ${SQLITE_BUSY_TIMEOUT_MS}`,
+      "-cmd",
+      "pragma synchronous = normal;",
+      ...args
+    ];
   }
 }
 
