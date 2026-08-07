@@ -26,6 +26,8 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.match(worker, new RegExp(asset.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")));
   }
   assert.match(app, /indexedDB\.open\(DB_NAME, DB_VERSION\)/);
-  assert.match(app, /eventId !== entry\.eventId/);
+  assert.match(app, /ackedEventIds\.includes\(entry\.eventId\)/);
+  assert.match(app, /\/v1\/mailbox\/events/);
+  assert.match(app, /events: \[syncing\]/);
   assert.match(app, /globalThis\.AccordAgentsMobile/);
 });

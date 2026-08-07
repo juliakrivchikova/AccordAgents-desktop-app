@@ -125,14 +125,16 @@
   function readBootstrapFromLocation(locationValue) {
     const url = new URL(locationValue.href);
     const endpoint = url.searchParams.get("endpoint") || url.searchParams.get("relay");
+    const outboxUrl = url.searchParams.get("outboxUrl");
     const conversationId = url.searchParams.get("conversationId");
     const routingId = url.searchParams.get("routingId");
     const rendezvousId = url.searchParams.get("rendezvousId");
-    if (!endpoint && !conversationId && !routingId && !rendezvousId) {
+    if (!endpoint && !outboxUrl && !conversationId && !routingId && !rendezvousId) {
       return loadPairing();
     }
     return savePairing({
       endpoint: endpoint || undefined,
+      outboxUrl: outboxUrl || undefined,
       conversationId: conversationId || undefined,
       routingId: routingId || undefined,
       rendezvousId: rendezvousId || undefined,
@@ -177,11 +179,15 @@
   }
 
   function outboxEndpoint(endpoint) {
-    const base = endpoint || loadPairing()?.endpoint;
+    const pairing = loadPairing();
+    if (pairing?.outboxUrl) {
+      return pairing.outboxUrl;
+    }
+    const base = endpoint || pairing?.endpoint;
     if (!base) {
       return undefined;
     }
-    return new URL("/v1/mobile/outbox", base).toString();
+    return new URL("/v1/mailbox/events", base).toString();
   }
 
   async function flushOutbox(options) {
@@ -206,13 +212,14 @@
         const response = await fetch(endpoint, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(syncing)
+          body: JSON.stringify({ events: [syncing] })
         });
         if (!response.ok) {
           throw new Error("HTTP " + response.status);
         }
         const ack = await response.json();
-        if (!ack || ack.eventId !== entry.eventId) {
+        const ackedEventIds = Array.isArray(ack?.eventIds) ? ack.eventIds : [ack?.eventId];
+        if (!ackedEventIds.includes(entry.eventId)) {
           throw new Error("Ack eventId mismatch.");
         }
         await putOutboxEntry({
