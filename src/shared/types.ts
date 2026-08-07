@@ -1,4 +1,7 @@
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
+import type { CreateMobilePairingRequest, CreateMobilePairingResult } from "./mobilePairing";
+
+export type { CreateMobilePairingRequest, CreateMobilePairingResult } from "./mobilePairing";
 
 export type ProviderKind = "openai" | "anthropic" | "gemini" | "codex-cli" | "claude-code" | "gemini-cli";
 
@@ -2437,6 +2440,7 @@ export interface AppBridge {
   respondToChatMentions(request: RespondToChatMentionsRequest): Promise<StartReviewResult>;
   respondToChatChoice(request: RespondToChatChoiceRequest): Promise<StartReviewResult>;
   respondToChatAppToolApproval(request: RespondToChatAppToolApprovalRequest): Promise<Conversation | undefined>;
+  createMobilePairing(request: CreateMobilePairingRequest): Promise<CreateMobilePairingResult>;
   startReview(request: ReviewRequest): Promise<StartReviewResult>;
   continueReview(request: ContinueReviewRequest): Promise<StartReviewResult>;
   askPlanDecisionClarification(request: PlanDecisionClarificationRequest): Promise<StartReviewResult>;

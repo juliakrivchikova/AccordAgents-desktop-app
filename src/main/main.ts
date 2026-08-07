@@ -13,6 +13,7 @@ import type {
   CloudRunsSettingsUpdate,
   CloudRunWorkerSettings,
   ConnectAwsWorkerRequest,
+  CreateMobilePairingRequest,
   AwsWorkerStartRequest,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
@@ -84,6 +85,7 @@ import { validateArtifactCreateToolRequest } from "./services/artifactToolReques
 import { ChatEventLogService } from "./services/chatEventLog";
 import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "./services/chatEventMirror";
 import { ChatService } from "./services/chat";
+import { MobilePairingService } from "./services/mobilePairing";
 import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
@@ -169,6 +171,7 @@ const chatEventMirrorService = new ChatEventMirrorService(
   debugLogService,
   chatEventMirrorOptionsFromEnv()
 );
+const mobilePairingService = new MobilePairingService(chatEventLogService);
 const consensusService = new ConsensusService(gitService, storageService, providerRunner, cliAgentRunner, debugLogService, (conversation) => {
   mainWindow?.webContents.send("conversations:updated", conversation);
 });
@@ -1066,6 +1069,9 @@ function registerIpc(): void {
       request,
       (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
     );
+  });
+  ipcMain.handle("mobile:create-pairing", async (_event, request: CreateMobilePairingRequest) => {
+    return mobilePairingService.createPairing(request);
   });
   ipcMain.handle("conversations:start-review", async (_event, request: ReviewRequest) => {
     const runId = request.runId ?? randomUUID();
