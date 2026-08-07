@@ -25,6 +25,9 @@ test("mobile shell builds static installable PWA assets", async () => {
   for (const asset of ["./index.html", "./mobile-app.css", "./mobile-app.js", "./manifest.webmanifest"]) {
     assert.match(worker, new RegExp(asset.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")));
   }
+  assert.match(worker, /self\.addEventListener\("push"/);
+  assert.match(worker, /Open AccordAgents to sync updates\./);
+  assert.doesNotMatch(worker, /event\.data/);
   assert.match(app, /indexedDB\.open\(DB_NAME, DB_VERSION\)/);
   assert.match(app, /ackedEventIds\.includes\(entry\.eventId\)/);
   assert.match(app, /\/v1\/mailbox\/events/);

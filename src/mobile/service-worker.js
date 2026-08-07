@@ -7,6 +7,14 @@ const APP_SHELL = [
   "./manifest.webmanifest",
   "./assets/accordagents-mark.png"
 ];
+const NOTIFICATION_TITLE = "AccordAgents";
+const NOTIFICATION_OPTIONS = {
+  body: "Open AccordAgents to sync updates.",
+  icon: "./assets/accordagents-mark.png",
+  badge: "./assets/accordagents-mark.png",
+  tag: "accordagents-sync",
+  data: { action: "sync" }
+};
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -51,5 +59,25 @@ self.addEventListener("fetch", (event) => {
       caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
       return response;
     }))
+  );
+});
+
+self.addEventListener("push", (event) => {
+  event.waitUntil(
+    self.registration.showNotification(NOTIFICATION_TITLE, NOTIFICATION_OPTIONS)
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      for (const client of clients) {
+        if ("focus" in client) {
+          return client.focus();
+        }
+      }
+      return self.clients.openWindow("./");
+    })
   );
 });
