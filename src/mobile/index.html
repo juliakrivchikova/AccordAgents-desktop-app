@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#f7f8f3" />
+    <title>AccordAgents</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="assets/accordagents-mark.png" />
+    <link rel="stylesheet" href="mobile-app.css" />
+  </head>
+  <body>
+    <main class="mobile-shell">
+      <header class="mobile-header">
+        <img class="mobile-mark" src="assets/accordagents-mark.png" alt="" width="44" height="44" />
+        <div class="mobile-title">
+          <h1>AccordAgents</h1>
+          <p id="connection-state">Waiting to sync</p>
+        </div>
+      </header>
+      <section class="thread-surface" aria-live="polite">
+        <ol id="message-list" class="message-list"></ol>
+      </section>
+      <form id="composer-form" class="composer">
+        <textarea id="composer-input" name="message" rows="1" placeholder="Message" autocomplete="off"></textarea>
+        <button id="send-button" type="submit">Send</button>
+      </form>
+    </main>
+    <script src="mobile-app.js" defer></script>
+  </body>
+</html>

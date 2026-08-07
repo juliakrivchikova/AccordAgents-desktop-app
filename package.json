@@ -8,8 +8,9 @@
   "repository": "https://github.com/juliakrivchikova/AccordAgents-desktop-app.git",
   "main": "dist/main/main/launcher.js",
   "scripts": {
-    "build": "npm run build:main && vite build",
+    "build": "npm run build:main && vite build && npm run build:mobile",
     "build:main": "tsc -p tsconfig.main.json && node scripts/copy-main-assets.mjs",
+    "build:mobile": "node scripts/build-mobile-shell.mjs",
     "build:renderer-tests": "node scripts/build-renderer-tests.mjs",
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && npm run build:main && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
     "package": "npm run build && electron-forge package",
@@ -27,6 +28,7 @@
     "test:agent-env": "npm run build:main && node --test dist/main/main/services/settings.agentEnvironment.test.js dist/main/main/services/toolchainRequirements.test.js dist/main/main/services/remoteRuns.test.js dist/main/main/services/cliAgents.permissions.test.js",
     "test:storage": "npm run build:main && node --test dist/main/main/services/storage.messages.test.js dist/main/main/services/chatEventProjection.test.js dist/main/main/services/chatEventLog.test.js dist/main/main/services/chatEventMigration.test.js dist/main/main/services/chatEventMirror.test.js dist/main/main/services/chatEventResidency.test.js dist/main/main/services/stableJson.test.js",
     "test:relay": "npm run build:main && node --test dist/main/main/services/relayProtocol.test.js && node --test scripts/relay-reference-server.test.mjs",
+    "test:mobile-shell": "node --test scripts/mobile-shell-contract.test.mjs",
     "test:leases": "npm run build:main && node --test dist/main/main/services/chatExecutionLeases.test.js",
     "test:artifacts": "npm run build:main && node --test dist/main/main/services/artifacts.test.js dist/main/main/services/appMcp.artifacts.test.js dist/main/main/services/chat.rename.test.js && node --test scripts/artifact-boundary-guard.test.mjs",
     "test:activity": "npm run build:main && node --test dist/main/main/services/activityItemState.test.js dist/main/main/services/chatActivity.test.js dist/main/main/services/chatActivityFocus.test.js dist/main/main/services/storage.activity.test.js && node --test scripts/activity-focus-contract.test.mjs",
