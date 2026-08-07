@@ -3,6 +3,7 @@ import {
   type CreateMobilePairingRequest,
   type CreateMobilePairingResult,
   MOBILE_PAIRING_VERSION,
+  mobilePairingPwaUrl,
   mobilePairingPayloadForQr,
   type MobilePairingPackage
 } from "../../shared/mobilePairing";
@@ -24,6 +25,8 @@ export class MobilePairingService {
       throw new Error("Mobile pairing requires a conversationId.");
     }
     const relayUrl = normalizedOptionalUrl(request.relayUrl, ["https:", "wss:"], "relayUrl");
+    const mailboxUrl = normalizedOptionalUrl(request.mailboxUrl, ["https:"], "mailboxUrl");
+    const outboxUrl = normalizedOptionalUrl(request.outboxUrl, ["https:"], "outboxUrl");
     const staticOriginUrl = normalizedOptionalUrl(request.staticOriginUrl, ["https:"], "staticOriginUrl");
     const identity = await this.eventLog.getOrCreateDeviceIdentity();
     const createdAtDate = this.now();
@@ -46,6 +49,10 @@ export class MobilePairingService {
     const fingerprint = pairingFingerprint({
       issuer,
       stableRoutingId,
+      relayUrl,
+      mailboxUrl,
+      outboxUrl,
+      staticOriginUrl,
       capability
     });
     const pairing: MobilePairingPackage = {
@@ -55,6 +62,8 @@ export class MobilePairingService {
       rendezvousId: `rv-${randomUUID()}`,
       stableRoutingId,
       ...(relayUrl ? { relayUrl } : {}),
+      ...(mailboxUrl ? { mailboxUrl } : {}),
+      ...(outboxUrl ? { outboxUrl } : {}),
       ...(staticOriginUrl ? { staticOriginUrl } : {}),
       capabilities: [capability],
       fingerprint,
@@ -63,7 +72,8 @@ export class MobilePairingService {
     };
     return {
       package: pairing,
-      qrPayload: mobilePairingPayloadForQr(pairing)
+      qrPayload: mobilePairingPayloadForQr(pairing),
+      ...(staticOriginUrl ? { pwaUrl: mobilePairingPwaUrl(pairing, staticOriginUrl) } : {})
     };
   }
 }

@@ -24,6 +24,8 @@ export interface MobilePairingPackage {
   rendezvousId: string;
   stableRoutingId: string;
   relayUrl?: string;
+  mailboxUrl?: string;
+  outboxUrl?: string;
   staticOriginUrl?: string;
   capabilities: MobilePairingCapability[];
   fingerprint: string;
@@ -35,6 +37,8 @@ export interface CreateMobilePairingRequest {
   conversationId: string;
   purpose?: MobilePairingPurpose;
   relayUrl?: string;
+  mailboxUrl?: string;
+  outboxUrl?: string;
   staticOriginUrl?: string;
   ttlMinutes?: number;
   canRunCloudParticipants?: boolean;
@@ -44,11 +48,32 @@ export interface CreateMobilePairingRequest {
 export interface CreateMobilePairingResult {
   package: MobilePairingPackage;
   qrPayload: string;
+  pwaUrl?: string;
 }
 
 export function mobilePairingPayloadForQr(pairing: MobilePairingPackage): string {
   assertMobilePairingPackage(pairing);
   return JSON.stringify(pairing);
+}
+
+export function mobilePairingPwaUrl(pairing: MobilePairingPackage, staticOriginUrl: string | undefined = pairing.staticOriginUrl): string {
+  assertMobilePairingPackage(pairing);
+  if (!staticOriginUrl) {
+    throw new Error("Mobile pairing PWA URL requires staticOriginUrl.");
+  }
+  assertHttpsUrl(staticOriginUrl, "staticOriginUrl");
+  const url = new URL(staticOriginUrl);
+  url.searchParams.set("conversationId", pairing.capabilities[0].conversationId);
+  url.searchParams.set("routingId", pairing.stableRoutingId);
+  url.searchParams.set("rendezvousId", pairing.rendezvousId);
+  url.searchParams.set("fingerprint", pairing.fingerprint);
+  if (pairing.relayUrl) {
+    url.searchParams.set("relay", pairing.relayUrl);
+  }
+  if (pairing.outboxUrl) {
+    url.searchParams.set("outboxUrl", pairing.outboxUrl);
+  }
+  return url.toString();
 }
 
 export function parseMobilePairingPayload(payload: string, now: Date = new Date()): MobilePairingPackage {
@@ -91,6 +116,12 @@ export function assertMobilePairingPackage(value: unknown, now?: Date): asserts 
   }
   if (typeof value.relayUrl === "string") {
     assertHttpsOrWssUrl(value.relayUrl, "relayUrl");
+  }
+  if (typeof value.mailboxUrl === "string") {
+    assertHttpsUrl(value.mailboxUrl, "mailboxUrl");
+  }
+  if (typeof value.outboxUrl === "string") {
+    assertHttpsUrl(value.outboxUrl, "outboxUrl");
   }
   if (typeof value.staticOriginUrl === "string") {
     assertHttpsUrl(value.staticOriginUrl, "staticOriginUrl");

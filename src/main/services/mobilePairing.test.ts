@@ -16,6 +16,8 @@ test("MobilePairingService creates QR payload with separate rendezvous and routi
     const result = await service.createPairing({
       conversationId: "conversation-1",
       relayUrl: "wss://relay.example.test/live",
+      mailboxUrl: "https://mailbox.example.test/",
+      outboxUrl: "https://mailbox.example.test/v1/mailbox/events",
       staticOriginUrl: "https://app.example.test/mobile/",
       ttlMinutes: 5
     });
@@ -30,7 +32,18 @@ test("MobilePairingService creates QR payload with separate rendezvous and routi
     assert.notEqual(parsed.rendezvousId, parsed.stableRoutingId);
     assert.match(parsed.fingerprint, /^[0-9A-F]{4}(-[0-9A-F]{4}){5}$/);
     assert.equal(parsed.relayUrl, "wss://relay.example.test/live");
+    assert.equal(parsed.mailboxUrl, "https://mailbox.example.test/");
+    assert.equal(parsed.outboxUrl, "https://mailbox.example.test/v1/mailbox/events");
     assert.equal(parsed.staticOriginUrl, "https://app.example.test/mobile/");
+    assert.ok(result.pwaUrl);
+    const pwaUrl = new URL(result.pwaUrl);
+    assert.equal(`${pwaUrl.origin}${pwaUrl.pathname}`, "https://app.example.test/mobile/");
+    assert.equal(pwaUrl.searchParams.get("conversationId"), "conversation-1");
+    assert.equal(pwaUrl.searchParams.get("routingId"), parsed.stableRoutingId);
+    assert.equal(pwaUrl.searchParams.get("rendezvousId"), parsed.rendezvousId);
+    assert.equal(pwaUrl.searchParams.get("relay"), "wss://relay.example.test/live");
+    assert.equal(pwaUrl.searchParams.get("outboxUrl"), "https://mailbox.example.test/v1/mailbox/events");
+    assert.equal(pwaUrl.searchParams.get("fingerprint"), parsed.fingerprint);
   } finally {
     await cleanup();
   }
@@ -55,6 +68,12 @@ test("parseMobilePairingPayload rejects expired and unsafe URL packages", async 
     assert.throws(
       () => parseMobilePairingPayload(JSON.stringify(unsafe), new Date("2026-08-06T00:00:10.000Z")),
       /staticOriginUrl must use https/
+    );
+    unsafe.staticOriginUrl = "https://app.example.test";
+    unsafe.outboxUrl = "ws://mailbox.example.test/v1/mailbox/events";
+    assert.throws(
+      () => parseMobilePairingPayload(JSON.stringify(unsafe), new Date("2026-08-06T00:00:10.000Z")),
+      /outboxUrl must use https/
     );
   } finally {
     await cleanup();
