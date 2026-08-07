@@ -23,6 +23,7 @@ export interface MobilePairingPackage {
   issuer: MobilePairingIssuer;
   rendezvousId: string;
   stableRoutingId: string;
+  relaySealKeyBase64: string;
   relayUrl?: string;
   mailboxUrl?: string;
   outboxUrl?: string;
@@ -65,14 +66,8 @@ export function mobilePairingPwaUrl(pairing: MobilePairingPackage, staticOriginU
   const url = new URL(staticOriginUrl);
   url.searchParams.set("conversationId", pairing.capabilities[0].conversationId);
   url.searchParams.set("routingId", pairing.stableRoutingId);
-  url.searchParams.set("rendezvousId", pairing.rendezvousId);
   url.searchParams.set("fingerprint", pairing.fingerprint);
-  if (pairing.relayUrl) {
-    url.searchParams.set("relay", pairing.relayUrl);
-  }
-  if (pairing.outboxUrl) {
-    url.searchParams.set("outboxUrl", pairing.outboxUrl);
-  }
+  url.hash = `pairing=${base64UrlEncode(JSON.stringify(pairing))}`;
   return url.toString();
 }
 
@@ -103,6 +98,8 @@ export function assertMobilePairingPackage(value: unknown, now?: Date): asserts 
   assertNonEmptyString(value.issuer.publicKeyDerBase64, "issuer.publicKeyDerBase64");
   assertNonEmptyString(value.rendezvousId, "rendezvousId");
   assertNonEmptyString(value.stableRoutingId, "stableRoutingId");
+  assertNonEmptyString(value.relaySealKeyBase64, "relaySealKeyBase64");
+  assertBase64Url(value.relaySealKeyBase64, "relaySealKeyBase64");
   assertNonEmptyString(value.fingerprint, "fingerprint");
   const createdAt = value.createdAt;
   const expiresAt = value.expiresAt;
@@ -172,6 +169,12 @@ function assertIsoDate(value: unknown, label: string): asserts value is string {
   }
 }
 
+function assertBase64Url(value: string, label: string): void {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw new Error(`Mobile pairing package ${label} must be base64url.`);
+  }
+}
+
 function assertHttpsOrWssUrl(value: string, label: string): void {
   const parsed = new URL(value);
   if (parsed.protocol !== "https:" && parsed.protocol !== "wss:") {
@@ -188,4 +191,13 @@ function assertHttpsUrl(value: string, label: string): void {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function base64UrlEncode(value: string): string {
+  const maybeBuffer = (globalThis as { Buffer?: { from(value: string, encoding: string): { toString(encoding: string): string } } }).Buffer;
+  if (maybeBuffer) {
+    return maybeBuffer.from(value, "utf8").toString("base64url");
+  }
+  const binary = btoa(unescape(encodeURIComponent(value)));
+  return binary.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }

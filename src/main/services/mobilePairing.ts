@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   type CreateMobilePairingRequest,
   type CreateMobilePairingResult,
@@ -46,9 +46,11 @@ export class MobilePairingService {
       canRunCloudParticipants: request.canRunCloudParticipants !== false,
       canInviteOthers: request.canInviteOthers === true
     };
+    const relaySealKeyBase64 = randomBytes(32).toString("base64url");
     const fingerprint = pairingFingerprint({
       issuer,
       stableRoutingId,
+      relaySealKeyBase64,
       relayUrl,
       mailboxUrl,
       outboxUrl,
@@ -61,6 +63,7 @@ export class MobilePairingService {
       issuer,
       rendezvousId: `rv-${randomUUID()}`,
       stableRoutingId,
+      relaySealKeyBase64,
       ...(relayUrl ? { relayUrl } : {}),
       ...(mailboxUrl ? { mailboxUrl } : {}),
       ...(outboxUrl ? { outboxUrl } : {}),

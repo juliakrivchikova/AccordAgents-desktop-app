@@ -30,6 +30,7 @@ test("MobilePairingService creates QR payload with separate rendezvous and routi
     assert.equal(parsed.rendezvousId.startsWith("rv-"), true);
     assert.equal(parsed.stableRoutingId.startsWith("route-"), true);
     assert.notEqual(parsed.rendezvousId, parsed.stableRoutingId);
+    assert.match(parsed.relaySealKeyBase64, /^[A-Za-z0-9_-]+$/);
     assert.match(parsed.fingerprint, /^[0-9A-F]{4}(-[0-9A-F]{4}){5}$/);
     assert.equal(parsed.relayUrl, "wss://relay.example.test/live");
     assert.equal(parsed.mailboxUrl, "https://mailbox.example.test/");
@@ -40,10 +41,18 @@ test("MobilePairingService creates QR payload with separate rendezvous and routi
     assert.equal(`${pwaUrl.origin}${pwaUrl.pathname}`, "https://app.example.test/mobile/");
     assert.equal(pwaUrl.searchParams.get("conversationId"), "conversation-1");
     assert.equal(pwaUrl.searchParams.get("routingId"), parsed.stableRoutingId);
-    assert.equal(pwaUrl.searchParams.get("rendezvousId"), parsed.rendezvousId);
-    assert.equal(pwaUrl.searchParams.get("relay"), "wss://relay.example.test/live");
-    assert.equal(pwaUrl.searchParams.get("outboxUrl"), "https://mailbox.example.test/v1/mailbox/events");
     assert.equal(pwaUrl.searchParams.get("fingerprint"), parsed.fingerprint);
+    assert.equal(pwaUrl.searchParams.has("relaySealKey"), false);
+    assert.equal(pwaUrl.searchParams.has("rendezvousId"), false);
+    assert.match(pwaUrl.hash, /^#pairing=/);
+    const fragmentPayload = new URLSearchParams(pwaUrl.hash.slice(1)).get("pairing");
+    assert.ok(fragmentPayload);
+    const fragmentPairing = parseMobilePairingPayload(
+      Buffer.from(fragmentPayload, "base64url").toString("utf8"),
+      new Date("2026-08-06T00:04:00.000Z")
+    );
+    assert.equal(fragmentPairing.rendezvousId, parsed.rendezvousId);
+    assert.equal(fragmentPairing.relaySealKeyBase64, parsed.relaySealKeyBase64);
   } finally {
     await cleanup();
   }
