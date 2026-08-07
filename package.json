@@ -27,7 +27,7 @@
     "test:beta-updates": "npm run build:main && node --test dist/main/main/services/settings.behaviorRules.test.js dist/main/main/services/appUpdater.test.js && node --test scripts/release-mac-arm64.dry-run.test.mjs",
     "test:agent-env": "npm run build:main && node --test dist/main/main/services/settings.agentEnvironment.test.js dist/main/main/services/toolchainRequirements.test.js dist/main/main/services/remoteRuns.test.js dist/main/main/services/cliAgents.permissions.test.js",
     "test:storage": "npm run build:main && node --test dist/main/main/services/storage.messages.test.js dist/main/main/services/chatEventProjection.test.js dist/main/main/services/chatEventLog.test.js dist/main/main/services/chatEventMigration.test.js dist/main/main/services/chatEventMirror.test.js dist/main/main/services/chatEventResidency.test.js dist/main/main/services/stableJson.test.js",
-    "test:relay": "npm run build:main && node --test dist/main/main/services/relayProtocol.test.js && node --test scripts/relay-reference-server.test.mjs",
+    "test:relay": "npm run build:main && node --test dist/main/main/services/relayProtocol.test.js && node --test scripts/relay-reference-server.test.mjs scripts/relay-tunnel-client.test.mjs",
     "test:mobile-shell": "node --test scripts/mobile-shell-contract.test.mjs",
     "test:mobile-control": "npm run build:main && node --test dist/main/main/services/mobilePairing.test.js && npm run test:mobile-shell",
     "test:leases": "npm run build:main && node --test dist/main/main/services/chatExecutionLeases.test.js",
