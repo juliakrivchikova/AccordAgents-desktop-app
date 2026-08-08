@@ -1,6 +1,6 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, autoUpdater, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import type {
   AddChatParticipantRequest,
   AgentDetectionRequest,
@@ -132,6 +132,7 @@ import { UserSkillsService } from "./services/userSkills";
 let mainWindow: BrowserWindow | undefined;
 let quitCleanupStarted = false;
 let quitCleanupFinished = false;
+let quittingForUpdate = false;
 
 const userDataDirOverride = process.env.ACCORDAGENTS_USER_DATA_DIR?.trim();
 if (userDataDirOverride) {
@@ -1438,7 +1439,14 @@ app.on("window-all-closed", () => {
   }
 });
 
+autoUpdater.on("before-quit-for-update", () => {
+  quittingForUpdate = true;
+});
+
 app.on("before-quit", (event) => {
+  if (quittingForUpdate) {
+    return;
+  }
   if (quitCleanupFinished) {
     return;
   }
