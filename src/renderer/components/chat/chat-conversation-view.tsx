@@ -401,6 +401,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
                   props.onStopRun?.(runId);
                 }
               } : undefined}
+              onJumpToParticipantLastMessage={props.onJumpToParticipantLastMessage}
               placeholder="Message @name, /name, or #path..."
               status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
               testId="chat-main-composer"

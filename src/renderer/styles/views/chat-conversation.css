@@ -4233,6 +4233,23 @@
   min-width: 0;
 }
 
+button.composer-active-run-row-main {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+button.composer-active-run-row-main:focus-visible {
+  border-radius: 4px;
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 .composer-active-run-row-name {
   min-width: 0;
   overflow: hidden;
