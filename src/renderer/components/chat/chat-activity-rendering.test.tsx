@@ -78,16 +78,8 @@ test("activity detail masks secrets and independently preserves reveal and lengt
   await act(async () => renderer!.unmount());
 });
 
-test("every detailed activity kind has disclosure plus semantic kind icon and valid hidden semantics", async () => {
+test("every detailed activity kind has one disclosure icon and valid hidden semantics", async () => {
   const activityKinds = ["tool", "command", "file-edit", "web", "approval", "status"] as const;
-  const expectedIconClasses: Record<ChatAgentActivityKind, string> = {
-    tool: "lucide-wrench",
-    command: "lucide-terminal",
-    "file-edit": "lucide-file-pen-line",
-    web: "lucide-globe",
-    approval: "lucide-shield-check",
-    status: "lucide-activity"
-  };
   for (const [index, kind] of activityKinds.entries()) {
     const label = `Activity ${kind}`;
     const detail = `Detail ${kind}`;
@@ -116,8 +108,8 @@ test("every detailed activity kind has disclosure plus semantic kind icon and va
     assert.equal(controlledContent.props.id, toggle.props["aria-controls"], `${kind} controls a mounted node`);
     assert.equal(controlledContent.props.hidden, true, `${kind} hides detail semantically`);
     const iconClasses = svgClassNames(toggle);
-    assert.ok(iconClasses.some((className) => className.includes("chat-inline-activity-disclosure-icon")), `${kind} has disclosure icon`);
-    assert.ok(iconClasses.some((className) => className.includes(expectedIconClasses[kind])), `${kind} has semantic kind icon`);
+    assert.equal(iconClasses.length, 1, `${kind} renders only the disclosure icon`);
+    assert.match(iconClasses[0] ?? "", /chat-inline-activity-disclosure-icon/, `${kind} has disclosure icon`);
     await act(async () => {
       toggle.props.onClick();
     });
@@ -199,9 +191,9 @@ test("long activity detail uses a six-line preview and keeps Show more at the fa
 
   const css = readFileSync("src/renderer/styles/views/chat-conversation.css", "utf8");
   assert.match(css, /chat-inline-activity-detail\.is-collapsed\s*{[^}]*max-height:\s*calc\(6 \* 1\.4em\)/s);
-  assert.match(css, /chat-inline-activity-actions\s*{[^}]*justify-content:\s*flex-start/s);
-  assert.match(css, /chat-inline-activity-action\.is-detail-length-toggle\s*{[^}]*margin-left:\s*auto/s);
-  assert.match(css, /chat-inline-activity-detail\s*{[^}]*background:\s*transparent[^}]*color:\s*var\(--app-text\)/s);
+  assert.match(css, /chat-inline-activity-actions\s*{[^}]*justify-content:\s*flex-end/s);
+  assert.match(css, /chat-inline-activity-action\s*{[^}]*border:\s*0[^}]*background:\s*transparent/s);
+  assert.match(css, /chat-inline-activity-detail\s*{[^}]*background:\s*transparent[^}]*color:\s*var\(--app-muted-subtle\)/s);
 
   await act(async () => renderer!.unmount());
 });

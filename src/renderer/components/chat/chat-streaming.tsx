@@ -3,8 +3,6 @@ import {
   Activity,
   ChevronDown,
   ChevronRight,
-  Eye,
-  EyeOff,
   FilePenLine,
   Globe,
   ShieldCheck,
@@ -168,7 +166,6 @@ function ChatInlineActivityEvent(props: {
           {activityExpanded
             ? <ChevronDown className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />
             : <ChevronRight className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />}
-          <Icon className="chat-inline-activity-kind-icon" size={14} aria-hidden />
           <span>{event.label}</span>
         </button>
       ) : (
@@ -188,7 +185,6 @@ function ChatInlineActivityEvent(props: {
                   className="chat-inline-activity-action"
                   onClick={() => activityDisclosure.toggleDetailReveal(event.id)}
                 >
-                  {detailRevealed ? <EyeOff size={13} aria-hidden /> : <Eye size={13} aria-hidden />}
                   <span>{detailRevealed ? "Hide" : "Reveal"}</span>
                 </button>
               )}

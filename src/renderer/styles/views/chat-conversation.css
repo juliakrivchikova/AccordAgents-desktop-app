@@ -3102,7 +3102,6 @@
 }
 
 .chat-inline-activity-toggle {
-  grid-template-columns: 12px 16px minmax(0, auto);
   padding: 0;
   border: 0;
   background: transparent;
@@ -3117,9 +3116,7 @@
 }
 
 .chat-inline-activity-toggle:hover .chat-inline-activity-disclosure-icon,
-.chat-inline-activity-toggle:hover .chat-inline-activity-kind-icon,
-.chat-inline-activity-toggle:focus-visible .chat-inline-activity-disclosure-icon,
-.chat-inline-activity-toggle:focus-visible .chat-inline-activity-kind-icon {
+.chat-inline-activity-toggle:focus-visible .chat-inline-activity-disclosure-icon {
   color: currentColor;
 }
 
@@ -3141,13 +3138,13 @@
 
 .chat-inline-activity-detail {
   max-width: 100%;
-  margin: 0 0 0 42px;
+  margin: 0 0 0 23px;
   padding: 2px 0 0;
   overflow-x: auto;
   border: 0;
   border-radius: 0;
   background: transparent;
-  color: var(--app-text);
+  color: var(--app-muted-subtle);
   font: 12px/1.4 var(--font-code, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -3160,52 +3157,34 @@
 
 .chat-inline-activity-actions {
   display: inline-flex;
-  width: calc(100% - 42px);
+  width: calc(100% - 23px);
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-start;
-  gap: 6px;
-  margin-left: 42px;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-left: 23px;
 }
 
 .chat-inline-activity-action {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  min-height: 24px;
-  padding: 0 6px;
-  border: 1px solid var(--app-border-subtle);
-  border-radius: 6px;
-  background: var(--app-surface);
-  color: var(--app-muted);
-  font: inherit;
-  cursor: pointer;
-}
-
-.chat-inline-activity-action:hover {
-  border-color: var(--app-border);
-  color: var(--app-text);
-}
-
-.chat-inline-activity-action:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-
-.chat-inline-activity-action.is-detail-length-toggle {
-  margin-left: auto;
   min-height: 0;
   padding: 2px 0;
   border: 0;
   border-radius: 0;
   background: transparent;
   color: var(--app-muted-subtle);
+  font: inherit;
+  cursor: pointer;
 }
 
-.chat-inline-activity-action.is-detail-length-toggle:hover {
-  border-color: transparent;
-  background: transparent;
+.chat-inline-activity-action:hover {
   color: var(--app-muted);
+}
+
+.chat-inline-activity-action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 .chat-processing-transcript-notices {
