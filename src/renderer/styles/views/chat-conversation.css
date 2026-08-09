@@ -3073,6 +3073,7 @@
 
 .chat-inline-activity-event {
   display: grid;
+  width: 100%;
   gap: 5px;
   justify-self: start;
   max-width: min(760px, 100%);
@@ -3085,6 +3086,7 @@
   display: inline-grid;
   grid-template-columns: 16px minmax(0, auto);
   align-items: center;
+  justify-self: start;
   gap: 7px;
   max-width: 100%;
 }
