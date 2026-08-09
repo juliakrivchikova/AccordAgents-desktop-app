@@ -106,15 +106,21 @@ test("commandEnvironment discovers nvm bins when versions root contains non-dire
   assert.equal(command.path, codexPath);
 });
 
+const stdioHoldingGrandchildScript = [
+  "const { spawn } = require('node:child_process');",
+  "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 3000)'], { stdio: 'inherit' });",
+  "setTimeout(() => {}, 3000);"
+].join("");
+
 test("aborted run settles even when a grandchild keeps the stdio pipes open", async () => {
   const controller = new AbortController();
   const startedAt = Date.now();
   setTimeout(() => controller.abort(), 300);
-  // `sh` dies on SIGTERM but both `sleep`s survive it and inherit the stdio
-  // pipes; without releasing our pipe ends the promise would settle only when
-  // the sleeps exit (~15s).
+  // The direct Node child dies on cancellation while its grandchild inherits
+  // the stdio pipes. Without releasing our pipe ends the promise would wait for
+  // the grandchild to exit.
   await assert.rejects(
-    runCommand("sh", ["-c", "sleep 15 & sleep 15"], {
+    runCommand(process.execPath, ["-e", stdioHoldingGrandchildScript], {
       timeoutMs: 30_000,
       killProcessGroup: true,
       primeLoginShellEnv: false,
@@ -129,7 +135,7 @@ test("aborted run settles even when a grandchild keeps the stdio pipes open", as
 test("timed-out run settles even when a grandchild keeps the stdio pipes open", async () => {
   const startedAt = Date.now();
   await assert.rejects(
-    runCommand("sh", ["-c", "sleep 15 & sleep 15"], {
+    runCommand(process.execPath, ["-e", stdioHoldingGrandchildScript], {
       timeoutMs: 300,
       killProcessGroup: true,
       primeLoginShellEnv: false
@@ -166,7 +172,7 @@ test("timed-out process-group run leaves no helper process", async (t) => {
 });
 
 test("runCommand treats timeoutMs 0 as no wall-clock deadline", async () => {
-  const result = await runCommand("sh", ["-c", "sleep 0.05; printf done"], {
+  const result = await runCommand(process.execPath, ["-e", "setTimeout(() => process.stdout.write('done'), 50);"], {
     timeoutMs: 0,
     allowNoTimeout: true,
     primeLoginShellEnv: false

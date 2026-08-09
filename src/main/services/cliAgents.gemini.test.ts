@@ -313,7 +313,7 @@ test("syncGeminiMcpConfig: preserves foreign keys and servers while installing t
 
 test("geminiMcpProxyLaunchArgs: packaged and default-app launches use the dedicated proxy mode", () => {
   assert.deepEqual(geminiMcpProxyLaunchArgs(false, "/repo"), ["--accordagents-gemini-mcp-proxy"]);
-  assert.deepEqual(geminiMcpProxyLaunchArgs(true, "/repo"), ["/repo", "--accordagents-gemini-mcp-proxy"]);
+  assert.deepEqual(geminiMcpProxyLaunchArgs(true, "/repo"), [path.resolve("/repo"), "--accordagents-gemini-mcp-proxy"]);
   assert.deepEqual(geminiMcpProxyLaunchArgs(true, "."), [path.resolve("."), "--accordagents-gemini-mcp-proxy"]);
 });
 
