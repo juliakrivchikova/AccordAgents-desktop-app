@@ -24,10 +24,12 @@ import {
 import { ChatMessageItem, type ChatChoiceResponse } from "./chat-message-item";
 import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 import { ChatThinkingRowItem } from "./chat-streaming";
+import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
 type ThreadSummaryMap = Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }>;
 
 export function ChatConversationTimeline(props: {
+  activityDisclosure: ChatActivityDisclosureState;
   conversationId: string;
   contextUsageByParticipant: Map<string, AgentContextUsage>;
   continuedMentionRequestIds: Set<string>;
@@ -119,6 +121,7 @@ export function ChatConversationTimeline(props: {
                 />
               ) : (
                 <ChatMessageItem
+                  activityDisclosure={props.activityDisclosure}
                   message={row.message}
                   conversationId={props.conversationId}
                   participants={props.participants}
