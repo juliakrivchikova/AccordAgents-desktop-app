@@ -155,6 +155,13 @@ test("streaming activity detail masks secrets by default and can reveal collapse
     );
   });
 
+  const activityToggle = buttonWithLabel(renderer!, "Using MCP tool");
+  assert.equal(activityToggle.props["aria-expanded"], false);
+  assert.equal(renderer!.root.findAllByType("pre").length, 0);
+  await act(async () => {
+    activityToggle.props.onClick();
+  });
+
   const pre = () => renderer!.root.findByType("pre");
   assert.match(pre().props.className, /is-collapsed/);
   assert.match(textContent(pre()), /Authorization: Bearer ••••/);
@@ -177,7 +184,42 @@ test("streaming activity detail masks secrets by default and can reveal collapse
   renderer!.unmount();
 });
 
-test("command activity detail is collapsed by default and toggles from its heading", async () => {
+test("every activity kind with detail is collapsed by default and toggles from its heading", async () => {
+  const activityKinds = ["tool", "command", "file-edit", "web", "approval", "status"] as const;
+  for (const [index, kind] of activityKinds.entries()) {
+    const label = `Activity ${kind}`;
+    const detail = `Detail ${kind}`;
+    const activityEvent: ChatAgentActivityEvent = {
+      id: `activity-${kind}`,
+      sequence: index + 1,
+      kind,
+      label,
+      detail,
+      createdAt: NOW
+    };
+    let renderer: ReactTestRenderer | undefined;
+    await act(async () => {
+      renderer = create(
+        <StreamingMessageContent
+          startedAt={NOW}
+          activityEvents={[activityEvent]}
+        />
+      );
+    });
+
+    const toggle = buttonWithLabel(renderer!, label);
+    assert.equal(toggle.props["aria-expanded"], false, `${kind} starts collapsed`);
+    assert.equal(renderer!.root.findAllByType("pre").length, 0, `${kind} hides detail`);
+    await act(async () => {
+      toggle.props.onClick();
+    });
+    assert.equal(buttonWithLabel(renderer!, label).props["aria-expanded"], true, `${kind} expands`);
+    assert.equal(textContent(renderer!.root.findByType("pre")), detail, `${kind} renders its detail`);
+    renderer!.unmount();
+  }
+});
+
+test("long activity detail supports text-style show more and preserves disclosure state", async () => {
   const detail = [
     "/bin/zsh -lc 'npm run typecheck'",
     "",

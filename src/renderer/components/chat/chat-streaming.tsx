@@ -103,27 +103,25 @@ export const ChatExpandedProcessingTranscript = memo(function ChatExpandedProces
 function ChatInlineActivityEvent({ event }: { event: ChatAgentActivityEvent }): JSX.Element {
   const Icon = iconForActivityKind(event.kind);
   const detailId = useId();
-  const [commandExpanded, setCommandExpanded] = useState(false);
+  const [activityExpanded, setActivityExpanded] = useState(false);
   const [detailExpanded, setDetailExpanded] = useState(false);
   const [detailRevealed, setDetailRevealed] = useState(false);
   const rawDetail = event.detail;
   const maskedDetail = useMemo(() => rawDetail ? maskActivityDetailSecrets(rawDetail) : undefined, [rawDetail]);
   const displayDetail = detailRevealed ? rawDetail : maskedDetail;
-  const isCommand = event.kind === "command";
-  const detailVisible = Boolean(displayDetail && (!isCommand || commandExpanded));
   const detailIsMasked = Boolean(rawDetail && maskedDetail && rawDetail !== maskedDetail);
   const detailIsLong = Boolean(rawDetail && (rawDetail.length > 600 || rawDetail.split(/\n/).length > 6));
   return (
     <div className={`chat-inline-activity-event is-${event.kind}`}>
-      {isCommand && displayDetail ? (
+      {displayDetail ? (
         <button
           type="button"
           className="chat-inline-activity-heading chat-inline-activity-toggle"
           aria-controls={detailId}
-          aria-expanded={commandExpanded}
-          onClick={() => setCommandExpanded((value) => !value)}
+          aria-expanded={activityExpanded}
+          onClick={() => setActivityExpanded((value) => !value)}
         >
-          {commandExpanded ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
+          {activityExpanded ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
           <span>{event.label}</span>
         </button>
       ) : (
@@ -132,7 +130,7 @@ function ChatInlineActivityEvent({ event }: { event: ChatAgentActivityEvent }): 
           <span>{event.label}</span>
         </div>
       )}
-      {detailVisible && displayDetail && (
+      {activityExpanded && displayDetail && (
         <>
           <pre id={detailId} className={`chat-inline-activity-detail ${detailIsLong && !detailExpanded ? "is-collapsed" : ""}`}>{displayDetail}</pre>
           {(detailIsMasked || detailIsLong) && (

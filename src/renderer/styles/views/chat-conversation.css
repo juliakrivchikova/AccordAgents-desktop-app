@@ -3122,12 +3122,12 @@
 .chat-inline-activity-detail {
   max-width: 100%;
   margin: 0 0 0 23px;
-  padding: 7px 9px;
+  padding: 2px 0 0;
   overflow-x: auto;
-  border: 1px solid var(--app-border-subtle);
-  border-radius: 7px;
-  background: var(--app-surface-subtle);
-  color: var(--app-muted);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--app-muted-subtle);
   font: 12px/1.4 var(--font-code, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -3138,18 +3138,12 @@
   overflow: hidden;
 }
 
-.chat-inline-activity-event.is-command .chat-inline-activity-detail {
-  padding: 2px 0 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: var(--app-muted-subtle);
-}
-
 .chat-inline-activity-actions {
   display: inline-flex;
+  width: calc(100% - 23px);
   flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
   margin-left: 23px;
 }
@@ -3173,12 +3167,7 @@
   color: var(--app-text);
 }
 
-.chat-inline-activity-event.is-command .chat-inline-activity-actions {
-  width: calc(100% - 23px);
-  justify-content: flex-end;
-}
-
-.chat-inline-activity-event.is-command .is-detail-length-toggle {
+.chat-inline-activity-action.is-detail-length-toggle {
   min-height: 0;
   padding: 2px 0;
   border: 0;
@@ -3187,7 +3176,7 @@
   color: var(--app-muted-subtle);
 }
 
-.chat-inline-activity-event.is-command .is-detail-length-toggle:hover {
+.chat-inline-activity-action.is-detail-length-toggle:hover {
   border-color: transparent;
   background: transparent;
   color: var(--app-muted);
