@@ -69,6 +69,7 @@ test("activity detail masks secrets and independently preserves reveal and lengt
     buttonWithLabel(renderer!, "Using MCP tool").props.onClick();
   });
   assert.equal(activityContent(renderer!).props.hidden, true);
+  assert.doesNotMatch(textContent(pre()), /sk-test-secret|abc123/, "collapsed rows never keep revealed secrets mounted");
   await act(async () => {
     buttonWithLabel(renderer!, "Using MCP tool").props.onClick();
   });

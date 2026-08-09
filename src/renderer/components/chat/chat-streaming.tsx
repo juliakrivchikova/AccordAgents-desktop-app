@@ -149,7 +149,7 @@ function ChatInlineActivityEvent(props: {
   const detailRevealed = activityDisclosure.revealedDetailIds.has(event.id);
   const rawDetail = event.detail;
   const maskedDetail = useMemo(() => rawDetail ? maskActivityDetailSecrets(rawDetail) : undefined, [rawDetail]);
-  const displayDetail = detailRevealed ? rawDetail : maskedDetail;
+  const displayDetail = detailRevealed && activityExpanded ? rawDetail : maskedDetail;
   const detailIsMasked = Boolean(rawDetail && maskedDetail && rawDetail !== maskedDetail);
   const detailIsLong = Boolean(rawDetail && (rawDetail.length > 600 || rawDetail.split(/\n/).length > 6));
   return (
