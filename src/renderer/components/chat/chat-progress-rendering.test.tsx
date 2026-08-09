@@ -177,6 +177,62 @@ test("streaming activity detail masks secrets by default and can reveal collapse
   renderer!.unmount();
 });
 
+test("command activity detail is collapsed by default and toggles from its heading", async () => {
+  const detail = [
+    "/bin/zsh -lc 'npm run typecheck'",
+    "",
+    "Output tail:",
+    "line 1",
+    "line 2",
+    "line 3",
+    "line 4",
+    "line 5"
+  ].join("\n");
+  const activityEvent: ChatAgentActivityEvent = {
+    id: "activity-command",
+    sequence: 1,
+    kind: "command",
+    label: "Running command",
+    detail,
+    createdAt: NOW
+  };
+  let renderer: ReactTestRenderer | undefined;
+  await act(async () => {
+    renderer = create(
+      <StreamingMessageContent
+        startedAt={NOW}
+        activityEvents={[activityEvent]}
+      />
+    );
+  });
+
+  const toggle = buttonWithLabel(renderer!, "Running command");
+  assert.equal(toggle.props["aria-expanded"], false);
+  assert.equal(renderer!.root.findAllByType("pre").length, 0);
+
+  await act(async () => {
+    toggle.props.onClick();
+  });
+  assert.equal(buttonWithLabel(renderer!, "Running command").props["aria-expanded"], true);
+  assert.equal(textContent(renderer!.root.findByType("pre")), detail);
+  assert.match(renderer!.root.findByType("pre").props.className, /is-collapsed/);
+
+  const showMoreButton = buttonWithLabel(renderer!, "Show more");
+  assert.match(showMoreButton.props.className, /is-detail-length-toggle/);
+  await act(async () => {
+    showMoreButton.props.onClick();
+  });
+  assert.doesNotMatch(renderer!.root.findByType("pre").props.className, /is-collapsed/);
+  buttonWithLabel(renderer!, "Show less");
+
+  await act(async () => {
+    buttonWithLabel(renderer!, "Running command").props.onClick();
+  });
+  assert.equal(renderer!.root.findAllByType("pre").length, 0);
+
+  renderer!.unmount();
+});
+
 function stableActionHandlers(label: string, calls: string[]): StableChatMessageActionHandlers {
   return {
     onApproveMentions: (sourceMessageId, targetParticipantIds, continueRequester) => {

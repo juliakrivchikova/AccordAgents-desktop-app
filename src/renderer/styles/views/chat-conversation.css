@@ -3099,6 +3099,26 @@
   white-space: nowrap;
 }
 
+.chat-inline-activity-toggle {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-inline-activity-toggle:hover {
+  color: var(--app-text);
+}
+
+.chat-inline-activity-toggle:focus-visible {
+  border-radius: 4px;
+  box-shadow: var(--focus-ring);
+  outline: none;
+}
+
 .chat-inline-activity-detail {
   max-width: 100%;
   margin: 0 0 0 23px;
@@ -3116,6 +3136,14 @@
 .chat-inline-activity-detail.is-collapsed {
   max-height: 108px;
   overflow: hidden;
+}
+
+.chat-inline-activity-event.is-command .chat-inline-activity-detail {
+  padding: 2px 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--app-muted-subtle);
 }
 
 .chat-inline-activity-actions {
@@ -3143,6 +3171,26 @@
 .chat-inline-activity-action:hover {
   border-color: var(--app-border);
   color: var(--app-text);
+}
+
+.chat-inline-activity-event.is-command .chat-inline-activity-actions {
+  width: calc(100% - 23px);
+  justify-content: flex-end;
+}
+
+.chat-inline-activity-event.is-command .is-detail-length-toggle {
+  min-height: 0;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--app-muted-subtle);
+}
+
+.chat-inline-activity-event.is-command .is-detail-length-toggle:hover {
+  border-color: transparent;
+  background: transparent;
+  color: var(--app-muted);
 }
 
 .chat-processing-transcript-notices {

@@ -1,5 +1,5 @@
-import { memo, useEffect, useMemo, useState } from "react";
-import { ChevronRight, Eye, EyeOff, FilePenLine, Globe, ShieldCheck, Terminal, type LucideIcon } from "lucide-react";
+import { memo, useEffect, useId, useMemo, useState } from "react";
+import { ChevronDown, ChevronRight, Eye, EyeOff, FilePenLine, Globe, ShieldCheck, type LucideIcon } from "lucide-react";
 
 import { MarkdownText } from "../content/markdown-text";
 import type { ChatAgentActivityEvent, ChatAgentActivityKind } from "../../../shared/types";
@@ -102,22 +102,39 @@ export const ChatExpandedProcessingTranscript = memo(function ChatExpandedProces
 
 function ChatInlineActivityEvent({ event }: { event: ChatAgentActivityEvent }): JSX.Element {
   const Icon = iconForActivityKind(event.kind);
+  const detailId = useId();
+  const [commandExpanded, setCommandExpanded] = useState(false);
   const [detailExpanded, setDetailExpanded] = useState(false);
   const [detailRevealed, setDetailRevealed] = useState(false);
   const rawDetail = event.detail;
   const maskedDetail = useMemo(() => rawDetail ? maskActivityDetailSecrets(rawDetail) : undefined, [rawDetail]);
   const displayDetail = detailRevealed ? rawDetail : maskedDetail;
+  const isCommand = event.kind === "command";
+  const detailVisible = Boolean(displayDetail && (!isCommand || commandExpanded));
   const detailIsMasked = Boolean(rawDetail && maskedDetail && rawDetail !== maskedDetail);
   const detailIsLong = Boolean(rawDetail && (rawDetail.length > 600 || rawDetail.split(/\n/).length > 6));
   return (
     <div className={`chat-inline-activity-event is-${event.kind}`}>
-      <div className="chat-inline-activity-heading" title={event.label}>
-        <Icon size={14} aria-hidden />
-        <span>{event.label}</span>
-      </div>
-      {displayDetail && (
+      {isCommand && displayDetail ? (
+        <button
+          type="button"
+          className="chat-inline-activity-heading chat-inline-activity-toggle"
+          aria-controls={detailId}
+          aria-expanded={commandExpanded}
+          onClick={() => setCommandExpanded((value) => !value)}
+        >
+          {commandExpanded ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
+          <span>{event.label}</span>
+        </button>
+      ) : (
+        <div className="chat-inline-activity-heading" title={event.label}>
+          <Icon size={14} aria-hidden />
+          <span>{event.label}</span>
+        </div>
+      )}
+      {detailVisible && displayDetail && (
         <>
-          <pre className={`chat-inline-activity-detail ${detailIsLong && !detailExpanded ? "is-collapsed" : ""}`}>{displayDetail}</pre>
+          <pre id={detailId} className={`chat-inline-activity-detail ${detailIsLong && !detailExpanded ? "is-collapsed" : ""}`}>{displayDetail}</pre>
           {(detailIsMasked || detailIsLong) && (
             <div className="chat-inline-activity-actions">
               {detailIsMasked && (
@@ -127,7 +144,7 @@ function ChatInlineActivityEvent({ event }: { event: ChatAgentActivityEvent }): 
                 </button>
               )}
               {detailIsLong && (
-                <button type="button" className="chat-inline-activity-action" onClick={() => setDetailExpanded((value) => !value)}>
+                <button type="button" className="chat-inline-activity-action is-detail-length-toggle" onClick={() => setDetailExpanded((value) => !value)}>
                   <span>{detailExpanded ? "Show less" : "Show more"}</span>
                 </button>
               )}
@@ -210,9 +227,6 @@ function splitStreamingMarkdown(content: string): { completed: string; tail: str
 }
 
 function iconForActivityKind(kind: ChatAgentActivityKind): LucideIcon {
-  if (kind === "command") {
-    return Terminal;
-  }
   if (kind === "file-edit") {
     return FilePenLine;
   }
