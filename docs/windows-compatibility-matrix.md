@@ -17,7 +17,7 @@ Every Windows failure belongs to one of these categories:
 
 The Windows workflow uses `continue-on-error` only so later checks still run and produce evidence. Its final enforcement step fails the job if any validation step failed, so failures are not hidden to make CI green.
 
-Clean-host evidence is collected from GitHub Actions on `windows-latest`. The first branch run (`31337105537`) proved dependency installation, typecheck, both production builds, command/readiness/file-opening/link/Accord/activity tests, and exposed the remaining failures without short-circuiting the job.
+Clean-host evidence is collected from GitHub Actions on `windows-latest`. The first branch run (`31337105537`) exposed the host-specific test-fixture assumptions. After those fixtures were made portable, follow-up run `31337653232` passed dependency installation, typecheck, both production builds, and the command/readiness/file-opening/link/Accord/activity checks. Its remaining failures are the classified SQLite blocker (NIC-405), the pre-existing renderer harness TS1343 failure, and the Codex Stop cancellation blocker (NIC-406).
 
 ## Automated baseline
 
@@ -35,7 +35,7 @@ Clean-host evidence is collected from GitHub Actions on `windows-latest`. The fi
 | `npm run test:accord` | Pass | Baseline pass | Accord launcher preference and target reconciliation tests pass on Windows. |
 | `npm run test:chat-progress-renderer` | Pass | Baseline pass | Current upstream focused activity renderer suite passes on Windows. |
 | `npm run test:renderer-components` | Fail on clean Windows runner | Pre-existing upstream failure | `tsconfig.renderer-tests.json` compiles a CommonJS harness that now reaches renderer files using `import.meta`, causing TS1343. This is present at the baseline upstream revision and is not Windows-specific. |
-| `npm run test:permissions` | Windows failure isolated after NIC-403 fixture fixes | Windows portability blocker + test harness portability | Unix shebang `codex`/`ssh` fixtures, `/dev/null`, and hard-coded `/` source expectations were made host-portable or explicitly POSIX-only. The remaining locally reproducible Codex Stop test times out after the provider closes its approval stdin, which is NIC-406 cancellation evidence. AWS worker key-material tests pass on the clean GitHub Windows runner. |
+| `npm run test:permissions` | Fail on clean Windows runner after NIC-403 fixture fixes | Windows portability blocker + test harness portability | Unix shebang `codex`/`ssh` fixtures, `/dev/null`, and hard-coded `/` source expectations were made host-portable or explicitly POSIX-only. The remaining Codex Stop test fails with `Stop hung after dead approval pipe`, which is NIC-406 cancellation evidence. AWS worker key-material tests pass on the clean GitHub Windows runner. |
 
 ## Compatibility matrix
 
