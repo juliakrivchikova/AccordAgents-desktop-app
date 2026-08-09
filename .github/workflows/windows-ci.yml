@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   windows-baseline:
-    name: Windows 11 x64 baseline
+    name: Windows x64 runner baseline
     runs-on: windows-latest
     timeout-minutes: 45
 

@@ -108,8 +108,8 @@ test("commandEnvironment discovers nvm bins when versions root contains non-dire
 
 const stdioHoldingGrandchildScript = [
   "const { spawn } = require('node:child_process');",
-  "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 3000)'], { stdio: 'inherit' });",
-  "setTimeout(() => {}, 3000);"
+  "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 15000)'], { stdio: 'inherit' });",
+  "setTimeout(() => {}, 15000);"
 ].join("");
 
 test("aborted run settles even when a grandchild keeps the stdio pipes open", async () => {

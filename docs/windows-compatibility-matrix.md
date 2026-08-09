@@ -4,7 +4,7 @@ This document is the NIC-403 baseline for the AccordAgents Windows port. It reco
 
 Baseline source revision: upstream `main` at `0d4ef2cf660227de57e817d5ddd490622e408c43`.
 
-Target environment: Windows 11 x64. GitHub Actions uses `windows-latest` with Node.js 20, matching the repository's documented Node.js 20+ requirement.
+Target product environment: Windows 11 x64. Automated clean-host evidence comes from GitHub Actions `windows-latest` (Windows Server 2025 at the time of this baseline) with Node.js 20. It is portability evidence, not Windows 11 acceptance.
 
 ## Failure classification
 
@@ -17,7 +17,7 @@ Every Windows failure belongs to one of these categories:
 
 The Windows workflow uses `continue-on-error` only so later checks still run and produce evidence. Its final enforcement step fails the job if any validation step failed, so failures are not hidden to make CI green.
 
-Clean-host evidence is collected from GitHub Actions on `windows-latest`. The first branch run (`31337105537`) exposed the host-specific test-fixture assumptions. After those fixtures were made portable, follow-up run `31337653232` passed dependency installation, typecheck, both production builds, and the command/readiness/file-opening/link/Accord/activity checks. Its remaining failures are the classified SQLite blocker (NIC-405), the pre-existing renderer harness TS1343 failure, and the Codex Stop cancellation blocker (NIC-406).
+Clean-host evidence is collected from GitHub Actions on the Windows Server-backed `windows-latest` runner. The first branch run (`31337105537`) exposed the host-specific test-fixture assumptions. After those fixtures were made portable, follow-up run `31337653232` passed dependency installation, typecheck, both production builds, and the command/readiness/file-opening/link/Accord/activity checks. Its remaining failures are the classified SQLite blocker (NIC-405), the pre-existing renderer harness TS1343 failure, and the Codex Stop cancellation blocker (NIC-406).
 
 ## Automated baseline
 
@@ -49,6 +49,7 @@ Clean-host evidence is collected from GitHub Actions on `windows-latest`. The fi
 | Repository selection | No Windows-specific source blocker identified in the baseline. | Not yet proven | Exercise repository dialog and selected-path handling in NIC-409 installed-app acceptance. |
 | Git operations | `git.exe` is available on the current Windows host; no architectural rewrite is indicated. | Partially proven | Broad service CI plus NIC-409 repository/Git smoke checks. Paths containing spaces remain mandatory acceptance coverage. |
 | Local file opening | IntelliJ launcher already contains Windows-specific executable discovery and rejects `.cmd`/`.bat` direct-spawn shims. Generic launcher tests now run on Windows. | Partially proven | Clean-host CI plus NIC-409 installed local-file open/reveal verification. |
+| Remote-worker SSH transport | The default operation-lease integration fixture is POSIX-only and skipped on Windows. Its lease script has direct coverage, but the native Windows-to-Linux `ssh.exe` boundary is not exercised. | Test coverage gap | NIC-404 must provide the Windows command transport; NIC-409 must exercise it against an installed app and worker. |
 | AWS remote-worker SSH keys | Clean GitHub Windows tests pass when Git for Windows supplies Bash. On this workstation, PATH resolves `bash.exe` to the WSL launcher and the same native path is misinterpreted. | Environment-sensitive portability gap | NIC-413 removes machine-dependent Bash coupling and covers paths containing spaces without unsafe shell concatenation. This is not an NIC-403 clean-run blocker. |
 | Packaging | Forge makers are currently ZIP/DMG restricted to `darwin`; there is no Windows maker or installer. | Windows portability blocker | NIC-407. Do not treat a future `make` success alone as installed-app acceptance. |
 | Installed-app smoke testing | No Windows installer exists yet. | Not yet available | NIC-409 requires clean install, launch, persistence, CLI turns, cancellation, Git/file operations, path-with-spaces, and reinstall/upgrade preservation evidence. |
