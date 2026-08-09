@@ -19,6 +19,8 @@ The Windows workflow uses `continue-on-error` only so later checks still run and
 
 Clean-host evidence is collected from GitHub Actions on the Windows Server-backed `windows-latest` runner. The first branch run (`31337105537`) exposed the host-specific test-fixture assumptions. After those fixtures were made portable, follow-up run `31337653232` passed dependency installation, typecheck, both production builds, and the command/readiness/file-opening/link/Accord/activity checks. Its remaining failures are the classified SQLite blocker (NIC-405), the pre-existing renderer harness TS1343 failure, and the Codex Stop cancellation blocker (NIC-406).
 
+Local Windows 11 x64 follow-up on this branch resolves NIC-405 and NIC-407: the app now bundles the pinned official SQLite CLI outside ASAR and Forge produces a Squirrel installer. The packaged and installed apps both launched through the real Electron renderer, initialized SQLite with `pragma integrity_check` returning `ok`, and detected the workstation's signed-in native Codex, Claude Code, and Antigravity executables. Clean-runner confirmation remains separate from this local installed-app evidence.
+
 ## Automated baseline
 
 | Check | Local Windows result | Classification | Notes |
@@ -28,9 +30,9 @@ Clean-host evidence is collected from GitHub Actions on the Windows Server-backe
 | `npm run build:main` | Pass | Baseline pass | Main process and preload compile successfully on Windows. |
 | Renderer production build (`vite build`) | Pass | Baseline pass | Production renderer bundles successfully. |
 | `npm run test:command` | Pass after NIC-403 fixture portability fix | Test harness portability | Three generic tests used `sh` even though their assertions were platform-neutral. They now use Node child processes. POSIX process-group assertions remain explicit Windows skips. |
-| `npm run test:cli-readiness` | Pass | Baseline pass with coverage limit | Service-level readiness logic passes because command lookup/execution are dependency-injected in these tests. This does not prove real Windows executable discovery. |
+| `npm run test:cli-readiness` | Pass locally and in the baseline runner | Baseline pass plus local native-executable proof | Windows lookup uses `where.exe`; version and authentication probes use the exact resolved path. The installed app reported the workstation's Codex 0.144.1, Claude Code 2.1.222, and Antigravity 1.1.11 as detected, runnable, and authenticated. |
 | `npm run test:file-opener` | Pass on clean Windows runner | Baseline pass | IntelliJ launcher fixtures were made host-portable. This workstation's generated `node_modules/electron` payload is broken, so clean-host CI is the authoritative result for Electron-importing tests. |
-| `npm run test:storage` | Fail on clean Windows runner | Windows portability blocker | GitHub Actions records `spawn sqlite3 ENOENT`; `sqlite3` is absent from the clean runner. This is the expected NIC-405 blocker. |
+| `npm run test:storage` | Pass locally with 22 tests | Resolved locally; clean-runner confirmation pending | Storage tests use the bundled, hash-verified SQLite 3.53.4 executable instead of requiring a host installation. |
 | `npm run test:links` | Pass | Baseline pass | External links, message links, and local file reference parsing pass on Windows. |
 | `npm run test:accord` | Pass | Baseline pass | Accord launcher preference and target reconciliation tests pass on Windows. |
 | `npm run test:chat-progress-renderer` | Pass | Baseline pass | Current upstream focused activity renderer suite passes on Windows. |
@@ -41,9 +43,9 @@ Clean-host evidence is collected from GitHub Actions on the Windows Server-backe
 
 | Area | Current Windows baseline | Classification | Owning issue / next evidence |
 | --- | --- | --- | --- |
-| Application startup | Main and renderer builds pass. Development/installed startup is not yet accepted. | Not yet proven | NIC-407 provides a Windows package; NIC-409 must prove installed startup. |
-| SQLite persistence | `StorageService` and `ArtifactStore` execute the external `sqlite3` CLI. `sqlite3` is not installed on the current Windows host. | Windows portability blocker | NIC-405 bundles and resolves `sqlite3.exe`, then reruns persistence/restart checks. |
-| CLI discovery/readiness | `lookupCommand()` executes Unix `which`. The current Windows host has `codex.exe`, `claude.exe`, and `agy.EXE`, but no `which`, so production discovery cannot reliably find them. | Windows portability blocker | NIC-404 adds PATH/PATHEXT-aware resolution and Windows launcher tests. |
+| Application startup | Packaged and Squirrel-installed Windows apps both reached the real Electron renderer from isolated profiles. | Proven locally | Repeat on the clean acceptance host in NIC-409. |
+| SQLite persistence | Windows x64 packages include pinned SQLite 3.53.4 outside ASAR. Storage and artifact persistence tests pass, packaged restart succeeds, and the installed database passes `pragma integrity_check`. | Proven locally | Confirm on the clean runner and retain the pinned binary provenance check. |
+| CLI discovery/readiness | Windows uses native `where.exe` discovery and probes the resolved executable path. The installed app detected and authenticated this host's native Codex, Claude Code, and Antigravity executables. | Proven locally for native executables | NIC-404 still owns safe `.cmd`/`.bat` launcher support and real-turn path-with-spaces coverage. |
 | CLI execution | `spawn(..., { shell: false })` is safe for native executables, but Windows npm `.cmd`/`.bat` shims cannot be treated like Unix executables. | Windows portability blocker | NIC-404 adds a platform command abstraction with quoting/path-with-spaces coverage and no unsafe interpolation. |
 | Cancellation | `runCommand()` disables POSIX process groups on `win32` and falls back to killing the direct child. POSIX descendant/process-group tests are explicitly skipped on Windows. After making the Codex app-server fixture executable on Windows, `Codex Stop still terminates the turn when the approval refusal pipe is dead` times out instead of settling. | Windows portability blocker | NIC-406 must prove full descendant termination for Stop, Abort, timeout, and the dead-approval-pipe case. |
 | Repository selection | No Windows-specific source blocker identified in the baseline. | Not yet proven | Exercise repository dialog and selected-path handling in NIC-409 installed-app acceptance. |
@@ -51,8 +53,8 @@ Clean-host evidence is collected from GitHub Actions on the Windows Server-backe
 | Local file opening | IntelliJ launcher already contains Windows-specific executable discovery and rejects `.cmd`/`.bat` direct-spawn shims. Generic launcher tests now run on Windows. | Partially proven | Clean-host CI plus NIC-409 installed local-file open/reveal verification. |
 | Remote-worker SSH transport | The default operation-lease integration fixture is POSIX-only and skipped on Windows. Its lease script has direct coverage, but the native Windows-to-Linux `ssh.exe` boundary is not exercised. | Test coverage gap | NIC-404 must provide the Windows command transport; NIC-409 must exercise it against an installed app and worker. |
 | AWS remote-worker SSH keys | Clean GitHub Windows tests pass when Git for Windows supplies Bash. On this workstation, PATH resolves `bash.exe` to the WSL launcher and the same native path is misinterpreted. | Environment-sensitive portability gap | NIC-413 removes machine-dependent Bash coupling and covers paths containing spaces without unsafe shell concatenation. This is not an NIC-403 clean-run blocker. |
-| Packaging | Forge makers are currently ZIP/DMG restricted to `darwin`; there is no Windows maker or installer. | Windows portability blocker | NIC-407. Do not treat a future `make` success alone as installed-app acceptance. |
-| Installed-app smoke testing | No Windows installer exists yet. | Not yet available | NIC-409 requires clean install, launch, persistence, CLI turns, cancellation, Git/file operations, path-with-spaces, and reinstall/upgrade preservation evidence. |
+| Packaging | `npm run make:win-x64` produces a branded Squirrel Setup executable, full NuGet package, and RELEASES manifest. Install and shortcut creation pass locally. | Proven locally | Signing and Windows updates remain outside this milestone. |
+| Installed-app smoke testing | Install, renderer launch, bundled SQLite initialization, native provider authentication, and same-version reinstall pass locally. | Partially proven | NIC-409 still requires real CLI turns, cancellation, Git/file operations, path-with-spaces, and user-data preservation evidence. |
 
 ## macOS-only and platform-specific behavior
 
@@ -70,10 +72,10 @@ These items are intentionally excluded from the Windows alpha baseline unless th
 
 | Issue | Baseline evidence |
 | --- | --- |
-| NIC-404 | Unix `which` command discovery; missing PATH/PATHEXT resolution; `.cmd`/`.bat` direct-spawn limitation. |
-| NIC-405 | Persistence shells out to external `sqlite3`; current Windows host has no `sqlite3` command. |
+| NIC-404 | Native executable discovery is resolved locally; `.cmd`/`.bat` direct-spawn support and real-turn path-with-spaces evidence remain. |
+| NIC-405 | Resolved locally by bundling and resolving the pinned official Windows x64 SQLite CLI outside ASAR. |
 | NIC-406 | Windows disables the existing POSIX process-group path; descendant termination is unproven, related POSIX tests are skipped, and the now-runnable Codex dead-approval-pipe Stop test times out on Windows. |
-| NIC-407 | Forge configuration exposes only macOS ZIP/DMG makers. |
+| NIC-407 | Resolved locally with a branded Squirrel Windows x64 installer and lifecycle handling. |
 | NIC-408 | Open Terminal and Antigravity native `/goal` are macOS-only and need explicit Windows UX/gating. |
 | NIC-413 | AWS worker SSH-key generation is coupled to whichever `bash` wins PATH. GitHub's Git Bash passes; this workstation's WindowsApps/WSL Bash misinterprets the native path. |
 
@@ -81,12 +83,10 @@ These items are intentionally excluded from the Windows alpha baseline unless th
 
 NIC-403 establishes CI and classification only. It does not claim an installed Windows alpha. The following checks remain manual acceptance evidence for later issues:
 
-1. Start the installed application on Windows 11 x64.
-2. Create, persist, restart, and reload conversations/artifacts without separately installing SQLite.
-3. Detect and authenticate supported CLI providers using real Windows launchers.
-4. Execute real Claude, Codex, and supported Antigravity turns with repository paths containing spaces.
-5. Stop, abort, and time out turns while proving no descendant processes remain.
-6. Select repositories, inspect Git state, and open/reveal local files.
-7. Reinstall or upgrade without losing Electron `userData`.
+1. Create, persist, restart, and reload a conversation through the installed UI; service-level conversation and artifact persistence already passes with the bundled SQLite runtime.
+2. Execute real Claude, Codex, and supported Antigravity turns with repository paths containing spaces; installed-app discovery and authentication already passes for their native executables.
+3. Stop, abort, and time out turns while proving no descendant processes remain.
+4. Select repositories, inspect Git state, and open/reveal local files.
+5. Upgrade to a later version without losing Electron `userData`; same-version reinstall already passes.
 
 Those installed-app checks belong to NIC-409 after NIC-404 through NIC-408 have produced a usable package.

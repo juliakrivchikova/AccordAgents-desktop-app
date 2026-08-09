@@ -311,15 +311,31 @@ export interface CommandLookupResult {
   timedOut?: boolean;
 }
 
+export interface CommandLookupInvocation {
+  command: string;
+  args: string[];
+}
+
+export function commandLookupInvocation(command: string, platform = process.platform): CommandLookupInvocation {
+  return platform === "win32"
+    ? { command: "where.exe", args: [command] }
+    : { command: "which", args: [command] };
+}
+
+export function firstCommandLookupPath(stdout: string): string | undefined {
+  return stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+}
+
 export async function lookupCommand(command: string, env?: NodeJS.ProcessEnv): Promise<CommandLookupResult> {
+  const lookup = commandLookupInvocation(command);
   try {
-    const which = await runCommand("which", [command], {
+    const result = await runCommand(lookup.command, lookup.args, {
       env,
       killProcessGroup: true,
       primeLoginShellEnv: env ? false : undefined,
       timeoutMs: 5000
     });
-    const commandPath = which.stdout.trim();
+    const commandPath = firstCommandLookupPath(result.stdout);
     return commandPath ? { status: "found", path: commandPath } : { status: "not-found" };
   } catch (error) {
     if (error instanceof CommandError && error.result.exitCode === 1 && !error.result.timedOut) {

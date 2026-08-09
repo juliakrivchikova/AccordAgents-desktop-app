@@ -86,7 +86,7 @@ export function CliReadinessSetupPanel(props: {
       <div className="cli-readiness-heading">
         <div>
           <h2>Connect a CLI provider</h2>
-          <p>AccordAgents uses a CLI you've already installed and signed in on this Mac.</p>
+          <p>AccordAgents uses a CLI you've already installed and signed in on this computer.</p>
         </div>
         <button
           type="button"

@@ -5,12 +5,36 @@ import path from "node:path";
 import test from "node:test";
 import {
   CommandError,
+  commandLookupInvocation,
   commandExists,
   commandEnvironment,
+  firstCommandLookupPath,
   parseLoginShellEnvOutput,
   resolveCommandTimeoutMs,
   runCommand
 } from "./command";
+
+test("command lookup uses native Windows discovery and keeps the first path", () => {
+  assert.deepEqual(commandLookupInvocation("codex", "win32"), {
+    command: "where.exe",
+    args: ["codex"]
+  });
+  assert.deepEqual(commandLookupInvocation("codex", "linux"), {
+    command: "which",
+    args: ["codex"]
+  });
+  assert.equal(firstCommandLookupPath("\r\nC:\\Program Files\\OpenAI\\codex.exe\r\nC:\\Users\\private\\bin\\codex.cmd\r\n"), "C:\\Program Files\\OpenAI\\codex.exe");
+  assert.equal(firstCommandLookupPath(" \r\n\t\n"), undefined);
+});
+
+test("commandEnvironment preserves injected Windows PATH and PATHEXT", () => {
+  const env = commandEnvironment({
+    PATH: ["fixture-bin", "windows-system32"].join(path.delimiter),
+    PATHEXT: ".COM;.EXE;.BAT;.CMD"
+  });
+  assert.ok(env.PATH?.split(path.delimiter).includes("fixture-bin"));
+  assert.equal(env.PATHEXT, ".COM;.EXE;.BAT;.CMD");
+});
 
 test("parseLoginShellEnvOutput extracts valid env lines between sentinels", () => {
   const env = parseLoginShellEnvOutput([

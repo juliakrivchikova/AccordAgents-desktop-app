@@ -1,7 +1,9 @@
 import { app } from "electron";
 import { runGeminiMcpProxy } from "./services/geminiMcpProxy";
 
-if (process.argv.includes("--accordagents-gemini-mcp-proxy")) {
+if (require("electron-squirrel-startup")) {
+  app.quit();
+} else if (process.argv.includes("--accordagents-gemini-mcp-proxy")) {
   app.dock?.hide();
   runGeminiMcpProxy();
 } else {

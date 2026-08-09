@@ -120,6 +120,7 @@ import { RemoteRunCoordinator } from "./services/remoteRunCoordinator";
 import { LocalFileOpenerService } from "./services/localFileOpener";
 import { SettingsService } from "./services/settings";
 import { StorageService } from "./services/storage";
+import { resolveSqliteExecutable } from "./services/sqliteCli";
 import { PluginService } from "./services/plugins";
 import { UserSkillsService } from "./services/userSkills";
 
@@ -135,7 +136,12 @@ if (userDataDirOverride) {
 const gitService = new GitService();
 const settingsService = new SettingsService();
 const agentEnvironmentService = new AgentEnvironmentService(settingsService);
-const storageService = new StorageService();
+const sqliteExecutable = resolveSqliteExecutable({
+  appPath: app.getAppPath(),
+  resourcesPath: process.resourcesPath,
+  isPackaged: app.isPackaged
+});
+const storageService = new StorageService({ sqliteExecutable });
 const localFileOpenerService = new LocalFileOpenerService(storageService, settingsService);
 const providerRunner = new ProviderRunner();
 const debugLogService = new DebugLogService();
@@ -214,7 +220,7 @@ appMcpService.setChatSendMessageHandler((actor, request) => chatService.sendChat
 appMcpService.setChatSetTitleHandler((actor, request) => chatService.setChatTitleFromTool(actor, request));
 // Artifacts persist in their own tables of the same SQLite database as
 // conversations, but independently of conversation payloads.
-const artifactStore = new ArtifactStore(path.join(app.getPath("userData"), "accordagents.sqlite3"));
+const artifactStore = new ArtifactStore(path.join(app.getPath("userData"), "accordagents.sqlite3"), sqliteExecutable);
 const artifactService = new ArtifactService({
   store: artifactStore,
   getMembers: async (conversationId) => {

@@ -4,11 +4,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { StorageService } from "./storage";
+import { resolveSqliteExecutable } from "./sqliteCli";
 import type { ChatMessage, Conversation } from "../../shared/types";
 
 function hexJson(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8").toString("hex").toUpperCase();
 }
+
+const SQLITE_EXECUTABLE = resolveSqliteExecutable({ appPath: process.cwd() });
 
 function fakeStorage(queryJson: (sql: string) => Promise<unknown[]>): StorageService {
   const storage = Object.create(StorageService.prototype) as any;
@@ -89,6 +92,7 @@ test("listConversationMessages round-trips large escape-dense output across adja
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-messages-"));
   const storage = Object.create(StorageService.prototype) as any;
   storage.dbPath = path.join(directory, "accordagents.sqlite3");
+  storage.sqliteExecutable = SQLITE_EXECUTABLE;
   storage.initialized = true;
   const denseContent = `quotes "' slash \\\\ tabs\t lines\n separators \u001e\u001f unicode 🙂 lone \ud800 `
     .repeat(12_000);

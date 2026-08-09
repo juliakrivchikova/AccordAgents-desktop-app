@@ -1,12 +1,16 @@
 import path from "node:path";
 import { MakerDMG } from "@electron-forge/maker-dmg";
+import { MakerSquirrel } from "@electron-forge/maker-squirrel";
 import { MakerZIP } from "@electron-forge/maker-zip";
 import { FusesPlugin } from "@electron-forge/plugin-fuses";
 import { FuseV1Options, FuseVersion } from "@electron/fuses";
 
 const productName = "AccordAgents";
 const assetsDir = path.resolve(__dirname, "assets");
-const iconPath = path.join(assetsDir, "icon.icns");
+const iconBasePath = path.join(assetsDir, "icon");
+const iconPath = `${iconBasePath}.icns`;
+const windowsIconPath = `${iconBasePath}.ico`;
+const sqliteResourcePath = path.join(assetsDir, "sqlite");
 const dmgBackgroundPath = path.join(assetsDir, "dmg-background.png");
 const entitlementsPath = path.resolve(__dirname, "entitlements.mac.plist");
 const entitlementsInheritPath = path.resolve(__dirname, "entitlements.mac.inherit.plist");
@@ -71,7 +75,8 @@ const config = {
     executableName: productName,
     appBundleId: process.env.MACOS_BUNDLE_ID || "com.juliakrivchikova.accordagents",
     asar: true,
-    icon: iconPath,
+    icon: iconBasePath,
+    ...(process.platform === "win32" ? { extraResource: [sqliteResourcePath] } : {}),
     extendInfo: {
       CFBundleDisplayName: productName,
       CFBundleName: productName,
@@ -148,7 +153,10 @@ const config = {
           path: "/Applications"
         }
       ]
-    }, ["darwin"])
+    }, ["darwin"]),
+    new MakerSquirrel({
+      setupIcon: windowsIconPath
+    }, ["win32"])
   ],
   plugins: [
     new FusesPlugin({
