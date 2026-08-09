@@ -17,6 +17,8 @@ Every Windows failure belongs to one of these categories:
 
 The Windows workflow uses `continue-on-error` only so later checks still run and produce evidence. Its final enforcement step fails the job if any validation step failed, so failures are not hidden to make CI green.
 
+Clean-host evidence is collected from GitHub Actions on `windows-latest`. The first branch run (`31337105537`) proved dependency installation, typecheck, both production builds, command/readiness/file-opening/link/Accord/activity tests, and exposed the remaining failures without short-circuiting the job.
+
 ## Automated baseline
 
 | Check | Local Windows result | Classification | Notes |
@@ -27,13 +29,13 @@ The Windows workflow uses `continue-on-error` only so later checks still run and
 | Renderer production build (`vite build`) | Pass | Baseline pass | Production renderer bundles successfully. |
 | `npm run test:command` | Pass after NIC-403 fixture portability fix | Test harness portability | Three generic tests used `sh` even though their assertions were platform-neutral. They now use Node child processes. POSIX process-group assertions remain explicit Windows skips. |
 | `npm run test:cli-readiness` | Pass | Baseline pass with coverage limit | Service-level readiness logic passes because command lookup/execution are dependency-injected in these tests. This does not prove real Windows executable discovery. |
-| `npm run test:file-opener` | Partial locally | Unrelated test/environment issue | IntelliJ launcher tests pass after path fixtures were made host-portable. The remaining local tests are blocked because this workstation's generated `node_modules/electron` payload is missing the Electron executable. GitHub Actions is the clean-host check. |
-| `npm run test:storage` | Blocked locally before SQLite | Unrelated test/environment issue | The same broken local Electron payload prevents the storage test module from loading. Independent source inspection still shows an external `sqlite3` runtime dependency, tracked under NIC-405. |
+| `npm run test:file-opener` | Pass on clean Windows runner | Baseline pass | IntelliJ launcher fixtures were made host-portable. This workstation's generated `node_modules/electron` payload is broken, so clean-host CI is the authoritative result for Electron-importing tests. |
+| `npm run test:storage` | Fail on clean Windows runner | Windows portability blocker | GitHub Actions records `spawn sqlite3 ENOENT`; `sqlite3` is absent from the clean runner. This is the expected NIC-405 blocker. |
 | `npm run test:links` | Pass | Baseline pass | External links, message links, and local file reference parsing pass on Windows. |
 | `npm run test:accord` | Pass | Baseline pass | Accord launcher preference and target reconciliation tests pass on Windows. |
 | `npm run test:chat-progress-renderer` | Pass | Baseline pass | Current upstream focused activity renderer suite passes on Windows. |
-| `npm run test:renderer-components` | Fail | Pre-existing upstream failure | `tsconfig.renderer-tests.json` compiles a CommonJS harness that now reaches renderer files using `import.meta`, causing TS1343. This is present at the baseline upstream revision and is not Windows-specific. |
-| `npm run test:permissions` | Fail locally | Mixed: Windows blocker + unrelated local environment issue | Electron-importing modules are blocked by this workstation's broken generated Electron payload. Independently, AWS worker key-material tests expose a real Windows path/quoting blocker tracked as NIC-413. A Gemini proxy launch-args assertion was a host-path fixture and is fixed in NIC-403. |
+| `npm run test:renderer-components` | Fail on clean Windows runner | Pre-existing upstream failure | `tsconfig.renderer-tests.json` compiles a CommonJS harness that now reaches renderer files using `import.meta`, causing TS1343. This is present at the baseline upstream revision and is not Windows-specific. |
+| `npm run test:permissions` | Windows failure isolated after NIC-403 fixture fixes | Windows portability blocker + test harness portability | Unix shebang `codex`/`ssh` fixtures, `/dev/null`, and hard-coded `/` source expectations were made host-portable or explicitly POSIX-only. The remaining locally reproducible Codex Stop test times out after the provider closes its approval stdin, which is NIC-406 cancellation evidence. AWS worker key-material tests pass on the clean GitHub Windows runner. |
 
 ## Compatibility matrix
 
@@ -43,11 +45,11 @@ The Windows workflow uses `continue-on-error` only so later checks still run and
 | SQLite persistence | `StorageService` and `ArtifactStore` execute the external `sqlite3` CLI. `sqlite3` is not installed on the current Windows host. | Windows portability blocker | NIC-405 bundles and resolves `sqlite3.exe`, then reruns persistence/restart checks. |
 | CLI discovery/readiness | `lookupCommand()` executes Unix `which`. The current Windows host has `codex.exe`, `claude.exe`, and `agy.EXE`, but no `which`, so production discovery cannot reliably find them. | Windows portability blocker | NIC-404 adds PATH/PATHEXT-aware resolution and Windows launcher tests. |
 | CLI execution | `spawn(..., { shell: false })` is safe for native executables, but Windows npm `.cmd`/`.bat` shims cannot be treated like Unix executables. | Windows portability blocker | NIC-404 adds a platform command abstraction with quoting/path-with-spaces coverage and no unsafe interpolation. |
-| Cancellation | `runCommand()` disables POSIX process groups on `win32` and falls back to killing the direct child. Existing descendant/process-group tests are explicitly skipped on Windows. | Windows portability blocker | NIC-406 must prove full descendant termination for Stop, Abort, and timeout. |
+| Cancellation | `runCommand()` disables POSIX process groups on `win32` and falls back to killing the direct child. POSIX descendant/process-group tests are explicitly skipped on Windows. After making the Codex app-server fixture executable on Windows, `Codex Stop still terminates the turn when the approval refusal pipe is dead` times out instead of settling. | Windows portability blocker | NIC-406 must prove full descendant termination for Stop, Abort, timeout, and the dead-approval-pipe case. |
 | Repository selection | No Windows-specific source blocker identified in the baseline. | Not yet proven | Exercise repository dialog and selected-path handling in NIC-409 installed-app acceptance. |
 | Git operations | `git.exe` is available on the current Windows host; no architectural rewrite is indicated. | Partially proven | Broad service CI plus NIC-409 repository/Git smoke checks. Paths containing spaces remain mandatory acceptance coverage. |
 | Local file opening | IntelliJ launcher already contains Windows-specific executable discovery and rejects `.cmd`/`.bat` direct-spawn shims. Generic launcher tests now run on Windows. | Partially proven | Clean-host CI plus NIC-409 installed local-file open/reveal verification. |
-| AWS remote-worker SSH keys | Key generation routes through `bash -lc` and POSIX shell quoting. Native Windows temp paths are misinterpreted before the expected `.pem` exists. | Windows portability blocker | NIC-413 makes key generation native-path-safe and covers paths containing spaces without unsafe shell concatenation. |
+| AWS remote-worker SSH keys | Clean GitHub Windows tests pass when Git for Windows supplies Bash. On this workstation, PATH resolves `bash.exe` to the WSL launcher and the same native path is misinterpreted. | Environment-sensitive portability gap | NIC-413 removes machine-dependent Bash coupling and covers paths containing spaces without unsafe shell concatenation. This is not an NIC-403 clean-run blocker. |
 | Packaging | Forge makers are currently ZIP/DMG restricted to `darwin`; there is no Windows maker or installer. | Windows portability blocker | NIC-407. Do not treat a future `make` success alone as installed-app acceptance. |
 | Installed-app smoke testing | No Windows installer exists yet. | Not yet available | NIC-409 requires clean install, launch, persistence, CLI turns, cancellation, Git/file operations, path-with-spaces, and reinstall/upgrade preservation evidence. |
 
@@ -69,10 +71,10 @@ These items are intentionally excluded from the Windows alpha baseline unless th
 | --- | --- |
 | NIC-404 | Unix `which` command discovery; missing PATH/PATHEXT resolution; `.cmd`/`.bat` direct-spawn limitation. |
 | NIC-405 | Persistence shells out to external `sqlite3`; current Windows host has no `sqlite3` command. |
-| NIC-406 | Windows disables the existing POSIX process-group path; descendant termination is unproven and related tests are skipped. |
+| NIC-406 | Windows disables the existing POSIX process-group path; descendant termination is unproven, related POSIX tests are skipped, and the now-runnable Codex dead-approval-pipe Stop test times out on Windows. |
 | NIC-407 | Forge configuration exposes only macOS ZIP/DMG makers. |
 | NIC-408 | Open Terminal and Antigravity native `/goal` are macOS-only and need explicit Windows UX/gating. |
-| NIC-413 | AWS worker SSH-key generation passes native Windows paths through `bash` and POSIX quoting; Windows key create/reuse/rotation tests fail because the expected key file is not created at the native path. |
+| NIC-413 | AWS worker SSH-key generation is coupled to whichever `bash` wins PATH. GitHub's Git Bash passes; this workstation's WindowsApps/WSL Bash misinterprets the native path. |
 
 ## Manual Windows checks still required
 

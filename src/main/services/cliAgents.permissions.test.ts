@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,6 +10,11 @@ import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 
 function makeRunner(): CliAgentRunner {
   return new CliAgentRunner();
+}
+
+async function writeCodexAppServerFixture(fixtureDir: string, source: string): Promise<string> {
+  await writeFile(path.join(fixtureDir, "app-server"), source, "utf8");
+  return process.execPath;
 }
 
 function makeCodexPendingTurn(overrides: Partial<Record<string, unknown>> = {}): Record<string, any> {
@@ -1888,8 +1893,8 @@ test("codex app-server auto mode applies workspace-write web preset and native a
 
 test("Codex model catalog handles server requests and rejects external-token refresh contract drift", async () => {
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-model-catalog-"));
-  const codexPath = path.join(fixtureDir, "codex");
-  await writeFile(codexPath, `#!/usr/bin/env node
+  const originalCwd = process.cwd();
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
 const readline = require("node:readline");
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 let initializeId;
@@ -1913,8 +1918,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     process.exit(64);
   }
 });
-`, "utf8");
-  await chmod(codexPath, 0o755);
+`);
+  process.chdir(fixtureDir);
   const runner = new CliAgentRunner(undefined, undefined, codexPath);
   try {
     const catalog = await runner.listModelCatalog("codex-cli");
@@ -1922,7 +1927,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(catalog.models[0]?.id, "gpt-fixture");
   } finally {
     await runner.shutdownWarmAgents();
-    await rm(fixtureDir, { recursive: true, force: true });
+    process.chdir(originalCwd);
+    await rm(fixtureDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 });
 
@@ -1946,8 +1952,7 @@ test("every non-interactive Codex exec path explicitly disables approvals", () =
 
 test("codex app-server production transport round-trips an approval and acknowledges delivery", async () => {
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-app-server-"));
-  const codexPath = path.join(fixtureDir, "codex");
-  await writeFile(codexPath, `#!/usr/bin/env node
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
 const readline = require("node:readline");
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 const rl = readline.createInterface({ input: process.stdin });
@@ -1988,8 +1993,7 @@ rl.on("line", (line) => {
     send({ method: "turn/completed", params: { threadId: "thread-fixture", turn: { id: "turn-fixture", status: "completed" } } });
   }
 });
-`, "utf8");
-  await chmod(codexPath, 0o755);
+`);
   const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
   let delivered = false;
   try {
@@ -2027,8 +2031,7 @@ rl.on("line", (line) => {
 
 test("codex app-server production transport returns method-specific results for every direct approval method", async () => {
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-direct-methods-"));
-  const codexPath = path.join(fixtureDir, "codex");
-  await writeFile(codexPath, `#!/usr/bin/env node
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
 const readline = require("node:readline");
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 const permissions = { network: { enabled: true }, fileSystem: null };
@@ -2094,8 +2097,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     process.exit(38);
   }
 });
-`, "utf8");
-  await chmod(codexPath, 0o755);
+`);
   const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
   const seen: string[] = [];
   try {
@@ -2148,8 +2150,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 
 test("codex app-server production transport sends the exact same-session Guardian override", async () => {
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-guardian-override-"));
-  const codexPath = path.join(fixtureDir, "codex");
-  await writeFile(codexPath, `#!/usr/bin/env node
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
 const readline = require("node:readline");
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
@@ -2187,8 +2188,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: {} });
   }
 });
-`, "utf8");
-  await chmod(codexPath, 0o755);
+`);
   const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
   let deliveryAcknowledged = false;
   let guardianSignal: AbortSignal | undefined;
@@ -2248,8 +2248,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 
 test("codex app-server expires a completed-turn Guardian denial before the next turn starts", async () => {
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-guardian-next-turn-"));
-  const codexPath = path.join(fixtureDir, "codex");
-  await writeFile(codexPath, `#!/usr/bin/env node
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
 const readline = require("node:readline");
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 let turn = 0;
@@ -2281,8 +2280,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ method: "turn/completed", params: { threadId: "thread-guardian-next", turn: { id: turnId, status: "completed" } } });
   }
 });
-`, "utf8");
-  await chmod(codexPath, 0o755);
+`);
   const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
   const participant = { id: "participant-guardian-next", kind: "codex-cli", label: "Codex" } as const;
   const warm = {
@@ -2341,8 +2339,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 
 test("codex app-server expires a completed-turn Guardian denial before compaction", async () => {
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-guardian-compact-"));
-  const codexPath = path.join(fixtureDir, "codex");
-  await writeFile(codexPath, `#!/usr/bin/env node
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
 const readline = require("node:readline");
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
@@ -2372,8 +2369,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ method: "turn/completed", params: { threadId: "thread-guardian-compact", turn: { id: "compact-turn", status: "completed" } } });
   }
 });
-`, "utf8");
-  await chmod(codexPath, 0o755);
+`);
   const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
   const participant = { id: "participant-guardian-compact", kind: "codex-cli", label: "Codex" } as const;
   const warm = {
@@ -2426,8 +2422,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 
 test("Codex Stop still terminates the turn when the approval refusal pipe is dead", async () => {
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-dead-pipe-"));
-  const codexPath = path.join(fixtureDir, "codex");
-  await writeFile(codexPath, `#!/usr/bin/env node
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
 const readline = require("node:readline");
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
@@ -2446,8 +2441,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     setInterval(() => {}, 1000);
   }
 });
-`, "utf8");
-  await chmod(codexPath, 0o755);
+`);
   const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
   const controller = new AbortController();
   let requestSeen!: () => void;
@@ -2497,8 +2491,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 
 test("Codex ignores cross-thread resolution and retires approval when its item completes", async () => {
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-retire-approval-"));
-  const codexPath = path.join(fixtureDir, "codex");
-  await writeFile(codexPath, `#!/usr/bin/env node
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
 const readline = require("node:readline");
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
@@ -2523,8 +2516,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     }, 75);
   }
 });
-`, "utf8");
-  await chmod(codexPath, 0o755);
+`);
   const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
   let aborted = false;
   const output: string[] = [];

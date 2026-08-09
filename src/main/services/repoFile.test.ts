@@ -172,7 +172,9 @@ test("resolveLocalFile rejects NUL paths", async () => {
   assert.equal(result.ok === false && result.reason, "invalid-path");
 });
 
-test("resolveLocalFile reports non-regular files", async () => {
+test("resolveLocalFile reports non-regular files", {
+  skip: process.platform === "win32" ? "/dev/null is a POSIX special-file fixture" : false
+}, async () => {
   const result = await resolveLocalFile(undefined, "/dev/null");
   assert.equal(result.ok, false);
   assert.equal(result.ok === false && result.reason, "not-regular-file");
