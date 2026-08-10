@@ -11,9 +11,12 @@ export function normalizeAppSidebarWidth(value: unknown): number {
   return Math.min(MAX_APP_SIDEBAR_WIDTH, Math.max(MIN_APP_SIDEBAR_WIDTH, Math.round(numericValue)));
 }
 
-export function maxAppSidebarWidthForContainer(containerWidth: number): number {
+export function maxAppSidebarWidthForContainer(
+  containerWidth: number,
+  minWorkspaceWidth = MIN_APP_WORKSPACE_WIDTH
+): number {
   return Math.max(
     MIN_APP_SIDEBAR_WIDTH,
-    Math.min(MAX_APP_SIDEBAR_WIDTH, Math.floor(containerWidth - MIN_APP_WORKSPACE_WIDTH))
+    Math.min(MAX_APP_SIDEBAR_WIDTH, Math.floor(containerWidth - minWorkspaceWidth))
   );
 }

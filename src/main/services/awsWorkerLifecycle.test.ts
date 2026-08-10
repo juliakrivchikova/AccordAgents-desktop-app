@@ -267,6 +267,8 @@ test("cloud-init and instance spec carry the toolchain and tag", () => {
   const init = buildWorkerCloudInit();
   assert.match(init, /@openai\/codex/);
   assert.match(init, /apparmor_restrict_unprivileged_userns=0/);
+  assert.doesNotMatch(init, /accordagents-mtu\.service/);
+  assert.doesNotMatch(init, /ip link set dev "\$IF" mtu 1200/);
   const spec = buildWorkerInstanceSpec({ imageId: "ami-1", rootDeviceName: "/dev/sda1", keyName: "k", securityGroupId: "sg-1" });
   assert.equal(spec.instanceType, "t3.small");
   assert.equal(spec.rootVolumeSizeGb, 8);

@@ -173,20 +173,20 @@ function ExternalLink({ url, label }: { url: string; label: string }): JSX.Eleme
   );
 }
 
-function MarkdownTextView({ content }: { content: string }): JSX.Element {
+function MarkdownTextView({ content, recognizedCommand }: { content: string; recognizedCommand?: "goal" }): JSX.Element {
   const blocks = useMemo(() => markdownBlocks(content), [content]);
   if (blocks.length === 0) {
     return <div className="markdown-text" />;
   }
-  return <div className="markdown-text">{blocks.map((block, index) => renderMarkdownBlock(block, index))}</div>;
+  return <div className="markdown-text">{blocks.map((block, index) => renderMarkdownBlock(block, index, recognizedCommand))}</div>;
 }
 
 export const MarkdownText = memo(MarkdownTextView);
 MarkdownText.displayName = "MarkdownText";
 
-function renderMarkdownBlock(block: MarkdownBlock, index: number): ReactNode {
+function renderMarkdownBlock(block: MarkdownBlock, index: number, recognizedCommand?: "goal"): ReactNode {
   if (block.type === "heading") {
-    return <h4 key={index}>{renderInlineWithBreaks(block.text, `h-${index}`)}</h4>;
+    return <h4 key={index}>{renderInlineWithBreaks(block.text, `h-${index}`, recognizedCommand)}</h4>;
   }
   if (block.type === "code") {
     return (
@@ -199,7 +199,7 @@ function renderMarkdownBlock(block: MarkdownBlock, index: number): ReactNode {
     return (
       <ol className="markdown-list" key={index} start={block.start}>
         {block.items.map((item, itemIndex) => (
-          <li key={itemIndex}>{renderInlineWithBreaks(item, `li-${index}-${itemIndex}`)}</li>
+          <li key={itemIndex}>{renderInlineWithBreaks(item, `li-${index}-${itemIndex}`, recognizedCommand)}</li>
         ))}
       </ol>
     );
@@ -208,7 +208,7 @@ function renderMarkdownBlock(block: MarkdownBlock, index: number): ReactNode {
     return (
       <ul className="markdown-list" key={index}>
         {block.items.map((item, itemIndex) => (
-          <li key={itemIndex}>{renderInlineWithBreaks(item, `li-${index}-${itemIndex}`)}</li>
+          <li key={itemIndex}>{renderInlineWithBreaks(item, `li-${index}-${itemIndex}`, recognizedCommand)}</li>
         ))}
       </ul>
     );
@@ -221,7 +221,7 @@ function renderMarkdownBlock(block: MarkdownBlock, index: number): ReactNode {
             <tr>
               {block.headers.map((header, headerIndex) => (
                 <th key={headerIndex} scope="col">
-                  {renderInlineWithBreaks(header, `t-${index}-h-${headerIndex}`)}
+                  {renderInlineWithBreaks(header, `t-${index}-h-${headerIndex}`, recognizedCommand)}
                 </th>
               ))}
             </tr>
@@ -230,7 +230,7 @@ function renderMarkdownBlock(block: MarkdownBlock, index: number): ReactNode {
             {block.rows.map((row, rowIndex) => (
               <tr key={rowIndex}>
                 {block.headers.map((_, cellIndex) => (
-                  <td key={cellIndex}>{renderInlineWithBreaks(row[cellIndex] ?? "", `t-${index}-${rowIndex}-${cellIndex}`)}</td>
+                  <td key={cellIndex}>{renderInlineWithBreaks(row[cellIndex] ?? "", `t-${index}-${rowIndex}-${cellIndex}`, recognizedCommand)}</td>
                 ))}
               </tr>
             ))}
@@ -240,20 +240,20 @@ function renderMarkdownBlock(block: MarkdownBlock, index: number): ReactNode {
     );
   }
   if (block.type === "paragraph") {
-    return <p key={index}>{renderInlineWithBreaks(block.lines.join("\n"), `p-${index}`)}</p>;
+    return <p key={index}>{renderInlineWithBreaks(block.lines.join("\n"), `p-${index}`, recognizedCommand)}</p>;
   }
   return null;
 }
 
-function renderInlineWithBreaks(text: string, keyPrefix: string): ReactNode[] {
+function renderInlineWithBreaks(text: string, keyPrefix: string, recognizedCommand?: "goal"): ReactNode[] {
   return text.split("\n").flatMap((line, index, lines) => {
-    const nodes = renderInline(line, `${keyPrefix}-${index}`);
+    const nodes = renderInline(line, `${keyPrefix}-${index}`, recognizedCommand);
     return index < lines.length - 1 ? [...nodes, <br key={`${keyPrefix}-br-${index}`} />] : nodes;
   });
 }
 
-function renderInline(text: string, keyPrefix: string): ReactNode[] {
-  return parseMarkdownInline(text).map((node, index) => renderInlineNode(node, `${keyPrefix}-${index}`));
+function renderInline(text: string, keyPrefix: string, recognizedCommand?: "goal"): ReactNode[] {
+  return parseMarkdownInline(text, { recognizedCommand }).map((node, index) => renderInlineNode(node, `${keyPrefix}-${index}`));
 }
 
 function renderInlineNode(node: MarkdownInlineNode, key: string): ReactNode {
@@ -278,6 +278,9 @@ function renderInlineNode(node: MarkdownInlineNode, key: string): ReactNode {
       );
     }
     return <code key={key}>{node.text}</code>;
+  }
+  if (node.type === "command") {
+    return <span key={key} className="chat-command-token">/{node.command}</span>;
   }
   if (node.type === "mention") {
     return <Mention key={key} handle={node.handle} />;

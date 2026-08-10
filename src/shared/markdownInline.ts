@@ -2,6 +2,7 @@ export type MarkdownInlineNode =
   | { type: "text"; text: string }
   | { type: "strong"; children: MarkdownInlineNode[] }
   | { type: "code"; text: string }
+  | { type: "command"; command: "goal" }
   | { type: "mention"; handle: string }
   | { type: "messageLink"; messageId: string; label?: string }
   | { type: "artifactLink"; artifactId: string; label?: string }
@@ -79,12 +80,21 @@ const INLINE_CODE_FILE_EXTENSIONS = new Set([
 // Mirrors the backend handle charset in chat.ts (extractMentions), but only at a word
 // boundary so email local-parts like `user@example.com` are not treated as mentions.
 const MENTION_RE = /^@([A-Za-z0-9][A-Za-z0-9_-]{0,31})/;
+const GOAL_COMMAND_RE = /^\/goal(?=\s|$)/;
+
+export interface MarkdownInlineOptions {
+  recognizedCommand?: "goal";
+}
 
 function isMentionBoundary(previous: string): boolean {
   return previous === "" || !/[A-Za-z0-9_]/.test(previous);
 }
 
-export function parseMarkdownInline(text: string): MarkdownInlineNode[] {
+function isCommandBoundary(previous: string): boolean {
+  return previous === "" || /\s/.test(previous);
+}
+
+export function parseMarkdownInline(text: string, options: MarkdownInlineOptions = {}): MarkdownInlineNode[] {
   const nodes: MarkdownInlineNode[] = [];
   let index = 0;
 
@@ -92,7 +102,7 @@ export function parseMarkdownInline(text: string): MarkdownInlineNode[] {
     if (text.startsWith("**", index)) {
       const end = text.indexOf("**", index + 2);
       if (end > index + 2) {
-        nodes.push({ type: "strong", children: parseMarkdownInline(text.slice(index + 2, end)) });
+        nodes.push({ type: "strong", children: parseMarkdownInline(text.slice(index + 2, end), options) });
         index = end + 2;
         continue;
       }
@@ -103,6 +113,19 @@ export function parseMarkdownInline(text: string): MarkdownInlineNode[] {
       if (end > index + 1) {
         nodes.push({ type: "code", text: text.slice(index + 1, end) });
         index = end + 1;
+        continue;
+      }
+    }
+
+    if (
+      text[index] === "/" &&
+      options.recognizedCommand === "goal" &&
+      isCommandBoundary(index > 0 ? text[index - 1] : "")
+    ) {
+      const command = text.slice(index).match(GOAL_COMMAND_RE);
+      if (command) {
+        nodes.push({ type: "command", command: "goal" });
+        index += command[0].length;
         continue;
       }
     }
@@ -187,7 +210,8 @@ export function parseMarkdownInline(text: string): MarkdownInlineNode[] {
     const nextBareArtifact = text.indexOf("#artifact:", index + 1);
     const nextMention = text.indexOf("@", index + 1);
     const nextExternal = nextExternalUrlStart(text, index + 1);
-    const nextCandidates = [nextBold, nextCode, nextLink, nextBare, nextBareArtifact, nextMention, nextExternal].filter((candidate) => candidate > -1);
+    const nextCommand = options.recognizedCommand === "goal" ? text.indexOf("/goal", index + 1) : -1;
+    const nextCandidates = [nextBold, nextCode, nextLink, nextBare, nextBareArtifact, nextMention, nextExternal, nextCommand].filter((candidate) => candidate > -1);
     const next = nextCandidates.length ? Math.min(...nextCandidates) : text.length;
     nodes.push({ type: "text", text: text.slice(index, next) });
     index = next;

@@ -12,6 +12,7 @@ import {
   shellQuotePosix
 } from "./cloudRunWorkers";
 import { runCommand } from "./command";
+import { isTransientSshError, runWithSshRetries } from "./sshRetry";
 import type { RemoteRunWorkerTarget } from "./remoteRuns";
 
 const PROBE_TIMEOUT_MS = 25_000;
@@ -46,6 +47,8 @@ export interface CloudRunSshExecRequest {
   command: string;
   timeoutMs: number;
   onStdout?: (chunk: string) => void;
+  retryAttempts?: number;
+  keepAlive?: "default" | "none";
 }
 
 export interface CloudRunDoctorServiceOptions {
@@ -79,7 +82,12 @@ export class CloudRunDoctorService {
     }
     let output: string;
     try {
-      output = await this.sshExec({ worker, command: probeScript(worker), timeoutMs: PROBE_TIMEOUT_MS });
+      output = await this.sshExec({
+        worker,
+        command: probeScript(worker),
+        timeoutMs: PROBE_TIMEOUT_MS,
+        retryAttempts: 1
+      });
     } catch (error) {
       return failedReport("connect", sshConnectionFailureDetail(errorMessage(error)));
     }
@@ -206,6 +214,7 @@ export class CloudRunDoctorService {
         worker,
         command: `${shellQuotePosix(codexPath)} login --device-auth < /dev/null 2>&1`,
         timeoutMs: DEVICE_AUTH_TIMEOUT_MS,
+        keepAlive: "none",
         onStdout: (chunk) => {
           buffered += chunk;
           const visible = stripAnsi(buffered);
@@ -347,17 +356,54 @@ function failedReport(id: CloudRunWorkerCheckId, detail: string): CloudRunWorker
 
 async function defaultSshExec(request: CloudRunSshExecRequest): Promise<string> {
   const target = buildCloudRunSshTarget(request.worker);
-  const result = await runCommand("ssh", [
-    "-o",
-    "ConnectTimeout=10",
-    ...cloudRunSshOptionArgs(request.worker),
-    target,
-    request.command
-  ], {
-    timeoutMs: request.timeoutMs,
-    onStdout: request.onStdout
-  });
+  // Some networks (e.g. a client behind a lossy VPN to a distant region) drop
+  // packets during SSH's multi-round-trip key exchange, so a single attempt
+  // fails at "banner exchange" ~half the time even though a fresh attempt
+  // usually succeeds. Retry transient connection failures. For streaming /
+  // interactive commands (device-auth) it is only safe to retry if nothing was
+  // emitted yet — a drop before the login prints its URL is just a failed
+  // connect, but re-running after output would double-prompt.
+  let producedOutput = false;
+  const onStdout = request.onStdout
+    ? (chunk: string) => {
+        producedOutput = true;
+        request.onStdout?.(chunk);
+      }
+    : undefined;
+  const sshArgs = request.keepAlive === "none"
+    ? withoutServerAliveOptions(cloudRunSshOptionArgs(request.worker))
+    : cloudRunSshOptionArgs(request.worker);
+  const result = await runWithSshRetries(
+    () => runCommand("ssh", [
+      ...sshArgs,
+      target,
+      request.command
+    ], {
+      timeoutMs: request.timeoutMs,
+      onStdout
+    }),
+    {
+      attempts: request.retryAttempts,
+      isTransient: (error) => !producedOutput && isTransientSshError(error)
+    }
+  );
   return result.stdout;
+}
+
+function withoutServerAliveOptions(args: string[]): string[] {
+  const next: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (
+      args[index] === "-o" &&
+      (args[index + 1]?.startsWith("ServerAliveInterval=") ||
+        args[index + 1]?.startsWith("ServerAliveCountMax="))
+    ) {
+      index += 1;
+      continue;
+    }
+    next.push(args[index]);
+  }
+  return next;
 }
 
 async function defaultLocalGitIdentity(): Promise<{ name?: string; email?: string }> {

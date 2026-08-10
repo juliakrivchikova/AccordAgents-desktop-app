@@ -19,6 +19,7 @@ import {
   MAX_STORED_ACTIVITY_LIST_WIDTH,
   MIN_STORED_ACTIVITY_LIST_WIDTH
 } from "../../lib/sidebar-width-storage";
+import { chatActivityShowsGenericCancel } from "../chat/chat-codex-approval-presentation";
 
 const MIN_ACTIVITY_LIST_WIDTH = 320;
 const NARROW_ACTIVITY_LIST_MAX_WIDTH = 340;
@@ -272,7 +273,7 @@ function ActivityRow({
   onCancelPending: () => void;
   onClear: () => void;
 }): JSX.Element {
-  const canCancelPending = canCancelPendingActivityItem(item);
+  const canCancelPending = chatActivityShowsGenericCancel(item);
   return (
     <div
       className="activity-row"
@@ -354,23 +355,6 @@ function ActivityRow({
       </span>
     </div>
   );
-}
-
-function canCancelPendingActivityItem(item: ChatActivityItem): boolean {
-  if (item.status !== "pending") {
-    return false;
-  }
-  if (item.kind === "approval") {
-    return Boolean(item.target.approvalId?.trim());
-  }
-  const sourceMessageId = item.target.sourceMessageId ?? item.target.messageId;
-  if (item.kind === "choice") {
-    return Boolean(sourceMessageId?.trim() && item.target.choiceId?.trim());
-  }
-  if (item.kind === "mention") {
-    return Boolean(sourceMessageId?.trim() && item.target.mentionTargetParticipantIds?.length);
-  }
-  return false;
 }
 
 function activityActorHandle(item: ChatActivityItem): string {

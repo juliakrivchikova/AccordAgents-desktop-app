@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { useState } from "react";
 import { act, create, type ReactTestInstance } from "react-test-renderer";
 
 import type {
@@ -15,6 +16,7 @@ import type { PendingChatImage } from "./use-chat-composer-images";
 
 const SETTINGS: AppSettings = {
   roundLimitDefault: 2,
+  betaUpdates: false,
   cliAgentRunTimeoutMs: 86_400_000,
   chatParticipantRequestMaxDepth: 2,
   chatParticipantRequestPromptMaxChars: 50_000,
@@ -106,6 +108,40 @@ test("send without a stored Assistant provider uses the priority preview", async
   renderer.unmount();
 });
 
+test("plain project folders do not render as repository errors", () => {
+  installWindowBridge();
+  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), {
+    repoPath: "/tmp/plain-project",
+    repoInfo: {
+      repoPath: "/tmp/plain-project",
+      isRepo: false,
+      branches: [],
+      statusLines: []
+    }
+  })} />);
+
+  assert.doesNotMatch(textOf(renderer.root), /Not a git repository/);
+  assert.doesNotMatch(textOf(renderer.root), /fatal:/);
+  renderer.unmount();
+});
+
+test("folder inspection failures still render as repository errors", () => {
+  installWindowBridge();
+  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), {
+    repoPath: "/tmp/missing-project",
+    repoInfo: {
+      repoPath: "/tmp/missing-project",
+      isRepo: false,
+      branches: [],
+      statusLines: [],
+      error: "Folder does not exist."
+    }
+  })} />);
+
+  assert.match(textOf(renderer.root), /Folder does not exist/);
+  renderer.unmount();
+});
+
 test("complete controlled New Chat draft survives unmount and is submitted intact", async () => {
   installWindowBridge();
   const fileMentions: RepoFileMention[] = [{ path: "src/main.ts" }];
@@ -166,6 +202,50 @@ test("complete controlled New Chat draft survives unmount and is submitted intac
   restored.unmount();
 });
 
+test("New Chat suggests /goal for one clear target and selection inserts /goal space", async () => {
+  let searchCalls = 0;
+  installWindowBridge({
+    searchUserSkills: async () => {
+      searchCalls += 1;
+      return {
+        target: {
+          participantIds: ["assistant-preview"],
+          providerKinds: ["codex-cli"],
+          hasClearTargets: true
+        },
+        skills: []
+      };
+    }
+  });
+  let renderer!: ReturnType<typeof create>;
+  await act(async () => {
+    renderer = create(<GoalCommandHarness />);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+  const textarea = renderer.root.findByProps({ "data-testid": "new-chat-prompt" });
+  await act(async () => {
+    textarea.props.onChange({ target: { value: "/go" } });
+    await new Promise((resolve) => setTimeout(resolve, 450));
+  });
+  assert.equal(searchCalls, 1);
+  const goalOption = renderer.root.findAllByType("button").find((button) => textOf(button).includes("/goal"));
+  assert.ok(goalOption, textOf(renderer.root));
+  await act(async () => {
+    goalOption.props.onMouseDown({ preventDefault: () => undefined });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+  assert.equal(renderer.root.findByProps({ "data-testid": "new-chat-prompt" }).props.value, "/goal ");
+  renderer.unmount();
+});
+
+function GoalCommandHarness(): JSX.Element {
+  const [prompt, setPrompt] = useState("");
+  return <NewChatScreen {...baseProps(readyAgents(), {
+    prompt,
+    onPromptChange: setPrompt
+  })} />;
+}
+
 function baseProps(agents: AgentHealth[], patch: Record<string, unknown> = {}) {
   return {
     prompt: "Draft",
@@ -176,6 +256,7 @@ function baseProps(agents: AgentHealth[], patch: Record<string, unknown> = {}) {
     repoPath: "",
     selectedParticipantIds: new Set<string>(),
     selectedParticipantRunLocations: {},
+    selectedParticipantRuntimeOverrides: {},
     settings: SETTINGS,
     summaries: [],
     agents,
@@ -192,6 +273,7 @@ function baseProps(agents: AgentHealth[], patch: Record<string, unknown> = {}) {
     onSelectRepo: () => undefined,
     onSelectedParticipantIdsChange: () => undefined,
     onSelectedParticipantRunLocationsChange: () => undefined,
+    onSelectedParticipantRuntimeOverridesChange: () => undefined,
     onOpenParticipantsSettings: () => undefined,
     onOpenProviderSettings: () => undefined,
     onRefreshAgents: async () => agents,
@@ -216,14 +298,15 @@ function readyAgent(kind: AgentHealth["kind"]): AgentHealth {
   };
 }
 
-function installWindowBridge(): void {
+function installWindowBridge(consensusPatch: Record<string, unknown> = {}): void {
   (globalThis as any).window = {
     consensus: {
       searchRepoFiles: async () => [],
       searchUserSkills: async () => ({ target: { participantIds: [], providerKinds: [], hasClearTargets: false }, skills: [] }),
       listPlugins: async () => ({ plugins: [], diagnostics: { checkedSources: [], errors: [], updatedAt: "" } }),
       openTerminal: async () => undefined,
-      openExternal: async () => undefined
+      openExternal: async () => undefined,
+      ...consensusPatch
     },
     setTimeout,
     clearTimeout,

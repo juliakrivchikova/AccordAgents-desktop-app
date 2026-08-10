@@ -34,6 +34,7 @@ const SQLITE_MIGRATION_TIMEOUT_MS = 120_000;
 const SCHEMA_META_COMPLETE = "complete";
 const INFERRED_REQUEST_THREAD_MIGRATION_KEY = "inferred-participant-request-threads-v1";
 const RUN_CANCEL_REQUEST_MAX_AGE_MS = 60 * 60_000;
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
 function sqlString(value: string | undefined | null): string {
   if (value === undefined || value === null) {
@@ -50,6 +51,23 @@ function sqlStringPairList(values: Array<[string, string]>): string {
   return values.length > 0
     ? `(${values.map(([left, right]) => `(${sqlString(left)}, ${sqlString(right)})`).join(", ")})`
     : "(('', ''))";
+}
+
+function parseHexJson<T>(value: unknown, context: string): T {
+  if (typeof value !== "string" || value.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(value)) {
+    throw new Error(`Invalid hexadecimal JSON returned for ${context}.`);
+  }
+  let json: string;
+  try {
+    json = UTF8_DECODER.decode(Buffer.from(value, "hex"));
+  } catch {
+    throw new Error(`Invalid UTF-8 JSON returned for ${context}.`);
+  }
+  try {
+    return JSON.parse(json) as T;
+  } catch {
+    throw new Error(`Invalid JSON returned for ${context}.`);
+  }
 }
 
 function clearLegacyAccordState(metadata: Conversation["metadata"]): Conversation["metadata"] {
@@ -287,11 +305,11 @@ export class StorageService {
     );
     const rows = await this.queryJson<{
       id: string;
-      bodyJson: string;
+      bodyHex: string;
     }>(
       `select
          id,
-         coalesce(nullif(body_json, ''), json_set(payload_json, '$.messages', json_array())) as bodyJson
+         hex(coalesce(nullif(body_json, ''), json_set(payload_json, '$.messages', json_array()))) as bodyHex
        from conversations
        where kind = 'chat'
          and coalesce(json_extract(payload_json, '$.metadata.archived'), 0) not in (1, '1', 'true')
@@ -304,15 +322,21 @@ export class StorageService {
 
     const conversationsById = new Map<string, Conversation>();
     for (const row of rows) {
+      let conversation: Conversation;
       try {
-        const conversation = JSON.parse(row.bodyJson) as Conversation;
-        conversation.metadata = clearLegacyAccordState(conversation.metadata);
-        conversation.messages = [];
-        sanitizeConversationWarnings(conversation);
-        conversationsById.set(conversation.id, conversation);
-      } catch {
+        conversation = parseHexJson<Conversation>(row.bodyHex, `conversation ${row.id}`);
+      } catch (error) {
+        console.warn(
+          `[StorageService] Skipping invalid chat activity conversation ${row.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
         continue;
       }
+      conversation.metadata = clearLegacyAccordState(conversation.metadata);
+      conversation.messages = [];
+      sanitizeConversationWarnings(conversation);
+      conversationsById.set(conversation.id, conversation);
     }
     if (conversationsById.size === 0) {
       return { items: [], generatedAt: new Date().toISOString() };
@@ -334,11 +358,7 @@ export class StorageService {
       if (!conversation) {
         continue;
       }
-      try {
-        conversation.messages.push(JSON.parse(row.payloadJson) as ChatMessage);
-      } catch {
-        continue;
-      }
+      conversation.messages.push(row.message);
     }
     for (const conversation of conversationsById.values()) {
       conversation.messages.sort((left, right) => {
@@ -432,9 +452,9 @@ export class StorageService {
     } else if (typeof request.beforeSequence === "number") {
       sequenceClause = ` and sequence < ${Math.max(0, Math.floor(request.beforeSequence))}`;
     }
-    const rows = await this.queryJson<{ sequence: number; payloadJson: string }>(
+    const rows = await this.queryJson<{ sequence: number; payloadHex: string }>(
       `
-        select sequence, hex(payload_json) as payloadJson
+        select sequence, hex(payload_json) as payloadHex
         from conversation_messages
         where conversation_id = ${sqlString(request.conversationId)}${sequenceClause}
         order by sequence desc
@@ -446,7 +466,9 @@ export class StorageService {
       `select count(*) as totalMessages from conversation_messages where conversation_id = ${sqlString(request.conversationId)};`
     );
     return {
-      messages: selectedRows.map((row) => JSON.parse(Buffer.from(row.payloadJson, "hex").toString("utf8")) as ChatMessage),
+      messages: selectedRows.map((row) =>
+        parseHexJson<ChatMessage>(row.payloadHex, `conversation message ${request.conversationId}:${row.sequence}`)
+      ),
       oldestSequence: selectedRows[0]?.sequence,
       newestSequence: selectedRows[selectedRows.length - 1]?.sequence,
       hasMoreBefore: rows.length > limit,
@@ -629,11 +651,11 @@ export class StorageService {
     conversationLimit: number,
     approvalConversationIds: string[] = [],
     approvalTriggerTargets: Array<[string, string]> = []
-  ): Promise<{ conversationId: string; sequence: number; payloadJson: string }[]> {
+  ): Promise<{ conversationId: string; sequence: number; message: ChatMessage }[]> {
     const idList = sqlStringList(conversationIds);
-    const pendingRows = await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
+    const pendingRows = await this.queryJson<{ conversationId: string; sequence: number; payloadHex: string }>(
       `
-        select conversation_id as conversationId, sequence, payload_json as payloadJson
+        select conversation_id as conversationId, sequence, hex(payload_json) as payloadHex
         from conversation_messages
         where conversation_id in ${idList}
           and (
@@ -648,9 +670,9 @@ export class StorageService {
         order by created_at desc;
       `
     );
-    const pendingParticipantRows = await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
+    const pendingParticipantRows = await this.queryJson<{ conversationId: string; sequence: number; payloadHex: string }>(
       `
-        select conversation_id as conversationId, sequence, payload_json as payloadJson
+        select conversation_id as conversationId, sequence, hex(payload_json) as payloadHex
         from conversation_messages
         where conversation_id in ${idList}
           and json_extract(payload_json, '$.role') = 'participant'
@@ -660,9 +682,9 @@ export class StorageService {
         limit ${Math.max(DEFAULT_CHAT_ACTIVITY_LIMIT, conversationLimit * 2)};
       `
     );
-    const participantRows = await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
+    const participantRows = await this.queryJson<{ conversationId: string; sequence: number; payloadHex: string }>(
       `
-        select conversationId, sequence, payloadJson
+        select conversationId, sequence, hex(payloadJson) as payloadHex
         from (
           select
             conversation_id as conversationId,
@@ -690,9 +712,9 @@ export class StorageService {
       `
     );
     const approvalContextRows = approvalConversationIds.length > 0
-      ? await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
+      ? await this.queryJson<{ conversationId: string; sequence: number; payloadHex: string }>(
         `
-          select conversationId, sequence, payloadJson
+          select conversationId, sequence, hex(payloadJson) as payloadHex
           from (
             select
               conversation_id as conversationId,
@@ -709,41 +731,64 @@ export class StorageService {
       )
       : [];
     const approvalTriggerRows = approvalTriggerTargets.length > 0
-      ? await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
+      ? await this.queryJson<{ conversationId: string; sequence: number; payloadHex: string }>(
         `
-          select conversation_id as conversationId, sequence, payload_json as payloadJson
+          select conversation_id as conversationId, sequence, hex(payload_json) as payloadHex
           from conversation_messages
           where (conversation_id, message_id) in ${sqlStringPairList(approvalTriggerTargets)};
         `
       )
       : [];
-    const activitySourceTargets = [...pendingRows, ...pendingParticipantRows, ...approvalTriggerRows].flatMap((row) => {
-      try {
-        const message = JSON.parse(row.payloadJson) as ChatMessage;
-        const ids = [message.metadata?.sourceMessageId, message.metadata?.parentMessageId, message.metadata?.chatThreadRootId]
-          .flatMap((value) => typeof value === "string" && value.trim() ? [value.trim()] : []);
-        return [...new Set(ids)].map((messageId) => [row.conversationId, messageId] as [string, string]);
-      } catch {
-        return [];
-      }
+    const decodeRows = (
+      rows: Array<{ conversationId: string; sequence: number; payloadHex: string }>,
+      context: string
+    ) => rows.map((row) => ({
+      conversationId: row.conversationId,
+      sequence: row.sequence,
+      message: parseHexJson<ChatMessage>(
+        row.payloadHex,
+        `${context} ${row.conversationId}:${row.sequence}`
+      )
+    }));
+    const decodedPendingRows = decodeRows(pendingRows, "pending activity message");
+    const decodedPendingParticipantRows = decodeRows(pendingParticipantRows, "pending participant activity message");
+    const decodedParticipantRows = decodeRows(participantRows, "participant activity message");
+    const decodedApprovalContextRows = decodeRows(approvalContextRows, "approval context message");
+    const decodedApprovalTriggerRows = decodeRows(approvalTriggerRows, "approval trigger message");
+    const activitySourceTargets = [
+      ...decodedPendingRows,
+      ...decodedPendingParticipantRows,
+      ...decodedApprovalTriggerRows
+    ].flatMap((row) => {
+      const ids = [row.message.metadata?.sourceMessageId, row.message.metadata?.parentMessageId, row.message.metadata?.chatThreadRootId]
+        .flatMap((value) => typeof value === "string" && value.trim() ? [value.trim()] : []);
+      return [...new Set(ids)].map((messageId) => [row.conversationId, messageId] as [string, string]);
     });
     const activitySourceRows = activitySourceTargets.length > 0
-      ? await this.queryJson<{ conversationId: string; sequence: number; payloadJson: string }>(
+      ? await this.queryJson<{ conversationId: string; sequence: number; payloadHex: string }>(
         `
-          select conversation_id as conversationId, sequence, payload_json as payloadJson
+          select conversation_id as conversationId, sequence, hex(payload_json) as payloadHex
           from conversation_messages
           where (conversation_id, message_id) in ${sqlStringPairList(activitySourceTargets)};
         `
       )
       : [];
-    const byKey = new Map<string, { conversationId: string; sequence: number; payloadJson: string }>();
+    const decodedSourceRows = activitySourceRows.map((row) => ({
+      conversationId: row.conversationId,
+      sequence: row.sequence,
+      message: parseHexJson<ChatMessage>(
+        row.payloadHex,
+        `activity source message ${row.conversationId}:${row.sequence}`
+      )
+    }));
+    const byKey = new Map<string, { conversationId: string; sequence: number; message: ChatMessage }>();
     for (const row of [
-      ...pendingRows,
-      ...pendingParticipantRows,
-      ...participantRows,
-      ...approvalContextRows,
-      ...approvalTriggerRows,
-      ...activitySourceRows
+      ...decodedPendingRows,
+      ...decodedPendingParticipantRows,
+      ...decodedParticipantRows,
+      ...decodedApprovalContextRows,
+      ...decodedApprovalTriggerRows,
+      ...decodedSourceRows
     ]) {
       byKey.set(`${row.conversationId}:${row.sequence}`, row);
     }

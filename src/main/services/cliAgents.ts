@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import type { Dirent } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { constants, type Dirent } from "node:fs";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import type {
@@ -41,7 +41,18 @@ import {
   extractCodexText as extractCodexExecText
 } from "./codexExec";
 import {
+  CODEX_GUARDIAN_DENIED_APPROVAL_METHOD,
+  CODEX_GUARDIAN_TIMED_OUT_APPROVAL_METHOD,
+  codexGuardianAssessmentEvent,
+  codexApprovalCancellationResult,
+  isCodexApprovalMethod,
+  validateCodexApprovalCorrelation,
+  type CodexApprovalCorrelation,
+  type CodexInboundServerRequest
+} from "./codexApprovals";
+import {
   buildGeminiExecInvocation,
+  buildGeminiInteractiveGoalInvocation,
   extractGeminiLogConversationId,
   geminiTranscriptPathForConversation,
   isGeminiResumeMissText,
@@ -60,8 +71,12 @@ const SESSION_LOG_RETRIES = 4;
 const MODEL_CATALOG_CACHE_MS = 5 * 60_000;
 const MODEL_CATALOG_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_TIMEOUT_MS = 8_000;
+const NATIVE_GOAL_IDLE_WARNING_MS = 5 * 60_000;
 const CODEX_APP_SERVER_DISABLED_ENV = "ACCORD_AGENTS_CODEX_APP_SERVER";
 const CODEX_APP_SERVER_MCP_TOKEN_ENV = "ACCORD_AGENTS_MCP_TOKEN";
+const CODEX_ACTIVITY_INVOCATION_MAX_CHARS = 1_800;
+const CODEX_ACTIVITY_OUTPUT_MAX_LINES = 20;
+const CODEX_ACTIVITY_OUTPUT_MAX_CHARS = 2_000;
 const CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
@@ -71,7 +86,7 @@ const CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS = [
 const CLAUDE_CODE_COMMAND_ENV_OPTIONS: CommandEnvironmentOptions = {
   dropProcessEnvKeysAbsentFromLoginShell: CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS
 };
-const CODEX_AUTO_APPROVALS_REVIEWER = "guardian_subagent";
+const CODEX_AUTO_APPROVALS_REVIEWER = "auto_review";
 // Gemini 3.x models served through Antigravity share a 1M-token context window;
 // used when no model is configured so the context indicator still renders.
 const GEMINI_DEFAULT_CONTEXT_WINDOW_TOKENS = 1_048_576;
@@ -79,6 +94,71 @@ const GEMINI_MCP_PROXY_ARG = "--accordagents-gemini-mcp-proxy";
 const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 const APP_TOOL_PERMISSION_TOOL = "app_tool_permission";
 const APP_TOOL_PERMISSION_MCP_TOOL = `mcp__accord_agents__${APP_TOOL_PERMISSION_TOOL}`;
+const ANTIGRAVITY_GOAL_ENV = "ACCORD_AGENTS_NATIVE_GOAL_PROMPT";
+const ANTIGRAVITY_GOAL_ARG_COUNT_ENV = "ACCORD_AGENTS_NATIVE_GOAL_ARG_COUNT";
+const ANTIGRAVITY_GOAL_ARG_ENV_PREFIX = "ACCORD_AGENTS_NATIVE_GOAL_ARG_";
+const ANTIGRAVITY_EXPECT_PATH = "/usr/bin/expect";
+const ANTIGRAVITY_GOAL_CANCEL_GRACE_MS = 2_500;
+const ANTIGRAVITY_CONVERSATION_RE = /agy --conversation=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+// eslint-disable-next-line no-control-regex
+const ANSI_ESCAPE_RE = /[\u001b\u009b][[\]()#;?]*(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*)?\u0007|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
+const ANTIGRAVITY_EXPECT_PROGRAM = `
+  set timeout -1
+  set goal $env(${ANTIGRAVITY_GOAL_ENV})
+  set args {}
+  for {set i 0} {$i < $env(${ANTIGRAVITY_GOAL_ARG_COUNT_ENV})} {incr i} {
+    set key "${ANTIGRAVITY_GOAL_ARG_ENV_PREFIX}$i"
+    lappend args $env($key)
+  }
+  set stty_init "rows 40 columns 120"
+  spawn -noecho agy {*}$args -i $goal
+  set child $spawn_id
+  log_user 0
+  fconfigure stdin -translation binary -encoding binary -blocking 0
+  fconfigure stdout -translation binary -encoding binary -buffering none
+  proc forward_input {} {
+    global child
+    set data [read stdin 4096]
+    if {[string length $data] > 0} {
+      send -i $child -raw -- $data
+    }
+  }
+  fileevent stdin readable forward_input
+  expect {
+    -i $child -re {(.|\\r|\\n)+} {
+      puts -nonewline stdout $expect_out(buffer)
+      exp_continue
+    }
+    -i $child eof {}
+  }
+  set result [wait -i $child]
+  exit [lindex $result 3]
+`;
+
+export function resolveCodexCompactTimeoutMs(requestedTimeoutMs: number | undefined): number {
+  return typeof requestedTimeoutMs === "number" && requestedTimeoutMs > 0
+    ? requestedTimeoutMs
+    : CLI_AGENT_COMPACT_TIMEOUT_MS;
+}
+
+export function codexAppServerMessageKind(
+  record: Record<string, unknown>
+): "server-request" | "response" | "notification" {
+  const hasId = typeof record.id === "string" || typeof record.id === "number";
+  if (hasId && typeof record.method === "string") {
+    return "server-request";
+  }
+  return hasId ? "response" : "notification";
+}
+
+export function antigravityInteractiveGoalAtPrompt(transcript: string): boolean {
+  const generating = transcript.lastIndexOf("Generating");
+  return generating >= 0 && transcript.lastIndexOf("? for shortcuts") > generating;
+}
+
+export function antigravityInteractivePermissionPrompt(transcript: string): boolean {
+  return transcript.includes("Requesting permission for:") && transcript.includes("Do you want to proceed?");
+}
 
 export interface CliAgentRunOptions {
   persistSession?: boolean;
@@ -98,6 +178,14 @@ export interface CliAgentRunOptions {
   permissions?: ChatAgentPermissions;
   timeoutMs?: number;
   allowEmptyContent?: boolean;
+  nativeGoal?: NativeGoalRun;
+  onProviderActivity?: () => void;
+  onCodexServerRequest?: CliAgentCodexServerRequestCallback;
+}
+
+export interface NativeGoalRun {
+  name: "goal";
+  objective: string;
 }
 
 export type CliAgentOutputKind = "tool" | "text";
@@ -109,11 +197,16 @@ export interface CliAgentOutputEvent {
   activityKind?: ChatAgentActivityKind;
   activityStatus?: ChatAgentActivityEvent["status"];
   activityDetail?: string;
+  activityItemId?: string;
 }
 
 export type CliAgentOutputCallback = (event: CliAgentOutputEvent) => void;
 
 export type CliAgentSessionIdCallback = (sessionId: string) => void;
+
+export type CliAgentCodexServerRequest = CodexInboundServerRequest;
+
+export type CliAgentCodexServerRequestCallback = (request: CliAgentCodexServerRequest) => Promise<unknown>;
 
 export interface CliAgentWarmOptions {
   conversationId: string;
@@ -180,7 +273,15 @@ interface WarmAgentEntry {
   scopeKey: string;
   providerKind: ParticipantConfig["kind"];
   process: ChildProcessWithoutNullStreams;
-  run: (prompt: string, signal?: AbortSignal, onOutput?: CliAgentOutputCallback, onSessionId?: CliAgentSessionIdCallback, timeoutMs?: number) => Promise<ParticipantRunResult>;
+  run: (
+    prompt: string,
+    signal?: AbortSignal,
+    onOutput?: CliAgentOutputCallback,
+    onSessionId?: CliAgentSessionIdCallback,
+    timeoutMs?: number,
+    nativeGoal?: NativeGoalRun,
+    onCodexServerRequest?: CliAgentCodexServerRequestCallback
+  ) => Promise<ParticipantRunResult>;
   compact?: (instructions?: string, signal?: AbortSignal, onSessionId?: CliAgentSessionIdCallback) => Promise<CliAgentCompactResult>;
   queue: Promise<void>;
   idleTimer?: NodeJS.Timeout;
@@ -204,10 +305,42 @@ interface ClaudeWarmPendingTurn {
   reject: (error: Error) => void;
 }
 
+interface ClaudeOneShotStreamState {
+  buffer: string;
+  streamedText: string;
+  messages: string[];
+  nextTextBlockStartsBlock: boolean;
+  resultEvent?: unknown;
+  error?: string;
+  sessionId?: string;
+  model?: string;
+  usedTokens?: number;
+  contextWindowTokens?: number;
+}
+
 interface CodexAppServerPendingRequest {
   method: string;
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
+}
+
+interface CodexAppServerPendingInboundRequest {
+  id: string | number;
+  key: string;
+  method: string;
+  controller: AbortController;
+  turn: CodexAppServerPendingTurn;
+  answered: boolean;
+  correlation: CodexApprovalCorrelation;
+}
+
+interface CodexAppServerPendingGuardianApproval {
+  key: string;
+  controller: AbortController;
+  threadId: string;
+  turnId: string;
+  reviewId: string;
+  targetItemId: string | null;
 }
 
 interface CachedModelCatalog {
@@ -219,19 +352,53 @@ interface CodexAppServerPendingTurn {
   startedAt: number;
   threadId: string;
   turnId?: string;
+  acceptedByProvider?: boolean;
   messages: string[];
   streamedText: string;
+  visibleTranscript: string;
+  activityItems: Map<string, {
+    label: string;
+    kind: ChatAgentActivityKind;
+    detail?: string;
+  }>;
+  agentTextPendingCarriageReturn?: boolean;
   completedAgentMessages: string[];
   finalMessage?: string;
   nextAgentMessageStartsBlock: boolean;
   model?: string;
   contextUsage?: AgentContextUsage;
-  timer: NodeJS.Timeout;
+  nativeGoal?: {
+    status?: CodexNativeGoalStatus | "cleared";
+    turnCompleted: boolean;
+  };
+  timer?: NodeJS.Timeout;
+  timeoutRemainingMs?: number;
+  timeoutDeadline?: number;
+  outstandingServerRequestIds: Set<string>;
   abort?: () => void;
   onOutput?: CliAgentOutputCallback;
+  onCodexServerRequest?: CliAgentCodexServerRequestCallback;
   resolve: (result: ParticipantRunResult) => void;
   reject: (error: Error) => void;
 }
+
+export class CodexAppServerRunError extends Error {
+  readonly turnAccepted: boolean;
+
+  constructor(cause: Error, turnAccepted: boolean) {
+    super(cause.message, { cause });
+    this.name = "CodexAppServerRunError";
+    this.turnAccepted = turnAccepted;
+  }
+}
+
+type CodexNativeGoalStatus =
+  | "active"
+  | "paused"
+  | "blocked"
+  | "usageLimited"
+  | "budgetLimited"
+  | "complete";
 
 interface CodexAppServerPendingCompact {
   threadId: string;
@@ -421,7 +588,8 @@ export class CliAgentRunner {
 
   constructor(
     private readonly debugLogs?: CliAgentDebugLogger,
-    manualReadinessEnvironment?: () => Promise<{ env: NodeJS.ProcessEnv }>
+    manualReadinessEnvironment?: () => Promise<{ env: NodeJS.ProcessEnv }>,
+    private readonly codexExecutable = "codex"
   ) {
     this.readiness = new CliReadinessService(debugLogs, {
       manualEnvironment: async () => (await manualReadinessEnvironment?.())?.env ?? {}
@@ -502,16 +670,34 @@ export class CliAgentRunner {
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
     const effectiveRepoPath = this.repoPathForRun(repoPath, diffMode, kind);
-    if (participant.kind === "codex-cli") {
-      return this.runCodex(participant, prompt, effectiveRepoPath, diffMode, kind, signal, options);
+    const idleMonitor = options.nativeGoal
+      ? this.createNativeGoalIdleMonitor(participant, options.onOutput)
+      : undefined;
+    const effectiveOptions: CliAgentRunOptions = idleMonitor
+      ? {
+          ...options,
+          timeoutMs: 0,
+          onProviderActivity: idleMonitor.touch,
+          onOutput: (event) => {
+            idleMonitor.touch();
+            options.onOutput?.(event);
+          }
+        }
+      : options;
+    try {
+      if (participant.kind === "codex-cli") {
+        return await this.runCodex(participant, prompt, effectiveRepoPath, diffMode, kind, signal, effectiveOptions);
+      }
+      if (participant.kind === "claude-code") {
+        return await this.runClaude(participant, prompt, effectiveRepoPath, kind, signal, effectiveOptions);
+      }
+      if (participant.kind === "gemini-cli") {
+        return await this.runGemini(participant, prompt, effectiveRepoPath, kind, signal, effectiveOptions);
+      }
+      return { participant, ok: false, content: "", error: `${participant.label} is not a CLI agent.` };
+    } finally {
+      idleMonitor?.close();
     }
-    if (participant.kind === "claude-code") {
-      return this.runClaude(participant, prompt, effectiveRepoPath, kind, signal, options);
-    }
-    if (participant.kind === "gemini-cli") {
-      return this.runGemini(participant, prompt, effectiveRepoPath, kind, signal, options);
-    }
-    return { participant, ok: false, content: "", error: `${participant.label} is not a CLI agent.` };
   }
 
   async compactSession(
@@ -565,7 +751,7 @@ export class CliAgentRunner {
 
   private async listCodexModelCatalog(fetchedAt: string): Promise<ProviderModelCatalog> {
     await ensureLoginShellEnvPrimed();
-    const child = spawn("codex", ["app-server", "--listen", "stdio://"], {
+    const child = spawn(this.codexExecutable, ["app-server", "--listen", "stdio://"], {
       env: commandEnvironment(),
       stdio: ["pipe", "pipe", "pipe"]
     });
@@ -610,6 +796,10 @@ export class CliAgentRunner {
       });
     };
 
+    const writeServerMessage = (message: Record<string, unknown>): Promise<void> => new Promise<void>((resolve, reject) => {
+      child.stdin.write(`${JSON.stringify(message)}\n`, (error) => error ? reject(error) : resolve());
+    });
+
     const handleResponse = (record: Record<string, unknown>): void => {
       const id = typeof record.id === "number" ? record.id : undefined;
       if (id === undefined) {
@@ -639,7 +829,21 @@ export class CliAgentRunner {
             const event = JSON.parse(line) as unknown;
             const record = this.asRecord(event);
             if (record) {
-              handleResponse(record);
+              const kind = codexAppServerMessageKind(record);
+              if (kind === "server-request") {
+                const id = typeof record.id === "string" || typeof record.id === "number" ? record.id : undefined;
+                const method = this.stringField(record, "method");
+                if (id !== undefined && method === "currentTime/read") {
+                  void writeServerMessage({ id, result: { currentTimeAt: Math.floor(Date.now() / 1_000) } }).catch(cleanup);
+                } else if (id !== undefined && method) {
+                  const message = method === "account/chatgptAuthTokens/refresh"
+                    ? "The model catalog uses Codex CLI-managed authentication and never supplies external ChatGPT tokens. A refresh callback indicates an unsupported authentication contract."
+                    : `The model catalog does not support the Codex client request ${method}.`;
+                  void writeServerMessage({ id, error: { code: -32601, message } }).catch(cleanup);
+                }
+              } else if (kind === "response") {
+                handleResponse(record);
+              }
             }
           } catch {
             // Ignore non-JSON status output.
@@ -667,6 +871,7 @@ export class CliAgentRunner {
         },
         capabilities: {
           experimentalApi: true,
+          requestAttestation: false,
           optOutNotificationMethods: []
         }
       });
@@ -904,9 +1109,256 @@ export class CliAgentRunner {
     signal?: AbortSignal,
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
+    if (options.nativeGoal) {
+      return this.runGeminiNativeGoal(participant, prompt, repoPath, kind, signal, this.withoutWarm(options));
+    }
     // Antigravity has no warm stdio protocol; print-mode one-shots with
     // `--conversation <id>` resume carry the session across turns.
     return this.runGeminiOneShot(participant, prompt, repoPath, kind, signal, this.withoutWarm(options));
+  }
+
+  private async runGeminiNativeGoal(
+    participant: ParticipantConfig,
+    prompt: string,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    signal?: AbortSignal,
+    options: CliAgentRunOptions = {}
+  ): Promise<ParticipantRunResult> {
+    const startedAt = Date.now();
+    const warnings: string[] = [];
+    if (process.platform !== "darwin") {
+      return this.failed(participant, new Error("Antigravity native /goal currently requires the macOS Expect PTY transport."));
+    }
+    try {
+      await access(ANTIGRAVITY_EXPECT_PATH, constants.X_OK);
+    } catch {
+      return this.failed(
+        participant,
+        new Error(`Antigravity native /goal requires executable ${ANTIGRAVITY_EXPECT_PATH} on macOS. Install the system Expect tool or use the dedicated Antigravity CLI.`)
+      );
+    }
+    if (options.appMcp) {
+      const mcpConfigError = await this.ensureGeminiMcpConfig();
+      if (mcpConfigError) {
+        warnings.push(
+          `${participant.label}: app tools may be unavailable; failed to update the Antigravity MCP config (${mcpConfigError}).`
+        );
+      }
+    }
+    const usesRolePromptFallback = Boolean(options.role && !options.sessionId);
+    const effectivePrompt = usesRolePromptFallback ? (options.role as CliAgentRoleOptions).promptFallbackPrompt : prompt;
+    let logDir: string | undefined;
+    let child: ChildProcessWithoutNullStreams | undefined;
+    let tail: { stop: () => void; sessionId: () => string | undefined } | undefined;
+    const cleanupTimers = new Set<NodeJS.Timeout>();
+    try {
+      logDir = await mkdtemp(path.join(tmpdir(), "accordagents-gemini-goal-"));
+      const logFilePath = path.join(logDir, "run.log");
+      const invocation = buildGeminiInteractiveGoalInvocation({
+        participant,
+        prompt: effectivePrompt,
+        repoPath,
+        kind,
+        logFilePath,
+        options: {
+          sessionId: options.sessionId,
+          extraReadableDirs: options.extraReadableDirs,
+          appMcp: options.appMcp,
+          agentMode: options.agentMode,
+          permissions: options.permissions,
+          extraEnv: this.agentRunEnv(options)
+        }
+      });
+      const initialTranscriptLines = options.sessionId
+        ? this.completeLineCount(await this.readOptionalFile(
+            geminiTranscriptPathForConversation(homedir(), options.sessionId)
+          ))
+        : 0;
+      const env = commandEnvironment({
+        ...invocation.env,
+        [ANTIGRAVITY_GOAL_ENV]: invocation.goalPrompt,
+        [ANTIGRAVITY_GOAL_ARG_COUNT_ENV]: String(invocation.args.length),
+        ...Object.fromEntries(
+          invocation.args.map((argument, index) => [`${ANTIGRAVITY_GOAL_ARG_ENV_PREFIX}${index}`, argument])
+        ),
+        TERM: "xterm-256color"
+      });
+      child = spawn(ANTIGRAVITY_EXPECT_PATH, ["-c", ANTIGRAVITY_EXPECT_PROGRAM], {
+        cwd: repoPath,
+        env,
+        stdio: ["pipe", "pipe", "pipe"]
+      });
+      const broker = child;
+      let cleanTranscript = "";
+      let finalResponse: string | undefined;
+      let candidateResponse: string | undefined;
+      let permissionFailure: string | undefined;
+      let cleanExitRequested = false;
+      let aborted = signal?.aborted === true;
+      const terminalReplies = new Set<string>();
+      const writeIfOpen = (value: string): void => {
+        if (broker.exitCode === null && !broker.killed && broker.stdin.writable) {
+          broker.stdin.write(value);
+        }
+      };
+      const scheduleWrite = (value: string, delayMs: number): void => {
+        const timer = setTimeout(() => {
+          cleanupTimers.delete(timer);
+          writeIfOpen(value);
+        }, delayMs);
+        cleanupTimers.add(timer);
+        timer.unref();
+      };
+      const requestCleanExit = (): void => {
+        if (cleanExitRequested || aborted) {
+          return;
+        }
+        cleanExitRequested = true;
+        writeIfOpen("\u0004");
+        scheduleWrite("\u0004", 650);
+        scheduleWrite("\u0004", 1_400);
+      };
+      const maybeFinishGoal = (): void => {
+        if (
+          candidateResponse &&
+          antigravityInteractiveGoalAtPrompt(cleanTranscript)
+        ) {
+          finalResponse = candidateResponse;
+          requestCleanExit();
+        }
+      };
+      const handleOutput = (chunk: Buffer | string): void => {
+        options.onProviderActivity?.();
+        const raw = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
+        cleanTranscript += raw.replace(ANSI_ESCAPE_RE, "").replace(/\u0000/g, "");
+        if (cleanTranscript.length > 300_000) {
+          cleanTranscript = cleanTranscript.slice(-180_000);
+        }
+        if (
+          !permissionFailure &&
+          antigravityInteractivePermissionPrompt(cleanTranscript)
+        ) {
+          permissionFailure = "Antigravity requested interactive tool permission during native /goal. AccordAgents cannot safely proxy this TUI approval yet; retry in Auto-review or grant the required write/shell permission before starting the goal.";
+          writeIfOpen("4\r");
+          scheduleWrite("\u0004", 300);
+          scheduleWrite("\u0004", 950);
+        }
+        for (const [query, response] of [
+          ["\u001b[?2026$p", "\u001b[?2026;2$y"],
+          ["\u001b[?2027$p", "\u001b[?2027;2$y"],
+          ["\u001b[?u", "\u001b[?0u"]
+        ] as const) {
+          if (raw.includes(query) && !terminalReplies.has(query)) {
+            terminalReplies.add(query);
+            writeIfOpen(response);
+          }
+        }
+        const sessionMatch = cleanTranscript.match(ANTIGRAVITY_CONVERSATION_RE);
+        if (sessionMatch?.[1]) {
+          this.reportSessionId(options.onSessionId, sessionMatch[1].toLowerCase());
+        }
+        maybeFinishGoal();
+      };
+      broker.stdout.on("data", handleOutput);
+      broker.stderr.on("data", handleOutput);
+      broker.stdin.on("error", () => undefined);
+      tail = this.startGeminiGoalRunTail(
+        logFilePath,
+        options.sessionId,
+        initialTranscriptLines,
+        options,
+        (response) => {
+          candidateResponse = response;
+          maybeFinishGoal();
+        }
+      );
+      if (options.sessionId) {
+        this.reportSessionId(options.onSessionId, options.sessionId);
+      }
+      const abort = (): void => {
+        aborted = true;
+        writeIfOpen("\u001b");
+        const toolPids = this.antigravityToolDescendantPids(broker.pid);
+        const terminateTimer = setTimeout(() => {
+          cleanupTimers.delete(terminateTimer);
+          this.terminateProcessIds(toolPids, "SIGTERM");
+          writeIfOpen("\u0004");
+        }, 250);
+        cleanupTimers.add(terminateTimer);
+        terminateTimer.unref();
+        scheduleWrite("\u0004", 900);
+        const killTimer = setTimeout(() => {
+          cleanupTimers.delete(killTimer);
+          this.terminateProcessIds(this.antigravityDescendantPids(broker.pid), "SIGKILL");
+          if (broker.exitCode === null) {
+            broker.kill("SIGTERM");
+          }
+        }, ANTIGRAVITY_GOAL_CANCEL_GRACE_MS);
+        cleanupTimers.add(killTimer);
+        killTimer.unref();
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) {
+        abort();
+      }
+      const exit = await new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+        broker.once("error", reject);
+        broker.once("close", (exitCode, exitSignal) => resolve({ exitCode, signal: exitSignal }));
+      });
+      signal?.removeEventListener("abort", abort);
+      const detectedSessionId = tail.sessionId();
+      tail.stop();
+      tail = undefined;
+      for (const timer of cleanupTimers) {
+        clearTimeout(timer);
+      }
+      cleanupTimers.clear();
+      const sessionId = detectedSessionId ??
+        cleanTranscript.match(ANTIGRAVITY_CONVERSATION_RE)?.[1]?.toLowerCase() ??
+        options.sessionId;
+      this.reportSessionId(options.onSessionId, sessionId);
+      if (aborted || signal?.aborted) {
+        throw new Error("Antigravity native goal was cancelled.");
+      }
+      if (permissionFailure) {
+        throw new Error(permissionFailure);
+      }
+      if (exit.exitCode !== 0 || exit.signal) {
+        const detail = this.truncateText(cleanTranscript.trim(), MAX_CLI_ERROR_CHARS);
+        throw new Error(`Antigravity native goal PTY exited unexpectedly${exit.exitCode === null ? "" : ` with code ${exit.exitCode}`}${detail ? `: ${detail}` : "."}`);
+      }
+      const content = finalResponse?.trim() ?? "";
+      if (!content && !options.allowEmptyContent) {
+        throw new Error("Antigravity native goal completed without response content.");
+      }
+      const runResult = this.withAppMcpClientStatus({
+        participant,
+        ok: true,
+        content,
+        durationMs: Date.now() - startedAt,
+        sessionId,
+        roleRuntime: usesRolePromptFallback ? "prompt-fallback" : undefined
+      }, participant, options);
+      return warnings.length > 0
+        ? { ...runResult, warnings: [...(runResult.warnings ?? []), ...warnings] }
+        : runResult;
+    } catch (error) {
+      const failed = this.failed(participant, error, Date.now() - startedAt);
+      return warnings.length > 0 ? { ...failed, warnings: [...(failed.warnings ?? []), ...warnings] } : failed;
+    } finally {
+      tail?.stop();
+      for (const timer of cleanupTimers) {
+        clearTimeout(timer);
+      }
+      if (child && child.exitCode === null && !child.killed) {
+        this.terminateProcessIds(this.antigravityDescendantPids(child.pid), "SIGKILL");
+        child.kill("SIGKILL");
+      }
+      if (logDir) {
+        await rm(logDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
   }
 
   private async runGeminiOneShot(
@@ -1126,6 +1578,180 @@ export class CliAgentRunner {
     };
   }
 
+  private startGeminiGoalRunTail(
+    logFilePath: string,
+    initialSessionId: string | undefined,
+    initialTranscriptLines: number,
+    options: CliAgentRunOptions,
+    onFinalResponse: (content: string) => void
+  ): { stop: () => void; sessionId: () => string | undefined } {
+    let sessionId = initialSessionId;
+    let transcriptPath = initialSessionId
+      ? geminiTranscriptPathForConversation(homedir(), initialSessionId)
+      : undefined;
+    let transcriptLinesSeen = initialSessionId ? initialTranscriptLines : 0;
+    let scanning = false;
+    let stopped = false;
+    let candidate: string | undefined;
+    let lastEmittedCandidate = "";
+    let emittedText = "";
+
+    const adoptSessionId = (id: string): void => {
+      const normalized = id.toLowerCase();
+      if (sessionId === normalized) {
+        return;
+      }
+      sessionId = normalized;
+      transcriptPath = geminiTranscriptPathForConversation(homedir(), normalized);
+      transcriptLinesSeen = 0;
+      candidate = undefined;
+      lastEmittedCandidate = "";
+      this.reportSessionId(options.onSessionId, normalized);
+    };
+    if (initialSessionId) {
+      this.reportSessionId(options.onSessionId, initialSessionId);
+    }
+
+    const scan = async (): Promise<void> => {
+      if (scanning || stopped) {
+        return;
+      }
+      scanning = true;
+      try {
+        const found = extractGeminiLogConversationId(await this.readOptionalFile(logFilePath));
+        if (found) {
+          adoptSessionId(found);
+        }
+        if (!transcriptPath) {
+          return;
+        }
+        const content = await this.readOptionalFile(transcriptPath);
+        if (!content) {
+          return;
+        }
+        const lines = content.split("\n");
+        const completeCount = Math.max(lines.length - 1, 0);
+        for (let index = transcriptLinesSeen; index < completeCount; index += 1) {
+          const line = lines[index] ?? "";
+          const activity = parseGeminiTranscriptActivity(line);
+          if (activity) {
+            this.emitLiveOutput(options.onOutput, "tool", `${activity.label}\n`, undefined, {
+              activityKind: activity.kind,
+              activityStatus: "started"
+            });
+          }
+          const record = this.parseJsonRecord(line);
+          if (!record) {
+            continue;
+          }
+          if (
+            record.type === "PLANNER_RESPONSE" &&
+            record.status === "DONE" &&
+            typeof record.content === "string" &&
+            record.content.trim()
+          ) {
+            candidate = record.content.trim();
+            if (candidate !== lastEmittedCandidate) {
+              lastEmittedCandidate = candidate;
+              emittedText = emittedText
+                ? this.textWithAgentMessageBoundary(emittedText, candidate)
+                : candidate;
+              this.emitLiveOutput(options.onOutput, "text", `${candidate}\n`, emittedText);
+            }
+            onFinalResponse(candidate);
+          }
+        }
+        transcriptLinesSeen = Math.max(transcriptLinesSeen, completeCount);
+      } finally {
+        scanning = false;
+      }
+    };
+
+    const interval = setInterval(() => {
+      void scan();
+    }, 250);
+    interval.unref();
+    void scan();
+    return {
+      stop: (): void => {
+        stopped = true;
+        clearInterval(interval);
+      },
+      sessionId: (): string | undefined => sessionId
+    };
+  }
+
+  private completeLineCount(content: string): number {
+    if (!content) {
+      return 0;
+    }
+    const lines = content.split("\n");
+    return Math.max(lines.length - 1, 0);
+  }
+
+  private parseJsonRecord(line: string): Record<string, unknown> | undefined {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) {
+      return undefined;
+    }
+    try {
+      const parsed = JSON.parse(trimmed);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private antigravityDescendantPids(rootPid: number | undefined): number[] {
+    if (!rootPid) {
+      return [];
+    }
+    try {
+      const rows = execFileSync("/bin/ps", ["-axo", "pid=,ppid="], { encoding: "utf8" })
+        .split("\n")
+        .map((line) => line.trim().match(/^(\d+)\s+(\d+)$/))
+        .filter((match): match is RegExpMatchArray => Boolean(match))
+        .map((match) => ({ pid: Number(match[1]), ppid: Number(match[2]) }));
+      const descendants: number[] = [];
+      const queue = [rootPid];
+      while (queue.length > 0) {
+        const parent = queue.shift() as number;
+        for (const row of rows) {
+          if (row.ppid === parent && !descendants.includes(row.pid)) {
+            descendants.push(row.pid);
+            queue.push(row.pid);
+          }
+        }
+      }
+      return descendants.reverse();
+    } catch {
+      return [];
+    }
+  }
+
+  private antigravityToolDescendantPids(rootPid: number | undefined): number[] {
+    const descendants = this.antigravityDescendantPids(rootPid);
+    return descendants.length > 1 ? descendants.slice(0, -1) : [];
+  }
+
+  private terminateProcessIds(pids: number[], signal: NodeJS.Signals): void {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, signal);
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "ESRCH") {
+          void this.writeDebugLog("cli-agent-native-goal-process-cleanup-error", {
+            pid,
+            signal,
+            error: this.errorText(error)
+          });
+        }
+      }
+    }
+  }
+
   private async compactGeminiSession(
     participant: ParticipantConfig,
     repoPath: string | undefined,
@@ -1255,10 +1881,66 @@ export class CliAgentRunner {
     signal?: AbortSignal,
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
+    if (options.nativeGoal) {
+      if (kind !== "chat") {
+        return {
+          participant,
+          ok: false,
+          content: "",
+          error: "Native /goal is available only in Chat."
+        };
+      }
+      if (!options.warm) {
+        return this.runCodexNativeGoalOneOff(participant, prompt, repoPath, diffMode, kind, signal, options);
+      }
+      return this.runCodexAppServerWarmOrOneShot(participant, prompt, repoPath, diffMode, kind, signal, options);
+    }
     if (options.warm && kind === "chat") {
       return this.runCodexAppServerWarmOrOneShot(participant, prompt, repoPath, diffMode, kind, signal, options);
     }
     return this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, options);
+  }
+
+  private async runCodexNativeGoalOneOff(
+    participant: ParticipantConfig,
+    prompt: string,
+    repoPath: string | undefined,
+    diffMode: GitDiffMode | undefined,
+    kind: ConversationKind,
+    signal: AbortSignal | undefined,
+    options: CliAgentRunOptions
+  ): Promise<ParticipantRunResult> {
+    if (process.env[CODEX_APP_SERVER_DISABLED_ENV] === "0") {
+      return this.failed(participant, new Error("Native /goal requires the Codex app-server transport; it is disabled."));
+    }
+    try {
+      await ensureLoginShellEnvPrimed();
+      const entry = this.createCodexAppServerWarmAgent(
+        `native-goal:${randomUUID()}`,
+        `native-goal:${participant.id}`,
+        participant,
+        repoPath,
+        diffMode,
+        kind,
+        this.withoutWarm(options)
+      );
+      try {
+        const result = await entry.run(
+          prompt,
+          signal,
+          options.onOutput,
+          options.onSessionId,
+          options.timeoutMs,
+          options.nativeGoal,
+          options.onCodexServerRequest
+        );
+        return this.withAppMcpClientStatus(result, participant, options);
+      } finally {
+        await this.closeWarmAgent(entry, "native-goal-complete");
+      }
+    } catch (error) {
+      return this.failed(participant, error);
+    }
   }
 
   private async compactCodexSession(
@@ -1343,6 +2025,13 @@ export class CliAgentRunner {
   ): Promise<ParticipantRunResult> {
     const warm = options.warm;
     if (!warm || process.env[CODEX_APP_SERVER_DISABLED_ENV] === "0") {
+      if (options.nativeGoal) {
+        return this.failed(participant, new Error(
+          process.env[CODEX_APP_SERVER_DISABLED_ENV] === "0"
+            ? "Native /goal requires the Codex app-server transport; it is disabled."
+            : "Native /goal requires a Codex app-server session."
+        ));
+      }
       return this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
     }
     const key = this.warmAgentKey(participant, repoPath, kind, options);
@@ -1372,7 +2061,9 @@ export class CliAgentRunner {
           runtime: "codex-app-server",
           error: this.errorText(error)
         });
-        return this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
+        return options.nativeGoal
+          ? this.failed(participant, error)
+          : this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
       }
     }
 
@@ -1380,7 +2071,15 @@ export class CliAgentRunner {
       this.clearWarmIdleTimer(entry as WarmAgentEntry);
       try {
         const result = this.withAppMcpClientStatus(
-          await (entry as WarmAgentEntry).run(prompt, signal, options.onOutput, options.onSessionId, options.timeoutMs),
+          await (entry as WarmAgentEntry).run(
+            prompt,
+            signal,
+            options.onOutput,
+            options.onSessionId,
+            options.timeoutMs,
+            options.nativeGoal,
+            options.onCodexServerRequest
+          ),
           participant,
           options
         );
@@ -1397,6 +2096,16 @@ export class CliAgentRunner {
         if (signal?.aborted) {
           return this.failed(participant, error);
         }
+        if (error instanceof CodexAppServerRunError && error.turnAccepted) {
+          void this.writeDebugLog("cli-agent-warm-terminal-after-turn-accepted", {
+            providerKind: participant.kind,
+            participantId: participant.id,
+            conversationId: warm.conversationId,
+            runtime: "codex-app-server",
+            error: this.errorText(error)
+          });
+          return this.failed(participant, error);
+        }
         void this.writeDebugLog("cli-agent-warm-fallback", {
           providerKind: participant.kind,
           participantId: participant.id,
@@ -1404,7 +2113,9 @@ export class CliAgentRunner {
           runtime: "codex-app-server",
           error: this.errorText(error)
         });
-        return this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
+        return options.nativeGoal
+          ? this.failed(participant, error)
+          : this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
       }
     });
   }
@@ -1418,7 +2129,7 @@ export class CliAgentRunner {
     kind: ConversationKind,
     options: CliAgentRunOptions
   ): WarmAgentEntry {
-    const child = spawn("codex", ["app-server", "--listen", "stdio://"], {
+    const child = spawn(this.codexExecutable, ["app-server", "--listen", "stdio://"], {
       cwd: repoPath,
       env: commandEnvironment(this.agentRunEnv(options)),
       stdio: ["pipe", "pipe", "pipe"]
@@ -1436,6 +2147,10 @@ export class CliAgentRunner {
     let initialized = false;
     let activeModel = participant.model;
     const pendingRequests = new Map<number, CodexAppServerPendingRequest>();
+    const pendingInboundRequests = new Map<string, CodexAppServerPendingInboundRequest>();
+    const pendingGuardianApprovals = new Map<string, CodexAppServerPendingGuardianApproval>();
+    const pendingFileChangeSummaries = new Map<string, Array<Record<string, unknown>>>();
+    const seenGuardianReviewKeys = new Set<string>();
     let pendingTurn: CodexAppServerPendingTurn | undefined;
     let pendingCompact: CodexAppServerPendingCompact | undefined;
 
@@ -1444,17 +2159,36 @@ export class CliAgentRunner {
       if (!current) {
         return undefined;
       }
-      clearTimeout(current.timer);
+      if (current.timer) {
+        clearTimeout(current.timer);
+      }
       if (current.abort) {
         current.abort();
       }
+      for (const [requestKey, request] of pendingInboundRequests) {
+        if (request.turn !== current) {
+          continue;
+        }
+        pendingInboundRequests.delete(requestKey);
+        request.controller.abort(new Error("Codex turn ended before the approval was answered."));
+      }
+      const turnPrefix = current.turnId ? `${current.threadId}:${current.turnId}:` : `${current.threadId}:`;
+      for (const key of pendingFileChangeSummaries.keys()) {
+        if (key.startsWith(turnPrefix)) pendingFileChangeSummaries.delete(key);
+      }
+      current.outstandingServerRequestIds.clear();
       pendingTurn = undefined;
       return current;
     };
 
     const rejectPendingTurn = (error: Error): void => {
       const current = cleanupPendingTurn();
-      current?.reject(error);
+      if (!current) {
+        return;
+      }
+      current.reject(error instanceof CodexAppServerRunError
+        ? error
+        : new CodexAppServerRunError(error, current.acceptedByProvider === true));
     };
 
     const cleanupPendingCompact = (): CodexAppServerPendingCompact | undefined => {
@@ -1524,6 +2258,7 @@ export class CliAgentRunner {
         },
         capabilities: {
           experimentalApi: true,
+          requestAttestation: false,
           optOutNotificationMethods: []
         }
       }, timeoutMs);
@@ -1573,6 +2308,468 @@ export class CliAgentRunner {
       pending.resolve(record.result);
     };
 
+    const inboundRequestKey = (id: string | number): string => `${typeof id}:${String(id)}`;
+    const itemCorrelationKey = (thread: string, turn: string, item: string): string => `${thread}:${turn}:${item}`;
+
+    const writeServerMessage = (message: Record<string, unknown>): Promise<void> => {
+      if (closed || child.exitCode !== null || child.killed) {
+        return Promise.reject(new Error("codex app-server process is not running"));
+      }
+      return new Promise<void>((resolve, reject) => {
+        child.stdin.write(`${JSON.stringify(message)}\n`, (error) => error ? reject(error) : resolve());
+      });
+    };
+
+    const rejectPendingGuardianApprovals = (error: Error): void => {
+      for (const approval of pendingGuardianApprovals.values()) {
+        approval.controller.abort(error);
+      }
+      pendingGuardianApprovals.clear();
+    };
+
+    let cancelPendingInboundApprovals: (turn: CodexAppServerPendingTurn, reason: string) => Promise<void>;
+
+    const armPendingTurnTimer = (turn: CodexAppServerPendingTurn, delayMs: number): void => {
+      if (delayMs <= 0 || pendingTurn !== turn) {
+        return;
+      }
+      if (turn.timer) {
+        clearTimeout(turn.timer);
+      }
+      turn.timeoutRemainingMs = delayMs;
+      turn.timeoutDeadline = Date.now() + delayMs;
+      turn.timer = setTimeout(() => {
+        void cancelPendingInboundApprovals(turn, "Codex approval expired because the turn timed out.")
+          .finally(() => {
+            rejectPendingGuardianApprovals(new Error("Codex Guardian approval expired because the provider turn timed out."));
+            rejectPendingTurn(new Error(`codex app-server timed out after ${delayMs}ms`));
+          });
+      }, delayMs);
+      turn.timer.unref();
+    };
+
+    const pausePendingTurnTimer = (turn: CodexAppServerPendingTurn): void => {
+      if (!turn.timer) {
+        return;
+      }
+      clearTimeout(turn.timer);
+      turn.timer = undefined;
+      turn.timeoutRemainingMs = Math.max(1, (turn.timeoutDeadline ?? Date.now()) - Date.now());
+      turn.timeoutDeadline = undefined;
+    };
+
+    const resumePendingTurnTimer = (turn: CodexAppServerPendingTurn): void => {
+      if (turn.outstandingServerRequestIds.size > 0 || turn.timer || !turn.timeoutRemainingMs) {
+        return;
+      }
+      armPendingTurnTimer(turn, turn.timeoutRemainingMs);
+    };
+
+    const finishPendingInboundRequest = async (
+      request: CodexAppServerPendingInboundRequest,
+      message: Record<string, unknown>
+    ): Promise<boolean> => {
+      const current = pendingInboundRequests.get(request.key);
+      if (!current || current !== request || request.answered) {
+        return false;
+      }
+      request.answered = true;
+      pendingInboundRequests.delete(request.key);
+      request.turn.outstandingServerRequestIds.delete(request.key);
+      try {
+        await writeServerMessage(message);
+      } finally {
+        resumePendingTurnTimer(request.turn);
+      }
+      return true;
+    };
+
+    const answerPendingInboundRequest = (
+      request: CodexAppServerPendingInboundRequest,
+      result: unknown
+    ): Promise<boolean> => finishPendingInboundRequest(request, { id: request.id, result });
+
+    const rejectPendingInboundRequest = (
+      request: CodexAppServerPendingInboundRequest,
+      code: number,
+      message: string
+    ): Promise<boolean> => finishPendingInboundRequest(request, {
+      id: request.id,
+      error: { code, message: this.truncateText(message, MAX_CLI_ERROR_CHARS) }
+    });
+
+    cancelPendingInboundApprovals = async (turn: CodexAppServerPendingTurn, reason: string): Promise<void> => {
+      const requests = [...pendingInboundRequests.values()].filter((request) => request.turn === turn);
+      const failures: Error[] = [];
+      for (const request of requests) {
+        if (!isCodexApprovalMethod(request.method)) {
+          continue;
+        }
+        try {
+          await answerPendingInboundRequest(request, codexApprovalCancellationResult(request.method));
+        } catch (error) {
+          failures.push(error instanceof Error ? error : new Error(String(error)));
+        } finally {
+          request.controller.abort(new Error(reason));
+        }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(failures, "One or more Codex approval refusal frames could not be written.");
+      }
+    };
+
+    const handleServerRequestResolved = (record: Record<string, unknown>): boolean => {
+      if (this.stringField(record, "method") !== "serverRequest/resolved") {
+        return false;
+      }
+      const params = this.asRecord(record.params);
+      const notificationThreadId = this.stringField(params ?? {}, "threadId");
+      const id = params && (typeof params.requestId === "string" || typeof params.requestId === "number")
+        ? params.requestId
+        : undefined;
+      if (id === undefined || !notificationThreadId) {
+        return true;
+      }
+      const request = pendingInboundRequests.get(inboundRequestKey(id));
+      if (!request) {
+        return true;
+      }
+      if (notificationThreadId !== request.correlation.threadId) {
+        const message = `Ignored serverRequest/resolved for thread ${notificationThreadId}; request ${String(id)} belongs to ${request.correlation.threadId}.`;
+        this.emitLiveOutput(request.turn.onOutput, "tool", `${message}\n`, undefined, {
+          activityKind: "approval",
+          activityStatus: "failed",
+          activityDetail: message
+        });
+        return true;
+      }
+      pendingInboundRequests.delete(request.key);
+      request.answered = true;
+      request.turn.outstandingServerRequestIds.delete(request.key);
+      request.controller.abort(new Error("Codex resolved this approval request before the user answered."));
+      resumePendingTurnTimer(request.turn);
+      return true;
+    };
+
+    const handleServerRequest = (record: Record<string, unknown>): void => {
+      const id = typeof record.id === "string" || typeof record.id === "number" ? record.id : undefined;
+      const method = this.stringField(record, "method");
+      if (id === undefined || !method) {
+        return;
+      }
+      if (method === "currentTime/read") {
+        void writeServerMessage({ id, result: { currentTimeAt: Math.floor(Date.now() / 1_000) } })
+          .catch((error) => rejectPendingTurn(error instanceof Error ? error : new Error(String(error))));
+        return;
+      }
+      if (!isCodexApprovalMethod(method)) {
+        // Codex 0.146's account/read contract says managed authentication uses
+        // the CLI's normal refresh-token flow; this callback belongs to clients
+        // that supplied external chatgptAuthTokens through account/login/start.
+        // AccordAgents never performs that login variant, so receiving it is
+        // authentication-contract drift rather than a recoverable refresh ask.
+        const message = method === "account/chatgptAuthTokens/refresh"
+          ? "This app-server was launched with Codex CLI-managed authentication, but Codex requested a client-managed token refresh. AccordAgents did not supply external ChatGPT tokens; re-authenticate the Codex CLI and retry."
+          : `AccordAgents does not support the Codex client request ${method}.`;
+        this.emitLiveOutput(pendingTurn?.onOutput, "tool", `${message}\n`, undefined, {
+          activityKind: "status",
+          activityStatus: "failed",
+          activityDetail: message
+        });
+        void writeServerMessage({ id, error: { code: method === "account/chatgptAuthTokens/refresh" ? -32001 : -32601, message } })
+          .catch((error) => rejectPendingTurn(error instanceof Error ? error : new Error(String(error))));
+        return;
+      }
+      const turn = pendingTurn;
+      if (!turn?.onCodexServerRequest) {
+        const message = "This Codex transport cannot present interactive approvals.";
+        void writeServerMessage({ id, error: { code: -32601, message } })
+          .catch((error) => rejectPendingTurn(error instanceof Error ? error : new Error(String(error))));
+        return;
+      }
+      let correlation: CodexApprovalCorrelation;
+      try {
+        correlation = validateCodexApprovalCorrelation(method, record.params, turn.threadId, turn.turnId);
+      } catch (error) {
+        const message = this.errorText(error);
+        void writeServerMessage({ id, error: { code: -32602, message: this.truncateText(message, MAX_CLI_ERROR_CHARS) } })
+          .catch((writeError) => rejectPendingTurn(writeError instanceof Error ? writeError : new Error(String(writeError))));
+        this.emitLiveOutput(turn.onOutput, "tool", `Rejected malformed Codex approval request: ${message}\n`, undefined, {
+          activityKind: "approval",
+          activityStatus: "failed",
+          activityDetail: message
+        });
+        return;
+      }
+      if (!turn.turnId && correlation.turnId) turn.turnId = correlation.turnId;
+      turn.acceptedByProvider = true;
+      const key = inboundRequestKey(id);
+      if (pendingInboundRequests.has(key)) {
+        const message = `Codex reused an active JSON-RPC request id (${String(id)}).`;
+        void writeServerMessage({ id, error: { code: -32600, message } })
+          .catch((error) => rejectPendingTurn(error instanceof Error ? error : new Error(String(error))));
+        return;
+      }
+      const controller = new AbortController();
+      const request: CodexAppServerPendingInboundRequest = {
+        id,
+        key,
+        method,
+        controller,
+        turn,
+        answered: false,
+        correlation
+      };
+      pendingInboundRequests.set(key, request);
+      turn.outstandingServerRequestIds.add(key);
+      pausePendingTurnTimer(turn);
+      let resolveDelivery!: () => void;
+      let rejectDelivery!: (error: Error) => void;
+      const responseDelivered = new Promise<void>((resolve, reject) => {
+        resolveDelivery = resolve;
+        rejectDelivery = reject;
+      });
+      void responseDelivered.catch(() => undefined);
+      const correlatedParams = method === "item/fileChange/requestApproval" && correlation.turnId
+        ? {
+            ...(this.asRecord(record.params) ?? {}),
+            fileChanges: pendingFileChangeSummaries.get(itemCorrelationKey(correlation.threadId, correlation.turnId, correlation.itemId))
+          }
+        : record.params;
+      void turn.onCodexServerRequest({ id, method, params: correlatedParams, signal: controller.signal, responseDelivered })
+        .then(async (result) => {
+          try {
+            const delivered = await answerPendingInboundRequest(request, result);
+            if (!delivered) {
+              throw new Error("The Codex approval request was resolved before this decision could be delivered.");
+            }
+            resolveDelivery();
+          } catch (error) {
+            const deliveryError = error instanceof Error ? error : new Error(String(error));
+            rejectDelivery(deliveryError);
+            throw deliveryError;
+          }
+        })
+        .catch((error) => {
+          rejectDelivery(error instanceof Error ? error : new Error(String(error)));
+          if (!pendingInboundRequests.has(key)) {
+            return;
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          return rejectPendingInboundRequest(request, -32000, message);
+        })
+        .catch((error) => rejectPendingTurn(error instanceof Error ? error : new Error(String(error))));
+    };
+
+    const handleFileChangePatchUpdated = (record: Record<string, unknown>): boolean => {
+      if (this.stringField(record, "method") !== "item/fileChange/patchUpdated") return false;
+      const params = this.asRecord(record.params);
+      const notificationThreadId = this.stringField(params ?? {}, "threadId");
+      const notificationTurnId = this.stringField(params ?? {}, "turnId");
+      const itemId = this.stringField(params ?? {}, "itemId");
+      const turn = pendingTurn;
+      if (
+        !params || !notificationThreadId || !notificationTurnId || !itemId || !Array.isArray(params.changes) ||
+        !turn || notificationThreadId !== turn.threadId || (turn.turnId && notificationTurnId !== turn.turnId)
+      ) {
+        return true;
+      }
+      if (!turn.turnId) turn.turnId = notificationTurnId;
+      const summaries = params.changes.flatMap((value): Array<Record<string, unknown>> => {
+        const change = this.asRecord(value);
+        const pathValue = this.stringField(change ?? {}, "path");
+        const kind = this.asRecord(change?.kind);
+        const kindType = this.stringField(kind ?? {}, "type");
+        if (!pathValue || (kindType !== "add" && kindType !== "delete" && kindType !== "update")) return [];
+        return [{ path: pathValue, kind: { type: kindType } }];
+      });
+      if (summaries.length !== params.changes.length) {
+        const message = "Ignored malformed item/fileChange/patchUpdated notification.";
+        this.emitLiveOutput(turn.onOutput, "tool", `${message}\n`, undefined, {
+          activityKind: "approval",
+          activityStatus: "failed",
+          activityDetail: message
+        });
+        return true;
+      }
+      pendingFileChangeSummaries.set(itemCorrelationKey(notificationThreadId, notificationTurnId, itemId), summaries);
+      return true;
+    };
+
+    const handleItemCompletedApprovalRetirement = (record: Record<string, unknown>): boolean => {
+      if (this.stringField(record, "method") !== "item/completed") return false;
+      const params = this.asRecord(record.params);
+      const item = this.asRecord(params?.item);
+      const notificationThreadId = this.stringField(params ?? {}, "threadId");
+      const notificationTurnId = this.stringField(params ?? {}, "turnId");
+      const itemId = this.stringField(item ?? {}, "id");
+      if (!notificationThreadId || !notificationTurnId || !itemId) return true;
+      for (const [requestKey, request] of pendingInboundRequests) {
+        if (
+          request.correlation.threadId !== notificationThreadId ||
+          request.correlation.turnId !== notificationTurnId ||
+          request.correlation.itemId !== itemId
+        ) {
+          continue;
+        }
+        pendingInboundRequests.delete(requestKey);
+        request.answered = true;
+        request.turn.outstandingServerRequestIds.delete(request.key);
+        request.controller.abort(new Error("Codex completed the item before the approval was answered."));
+        resumePendingTurnTimer(request.turn);
+      }
+      pendingFileChangeSummaries.delete(itemCorrelationKey(notificationThreadId, notificationTurnId, itemId));
+      return true;
+    };
+
+    const handleGuardianReviewCompleted = (record: Record<string, unknown>): void => {
+      if (this.stringField(record, "method") !== "item/autoApprovalReview/completed") {
+        return;
+      }
+      const params = this.asRecord(record.params);
+      const review = this.asRecord(params?.review);
+      const reviewId = this.stringField(params ?? {}, "reviewId");
+      const notificationThreadId = this.stringField(params ?? {}, "threadId");
+      const notificationTurnId = this.stringField(params ?? {}, "turnId");
+      const status = this.stringField(review ?? {}, "status");
+      const targetItemId = params?.targetItemId === null
+        ? null
+        : this.stringField(params ?? {}, "targetItemId");
+      if (
+        !params || !review || !reviewId || !notificationThreadId || !notificationTurnId ||
+        (params.targetItemId !== null && !targetItemId) ||
+        (status !== "denied" && status !== "timedOut" && status !== "approved" && status !== "aborted")
+      ) {
+        return;
+      }
+      const turn = pendingTurn;
+      if (
+        !turn?.onCodexServerRequest ||
+        notificationThreadId !== turn.threadId ||
+        (turn.turnId && notificationTurnId !== turn.turnId)
+      ) {
+        return;
+      }
+      if (!turn.turnId) turn.turnId = notificationTurnId;
+      const key = `${notificationThreadId}:${notificationTurnId}:${reviewId}:${targetItemId ?? "<none>"}`;
+      if (seenGuardianReviewKeys.has(key)) return;
+      if (seenGuardianReviewKeys.size >= 512) {
+        const oldest = seenGuardianReviewKeys.values().next().value;
+        if (typeof oldest === "string") seenGuardianReviewKeys.delete(oldest);
+      }
+      seenGuardianReviewKeys.add(key);
+      turn.acceptedByProvider = true;
+      if (status === "approved" || status === "aborted") return;
+      if (status === "timedOut") {
+        void turn.onCodexServerRequest({
+          id: `guardian-timeout:${reviewId}`,
+          method: CODEX_GUARDIAN_TIMED_OUT_APPROVAL_METHOD,
+          params,
+          signal: new AbortController().signal,
+          responseDelivered: Promise.resolve()
+        }).catch((error) => {
+          void this.debugLogs?.write("cli.codex-app-server.guardian-timeout-projection-failed", {
+            threadId: notificationThreadId,
+            turnId: notificationTurnId,
+            reviewId,
+            message: this.errorText(error)
+          });
+        });
+        return;
+      }
+      let event: Record<string, unknown>;
+      try {
+        event = codexGuardianAssessmentEvent(params);
+      } catch (error) {
+        const message = `Codex Auto Review denial could not be prepared for approval: ${this.errorText(error)}`;
+        this.emitLiveOutput(turn.onOutput, "tool", `${message}\n`, undefined, {
+          activityKind: "approval",
+          activityStatus: "failed",
+          activityDetail: message
+        });
+        void this.debugLogs?.write("cli.codex-app-server.guardian-approval-invalid", {
+          threadId: notificationThreadId,
+          turnId: notificationTurnId,
+          reviewId,
+          message: this.errorText(error)
+        });
+        return;
+      }
+      const controller = new AbortController();
+      const approval: CodexAppServerPendingGuardianApproval = {
+        key,
+        controller,
+        threadId: notificationThreadId,
+        turnId: notificationTurnId,
+        reviewId,
+        targetItemId: targetItemId ?? null
+      };
+      pendingGuardianApprovals.set(key, approval);
+      let resolveDelivery!: () => void;
+      let rejectDelivery!: (error: Error) => void;
+      const responseDelivered = new Promise<void>((resolve, reject) => {
+        resolveDelivery = resolve;
+        rejectDelivery = reject;
+      });
+      void responseDelivered.catch(() => undefined);
+      void turn.onCodexServerRequest({
+        id: `guardian:${reviewId}`,
+        method: CODEX_GUARDIAN_DENIED_APPROVAL_METHOD,
+        params,
+        signal: controller.signal,
+        responseDelivered
+      }).then(async (result) => {
+        if (pendingGuardianApprovals.get(key) !== approval || controller.signal.aborted) {
+          throw new Error("The Guardian approval is no longer active.");
+        }
+        const decision = this.stringField(this.asRecord(result) ?? {}, "decision");
+        if (decision !== "approveRetry") {
+          resolveDelivery();
+          return;
+        }
+        if (closed || child.exitCode !== null || child.killed || threadId !== notificationThreadId) {
+          throw new Error("The Codex app-server session for this Guardian denial is no longer active.");
+        }
+        await sendRequest("thread/approveGuardianDeniedAction", {
+          threadId: notificationThreadId,
+          event
+        }, 10_000);
+        void this.debugLogs?.write("cli.codex-app-server.guardian-approval-sent", {
+          threadId: notificationThreadId,
+          turnId: notificationTurnId,
+          reviewId
+        });
+        this.emitLiveOutput(turn.onOutput, "tool", "Recorded User approval for the Auto Review denial\n", undefined, {
+          activityKind: "approval",
+          activityStatus: "completed",
+          activityDetail: "The User approved one retry. AccordAgents will continue the participant if the original response has ended."
+        });
+        resolveDelivery();
+      }).catch((error) => {
+        const deliveryError = error instanceof Error ? error : new Error(String(error));
+        rejectDelivery(deliveryError);
+        if (controller.signal.aborted) {
+          return;
+        }
+        const message = this.errorText(deliveryError);
+        this.emitLiveOutput(turn.onOutput, "tool", `Could not approve the Auto Review retry: ${message}\n`, undefined, {
+          activityKind: "approval",
+          activityStatus: "failed",
+          activityDetail: message
+        });
+        void this.debugLogs?.write("cli.codex-app-server.guardian-approval-failed", {
+          threadId: notificationThreadId,
+          turnId: notificationTurnId,
+          reviewId,
+          message
+        });
+      }).finally(() => {
+        if (pendingGuardianApprovals.get(key) === approval) {
+          pendingGuardianApprovals.delete(key);
+        }
+      });
+    };
+
     const handleLine = (line: string): void => {
       let event: unknown;
       try {
@@ -1584,14 +2781,32 @@ export class CliAgentRunner {
       if (!record) {
         return;
       }
-      if ("id" in record) {
+      const messageKind = codexAppServerMessageKind(record);
+      if (messageKind === "server-request") {
+        handleServerRequest(record);
+        return;
+      }
+      if (messageKind === "response") {
         handleResponse(record);
         return;
       }
+      if (handleServerRequestResolved(record)) {
+        return;
+      }
+      handleFileChangePatchUpdated(record);
+      handleItemCompletedApprovalRetirement(record);
       if (this.handleCodexAppServerCompactNotification(record, participant, pendingCompact, cleanupPendingCompact, rejectPendingCompact)) {
         return;
       }
-      this.handleCodexAppServerNotification(record, participant, pendingTurn, cleanupPendingTurn, rejectPendingTurn);
+      handleGuardianReviewCompleted(record);
+      this.handleCodexAppServerNotification(
+        record,
+        participant,
+        pendingTurn,
+        cleanupPendingTurn,
+        rejectPendingTurn,
+        rejectPendingGuardianApprovals
+      );
     };
 
     const handleData = (chunk: string, stream: "stdout" | "stderr"): void => {
@@ -1624,6 +2839,7 @@ export class CliAgentRunner {
       closed = true;
       rejectPendingTurn(error);
       rejectPendingCompact(error);
+      rejectPendingGuardianApprovals(error);
       for (const pending of pendingRequests.values()) {
         pending.reject(error);
       }
@@ -1633,16 +2849,23 @@ export class CliAgentRunner {
       closed = true;
       rejectPendingTurn(error);
       rejectPendingCompact(error);
+      rejectPendingGuardianApprovals(error);
       for (const pending of pendingRequests.values()) {
         pending.reject(error);
       }
       pendingRequests.clear();
     });
-    child.on("close", (exitCode) => {
+    child.on("close", (exitCode, signal) => {
       closed = true;
-      const error = new Error(`codex app-server process exited${exitCode === null ? "" : ` with code ${exitCode}`}${stderr ? `: ${stderr}` : ""}`);
+      const exitDetail = signal
+        ? ` after signal ${signal}`
+        : exitCode === null
+          ? ""
+          : ` with code ${exitCode}`;
+      const error = new Error(`codex app-server process exited${exitDetail}${!signal && stderr ? `: ${stderr}` : ""}`);
       rejectPendingTurn(error);
       rejectPendingCompact(error);
+      rejectPendingGuardianApprovals(error);
       for (const pending of pendingRequests.values()) {
         pending.reject(error);
       }
@@ -1661,7 +2884,11 @@ export class CliAgentRunner {
         signal?: AbortSignal,
         onSessionId?: CliAgentSessionIdCallback
       ): Promise<CliAgentCompactResult> => {
-        const timeoutMs = options.timeoutMs ?? CLI_AGENT_COMPACT_TIMEOUT_MS;
+        rejectPendingGuardianApprovals(new Error("Codex Guardian approval expired because context compaction started."));
+        // A native goal deliberately gives its turn an unbounded timeout. Warm
+        // app-server entries can be reused by later slash workflows, but that
+        // turn-specific zero must never become an immediate compact timeout.
+        const timeoutMs = resolveCodexCompactTimeoutMs(options.timeoutMs);
         const currentThreadId = await ensureThread(timeoutMs);
         const compactOptions: CliAgentRunOptions = {
           ...options,
@@ -1758,22 +2985,46 @@ export class CliAgentRunner {
         signal?: AbortSignal,
         onOutput?: CliAgentOutputCallback,
         onSessionId?: CliAgentSessionIdCallback,
-        timeoutMsOverride?: number
+        timeoutMsOverride?: number,
+        nativeGoal?: NativeGoalRun,
+        onCodexServerRequest?: CliAgentCodexServerRequestCallback
       ): Promise<ParticipantRunResult> => {
-        const timeoutMs = timeoutMsOverride ?? this.runTimeoutMs;
+        rejectPendingGuardianApprovals(new Error("Codex Guardian approval expired because a new turn started."));
+        const timeoutMs = nativeGoal ? 0 : (timeoutMsOverride ?? this.runTimeoutMs);
         const currentThreadId = await ensureThread(timeoutMs);
         this.reportSessionId(onSessionId, currentThreadId);
         const startedAt = Date.now();
-        const timer = setTimeout(() => {
-          rejectPendingTurn(new Error(`codex app-server timed out after ${timeoutMs}ms`));
-        }, timeoutMs);
-        timer.unref();
+        let aborting = false;
         const abort = (): void => {
-          const current = pendingTurn;
-          if (current?.turnId) {
-            void sendRequest("turn/interrupt", { threadId: current.threadId, turnId: current.turnId }).catch(() => undefined);
+          if (aborting) {
+            return;
           }
-          rejectPendingTurn(new Error("codex app-server turn was cancelled"));
+          aborting = true;
+          const current = pendingTurn;
+          if (!current) {
+            return;
+          }
+          void (async () => {
+            try {
+              await cancelPendingInboundApprovals(current, "Stopped by user.");
+            } catch (error) {
+              void this.debugLogs?.write("cli.codex-app-server.stop-refusal-write-failed", {
+                threadId: current.threadId,
+                turnId: current.turnId,
+                message: this.errorText(error)
+              });
+            }
+            rejectPendingGuardianApprovals(new Error("Stopped by user."));
+            try {
+              if (current.turnId) {
+                await sendRequest("turn/interrupt", { threadId: current.threadId, turnId: current.turnId }).catch(() => undefined);
+              }
+            } finally {
+              rejectPendingTurn(new Error("codex app-server turn was cancelled"));
+            }
+          })().catch((error) => {
+            rejectPendingTurn(error instanceof Error ? error : new Error(String(error)));
+          });
         };
         const resultPromise = new Promise<ParticipantRunResult>((resolve, reject) => {
           pendingTurn = {
@@ -1781,34 +3032,58 @@ export class CliAgentRunner {
             threadId: currentThreadId,
             messages: [],
             streamedText: "",
+            visibleTranscript: "",
+            activityItems: new Map(),
             completedAgentMessages: [],
             nextAgentMessageStartsBlock: false,
             model: activeModel,
-            timer,
+            nativeGoal: nativeGoal ? { turnCompleted: false } : undefined,
+            timeoutRemainingMs: timeoutMs > 0 ? timeoutMs : undefined,
+            outstandingServerRequestIds: new Set(),
             abort: signal ? () => signal.removeEventListener("abort", abort) : undefined,
             onOutput,
+            onCodexServerRequest,
             resolve,
             reject
           };
         });
+        if (pendingTurn && timeoutMs > 0) {
+          armPendingTurnTimer(pendingTurn, timeoutMs);
+        }
         if (signal?.aborted) {
           abort();
           return resultPromise;
         }
         signal?.addEventListener("abort", abort, { once: true });
-        const turn = await sendRequest("turn/start", {
-          threadId: currentThreadId,
-          effort: this.codexReasoningEffort(participant.reasoningEffort) ?? null,
-          input: [
-            {
-              type: "text",
-              text: this.codexPrompt(turnPrompt, repoPath, diffMode, kind, options),
-              text_elements: []
+        const codexTurnPrompt = this.codexPrompt(turnPrompt, repoPath, diffMode, kind, options);
+        try {
+          if (nativeGoal) {
+            await sendRequest("thread/goal/set", {
+              threadId: currentThreadId,
+              objective: nativeGoal.objective,
+              status: "active",
+              tokenBudget: null
+            });
+          }
+          const turn = await sendRequest("turn/start", {
+            threadId: currentThreadId,
+            effort: this.codexReasoningEffort(participant.reasoningEffort) ?? null,
+            input: [
+              {
+                type: "text",
+                text: codexTurnPrompt,
+                text_elements: []
+              }
+            ]
+          }, timeoutMs) as CodexAppServerTurnStartResult;
+          if (pendingTurn) {
+            pendingTurn.acceptedByProvider = true;
+            if (!pendingTurn.turnId) {
+              pendingTurn.turnId = turn.turn?.id;
             }
-          ]
-        }, timeoutMs) as CodexAppServerTurnStartResult;
-        if (pendingTurn) {
-          pendingTurn.turnId = turn.turn?.id;
+          }
+        } catch (error) {
+          rejectPendingTurn(error instanceof Error ? error : new Error(String(error)));
         }
         return resultPromise;
       }
@@ -1986,7 +3261,15 @@ export class CliAgentRunner {
     const turn = this.asRecord(params.turn) ?? this.asRecord(record.turn);
     return (
       this.stringField(turn ?? {}, "id") ??
+      this.findStringField(params, ["turnId", "turn_id"]) ??
       this.findStringField(record, ["turnId", "turn_id"])
+    );
+  }
+
+  private codexAppServerThreadId(record: Record<string, unknown>, params: Record<string, unknown>): string | undefined {
+    return (
+      this.findStringField(params, ["threadId", "thread_id"]) ??
+      this.findStringField(record, ["threadId", "thread_id"])
     );
   }
 
@@ -2051,7 +3334,8 @@ export class CliAgentRunner {
     participant: ParticipantConfig,
     pending: CodexAppServerPendingTurn | undefined,
     cleanupPending: () => CodexAppServerPendingTurn | undefined,
-    rejectPending: (error: Error) => void
+    rejectPending: (error: Error) => void,
+    rejectPendingGuardianApprovals: (error: Error) => void = () => undefined
   ): void {
     if (!pending) {
       return;
@@ -2062,6 +3346,61 @@ export class CliAgentRunner {
       return;
     }
     this.logCodexAppServerNotificationSummary(method, params, pending);
+    const eventTurnId = this.codexAppServerTurnId(record, params);
+    const eventThreadId = this.codexAppServerThreadId(record, params);
+    if (eventThreadId && eventThreadId !== pending.threadId) {
+      if (method === "error") {
+        void this.debugLogs?.write("cli.codex-app-server.child-thread-error-dropped", {
+          threadId: eventThreadId,
+          expectedThreadId: pending.threadId,
+          turnId: eventTurnId,
+          message: this.stringField(this.asRecord(params.error) ?? {}, "message")
+        });
+      }
+      return;
+    }
+    // Current app-server notifications always identify their thread. Keep the
+    // turn-id fallback for older/experimental events that do not. A goal can
+    // replace the root turn id while continuing in the same thread, whereas a
+    // native subagent runs in a different thread.
+    if (!eventThreadId && !pending.nativeGoal && pending.turnId && eventTurnId && eventTurnId !== pending.turnId) {
+      return;
+    }
+    if (method === "turn/started" || method === "turn/completed" || method.startsWith("item/")) {
+      pending.acceptedByProvider = true;
+    }
+    if (method === "turn/started") {
+      pending.turnId = eventTurnId ?? pending.turnId;
+      if (pending.nativeGoal) {
+        pending.nativeGoal.turnCompleted = false;
+      }
+      return;
+    }
+    if (method === "thread/goal/updated" && pending.nativeGoal) {
+      const goal = this.asRecord(params.goal);
+      const status = this.codexNativeGoalStatus(this.stringField(goal ?? {}, "status"));
+      if (status) {
+        pending.nativeGoal.status = status;
+        if (status !== "active") {
+          this.emitLiveOutput(pending.onOutput, "tool", `Native goal ${this.codexNativeGoalStatusLabel(status)}\n`, undefined, {
+            activityKind: "status",
+            activityStatus: status === "complete" ? "completed" : "failed",
+            activityDetail: `Codex native goal status: ${status}`
+          });
+        }
+      }
+      if (pending.nativeGoal.turnCompleted && status && status !== "active") {
+        this.settleCodexNativeGoal(participant, cleanupPending, status);
+      }
+      return;
+    }
+    if (method === "thread/goal/cleared" && pending.nativeGoal) {
+      pending.nativeGoal.status = "cleared";
+      if (pending.nativeGoal.turnCompleted) {
+        this.settleCodexNativeGoal(participant, cleanupPending, "cleared");
+      }
+      return;
+    }
     if (method === "item/autoApprovalReview/started") {
       this.emitLiveOutput(pending.onOutput, "tool", "Auto-reviewing approval request\n", undefined, {
         activityKind: "approval",
@@ -2070,9 +3409,21 @@ export class CliAgentRunner {
       return;
     }
     if (method === "item/autoApprovalReview/completed") {
-      this.emitLiveOutput(pending.onOutput, "tool", "Auto-review completed\n", undefined, {
+      const review = this.asRecord(params.review);
+      const status = this.stringField(review ?? {}, "status");
+      const label = status === "approved"
+        ? "Auto Review approved the request"
+        : status === "denied"
+          ? "Auto Review denied the request"
+          : status === "timedOut"
+            ? "Auto Review timed out"
+            : status === "aborted"
+              ? "Auto Review stopped"
+              : "Auto Review completed";
+      this.emitLiveOutput(pending.onOutput, "tool", `${label}\n`, undefined, {
         activityKind: "approval",
-        activityStatus: "completed"
+        activityStatus: status === "approved" ? "completed" : "failed",
+        ...(this.stringField(review ?? {}, "rationale") ? { activityDetail: this.stringField(review ?? {}, "rationale") } : {})
       });
       return;
     }
@@ -2083,10 +3434,19 @@ export class CliAgentRunner {
         pending.nextAgentMessageStartsBlock = true;
       }
       const summary = this.codexAppServerToolSummary(item);
+      const activityItemId = this.stringField(item ?? {}, "id");
       if (summary) {
+        if (
+          activityItemId &&
+          (itemType === "commandExecution" || itemType === "mcpToolCall" || itemType === "fileChange")
+        ) {
+          pending.activityItems.set(activityItemId, summary);
+        }
         this.emitLiveOutput(pending.onOutput, "tool", `${summary.label}\n`, undefined, {
           activityKind: summary.kind,
-          activityStatus: "started"
+          activityStatus: "started",
+          ...(activityItemId ? { activityItemId } : {}),
+          ...(summary.detail ? { activityDetail: summary.detail } : {})
         });
       }
       return;
@@ -2094,23 +3454,99 @@ export class CliAgentRunner {
     if (method === "item/agentMessage/delta") {
       const delta = this.stringField(params, "delta");
       if (delta) {
-        pending.messages.push(delta);
-        if (pending.nextAgentMessageStartsBlock) {
-          pending.streamedText = this.textWithAgentMessageBoundary(pending.streamedText, delta);
-          pending.nextAgentMessageStartsBlock = false;
+        this.appendCodexAppServerAgentTextDelta(pending, delta);
+      }
+      return;
+    }
+    if (
+      method === "item/commandExecution/outputDelta" ||
+      method === "item/fileChange/outputDelta" ||
+      method === "item/mcpToolCall/progress"
+    ) {
+      // The dedicated Codex CLI keeps raw tool output out of the assistant
+      // transcript. Item activity carries the user-visible tool state instead.
+      return;
+    }
+    if (method === "item/fileChange/patchUpdated") {
+      const detail = this.codexAppServerFileChangesDetail(params.changes);
+      if (detail) {
+        const activityItemId = this.stringField(params, "itemId");
+        if (activityItemId) {
+          pending.activityItems.set(activityItemId, {
+            label: "Updating files",
+            kind: "file-edit",
+            detail
+          });
         }
-        pending.streamedText += delta;
-        this.emitLiveOutput(pending.onOutput, "text", delta, pending.streamedText);
+        this.emitLiveOutput(pending.onOutput, "tool", "Updating files\n", undefined, {
+          activityKind: "file-edit",
+          activityStatus: "started",
+          ...(activityItemId ? { activityItemId } : {}),
+          activityDetail: detail
+        });
       }
       return;
     }
     if (method === "item/completed") {
       const item = this.asRecord(params.item);
-      if (this.stringField(item ?? {}, "type") === "agentMessage") {
+      const itemType = this.stringField(item ?? {}, "type");
+      const itemId = this.stringField(item ?? {}, "id");
+      if (itemType === "agentMessage") {
+        this.flushCodexAppServerAgentText(pending);
         const text = this.stringField(item ?? {}, "text");
         if (text) {
-          pending.finalMessage = text;
-          pending.completedAgentMessages.push(text);
+          const normalizedText = this.normalizeCodexAppServerCompleteText(text);
+          pending.finalMessage = normalizedText;
+          pending.completedAgentMessages.push(normalizedText);
+          if (!pending.streamedText.trimEnd().endsWith(normalizedText.trimEnd())) {
+            pending.streamedText = this.textWithAgentMessageBoundary(
+              pending.streamedText,
+              normalizedText,
+              { fencedBlockEndsBlock: true }
+            );
+            pending.streamedText += normalizedText;
+            this.appendCodexAppServerAgentText(pending, normalizedText, true);
+          }
+        }
+      } else if (itemType === "subAgentActivity") {
+        const detail = this.codexAppServerSubagentDetail(item);
+        this.emitLiveOutput(pending.onOutput, "tool", "Using subagent\n", undefined, {
+          activityKind: "tool",
+          activityStatus: "completed",
+          activityItemId: itemId ?? "subAgentActivity",
+          ...(detail ? { activityDetail: detail } : {})
+        });
+      } else if (
+        itemType === "commandExecution" ||
+        itemType === "mcpToolCall" ||
+        itemType === "fileChange"
+      ) {
+        const priorSummary = itemId ? pending.activityItems.get(itemId) : undefined;
+        const completedSummary = this.codexAppServerToolSummary(item);
+        const summary = completedSummary
+          ? {
+            ...completedSummary,
+            label: priorSummary?.label ?? completedSummary.label,
+            kind: priorSummary?.kind ?? completedSummary.kind
+          }
+          : priorSummary;
+        if (summary) {
+          const invocation = completedSummary?.detail ?? priorSummary?.detail;
+          const detail = itemType === "fileChange"
+            ? invocation
+            : this.codexAppServerCompletedActivityDetail(
+              invocation,
+              this.codexAppServerCompletedActivityOutput(item)
+            );
+          this.emitLiveOutput(pending.onOutput, "tool", `${summary.label}\n`, undefined, {
+            activityKind: summary.kind,
+            activityStatus: "completed",
+            ...(itemId ? { activityItemId: itemId } : {}),
+            ...(detail ? { activityDetail: detail } : {})
+          });
+        }
+        if (itemId) {
+          pending.activityItems.delete(itemId);
         }
       }
       return;
@@ -2121,21 +3557,45 @@ export class CliAgentRunner {
     }
     if (method === "error") {
       const error = this.asRecord(params.error);
-      rejectPending(new Error(this.stringField(error ?? {}, "message") ?? "codex app-server reported an error"));
+      const failure = new Error(this.stringField(error ?? {}, "message") ?? "codex app-server reported an error");
+      rejectPendingGuardianApprovals(failure);
+      rejectPending(failure);
       return;
     }
     if (method !== "turn/completed") {
       return;
     }
     const turn = this.asRecord(params.turn);
-    const status = this.stringField(turn ?? {}, "status");
-    const current = cleanupPending();
-    if (!current) {
+    const completedTurnId = this.stringField(turn ?? {}, "id") ?? eventTurnId;
+    if (!pending.nativeGoal && completedTurnId && pending.turnId && completedTurnId !== pending.turnId) {
+      void this.debugLogs?.write("cli.codex-app-server.turn-completed-ignored", {
+        threadId: pending.threadId,
+        expectedTurnId: pending.turnId,
+        eventTurnId: completedTurnId
+      });
       return;
     }
+    const status = this.stringField(turn ?? {}, "status");
+    this.flushCodexAppServerAgentText(pending);
     if (status !== "completed") {
+      rejectPendingGuardianApprovals(new Error(`Codex Guardian approval expired because the provider turn ${status ?? "failed"}.`));
+      const current = cleanupPending();
+      if (!current) {
+        return;
+      }
       const error = this.asRecord(turn?.error);
       current.reject(new Error(this.stringField(error ?? {}, "message") ?? `codex app-server turn ${status ?? "failed"}`));
+      return;
+    }
+    if (pending.nativeGoal) {
+      pending.nativeGoal.turnCompleted = true;
+      if (pending.nativeGoal.status && pending.nativeGoal.status !== "active") {
+        this.settleCodexNativeGoal(participant, cleanupPending, pending.nativeGoal.status);
+      }
+      return;
+    }
+    const current = cleanupPending();
+    if (!current) {
       return;
     }
     const content = this.codexAppServerFinalContent(current);
@@ -2150,10 +3610,66 @@ export class CliAgentRunner {
     });
   }
 
+  private codexNativeGoalStatus(status: string | undefined): CodexNativeGoalStatus | undefined {
+    return status === "active" ||
+      status === "paused" ||
+      status === "blocked" ||
+      status === "usageLimited" ||
+      status === "budgetLimited" ||
+      status === "complete"
+      ? status
+      : undefined;
+  }
+
+  private codexNativeGoalStatusLabel(status: CodexNativeGoalStatus): string {
+    if (status === "usageLimited") {
+      return "usage limited";
+    }
+    if (status === "budgetLimited") {
+      return "budget limited";
+    }
+    return status;
+  }
+
+  private settleCodexNativeGoal(
+    participant: ParticipantConfig,
+    cleanupPending: () => CodexAppServerPendingTurn | undefined,
+    status: Exclude<CodexNativeGoalStatus, "active"> | "cleared"
+  ): void {
+    const current = cleanupPending();
+    if (!current) {
+      return;
+    }
+    const content = this.codexAppServerFinalContent(current);
+    if (status === "complete" || status === "cleared") {
+      current.resolve({
+        participant,
+        ok: true,
+        content,
+        durationMs: Date.now() - current.startedAt,
+        sessionId: current.threadId,
+        roleRuntime: undefined,
+        contextUsage: current.contextUsage
+      });
+      return;
+    }
+    const label = this.codexNativeGoalStatusLabel(status);
+    current.resolve({
+      participant,
+      ok: false,
+      content,
+      error: `Codex native goal is ${label}.`,
+      durationMs: Date.now() - current.startedAt,
+      sessionId: current.threadId,
+      roleRuntime: undefined,
+      contextUsage: current.contextUsage
+    });
+  }
+
   private codexAppServerFinalContent(turn: CodexAppServerPendingTurn): string {
     const completedMessages = this.completedAgentMessagesForFinal(turn.completedAgentMessages, turn.finalMessage);
     if (completedMessages.length > 0) {
-      return this.finalTextFromMessageItems(completedMessages);
+      return this.finalTextFromMessageItems(completedMessages, { fencedBlockEndsBlock: true });
     }
     return this.trailingTextBlock(turn.streamedText || turn.messages.join(""));
   }
@@ -2166,12 +3682,19 @@ export class CliAgentRunner {
     return messages;
   }
 
-  private finalTextFromMessageItems(messages: string[]): string {
+  private finalTextFromMessageItems(
+    messages: string[],
+    options: { fencedBlockEndsBlock?: boolean } = {}
+  ): string {
     let currentIndex = messages.length - 1;
     let finalText = messages[currentIndex] ?? "";
     while (currentIndex > 0) {
       const previous = messages[currentIndex - 1] ?? "";
-      const separator = this.agentMessageBoundarySeparator(previous, messages[currentIndex] ?? finalText);
+      const separator = this.agentMessageBoundarySeparator(
+        previous,
+        messages[currentIndex] ?? finalText,
+        options
+      );
       if (separator === "\n\n") {
         break;
       }
@@ -2194,25 +3717,268 @@ export class CliAgentRunner {
     return normalized.slice(start).trim();
   }
 
-  private textWithAgentMessageBoundary(previous: string, next: string): string {
+  private textWithAgentMessageBoundary(
+    previous: string,
+    next: string,
+    options: { fencedBlockEndsBlock?: boolean } = {}
+  ): string {
     const trimmedPrevious = previous.trimEnd();
     if (!trimmedPrevious) {
       return previous;
     }
-    return `${trimmedPrevious}${this.agentMessageBoundarySeparator(trimmedPrevious, next)}`;
+    return `${trimmedPrevious}${this.agentMessageBoundarySeparator(trimmedPrevious, next, options)}`;
   }
 
-  private agentMessageBoundarySeparator(previous: string, next: string): string {
+  private agentMessageBoundarySeparator(
+    previous: string,
+    next: string,
+    options: { fencedBlockEndsBlock?: boolean } = {}
+  ): string {
     if (!previous.trim() || !next) {
       return "";
     }
-    if (chatTextEndsAtSentenceOrParagraphBoundary(previous)) {
+    if (
+      chatTextEndsAtSentenceOrParagraphBoundary(previous) ||
+      (
+        options.fencedBlockEndsBlock === true &&
+        /(?:^|\n)```[ \t]*$/.test(previous.trimEnd())
+      )
+    ) {
       return "\n\n";
     }
     if (/^\s|^[,.;:!?)]/.test(next)) {
       return "";
     }
     return " ";
+  }
+
+  private appendCodexAppServerAgentText(
+    pending: CodexAppServerPendingTurn,
+    text: string,
+    startsBlock: boolean
+  ): void {
+    if (!text) {
+      return;
+    }
+    if (startsBlock && pending.visibleTranscript.trim()) {
+      const trimmed = pending.visibleTranscript.trimEnd();
+      pending.visibleTranscript = this.textWithAgentMessageBoundary(trimmed, text, {
+        fencedBlockEndsBlock: true
+      });
+    }
+    pending.visibleTranscript += text;
+    this.emitLiveOutput(pending.onOutput, "text", text, pending.visibleTranscript);
+  }
+
+  private appendCodexAppServerAgentTextDelta(
+    pending: CodexAppServerPendingTurn,
+    delta: string
+  ): void {
+    const normalized = this.normalizeCodexAppServerTextChunk(delta, pending.agentTextPendingCarriageReturn === true);
+    pending.agentTextPendingCarriageReturn = normalized.pendingCarriageReturn;
+    if (!normalized.text) {
+      return;
+    }
+    pending.messages.push(normalized.text);
+    if (pending.nextAgentMessageStartsBlock) {
+      pending.streamedText = this.textWithAgentMessageBoundary(
+        pending.streamedText,
+        normalized.text,
+        { fencedBlockEndsBlock: true }
+      );
+    }
+    pending.streamedText += normalized.text;
+    this.appendCodexAppServerAgentText(pending, normalized.text, pending.nextAgentMessageStartsBlock);
+    pending.nextAgentMessageStartsBlock = false;
+  }
+
+  private flushCodexAppServerAgentText(pending: CodexAppServerPendingTurn): void {
+    if (!pending.agentTextPendingCarriageReturn) {
+      return;
+    }
+    pending.agentTextPendingCarriageReturn = false;
+    const text = "\r";
+    pending.messages.push(text);
+    if (pending.nextAgentMessageStartsBlock) {
+      pending.streamedText = this.textWithAgentMessageBoundary(
+        pending.streamedText,
+        text,
+        { fencedBlockEndsBlock: true }
+      );
+    }
+    pending.streamedText += text;
+    this.appendCodexAppServerAgentText(pending, text, pending.nextAgentMessageStartsBlock);
+    pending.nextAgentMessageStartsBlock = false;
+  }
+
+  private normalizeCodexAppServerCompleteText(text: string): string {
+    return this.normalizeCodexAppServerTextChunk(text, false, { final: true }).text;
+  }
+
+  private normalizeCodexAppServerTextChunk(
+    text: string,
+    pendingCarriageReturn: boolean,
+    options: { final?: boolean } = {}
+  ): { text: string; pendingCarriageReturn: boolean } {
+    let remaining = text;
+    let normalized = "";
+    if (pendingCarriageReturn) {
+      if (remaining.startsWith("\n")) {
+        normalized += "\n";
+        remaining = remaining.slice(1);
+      } else {
+        normalized += "\r";
+      }
+    }
+    let nextPendingCarriageReturn = false;
+    if (!options.final && remaining.endsWith("\r")) {
+      nextPendingCarriageReturn = true;
+      remaining = remaining.slice(0, -1);
+    }
+    normalized += remaining.replace(/\r\n/g, "\n");
+    return {
+      text: normalized,
+      pendingCarriageReturn: nextPendingCarriageReturn
+    };
+  }
+
+  private codexAppServerCompletedActivityOutput(item: Record<string, unknown> | undefined): string | undefined {
+    if (!item) {
+      return undefined;
+    }
+    const type = this.stringField(item, "type");
+    if (type === "commandExecution") {
+      return this.stringField(item, "aggregatedOutput");
+    }
+    if (type === "mcpToolCall") {
+      const error = this.asRecord(item.error);
+      if (error) {
+        return this.stringField(error, "message");
+      }
+      const result = this.asRecord(item.result);
+      return result ? this.codexAppServerOutputContent(result.content) : undefined;
+    }
+    return undefined;
+  }
+
+  private codexAppServerCompletedActivityDetail(
+    invocation: string | undefined,
+    output: string | undefined
+  ): string | undefined {
+    const preview = this.codexAppServerBoundedOutputTail(output);
+    return [
+      invocation,
+      preview ? `Output tail:\n${preview}` : undefined
+    ].filter((part): part is string => Boolean(part)).join("\n\n") || undefined;
+  }
+
+  private codexAppServerBoundedInvocationSummary(invocation: string | undefined): string | undefined {
+    const normalized = invocation?.trimEnd();
+    if (!normalized || normalized.length <= CODEX_ACTIVITY_INVOCATION_MAX_CHARS) {
+      return normalized || undefined;
+    }
+    let keep = CODEX_ACTIVITY_INVOCATION_MAX_CHARS;
+    let omitted = normalized.length - keep;
+    let marker = `… [+${omitted} chars omitted]`;
+    while (keep + marker.length > CODEX_ACTIVITY_INVOCATION_MAX_CHARS) {
+      keep = Math.max(0, CODEX_ACTIVITY_INVOCATION_MAX_CHARS - marker.length);
+      omitted = normalized.length - keep;
+      marker = `… [+${omitted} chars omitted]`;
+    }
+    return `${normalized.slice(0, keep)}${marker}`;
+  }
+
+  private codexAppServerBoundedOutputTail(output: string | undefined): string | undefined {
+    if (!output) {
+      return undefined;
+    }
+    const normalized = this.normalizeCodexAppServerCompleteText(output).trimEnd();
+    if (!normalized) {
+      return undefined;
+    }
+    const lines = normalized.split("\n");
+    const omittedLines = Math.max(0, lines.length - CODEX_ACTIVITY_OUTPUT_MAX_LINES);
+    let tail = lines.slice(-CODEX_ACTIVITY_OUTPUT_MAX_LINES).join("\n");
+    let marker = "";
+    for (let iteration = 0; iteration < 5; iteration += 1) {
+      const omittedChars = Math.max(0, normalized.length - tail.length);
+      marker = omittedLines > 0 || omittedChars > 0
+        ? `… [${[
+          omittedLines > 0 ? `${omittedLines} earlier lines` : undefined,
+          omittedChars > 0 ? `${omittedChars} chars omitted` : undefined
+        ].filter(Boolean).join("; ")}]`
+        : "";
+      const availableTailChars = Math.max(
+        0,
+        CODEX_ACTIVITY_OUTPUT_MAX_CHARS - marker.length - (marker ? 1 : 0)
+      );
+      if (tail.length <= availableTailChars) {
+        break;
+      }
+      tail = tail.slice(-availableTailChars);
+    }
+    return marker ? `${marker}\n${tail}` : tail;
+  }
+
+  private codexAppServerOutputContent(value: unknown): string | undefined {
+    if (!Array.isArray(value)) {
+      return this.codexAppServerReadableJson(value);
+    }
+    const parts = value.flatMap((entry): string[] => {
+      if (typeof entry === "string") {
+        return [entry];
+      }
+      const record = this.asRecord(entry);
+      if (!record) {
+        return [];
+      }
+      const text = this.findStringField(record, ["text", "outputText", "output_text"]);
+      if (text) {
+        return [text];
+      }
+      const type = this.stringField(record, "type");
+      if (type && /image|audio/i.test(type)) {
+        return [`[${type} output]`];
+      }
+      return [this.codexAppServerReadableJson(record) ?? ""];
+    }).filter(Boolean);
+    return parts.length > 0 ? parts.join("\n") : undefined;
+  }
+
+  private codexAppServerFileChangesDetail(value: unknown): string | undefined {
+    if (!Array.isArray(value)) {
+      return undefined;
+    }
+    const paths = value.map((entry) => {
+      const record = this.asRecord(entry);
+      const path = this.stringField(record ?? {}, "path");
+      const kind = this.stringField(record ?? {}, "kind");
+      return path ? `${kind ? `${kind}: ` : ""}${path}` : undefined;
+    }).filter((entry): entry is string => Boolean(entry));
+    return paths.length > 0 ? paths.join("\n") : undefined;
+  }
+
+  private codexAppServerSubagentDetail(item: Record<string, unknown> | undefined): string | undefined {
+    if (!item) {
+      return undefined;
+    }
+    const kind = this.stringField(item, "kind");
+    const agentPath = this.stringField(item, "agentPath");
+    return [kind, agentPath].filter(Boolean).join(" · ") || undefined;
+  }
+
+  private codexAppServerReadableJson(value: unknown): string | undefined {
+    if (value === undefined || value === null) {
+      return undefined;
+    }
+    if (typeof value === "string") {
+      return value;
+    }
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
   }
 
   private logCodexAppServerNotificationSummary(
@@ -2229,36 +3995,64 @@ export class CliAgentRunner {
       method,
       itemType,
       itemId: this.stringField(item ?? {}, "id"),
-      turnId: this.stringField(turn ?? {}, "id") ?? pending.turnId,
+      turnId: this.stringField(turn ?? {}, "id") ?? this.findStringField(params, ["turnId", "turn_id"]) ?? pending.turnId,
       deltaLength: delta?.length,
       completedTextLength: text?.length
     });
   }
 
-  private codexAppServerToolSummary(item: Record<string, unknown> | undefined): { label: string; kind: ChatAgentActivityKind } | undefined {
+  private codexAppServerToolSummary(item: Record<string, unknown> | undefined): { label: string; kind: ChatAgentActivityKind; detail?: string } | undefined {
     if (!item) {
       return undefined;
     }
     const type = this.stringField(item, "type");
     if (type === "commandExecution") {
-      return { label: "Running command", kind: "command" };
+      return {
+        label: "Running command",
+        kind: "command",
+        detail: this.codexAppServerBoundedInvocationSummary(this.stringField(item, "command"))
+      };
     }
     if (type === "mcpToolCall") {
       const tool = this.stringField(item, "tool");
-      return { label: tool ? this.toolActivityLabel(tool) : "Using MCP tool", kind: "tool" };
+      return {
+        label: tool ? this.toolActivityLabel(tool) : "Using MCP tool",
+        kind: "tool",
+        detail: this.codexAppServerBoundedInvocationSummary(
+          this.codexAppServerReadableJson(item.arguments)
+        )
+      };
     }
     if (type === "dynamicToolCall") {
       const tool = this.stringField(item, "tool");
-      return { label: tool ? this.toolActivityLabel(tool) : "Using tool", kind: "tool" };
+      return {
+        label: tool ? this.toolActivityLabel(tool) : "Using tool",
+        kind: "tool",
+        detail: this.codexAppServerBoundedInvocationSummary(
+          this.codexAppServerReadableJson(item.arguments)
+        )
+      };
+    }
+    if (type === "collabAgentToolCall") {
+      const tool = this.stringField(item, "tool");
+      const label = tool === "spawnAgent"
+        ? "Spawning subagent"
+        : tool === "sendInput"
+          ? "Messaging subagent"
+          : tool === "wait"
+            ? "Waiting for subagent"
+            : "Using subagent";
+      const detail = this.stringField(item, "prompt") ?? this.codexAppServerReadableJson(item.agentsStates);
+      return { label, kind: "tool", detail };
     }
     if (type === "webSearch") {
-      return { label: "Using web search", kind: "web" };
+      return { label: "Using web search", kind: "web", detail: this.stringField(item, "query") };
     }
     if (type === "imageView") {
-      return { label: "Viewing image", kind: "tool" };
+      return { label: "Viewing image", kind: "tool", detail: this.stringField(item, "path") };
     }
     if (type === "fileChange") {
-      return { label: "Updating files", kind: "file-edit" };
+      return { label: "Updating files", kind: "file-edit", detail: this.codexAppServerFileChangesDetail(item.changes) };
     }
     return undefined;
   }
@@ -2273,6 +4067,7 @@ export class CliAgentRunner {
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
     const startedAt = Date.now();
+    const nonInteractiveApprovalWarning = "Codex is using non-interactive exec mode, so protected actions that require approval are refused. Run this member locally in Chat for an interactive approval card.";
     let outputDir: string | undefined;
     try {
       outputDir = await mkdtemp(path.join(tmpdir(), "accordagents-codex-"));
@@ -2313,7 +4108,8 @@ export class CliAgentRunner {
         roleRuntime: options.role ? "codex-developer-instructions" : undefined,
         contextUsage:
           this.extractCodexContextUsage(result.stdout, participant) ??
-          await this.extractCodexSessionLogContextUsageWithRetry(sessionId, participant)
+          await this.extractCodexSessionLogContextUsageWithRetry(sessionId, participant),
+        warnings: [nonInteractiveApprovalWarning]
       }, participant, options);
     } catch (error) {
       if (options.role && this.isCodexDeveloperInstructionsUnsupported(error)) {
@@ -2360,7 +4156,8 @@ export class CliAgentRunner {
         });
         return { ...restarted, sessionRestarted: true };
       }
-      return this.failed(participant, error, Date.now() - startedAt);
+      const failed = this.failed(participant, error, Date.now() - startedAt);
+      return { ...failed, warnings: [...(failed.warnings ?? []), nonInteractiveApprovalWarning] };
     } finally {
       if (outputDir) {
         await rm(outputDir, { recursive: true, force: true }).catch(() => undefined);
@@ -2376,6 +4173,9 @@ export class CliAgentRunner {
     signal?: AbortSignal,
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
+    if (options.nativeGoal) {
+      return this.runClaudeOneShot(participant, prompt, repoPath, kind, signal, this.withoutWarm(options));
+    }
     if (options.warm && kind === "chat") {
       return this.runClaudeWarmOrOneShot(participant, prompt, repoPath, kind, signal, options);
     }
@@ -2435,27 +4235,67 @@ export class CliAgentRunner {
         options,
         toolConfig,
         extraReadableDirs,
-        "one-shot",
+        options.nativeGoal ? "one-shot-stream" : "one-shot",
         newSessionId
       );
-      this.logClaudeLaunch(participant, repoPath, kind, options, args, toolConfig, extraReadableDirs, "one-shot");
+      this.logClaudeLaunch(
+        participant,
+        repoPath,
+        kind,
+        options,
+        args,
+        toolConfig,
+        extraReadableDirs,
+        options.nativeGoal ? "one-shot-stream" : "one-shot"
+      );
       this.reportSessionId(options.onSessionId, newSessionId);
+      const streamState: ClaudeOneShotStreamState | undefined = options.nativeGoal
+        ? {
+            buffer: "",
+            streamedText: "",
+            messages: [],
+            nextTextBlockStartsBlock: false
+          }
+        : undefined;
 
       const result = await runCommand(
         "claude",
         args,
         {
           cwd: repoPath,
-          input: prompt,
+          input: options.nativeGoal ? `/goal ${prompt}` : prompt,
           timeoutMs: options.timeoutMs ?? this.runTimeoutMs,
+          allowNoTimeout: Boolean(options.nativeGoal),
           env: this.agentRunEnv(options),
           envOptions: CLAUDE_CODE_COMMAND_ENV_OPTIONS,
-          signal
+          signal,
+          onStdout: (chunk) => {
+            options.onProviderActivity?.();
+            if (streamState) {
+              this.handleClaudeOneShotStreamChunk(chunk, streamState, participant, options);
+            }
+          },
+          onStderr: () => options.onProviderActivity?.()
         }
       );
-      const sessionId = this.extractClaudeSessionId(result.stdout) ?? newSessionId ?? options.sessionId;
+      if (streamState?.buffer.trim()) {
+        this.handleClaudeOneShotStreamLine(streamState.buffer, streamState, participant, options);
+        streamState.buffer = "";
+      }
+      if (streamState?.error) {
+        throw new Error(streamState.error);
+      }
+      const sessionId = streamState?.sessionId ?? this.extractClaudeSessionId(result.stdout) ?? newSessionId ?? options.sessionId;
       this.reportSessionId(options.onSessionId, sessionId);
-      const content = this.extractClaudeText(result.stdout).trim();
+      const content = (
+        streamState
+          ? this.extractClaudeWarmResultText(streamState.resultEvent) ?? (
+              streamState.messages.length > 0
+                ? this.finalTextFromMessageItems(streamState.messages)
+                : this.trailingTextBlock(streamState.streamedText)
+            )
+          : this.extractClaudeText(result.stdout)
+      ).trim();
       if (!content && !options.allowEmptyContent) {
         throw new Error("Claude Code completed without response content.");
       }
@@ -2467,16 +4307,23 @@ export class CliAgentRunner {
         sessionId,
         roleRuntime: options.role && !options.sessionId ? "claude-agent" : undefined,
         contextUsage:
-          this.extractClaudeContextUsage(result.stdout, participant) ??
+          (streamState
+            ? buildAgentContextUsage({
+                usedTokens: streamState.usedTokens,
+                contextWindowTokens: streamState.contextWindowTokens ?? contextWindowForModel(participant.kind, streamState.model),
+                source: "claude-code",
+                model: streamState.model
+              })
+            : this.extractClaudeContextUsage(result.stdout, participant)) ??
           await this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant)
-      }, participant, options), result.stdout, participant, "one-shot");
+      }, participant, options), streamState?.resultEvent ?? result.stdout, participant, options.nativeGoal ? "one-shot-stream" : "one-shot");
     } catch (error) {
       if (this.agentModeForRun(kind, options) === "auto" && this.isClaudePermissionModeUnsupported(error)) {
         // Fail loudly instead of silently downgrading: Auto-review must run as native
         // Claude auto, not a different mode under the same label.
         return this.failed(
           participant,
-          new Error("Claude Code in this environment does not support Auto-review (--permission-mode auto). Upgrade Claude Code, or set this participant to Default or Plan mode."),
+          new Error("Claude Code in this environment does not support Auto-review (--permission-mode auto). Upgrade Claude Code, or set this member to Default or Plan mode."),
           Date.now() - startedAt
         );
       }
@@ -2494,7 +4341,13 @@ export class CliAgentRunner {
             agentMode: options.agentMode,
             permissions: options.permissions,
             appMcp: options.appMcp,
-            onSessionId: options.onSessionId
+            agentEnv: options.agentEnv,
+            agentEnvKey: options.agentEnvKey,
+            onOutput: options.onOutput,
+            onSessionId: options.onSessionId,
+            timeoutMs: options.timeoutMs,
+            nativeGoal: options.nativeGoal,
+            onProviderActivity: options.onProviderActivity
           }
         );
         return {
@@ -2514,7 +4367,13 @@ export class CliAgentRunner {
           agentMode: options.agentMode,
           permissions: options.permissions,
           appMcp: options.appMcp,
-          onSessionId: options.onSessionId
+          agentEnv: options.agentEnv,
+          agentEnvKey: options.agentEnvKey,
+          onOutput: options.onOutput,
+          onSessionId: options.onSessionId,
+          timeoutMs: options.timeoutMs,
+          nativeGoal: options.nativeGoal,
+          onProviderActivity: options.onProviderActivity
         });
         return { ...restarted, sessionRestarted: true };
       }
@@ -2750,7 +4609,7 @@ export class CliAgentRunner {
     options: CliAgentRunOptions,
     toolConfig: ClaudeToolConfig,
     extraReadableDirs: string[],
-    transport: "one-shot" | "warm",
+    transport: "one-shot" | "one-shot-stream" | "warm",
     newSessionId?: string
   ): string[] {
     const args = transport === "warm"
@@ -2765,7 +4624,17 @@ export class CliAgentRunner {
           "--permission-mode",
           toolConfig.permissionMode
         ]
-      : [
+      : transport === "one-shot-stream"
+        ? [
+            "-p",
+            "--verbose",
+            "--include-partial-messages",
+            "--output-format",
+            "stream-json",
+            "--permission-mode",
+            toolConfig.permissionMode
+          ]
+        : [
           "-p",
           "--output-format",
           "json",
@@ -2899,6 +4768,71 @@ export class CliAgentRunner {
       .catch(() => current.resolve(result));
   }
 
+  private handleClaudeOneShotStreamChunk(
+    chunk: string,
+    state: ClaudeOneShotStreamState,
+    participant: ParticipantConfig,
+    options: CliAgentRunOptions
+  ): void {
+    state.buffer += chunk;
+    let newline = state.buffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = state.buffer.slice(0, newline).trimEnd();
+      state.buffer = state.buffer.slice(newline + 1);
+      if (line.trim()) {
+        this.handleClaudeOneShotStreamLine(line, state, participant, options);
+      }
+      newline = state.buffer.indexOf("\n");
+    }
+  }
+
+  private handleClaudeOneShotStreamLine(
+    line: string,
+    state: ClaudeOneShotStreamState,
+    participant: ParticipantConfig,
+    options: CliAgentRunOptions
+  ): void {
+    let event: unknown;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      state.error = `claude native goal emitted invalid JSON: ${line.slice(0, 120)}`;
+      return;
+    }
+    state.sessionId = this.findSessionId(event) ?? state.sessionId;
+    this.reportSessionId(options.onSessionId, state.sessionId);
+    state.model = this.findModelId(event) ?? state.model ?? participant.model;
+    state.usedTokens = this.findContextUsedTokens(event) ?? state.usedTokens;
+    state.contextWindowTokens = this.findContextWindowTokens(event) ?? state.contextWindowTokens;
+    state.error = this.claudeWarmStreamError(event) ?? state.error;
+    const toolSummary = this.claudeWarmToolSummary(event);
+    if (toolSummary) {
+      this.emitLiveOutput(options.onOutput, "tool", `${toolSummary.label}\n`, undefined, {
+        activityKind: toolSummary.kind,
+        activityStatus: "started"
+      });
+    }
+    if (this.claudeWarmTextBlockStarted(event) && state.streamedText.trim()) {
+      state.nextTextBlockStartsBlock = true;
+    }
+    const streamDelta = this.extractClaudeStreamEventTextDelta(event);
+    if (streamDelta) {
+      if (state.nextTextBlockStartsBlock) {
+        state.streamedText = this.textWithAgentMessageBoundary(state.streamedText, streamDelta);
+        state.nextTextBlockStartsBlock = false;
+      }
+      state.streamedText += streamDelta;
+      this.emitLiveOutput(options.onOutput, "text", streamDelta, state.streamedText);
+    }
+    const assistantText = this.extractClaudeWarmAssistantText(event);
+    if (assistantText) {
+      state.messages.push(assistantText);
+    }
+    if (this.isClaudeWarmResult(event)) {
+      state.resultEvent = event;
+    }
+  }
+
   private claudeWarmUserMessage(prompt: string): Record<string, unknown> {
     return {
       type: "user",
@@ -3030,6 +4964,56 @@ export class CliAgentRunner {
     entry.idleTimer.unref();
   }
 
+  private createNativeGoalIdleMonitor(
+    participant: ParticipantConfig,
+    onOutput: CliAgentOutputCallback | undefined,
+    warningMs = NATIVE_GOAL_IDLE_WARNING_MS
+  ): { touch: () => void; close: () => void } {
+    let timer: NodeJS.Timeout | undefined;
+    let closed = false;
+    const schedule = (): void => {
+      if (closed) {
+        return;
+      }
+      if (timer) {
+        clearTimeout(timer);
+      }
+      timer = setTimeout(() => {
+        timer = undefined;
+        if (closed) {
+          return;
+        }
+        const text = `${participant.label} has produced no provider output for 5 minutes. The native goal is still running and can be stopped.`;
+        onOutput?.({
+          kind: "tool",
+          text: `${text}\n`,
+          activityKind: "status",
+          activityStatus: "started"
+        });
+        void this.writeDebugLog("cli-agent-native-goal-idle-warning", {
+          providerKind: participant.kind,
+          participantId: participant.id,
+          idleMs: warningMs
+        });
+      }, warningMs);
+      timer.unref();
+    };
+    const touch = (): void => {
+      schedule();
+    };
+    schedule();
+    return {
+      touch,
+      close: (): void => {
+        closed = true;
+        if (timer) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+      }
+    };
+  }
+
   private clearWarmIdleTimer(entry: WarmAgentEntry): void {
     if (entry.idleTimer) {
       clearTimeout(entry.idleTimer);
@@ -3110,7 +5094,8 @@ export class CliAgentRunner {
       if (toolSummary) {
         this.emitLiveOutput(onOutput, "tool", `${toolSummary.label}\n`, undefined, {
           activityKind: toolSummary.kind,
-          activityStatus: "started"
+          activityStatus: "started",
+          ...(toolSummary.itemId ? { activityItemId: toolSummary.itemId } : {})
         });
       }
     } catch {
@@ -3136,6 +5121,7 @@ export class CliAgentRunner {
       activityKind?: ChatAgentActivityKind;
       activityStatus?: ChatAgentActivityEvent["status"];
       activityDetail?: string;
+      activityItemId?: string;
     }
   ): void {
     const clean = this.cleanLiveOutputText(text);
@@ -3150,7 +5136,7 @@ export class CliAgentRunner {
     return text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
   }
 
-  private codexToolSummary(event: unknown): { label: string; kind: ChatAgentActivityKind } | undefined {
+  private codexToolSummary(event: unknown): { label: string; kind: ChatAgentActivityKind; itemId?: string } | undefined {
     const record = this.asRecord(event);
     if (!record) {
       return undefined;
@@ -3163,17 +5149,18 @@ export class CliAgentRunner {
       return { label: "Auto-review completed", kind: "approval" };
     }
     const item = this.asRecord(record.item) ?? record;
+    const itemId = this.stringField(item, "id") ?? this.stringField(record, "itemId");
     const type = `${this.stringField(record, "type") ?? ""} ${this.stringField(item, "type") ?? ""}`.toLowerCase();
     const name = this.stringField(item, "name") ?? this.stringField(item, "tool_name");
     const command = this.stringField(item, "command") ?? this.stringField(item, "cmd");
     if (command && /command|exec|shell|bash/.test(type)) {
-      return { label: "Running command", kind: "command" };
+      return { label: "Running command", kind: "command", itemId };
     }
     if (name && /tool|function|call/.test(type)) {
-      return { label: this.toolActivityLabel(name), kind: "tool" };
+      return { label: this.toolActivityLabel(name), kind: "tool", itemId };
     }
     if (/read|grep|glob|ls/.test(type) && name) {
-      return { label: this.toolActivityLabel(name), kind: "tool" };
+      return { label: this.toolActivityLabel(name), kind: "tool", itemId };
     }
     return undefined;
   }
@@ -3412,7 +5399,7 @@ export class CliAgentRunner {
     args: string[],
     toolConfig: ClaudeToolConfig,
     extraReadableDirs: string[],
-    transport: "one-shot" | "warm"
+    transport: "one-shot" | "one-shot-stream" | "warm"
   ): void {
     if (!this.debugLogs) {
       return;
@@ -3487,7 +5474,7 @@ export class CliAgentRunner {
     result: ParticipantRunResult,
     raw: unknown,
     participant: ParticipantConfig,
-    transport: "one-shot" | "warm"
+    transport: "one-shot" | "one-shot-stream" | "warm"
   ): ParticipantRunResult {
     const denials = this.claudePermissionDenials(raw);
     if (denials.length === 0) {

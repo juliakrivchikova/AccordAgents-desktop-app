@@ -2,6 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { CloudRunDoctorService } from "./cloudRunDoctor";
 import type { CloudRunSshExecRequest } from "./cloudRunDoctor";
+import { isTransientSshError, runWithSshRetries } from "./sshRetry";
+import { CommandError } from "./command";
+
+function commandError(fields: { stderr?: string; exitCode?: number | null; timedOut?: boolean; message?: string }): CommandError {
+  return new CommandError(fields.message ?? "command failed", {
+    command: "ssh",
+    args: [],
+    stdout: "",
+    stderr: fields.stderr ?? "",
+    exitCode: fields.exitCode ?? 255,
+    timedOut: fields.timedOut ?? false
+  });
+}
 
 const WORKER = { host: "worker.example", user: "ubuntu", identityFile: "/tmp/key.pem" };
 
@@ -112,6 +125,18 @@ test("diagnose keeps generic connection errors generic", async () => {
   assert.doesNotMatch(report.message, /Delete and recreate/);
 });
 
+test("diagnose caps connection-check retries", async () => {
+  let observedAttempts: number | undefined;
+  const { service } = doctorWith(async (request) => {
+    observedAttempts = request.retryAttempts;
+    return FULLY_PROVISIONED;
+  });
+
+  await service.diagnose(WORKER);
+
+  assert.equal(observedAttempts, 1);
+});
+
 test("setup installs only the missing pieces and re-diagnoses", async () => {
   let probes = 0;
   const { service, commands } = doctorWith(async (request) => {
@@ -154,6 +179,7 @@ test("setup drives codex device-auth and surfaces url + code to the user", async
           : FULLY_PROVISIONED;
       }
       if (request.command.includes("login --device-auth")) {
+        assert.equal(request.keepAlive, "none");
         request.onStdout?.("Open \u001b[94mhttps://auth.openai.com/codex/device\u001b[0m\n");
         request.onStdout?.("Enter this one-time code\n   \u001b[94mKIAK-7ETT8\u001b[0m\n");
         return "";
@@ -186,4 +212,70 @@ test("setup without sudo skips installs and reports remaining gaps", async () =>
   const report = await service.setup(WORKER);
   assert.doesNotMatch(commands.join("\n"), /apt-get install/);
   assert.equal(report.checks.find((check) => check.id === "rsync")?.status, "fail");
+});
+
+test("isTransientSshError retries connection failures but not auth/command failures", () => {
+  assert.equal(isTransientSshError(commandError({ stderr: "kex_exchange_identification: Connection timed out" })), true);
+  assert.equal(isTransientSshError(commandError({ stderr: "ssh: connect to host x port 22: Connection refused" })), true);
+  assert.equal(isTransientSshError(commandError({ timedOut: true })), true);
+  assert.equal(isTransientSshError(commandError({ stderr: "client_loop: send disconnect: Broken pipe" })), true);
+  // Non-transient: a real auth failure or command error must NOT be retried.
+  assert.equal(isTransientSshError(commandError({ stderr: "Permission denied (publickey)." })), false);
+  assert.equal(isTransientSshError(commandError({ stderr: "sudo: a password is required", exitCode: 1 })), false);
+  assert.equal(isTransientSshError(new Error("boom")), false);
+});
+
+test("runWithSshRetries retries a transient failure then succeeds", async () => {
+  let calls = 0;
+  const delays: number[] = [];
+  const result = await runWithSshRetries(async () => {
+    calls += 1;
+    if (calls < 3) throw commandError({ stderr: "Connection timed out during banner exchange" });
+    return "ok";
+  }, { baseDelayMs: 1, sleep: async (ms) => { delays.push(ms); } });
+  assert.equal(result, "ok");
+  assert.equal(calls, 3);
+  assert.equal(delays.length, 2);
+});
+
+test("runWithSshRetries gives up after the attempt cap and rethrows", async () => {
+  let calls = 0;
+  await assert.rejects(
+    () => runWithSshRetries(async () => { calls += 1; throw commandError({ stderr: "banner exchange", message: "banner exchange" }); },
+      { attempts: 4, sleep: async () => {} }),
+    /banner exchange/
+  );
+  assert.equal(calls, 4);
+});
+
+test("runWithSshRetries does not retry a non-transient failure", async () => {
+  let calls = 0;
+  await assert.rejects(
+    () => runWithSshRetries(async () => { calls += 1; throw commandError({ stderr: "Permission denied (publickey).", message: "Permission denied (publickey)." }); },
+      { sleep: async () => {} }),
+    /Permission denied/
+  );
+  assert.equal(calls, 1);
+});
+
+test("runWithSshRetries stops when the signal is already aborted", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+  await assert.rejects(
+    () => runWithSshRetries(async () => { calls += 1; return "unreached"; }, { signal: controller.signal, sleep: async () => {} })
+  );
+  assert.equal(calls, 0);
+});
+
+test("runWithSshRetries can stop retrying once output is produced (device-auth safety)", async () => {
+  let produced = false;
+  let calls = 0;
+  await assert.rejects(() => runWithSshRetries(async () => {
+    calls += 1;
+    if (calls === 1) throw commandError({ stderr: "banner exchange", message: "banner exchange" }); // pre-output drop -> retry
+    produced = true; // second attempt emits output, then the connection dies
+    throw commandError({ stderr: "banner exchange", message: "banner exchange" });
+  }, { sleep: async () => {}, isTransient: (e) => !produced && isTransientSshError(e) }));
+  assert.equal(calls, 2); // retried the pre-output failure once, did not retry after output
 });

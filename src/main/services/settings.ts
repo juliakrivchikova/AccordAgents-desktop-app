@@ -31,6 +31,7 @@ import type {
   ChatRoleParticipantDefaults,
   ChatRoleConfigUpdate,
   ManualAgentEnvironmentVariable,
+  ProviderKind,
   ProviderSettings,
   ProviderSettingsUpdate,
   RepoFileOpenAction,
@@ -77,7 +78,7 @@ import {
   normalizeChatSavedPromptTrigger
 } from "../../shared/chatSavedPrompts";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
-import { preferredReadyAssistantProviderKind } from "../../shared/cliReadiness";
+import { CLI_PROVIDER_SETUP, preferredReadyAssistantProviderKind } from "../../shared/cliReadiness";
 import { normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 
@@ -100,6 +101,7 @@ interface StoredAgentEnvironmentSettings {
 interface StoredSettings {
   settingsVersion?: number;
   roundLimitDefault: number;
+  betaUpdates?: boolean;
   cliAgentRunTimeoutMs?: number;
   chatParticipantRequestMaxDepth?: number;
   chatParticipantRequestPromptMaxChars?: number;
@@ -140,12 +142,19 @@ function isRemoteSessionCleanupReason(value: unknown): value is RemoteSessionCle
 }
 
 const DEFAULT_PROVIDERS: ProviderSettings[] = [
-  { kind: "codex-cli", label: "Codex CLI", enabled: true },
-  { kind: "claude-code", label: "Claude Code", enabled: true },
-  { kind: "gemini-cli", label: "Gemini CLI (Antigravity)", enabled: true }
+  { kind: "codex-cli", label: CLI_PROVIDER_SETUP["codex-cli"].label, enabled: true },
+  { kind: "claude-code", label: CLI_PROVIDER_SETUP["claude-code"].label, enabled: true },
+  { kind: "gemini-cli", label: CLI_PROVIDER_SETUP["gemini-cli"].label, enabled: true }
 ];
 
 const DEFAULT_PROVIDER_KINDS = new Set<ProviderSettings["kind"]>(DEFAULT_PROVIDERS.map((provider) => provider.kind));
+
+function canonicalProviderLabel(kind: ProviderKind, fallback: string): string {
+  if (kind === "codex-cli" || kind === "claude-code" || kind === "gemini-cli") {
+    return CLI_PROVIDER_SETUP[kind].label;
+  }
+  return fallback;
+}
 
 const DEFAULT_CLOUD_RUNS_SETTINGS: CloudRunsSettings = {
   enabled: false,
@@ -225,10 +234,10 @@ const DEFAULT_ADMINISTRATOR_INSTRUCTIONS = [
 const DEFAULT_GENERIC_PARTICIPANT_INSTRUCTIONS = [
   "---",
   "name: generic-participant",
-  "description: A general-purpose AccordAgents chat participant without a specialized professional role. Useful for cold-start chats and broad second opinions.",
+  "description: A general-purpose AccordAgents chat member without a specialized professional role. Useful for cold-start chats and broad second opinions.",
   "---",
   "",
-  "You are a general-purpose chat participant in AccordAgents.",
+  "You are a general-purpose chat member in AccordAgents.",
   "",
   "Your job is to respond to the user's request directly, using the available chat context and any explicitly granted app context.",
   "",
@@ -1742,6 +1751,7 @@ export class SettingsService {
     const stored = await this.readStored();
     return {
       roundLimitDefault: stored.roundLimitDefault,
+      betaUpdates: this.normalizeBetaUpdates(stored.betaUpdates),
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
       chatParticipantRequestPromptMaxChars: this.normalizeChatParticipantRequestPromptMaxChars(stored.chatParticipantRequestPromptMaxChars),
@@ -1759,7 +1769,7 @@ export class SettingsService {
       chatParticipantSeedState: stored.chatParticipantSeedState,
       providers: stored.providers.map((provider) => ({
         kind: provider.kind,
-        label: provider.label,
+        label: canonicalProviderLabel(provider.kind, provider.label),
         enabled: provider.enabled,
         model: provider.model
       }))
@@ -2457,6 +2467,18 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  async getBetaUpdatesEnabled(): Promise<boolean> {
+    const stored = await this.readStored();
+    return this.normalizeBetaUpdates(stored.betaUpdates);
+  }
+
+  async setBetaUpdates(enabled: boolean): Promise<AppSettings> {
+    const stored = await this.readStored();
+    stored.betaUpdates = this.normalizeBetaUpdates(enabled);
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
   async getCliAgentRunTimeoutMs(): Promise<number> {
     const stored = await this.readStored();
     return this.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs);
@@ -2663,7 +2685,7 @@ export class SettingsService {
       const existing = settings.providers?.find((item) => item.kind === fallback.kind);
       return {
         kind: fallback.kind,
-        label: fallback.label,
+        label: canonicalProviderLabel(fallback.kind, fallback.label),
         enabled: typeof existing?.enabled === "boolean" ? existing.enabled : fallback.enabled,
         model: typeof existing?.model === "string" ? existing.model.trim() || fallback.model : fallback.model
       };
@@ -2673,6 +2695,7 @@ export class SettingsService {
     return {
       settingsVersion: 1,
       roundLimitDefault: this.defaultRoundLimit(settings),
+      betaUpdates: this.normalizeBetaUpdates(settings.betaUpdates),
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(settings.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(settings.chatParticipantRequestMaxDepth),
       chatParticipantRequestPromptMaxChars: this.normalizeChatParticipantRequestPromptMaxChars(settings.chatParticipantRequestPromptMaxChars),
@@ -2735,7 +2758,11 @@ export class SettingsService {
     if (!Array.isArray(settings.providers)) {
       return false;
     }
-    return settings.providers.some((provider) => !DEFAULT_PROVIDER_KINDS.has(provider.kind) || "encryptedApiKey" in provider);
+    return settings.providers.some((provider) =>
+      !DEFAULT_PROVIDER_KINDS.has(provider.kind) ||
+      "encryptedApiKey" in provider ||
+      provider.label !== canonicalProviderLabel(provider.kind, provider.label)
+    );
   }
 
   private mergeDefaultRoles(roles: ChatRoleConfig[] | undefined): ChatRoleConfig[] {
@@ -2818,6 +2845,10 @@ export class SettingsService {
 
   private normalizeRepoFileOpenAction(action: unknown): RepoFileOpenAction | undefined {
     return action === "open" || action === "reveal" || action === "intellij-idea" ? action : undefined;
+  }
+
+  private normalizeBetaUpdates(value: unknown): boolean {
+    return value === true;
   }
 
   private normalizeAgentEnvironmentVariables(value: unknown): StoredAgentEnvironmentVariable[] {

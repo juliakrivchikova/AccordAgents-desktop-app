@@ -180,6 +180,15 @@ export class SdkEc2Client implements Ec2Client {
   }
 
   async deleteKeyPair(name: string): Promise<void> {
+    // A scoped worker key can only DeleteKeyPair by matching the key-pair ARN.
+    // If the key is already gone, a delete-by-name can't resolve to an ARN and
+    // IAM answers UnauthorizedOperation (not InvalidKeyPair.NotFound), which
+    // would otherwise turn a completed teardown into a false "cleanup failed".
+    // Skip the doomed call when the key no longer exists; DescribeKeyPairs is
+    // region-wide and always permitted, so this never masks a real perms gap.
+    if (!(await this.keyPairExists(name))) {
+      return;
+    }
     try {
       await this.client.send(new DeleteKeyPairCommand({ KeyName: name }));
     } catch (error) {
@@ -358,7 +367,18 @@ export class SdkEc2Client implements Ec2Client {
   }
 
   async terminateInstance(instanceId: string): Promise<void> {
-    await this.client.send(new TerminateInstancesCommand({ InstanceIds: [instanceId] }));
+    try {
+      await this.client.send(new TerminateInstancesCommand({ InstanceIds: [instanceId] }));
+    } catch (error) {
+      // An instance that no longer exists is already in the desired end state;
+      // treat NotFound as a successful teardown (like deleteKeyPair /
+      // deleteSecurityGroup) so delete stays idempotent and the caller still
+      // clears local settings and the key pair / security group instead of
+      // stranding a stale handle the user can no longer delete.
+      if (!isAwsError(error, "InvalidInstanceID.NotFound")) {
+        throw error;
+      }
+    }
   }
 
   private async mapInstance(instance: Instance): Promise<AwsWorkerInstanceInfo | undefined> {

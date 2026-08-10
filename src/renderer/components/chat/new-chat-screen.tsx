@@ -30,29 +30,28 @@ import type {
   ChatParticipantConfig,
   ConversationSummary,
   CloudRunRemoteExecutionMode,
-  ChatProviderKind,
   ChatSkillMention,
   GitRepoInfo,
   RepoFileMention
 } from "../../../shared/types";
-import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
 import {
   type AddableSavedParticipantConfig,
-  CHAT_RUN_LOCATION_OPTIONS,
+  type ChatParticipantRuntimeOverride,
   addableSavedParticipantConfigs,
-  chatAgentModeLabel,
-  chatInheritedCliSettingLabel,
-  chatRunLocationLabel,
+  hasChatParticipantRuntimeOverride,
+  NEW_CHAT_ASSISTANT_PARTICIPANT_ID,
+  newChatAssistantParticipantConfig,
+  newChatAssistantParticipantDraft,
   normalizeChatRunLocation,
   selectedOrMentionedChatParticipantDrafts,
   validateChatStartupDrafts
 } from "./chat-participant-drafts";
-import { providerLabel } from "./chat-conversation-data";
 import {
   cliProviderMetadata,
   readyProviderKinds,
   resolveAssistantProviderKind
 } from "../../../shared/cliReadiness";
+import { ChatParticipantSelectableRosterRow } from "./chat-participant-roster-row";
 import { CliReadinessSetupPanel } from "./cli-readiness-setup-panel";
 import { ChatComposerAttachmentChips } from "./chat-composer-attachment-chips";
 import { ChatComposerMenus } from "./chat-composer-menus";
@@ -65,16 +64,12 @@ import { useChatComposerImages } from "./use-chat-composer-images";
 import { useChatComposerMentions } from "./use-chat-composer-mentions";
 import { sortSavedParticipantOptionsByUsage } from "./new-chat-participant-usage";
 import {
-  CHAT_ASSISTANT_DISPLAY_NAME,
-  CHAT_ASSISTANT_HANDLE,
-  CHAT_ASSISTANT_ROLE_ID,
-  chatParticipantDisplayName,
   isChatAssistantParticipant
 } from "../conversation/conversation-display";
 
 const ACCORDAGENTS_MARK_URL = new URL("../../assets/accordagents-mark.png", import.meta.url).href;
-const NEW_CHAT_ASSISTANT_PARTICIPANT_ID = "__new-chat-assistant__";
 const NEW_CHAT_MENU_OFFSET = 8;
+const NEW_CHAT_PARTICIPANT_MENU_OVERLAP = 80;
 const NEW_CHAT_MENU_VIEWPORT_MARGIN = 16;
 
 export function NewChatScreen(props: {
@@ -91,6 +86,7 @@ export function NewChatScreen(props: {
   repoInfo?: GitRepoInfo;
   selectedParticipantIds: Set<string>;
   selectedParticipantRunLocations: Record<string, CloudRunRemoteExecutionMode>;
+  selectedParticipantRuntimeOverrides: Record<string, ChatParticipantRuntimeOverride>;
   settings: AppSettings;
   summaries: ConversationSummary[];
   agents: AgentHealth[];
@@ -107,6 +103,7 @@ export function NewChatScreen(props: {
   onSelectRepo: () => void;
   onSelectedParticipantIdsChange: Dispatch<SetStateAction<Set<string>>>;
   onSelectedParticipantRunLocationsChange: Dispatch<SetStateAction<Record<string, CloudRunRemoteExecutionMode>>>;
+  onSelectedParticipantRuntimeOverridesChange: Dispatch<SetStateAction<Record<string, ChatParticipantRuntimeOverride>>>;
   onOpenParticipantsSettings: () => void;
   onOpenProviderSettings: () => void;
   onRefreshAgents: () => Promise<AgentHealth[]>;
@@ -136,7 +133,7 @@ export function NewChatScreen(props: {
     ? props.settings.assistantProviderKind
     : undefined;
   const assistantParticipant = useMemo(
-    () => assistantProviderKind ? newChatAssistantParticipant(assistantProviderKind) : undefined,
+    () => assistantProviderKind ? newChatAssistantParticipantConfig(assistantProviderKind) : undefined,
     [assistantProviderKind]
   );
   const savedParticipantOptions = useMemo(
@@ -156,15 +153,27 @@ export function NewChatScreen(props: {
     ],
     [assistantParticipant, savedParticipantOptions]
   );
-  const prospectiveParticipantDrafts = useMemo(
-    () => selectedOrMentionedChatParticipantDrafts(
+  const prospectiveParticipantDrafts = useMemo(() => {
+    const drafts = selectedOrMentionedChatParticipantDrafts(
       props.settings.chatParticipantConfigs,
       props.selectedParticipantIds,
       props.prompt,
-      props.selectedParticipantRunLocations
-    ),
-    [props.prompt, props.selectedParticipantIds, props.selectedParticipantRunLocations, props.settings.chatParticipantConfigs]
-  );
+      props.selectedParticipantRunLocations,
+      props.selectedParticipantRuntimeOverrides
+    );
+    const assistantRuntimeOverride = props.selectedParticipantRuntimeOverrides[NEW_CHAT_ASSISTANT_PARTICIPANT_ID];
+    if (!assistantProviderKind || !hasChatParticipantRuntimeOverride(assistantRuntimeOverride)) {
+      return drafts;
+    }
+    return [newChatAssistantParticipantDraft(assistantProviderKind, assistantRuntimeOverride), ...drafts];
+  }, [
+    assistantProviderKind,
+    props.prompt,
+    props.selectedParticipantIds,
+    props.selectedParticipantRunLocations,
+    props.selectedParticipantRuntimeOverrides,
+    props.settings.chatParticipantConfigs
+  ]);
   const searchSource = useMemo(
     () => ({
       type: "pre-chat" as const,
@@ -205,6 +214,7 @@ export function NewChatScreen(props: {
   const hasPrompt = props.prompt.trim().length > 0;
   const canSubmit = Boolean(assistantProviderKind) && (hasPrompt || images.readyImages.length > 0 || mentions.selectedSkillMentions.length > 0) && !images.hasInvalidImages && !props.busy && !validation;
   const hasLeadingPluginToken = draftStartsWithPluginMention(props.prompt, mentions.selectedPluginMentions);
+  const needsProviderSetup = readyKinds.length === 0;
 
   useLayoutEffect(() => {
     resizeNewChatPrompt(promptRef.current);
@@ -298,7 +308,7 @@ export function NewChatScreen(props: {
   }
 
   return (
-    <div className="new-chat-screen" data-testid="new-chat-screen">
+    <div className={["new-chat-screen", needsProviderSetup ? "has-cli-readiness" : ""].filter(Boolean).join(" ")} data-testid="new-chat-screen">
       <div className="new-chat-hero">
         <div className="new-chat-logo" aria-hidden="true">
           <span className="new-chat-logo-glow" />
@@ -309,7 +319,7 @@ export function NewChatScreen(props: {
         <p>Coordinate AI agents in one workspace</p>
       </div>
 
-      {readyKinds.length === 0 && (
+      {needsProviderSetup && (
         <CliReadinessSetupPanel
           agents={props.agents}
           settings={props.settings}
@@ -329,7 +339,7 @@ export function NewChatScreen(props: {
         </div>
       )}
 
-      <div className="new-chat-card" hidden={readyKinds.length === 0}>
+      <div className="new-chat-card" hidden={needsProviderSetup}>
         <ChatComposerAttachmentChips
           pendingImages={images.pendingImages}
           removeFileMention={mentions.removeFileMention}
@@ -341,7 +351,7 @@ export function NewChatScreen(props: {
         <div className={["new-chat-input-wrap", mentions.showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")}>
           <ChatComposerMenus
             fileIndex={mentions.fileIndex}
-            insertCompactCommand={mentions.insertCompactCommand}
+            insertCommand={mentions.insertCommand}
             insertFileMention={mentions.insertFileMention}
             insertMention={mentions.insertMention}
             insertSavedPrompt={mentions.insertSavedPrompt}
@@ -495,10 +505,12 @@ export function NewChatScreen(props: {
             savedParticipantOptions={savedParticipantOptions}
             selectedParticipantIds={props.selectedParticipantIds}
             selectedParticipantRunLocations={props.selectedParticipantRunLocations}
+            selectedParticipantRuntimeOverrides={props.selectedParticipantRuntimeOverrides}
             renderParticipantAvatar={props.renderParticipantAvatar}
             participantRoleLabel={props.participantRoleLabel}
             onSelectedParticipantIdsChange={props.onSelectedParticipantIdsChange}
             onSelectedParticipantRunLocationsChange={props.onSelectedParticipantRunLocationsChange}
+            onSelectedParticipantRuntimeOverridesChange={props.onSelectedParticipantRuntimeOverridesChange}
             onOpenParticipantsSettings={props.onOpenParticipantsSettings}
           />
           <button
@@ -515,10 +527,10 @@ export function NewChatScreen(props: {
         </div>
       </div>
 
-      {props.repoInfo && !props.repoInfo.isRepo && (
+      {props.repoInfo && !props.repoInfo.isRepo && props.repoInfo.error && (
         <div className="repo-status new-chat-repo-status bad">
           <XCircle size={16} aria-hidden />
-          {props.repoInfo.error || "Not a git repository"}
+          {props.repoInfo.error}
         </div>
       )}
 
@@ -626,14 +638,15 @@ function ParticipantPicker(props: {
   savedParticipantOptions: AddableSavedParticipantConfig[];
   selectedParticipantIds: Set<string>;
   selectedParticipantRunLocations: Record<string, CloudRunRemoteExecutionMode>;
+  selectedParticipantRuntimeOverrides: Record<string, ChatParticipantRuntimeOverride>;
   renderParticipantAvatar: (participant: ChatParticipant) => ReactNode;
   participantRoleLabel: (participant: Pick<ChatParticipant, "roleConfigId">) => string;
   onSelectedParticipantIdsChange: Dispatch<SetStateAction<Set<string>>>;
   onSelectedParticipantRunLocationsChange: Dispatch<SetStateAction<Record<string, CloudRunRemoteExecutionMode>>>;
+  onSelectedParticipantRuntimeOverridesChange: Dispatch<SetStateAction<Record<string, ChatParticipantRuntimeOverride>>>;
   onOpenParticipantsSettings: () => void;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const [expandedParticipantIds, setExpandedParticipantIds] = useState<Set<string>>(() => new Set());
   const rootRef = useCloseOnOutside<HTMLDivElement>(open, () => setOpen(false));
   const participantMenuMaxHeight = useNewChatMenuMaxHeight(rootRef, open);
   const participantOptions: Array<AddableSavedParticipantConfig & { locked?: boolean }> = [
@@ -660,6 +673,10 @@ function ParticipantPicker(props: {
         const { [id]: _removed, ...rest } = current;
         return rest;
       });
+      props.onSelectedParticipantRuntimeOverridesChange((current) => {
+        const { [id]: _removed, ...rest } = current;
+        return rest;
+      });
     }
   }
 
@@ -667,7 +684,14 @@ function ParticipantPicker(props: {
     return normalizeChatRunLocation(props.selectedParticipantRunLocations[participant.id] ?? participant.remoteExecution);
   }
 
+  function runtimeOverrideFor(participant: ChatParticipantConfig): ChatParticipantRuntimeOverride | undefined {
+    return props.selectedParticipantRuntimeOverrides[participant.id];
+  }
+
   function updateRunLocation(participant: ChatParticipantConfig, remoteExecution: CloudRunRemoteExecutionMode): void {
+    if (isNewChatAssistantOption(participant)) {
+      return;
+    }
     props.onSelectedParticipantRunLocationsChange((current) => ({
       ...current,
       [participant.id]: normalizeChatRunLocation(remoteExecution)
@@ -675,16 +699,27 @@ function ParticipantPicker(props: {
     props.onSelectedParticipantIdsChange((current) => new Set(current).add(participant.id));
   }
 
-  function toggleExpanded(id: string): void {
-    setExpandedParticipantIds((current) => {
-      const next = new Set(current);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
+  function updateRuntime(participant: ChatParticipantConfig, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">): void {
+    const runtimeOverride: ChatParticipantRuntimeOverride = {
+      model: patch.model,
+      reasoningEffort: patch.reasoningEffort,
+      agentMode: patch.agentMode,
+      permissions: patch.permissions,
+      remoteExecution: normalizeChatRunLocation(patch.remoteExecution),
+      skipToolchainPreflight: patch.skipToolchainPreflight,
+      autoWatch: patch.autoWatch
+    };
+    props.onSelectedParticipantRuntimeOverridesChange((current) => ({
+      ...current,
+      [participant.id]: runtimeOverride
+    }));
+    if (!isNewChatAssistantOption(participant)) {
+      props.onSelectedParticipantIdsChange((current) => new Set(current).add(participant.id));
+      props.onSelectedParticipantRunLocationsChange((current) => ({
+        ...current,
+        [participant.id]: normalizeChatRunLocation(patch.remoteExecution)
+      }));
+    }
   }
 
   return (
@@ -708,84 +743,40 @@ function ParticipantPicker(props: {
       </button>
       {open && (
         <div
-          className="new-chat-menu new-chat-participant-menu"
+          className="new-chat-menu new-chat-participant-menu chat-participant-popover"
           role="menu"
           style={participantMenuMaxHeight === undefined ? undefined : { maxHeight: participantMenuMaxHeight }}
         >
-          {participantOptions.map(({ config: participant, invalidReason, locked }) => {
+          {participantOptions.length === 0 ? (
+            <div className="new-chat-menu-empty">No saved members configured.</div>
+          ) : participantOptions.map(({ config: participant, invalidReason, locked }) => {
             const selected = Boolean(locked) || props.selectedParticipantIds.has(participant.id);
-            const expanded = expandedParticipantIds.has(participant.id);
             const runLocation = runLocationFor(participant);
-            const detailValues = participantDetailValues(participant);
-            const displayName = chatParticipantDisplayName(participant);
             return (
-              <div
+              <ChatParticipantSelectableRosterRow
                 key={participant.id}
-                className={`new-chat-participant-row ${selected ? "is-selected" : ""} ${expanded ? "is-expanded" : ""} ${invalidReason ? "is-disabled" : ""}`}
-                role="none"
-                title={invalidReason}
-              >
-                <button
-                  type="button"
-                  className="new-chat-participant-main"
-                  role="menuitem"
-                  aria-expanded={expanded}
-                  onClick={() => toggleExpanded(participant.id)}
-                >
-                  {props.renderParticipantAvatar(participant)}
-                  <span className="new-chat-participant-text">
-                    <span className="new-chat-participant-title">
-                      <strong>{displayName}</strong>
-                      <span>- {providerLabel(participant.kind)}</span>
-                    </span>
-                    <small>{invalidReason ?? props.participantRoleLabel(participant)}</small>
-                  </span>
-                  <ChevronDown className="new-chat-participant-disclosure" size={14} aria-hidden />
-                </button>
-                <button
-                  type="button"
-                  className={`new-chat-participant-check ${selected ? "is-on" : ""}`}
-                  role="menuitemcheckbox"
-                  aria-checked={selected}
-                  aria-label={locked ? `${CHAT_ASSISTANT_DISPLAY_NAME} is always included` : `${selected ? "Remove" : "Add"} @${participant.handle}`}
-                  disabled={Boolean(locked) || Boolean(invalidReason)}
-                  onClick={() => {
-                    if (!locked) {
-                      toggleParticipant(participant.id);
-                    }
-                  }}
-                >
-                  {selected && <Check size={14} strokeWidth={3.2} />}
-                </button>
-                {expanded && (
-                  <div className="new-chat-participant-details">
-                    {detailValues.map((value, index) => (
-                      <span key={`${index}-${value}`} className="new-chat-participant-detail">{value}</span>
-                    ))}
-                    {participant.kind === "codex-cli" && !locked && (
-                      <label className="new-chat-run-location" title={`Run ${chatRunLocationLabel(runLocation).toLowerCase()}`}>
-                        <span>Run</span>
-                        <select
-                          aria-label={`Run location for @${participant.handle}`}
-                          value={runLocation}
-                          onChange={(event) => updateRunLocation(participant, event.currentTarget.value as CloudRunRemoteExecutionMode)}
-                        >
-                          {CHAT_RUN_LOCATION_OPTIONS.map((option) => (
-                            <option value={option.value} key={option.value}>{option.label}</option>
-                          ))}
-                        </select>
-                      </label>
-                    )}
-                  </div>
-                )}
-              </div>
+                participant={participant}
+                selected={selected}
+                locked={locked}
+                disabledReason={invalidReason}
+                roleLabel={props.participantRoleLabel(participant)}
+                remoteExecution={runLocation}
+                runtimeOverride={runtimeOverrideFor(participant)}
+                renderParticipantAvatar={props.renderParticipantAvatar}
+                onToggleSelected={() => {
+                  if (!locked) {
+                    toggleParticipant(participant.id);
+                  }
+                }}
+                onRunLocationChange={updateRunLocation}
+                onRuntimeChange={updateRuntime}
+              />
             );
           })}
-          <div className="new-chat-menu-divider" />
-          <div className="new-chat-participant-footer">
+          <div className="chat-participant-footer">
             <button
               type="button"
-              className="new-chat-manage-link"
+              className="chat-manage-link"
               role="menuitem"
               onClick={() => {
                 setOpen(false);
@@ -801,41 +792,8 @@ function ParticipantPicker(props: {
   );
 }
 
-function newChatAssistantParticipant(kind: ChatProviderKind): ChatParticipantConfig {
-  return {
-    id: NEW_CHAT_ASSISTANT_PARTICIPANT_ID,
-    handle: CHAT_ASSISTANT_HANDLE,
-    roleConfigId: CHAT_ASSISTANT_ROLE_ID,
-    behaviorRuleIds: [],
-    kind,
-    agentMode: "default",
-    permissions: {
-      repoRead: false,
-      workspaceWrite: false,
-      webAccess: false,
-      requestParticipants: "ask",
-      requestCompaction: "ask",
-      shell: {
-        enabled: false,
-        rules: []
-      }
-    },
-    remoteExecution: "local",
-    updatedAt: ""
-  };
-}
-
 function isNewChatAssistantOption(participant: Pick<ChatParticipantConfig, "id" | "handle" | "roleConfigId">): boolean {
   return participant.id === NEW_CHAT_ASSISTANT_PARTICIPANT_ID || isChatAssistantParticipant(participant);
-}
-
-function participantDetailValues(participant: ChatParticipantConfig): string[] {
-  const inheritedSetting = chatInheritedCliSettingLabel(participant.kind);
-  return [
-    chatAgentModeLabel(participant.agentMode),
-    participant.model?.trim() || inheritedSetting,
-    participant.reasoningEffort ? chatReasoningEffortLabel(participant.reasoningEffort) : inheritedSetting
-  ];
 }
 
 function useCloseOnOutside<T extends HTMLElement>(open: boolean, onClose: () => void): RefObject<T> {
@@ -869,7 +827,7 @@ function useNewChatMenuMaxHeight<T extends HTMLElement>(rootRef: RefObject<T>, o
       if (!rect) return;
       const topbarBottom = document.querySelector<HTMLElement>("[data-shell='topbar']")?.getBoundingClientRect().bottom ?? 0;
       const safeTop = Math.max(NEW_CHAT_MENU_VIEWPORT_MARGIN, topbarBottom + NEW_CHAT_MENU_VIEWPORT_MARGIN);
-      setMaxHeight(Math.max(0, Math.floor(rect.top - NEW_CHAT_MENU_OFFSET - safeTop)));
+      setMaxHeight(Math.max(0, Math.floor(rect.top - NEW_CHAT_MENU_OFFSET + NEW_CHAT_PARTICIPANT_MENU_OVERLAP - safeTop)));
     }
 
     updateMaxHeight();

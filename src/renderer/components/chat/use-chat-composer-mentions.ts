@@ -29,6 +29,7 @@ import {
   activeSkillQuery,
   type ChatSlashSuggestion,
   compactCommandOption,
+  goalCommandOption,
   draftHasArtifactMention,
   draftHasFileMention,
   draftHasMention,
@@ -81,7 +82,7 @@ export function useChatComposerMentions(props: {
   fileIndex: number;
   fileOptions: RepoFileSearchResult[];
   insertArtifactMention: (artifact: ArtifactSummary) => void;
-  insertCompactCommand: () => void;
+  insertCommand: (command: "compact" | "goal") => void;
   insertFileMention: (file: RepoFileSearchResult) => void;
   insertHashOptionAtIndex: (index: number) => void;
   insertMention: (participant: ChatParticipant) => void;
@@ -177,7 +178,10 @@ export function useChatComposerMentions(props: {
   const visiblePluginOptions = skillQuery === undefined ? [] : pluginOptions.filter((plugin) => isSlashInvocablePlugin(plugin, skillTarget));
   const skillTargetLabel = skillTarget ? skillPickerTargetLabel(skillTarget, props.participants) : undefined;
   const compactOption = props.searchSource.type === "conversation" ? compactCommandOption(skillQuery, skillTarget) : undefined;
-  const visibleCommandOptions = compactOption ? [compactOption] : [];
+  const goalOption = goalCommandOption(skillQuery, skillTarget);
+  const visibleCommandOptions = [compactOption, goalOption].filter(
+    (option): option is NonNullable<typeof option> => Boolean(option)
+  );
   const visibleSlashOptions = rankSlashSuggestions({
     commands: visibleCommandOptions,
     prompts: visiblePromptOptions,
@@ -404,8 +408,8 @@ export function useChatComposerMentions(props: {
     setSkillIndex(0);
   }
 
-  function insertCompactCommand(): void {
-    updateDraftWithCaret(replaceActiveSkillMention(props.draft, "compact"));
+  function insertCommand(command: "compact" | "goal"): void {
+    updateDraftWithCaret(replaceActiveSkillMention(props.draft, command));
     setSkillQuery(undefined);
     setSkillOptions([]);
     setPluginOptions([]);
@@ -442,7 +446,7 @@ export function useChatComposerMentions(props: {
       return;
     }
     if (selection.kind === "command") {
-      insertCompactCommand();
+      insertCommand(selection.item.id);
     } else if (selection.kind === "prompt") {
       insertSavedPrompt(selection.item);
     } else if (selection.kind === "skill") {
@@ -466,7 +470,7 @@ export function useChatComposerMentions(props: {
     fileIndex,
     fileOptions,
     insertArtifactMention,
-    insertCompactCommand,
+    insertCommand,
     insertFileMention,
     insertHashOptionAtIndex,
     insertMention,

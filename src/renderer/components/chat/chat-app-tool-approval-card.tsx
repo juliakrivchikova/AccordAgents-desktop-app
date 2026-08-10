@@ -18,12 +18,15 @@ import { chatParticipantDisplayName, chatParticipantReference } from "../convers
 import { MarkdownText } from "../content/markdown-text";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { formatChatTime } from "./chat-format";
-import { APP_ROSTER_REQUEST_CHANGE_TOOL, chatParticipantChangeRequest, chatParticipantRequestApprovalRequest, chatPermissionChangeRequest, chatRoleChangeRequest, chatRoleParticipantChangeRequest, chatSelfCompactionRequest, chatToolPermissionRequest, participantProviderLabel } from "./chat-conversation-data";
+import { APP_ROSTER_REQUEST_CHANGE_TOOL, chatApprovalKeyboardAction, chatApprovalShowsGenericSkip, chatCodexApprovalRequest, chatParticipantChangeRequest, chatParticipantRequestApprovalRequest, chatPermissionChangeRequest, chatRoleChangeRequest, chatRoleParticipantChangeRequest, chatSelfCompactionRequest, chatToolPermissionRequest, participantProviderLabel } from "./chat-conversation-data";
+import { chatCodexApprovalShowsCompactResult } from "./chat-codex-approval-presentation";
 import { approvalOptions, approvalQuestion, approvalReason, ChatAppToolReviewFooter, ChatAppToolReviewResult, ChatAppToolReviewStatus, participantReviewChipLabel, reviewPrimaryLabel, roleReviewChipLabel, temporaryRolesForReview } from "./chat-app-tool-approval-review";
+import { ChatCodexApprovalResult } from "./chat-codex-approval-result";
 import { ChatAppToolPermissionOperation, ChatAppToolParticipantRequestOperation, ChatAppToolPermissionPromptOperation } from "./chat-app-tool-permission-operations";
 import { ChatAppToolRosterOperation, ChatAppToolRosterPermissionEnvelope, RosterApprovalTitle, rosterApprovalQuestion } from "./chat-app-tool-roster";
 import { ChatAppToolRoleChangeOperation } from "./chat-app-tool-role-operation";
 import { ChatAppToolParticipantChangeOperation } from "./chat-app-tool-participant-operation";
+import { ChatCodexApprovalOperation } from "./chat-codex-approval-operation";
 
 export function ChatAppToolApprovalCard(props: {
   approval: ChatAppToolApproval;
@@ -31,11 +34,13 @@ export function ChatAppToolApprovalCard(props: {
   savedParticipants: ChatParticipantConfig[];
   roles: ChatRoleConfig[];
   submitting: boolean;
+  embedded?: boolean;
   onRespond: (
     approvalId: string,
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
-    draftOverride?: ChatAppToolApprovalRequest
+    draftOverride?: ChatAppToolApprovalRequest,
+    codexDecisionId?: string
   ) => Promise<void>;
 }): JSX.Element {
   const permissionRequest = chatPermissionChangeRequest(props.approval);
@@ -45,6 +50,7 @@ export function ChatAppToolApprovalCard(props: {
   const participantChange = chatParticipantChangeRequest(props.approval);
   const participantRequest = chatParticipantRequestApprovalRequest(props.approval);
   const selfCompactionRequest = chatSelfCompactionRequest(props.approval);
+  const codexRequest = chatCodexApprovalRequest(props.approval);
   const inferredParticipantRequest = participantRequest?.source === "inferred";
   const preferOnceApproval = Boolean(permissionRequest && permissionRequest.kind !== "portable");
   const added = props.approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL && "operations" in props.approval.request
@@ -65,7 +71,22 @@ export function ChatAppToolApprovalCard(props: {
   const effectiveParticipantChange = effectiveCombinedRequest?.participantRequest ?? (participantChange ? participantDraft ?? participantChange : undefined);
   const reviewChange = Boolean(effectiveCombinedRequest || effectiveRoleRequest || effectiveParticipantChange);
   const readOnly = props.approval.status !== "pending";
-  const options = approvalOptions(
+  const options: Array<{
+    key: string;
+    label: string;
+    detail?: string;
+    approve: boolean;
+    scope?: ChatAppToolApprovalScope;
+    codexDecisionId?: string;
+  }> = codexRequest
+    ? codexRequest.options.map((option) => ({
+        key: option.id,
+        label: option.label,
+        detail: option.detail,
+        approve: option.outcome === "approve",
+        codexDecisionId: option.id
+      }))
+    : approvalOptions(
     props.approval,
     permissionRequest,
     effectiveRoleRequest,
@@ -75,22 +96,31 @@ export function ChatAppToolApprovalCard(props: {
     toolPermissionRequest,
     added,
     inferredParticipantRequest
-  );
-  const defaultIndex = rosterApproval || preferOnceApproval || inferredParticipantRequest ? 0 : Math.min(1, options.length - 1);
+    );
+  const defaultIndex = codexRequest || rosterApproval || preferOnceApproval || inferredParticipantRequest ? 0 : Math.min(1, options.length - 1);
   const [selectedIndex, setSelectedIndex] = useState(defaultIndex);
   const requester = props.participants.find((participant) => participant.id === props.approval.requesterParticipantId);
   const requesterLabel = requester ? chatParticipantDisplayName(requester) : chatParticipantReference(props.approval.requesterHandle);
   const requesterAvatar = requester
     ? avatarForChatParticipant(requester, requesterLabel)
     : avatarForParticipant(requesterLabel, props.approval.requesterParticipantId);
-  const approvalPrompt = effectiveCombinedRequest
-    ? `${chatParticipantReference(props.approval.requesterHandle)} wants to create a role and add a member`
-    : approvalQuestion(props.approval, permissionRequest, effectiveRoleRequest, effectiveParticipantChange, participantRequest, selfCompactionRequest, toolPermissionRequest);
+  const approvalPrompt = codexRequest
+    ? codexRequest.method === "item/autoApprovalReview/denied"
+      ? `${chatParticipantReference(props.approval.requesterHandle)} wants to retry an action denied by Codex Auto Review`
+      : `${chatParticipantReference(props.approval.requesterHandle)} needs approval before Codex can continue`
+    : effectiveCombinedRequest
+      ? `${chatParticipantReference(props.approval.requesterHandle)} wants to create a role and add a member`
+      : approvalQuestion(props.approval, permissionRequest, effectiveRoleRequest, effectiveParticipantChange, participantRequest, selfCompactionRequest, toolPermissionRequest);
   const displayPrompt = rosterApproval ? rosterApprovalQuestion(props.approval, added) : approvalPrompt;
 
   if (reviewChange && readOnly) {
     return (
-      <section className={`chat-app-tool-approval-card is-review-change is-compact-result is-${props.approval.status}`} aria-label={displayPrompt}>
+      <section
+        className={`chat-app-tool-approval-card is-review-change is-compact-result is-${props.approval.status}`}
+        aria-label={displayPrompt}
+        data-app-tool-approval-id={props.approval.id}
+        tabIndex={-1}
+      >
         <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
         <div className="chat-app-tool-approval-body">
           <div className="chat-app-tool-approval-meta">
@@ -110,6 +140,27 @@ export function ChatAppToolApprovalCard(props: {
     );
   }
 
+  if (chatCodexApprovalShowsCompactResult(props.approval)) {
+    return (
+      <section
+        className={`chat-app-tool-approval-card is-compact-result is-${props.approval.status}`}
+        aria-label={displayPrompt}
+        data-app-tool-approval-id={props.approval.id}
+        tabIndex={-1}
+      >
+        <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+        <div className="chat-app-tool-approval-body">
+          <div className="chat-app-tool-approval-meta">
+            <strong>{requesterLabel}</strong>
+            {requester && <span className="message-provider">{participantProviderLabel(requester.kind)}</span>}
+            <span className="message-when">{formatChatTime(props.approval.createdAt)}</span>
+          </div>
+          <ChatCodexApprovalResult approval={props.approval} />
+        </div>
+      </section>
+    );
+  }
+
   function submit(): void {
     if (readOnly) {
       return;
@@ -119,7 +170,7 @@ export function ChatAppToolApprovalCard(props: {
       const draftOverride = option.approve
         ? effectiveCombinedRequest ?? effectiveRoleRequest ?? effectiveParticipantChange
         : undefined;
-      void props.onRespond(props.approval.id, option.approve, option.scope, draftOverride);
+      void props.onRespond(props.approval.id, option.approve, option.scope, draftOverride, option.codexDecisionId);
     }
   }
 
@@ -143,26 +194,23 @@ export function ChatAppToolApprovalCard(props: {
     if (props.submitting) {
       return;
     }
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setSelectedIndex((index) => Math.min(options.length - 1, index + 1));
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setSelectedIndex((index) => Math.max(0, index - 1));
-    } else if (/^[1-9]$/.test(event.key)) {
-      const next = Number(event.key) - 1;
-      if (next < options.length) {
-        event.preventDefault();
-        setSelectedIndex(next);
-      }
-    } else if (event.key === "Enter") {
-      event.preventDefault();
+    const action = chatApprovalKeyboardAction(event.key, selectedIndex, options.length);
+    if (!action) return;
+    event.preventDefault();
+    if (action.type === "submit") {
       submit();
+    } else {
+      setSelectedIndex(action.index);
     }
   }
 
   return (
-    <section className={`chat-app-tool-approval-card ${rosterApproval ? "is-roster-request" : ""} ${reviewChange ? "is-review-change" : ""} is-${props.approval.status}`} aria-label={displayPrompt}>
+    <section
+      className={`chat-app-tool-approval-card ${props.embedded ? "is-embedded" : ""} ${rosterApproval ? "is-roster-request" : ""} ${reviewChange ? "is-review-change" : ""} is-${props.approval.status}`}
+      aria-label={displayPrompt}
+      data-app-tool-approval-id={props.approval.id}
+      tabIndex={-1}
+    >
       <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
       <div className="chat-app-tool-approval-body">
         <div className="chat-app-tool-approval-meta">
@@ -183,7 +231,9 @@ export function ChatAppToolApprovalCard(props: {
           {!reviewChange && <h3>{rosterApproval ? <RosterApprovalTitle requesterHandle={props.approval.requesterHandle} added={added} /> : displayPrompt}</h3>}
           {readOnly && <ChatAppToolReviewStatus approval={props.approval} />}
           <fieldset className="chat-app-tool-review-fieldset" disabled={props.submitting}>
-          {permissionRequest ? (
+          {codexRequest ? (
+            <ChatCodexApprovalOperation request={codexRequest} />
+          ) : permissionRequest ? (
             <ChatAppToolPermissionOperation request={permissionRequest} />
           ) : toolPermissionRequest ? (
             <ChatAppToolPermissionPromptOperation request={toolPermissionRequest} />
@@ -246,7 +296,7 @@ export function ChatAppToolApprovalCard(props: {
             </div>
           )}
           </fieldset>
-          {approvalReason(props.approval, effectiveCombinedRequest) && !effectiveRoleRequest && (
+          {approvalReason(props.approval, effectiveCombinedRequest) && !effectiveRoleRequest && !codexRequest && (
             <div className="chat-app-tool-approval-reason">
               <MarkdownText content={approvalReason(props.approval, effectiveCombinedRequest) ?? ""} />
             </div>
@@ -272,7 +322,12 @@ export function ChatAppToolApprovalCard(props: {
               Allow once queues this compaction only. Chat approval allows future compaction requests from {requesterLabel} without another approval.
             </p>
           )}
-          {reviewChange && readOnly ? null : reviewChange ? (
+          {codexRequest && (
+            <p className="chat-app-tool-scope-note">
+              This decision applies only to the blocked Codex callback. Session options stay inside this Codex session and do not create a chat-wide grant.
+            </p>
+          )}
+          {readOnly ? null : reviewChange ? (
             <ChatAppToolReviewFooter
               primaryLabel={reviewPrimaryLabel(effectiveRoleRequest, effectiveParticipantChange, effectiveCombinedRequest)}
               submitting={props.submitting}
@@ -299,7 +354,10 @@ export function ChatAppToolApprovalCard(props: {
                 key={option.key}
               >
                 <span className="chat-approval-option-num">{index + 1}.</span>
-                <span className="chat-approval-option-label">{option.label}</span>
+                <span className="chat-approval-option-copy">
+                  <span className="chat-approval-option-label">{option.label}</span>
+                  {option.detail && <span className="chat-approval-option-detail">{option.detail}</span>}
+                </span>
                 {index === selectedIndex && (
                   <span className="chat-approval-option-keys" aria-hidden>
                     <ArrowUp size={16} />
@@ -310,14 +368,16 @@ export function ChatAppToolApprovalCard(props: {
                 ))}
               </div>
               <div className="chat-approval-footer">
-                <button
-                  type="button"
-                  className="chat-approval-skip"
-                  disabled={props.submitting}
-                  onClick={() => void props.onRespond(props.approval.id, false)}
-                >
-                  Skip
-                </button>
+                {chatApprovalShowsGenericSkip(codexRequest) && (
+                  <button
+                    type="button"
+                    className="chat-approval-skip"
+                    disabled={props.submitting}
+                    onClick={() => void props.onRespond(props.approval.id, false)}
+                  >
+                    Skip
+                  </button>
+                )}
                 <Button variant="default" size="sm" className="chat-approval-submit" disabled={props.submitting} onClick={submit}>
                   <span>Submit</span>
                   <CornerDownLeft size={14} aria-hidden />

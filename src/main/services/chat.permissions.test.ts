@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   APP_ARTIFACT_CREATE_TOOL,
   APP_CHAT_EXPORT_ATTACHMENT_TOOL,
+  APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL,
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
   APP_CHAT_LIST_ATTACHMENTS_TOOL,
   APP_CHAT_READ_ATTACHMENT_TOOL,
@@ -147,16 +148,22 @@ test("processing transcript metadata preserves visible stream text", () => {
   assert.equal(service.processingTranscriptFromContent("   ", NOW), undefined);
 });
 
-test("processing transcript metadata caps oversized streams to the latest text", () => {
+test("processing transcript metadata keeps 100k streams untruncated and bounds pathological streams", () => {
   const service = testService().service as any;
-  const content = `${"a".repeat(100_010)}tail`;
-  const transcript = service.processingTranscriptFromContent(content, NOW);
+  const ordinary = `${"a".repeat(100_010)}tail`;
+  const ordinaryTranscript = service.processingTranscriptFromContent(ordinary, NOW);
+  const oversized = `${"a".repeat(2_000_005)}tail`;
+  const oversizedTranscript = service.processingTranscriptFromContent(oversized, NOW);
 
-  assert.equal(transcript.content.length, 100_000);
-  assert.equal(transcript.content.endsWith("tail"), true);
-  assert.equal(transcript.originalLength, content.length);
-  assert.equal(transcript.retainedStart, content.length - 100_000);
-  assert.equal(transcript.truncated, true);
+  assert.equal(ordinaryTranscript.content, ordinary);
+  assert.equal(ordinaryTranscript.originalLength, ordinary.length);
+  assert.equal(ordinaryTranscript.retainedStart, undefined);
+  assert.equal(ordinaryTranscript.truncated, undefined);
+  assert.equal(oversizedTranscript.content.length, 2_000_000);
+  assert.equal(oversizedTranscript.content.endsWith("tail"), true);
+  assert.equal(oversizedTranscript.originalLength, oversized.length);
+  assert.equal(oversizedTranscript.retainedStart, oversized.length - 2_000_000);
+  assert.equal(oversizedTranscript.truncated, true);
 });
 
 test("processing transcript metadata records omitted activity event count", () => {
@@ -164,6 +171,36 @@ test("processing transcript metadata records omitted activity event count", () =
   const transcript = service.processingTranscriptFromContent("partial reply", NOW, { omittedActivityEventCount: 3 });
 
   assert.equal(transcript.omittedActivityEventCount, 3);
+});
+
+test("processing transcript stopped terminal note preserves and reapplies truncation metadata", () => {
+  const service = testService().service as any;
+  const terminal = "@codex stopped by user.";
+  const appendedLength = `\n\n${terminal}`.length;
+  const alreadyTruncated = service.processingTranscriptWithTerminalMessage({
+    content: "a".repeat(2_000_000),
+    capturedAt: NOW,
+    originalLength: 2_000_010,
+    retainedStart: 10,
+    truncated: true
+  }, terminal);
+  const crossesLimit = service.processingTranscriptWithTerminalMessage({
+    content: "b".repeat(2_000_000 - 3),
+    capturedAt: NOW,
+    originalLength: 2_000_000 - 3
+  }, terminal);
+
+  assert.equal(alreadyTruncated.content.length, 2_000_000);
+  assert.equal(alreadyTruncated.content.endsWith(terminal), true);
+  assert.equal(alreadyTruncated.originalLength, 2_000_010 + appendedLength);
+  assert.equal(alreadyTruncated.retainedStart, 10 + appendedLength);
+  assert.equal(alreadyTruncated.truncated, true);
+
+  assert.equal(crossesLimit.content.length, 2_000_000);
+  assert.equal(crossesLimit.content.endsWith(terminal), true);
+  assert.equal(crossesLimit.originalLength, (2_000_000 - 3) + appendedLength);
+  assert.equal(crossesLimit.retainedStart, appendedLength - 3);
+  assert.equal(crossesLimit.truncated, true);
 });
 
 test("processing transcript expansion hides when transcript only contains the final answer", () => {
@@ -414,6 +451,57 @@ test("agent progress sink preserves transcript without a visible progress callba
   assert.equal(sink.processingTranscript(NOW)?.content, full);
   assert.equal(sink.activityEvents()[0].label, "Reading renderer state");
   assert.equal(sink.activityEvents()[0].afterContentLength, preamble.length);
+});
+
+test("agent progress sink coalesces activity only by item id and caps retained activity", () => {
+  const service = testService().service as any;
+  const sink = service.createAgentProgressSink("run-1", undefined, chatParticipant("codex-cli"), "message-1");
+
+  sink.emit({
+    kind: "tool",
+    text: "Updating files",
+    activityKind: "file-edit",
+    activityStatus: "started",
+    activityDetail: "initial",
+    activityItemId: "file-change-1"
+  });
+  sink.emit({
+    kind: "tool",
+    text: "Updating files",
+    activityKind: "file-edit",
+    activityStatus: "completed",
+    activityDetail: "final",
+    activityItemId: "file-change-1"
+  });
+  sink.emit({ kind: "tool", text: "Running command", activityKind: "command", activityDetail: "npm test" });
+  sink.emit({ kind: "tool", text: "Running command", activityKind: "command", activityDetail: "npm test" });
+
+  const initialEvents = sink.activityEvents();
+  assert.deepEqual(initialEvents.map((event: ChatAgentActivityEvent) => [event.sequence, event.itemId, event.label, event.detail, event.status]), [
+    [1, "file-change-1", "Updating files", "final", "completed"],
+    [2, undefined, "Running command", "npm test", "started"],
+    [3, undefined, "Running command", "npm test", "started"]
+  ]);
+
+  const longDetail = "x".repeat(4_100);
+  for (let index = 0; index < 505; index += 1) {
+    sink.emit({
+      kind: "tool",
+      text: `Using tool ${index}`,
+      activityKind: "tool",
+      activityDetail: index === 504 ? longDetail : undefined,
+      activityItemId: `tool-${index}`
+    });
+  }
+
+  const retained = sink.activityEvents();
+  const transcript = sink.processingTranscript(NOW);
+  assert.equal(retained.length, 500);
+  assert.equal(retained[0].sequence, 9);
+  assert.equal(retained.at(-1)?.sequence, 508);
+  assert.equal(retained.at(-1)?.detail?.length, 4_000);
+  assert.match(retained.at(-1)?.detail ?? "", /… \[\+122 chars omitted\]$/);
+  assert.equal(transcript?.omittedActivityEventCount, 8);
 });
 
 test("agent progress sink keeps in-progress formatted stream for visible runs", async () => {
@@ -1114,6 +1202,96 @@ test("switching an existing session to auto adopts the mode on the next resumed 
   assert.equal(effective.webAccess, true);
 });
 
+test("chat native /goal preserves the posted message while enabling the provider-native run", async () => {
+  const runs: Array<{ prompt: string; options: any }> = [];
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      runs.push({ prompt, options });
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: "goal complete",
+        durationMs: 1,
+        sessionId: "goal-session"
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  const content = "@codex finish the implementation /goal";
+  await service.sendMessage({ conversationId: conversation.id, runId: "native-goal-run", content });
+  await waitFor(() => runs.length === 1);
+
+  assert.deepEqual(runs[0].options.nativeGoal, { name: "goal", objective: "finish the implementation" });
+  assert.match(runs[0].prompt, /@codex finish the implementation/);
+  assert.doesNotMatch(runs[0].prompt, /finish the implementation \/goal/);
+  const posted = storage.current.messages.filter((message: ChatMessage) => message.role === "user").at(-1);
+  assert.equal(posted?.content, content);
+  assert.deepEqual(posted?.metadata?.nativeCommand, {
+    name: "goal",
+    objective: "finish the implementation"
+  });
+});
+
+test("chat native /goal requires one target and a non-empty edge command while middle/repeated tokens stay prose", async () => {
+  const codex = chatParticipant("codex-cli");
+  const claude = chatParticipant("claude-code");
+  const conversation = chatConversation([codex, claude]);
+  const { service } = testService({ conversation });
+
+  await assert.rejects(
+    () => service.sendMessage({
+      conversationId: conversation.id,
+      runId: "native-goal-two-targets",
+      content: "@codex @drew finish together /goal"
+    }),
+    /exactly one resolved chat member/
+  );
+  await assert.rejects(
+    () => service.sendMessage({
+      conversationId: conversation.id,
+      runId: "native-goal-empty",
+      content: "@codex /goal"
+    }),
+    /Add a goal/
+  );
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "native-goal-middle",
+    content: "@codex finish /goal this"
+  });
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "native-goal-repeated",
+    content: "@codex /goal finish /goal"
+  });
+});
+
+test("chat does not activate native /goal from inline code", async () => {
+  const runs: Array<{ options: any }> = [];
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      runs.push({ options });
+      return { participant: runParticipant, ok: true, content: "ok", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "native-goal-code",
+    content: "@codex explain `/goal`"
+  });
+  await waitFor(() => runs.length === 1);
+  assert.equal(runs[0].options.nativeGoal, undefined);
+});
+
 test("reported provider session id is persisted even if the first turn fails", async () => {
   const runs: Array<{ options: any }> = [];
   const earlySessionId = "11111111-1111-4111-8111-111111111111";
@@ -1599,8 +1777,19 @@ test("permission resume registers a cancellable chat run controller", async () =
   });
   const { service, storage, tempRoot } = testService({
     conversation,
-    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, signal: AbortSignal | undefined) => {
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, signal: AbortSignal | undefined, runOptions: any) => {
       capturedSignal = signal;
+      runOptions.onOutput?.({
+        kind: "text",
+        text: "Partial reply.",
+        cumulative: "Partial reply."
+      });
+      runOptions.onOutput?.({
+        kind: "tool",
+        text: "Running command\n",
+        activityKind: "command",
+        activityDetail: "npm test"
+      });
       markStarted();
       await new Promise<void>((resolve) => {
         if (signal?.aborted) {
@@ -1644,8 +1833,110 @@ test("permission resume registers a cancellable chat run controller", async () =
   assert.equal(stoppedMessage?.status, "error");
   assert.equal(stoppedMessage?.metadata?.terminalReason, "user-stopped");
   assert.equal(stoppedMessage?.content, "@drew stopped by user.");
+  assert.equal(
+    stoppedMessage?.metadata?.processingTranscript?.content,
+    "Partial reply.\n\n@drew stopped by user."
+  );
+  assert.equal(stoppedMessage?.metadata?.activityEvents?.[0]?.label, "Running command");
+  assert.equal(stoppedMessage?.metadata?.activityEvents?.[0]?.detail, "npm test");
   assert.equal(stoppedMessage?.id, pendingMessageId);
   assert.equal(storage.current.metadata.lastMessageByParticipant?.[participant.id]?.messageId, stoppedMessage?.id);
+});
+
+test("running participant cancellation preserves output in one stopped bubble", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, signal: AbortSignal | undefined, runOptions: any) => {
+      runOptions.onOutput?.({
+        kind: "text",
+        text: "Work in progress.",
+        cumulative: "Work in progress."
+      });
+      markStarted();
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) {
+          resolve();
+          return;
+        }
+        signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return {
+        participant: runParticipant,
+        ok: false,
+        content: "provider cancellation notice",
+        error: "cancelled",
+        durationMs: 1
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "send-run",
+    content: `@${participant.handle} start work`
+  });
+  await started;
+  const pending = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "participant" && message.status === "pending"
+  );
+  assert.ok(pending?.metadata?.runId);
+
+  assert.equal(service.cancelRun(pending.metadata.runId), true);
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.id === pending.id && message.metadata?.terminalReason === "user-stopped"
+  ));
+
+  const stopped = storage.current.messages.find((message: ChatMessage) => message.id === pending.id);
+  assert.equal(stopped?.content, `@${participant.handle} stopped by user.`);
+  assert.equal(
+    stopped?.metadata?.processingTranscript?.content,
+    `Work in progress.\n\n@${participant.handle} stopped by user.`
+  );
+  assert.equal(storage.current.messages.some((message: ChatMessage) =>
+    message.role === "system" && message.content === `@${participant.handle} stopped by user.`
+  ), false);
+});
+
+test("stored participant stop preserves nonblank pending and diagnostic content", () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  conversation.messages.push({
+    id: "pending-message",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "Partial remote content.",
+    createdAt: NOW,
+    status: "pending",
+    metadata: { runId: "stored-run" }
+  }, {
+    id: "error-message",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "Provider diagnostic.",
+    createdAt: NOW,
+    status: "error",
+    metadata: { runId: "stored-run" }
+  });
+  const { service } = testService({ conversation });
+
+  const changed = (service as any).markStoredParticipantRunStoppedByUser(conversation, "stored-run");
+
+  assert.equal(changed, true);
+  assert.equal(conversation.messages.find((message) => message.id === "pending-message")?.status, "error");
+  assert.equal(conversation.messages.find((message) => message.id === "pending-message")?.content, "Partial remote content.");
+  assert.equal(conversation.messages.find((message) => message.id === "pending-message")?.metadata?.terminalReason, "user-stopped");
+  assert.equal(conversation.messages.find((message) => message.id === "error-message")?.status, "error");
+  assert.equal(conversation.messages.find((message) => message.id === "error-message")?.content, "Provider diagnostic.");
+  assert.equal(conversation.messages.find((message) => message.id === "error-message")?.metadata?.terminalReason, "user-stopped");
 });
 
 test("stop from a non-owner instance records a cancel request the owning instance honors", async () => {
@@ -2351,7 +2642,7 @@ test("remote provider activity survives split JSONL and renders before text", as
   const { service, storage } = testService({ conversation });
   const commandLine = JSON.stringify({
     type: "item.started",
-    item: { type: "command_execution", command: "rg remote" }
+    item: { id: "command-1", type: "command_execution", command: "rg remote" }
   });
   const splitAt = Math.floor(commandLine.length / 2);
 
@@ -2385,7 +2676,7 @@ test("remote provider activity survives split JSONL and renders before text", as
   assert.equal(activityResult.applied, true);
   assert.equal(activityMessage?.status, "pending");
   assert.equal(activityMessage?.content, "");
-  assert.deepEqual(activityMessage?.metadata?.activityEvents?.map((event: ChatAgentActivityEvent) => [event.sequence, event.label]), [[1, "Running command"]]);
+  assert.deepEqual(activityMessage?.metadata?.activityEvents?.map((event: ChatAgentActivityEvent) => [event.sequence, event.itemId, event.label]), [[1, "command-1", "Running command"]]);
 
   const textResult = await service.applyRemoteRunReplayRecord({
     id: "remote-run:provider-output:3",
@@ -2415,14 +2706,15 @@ test("remote provider activity survives split JSONL and renders before text", as
   assert.equal(textResult.applied, true);
   assert.equal(duplicate.applied, false);
   assert.equal(message?.content, "Remote text.");
-  assert.deepEqual(message?.metadata?.activityEvents?.map((event: ChatAgentActivityEvent) => [event.sequence, event.label]), [[1, "Running command"]]);
+  assert.deepEqual(message?.metadata?.activityEvents?.map((event: ChatAgentActivityEvent) => [event.sequence, event.itemId, event.label]), [[1, "command-1", "Running command"]]);
   assert.equal(message?.metadata?.remoteRunStatus?.phase, "processing-request");
   assert.equal(replay.providerOutputLineBuffer, "");
   assert.equal(replay.providerActivitySequence, 1);
   assert.equal(replay.providerActivityEvents.length, 1);
+  assert.equal(replay.providerActivityEvents[0].itemId, "command-1");
 });
 
-test("remote activity accumulator survives restart, dedupes labels, and stays bounded", async () => {
+test("remote activity accumulator survives restart and preserves every activity", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant], {
     remoteRunHandles: {
@@ -2482,12 +2774,75 @@ test("remote activity accumulator survives restart, dedupes labels, and stays bo
 
   const replay = (restarted.storage.current.metadata.remoteRunReplay as any)["remote-run"];
   const message = restarted.storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote");
-  assert.equal(replay.providerActivitySequence, 83);
-  assert.equal(replay.providerActivityEvents.length, 80);
-  assert.equal(replay.providerOmittedActivityEventCount, 3);
-  assert.equal(replay.providerActivityEvents[0].label, "Using tool_2");
+  assert.equal(replay.providerActivitySequence, 84);
+  assert.equal(replay.providerActivityEvents.length, 84);
+  assert.equal(replay.providerOmittedActivityEventCount, 0);
+  assert.equal(replay.providerActivityEvents[0].label, "Using first_tool");
   assert.equal(replay.providerActivityEvents.at(-1).label, "Using tool_81");
-  assert.equal(message?.metadata?.activityEvents?.length, 80);
+  assert.equal(message?.metadata?.activityEvents?.length, 84);
+});
+
+test("remote activity item ids survive restart and coalesce replayed updates", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], {
+    remoteRunHandles: {
+      "remote-run": {
+        runId: "remote-run",
+        conversationId: "conversation-1",
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        providerOutputMessageId: "pending-remote",
+        worker: { host: "worker.example" },
+        status: "running",
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    }
+  });
+  conversation.messages.push({
+    id: "pending-remote",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "",
+    createdAt: NOW,
+    status: "pending",
+    metadata: { runId: "remote-run", appMessageSource: "remote-run-provider-output" }
+  });
+  const first = testService({ conversation });
+  await first.service.applyRemoteRunReplayRecord({
+    id: "remote-run:provider-output:first",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 1,
+    createdAt: NOW,
+    kind: "provider_output",
+    participantId: participant.id,
+    stream: "stdout",
+    content: `${JSON.stringify({ type: "item.started", item: { id: "tool-1", type: "mcp_tool_call", name: "first_tool" } })}\n`
+  } as any);
+
+  const restarted = testService({ conversation: JSON.parse(JSON.stringify(first.storage.current)) });
+  await restarted.service.applyRemoteRunReplayRecord({
+    id: "remote-run:provider-output:update",
+    conversationId: conversation.id,
+    runId: "remote-run",
+    seq: 2,
+    createdAt: "2026-06-27T22:00:01.000Z",
+    kind: "provider_output",
+    participantId: participant.id,
+    stream: "stdout",
+    content: `${JSON.stringify({ type: "item.started", item: { id: "tool-1", type: "mcp_tool_call", name: "first_tool" } })}\n`
+  } as any);
+
+  const replay = (restarted.storage.current.metadata.remoteRunReplay as any)["remote-run"];
+  const message = restarted.storage.current.messages.find((item: ChatMessage) => item.id === "pending-remote");
+  assert.equal(replay.providerActivitySequence, 1);
+  assert.equal(replay.providerActivityEvents.length, 1);
+  assert.equal(replay.providerActivityEvents[0].itemId, "tool-1");
+  assert.deepEqual(message?.metadata?.activityEvents?.map((event: ChatAgentActivityEvent) => [event.sequence, event.itemId, event.label]), [
+    [1, "tool-1", "Using first_tool"]
+  ]);
 });
 
 test("stale conversation replay merge does not double-count omitted remote activity", async () => {
@@ -2533,10 +2888,33 @@ test("stale conversation replay merge does not double-count omitted remote activ
 
   const replay = (staleConversation.metadata.remoteRunReplay as any)["remote-run"];
   assert.equal(replay.providerActivitySequence, 150);
-  assert.equal(replay.providerActivityEvents.length, 80);
-  assert.equal(replay.providerActivityEvents[0].sequence, 71);
+  assert.equal(replay.providerActivityEvents.length, 90);
+  assert.equal(replay.providerActivityEvents[0].sequence, 61);
   assert.equal(replay.providerActivityEvents.at(-1).sequence, 150);
-  assert.equal(replay.providerOmittedActivityEventCount, 70);
+  assert.equal(replay.providerOmittedActivityEventCount, 60);
+});
+
+test("remote activity normalizer retains only the newest 500 events", () => {
+  const { service } = testService();
+  const events = Array.from({ length: 520 }, (_, index) => {
+    const sequence = index + 1;
+    return {
+      id: `remote-run:activity:${sequence}`,
+      sequence,
+      itemId: `item-${sequence}`,
+      kind: "tool",
+      label: `Using tool_${sequence}`,
+      createdAt: `2026-06-27T22:00:00.${String(sequence).padStart(3, "0")}Z`,
+      status: "started"
+    };
+  });
+
+  const normalized = (service as any).remoteRunActivityEvents(events) as ChatAgentActivityEvent[];
+
+  assert.equal(normalized.length, 500);
+  assert.equal(normalized[0].sequence, 21);
+  assert.equal(normalized[0].itemId, "item-21");
+  assert.equal(normalized.at(-1)?.sequence, 520);
 });
 
 test("remote Assistant result keeps exact content and records preference only after successful terminalization", async () => {
@@ -2954,6 +3332,43 @@ test("auto-watch runtime update enforces one watcher and clears scheduler state 
   participants = storage.current.metadata.participants as ChatParticipant[];
   assert.equal(participants.find((participant) => participant.id === codex.id)?.autoWatch, false);
   assert.equal(storage.current.metadata.participantWatchers, undefined);
+});
+
+test("permission runtime update with unchanged auto-watch does not schedule a watcher run", async () => {
+  const codex = { ...chatParticipant("codex-cli"), autoWatch: true };
+  const watcherState = {
+    [codex.id]: {
+      lastSeenMessageId: "user-message",
+      wakeChainDepth: 1,
+      updatedAt: NOW
+    }
+  };
+  const conversation = chatConversation([codex], { participantWatchers: watcherState });
+  const { service, storage } = testService({ conversation });
+  const scheduled: Array<{ conversationId: string; reason: string }> = [];
+  (service as any).scheduleAutoWatchEvaluation = (conversationId: string, reason: string) => {
+    scheduled.push({ conversationId, reason });
+  };
+  const permissions = {
+    ...defaultChatAgentPermissions(),
+    repoRead: true,
+    workspaceWrite: true
+  };
+
+  await service.updateParticipantRuntime({
+    conversationId: conversation.id,
+    participantId: codex.id,
+    permissions,
+    autoWatch: true
+  });
+
+  const participants = storage.current.metadata.participants as ChatParticipant[];
+  const updated = participants.find((participant) => participant.id === codex.id);
+  assert.equal(updated?.autoWatch, true);
+  assert.equal(updated?.permissions?.repoRead, true);
+  assert.equal(updated?.permissions?.workspaceWrite, true);
+  assert.deepEqual(storage.current.metadata.participantWatchers, watcherState);
+  assert.deepEqual(scheduled, []);
 });
 
 test("Workflow Manager default-on seeding keeps only one active watcher", async () => {
@@ -3945,10 +4360,12 @@ test("explicit remote launch rejection fails the participant bubble instead of f
   assert.equal(localRuns, 0);
 });
 
-test("remote chat launch passes user-reachable toolchain preflight skip flag", async () => {
+test("remote chat launch intentionally honors the legacy member preflight skip flag", async () => {
   const participant = {
     ...chatParticipant("codex-cli"),
     remoteExecution: "remote" as const,
+    // Legacy persisted field: the UI no longer surfaces this toggle, but old
+    // saved members still get intentional behavior instead of a silent ignore.
     skipToolchainPreflight: true
   };
   const conversation = chatConversation([participant]);
@@ -3984,8 +4401,8 @@ test("remote chat launch passes user-reachable toolchain preflight skip flag", a
 
   await service.sendMessage({ conversationId: conversation.id, content: "@codex run remote", runId: "remote-skip-preflight" });
 
-  await waitFor(() => observedPreflight?.skip === true);
-  assert.equal(observedPreflight.skip, true);
+  await waitFor(() => launchedRunId !== "");
+  assert.equal(observedPreflight?.skip, true);
   assert.equal((storage.current.metadata.remoteRunHandles as any)[launchedRunId]?.status, "running");
 });
 
@@ -5788,7 +6205,7 @@ test("removeParticipant clears stale participant state in the same mutation", as
   assert.equal(approvals.find((approval) => approval.id === removedPermissionApproval.id)?.status, "denied");
   assert.equal(approvals.find((approval) => approval.id === removedTargetApproval.id)?.status, "denied");
   assert.equal(approvals.find((approval) => approval.id === unrelatedApproval.id)?.status, "pending");
-  assert.equal(approvals.find((approval) => approval.id === removedPermissionApproval.id)?.error, "Participant was removed from this chat.");
+  assert.equal(approvals.find((approval) => approval.id === removedPermissionApproval.id)?.error, "Member was removed from this chat.");
   assert.deepEqual((saved.metadata.appToolApprovalPolicies as ChatAppToolApprovalPolicy[]).map((policy) => policy.id), []);
 
   const mentionMessage = saved.messages.find((message) => message.id === "mention-message") as ChatMessage;
@@ -5797,7 +6214,7 @@ test("removeParticipant clears stale participant state in the same mutation", as
   const requestBatch = saved.messages.find((message) => message.id === "request-message")?.metadata?.participantRequest;
   assert.equal(requestBatch?.status, "pending_approval");
   assert.equal(requestBatch?.items.find((item) => item.targetParticipantId === removed.id)?.status, "failed");
-  assert.equal(requestBatch?.items.find((item) => item.targetParticipantId === removed.id)?.error, "Participant was removed from this chat.");
+  assert.equal(requestBatch?.items.find((item) => item.targetParticipantId === removed.id)?.error, "Member was removed from this chat.");
   assert.equal(requestBatch?.items.find((item) => item.targetParticipantId === other.id)?.status, "pending_approval");
 });
 
@@ -5963,7 +6380,7 @@ test("stale permission approval for a removed requester fails closed", async () 
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "denied");
   assert.equal(normalizeChatAgentPermissions((storage.current.metadata.participants as ChatParticipant[])[0]?.permissions).webAccess, false);
   assert.equal(storage.current.messages.some((message: ChatMessage) =>
-    message.content.includes("The requesting participant is no longer in this chat.")
+    message.content.includes("The requesting member is no longer in this chat.")
   ), true);
 });
 
@@ -6046,7 +6463,7 @@ test("stale participant-request approval for a removed target fails closed witho
   assert.deepEqual(savedApproval.appliedParticipantIds, []);
   assert.equal(batch?.status, "failed");
   assert.equal(batch?.items[0].status, "failed");
-  assert.equal(batch?.items[0].error, "Target participant is no longer in this chat.");
+  assert.equal(batch?.items[0].error, "Target member is no longer in this chat.");
   assert.deepEqual(storage.current.metadata.appToolApprovalPolicies ?? [], []);
   assert.equal(runCount, 0);
 });
@@ -7232,6 +7649,27 @@ test("app_chat_send_message publishes a participant message and lets the author 
   assert.equal(storage.current.messages[1].metadata.reactions["✅"][0].actorLabel, "@codex");
 });
 
+test("app_chat_send_message keeps participant /goal prose ordinary", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 1,
+    capabilities: [],
+    snapshotMaxSequence: 0,
+    runId: "participant-goal-prose",
+    triggerThreadId: "user-message"
+  };
+
+  await service.sendChatMessageFromTool(actor, { content: "/goal this is participant prose" });
+
+  assert.equal(storage.current.messages[1].role, "participant");
+  assert.equal(storage.current.messages[1].metadata.nativeCommand, undefined);
+});
+
 test("app_chat_send_message imports image attachments and exposes them in the same run", async () => {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-send-image-"));
   const repoPath = path.join(tempRoot, "repo");
@@ -8266,6 +8704,7 @@ test("app MCP advertises attachment and reaction tools to chat participants", ()
   const listTool = tools.find((tool) => tool.name === APP_CHAT_LIST_ATTACHMENTS_TOOL);
   const readTool = tools.find((tool) => tool.name === APP_CHAT_READ_ATTACHMENT_TOOL);
   const reactionTool = tools.find((tool) => tool.name === APP_CHAT_REACT_TOOL);
+  const participantActivityTool = tools.find((tool) => tool.name === APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL);
   const exportTool = tools.find((tool) => tool.name === APP_CHAT_EXPORT_ATTACHMENT_TOOL);
   const titleTool = tools.find((tool) => tool.name === APP_CHAT_SET_TITLE_TOOL);
 
@@ -8281,6 +8720,10 @@ test("app MCP advertises attachment and reaction tools to chat participants", ()
   assert.ok(readTool.inputSchema?.properties?.attachmentId);
   assert.deepEqual(readTool.inputSchema?.required, ["attachmentId"]);
   assert.ok(reactionTool);
+  assert.ok(participantActivityTool);
+  assert.equal(participantActivityTool.annotations?.readOnlyHint, true);
+  assert.equal(participantActivityTool.annotations?.destructiveHint, false);
+  assert.deepEqual(participantActivityTool.inputSchema?.properties, {});
   assert.ok(reactionTool.inputSchema?.properties?.messageId);
   assert.ok(reactionTool.inputSchema?.properties?.emoji);
   assert.ok(exportTool);
@@ -8306,6 +8749,7 @@ test("appMcpToolNames exposes request tools only with their capabilities", () =>
   assert.ok(defaultTools.includes(APP_CHAT_READ_ATTACHMENT_TOOL));
   assert.ok(defaultTools.includes(APP_CHAT_SET_TITLE_TOOL));
   assert.ok(defaultTools.includes(APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL));
+  assert.ok(defaultTools.includes(APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL));
   assert.ok(requestTools.includes(APP_CHAT_REQUEST_PARTICIPANTS_TOOL));
   assert.ok(compactionTools.includes(APP_CHAT_REQUEST_COMPACTION_TOOL));
   assert.ok(requestTools.includes(APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL));
@@ -9206,7 +9650,7 @@ test("participant request chain guard limits one logical request chain", async (
       },
       "mcp"
     ),
-    /participant request chain limit \(24\) reached/
+    /member request chain limit \(24\) reached/
   );
 });
 
@@ -9312,7 +9756,7 @@ test("startAccord creates structured accord skill mention and dispatches only th
   assert.ok(userMessage);
   assert.equal(userMessage.metadata?.skillMentions?.[0]?.frontmatterName, "accord");
   assert.match(userMessage.content, /@codex \/accord/);
-  assert.match(userMessage.content, /Selected accord participants: drew\./);
+  assert.match(userMessage.content, /Selected accord members: drew\./);
   assert.doesNotMatch(userMessage.content, /@drew/);
 
   const facilitatorAfterStart = storage.current.metadata.participants.find((participant: ChatParticipant) => participant.id === facilitator.id);
@@ -9385,6 +9829,791 @@ test("manual accord structured skill mention flips only the dispatched facilitat
   assert.equal(participants.find((participant) => participant.id === target.id)?.permissions?.requestParticipants, "ask");
 });
 
+test("Codex session approval resolves the blocked callback without creating a chat policy", async () => {
+  const participant = chatParticipant("codex-cli");
+  participant.agentMode = "auto";
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "codex-thread-1",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  };
+  const controller = new AbortController();
+  const decision = (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    "run-codex-approval",
+    "user-message",
+    {
+      id: 77,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "codex-thread-1",
+        turnId: "turn-1",
+        itemId: "item-1",
+        startedAtMs: 1,
+        environmentId: null,
+        command: "git push origin main",
+        cwd: "/tmp/scratch",
+        availableDecisions: ["accept", "acceptForSession", "decline", "cancel"]
+      },
+      signal: controller.signal,
+      responseDelivered: Promise.resolve()
+    }
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+
+  assert.equal(pending.status, "pending");
+  assert.equal((pending.request as { kind?: string }).kind, "codexApproval");
+  assert.equal(JSON.stringify(pending.request).includes("allow for this chat"), false);
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: true,
+    codexDecisionId: "acceptForSession"
+  });
+
+  assert.deepEqual(await decision, { decision: "acceptForSession" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+  assert.deepEqual(storage.current.metadata.appToolApprovalPolicies ?? [], []);
+  assert.equal(storage.current.messages.length, 1);
+});
+
+test("Codex approval compacts immediately while the provider receives the selected response", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "codex-thread-ack",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  };
+  let acknowledge!: () => void;
+  const responseDelivered = new Promise<void>((resolve) => { acknowledge = resolve; });
+  const decision = (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    "run-codex-ack",
+    "user-message",
+    {
+      id: 78,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "codex-thread-ack",
+        turnId: "turn-ack",
+        itemId: "item-ack",
+        startedAtMs: 1,
+        environmentId: null,
+        command: "git push origin scratch",
+        availableDecisions: ["accept", "decline"]
+      },
+      signal: new AbortController().signal,
+      responseDelivered
+    }
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+  const response = service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: true,
+    codexDecisionId: "accept"
+  });
+  assert.deepEqual(await decision, { decision: "accept" });
+  await response;
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+  acknowledge();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+});
+
+test("Codex approval keeps the compact decision and reports provider delivery failure through run progress", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "codex-thread-delivery-failure",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  };
+  let rejectDelivery!: (error: Error) => void;
+  const responseDelivered = new Promise<void>((_resolve, reject) => { rejectDelivery = reject; });
+  void responseDelivered.catch(() => undefined);
+  const decision = (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    "run-codex-delivery-failure",
+    "user-message",
+    {
+      id: 79,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "codex-thread-delivery-failure",
+        turnId: "turn-delivery-failure",
+        itemId: "item-delivery-failure",
+        startedAtMs: 1,
+        environmentId: null,
+        command: "git push origin scratch",
+        availableDecisions: ["accept", "decline"]
+      },
+      signal: new AbortController().signal,
+      responseDelivered
+    }
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+  const progressEvents: Array<{ phase: string; message: string }> = [];
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: true,
+    codexDecisionId: "accept"
+  }, (progress) => {
+    progressEvents.push(progress);
+  });
+  assert.deepEqual(await decision, { decision: "accept" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+  rejectDelivery(new Error("stdin closed"));
+  await waitFor(() => progressEvents.some((event) => event.phase === "error" && /could not receive this decision.*stdin closed/i.test(event.message)));
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].error, undefined);
+});
+
+test("Codex approval rejects a tampered approve flag", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const session = {
+    participantId: participant.id,
+    sessionId: "codex-thread-tampered",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  } satisfies ChatParticipantSession;
+  const controller = new AbortController();
+  const decision = (service as any).requestCodexApprovalFromCli(conversation, participant, session, "run-tampered", "user-message", {
+    id: 80,
+    method: "item/commandExecution/requestApproval",
+    params: {
+      threadId: "codex-thread-tampered",
+      turnId: "turn-tampered",
+      itemId: "item-tampered",
+      startedAtMs: 1,
+      environmentId: null,
+      availableDecisions: ["decline"]
+    },
+    signal: controller.signal,
+    responseDelivered: Promise.resolve()
+  });
+  void decision.catch(() => undefined);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+  await assert.rejects(() => service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: true,
+    codexDecisionId: "decline"
+  }), /does not match the approval outcome/);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
+  controller.abort(new Error("Stopped by user."));
+  await assert.rejects(decision, /Stopped by user/);
+});
+
+test("Codex approval requires an explicit decision id and keeps deny distinct from cancel", async () => {
+  const participant = chatParticipant("codex-cli");
+  participant.agentMode = "auto";
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const session = {
+    participantId: participant.id,
+    sessionId: "codex-thread-explicit-decisions",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  } satisfies ChatParticipantSession;
+  const requestApproval = (id: number, itemId: string) => (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    `run-${itemId}`,
+    "user-message",
+    {
+      id,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: session.sessionId,
+        turnId: `turn-${itemId}`,
+        itemId,
+        startedAtMs: 1,
+        environmentId: null,
+        command: "git push scratch main",
+        availableDecisions: ["decline", "cancel"]
+      },
+      signal: new AbortController().signal,
+      responseDelivered: Promise.resolve()
+    }
+  );
+
+  const denyDecision = requestApproval(82, "deny-item");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const denyApproval = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])
+    .find((item) => item.status === "pending");
+  assert.ok(denyApproval);
+  let denySettled = false;
+  void denyDecision.finally(() => { denySettled = true; });
+
+  await assert.rejects(() => service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: denyApproval.id,
+    approve: false
+  }), /Select one of the decisions offered/);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(denySettled, false);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals.find((item: ChatAppToolApproval) => item.id === denyApproval.id)?.status, "pending");
+  assert.equal((service as any).codexApprovalResolvers.get(denyApproval.id)?.submitted, false);
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: denyApproval.id,
+    approve: false,
+    codexDecisionId: "decline"
+  });
+  assert.deepEqual(await denyDecision, { decision: "decline" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals.find((item: ChatAppToolApproval) => item.id === denyApproval.id)?.status, "denied");
+
+  const cancelDecision = requestApproval(83, "cancel-item");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const cancelApproval = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])
+    .find((item) => item.status === "pending");
+  assert.ok(cancelApproval);
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: cancelApproval.id,
+    approve: false,
+    codexDecisionId: "cancel"
+  });
+  assert.deepEqual(await cancelDecision, { decision: "cancel" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals.find((item: ChatAppToolApproval) => item.id === cancelApproval.id)?.status, "cancelled");
+});
+
+test("Codex human-decision timeout sends the method refusal and expires the card", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  service.setCodexApprovalWaitMsForTests(5);
+  const session = {
+    participantId: participant.id,
+    sessionId: "codex-thread-timeout",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  } satisfies ChatParticipantSession;
+  let acknowledge!: () => void;
+  const responseDelivered = new Promise<void>((resolve) => { acknowledge = resolve; });
+  const decision = (service as any).requestCodexApprovalFromCli(conversation, participant, session, "run-timeout", "user-message", {
+    id: 81,
+    method: "item/permissions/requestApproval",
+    params: {
+      threadId: "codex-thread-timeout",
+      turnId: "turn-timeout",
+      itemId: "item-timeout",
+      environmentId: null,
+      startedAtMs: 1,
+      cwd: "/tmp",
+      reason: null,
+      permissions: { network: { enabled: true }, fileSystem: null }
+    },
+    signal: new AbortController().signal,
+    responseDelivered
+  });
+  const [refusal] = await Promise.all([
+    decision,
+    new Promise<void>((resolve) => setTimeout(resolve, 10))
+  ]);
+  assert.deepEqual(refusal, { permissions: {}, scope: "turn" });
+  acknowledge();
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "expired");
+  assert.match(storage.current.metadata.pendingAppToolApprovals[0].error ?? "", /method-supported refusal/);
+});
+
+test("Guardian timeout creates a durable terminal card without a resolver", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const session = {
+    participantId: participant.id,
+    sessionId: "codex-thread-guardian-timeout",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  } satisfies ChatParticipantSession;
+  const result = await (service as any).requestCodexApprovalFromCli(conversation, participant, session, "run-guardian-timeout", "user-message", {
+    id: "guardian-timeout:review-1",
+    method: "item/autoApprovalReview/timedOut",
+    params: {
+      threadId: "codex-thread-guardian-timeout",
+      turnId: "turn-timeout",
+      startedAtMs: 1,
+      completedAtMs: 2,
+      reviewId: "review-timeout",
+      targetItemId: null,
+      decisionSource: "agent",
+      review: { status: "timedOut", riskLevel: "high", userAuthorization: "low", rationale: "Review timed out" },
+      action: { type: "command", source: "unifiedExec", command: "git push origin scratch", cwd: "/tmp" }
+    },
+    signal: new AbortController().signal,
+    responseDelivered: Promise.resolve()
+  });
+  assert.deepEqual(result, { decision: "keepDenied" });
+  const approval = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+  assert.equal(approval.status, "expired");
+  assert.deepEqual((approval.request as { options: unknown[] }).options, []);
+  assert.match(approval.error ?? "", /remains denied/);
+});
+
+test("Guardian approval compacts immediately and starts one hidden same-session continuation after delivery", async () => {
+  const participant = chatParticipant("codex-cli");
+  participant.agentMode = "auto";
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "codex-thread-1",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  };
+  const runs: Array<{ prompt: string; sessionId?: string }> = [];
+  const conversation = chatConversation([participant], { participantSessions: [session] });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      runs.push({ prompt, sessionId: options?.sessionId });
+      return { participant: runParticipant, ok: true, content: "Continuation complete.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const controller = new AbortController();
+  let acknowledge!: () => void;
+  const responseDelivered = new Promise<void>((resolve) => { acknowledge = resolve; });
+  const decision = (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    "run-guardian-approval",
+    "user-message",
+    {
+      id: "guardian:review-1",
+      method: "item/autoApprovalReview/denied",
+      params: {
+        threadId: "codex-thread-1",
+        turnId: "turn-1",
+        startedAtMs: 100,
+        completedAtMs: 200,
+        reviewId: "review-1",
+        targetItemId: "item-1",
+        decisionSource: "agent",
+        review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: "Not authorized" },
+        action: { type: "command", source: "unifiedExec", command: "git push origin main", cwd: "/tmp/scratch" }
+      },
+      signal: controller.signal,
+      responseDelivered
+    }
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+
+  assert.equal(pending.status, "pending");
+  assert.deepEqual((pending.request as { options: Array<{ label: string }> }).options.map((option) => option.label), [
+    "Approve one retry",
+    "Keep denied"
+  ]);
+  assert.equal(JSON.stringify(pending.request).includes("guardian_assessment"), false);
+  assert.equal(JSON.stringify(pending.request).includes("startedAtMs"), false);
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: true,
+    codexDecisionId: "approveRetry"
+  });
+
+  assert.deepEqual(await decision, { decision: "approveRetry" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+  await assert.rejects(() => service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: true,
+    codexDecisionId: "approveRetry"
+  }), /already been answered/);
+  acknowledge();
+  await waitFor(() => runs.length === 1);
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.role === "participant" && message.content === "Continuation complete." && message.status === "done"
+  ));
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+  assert.deepEqual(storage.current.metadata.appToolApprovalPolicies ?? [], []);
+  assert.equal(runs[0].sessionId, "codex-thread-1");
+  assert.match(runs[0].prompt, /Retry exactly the action I just approved, once/);
+  const hiddenControl = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "user" && message.content.includes("Retry exactly the action I just approved, once")
+  );
+  assert.equal(hiddenControl?.metadata?.hiddenFromTimeline, true);
+  assert.equal(storage.current.messages.filter((message: ChatMessage) => message.metadata?.approvedContinuation).length, 1);
+});
+
+test("Guardian Keep denied compacts and starts the decision-specific continuation", async () => {
+  const participant = chatParticipant("codex-cli");
+  participant.agentMode = "auto";
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "codex-thread-deny",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  };
+  const prompts: string[] = [];
+  const conversation = chatConversation([participant], { participantSessions: [session] });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, prompt) => {
+      prompts.push(prompt);
+      return { participant: runParticipant, ok: true, content: "Continued without the action.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const decision = (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    "run-guardian-deny",
+    "user-message",
+    guardianDeniedRequest("codex-thread-deny", Promise.resolve())
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: false,
+    codexDecisionId: "keepDenied"
+  });
+
+  assert.deepEqual(await decision, { decision: "keepDenied" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "denied");
+  await waitFor(() => prompts.length === 1);
+  assert.match(prompts[0], /Do not retry the action I just denied/);
+  assert.equal(storage.current.messages.filter((message: ChatMessage) => message.metadata?.approvedContinuation).length, 1);
+});
+
+test("Guardian decision queues one continuation while the original run finishes", async () => {
+  const participant = chatParticipant("codex-cli");
+  participant.agentMode = "auto";
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "codex-thread-active",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  };
+  const conversation = chatConversation([participant], { participantSessions: [session] });
+  let runCount = 0;
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => {
+      runCount += 1;
+      return { participant: runParticipant, ok: true, content: "Continued once.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  (service as any).rememberActiveChatRun(conversation.id, "run-guardian-active");
+  const decision = (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    "run-guardian-active",
+    "user-message",
+    guardianDeniedRequest("codex-thread-active", Promise.resolve())
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: true,
+    codexDecisionId: "approveRetry"
+  });
+  assert.deepEqual(await decision, { decision: "approveRetry" });
+  await waitFor(() => runCount === 1);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(runCount, 1);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+  (service as any).forgetActiveChatRun(conversation.id, "run-guardian-active");
+});
+
+test("Guardian delivery failure keeps the compact decision and creates an explicit participant error", async () => {
+  const participant = chatParticipant("codex-cli");
+  participant.agentMode = "auto";
+  const conversation = chatConversation([participant]);
+  let runCount = 0;
+  const { service, storage } = testService({
+    conversation,
+    run: async (runParticipant) => {
+      runCount += 1;
+      return { participant: runParticipant, ok: true, content: "Unexpected.", durationMs: 1 };
+    }
+  });
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "codex-thread-failed-delivery",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  };
+  let rejectDelivery!: (error: Error) => void;
+  const delivery = new Promise<void>((_resolve, reject) => { rejectDelivery = reject; });
+  void delivery.catch(() => undefined);
+  const decision = (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    "run-guardian-failed-delivery",
+    "user-message",
+    guardianDeniedRequest("codex-thread-failed-delivery", delivery)
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: true,
+    codexDecisionId: "approveRetry"
+  });
+  assert.deepEqual(await decision, { decision: "approveRetry" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+  rejectDelivery(new Error("app-server pipe closed"));
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.role === "participant" && message.status === "error" && /could not continue/i.test(message.content)
+  ));
+  assert.equal(runCount, 0);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+});
+
+test("Codex approval becomes non-actionable when its app-server request is cancelled", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "codex-thread-1",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  };
+  const controller = new AbortController();
+  const decision = (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    "run-codex-stop",
+    "user-message",
+    {
+      id: "request-stop",
+      method: "item/fileChange/requestApproval",
+      params: {
+        threadId: "codex-thread-1",
+        turnId: "turn-1",
+        itemId: "item-file",
+        startedAtMs: 1,
+        grantRoot: "/tmp/scratch"
+      },
+      signal: controller.signal,
+      responseDelivered: Promise.resolve()
+    }
+  );
+  controller.abort(new Error("Stopped by user."));
+  await assert.rejects(decision, /Stopped by user/);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const approval = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+  assert.equal(approval.status, "cancelled");
+  assert.match(approval.error ?? "", /Stopped by user/);
+  await assert.rejects(
+    () => service.respondToAppToolApproval({
+      conversationId: conversation.id,
+      approvalId: approval.id,
+      approve: true,
+      codexDecisionId: "accept"
+    }),
+    /already been answered/
+  );
+});
+
+test("stale Codex approval is expired when a conversation is hydrated after restart", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], {
+    pendingAppToolApprovals: [{
+      id: "stale-codex-approval",
+      conversationId: "conversation",
+      requesterParticipantId: participant.id,
+      requesterHandle: participant.handle,
+      requesterRoleConfigId: participant.roleConfigId,
+      toolName: "codex_auto_review_approval",
+      capability: "permissions.request",
+      status: "pending",
+      request: {
+        kind: "codexApproval",
+        method: "item/commandExecution/requestApproval",
+        requestId: 9,
+        threadId: "codex-thread-1",
+        turnId: "turn-1",
+        itemId: "item-1",
+        action: "command",
+        command: "git push origin main",
+        options: [
+          { id: "accept", label: "Allow once", outcome: "approve" },
+          { id: "decline", label: "Deny", outcome: "deny" }
+        ]
+      },
+      summary: "Codex wants to run a protected command.",
+      createdAt: NOW,
+      updatedAt: NOW
+    } satisfies ChatAppToolApproval]
+  });
+  const { service, storage } = testService({ conversation });
+
+  await service.hydrateContextUsage(conversation);
+
+  const approval = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+  assert.equal(approval.status, "expired");
+  assert.match(approval.error ?? "", /connection.*no longer active/i);
+});
+
+test("run termination preserves Codex Stop and provider-exit lifecycle states", () => {
+  const participant = chatParticipant("codex-cli");
+  const approval = {
+    id: "codex-run-terminal",
+    conversationId: "conversation",
+    requesterParticipantId: participant.id,
+    requesterHandle: participant.handle,
+    requesterRoleConfigId: participant.roleConfigId,
+    toolName: "codex_auto_review_approval",
+    capability: "permissions.request",
+    status: "pending",
+    request: {
+      kind: "codexApproval",
+      method: "item/fileChange/requestApproval",
+      requestId: "request-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "item-1",
+      action: "fileChange",
+      options: [
+        { id: "accept", label: "Allow once", outcome: "approve" },
+        { id: "cancel", label: "Cancel", outcome: "cancel" }
+      ]
+    },
+    summary: "Codex wants to apply protected file changes.",
+    createdAt: NOW,
+    updatedAt: NOW,
+    resumeContext: { runId: "run-1", triggerMessageId: "user-message" }
+  } satisfies ChatAppToolApproval;
+  const stopped = chatConversation([participant], { pendingAppToolApprovals: [approval] });
+  const failed = chatConversation([participant], { pendingAppToolApprovals: [{ ...approval, id: "codex-provider-exit" }] });
+  const service = testService().service as any;
+
+  assert.equal(service.markPendingAppToolApprovalsForRunTerminal(stopped, "run-1", "Stopped by user."), true);
+  assert.equal((stopped.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0].status, "cancelled");
+  assert.equal(service.markPendingAppToolApprovalsForRunTerminal(failed, "run-1", "Codex app-server process exited."), true);
+  assert.equal((failed.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0].status, "expired");
+});
+
 function testService(options: {
   conversation?: Conversation;
   run?: (...args: any[]) => Promise<any>;
@@ -9453,6 +10682,7 @@ function testService(options: {
   let assistantProviderKind = options.settings?.assistantProviderKind;
   const publicSettings = (): AppSettings => ({
     roundLimitDefault: 1,
+    betaUpdates: false,
     cliAgentRunTimeoutMs: 24 * 60 * 60_000,
     chatAutoWatchWakeLimit: options.settings?.chatAutoWatchWakeLimit
       ?? CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT,
@@ -9627,6 +10857,32 @@ function testService(options: {
     storage,
     settingsState,
     tempRoot
+  };
+}
+
+function guardianDeniedRequest(threadId: string, responseDelivered: Promise<void>): {
+  id: string;
+  method: "item/autoApprovalReview/denied";
+  params: Record<string, unknown>;
+  signal: AbortSignal;
+  responseDelivered: Promise<void>;
+} {
+  return {
+    id: `guardian:${threadId}`,
+    method: "item/autoApprovalReview/denied",
+    params: {
+      threadId,
+      turnId: `turn:${threadId}`,
+      startedAtMs: 100,
+      completedAtMs: 200,
+      reviewId: `review:${threadId}`,
+      targetItemId: `item:${threadId}`,
+      decisionSource: "agent",
+      review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: "Not authorized" },
+      action: { type: "command", source: "unifiedExec", command: "git push origin main", cwd: "/tmp/scratch" }
+    },
+    signal: new AbortController().signal,
+    responseDelivered
   };
 }
 

@@ -203,6 +203,52 @@ test("buildChatActivityItems emits pending approval, choice, mentions, and parti
   assert.equal(items.find((item) => item.kind === "participant-request")?.preview, "request content");
 });
 
+test("buildChatActivityItems marks only Codex approvals as typed Activity decisions", () => {
+  const ordinaryApproval: ChatAppToolApproval = {
+    id: "ordinary-approval",
+    conversationId: "conversation-1",
+    requesterParticipantId: participant.id,
+    requesterHandle: participant.handle,
+    requesterRoleConfigId: "engineer",
+    toolName: "app_permissions_request_change",
+    capability: "permissions.request",
+    status: "pending",
+    request: { kind: "portable", permissions: ["webAccess"] },
+    summary: "Web access requested",
+    createdAt: "2026-01-08T10:00:00.000Z",
+    updatedAt: "2026-01-08T10:00:00.000Z"
+  };
+  const codexApproval: ChatAppToolApproval = {
+    ...ordinaryApproval,
+    id: "codex-approval",
+    toolName: "codex_auto_review_approval",
+    request: {
+      kind: "codexApproval",
+      method: "item/commandExecution/requestApproval",
+      requestId: 1,
+      threadId: "thread",
+      turnId: "turn",
+      itemId: "item",
+      action: "command",
+      options: [
+        { id: "decline", label: "Deny", outcome: "deny" },
+        { id: "cancel", label: "Cancel turn", outcome: "cancel" }
+      ]
+    },
+    createdAt: "2026-01-08T11:00:00.000Z",
+    updatedAt: "2026-01-08T11:00:00.000Z"
+  };
+
+  const items = buildChatActivityItems(conversation({
+    metadata: { pendingAppToolApprovals: [ordinaryApproval, codexApproval] }
+  }));
+
+  const codexItem = items.find((item) => item.target.approvalId === codexApproval.id);
+  const ordinaryItem = items.find((item) => item.target.approvalId === ordinaryApproval.id);
+  assert.equal(codexItem?.target.approvalKind, "codex");
+  assert.equal(ordinaryItem?.target.approvalKind, undefined);
+});
+
 test("buildChatActivityItems moves cancelled pending cards to read finished activity", () => {
   const approval: ChatAppToolApproval = {
     id: "approval-1",

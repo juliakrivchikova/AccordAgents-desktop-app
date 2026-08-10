@@ -13,6 +13,16 @@ import type {
   Conversation
 } from "../../../shared/types";
 import { chatParticipantReference } from "../conversation/conversation-display";
+import { CODEX_APPROVAL_TOOL_NAME, chatCodexApprovalRequest } from "./chat-codex-approval-presentation";
+
+export {
+  CODEX_APPROVAL_TOOL_NAME,
+  chatApprovalKeyboardAction,
+  chatApprovalPlacement,
+  chatApprovalShowsGenericSkip,
+  chatCodexApprovalRequest
+} from "./chat-codex-approval-presentation";
+export type { ChatApprovalKeyboardAction, ChatApprovalPlacement } from "./chat-codex-approval-presentation";
 
 export const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 export const APP_TOOL_PERMISSION_TOOL = "app_tool_permission";
@@ -56,12 +66,15 @@ export function chatAppToolApprovals(conversation: Conversation | undefined): Ch
     const isSelfCompactionRequest =
       approval.toolName === APP_CHAT_REQUEST_COMPACTION_TOOL &&
       Boolean(chatSelfCompactionRequest(approval as ChatAppToolApproval));
+    const isCodexApprovalRequest =
+      approval.toolName === CODEX_APPROVAL_TOOL_NAME &&
+      Boolean(chatCodexApprovalRequest(approval as ChatAppToolApproval));
     return (
       typeof approval.id === "string" &&
       typeof approval.requesterHandle === "string" &&
       typeof approval.summary === "string" &&
-      (approval.status === "pending" || approval.status === "approved" || approval.status === "denied" || approval.status === "auto-applied") &&
-      (isRosterRequest || isRoleRequest || isParticipantChangeRequest || isPermissionRequest || isToolPermissionRequest || isParticipantRequest || isSelfCompactionRequest)
+      (approval.status === "pending" || approval.status === "approved" || approval.status === "denied" || approval.status === "cancelled" || approval.status === "expired" || approval.status === "auto-applied") &&
+      (isRosterRequest || isRoleRequest || isParticipantChangeRequest || isPermissionRequest || isToolPermissionRequest || isParticipantRequest || isSelfCompactionRequest || isCodexApprovalRequest)
     );
   });
 }

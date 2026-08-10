@@ -17,6 +17,8 @@ import type {
   ChatBehaviorRuleSnapshot,
   ChatAppToolCapability,
   ChatChoiceOption,
+  ChatCodexApprovalOption,
+  ChatCodexApprovalRequest,
   ChatAccordResolutionMetadata,
   ChatAgentActivityEvent,
   ChatImageAttachment,
@@ -27,6 +29,7 @@ import type {
   ChatMessageMetadata,
   ChatMessageReactions,
   ChatParticipant,
+  ChatParticipantActivitySnapshot,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
   ChatParticipantInput,
@@ -116,6 +119,7 @@ import {
   limitChatBehaviorRulePromptText
 } from "../../shared/chatBehaviorRules";
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../shared/reasoningEffort";
+import { CODEX_APPROVAL_TOOL_NAME, CODEX_GUARDIAN_DENIED_APPROVAL_METHOD, codexApprovalCancellationResult, prepareCodexApproval } from "./codexApprovals";
 import {
   CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH,
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
@@ -130,15 +134,16 @@ import {
   resolveChatManageRolesParticipantsPermission
 } from "../../shared/agentPermissions";
 import { normalizeAgentContextUsage } from "../../shared/agentContext";
+import { nativeGoalObjective, parseNativeGoalCommand } from "../../shared/nativeGoalCommand";
 import {
   chatAppToolCapabilitiesEqual,
   hasChatAppToolCapability,
   normalizeChatAppToolCapabilities
 } from "../../shared/appTools";
 import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
-import { CliAgentRunner } from "./cliAgents";
+import { buildChatParticipantActivitySnapshot } from "../../shared/chatParticipantActivity";
+import { CliAgentRunner, type CliAgentCodexServerRequest, type CliAgentOutputEvent, type CliAgentRoleOptions } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
-import type { CliAgentOutputEvent, CliAgentRoleOptions } from "./cliAgents";
 import type {
   RemoteDetachedRunState,
   RemoteRunApplyRecordResult,
@@ -153,6 +158,7 @@ import {
   APP_CHAT_EXPORT_ATTACHMENT_TOOL,
   APP_CHAT_GET_CONTEXT_TOOL,
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
+  APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL,
   APP_CHAT_GET_PARTICIPANTS_TOOL,
   APP_CHAT_LIST_ATTACHMENTS_TOOL,
   APP_CHAT_REACT_TOOL,
@@ -329,6 +335,11 @@ const CHAT_PARTICIPANT_REQUEST_RATE_LIMIT = 8;
 const CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS = 120_000;
 const CHAT_PARTICIPANT_REQUEST_WAIT_MAX_MS = 300_000;
 const CHAT_TOOL_PERMISSION_WAIT_MS = 30 * 60_000;
+// Mirrors the dedicated CLI's bounded human approval wait. The provider turn
+// timer is paused separately while a direct callback is outstanding.
+const CHAT_CODEX_APPROVAL_WAIT_MS = 30 * 60_000;
+const CHAT_CODEX_APPROVAL_CONTROL_APPROVE = "[AccordAgents approval control] Retry exactly the action I just approved, once. If it succeeds, continue the unfinished work from my original request that directly depends on it. Do not broaden the approved action or start unrelated work. If the retry cannot run, clearly explain why.";
+const CHAT_CODEX_APPROVAL_CONTROL_DENY = "[AccordAgents approval control] Do not retry the action I just denied. Continue the unfinished work from my original request without it. If you cannot continue, clearly explain why.";
 const CHAT_AUTO_WATCH_EVALUATION_DEBOUNCE_MS = 75;
 const CHAT_GITHUB_APP_REPOSITORY_MAX_LENGTH = 200;
 const CHAT_GITHUB_APP_PERMISSION_MAX_LENGTH = 80;
@@ -338,14 +349,15 @@ const PARTICIPANT_REQUEST_SCRUTINY_APPENDIX =
   "Review for blockers, incorrect assumptions, missing edge cases, or simpler alternatives. If none, reply with only `No objections.` Do not restate the proposal.";
 const CHAT_CONTEXT_READ_DEFAULT_LIMIT = 50;
 const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
+const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 2_000_000;
+const CHAT_ACTIVITY_EVENT_MAX_COUNT = 500;
+const CHAT_ACTIVITY_DETAIL_MAX_CHARS = 4_000;
 // A hard transport ceiling, not a truncation point. The send path rejects over-limit content
 // with an explicit error and never shortens it, so the canonical /accord message keeps the
 // exact text participants approve. Sits well under the MCP body cap (1 MB).
 const CHAT_SEND_MESSAGE_MAX_CONTENT_LENGTH = 200_000;
 const CHAT_SEND_MESSAGE_MAX_PER_RUN = 12;
 const CHAT_REMOVED_MESSAGE_ID_MAX = 100;
-const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 100_000;
-const CHAT_ACTIVITY_EVENT_MAX_COUNT = 80;
 const WORKFLOW_MANAGER_ROLE_ID = "workflow-manager";
 const ACTIVE_RUN_OWNERS_KEY = "activeRunOwnersByRunId";
 const ACTIVE_RUN_PARTICIPANTS_KEY = "activeRunParticipantIdsByRunId";
@@ -504,6 +516,18 @@ interface ToolPermissionDecision {
   source: "user" | "policy" | "timeout" | "abort";
 }
 
+interface CodexApprovalResolver {
+  conversationId: string;
+  runId: string;
+  responseByOptionId: ReadonlyMap<string, unknown>;
+  responseDelivered: Promise<void>;
+  submitted: boolean;
+  timer?: NodeJS.Timeout;
+  resolve: (result: unknown) => void;
+  reject: (error: Error) => void;
+  cleanup: () => void;
+}
+
 export interface ChatAppToolApprovalDecisionEvent {
   conversationId: string;
   approval: ChatAppToolApproval;
@@ -608,7 +632,9 @@ export class ChatService {
   private readonly participantRequestRunners = new Map<string, Promise<ParticipantRequestRunResult>>();
   private readonly participantRequestAutoResumes = new Set<string>();
   private readonly permissionApprovalAutoResumes = new Set<string>();
+  private readonly codexApprovalContinuations = new Set<string>();
   private readonly toolPermissionResolvers = new Map<string, (decision: ToolPermissionDecision) => void>();
+  private readonly codexApprovalResolvers = new Map<string, CodexApprovalResolver>();
   private readonly participantTurnQueues = new Map<string, Promise<void>>();
   private readonly chatRunControllers = new Map<string, Set<AbortController>>();
   private readonly chatRunMeta = new Map<string, { conversationId: string; participantId: string; participantHandle: string; pendingMessageId?: string }>();
@@ -626,6 +652,7 @@ export class ChatService {
   private remoteRunCoordinator?: RemoteRunCoordinatorControl;
   private cloudRunAws?: CloudRunAwsResolver;
   private artifactCleanup?: (conversationId: string) => Promise<void>;
+  private codexApprovalWaitMs = CHAT_CODEX_APPROVAL_WAIT_MS;
 
   constructor(
     private readonly storage: StorageService,
@@ -660,6 +687,10 @@ export class ChatService {
 
   setArtifactCleanup(handler: (conversationId: string) => Promise<void>): void {
     this.artifactCleanup = handler;
+  }
+
+  setCodexApprovalWaitMsForTests(timeoutMs: number): void {
+    this.codexApprovalWaitMs = Math.max(1, Math.floor(timeoutMs));
   }
 
   onAppToolApprovalDecision(listener: (event: ChatAppToolApprovalDecisionEvent) => Promise<void> | void): () => void {
@@ -732,6 +763,7 @@ export class ChatService {
       for (const requestMessageId of terminalRemoteRunsReconciled.autoResumeRequestMessageIds) {
         autoResumeRequestMessageIds.add(requestMessageId);
       }
+      const orphanedCodexApprovalsExpired = this.expireOrphanedCodexApprovals(conversation);
       const recoveredRunState = this.recoverStaleChatRun(conversation);
       const interruptedRequests = this.markOrphanedParticipantRequestsInterrupted(conversation);
       const usageUpdates = nextUsage ? this.contextUsageUpdatesAfterRefresh(conversation, existingUsage, nextUsage) : undefined;
@@ -739,7 +771,7 @@ export class ChatService {
       // Heal pointer maps left stale by the pre-fix index-ordering so roster jump targets
       // the participant's true latest message even before they post again.
       const pointersHealed = this.rebuildLastMessagesByParticipantIfChanged(conversation);
-      if (!usageUpdates && !interruptedRequests && !recoveredRunState && !participantsSynced && !pointersHealed && !terminalRemoteRunsReconciled.changed) {
+      if (!usageUpdates && !interruptedRequests && !recoveredRunState && !participantsSynced && !pointersHealed && !terminalRemoteRunsReconciled.changed && !orphanedCodexApprovalsExpired) {
         hydrated = conversation;
         return;
       }
@@ -752,7 +784,7 @@ export class ChatService {
           }
         };
       }
-      if (interruptedRequests || recoveredRunState || terminalRemoteRunsReconciled.changed) {
+      if (interruptedRequests || recoveredRunState || terminalRemoteRunsReconciled.changed || orphanedCodexApprovalsExpired) {
         conversation.updatedAt = new Date().toISOString();
       }
       await this.saveConversation(conversation);
@@ -1237,8 +1269,9 @@ export class ChatService {
         throw new Error("Run location is locked after the member has run. Remove and re-add the member to change it.");
       }
       const autoWatchRequested = Object.prototype.hasOwnProperty.call(request, "autoWatch");
+      const autoWatchChanged = autoWatchRequested && (request.autoWatch === true) !== (target.autoWatch === true);
       if (
-        autoWatchRequested &&
+        autoWatchChanged &&
         request.autoWatch === true &&
         participants.some((participant) => participant.id !== target.id && participant.autoWatch === true)
       ) {
@@ -1261,7 +1294,7 @@ export class ChatService {
         autoWatch: autoWatchRequested ? request.autoWatch === true : target.autoWatch
       };
       let nextMetadata = conversation.metadata;
-      if (autoWatchRequested) {
+      if (autoWatchChanged) {
         nextMetadata = request.autoWatch === true
           ? this.metadataWithAutoWatchEnabled(conversation, target.id)
           : this.metadataWithAutoWatchDisabled(conversation.metadata, target.id);
@@ -1273,7 +1306,7 @@ export class ChatService {
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
       this.queueSnapshot(conversation);
-      if (autoWatchRequested && request.autoWatch === true) {
+      if (autoWatchChanged && request.autoWatch === true) {
         this.scheduleAutoWatchEvaluation(conversation.id, "toggle-on");
       }
       return conversation;
@@ -1752,7 +1785,7 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
       throw new Error("The issued app-tool token does not grant permission requests.");
@@ -1910,7 +1943,7 @@ export class ChatService {
       } else if (!suppressPresentation && record.kind === "output_text") {
         const participant = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
         if (!participant) {
-          throw new Error("Remote run output references a participant that is no longer in this chat.");
+          throw new Error("Remote run output references a member that is no longer in this chat.");
         }
         const message = this.message(
           "participant",
@@ -1937,7 +1970,7 @@ export class ChatService {
       } else if (!suppressPresentation && record.kind === "provider_result") {
         const participant = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
         if (!participant) {
-          throw new Error("Remote run provider result references a participant that is no longer in this chat.");
+          throw new Error("Remote run provider result references a member that is no longer in this chat.");
         }
         this.applyRemoteProviderResultRecord(conversation, record, participant, state);
         const resumeMiss = this.isConfirmedRemoteResumeMiss(record);
@@ -1955,7 +1988,7 @@ export class ChatService {
       } else if (!suppressPresentation && record.kind === "permission_pending") {
         const requester = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
         if (!requester) {
-          throw new Error("Remote run permission request references a participant that is no longer in this chat.");
+          throw new Error("Remote run permission request references a member that is no longer in this chat.");
         }
         const applied = await this.applyPermissionChangeRequestFromTool(
           conversation,
@@ -2732,7 +2765,7 @@ export class ChatService {
     }
     const participant = this.chatParticipants(conversation).find((item) => item.id === record.participantId);
     if (!participant) {
-      throw new Error("Remote run provider output references a participant that is no longer in this chat.");
+      throw new Error("Remote run provider output references a member that is no longer in this chat.");
     }
     const combined = `${state.providerOutputLineBuffer ?? ""}${record.content}`;
     const complete = combined.endsWith("\n") || combined.endsWith("\r");
@@ -2762,7 +2795,7 @@ export class ChatService {
             createdAt: record.createdAt,
             afterContentLength: cumulative.length > 0 ? cumulative.length : undefined
           });
-          if (nextActivity.sequence !== activity.sequence) {
+          if (nextActivity !== activity) {
             activity = nextActivity;
             activityChanged = true;
             remoteRunStatus = this.remoteRunStatus("processing-request", "Processing request", undefined, remoteRunStatus);
@@ -3053,10 +3086,10 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      return { behavior: "deny", message: "The requesting participant is no longer in this chat." };
+      return { behavior: "deny", message: "The requesting member is no longer in this chat." };
     }
     if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
-      return { behavior: "deny", message: "This chat participant is not allowed to request tool permissions." };
+      return { behavior: "deny", message: "This chat member is not allowed to request tool permissions." };
     }
 
     let prepared: PreparedToolPermission;
@@ -3130,10 +3163,10 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     if (!hasChatAppToolCapability(actor.capabilities, "participants.request")) {
-      return this.participantRequestFailedToolResult("This participant is not allowed to request other participants.");
+      return this.participantRequestFailedToolResult("This member is not allowed to request other members.");
     }
 
     let prepared: PreparedParticipantRequest;
@@ -3257,10 +3290,10 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      return { ok: false, status: "rejected", error: "The requesting participant is no longer in this chat." };
+      return { ok: false, status: "rejected", error: "The requesting member is no longer in this chat." };
     }
     if (!hasChatAppToolCapability(actor.capabilities, "compaction.request")) {
-      return { ok: false, status: "rejected", error: "This participant is not allowed to request context compaction." };
+      return { ok: false, status: "rejected", error: "This member is not allowed to request context compaction." };
     }
     const permission = normalizeChatParticipantRequestPermission(
       normalizeChatAgentPermissions(requester.permissions).requestCompaction
@@ -3316,7 +3349,7 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     const record = rawRequest && typeof rawRequest === "object" && !Array.isArray(rawRequest)
       ? rawRequest as { requestId?: unknown }
@@ -3464,7 +3497,7 @@ export class ChatService {
       })),
       roleChange: {
         supportedOperations: ["create_role", "edit_role", "archive_role"],
-        editPolicy: "Built-in roles are available for matching but cannot be edited or deleted by Chat Assistant. Create a custom role when no built-in role fits. Use archive_role to delete an unused custom role; roles with saved participant preset usage cannot be deleted."
+        editPolicy: "Built-in roles are available for matching but cannot be edited or deleted by Chat Assistant. Create a custom role when no built-in role fits. Use archive_role to delete an unused custom role; roles with saved member preset usage cannot be deleted."
       }
     };
   }
@@ -3493,7 +3526,7 @@ export class ChatService {
       })),
       participantChange: {
         supportedOperations: ["add_new_participant_to_chat", "add_existing_participant_to_chat"],
-        savePolicy: "For add_new_participant_to_chat, saveAsPreset defaults to true. Set it to false only for a one-off chat participant. Do not use archived roles for new participants; archived roles are returned only so existing saved/current references can still be understood."
+        savePolicy: "For add_new_participant_to_chat, saveAsPreset defaults to true. Set it to false only for a one-off chat member. Do not use archived roles for new members; archived roles are returned only so existing saved/current references can still be understood."
       }
     };
   }
@@ -3605,7 +3638,7 @@ export class ChatService {
         this.upsertAppToolApproval(conversation, approval);
         conversation.messages.push(this.message(
           "system",
-          `Auto-applied role and participant request from @${requester.handle}: ${applied.summary}.`,
+          `Auto-applied role and member request from @${requester.handle}: ${applied.summary}.`,
           undefined,
           { threadId: "system" }
         ));
@@ -3628,7 +3661,7 @@ export class ChatService {
         updatedAt: new Date().toISOString()
       };
       this.upsertAppToolApproval(conversation, approval);
-      conversation.messages.push(this.message("system", `Role and participant approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
+      conversation.messages.push(this.message("system", `Role and member approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
         threadId: "system"
       }));
       conversation.updatedAt = new Date().toISOString();
@@ -3659,7 +3692,7 @@ export class ChatService {
       this.upsertAppToolApproval(conversation, approval);
       conversation.messages.push(this.message(
         "system",
-        `Auto-applied participant request from @${requester.handle}: ${prepared.summary}.`,
+          `Auto-applied member request from @${requester.handle}: ${prepared.summary}.`,
         undefined,
         { threadId: "system" }
       ));
@@ -3684,7 +3717,7 @@ export class ChatService {
       "pending"
     );
     this.upsertAppToolApproval(conversation, approval);
-    conversation.messages.push(this.message("system", `Participant approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
+    conversation.messages.push(this.message("system", `Member approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
       threadId: "system"
     }));
     conversation.updatedAt = new Date().toISOString();
@@ -3704,7 +3737,7 @@ export class ChatService {
     const participants = this.chatParticipants(conversation);
     const requester = participants.find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     const triggerSequence = actor.triggerMessageId
       ? conversation.messages.findIndex((message) => message.id === actor.triggerMessageId)
@@ -3739,6 +3772,7 @@ export class ChatService {
         preferredAttachmentListTool: APP_CHAT_LIST_ATTACHMENTS_TOOL,
         preferredAttachmentReadTool: APP_CHAT_READ_ATTACHMENT_TOOL,
         preferredParticipantTool: APP_CHAT_GET_PARTICIPANTS_TOOL,
+        preferredParticipantActivityTool: APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL,
         currentContextTool: APP_CHAT_GET_CONTEXT_TOOL,
         fallbackHistoryFiles: {
           markdownPath: historyFiles.markdownPath,
@@ -3780,7 +3814,7 @@ export class ChatService {
     const participants = this.chatParticipants(conversation);
     const requester = participants.find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
 
     const settings = await this.settings.getPublicSettings();
@@ -3838,12 +3872,23 @@ export class ChatService {
     };
   }
 
+  async describeChatParticipantActivityForTool(actor: ChatAppMcpActor): Promise<ChatParticipantActivitySnapshot> {
+    await this.waitForQueuedSave(actor.conversationId);
+    const conversation = await this.requireChat(actor.conversationId);
+    const requester = this.chatParticipants(conversation)
+      .find((participant) => participant.id === actor.participantId);
+    if (!requester) {
+      throw new Error("The requesting member is no longer in this chat.");
+    }
+    return buildChatParticipantActivitySnapshot(conversation);
+  }
+
   async readChatMessagesForTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
     await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
 
     const request = this.normalizeChatMessageReadRequest(rawRequest);
@@ -3934,7 +3979,7 @@ export class ChatService {
     await this.withChatMutation(conversation, async () => {
       const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
       if (!requester) {
-        throw new Error("The requesting participant is no longer in this chat.");
+        throw new Error("The requesting member is no longer in this chat.");
       }
       const messageRecord = this.findMessageRecord(conversation, request.messageId);
       if (!messageRecord || (typeof actor.snapshotMaxSequence === "number" && messageRecord.sequence > actor.snapshotMaxSequence)) {
@@ -3995,7 +4040,7 @@ export class ChatService {
       await this.withChatMutation(conversation, async () => {
         const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
         if (!requester) {
-          throw new Error("The requesting participant is no longer in this chat.");
+          throw new Error("The requesting member is no longer in this chat.");
         }
         // Resolve and validate the visible scope. parent/root, when provided, must be a message
         // visible to this turn; an invisible/wrong-conversation id is rejected.
@@ -4097,7 +4142,7 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const participant = this.chatParticipants(conversation).find((candidate) => candidate.id === actor.participantId);
     if (!participant) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     return normalizeArtifactMember(participant.handle);
   }
@@ -4224,7 +4269,7 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     const request = this.normalizeChatAttachmentListRequest(rawRequest);
     const records = this.visibleImageAttachmentRecords(conversation, actor)
@@ -4257,7 +4302,7 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     const request = this.normalizeChatAttachmentReadRequest(rawRequest);
     const record = this.visibleImageAttachmentRecords(conversation, actor).find((item) => item.attachment.id === request.attachmentId);
@@ -4269,7 +4314,7 @@ export class ChatService {
         snapshotMaxSequence: actor.snapshotMaxSequence
       });
       throw new Error(
-        "AttachmentReadDenied. Problem: this attachment is not visible to the current participant turn. Cause: the attachment id is absent, belongs to another conversation, or is newer than this turn snapshot. Fix: call app_chat_list_attachments for visible attachment IDs, or ask User to resend the image."
+        "AttachmentReadDenied. Problem: this attachment is not visible to the current member turn. Cause: the attachment id is absent, belongs to another conversation, or is newer than this turn snapshot. Fix: call app_chat_list_attachments for visible attachment IDs, or ask User to resend the image."
       );
     }
     const dataBase64 = await this.readAttachmentBase64(conversation.id, record.attachment);
@@ -4290,19 +4335,19 @@ export class ChatService {
     const conversation = await this.requireChat(actor.conversationId);
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     const runPermissions = actor.runPermissions
       ? normalizeChatAgentPermissions(actor.runPermissions)
       : undefined;
     if (!runPermissions) {
       throw new Error(
-        "AttachmentExportDenied. Problem: workspace write permission could not be verified for this participant run. Cause: the app MCP token does not include a run-scoped permission snapshot. Fix: retry in a new participant turn."
+        "AttachmentExportDenied. Problem: workspace write permission could not be verified for this member run. Cause: the app MCP token does not include a run-scoped permission snapshot. Fix: retry in a new member turn."
       );
     }
     if (!runPermissions.workspaceWrite) {
       throw new Error(
-        "AttachmentExportDenied. Problem: workspaceWrite is not granted for this participant run. Cause: exporting an attachment writes a file into the selected repository. Fix: request workspaceWrite permission, then retry the export."
+        "AttachmentExportDenied. Problem: workspaceWrite is not granted for this member run. Cause: exporting an attachment writes a file into the selected repository. Fix: request workspaceWrite permission, then retry the export."
       );
     }
     const request = this.normalizeChatAttachmentExportRequest(rawRequest);
@@ -4315,7 +4360,7 @@ export class ChatService {
         snapshotMaxSequence: actor.snapshotMaxSequence
       });
       throw new Error(
-        "AttachmentExportDenied. Problem: this attachment is not visible to the current participant turn. Cause: the attachment id is absent, belongs to another conversation, or is newer than this turn snapshot. Fix: call app_chat_list_attachments for visible attachment IDs, or ask User to resend the image."
+        "AttachmentExportDenied. Problem: this attachment is not visible to the current member turn. Cause: the attachment id is absent, belongs to another conversation, or is newer than this turn snapshot. Fix: call app_chat_list_attachments for visible attachment IDs, or ask User to resend the image."
       );
     }
 
@@ -4349,6 +4394,9 @@ export class ChatService {
     }
     if (approval.status !== "pending") {
       throw new Error("App tool approval request has already been answered.");
+    }
+    if (approval.toolName === CODEX_APPROVAL_TOOL_NAME && this.isCodexApprovalRequest(approval.request)) {
+      return this.respondToCodexApproval(conversation, request, progress);
     }
     const now = new Date().toISOString();
     if (!request.approve) {
@@ -4426,13 +4474,13 @@ export class ChatService {
       const requester = this.chatParticipants(conversation).find((participant) => participant.id === approval.requesterParticipantId);
       const guard = requester
         ? this.selfCompactionRequestGuard(conversation, requester, approval.id)
-        : { status: "rejected", error: "The requesting participant is no longer in this chat." };
+        : { status: "rejected", error: "The requesting member is no longer in this chat." };
       if (!requester || guard) {
         this.upsertAppToolApproval(conversation, {
           ...approval,
           status: "denied",
           updatedAt: now,
-          error: guard?.error ?? "The requesting participant is no longer in this chat."
+          error: guard?.error ?? "The requesting member is no longer in this chat."
         });
         conversation.updatedAt = now;
         await this.saveConversation(conversation);
@@ -4512,7 +4560,7 @@ export class ChatService {
           updatedAt: now,
           error: message
         });
-        conversation.messages.push(this.message("system", `Could not approve role and participant request from @${approval.requesterHandle}: ${message}`, undefined, {
+        conversation.messages.push(this.message("system", `Could not approve role and member request from @${approval.requesterHandle}: ${message}`, undefined, {
           threadId: "system"
         }));
         conversation.updatedAt = now;
@@ -4530,7 +4578,7 @@ export class ChatService {
       });
       conversation.messages.push(this.message(
         "system",
-        `Applied role and participant request from @${approval.requesterHandle}: ${applied.summary}.`,
+        `Applied role and member request from @${approval.requesterHandle}: ${applied.summary}.`,
         undefined,
         { threadId: "system" }
       ));
@@ -4589,7 +4637,7 @@ export class ChatService {
           updatedAt: now,
           error: message
         });
-        conversation.messages.push(this.message("system", `Could not approve participant request from @${approval.requesterHandle}: ${message}`, undefined, {
+        conversation.messages.push(this.message("system", `Could not approve member request from @${approval.requesterHandle}: ${message}`, undefined, {
           threadId: "system"
         }));
         conversation.updatedAt = now;
@@ -4607,7 +4655,7 @@ export class ChatService {
       });
       conversation.messages.push(this.message(
         "system",
-        `Applied participant request from @${approval.requesterHandle}: ${prepared.summary}.`,
+        `Applied member request from @${approval.requesterHandle}: ${prepared.summary}.`,
         undefined,
         { threadId: "system" }
       ));
@@ -4705,6 +4753,524 @@ export class ChatService {
       });
     }
     return conversation;
+  }
+
+  private async requestCodexApprovalFromCli(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    session: ChatParticipantSession,
+    runId: string,
+    triggerMessageId: string,
+    request: CliAgentCodexServerRequest
+  ): Promise<unknown> {
+    if (request.signal.aborted) {
+      throw this.abortReasonError(request.signal, "Codex approval request was cancelled.");
+    }
+    const prepared = prepareCodexApproval(request);
+    const now = new Date().toISOString();
+    const guardianTimedOut = prepared.request.method === "item/autoApprovalReview/timedOut";
+    const approval: ChatAppToolApproval = {
+      id: randomUUID(),
+      conversationId: conversation.id,
+      requesterParticipantId: participant.id,
+      requesterHandle: participant.handle,
+      requesterRoleConfigId: session.roleConfigId,
+      toolName: CODEX_APPROVAL_TOOL_NAME,
+      capability: "permissions.request",
+      status: guardianTimedOut ? "expired" : "pending",
+      request: prepared.request,
+      summary: this.codexApprovalSummary(prepared.request),
+      createdAt: now,
+      updatedAt: now,
+      resumeContext: {
+        runId,
+        triggerMessageId
+      },
+      error: guardianTimedOut ? "Codex Auto Review timed out. The action remains denied and cannot be retried from this card." : undefined
+    };
+
+    if (guardianTimedOut) {
+      await this.withChatMutation(conversation, async () => {
+        this.upsertAppToolApproval(conversation, approval);
+        conversation.updatedAt = now;
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+      });
+      return codexApprovalCancellationResult(prepared.request.method);
+    }
+
+    let resolveDecision!: (result: unknown) => void;
+    let rejectDecision!: (error: Error) => void;
+    const decisionPromise = new Promise<unknown>((resolve, reject) => {
+      resolveDecision = resolve;
+      rejectDecision = reject;
+    });
+    // A connection, Stop, compaction, or next-turn invalidation can arrive while
+    // the durable card mutation is still awaiting storage. Attach a handler
+    // immediately so early cancellation cannot surface as a process-level
+    // unhandled rejection; callers still observe the original promise below.
+    void decisionPromise.catch(() => undefined);
+    let finished = false;
+    let resolver!: CodexApprovalResolver;
+    const onAbort = (): void => {
+      if (finished || resolver.submitted) {
+        return;
+      }
+      const reason = this.abortReasonError(request.signal, "Codex approval request was cancelled.");
+      resolver.cleanup();
+      rejectDecision(reason);
+      void this.markCodexApprovalTerminal(
+        conversation,
+        approval.id,
+        reason.message,
+        reason.message === "Stopped by user." ? "cancelled" : "expired"
+      );
+    };
+    request.signal.addEventListener("abort", onAbort, { once: true });
+    const cleanup = (): void => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      if (resolver.timer) clearTimeout(resolver.timer);
+      request.signal.removeEventListener("abort", onAbort);
+      this.codexApprovalResolvers.delete(approval.id);
+    };
+    resolver = {
+      conversationId: conversation.id,
+      runId,
+      responseByOptionId: prepared.responseByOptionId,
+      responseDelivered: request.responseDelivered,
+      submitted: false,
+      resolve: resolveDecision,
+      reject: rejectDecision,
+      cleanup
+    };
+    resolver.timer = setTimeout(() => {
+      if (finished || resolver.submitted) return;
+      resolver.submitted = true;
+      resolveDecision(codexApprovalCancellationResult(prepared.request.method));
+      void resolver.responseDelivered
+        .catch((error) => {
+          void this.debugLogs.write("chat.codex-approval.timeout-delivery-failed", {
+            conversationId: conversation.id,
+            runId,
+            approvalId: approval.id,
+            message: error instanceof Error ? error.message : String(error)
+          });
+        })
+        .finally(() => {
+          resolver.cleanup();
+          void this.markCodexApprovalTerminal(
+            conversation,
+            approval.id,
+            "Timed out waiting for User approval. Codex received the method-supported refusal.",
+            "expired"
+          );
+        });
+    }, this.codexApprovalWaitMs);
+    resolver.timer.unref();
+    this.codexApprovalResolvers.set(approval.id, resolver);
+
+    try {
+      await this.withChatMutation(conversation, async () => {
+        this.upsertAppToolApproval(conversation, approval);
+        conversation.updatedAt = now;
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+      });
+      void this.debugLogs.write("chat.codex-approval.requested", {
+        conversationId: conversation.id,
+        participantId: participant.id,
+        runId,
+        approvalId: approval.id,
+        method: prepared.request.method,
+        itemId: prepared.request.itemId,
+        callbackApprovalId: prepared.request.approvalId
+      });
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+    return decisionPromise;
+  }
+
+  private async respondToCodexApproval(
+    conversation: Conversation,
+    request: RespondToChatAppToolApprovalRequest,
+    progress?: ProgressCallback
+  ): Promise<Conversation> {
+    const selected = await this.withChatMutation(conversation, async () => {
+      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === request.approvalId);
+      if (!approval || !this.isCodexApprovalRequest(approval.request)) {
+        throw new Error("Codex approval request was not found.");
+      }
+      if (approval.status !== "pending") {
+        throw new Error("Codex approval request has already been answered.");
+      }
+      const resolver = this.codexApprovalResolvers.get(approval.id);
+      if (!resolver || resolver.conversationId !== conversation.id) {
+        const now = new Date().toISOString();
+        this.upsertAppToolApproval(conversation, {
+          ...approval,
+          status: "expired",
+          updatedAt: now,
+          error: "The Codex app-server connection that requested this approval is no longer active."
+        });
+        conversation.updatedAt = now;
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+        throw new Error("The Codex app-server connection that requested this approval is no longer active.");
+      }
+      if (resolver.submitted) {
+        throw new Error("Codex approval request has already been answered.");
+      }
+      const decisionId = request.codexDecisionId?.trim();
+      const option = approval.request.options.find((item) => item.id === decisionId);
+      const response = decisionId ? resolver.responseByOptionId.get(decisionId) : undefined;
+      if (!option || response === undefined) {
+        throw new Error("Select one of the decisions offered by this Codex approval request.");
+      }
+      if (request.approve !== (option.outcome === "approve")) {
+        throw new Error("The selected Codex decision does not match the approval outcome.");
+      }
+      const status: ChatAppToolApproval["status"] = option.outcome === "approve"
+        ? "approved"
+        : option.outcome === "cancel"
+          ? "cancelled"
+          : "denied";
+      resolver.submitted = true;
+      if (resolver.timer) {
+        clearTimeout(resolver.timer);
+        resolver.timer = undefined;
+      }
+      const now = new Date().toISOString();
+      const completed: ChatAppToolApproval = { ...approval, status, updatedAt: now };
+      this.upsertAppToolApproval(conversation, completed);
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+      return { approval: completed, option, response, resolver, method: approval.request.method };
+    });
+    selected.resolver.resolve(selected.response);
+    void this.finishCodexApprovalDecision(
+      conversation.id,
+      selected.approval,
+      selected.option.outcome,
+      selected.resolver,
+      progress
+    ).catch((error) => {
+      void this.debugLogs.write("chat.codex-approval.completion.error", {
+        conversationId: conversation.id,
+        runId: selected.resolver.runId,
+        approvalId: selected.approval.id,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    });
+    void this.debugLogs.write("chat.codex-approval.responded", {
+      conversationId: conversation.id,
+      runId: selected.resolver.runId,
+      approvalId: selected.approval.id,
+      method: selected.method,
+      outcome: selected.option.outcome
+    });
+    return conversation;
+  }
+
+  private async finishCodexApprovalDecision(
+    conversationId: string,
+    approval: ChatAppToolApproval,
+    outcome: ChatCodexApprovalOption["outcome"],
+    resolver: CodexApprovalResolver,
+    progress?: ProgressCallback
+  ): Promise<void> {
+    try {
+      await resolver.responseDelivered;
+    } catch (error) {
+      resolver.cleanup();
+      const message = `Codex could not receive this decision: ${error instanceof Error ? error.message : String(error)}`;
+      if (this.isEndedTurnGuardianApproval(approval)) {
+        await this.appendCodexContinuationStartFailure(conversationId, approval, message);
+      } else {
+        this.emitProgress(resolver.runId, progress, "error", message);
+      }
+      void this.debugLogs.write("chat.codex-approval.delivery-failed", {
+        conversationId,
+        runId: resolver.runId,
+        approvalId: approval.id,
+        message
+      });
+      return;
+    }
+    resolver.cleanup();
+    if (!this.isEndedTurnGuardianApproval(approval) || (outcome !== "approve" && outcome !== "deny")) {
+      return;
+    }
+    try {
+      await this.autoResumeCodexGuardianDecision(conversationId, approval.id, progress);
+    } catch (error) {
+      const message = `Codex could not start the continuation: ${error instanceof Error ? error.message : String(error)}`;
+      await this.appendCodexContinuationStartFailure(conversationId, approval, message);
+      void this.debugLogs.write("chat.codex-approval.continuation-start-failed", {
+        conversationId,
+        runId: resolver.runId,
+        approvalId: approval.id,
+        message
+      });
+    }
+  }
+
+  private isEndedTurnGuardianApproval(approval: ChatAppToolApproval): boolean {
+    return this.isCodexApprovalRequest(approval.request) && approval.request.method === CODEX_GUARDIAN_DENIED_APPROVAL_METHOD;
+  }
+
+  private async autoResumeCodexGuardianDecision(
+    conversationId: string,
+    approvalId: string,
+    progress?: ProgressCallback
+  ): Promise<void> {
+    if (this.codexApprovalContinuations.has(approvalId)) {
+      return;
+    }
+    this.codexApprovalContinuations.add(approvalId);
+    let backgroundStarted = false;
+    let releaseReservation: (() => void) | undefined;
+    try {
+      const ingest = await this.withChatRunLock(conversationId, async () => {
+        const conversation = await this.requireChat(conversationId);
+        const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
+        if (
+          !approval ||
+          (approval.status !== "approved" && approval.status !== "denied") ||
+          !this.isEndedTurnGuardianApproval(approval) ||
+          !approval.resumeContext
+        ) {
+          return;
+        }
+        const participant = this.chatParticipants(conversation).find((item) => item.id === approval.requesterParticipantId);
+        const trigger = conversation.messages.find((message) => message.id === approval.resumeContext?.triggerMessageId);
+        if (!participant) {
+          throw new Error("The participant that requested this decision is no longer in the chat.");
+        }
+        if (!trigger) {
+          throw new Error("The original request for this decision is no longer available.");
+        }
+        const instruction = approval.status === "approved"
+          ? CHAT_CODEX_APPROVAL_CONTROL_APPROVE
+          : CHAT_CODEX_APPROVAL_CONTROL_DENY;
+        const controlMessage = this.message("user", instruction, undefined, {
+          threadId: trigger.metadata?.threadId ?? trigger.id,
+          parentMessageId: trigger.id,
+          chatThreadRootId: trigger.metadata?.chatThreadRootId,
+          sourceMessageId: trigger.id,
+          hiddenFromTimeline: true
+        });
+        const resumeRunId = randomUUID();
+        const turnReservation = this.reserveParticipantTurn(conversation.id, participant.id);
+        releaseReservation = turnReservation.release;
+        const pendingMessage = this.message(
+          "participant",
+          "",
+          { id: participant.id, kind: participant.kind, label: `@${participant.handle}`, model: participant.model },
+          {
+            threadId: controlMessage.metadata?.threadId ?? controlMessage.id,
+            parentMessageId: controlMessage.id,
+            chatThreadRootId: controlMessage.metadata?.chatThreadRootId,
+            sourceMessageId: controlMessage.id,
+            approvedContinuation: true,
+            runId: resumeRunId,
+            queuedBehind: turnReservation.queued ? { handle: participant.handle } : undefined
+          },
+          "pending"
+        );
+        this.setTargetRunPendingMessageId(resumeRunId, pendingMessage.id);
+        await this.beginChatRun(conversation, resumeRunId);
+        try {
+          await this.withChatMutation(conversation, async () => {
+            conversation.messages.push(controlMessage, pendingMessage);
+            this.recordLastMessageByParticipant(conversation, pendingMessage);
+            conversation.updatedAt = new Date().toISOString();
+            this.queueSnapshot(conversation);
+          });
+          await this.waitForQueuedSave(conversation.id);
+        } catch (error) {
+          await this.endChatRun(conversation, resumeRunId);
+          throw error;
+        }
+        return { conversation, approval, participant, controlMessage, pendingMessage, resumeRunId, turnReservation };
+      });
+      if (!ingest) {
+        return;
+      }
+      backgroundStarted = true;
+      releaseReservation = undefined;
+      void this.runCodexGuardianDecisionContinuation(
+        ingest.conversation,
+        ingest.participant,
+        ingest.controlMessage,
+        ingest.pendingMessage,
+        ingest.resumeRunId,
+        ingest.turnReservation,
+        approvalId,
+        progress
+      )
+        .catch((error) => {
+          void this.debugLogs.write("chat.codex-approval.continuation.background.error", {
+            conversationId,
+            runId: ingest.resumeRunId,
+            approvalId,
+            message: error instanceof Error ? error.message : String(error)
+          });
+        })
+        .finally(() => {
+          this.codexApprovalContinuations.delete(approvalId);
+        });
+    } finally {
+      if (!backgroundStarted) {
+        releaseReservation?.();
+        this.codexApprovalContinuations.delete(approvalId);
+      }
+    }
+  }
+
+  private async runCodexGuardianDecisionContinuation(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    controlMessage: ChatMessage,
+    pendingMessage: ChatMessage,
+    resumeRunId: string,
+    turnReservation: ParticipantTurnReservation,
+    approvalId: string,
+    progress?: ProgressCallback
+  ): Promise<void> {
+    try {
+      const messages = await this.runParticipantTurnSerialized(
+        conversation,
+        participant,
+        controlMessage,
+        resumeRunId,
+        undefined,
+        progress,
+        {
+          continuation: true,
+          warnings: [],
+          existingPendingMessage: pendingMessage,
+          turnReservation
+        }
+      );
+      await this.refreshStoredChatState(conversation);
+      const participantRequestsToRun = await this.appendParticipantTurnMessages(conversation, participant, messages);
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+      this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
+      await this.ensureHistoryFiles(conversation);
+      this.emitProgress(resumeRunId, progress, "done", "Codex approval continuation finished.");
+    } catch (error) {
+      await this.finalizeFailedPrecreatedPendingMessage(conversation, pendingMessage.id, participant, error);
+      await this.withChatMutation(conversation, async () => {
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+      this.emitChatRunFailure(resumeRunId, progress, error);
+      void this.debugLogs.write("chat.codex-approval.continuation.error", {
+        conversationId: conversation.id,
+        runId: resumeRunId,
+        approvalId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      await this.endChatRun(conversation, resumeRunId);
+    }
+  }
+
+  private async appendCodexContinuationStartFailure(
+    conversationId: string,
+    approvalSnapshot: ChatAppToolApproval,
+    message: string
+  ): Promise<void> {
+    await this.withChatRunLock(conversationId, async () => {
+      const conversation = await this.requireChat(conversationId);
+      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalSnapshot.id) ?? approvalSnapshot;
+      const participant = this.chatParticipants(conversation).find((item) => item.id === approval.requesterParticipantId);
+      const trigger = conversation.messages.find((item) => item.id === approval.resumeContext?.triggerMessageId);
+      const content = `@${approval.requesterHandle} could not continue after this ${approval.status === "approved" ? "approval" : "denial"}: ${sanitizeWarningText(message)}`;
+      const failure = participant
+        ? this.message(
+            "participant",
+            content,
+            { id: participant.id, kind: participant.kind, label: `@${participant.handle}`, model: participant.model },
+            {
+              threadId: trigger?.metadata?.threadId ?? trigger?.id ?? "system",
+              parentMessageId: trigger?.id,
+              chatThreadRootId: trigger?.metadata?.chatThreadRootId,
+              sourceMessageId: trigger?.id,
+              runId: randomUUID()
+            },
+            "error"
+          )
+        : this.message("system", content, undefined, { threadId: trigger?.metadata?.threadId ?? "system" });
+      await this.withChatMutation(conversation, async () => {
+        conversation.messages.push(failure);
+        if (participant) {
+          this.recordLastMessageByParticipant(conversation, failure);
+        }
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+      });
+    });
+  }
+
+  private async markCodexApprovalTerminal(
+    conversation: Conversation,
+    approvalId: string,
+    reason: string,
+    status: Extract<ChatAppToolApproval["status"], "cancelled" | "expired">
+  ): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
+      if (!approval || approval.status !== "pending" || !this.isCodexApprovalRequest(approval.request)) {
+        return;
+      }
+      const now = new Date().toISOString();
+      this.upsertAppToolApproval(conversation, {
+        ...approval,
+        status,
+        updatedAt: now,
+        error: reason
+      });
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+    });
+  }
+
+  private codexApprovalSummary(request: ChatCodexApprovalRequest): string {
+    if (request.method === "item/autoApprovalReview/denied") {
+      return request.command
+        ? `Codex Auto Review denied: ${request.command}`
+        : request.networkTarget
+          ? `Codex Auto Review denied network access to ${request.networkTarget}.`
+          : request.mcpToolName
+            ? `Codex Auto Review denied the MCP tool ${request.mcpToolName}.`
+            : "Codex Auto Review denied a protected action.";
+    }
+    if (request.action === "command") {
+      return request.command ? `Codex wants to run: ${request.command}` : "Codex wants to run a protected command.";
+    }
+    if (request.action === "permissions") {
+      return "Codex is requesting additional filesystem or network permissions.";
+    }
+    const count = request.fileChanges?.length ?? 0;
+    return count > 0
+      ? `Codex wants to apply ${count} protected file ${count === 1 ? "change" : "changes"}.`
+      : "Codex wants to apply protected file changes.";
+  }
+
+  private abortReasonError(signal: AbortSignal, fallback: string): Error {
+    return signal.reason instanceof Error
+      ? signal.reason
+      : new Error(typeof signal.reason === "string" && signal.reason.trim() ? signal.reason : fallback);
   }
 
   async startAccord(
@@ -4836,6 +5402,7 @@ export class ChatService {
       let repoFileMentions: RepoFileMention[];
       let dispatch: { targets: ChatParticipant[]; unknownHandles: string[] };
       let skillValidation: { skillMentions: ChatSkillMention[]; targets: ChatParticipant[]; blocks: string[] };
+      let nativeGoal: ReturnType<typeof parseNativeGoalCommand> = { kind: "none" };
       const chatThreadRootId = request.chatThreadRootId?.trim() || undefined;
       const replyContext: ChatDispatchReplyContext = {
         parentMessageId: request.parentMessageId,
@@ -4853,6 +5420,13 @@ export class ChatService {
           replyContext
         );
         dispatch = { ...dispatch, targets: skillValidation.targets };
+        nativeGoal = parseNativeGoalCommand(content);
+        if (nativeGoal.kind === "invalid") {
+          throw new Error(nativeGoal.error);
+        }
+        if (nativeGoal.kind === "valid" && dispatch.targets.length !== 1) {
+          throw new Error("/goal requires exactly one resolved chat member.");
+        }
         const settings = await this.settings.getPublicSettings();
         this.assertParticipantProvidersEnabled(dispatch.targets, settings.providers ?? []);
       } catch (error) {
@@ -4870,13 +5444,22 @@ export class ChatService {
         ...(repoFileMentions.length > 0 ? { repoFileMentions } : {}),
         ...(preparedImages.attachments.length > 0 ? { imageAttachments: preparedImages.attachments } : {})
       });
+      if (nativeGoal.kind === "valid") {
+        userMessage.metadata = {
+          ...userMessage.metadata,
+          nativeCommand: {
+            name: "goal",
+            objective: nativeGoalObjective(nativeGoal.contentWithoutCommand, dispatch.targets[0].handle)
+          }
+        };
+      }
       if (!request.threadId?.trim()) {
         userMessage.metadata = { ...userMessage.metadata, threadId: userMessage.id };
       }
       conversation.messages.push(userMessage);
       this.resetAutoWatchDepthForUserMessage(conversation);
       for (const unknown of dispatch.unknownHandles) {
-        const warning = `No participant named @${unknown}.`;
+        const warning = `No member named @${unknown}.`;
         warnings.push(warning);
         conversation.messages.push(this.message("system", warning, undefined, {
           threadId: userMessage.metadata?.threadId ?? threadId,
@@ -4923,7 +5506,7 @@ export class ChatService {
       return { conversation: ingest.conversation, warnings };
     }
 
-    this.emitProgress(runId, progress, "initial", `Running ${ingest.dispatch.targets.length} chat participant${ingest.dispatch.targets.length === 1 ? "" : "s"}.`, {
+    this.emitProgress(runId, progress, "initial", `Running ${ingest.dispatch.targets.length} chat member${ingest.dispatch.targets.length === 1 ? "" : "s"}.`, {
       total: ingest.dispatch.targets.length,
       completed: 0
     });
@@ -5111,7 +5694,7 @@ export class ChatService {
         throw new Error("Selected option was not found.");
       }
       if (!sourceMessage.participantId) {
-        throw new Error("Choice request is not attached to a chat participant.");
+        throw new Error("Choice request is not attached to a chat member.");
       }
       const requester = this.chatParticipants(conversation).find((participant) => participant.id === sourceMessage.participantId);
       if (!requester) {
@@ -5604,6 +6187,7 @@ export class ChatService {
     await this.withChatMutation(conversation, async () => {
       let threadId: string | undefined;
       let chatThreadRootId: string | undefined;
+      let keptStoppedParticipantMessage = false;
       if (pendingMessageId) {
         const idx = conversation.messages.findIndex((message) => message.id === pendingMessageId);
         if (idx >= 0) {
@@ -5625,6 +6209,13 @@ export class ChatService {
               metadata
             };
           }
+          if (
+            pending.role === "participant" &&
+            pending.status === "error" &&
+            pending.metadata?.terminalReason === "user-stopped"
+          ) {
+            keptStoppedParticipantMessage = true;
+          }
         }
       }
       this.markPendingAppToolApprovalsForRunTerminal(
@@ -5632,12 +6223,14 @@ export class ChatService {
         runId,
         `@${participant.handle} stopped before pending approval was resolved.`
       );
-      conversation.messages.push(this.message(
-        "system",
-        `@${participant.handle} stopped by user.`,
-        undefined,
-        { threadId, chatThreadRootId }
-      ));
+      if (!keptStoppedParticipantMessage) {
+        conversation.messages.push(this.message(
+          "system",
+          `@${participant.handle} stopped by user.`,
+          undefined,
+          { threadId, chatThreadRootId }
+        ));
+      }
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
     });
@@ -5665,15 +6258,30 @@ export class ChatService {
   ): Promise<ChatMessage[]> {
     const sessionState = await this.sessionForParticipant(conversation, participant);
     const session = sessionState.session;
-    const promptConversation = options.promptConversation ?? conversation;
+    const sourcePromptConversation = options.promptConversation ?? conversation;
+    const nativeGoal = triggerMessage.role === "user" && triggerMessage.metadata?.nativeCommand?.name === "goal"
+      ? triggerMessage.metadata.nativeCommand
+      : undefined;
+    const parsedTrigger = nativeGoal ? parseNativeGoalCommand(triggerMessage.content) : { kind: "none" as const };
+    const promptTriggerMessage = parsedTrigger.kind === "valid"
+      ? { ...triggerMessage, content: parsedTrigger.contentWithoutCommand }
+      : triggerMessage;
+    const promptConversation = parsedTrigger.kind === "valid"
+      ? {
+          ...sourcePromptConversation,
+          messages: sourcePromptConversation.messages.map((message) =>
+            message.id === triggerMessage.id ? promptTriggerMessage : message
+          )
+        }
+      : sourcePromptConversation;
     const workspacePath = options.workspacePath ?? await this.ensureHistoryFiles(promptConversation);
     const isResumingSession = Boolean(session.sessionId);
     const preparedPromptContext = await this.preparePromptContextForRun(
       conversation,
       promptConversation,
       participant,
-      triggerMessage,
-      options.promptContextScope ?? this.promptContextScopeForTrigger(triggerMessage),
+      promptTriggerMessage,
+      options.promptContextScope ?? this.promptContextScopeForTrigger(promptTriggerMessage),
       isResumingSession
     );
     const agentMode = this.agentModeForSession(session, participant);
@@ -5689,21 +6297,21 @@ export class ChatService {
     const usePromptRole = session.roleRuntime === "prompt-fallback";
     const includeRefreshedRoleInstructions = isResumingSession && sessionState.instructionsRefreshed;
     const primaryIncludeRoleInstructions = (usePromptRole && !isResumingSession) || includeRefreshedRoleInstructions;
-    const primary = this.buildPromptParts(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+    const primary = this.buildPromptParts(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: primaryIncludeRoleInstructions,
       agentMode,
       permissions,
       promptContextBlock: preparedPromptContext.block
     });
     const prompt = primary.prompt;
-    const promptFallbackPrompt = this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+    const promptFallbackPrompt = this.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: true,
       agentMode,
       permissions,
       promptContextBlock: preparedPromptContext.block
     });
     const resumeFallbackPrompt = isResumingSession
-      ? this.buildPrompt(promptConversation, participant, session, triggerMessage, workspacePath, Boolean(options.continuation), {
+      ? this.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
           includeRoleInstructions: usePromptRole || includeRefreshedRoleInstructions,
           agentMode,
           permissions,
@@ -5832,6 +6440,13 @@ export class ChatService {
     try {
       progressSink.beginAttempt();
       const participantRunsRemotely = this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution) === "remote";
+      if (nativeGoal && participantRunsRemotely) {
+        const message = `@${participant.handle} native /goal requires the local dedicated CLI transport; remote execution does not expose the provider's native goal protocol.`;
+        pendingMessage.status = "error";
+        pendingMessage.content = message;
+        options.warnings.push(message);
+        return [pendingMessage];
+      }
       if (participantRunsRemotely) {
         const preparingRemoteStatus = this.remoteRunStatus("preparing-worker", "Preparing remote worker");
         this.emitRemoteRunPhase(runId, progress, participant, pendingMessage.id, preparingRemoteStatus);
@@ -5889,12 +6504,10 @@ export class ChatService {
             kind: "chat",
             repoPath: worker.remoteCwd,
             sync: remoteSyncLocalPath ? { localPath: remoteSyncLocalPath } : undefined,
-            toolchainPreflight: remoteToolchainLocalPath || participant.skipToolchainPreflight === true
-              ? {
-                  localRepoPath: remoteToolchainLocalPath,
-                  skip: participant.skipToolchainPreflight === true
-                }
-              : undefined,
+            toolchainPreflight: {
+              localRepoPath: remoteToolchainLocalPath,
+              skip: participant.skipToolchainPreflight === true
+            },
             onToolchainAdvisory: (message) => {
               options.warnings.push(`@${participant.handle}: ${message}`);
             },
@@ -6031,8 +6644,17 @@ export class ChatService {
         agentEnvKey: agentEnvironment.version,
         agentMode,
         permissions,
+        nativeGoal,
         onOutput: progressSink.emit,
         onSessionId: persistSessionId,
+        onCodexServerRequest: (request) => this.requestCodexApprovalFromCli(
+          conversation,
+          participant,
+          session,
+          runId,
+          triggerMessage.id,
+          request
+        ),
         warm: {
           conversationId: conversation.id,
           participantId: participant.id,
@@ -6063,19 +6685,23 @@ export class ChatService {
       if (!signal?.aborted && !result.ok && result.error) {
         options.warnings.push(`@${participant.handle}: ${result.error}`);
       }
-      if (!signal?.aborted) {
-        const workedMs = Date.parse(now) - Date.parse(pendingMessage.createdAt);
-        if (Number.isFinite(workedMs) && workedMs >= 0) {
-          pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
-        }
-        const activityEvents = progressSink.activityEvents();
-        if (activityEvents.length > 0) {
-          pendingMessage.metadata = { ...pendingMessage.metadata, activityEvents };
-        }
-        const processingTranscript = progressSink.processingTranscript(now);
-        if (processingTranscript) {
-          pendingMessage.metadata = { ...pendingMessage.metadata, processingTranscript };
-        }
+      const workedMs = Date.parse(now) - Date.parse(pendingMessage.createdAt);
+      if (Number.isFinite(workedMs) && workedMs >= 0) {
+        pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
+      }
+      const activityEvents = progressSink.activityEvents();
+      if (activityEvents.length > 0) {
+        pendingMessage.metadata = { ...pendingMessage.metadata, activityEvents };
+      }
+      let processingTranscript = progressSink.processingTranscript(now);
+      if (processingTranscript && signal?.aborted) {
+        processingTranscript = this.processingTranscriptWithTerminalMessage(
+          processingTranscript,
+          pendingMessage.content
+        );
+      }
+      if (processingTranscript) {
+        pendingMessage.metadata = { ...pendingMessage.metadata, processingTranscript };
       }
       if (!signal?.aborted && result.ok && result.content.trim()) {
         this.commitPromptContextPointerAdvance(conversation, participant.id, preparedPromptContext.pointerAdvance);
@@ -6113,9 +6739,9 @@ export class ChatService {
         }
       }
       // Skip the snapshot push for two cases:
-      //   1. The run was cancelled — caller (`discardStoppedTargetRun`) will drop
-      //      the pending message and emit a clean "stopped by user" note under
-      //      `withChatMutation`.
+      //   1. The run was cancelled — caller (`discardStoppedTargetRun`) will
+      //      preserve a finalized stopped bubble (including captured output),
+      //      or replace a never-started queued bubble with a system note.
       //   2. This run came from `runParticipantBatch` (identified by the
       //      pre-created `existingPendingMessage`) — that caller emits the final
       //      snapshot under `withChatMutation` via `appendCompletedTurn`.
@@ -6209,9 +6835,13 @@ export class ChatService {
       : `@${participant.handle} run failed before a response was produced.`;
   }
 
-  private markParticipantMessageStoppedByUser(message: ChatMessage, participant: ChatParticipant): void {
+  private markParticipantMessageStoppedByUser(
+    message: ChatMessage,
+    participant: ChatParticipant,
+    options: { preserveContent?: boolean } = {}
+  ): void {
     message.status = "error";
-    if (!message.content.trim()) {
+    if (!options.preserveContent || !message.content.trim()) {
       message.content = `@${participant.handle} stopped by user.`;
     }
     message.metadata = {
@@ -6295,7 +6925,7 @@ export class ChatService {
       staticEnvelope = [
         `You are @${participant.handle}. Continue the same chat session.`,
         `Role: ${session.roleLabel}.`,
-        this.promptFallbackStaticInstructions(session),
+        this.promptFallbackStaticInstructions(participant, session),
         dynamicHeader,
         `App MCP is the source of truth for chat context. History files at ${historyMarkdownPath} and ${historyJsonPath} are debug-only fallbacks.`
       ].join("\n");
@@ -6601,20 +7231,32 @@ export class ChatService {
       "Role instructions:",
       session.roleInstructions,
       "",
-      this.staticChatInstructions(session)
+      this.staticChatInstructions(
+        session,
+        this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution) !== "remote"
+      )
     ].join("\n");
   }
 
-  private promptFallbackStaticInstructions(session: ChatParticipantSession): string {
+  private promptFallbackStaticInstructions(
+    participant: ChatParticipant,
+    session: ChatParticipantSession
+  ): string {
     return [
       "Role instructions:",
       session.roleInstructions,
       "",
-      this.staticChatInstructions(session)
+      this.staticChatInstructions(
+        session,
+        this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution) !== "remote"
+      )
     ].join("\n");
   }
 
-  private staticChatInstructions(session: ChatParticipantSession): string {
+  private staticChatInstructions(
+    session: ChatParticipantSession,
+    includeParticipantActivityTool = true
+  ): string {
     return [
       "Chat participant boundaries:",
       "- You are one participant in a multi-participant chat.",
@@ -6623,7 +7265,7 @@ export class ChatService {
       "- Do not ask another participant for user-owned clarification.",
       "",
       "App MCP policy:",
-      this.appToolPromptPolicy(session),
+      this.appToolPromptPolicy(session, includeParticipantActivityTool),
       "",
       "Response rules:",
       "- The user strongly prefers concise replies. Do not repeat accepted context or restate proposals when a short verdict, blocker, or delta is enough.",
@@ -6643,7 +7285,10 @@ export class ChatService {
     ].join("\n");
   }
 
-  private appToolPromptPolicy(session: ChatParticipantSession): string {
+  private appToolPromptPolicy(
+    session: ChatParticipantSession,
+    includeParticipantActivityTool = true
+  ): string {
     const agentMode = normalizeChatAgentMode(session.participantAgentMode);
     const canRequestPermissions = this.canRequestPermissionChanges(session);
     const canRequestCompaction = normalizeChatParticipantRequestPermission(
@@ -6669,9 +7314,17 @@ export class ChatService {
       : [
           "Permission changes are not directly available to this participant. If the current task needs a blocked capability, explain the specific capability needed before refusing."
         ];
+    const readOnlyChatTools = [
+      "app_chat_get_context",
+      "app_chat_get_participants",
+      ...(includeParticipantActivityTool ? [APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL] : []),
+      "app_chat_read_messages",
+      "app_chat_list_attachments",
+      "app_chat_read_attachment"
+    ];
     const lines = [
       "App MCP tools: use the connected `accord_agents` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
-      "Read-only chat MCP tools: `app_chat_get_context`, `app_chat_get_participants`, `app_chat_read_messages`, `app_chat_list_attachments`, and `app_chat_read_attachment`. Prefer them over history files for roster, thread, messages, and screenshots.",
+      `Read-only chat MCP tools: ${readOnlyChatTools.map((tool) => `\`${tool}\``).join(", ")}. Prefer them over history files for roster, authoritative member activity, thread, messages, and screenshots.`,
       "Reaction MCP tool: `app_chat_react` adds or toggles an emoji reaction on a specific message. To react, call it with the message `id` from `app_chat_read_messages` and an allowed emoji.",
       "Send-message MCP tool: `app_chat_send_message` posts immediately and returns `messageId`; use only for mid-turn visibility, not normal replies. It can attach PNG/JPEG/WebP with `attachments: [{ \"kind\": \"image\", \"sourcePath\": \"path.png\" }]` from image paths inside the selected repository when repoRead is granted.",
       "If a message lists attached images, call `app_chat_read_attachment` with the attachment ID before reasoning about visual details.",
@@ -8020,6 +8673,10 @@ export class ChatService {
         currentState.providerActivitySequence ?? 0,
         activity.events.at(-1)?.sequence ?? 0
       );
+      const providerOmittedActivityEventCount = Math.max(
+        activity.dropped,
+        providerActivitySequence - activity.events.length
+      );
       merged[runId] = {
         cursorSeq: Math.max(storedState.cursorSeq, currentState.cursorSeq),
         appliedRecordIds,
@@ -8038,7 +8695,7 @@ export class ChatService {
         providerActivityLabel: currentActivityIsLatest
           ? currentState.providerActivityLabel ?? storedState.providerActivityLabel
           : storedState.providerActivityLabel ?? currentState.providerActivityLabel,
-        providerOmittedActivityEventCount: Math.max(0, providerActivitySequence - activity.events.length),
+        providerOmittedActivityEventCount,
         remoteRunStatus: this.latestRemoteRunStatus(currentState.remoteRunStatus, storedState.remoteRunStatus),
         updatedAt: currentState.updatedAt && storedState.updatedAt
           ? currentState.updatedAt >= storedState.updatedAt
@@ -8088,7 +8745,11 @@ export class ChatService {
       const providerActivityLabel = typeof record.providerActivityLabel === "string"
         ? record.providerActivityLabel.trim() || undefined
         : undefined;
-      const providerOmittedActivityEventCount = this.normalizeOptionalInteger(record.providerOmittedActivityEventCount);
+      const observedProviderActivitySequence = providerActivitySequence ?? providerActivityEvents.at(-1)?.sequence ?? 0;
+      const providerOmittedActivityEventCount = Math.max(
+        this.normalizeOptionalInteger(record.providerOmittedActivityEventCount) ?? 0,
+        Math.max(0, observedProviderActivitySequence - providerActivityEvents.length)
+      );
       const remoteRunStatus = this.remoteRunStatusFromMetadata(record.remoteRunStatus);
       states[runId] = {
         cursorSeq,
@@ -8131,9 +8792,11 @@ export class ChatService {
       const status = record.status === "started" || record.status === "completed" || record.status === "failed"
         ? record.status
         : undefined;
+      const itemId = typeof record.itemId === "string" ? record.itemId.trim() || undefined : undefined;
       byId.set(id, {
         id,
         sequence,
+        ...(itemId ? { itemId } : {}),
         kind: record.kind,
         label,
         detail: typeof record.detail === "string" ? record.detail.trim() || undefined : undefined,
@@ -8142,9 +8805,9 @@ export class ChatService {
         afterContentLength: this.normalizeOptionalInteger(record.afterContentLength)
       });
     }
-    return Array.from(byId.values())
-      .sort((left, right) => left.sequence - right.sequence || left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
-      .slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT);
+    const events = Array.from(byId.values())
+      .sort((left, right) => left.sequence - right.sequence || left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    return this.capChatActivityEvents(events).events;
   }
 
   private mergeRemoteRunActivityEvents(
@@ -8157,10 +8820,16 @@ export class ChatService {
     }
     const events = Array.from(byId.values())
       .sort((left, right) => left.sequence - right.sequence || left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
-    const dropped = Math.max(0, events.length - CHAT_ACTIVITY_EVENT_MAX_COUNT);
+    return this.capChatActivityEvents(events);
+  }
+
+  private capChatActivityEvents(events: ChatAgentActivityEvent[]): { events: ChatAgentActivityEvent[]; dropped: number } {
+    if (events.length <= CHAT_ACTIVITY_EVENT_MAX_COUNT) {
+      return { events, dropped: 0 };
+    }
     return {
-      events: dropped > 0 ? events.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT) : events,
-      dropped
+      events: events.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT),
+      dropped: events.length - CHAT_ACTIVITY_EVENT_MAX_COUNT
     };
   }
 
@@ -8397,7 +9066,7 @@ export class ChatService {
   }
 
   private isTerminalAppToolApprovalStatus(status: string): boolean {
-    return status === "approved" || status === "denied" || status === "auto-applied";
+    return status === "approved" || status === "denied" || status === "cancelled" || status === "expired" || status === "auto-applied";
   }
 
   private metadataStringKey(item: Record<string, unknown>, key: string): string | undefined {
@@ -9183,10 +9852,10 @@ export class ChatService {
   ): Promise<ParticipantManagementAuthorization> {
     const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-      throw new Error("The issued app-tool token does not grant participant management.");
+      throw new Error("The issued app-tool token does not grant member management.");
     }
     const manageRolesParticipants = await this.manageRolesParticipantsPermissionForParticipant(requester);
     if (manageRolesParticipants === "deny") {
@@ -9218,7 +9887,7 @@ export class ChatService {
         }
         const participant = operationRecord.participant;
         if (!participant || typeof participant !== "object" || Array.isArray(participant)) {
-          throw new Error(`Roster operation ${index + 1} needs a participant object.`);
+          throw new Error(`Roster operation ${index + 1} needs a member object.`);
         }
         const participantRecord = participant as Record<string, unknown>;
         const handle = typeof participantRecord.handle === "string" ? participantRecord.handle.trim() : "";
@@ -9467,7 +10136,7 @@ export class ChatService {
 
   private normalizeRoleParticipantChangeRequest(raw: unknown): ChatRoleParticipantChangeRequest {
     if (!this.isRoleParticipantChangeRequest(raw)) {
-      throw new Error("Role and participant request must include roleRequest and participantRequest.");
+      throw new Error("Role and member request must include roleRequest and participantRequest.");
     }
     const record = raw as ChatRoleParticipantChangeRequest;
     return {
@@ -9646,20 +10315,20 @@ export class ChatService {
 
   private normalizeParticipantChangeRequest(raw: unknown): ChatParticipantChangeRequest {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      throw new Error("Participant change request must be an object.");
+      throw new Error("Member change request must be an object.");
     }
     const record = raw as { reason?: unknown; operations?: unknown };
     if (!Array.isArray(record.operations) || record.operations.length === 0) {
-      throw new Error("Participant change request needs at least one operation.");
+      throw new Error("Member change request needs at least one operation.");
     }
     if (record.operations.length > CHAT_ROSTER_CHANGE_MAX_OPERATIONS) {
-      throw new Error("Participant change request is too large.");
+      throw new Error("Member change request is too large.");
     }
     return {
       reason: typeof record.reason === "string" ? record.reason.trim().slice(0, 500) || undefined : undefined,
       operations: record.operations.map((operation, index): ChatParticipantChangeOperation => {
         if (!operation || typeof operation !== "object" || Array.isArray(operation)) {
-          throw new Error(`Participant operation ${index + 1} must be an object.`);
+          throw new Error(`Member operation ${index + 1} must be an object.`);
         }
         const operationRecord = operation as Record<string, unknown>;
         if (operationRecord.type === "add_existing_participant_to_chat") {
@@ -9667,7 +10336,7 @@ export class ChatService {
             ? operationRecord.participantConfigId.trim()
             : "";
           if (!participantConfigId) {
-            throw new Error(`Participant operation ${index + 1} needs participantConfigId.`);
+            throw new Error(`Member operation ${index + 1} needs participantConfigId.`);
           }
           const overrides = this.normalizeExistingParticipantOverrides(operationRecord.overrides);
           return {
@@ -9677,16 +10346,16 @@ export class ChatService {
           };
         }
         if (operationRecord.type !== "add_new_participant_to_chat") {
-          throw new Error(`Participant operation ${index + 1} has an unsupported type.`);
+          throw new Error(`Member operation ${index + 1} has an unsupported type.`);
         }
         const participant = operationRecord.participant;
         if (!participant || typeof participant !== "object" || Array.isArray(participant)) {
-          throw new Error(`Participant operation ${index + 1} needs a participant object.`);
+          throw new Error(`Member operation ${index + 1} needs a member object.`);
         }
         const participantRecord = participant as Record<string, unknown>;
         const kind = participantRecord.kind;
         if (kind !== "codex-cli" && kind !== "claude-code" && kind !== "gemini-cli") {
-          throw new Error(`Participant operation ${index + 1} has an unsupported CLI kind.`);
+          throw new Error(`Member operation ${index + 1} has an unsupported CLI kind.`);
         }
         const roleConfigId = typeof participantRecord.roleConfigId === "string" ? participantRecord.roleConfigId.trim() : "";
         const permissionsProvided = Object.prototype.hasOwnProperty.call(participantRecord, "permissions");
@@ -10206,7 +10875,7 @@ export class ChatService {
         ok: false,
         status: "not_found",
         requestId,
-        error: "Permission request was not found for this participant run."
+        error: "Permission request was not found for this member run."
       };
     }
     return this.permissionRequestStatusResult(approval);
@@ -10597,7 +11266,7 @@ export class ChatService {
     currentPermissionsOverride?: ChatAgentPermissions
   ): PreparedPermissionChange {
     if (!requester) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     if (!this.isPermissionChangeRequest(request)) {
       throw new Error("Permission approval request is invalid.");
@@ -10698,7 +11367,7 @@ export class ChatService {
     const participants = this.chatParticipants(conversation);
     const target = participants.find((participant) => participant.id === requesterParticipantId);
     if (!target) {
-      throw new Error("The requesting participant is no longer in this chat.");
+      throw new Error("The requesting member is no longer in this chat.");
     }
     const nextPermissions = this.applyPermissionChangeToPermissions(
       normalizeChatAgentPermissions(target.permissions),
@@ -10721,28 +11390,28 @@ export class ChatService {
     resumeRequester: boolean;
   } {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      throw new Error("Participant request must be an object.");
+      throw new Error("Member request must be an object.");
     }
     const record = raw as { requests?: unknown; timeoutMs?: unknown; resumeRequester?: unknown };
     if (!Array.isArray(record.requests) || record.requests.length === 0) {
-      throw new Error("Participant request needs at least one target.");
+      throw new Error("Member request needs at least one target.");
     }
     if (record.requests.length > CHAT_PARTICIPANT_REQUEST_MAX_ITEMS) {
-      throw new Error(`Participant request can target at most ${CHAT_PARTICIPANT_REQUEST_MAX_ITEMS} participants.`);
+      throw new Error(`Member request can target at most ${CHAT_PARTICIPANT_REQUEST_MAX_ITEMS} members.`);
     }
     const requests: ChatParticipantRequestInput[] = [];
     for (const item of record.requests) {
       if (!item || typeof item !== "object" || Array.isArray(item)) {
-        throw new Error("Each participant request item must be an object.");
+        throw new Error("Each member request item must be an object.");
       }
       const candidate = item as { target?: unknown; prompt?: unknown; reason?: unknown };
       const target = typeof candidate.target === "string" ? candidate.target.trim().replace(/^@/, "") : "";
       const prompt = typeof candidate.prompt === "string" ? candidate.prompt.trim() : "";
       if (!HANDLE_PATTERN.test(target)) {
-        throw new Error(`Invalid participant target: ${String(candidate.target ?? "")}.`);
+        throw new Error(`Invalid member target: ${String(candidate.target ?? "")}.`);
       }
       if (!prompt) {
-        throw new Error(`Participant request for @${target} needs a prompt.`);
+        throw new Error(`Member request for @${target} needs a prompt.`);
       }
       requests.push({
         target,
@@ -10781,12 +11450,12 @@ export class ChatService {
     const promptMaxChars = await this.chatParticipantRequestPromptMaxChars();
     for (const request of normalized.requests) {
       if (request.prompt.length > promptMaxChars) {
-        throw new Error(`Participant request prompt for @${request.target} exceeds ${promptMaxChars} characters; it is rejected, not truncated.`);
+        throw new Error(`Member request prompt for @${request.target} exceeds ${promptMaxChars} characters; it is rejected, not truncated.`);
       }
     }
     const permission = normalizeChatAgentPermissions(requester.permissions).requestParticipants;
     if (permission === "deny") {
-      throw new Error(`Participant requests are disabled for @${requester.handle}.`);
+      throw new Error(`Member requests are disabled for @${requester.handle}.`);
     }
     const requestStatus: ChatParticipantRequestStatus = permission === "allow" ? "running" : "pending_approval";
     const participants = this.chatParticipants(conversation);
@@ -10795,10 +11464,10 @@ export class ChatService {
     for (const request of normalized.requests) {
       const target = this.participantForMentionHandle(participants, request.target);
       if (!target) {
-        throw new Error(`No participant named @${request.target}.`);
+        throw new Error(`No member named @${request.target}.`);
       }
       if (target.id === requester.id) {
-        throw new Error("A participant cannot request itself.");
+        throw new Error("A member cannot request itself.");
       }
       if (targets.has(target.id)) {
         continue;
@@ -10807,7 +11476,7 @@ export class ChatService {
       requests.push({ ...request, target: target.handle });
     }
     if (targets.size === 0) {
-      throw new Error("Participant request did not include any runnable targets.");
+      throw new Error("Member request did not include any runnable targets.");
     }
 
     const now = new Date().toISOString();
@@ -10887,7 +11556,7 @@ export class ChatService {
       this.participantRequestBatchChainRootId(batch) === chainRootId
     );
     if (chainBatches.length >= CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES) {
-      return `participant request chain limit (${CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES}) reached`;
+      return `member request chain limit (${CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES}) reached`;
     }
     const sameTurnMcpBatches = actor.triggerMessageId
       ? this.participantRequestBatches(conversation).filter((batch) =>
@@ -10900,12 +11569,12 @@ export class ChatService {
       return "one active request batch is already attached to this requester turn";
     }
     if (sameTurnMcpBatches.length >= CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN) {
-      return `participant request turn limit (${CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN}) reached`;
+      return `member request turn limit (${CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN}) reached`;
     }
     const threshold = Date.now() - CHAT_PARTICIPANT_REQUEST_RATE_WINDOW_MS;
     const recent = this.participantRequestBatches(conversation).filter((batch) => Date.parse(batch.createdAt) >= threshold);
     if (recent.length >= CHAT_PARTICIPANT_REQUEST_RATE_LIMIT) {
-      return `participant request rate limit (${CHAT_PARTICIPANT_REQUEST_RATE_LIMIT}/minute) reached`;
+      return `member request rate limit (${CHAT_PARTICIPANT_REQUEST_RATE_LIMIT}/minute) reached`;
     }
     return undefined;
   }
@@ -11004,7 +11673,7 @@ export class ChatService {
           return {
             ...item,
             status: "failed" as const,
-            error: "Target participant is no longer in this chat.",
+            error: "Target member is no longer in this chat.",
             updatedAt: now
           };
         }
@@ -11141,7 +11810,7 @@ export class ChatService {
     const requestMessage = conversation.messages.find((message) => message.id === requestMessageId);
     const batch = requestMessage?.metadata?.participantRequest;
     if (!requestMessage || !batch) {
-      throw new Error("Participant request message was not found.");
+      throw new Error("Member request message was not found.");
     }
     const participants = this.chatParticipants(conversation);
     const runnableItems = batch.items.filter((item) => item.status === "running");
@@ -11153,7 +11822,7 @@ export class ChatService {
         this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
           ...current,
           items: current.items.map((candidate) => candidate.targetParticipantId === item.targetParticipantId
-            ? { ...candidate, status: "failed", error: "Target participant is no longer in this chat.", updatedAt: now }
+            ? { ...candidate, status: "failed", error: "Target member is no longer in this chat.", updatedAt: now }
             : candidate),
           updatedAt: now
         }));
@@ -11572,7 +12241,7 @@ export class ChatService {
         const trigger = this.message(
           "system",
           [
-            `Auto-resumed @${requester.handle} after participant request.`,
+            `Auto-resumed @${requester.handle} after member request.`,
             "Target replies/errors are in the transcript above. Continue from your request using the available answers and errors."
           ].join("\n"),
           undefined,
@@ -12162,7 +12831,7 @@ export class ChatService {
     const message = conversation.messages.find((item) => item.id === requestMessageId);
     const batch = message?.metadata?.participantRequest;
     if (!batch) {
-      return { ok: false, status: "failed", error: "Participant request was not found." };
+      return { ok: false, status: "failed", error: "Member request was not found." };
     }
     return {
       ok: true,
@@ -12214,7 +12883,7 @@ export class ChatService {
     excludeMessageId?: string
   ): boolean {
     const now = new Date().toISOString();
-    const reason = "Superseded by a newer turn from this participant.";
+    const reason = "Superseded by a newer turn from this member.";
     let changed = false;
     for (const message of conversation.messages) {
       if (message.id === excludeMessageId || !message.metadata) {
@@ -12282,9 +12951,56 @@ export class ChatService {
           reason
         });
       }
+      if (approval.toolName === CODEX_APPROVAL_TOOL_NAME && this.isCodexApprovalRequest(approval.request)) {
+        const resolver = this.codexApprovalResolvers.get(approval.id);
+        if (resolver) {
+          resolver.cleanup();
+          resolver.reject(new Error(reason));
+        }
+        return {
+          ...approval,
+          status: /stop|cancel/i.test(reason) ? "cancelled" as const : "expired" as const,
+          error: reason,
+          updatedAt: now
+        };
+      }
       return {
         ...approval,
         status: "denied" as const,
+        error: reason,
+        updatedAt: now
+      };
+    });
+    if (!changed) {
+      return false;
+    }
+    conversation.metadata = {
+      ...conversation.metadata,
+      pendingAppToolApprovals: nextApprovals
+    };
+    return true;
+  }
+
+  private expireOrphanedCodexApprovals(
+    conversation: Conversation,
+    reason = "The Codex app-server connection that requested this approval is no longer active."
+  ): boolean {
+    const approvals = this.chatAppToolApprovals(conversation);
+    const now = new Date().toISOString();
+    let changed = false;
+    const nextApprovals = approvals.map((approval) => {
+      if (
+        approval.status !== "pending" ||
+        approval.toolName !== CODEX_APPROVAL_TOOL_NAME ||
+        !this.isCodexApprovalRequest(approval.request) ||
+        this.codexApprovalResolvers.has(approval.id)
+      ) {
+        return approval;
+      }
+      changed = true;
+      return {
+        ...approval,
+        status: "expired" as const,
         error: reason,
         updatedAt: now
       };
@@ -12833,17 +13549,31 @@ export class ChatService {
   }
 
   private cleanupRemovedParticipantState(conversation: Conversation, participant: ChatParticipant, now: string): void {
-    const removalError = "Participant was removed from this chat.";
-    const approvals = this.chatAppToolApprovals(conversation).map((approval) =>
-      approval.status === "pending" && this.appToolApprovalReferencesParticipant(conversation, approval, participant)
-        ? {
-            ...approval,
-            status: "denied" as const,
-            updatedAt: now,
-            error: removalError
-          }
-        : approval
-    );
+    const removalError = "Member was removed from this chat.";
+    const approvals = this.chatAppToolApprovals(conversation).map((approval) => {
+      if (approval.status !== "pending" || !this.appToolApprovalReferencesParticipant(conversation, approval, participant)) {
+        return approval;
+      }
+      if (approval.toolName === CODEX_APPROVAL_TOOL_NAME && this.isCodexApprovalRequest(approval.request)) {
+        const resolver = this.codexApprovalResolvers.get(approval.id);
+        if (resolver) {
+          resolver.cleanup();
+          resolver.reject(new Error(removalError));
+        }
+        return {
+          ...approval,
+          status: "expired" as const,
+          updatedAt: now,
+          error: removalError
+        };
+      }
+      return {
+        ...approval,
+        status: "denied" as const,
+        updatedAt: now,
+        error: removalError
+      };
+    });
     const policies = this.chatAppToolApprovalPolicies(conversation).filter((policy) =>
       policy.participantId !== participant.id && policy.targetParticipantId !== participant.id
     );
@@ -12865,8 +13595,8 @@ export class ChatService {
       "Subject:",
       subject,
       "",
-      `Selected accord participants: ${targetNames}.`,
-      "Run the accord skill for exactly those selected participants and this subject. Use app_chat_request_participants for those participants only. The app has enabled request-participants permission for you in this chat; the user can revoke it from your participant controls."
+      `Selected accord members: ${targetNames}.`,
+      "Run the accord skill for exactly those selected members and this subject. Use app_chat_request_participants for those members only. The app has enabled request-members permission for you in this chat; the user can revoke it from your member controls."
     ].join("\n");
   }
 
@@ -13741,7 +14471,7 @@ export class ChatService {
       `Conversation ID: ${conversation.id}`,
       conversation.repoPath ? `Repository: ${conversation.repoPath}` : "Repository: none",
       "",
-      "## Participants",
+      "## Members",
       "- User: human conversation owner, requirements authority, and clarification source",
       ...participants.map((participant) => `- @${participant.handle}: ${this.roleLabelForParticipant(conversation, participant)} (${participant.kind})`),
       "",
@@ -14554,13 +15284,13 @@ export class ChatService {
       : undefined;
     if (!runPermissions) {
       throw new Error(
-        "AttachmentImportDenied. Problem: sourcePath import permission could not be verified for this participant run. Cause: the app MCP token does not include a run-scoped permission snapshot. Fix: retry in a new participant turn."
+        "AttachmentImportDenied. Problem: sourcePath import permission could not be verified for this member run. Cause: the app MCP token does not include a run-scoped permission snapshot. Fix: retry in a new member turn."
       );
     }
     const allowedRoots = await this.chatAttachmentImportRoots(conversation, runPermissions);
     if (allowedRoots.length === 0) {
       throw new Error(
-        "AttachmentImportDenied. Problem: this participant run has no allowed image import roots. Cause: sourcePath imports require repoRead for selected-repository files. Fix: request repoRead or attach image content another way."
+        "AttachmentImportDenied. Problem: this member run has no allowed image import roots. Cause: sourcePath imports require repoRead for selected-repository files. Fix: request repoRead or attach image content another way."
       );
     }
 
@@ -14940,7 +15670,7 @@ export class ChatService {
   private chatIntro(participants: ChatParticipant[]): string {
     return [
       "Chat started.",
-      "Participants:",
+      "Members:",
       "- User",
       ...participants.map((participant) => `- @${participant.handle}`)
     ].join("\n");
@@ -15422,17 +16152,57 @@ export class ChatService {
       approval.toolName === APP_CHAT_REQUEST_COMPACTION_TOOL &&
       approval.capability === "compaction.request" &&
       this.isSelfCompactionRequest(approval.request);
+    const isCodexApproval =
+      approval.toolName === CODEX_APPROVAL_TOOL_NAME &&
+      approval.capability === "permissions.request" &&
+      this.isCodexApprovalRequest(approval.request);
     return (
       typeof approval.id === "string" &&
       typeof approval.conversationId === "string" &&
       typeof approval.requesterParticipantId === "string" &&
       typeof approval.requesterHandle === "string" &&
       typeof approval.requesterRoleConfigId === "string" &&
-      (isRosterApproval || isRoleApproval || isParticipantChangeApproval || isPermissionApproval || isToolPermissionApproval || isParticipantRequestApproval || isSelfCompactionApproval) &&
-      (approval.status === "pending" || approval.status === "approved" || approval.status === "denied" || approval.status === "auto-applied") &&
+      (isRosterApproval || isRoleApproval || isParticipantChangeApproval || isPermissionApproval || isToolPermissionApproval || isParticipantRequestApproval || isSelfCompactionApproval || isCodexApproval) &&
+      (approval.status === "pending" || approval.status === "approved" || approval.status === "denied" || approval.status === "cancelled" || approval.status === "expired" || approval.status === "auto-applied") &&
       typeof approval.summary === "string" &&
       typeof approval.createdAt === "string" &&
       typeof approval.updatedAt === "string"
+    );
+  }
+
+  private isCodexApprovalRequest(request: unknown): request is ChatCodexApprovalRequest {
+    const candidate = request as Partial<ChatCodexApprovalRequest>;
+    const method = candidate.method;
+    return Boolean(
+      request &&
+      typeof request === "object" &&
+      !Array.isArray(request) &&
+      candidate.kind === "codexApproval" &&
+      (
+        method === "item/commandExecution/requestApproval" ||
+        method === "item/fileChange/requestApproval" ||
+        method === "item/permissions/requestApproval" ||
+        method === "item/autoApprovalReview/denied" ||
+        method === "item/autoApprovalReview/timedOut" ||
+        method === "applyPatchApproval" ||
+        method === "execCommandApproval"
+      ) &&
+      (typeof candidate.requestId === "string" || typeof candidate.requestId === "number") &&
+      (
+        candidate.action === "command" ||
+        candidate.action === "fileChange" ||
+        candidate.action === "permissions" ||
+        candidate.action === "network" ||
+        candidate.action === "mcpToolCall"
+      ) &&
+      Array.isArray(candidate.options) &&
+      (method === "item/autoApprovalReview/timedOut" ? candidate.options.length === 0 : candidate.options.length > 0) &&
+      candidate.options.every((option) =>
+        typeof option?.id === "string" &&
+        typeof option.label === "string" &&
+        (option.detail === undefined || typeof option.detail === "string") &&
+        (option.outcome === "approve" || option.outcome === "deny" || option.outcome === "cancel")
+      )
     );
   }
 
@@ -16254,7 +17024,7 @@ export class ChatService {
       const before = this.stableJson(message);
       const participant = message.participantId ? participantsById.get(message.participantId) : undefined;
       if (participant) {
-        this.markParticipantMessageStoppedByUser(message, participant);
+        this.markParticipantMessageStoppedByUser(message, participant, { preserveContent: true });
       } else {
         message.status = "error";
         if (!message.content.trim()) {
@@ -16766,33 +17536,71 @@ export class ChatService {
     options: { createdAt?: string; afterContentLength?: number } = {}
   ): ChatActivityAccumulator {
     const label = event.text.trim().replace(/\s+/g, " ");
-    if (!label || label === current.label) {
+    if (!label) {
       return current;
+    }
+    const itemId = event.activityItemId?.trim() || undefined;
+    const detail = this.chatActivityDetail(event.activityDetail);
+    if (itemId) {
+      const existingIndex = current.events.findIndex((activityEvent) => activityEvent.itemId === itemId);
+      if (existingIndex >= 0) {
+        const existing = current.events[existingIndex];
+        const nextEvent: ChatAgentActivityEvent = {
+          ...existing,
+          detail: detail ?? existing.detail,
+          status: event.activityStatus ?? existing.status
+        };
+        if (nextEvent.detail === existing.detail && nextEvent.status === existing.status && label === current.label) {
+          return current;
+        }
+        const events = [...current.events];
+        events[existingIndex] = nextEvent;
+        return {
+          events,
+          sequence: current.sequence,
+          label,
+          omittedCount: current.omittedCount
+        };
+      }
     }
     const sequence = current.sequence + 1;
     const nextEvent: ChatAgentActivityEvent = {
       id: `${runId}:activity:${sequence}`,
       sequence,
+      ...(itemId ? { itemId } : {}),
       kind: event.activityKind ?? "tool",
       label,
-      detail: event.activityDetail?.trim() || undefined,
+      detail,
       createdAt: options.createdAt ?? new Date().toISOString(),
       status: event.activityStatus ?? "started",
       afterContentLength: options.afterContentLength
     };
-    let events = [...current.events, nextEvent];
-    let omittedCount = current.omittedCount;
-    if (events.length > CHAT_ACTIVITY_EVENT_MAX_COUNT) {
-      const dropped = events.length - CHAT_ACTIVITY_EVENT_MAX_COUNT;
-      omittedCount += dropped;
-      events = events.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT);
-    }
+    const capped = this.capChatActivityEvents([...current.events, nextEvent]);
     return {
-      events,
+      events: capped.events,
       sequence,
       label,
-      omittedCount
+      omittedCount: Math.max(current.omittedCount + capped.dropped, sequence - capped.events.length)
     };
+  }
+
+  private chatActivityDetail(value: string | undefined): string | undefined {
+    const detail = value?.trim();
+    if (!detail) {
+      return undefined;
+    }
+    if (detail.length <= CHAT_ACTIVITY_DETAIL_MAX_CHARS) {
+      return detail;
+    }
+    let keep = CHAT_ACTIVITY_DETAIL_MAX_CHARS;
+    let omitted = detail.length - keep;
+    let marker = `… [+${omitted} chars omitted]`;
+    while (keep + marker.length > CHAT_ACTIVITY_DETAIL_MAX_CHARS) {
+      keep = Math.max(0, CHAT_ACTIVITY_DETAIL_MAX_CHARS - marker.length);
+      omitted = detail.length - keep;
+      marker = `… [+${omitted} chars omitted]`;
+    }
+    return `${detail.slice(0, keep)}${marker}`;
   }
 
   private createAgentProgressSink(
@@ -16808,7 +17616,6 @@ export class ChatService {
     processingTranscript: (capturedAt: string) => ChatProcessingTranscript | undefined;
   } {
     const participantLabel = `@${participant.handle}`;
-    const THROTTLE_MS = 250;
     let finished = false;
     let cumulative = "";
     let activity: ChatActivityAccumulator = {
@@ -16852,11 +17659,12 @@ export class ChatService {
       if (finished || pendingTimer) {
         return;
       }
+      const throttleMs = this.agentProgressFlushIntervalMs(cumulative.length);
       const elapsed = Date.now() - lastFlush;
-      if (elapsed >= THROTTLE_MS) {
+      if (elapsed >= throttleMs) {
         flush();
       } else {
-        pendingTimer = setTimeout(flush, THROTTLE_MS - elapsed);
+        pendingTimer = setTimeout(flush, throttleMs - elapsed);
         pendingTimer.unref?.();
       }
     };
@@ -16878,7 +17686,7 @@ export class ChatService {
       const nextActivity = this.appendChatActivity(runId, activity, event, {
         afterContentLength: cumulative.length > 0 ? cumulative.length : undefined
       });
-      if (nextActivity.sequence === activity.sequence) {
+      if (nextActivity === activity) {
         return;
       }
       activity = nextActivity;
@@ -16935,35 +17743,66 @@ export class ChatService {
     };
   }
 
+  private agentProgressFlushIntervalMs(cumulativeLength: number): number {
+    if (cumulativeLength >= 1_000_000) {
+      return 2_000;
+    }
+    if (cumulativeLength >= 256_000) {
+      return 1_000;
+    }
+    return 250;
+  }
+
   private processingTranscriptFromContent(
     content: string,
     capturedAt: string,
     options: { omittedActivityEventCount?: number } = {}
   ): ChatProcessingTranscript | undefined {
     const normalized = content.replace(/\r\n/g, "\n").trimEnd();
-    if (!normalized.trim()) {
-      return undefined;
-    }
-    const originalLength = normalized.length;
     const omittedActivityEventCount = options.omittedActivityEventCount && options.omittedActivityEventCount > 0
       ? options.omittedActivityEventCount
       : undefined;
-    if (originalLength <= CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS) {
-      return {
-        content: normalized,
-        capturedAt,
-        originalLength,
-        ...(omittedActivityEventCount ? { omittedActivityEventCount } : {})
-      };
+    if (!normalized.trim() && !omittedActivityEventCount) {
+      return undefined;
     }
-    const retainedStart = originalLength - CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS;
+    const originalLength = normalized.length;
+    const retainedStart = Math.max(0, originalLength - CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS);
+    const retained = retainedStart > 0 ? normalized.slice(retainedStart) : normalized;
     return {
-      content: normalized.slice(retainedStart),
+      content: retained,
       capturedAt,
       originalLength,
-      retainedStart,
-      truncated: true,
+      ...(retainedStart > 0 ? { retainedStart, truncated: true } : {}),
       ...(omittedActivityEventCount ? { omittedActivityEventCount } : {})
+    };
+  }
+
+  private processingTranscriptWithTerminalMessage(
+    transcript: ChatProcessingTranscript,
+    terminalMessage: string
+  ): ChatProcessingTranscript {
+    const terminal = terminalMessage.replace(/\r\n/g, "\n").trim();
+    if (!terminal || transcript.content.trimEnd().endsWith(terminal)) {
+      return transcript;
+    }
+    const retainedBase = transcript.content.trimEnd();
+    const trimmedChars = transcript.content.length - retainedBase.length;
+    const appended = `\n\n${terminal}`;
+    let content = `${retainedBase}${appended}`;
+    let retainedStart = transcript.retainedStart;
+    let truncated = transcript.truncated;
+    if (content.length > CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS) {
+      const overflow = content.length - CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS;
+      content = content.slice(overflow);
+      retainedStart = (retainedStart ?? 0) + overflow;
+      truncated = true;
+    }
+    return {
+      ...transcript,
+      content,
+      originalLength: Math.max(0, transcript.originalLength - trimmedChars) + appended.length,
+      retainedStart,
+      truncated
     };
   }
 

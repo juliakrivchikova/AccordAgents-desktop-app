@@ -238,7 +238,7 @@ export class ConsensusService {
       .map((point) => this.withInferredSources(point, participantPoints, healthyParticipants));
     const untraceablePointCount = canonicalPoints.filter((point) => point.sourceParticipantIds.length === 0).length;
     if (untraceablePointCount > 0) {
-      warnings.push(`${untraceablePointCount} arbiter point${untraceablePointCount === 1 ? "" : "s"} had no matching participant source and were filtered out.`);
+      warnings.push(`${untraceablePointCount} arbiter point${untraceablePointCount === 1 ? "" : "s"} had no matching member source and were filtered out.`);
     }
     canonicalPoints = canonicalPoints
       .filter((point) => point.sourceParticipantIds.length > 0)
@@ -792,7 +792,7 @@ export class ConsensusService {
         const healthyParticipantIds = new Set(rawPlans.map((plan) => plan.participantId));
         const healthyParticipants = originalRequest.participants.filter((participant) => healthyParticipantIds.has(participant.id));
         if (healthyParticipants.length < 2) {
-          throw new Error("Fewer than two saved participant plans are available for recovery.");
+          throw new Error("Fewer than two saved member plans are available for recovery.");
         }
         conversation.findings = [];
         conversation.finalSummary = undefined;
@@ -813,7 +813,7 @@ export class ConsensusService {
         };
         conversation.updatedAt = new Date().toISOString();
         this.queueConversationSnapshot(conversation);
-        this.emitProgress(runId, recordProgress, "initial", "Recovering implementation plan from saved participant plans.");
+        this.emitProgress(runId, recordProgress, "initial", "Recovering implementation plan from saved member plans.");
         return await this.processImplementationPlanRawPlans(
           recoveredRequest,
           conversation,
@@ -1033,7 +1033,7 @@ export class ConsensusService {
       throw new Error("Select a local CLI planner for implementation plans.");
     }
     if (participants.length < 2) {
-      throw new Error("Select at least two local CLI participants for an implementation plan.");
+      throw new Error("Select at least two local CLI members for an implementation plan.");
     }
 
     try {
@@ -1174,13 +1174,13 @@ export class ConsensusService {
         conversation.messages.push(this.message("participant", result.content, result.participant, result.ok ? "done" : "error"));
         if (!result.ok && result.error) {
           failedParticipantIds.add(result.participant.id);
-          warnings.push(`${result.participant.label}: ${result.error}. Skipping this participant for the rest of the run.`);
+          warnings.push(`${result.participant.label}: ${result.error}. Skipping this member for the rest of the run.`);
         }
       }
 
       const healthyParticipants = participants.filter((participant) => !failedParticipantIds.has(participant.id));
       if (healthyParticipants.length < 2) {
-        warnings.push("Fewer than two local participants completed successfully, so no implementation plan can be marked approved by both models.");
+        warnings.push("Fewer than two local members completed successfully, so no implementation plan can be marked approved by both models.");
         conversation.findings = [];
         conversation.finalSummary = this.finalSummary(conversation);
         conversation.messages.push(this.message("summary", conversation.finalSummary));
@@ -1735,7 +1735,7 @@ export class ConsensusService {
       .slice(0, MAX_VERIFIERS_PER_POINT);
     const totalMissing = finding.missingParticipantIds?.length ?? 0;
     if (totalMissing > missingParticipants.length) {
-      warnings.push(`Point "${finding.title}" was checked with ${MAX_VERIFIERS_PER_POINT} missing participants to keep the run bounded.`);
+      warnings.push(`Point "${finding.title}" was checked with ${MAX_VERIFIERS_PER_POINT} missing members to keep the run bounded.`);
     }
 
     for (const participant of missingParticipants) {
@@ -1794,7 +1794,7 @@ export class ConsensusService {
     );
     if (!sourceResult.ok) {
       failedParticipantIds.add(source.id);
-      warnings.push(`${source.label}: ${sourceResult.error ?? "failed"}. Skipping this participant for the rest of the run.`);
+      warnings.push(`${source.label}: ${sourceResult.error ?? "failed"}. Skipping this member for the rest of the run.`);
       return;
     }
 
@@ -2538,7 +2538,7 @@ export class ConsensusService {
       .map((point) => this.withVerifiedSources(point, pointsByParticipant, participants));
     const untraceablePointCount = normalizedPoints.filter((point) => point.sourceParticipantIds.length === 0).length;
     if (untraceablePointCount > 0) {
-      warnings.push(`${untraceablePointCount} implementation-plan item${untraceablePointCount === 1 ? "" : "s"} had no matching participant source and were filtered out.`);
+      warnings.push(`${untraceablePointCount} implementation-plan item${untraceablePointCount === 1 ? "" : "s"} had no matching member source and were filtered out.`);
     }
 
     return normalizedPoints.filter((point) => point.sourceParticipantIds.length > 0);
@@ -2554,7 +2554,7 @@ export class ConsensusService {
       }));
     const untraceablePointCount = normalizedPoints.filter((point) => point.sourceParticipantIds.length === 0).length;
     if (untraceablePointCount > 0) {
-      warnings.push(`${untraceablePointCount} implementation-plan item${untraceablePointCount === 1 ? "" : "s"} had no valid participant source and were filtered out.`);
+      warnings.push(`${untraceablePointCount} implementation-plan item${untraceablePointCount === 1 ? "" : "s"} had no valid member source and were filtered out.`);
     }
 
     return normalizedPoints.filter((point) => point.sourceParticipantIds.length > 0);
@@ -2920,7 +2920,7 @@ export class ConsensusService {
   private localImplementationPlanDebateSummary(conversation: Conversation): string {
     const debated = conversation.findings.filter((finding) => finding.rounds.length > 0 || finding.status !== "Confirmed");
     if (debated.length === 0) {
-      return "All approved items were common across the healthy participants; no non-common plan items required debate.";
+      return "All approved items were common across the healthy members; no non-common plan items required debate.";
     }
 
     const lines: string[] = [];
@@ -3021,7 +3021,7 @@ export class ConsensusService {
 
   private formatRawImplementationPlansForPrompt(rawPlans: RawImplementationPlan[]): string {
     if (rawPlans.length === 0) {
-      return "No participant plans were available.";
+      return "No member plans were available.";
     }
 
     return rawPlans
@@ -3065,7 +3065,7 @@ export class ConsensusService {
     }
     return replies
       .map((reply) => {
-        const author = reply.role === "user" ? "User" : reply.participantLabel ?? "Participant";
+        const author = reply.role === "user" ? "User" : reply.participantLabel ?? "Member";
         return `${author}: ${reply.content}`;
       })
       .join("\n");

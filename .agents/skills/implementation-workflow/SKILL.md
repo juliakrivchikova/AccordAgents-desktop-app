@@ -10,6 +10,8 @@ step yourself.
 
 ## Operating Rules
 
+- Act as the workflow manager: own orchestration, roster setup, delegation, stage gates, and status transitions. Do not
+  perform participant-owned planning, implementation, review, QA, fixes, merge, or release work yourself.
 - Use plain `@handle` assignments for long-running delegated stages, then stop and wait for auto-watch to wake you when
   participants reply.
 - Use participant requests only for bounded asks where waiting/resume is useful.
@@ -19,12 +21,67 @@ step yourself.
 - Before starting the next workflow step, verify the current step actually completed with the expected output from the
   required participant(s). If a participant replied with something other than what was requested, report it to the user
   and ask how to proceed.
-- For accord steps, an in-progress accord is not a wrong reply. If the facilitator says accord is still running, pending,
-  or waiting on another participant, wait for completion instead of treating it as failure.
-- If interrupted or resumed, read the latest chat context and continue from the last completed stage.
+- For accord steps, an in-progress accord is not a wrong reply, but the facilitator's statement alone does not prove it
+  remains active. Wait only when the status check confirms an active accord request or reviewer run. If none is active,
+  advance from an approved accord or re-dispatch the unfinished accord.
+- On every resume, including auto-watch and participant-request resume, verify app-tracked active work before deciding to
+  wait. Read the latest chat context and inspect known participant-request status. Participant prose such as "I'm
+  continuing" or "the review is running" never proves that work is active after that participant's turn has ended.
+- If no participant request or run is actually active, do not wait based on prose. Continue from the last completed stage:
+  advance when its gate passed, re-dispatch unfinished participant-owned work, handle a blocker, or ask User for a
+  user-owned decision.
 - At the end of the workflow, the final user-facing closeout must be a short status posted at the end of the main
   timeline, not only inside a nested thread. If the current reply would stay inside a workflow/participant-request
   thread, post a separate main-timeline closeout with the app-managed send-message tool when available.
+
+## Required Participant Preflight
+
+Before the first delegated stage, use the app-managed participant tools to ensure `@drew-codex-engineer` and
+`@taylor-claude-engineer` are current chat members.
+
+- Inspect the current roster and saved participant options.
+- If either required participant is missing and an exact-handle saved preset exists, add that preset to the chat with
+  `app_participants_request_change`. The user's invocation of this workflow authorizes these required, non-escalating
+  roster additions; do not pause for a separate User choice.
+- If an exact saved preset is unavailable or the app rejects the addition, report the concrete blocker on the main
+  timeline. Do not substitute a different participant or do the missing participant's work yourself.
+- Re-read the roster after any addition and proceed only when both required participants are present.
+
+## Resume And Auto-Watch Triage
+
+Apply this triage on every manager resume, regardless of the resume source or the participant's wording. Classify the
+latest stable participant output only after verifying whether work is actually active.
+
+First inspect active work:
+
+- Use `app_chat_read_messages` for the current workflow thread and main timeline.
+- If a known participant request exists, use `app_chat_get_participant_request_status` when available.
+- Treat only a participant request with `pending_approval` or `running` status, or a visible participant message with
+  active/pending status, as active work.
+- If the latest participant message is `done` and no participant request is active, the participant's turn has ended.
+  In that state, "I'm continuing" is not active work; choose the next manager action.
+
+Then classify the output:
+
+- **Completed expected output**: if the current stage's required output is complete and passes the stage gate, advance to
+  the next workflow step in the same turn.
+- **Verified active work**: only if the status check shows an active request or run, reply with a concise wait status.
+  Participant prose may explain the active work but cannot establish it. Do not re-dispatch while verified work remains
+  active.
+- **No active work**: never choose wait, even if the participant said work was continuing. If the assigned output is
+  incomplete, re-dispatch it; otherwise advance, handle its blocker, or ask User for the required decision.
+- **Blocked or failed**: if the participant reports a blocker, denied approval, failed tool, failed QA, or incomplete
+  evidence, do not advance. Classify ownership: re-dispatch participant-owned retries, take manager-owned actions, or ask
+  User on the main timeline for user-owned decisions.
+- **Wrong or incomplete output**: if the participant replied with something other than the stage requested, report the
+  mismatch and send the participant back for the exact missing artifact/evidence unless User input is required.
+
+For accord stages, distinguish partial progress from completion. A submitted draft plus an active reviewer request is a
+legitimate wait. A facilitator consensus message or fully approved artifact with no active participant work is a manager
+action trigger: open the artifact, verify approval, and advance.
+
+Never leave a passive "waiting" status when no participant work is active and the latest completed output requires a
+manager transition, retry, blocker handling, or user-owned question.
 
 ## Plan Invalidation Handling
 
@@ -149,7 +206,7 @@ User choice:
 T: Final Step
 Q: What should happen after implementation is approved?
 O1: Merge to main and push | Land the approved work.
-O2: Make a release | Prepare the release with npm run release:[patch/minor/major].
+O2: Make a release | Prepare the release with npm run release:[patch/minor/major/beta].
 O3: Open app instance | Open a separate app instance so you can check manually.
 R: O3
 ```
@@ -297,10 +354,10 @@ If the selected final step is `Merge to main and push`, ask Drew:
 ```
 
 If the selected final step is `Make a release`, the release type must be explicit from the user. If the user has not
-chosen `patch`, `minor`, or `major`, ask on the main timeline before assigning the release. Then ask Drew:
+chosen `patch`, `minor`, `major`, or `beta`, ask on the main timeline before assigning the release. Then ask Drew:
 
 ```text
-@drew-codex-engineer release new version with the implemented work with `npm run release:[patch/minor/major chosen by User]`
+@drew-codex-engineer release new version with the implemented work with `npm run release:[patch/minor/major/beta chosen by User]`
 ```
 
 ### 11. Report Status

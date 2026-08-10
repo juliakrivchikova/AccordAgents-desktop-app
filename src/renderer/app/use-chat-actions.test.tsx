@@ -3,7 +3,8 @@ import test from "node:test";
 import type { SetStateAction } from "react";
 import { act, create } from "react-test-renderer";
 
-import type { AgentHealth, AppSettings } from "../../shared/types";
+import type { AgentHealth, AppSettings, ChatParticipantInput } from "../../shared/types";
+import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 import type { AppState } from "./app-state";
 import { useChatActions, type ChatActions } from "./use-chat-actions";
 import type { ConversationActions } from "./use-conversation-actions";
@@ -30,6 +31,7 @@ test("unavailable saved Assistant provider reports a visible Settings error with
     question: "Draft",
     agents: [readyAgent("codex-cli")],
     settings: currentSettings,
+    selectedChatParticipantRuntimeOverrides: {},
     setError: (value: string | undefined) => { error = value; },
     setWarnings: () => undefined
   } as unknown as AppState;
@@ -81,6 +83,7 @@ test("stale readiness refreshes before creating without a per-chat provider over
     settings: currentSettings,
     selectedChatParticipantConfigIds: new Set<string>(),
     selectedChatParticipantRunLocations: {},
+    selectedChatParticipantRuntimeOverrides: {},
     startingChatRef: { current: false },
     repoPath: "",
     setError: (value: string | undefined) => { error = value; },
@@ -113,6 +116,113 @@ test("stale readiness refreshes before creating without a per-chat provider over
   renderer.unmount();
 });
 
+test("New Chat runtime overrides are sent for edited Assistant and selected saved members", async () => {
+  let createRequest: { participants: ChatParticipantInput[]; skipDefaultParticipants?: boolean } | undefined;
+  (globalThis as any).window = {
+    consensus: {
+      createChatConversation: async (request: { participants: ChatParticipantInput[]; skipDefaultParticipants?: boolean }) => {
+        createRequest = request;
+        throw new Error("stop after create request");
+      }
+    }
+  };
+  let error: string | undefined;
+  const currentSettings = settings();
+  currentSettings.providers = [{ kind: "codex-cli", label: "Codex", enabled: true }];
+  currentSettings.assistantProviderKind = "codex-cli";
+  currentSettings.chatRoleConfigs = [
+    ...currentSettings.chatRoleConfigs,
+    {
+      id: "engineer",
+      label: "Engineer",
+      instructions: "Implement changes.",
+      version: 1,
+      appToolCapabilities: [],
+      builtIn: false,
+      updatedAt: "2026-07-13T00:00:00.000Z"
+    }
+  ];
+  currentSettings.chatParticipantConfigs = [{
+    id: "member-codex",
+    handle: "codex",
+    roleConfigId: "engineer",
+    behaviorRuleIds: [],
+    kind: "codex-cli",
+    model: "saved-model",
+    reasoningEffort: "medium",
+    agentMode: "plan",
+    permissions: defaultChatAgentPermissions(),
+    remoteExecution: "local",
+    skipToolchainPreflight: false,
+    autoWatchEnabled: false,
+    updatedAt: "2026-07-13T00:00:00.000Z"
+  }];
+  const memberPermissions = {
+    ...defaultChatAgentPermissions(),
+    repoRead: true,
+    workspaceWrite: true
+  };
+  const state = {
+    question: "Draft",
+    agents: [readyAgent("codex-cli")],
+    settings: currentSettings,
+    selectedChatParticipantConfigIds: new Set<string>(["member-codex"]),
+    selectedChatParticipantRunLocations: {},
+    selectedChatParticipantRuntimeOverrides: {
+      "__new-chat-assistant__": {
+        model: "assistant-model",
+        reasoningEffort: "high"
+      },
+      "member-codex": {
+        model: "member-model",
+        reasoningEffort: "low",
+        agentMode: "auto",
+        permissions: memberPermissions,
+        remoteExecution: "remote",
+        skipToolchainPreflight: true,
+        autoWatch: true
+      }
+    },
+    startingChatRef: { current: false },
+    repoPath: "",
+    setError: (value: string | undefined) => { error = value; },
+    setWarnings: () => undefined,
+    setCurrentRunId: () => undefined,
+    setBusy: () => undefined
+  } as unknown as AppState;
+  let actions: ChatActions | undefined;
+
+  function Harness(): null {
+    actions = useChatActions(state, {} as ConversationActions);
+    return null;
+  }
+
+  const renderer = create(<Harness />);
+  let started: boolean | undefined;
+  await act(async () => {
+    started = await actions?.startChat();
+  });
+
+  assert.equal(started, false);
+  assert.equal(error, "stop after create request");
+  assert.equal(createRequest?.skipDefaultParticipants, false);
+  assert.equal(createRequest?.participants.length, 2);
+  const [assistant, member] = createRequest?.participants ?? [];
+  assert.equal(assistant?.handle, "assistant");
+  assert.equal(assistant?.roleConfigId, "administrator");
+  assert.equal(assistant?.model, "assistant-model");
+  assert.equal(assistant?.reasoningEffort, "high");
+  assert.equal(member?.participantConfigId, "member-codex");
+  assert.equal(member?.model, "member-model");
+  assert.equal(member?.reasoningEffort, "low");
+  assert.equal(member?.agentMode, "auto");
+  assert.equal(member?.permissions?.workspaceWrite, true);
+  assert.equal(member?.remoteExecution, "remote");
+  assert.equal(member?.skipToolchainPreflight, true);
+  assert.equal(member?.autoWatch, true);
+  renderer.unmount();
+});
+
 test("stale New Chat readiness refresh failure fails closed and preserves the complete draft", async () => {
   let createCalls = 0;
   (globalThis as any).window = {
@@ -130,6 +240,7 @@ test("stale New Chat readiness refresh failure fails closed and preserves the co
     settings: { ...settings(), assistantProviderKind: "claude-code" },
     selectedChatParticipantConfigIds: new Set<string>(),
     selectedChatParticipantRunLocations: {},
+    selectedChatParticipantRuntimeOverrides: {},
     newChatPendingImages: [{ id: "image", filename: "qa.png", mimeType: "image/png", sizeBytes: 3, dataBase64: "YWJj", status: "ready" }],
     newChatRepoFileMentions: [{ path: "src/main.ts" }],
     newChatSkillMentions: [{ frontmatterName: "office-hours" }],
@@ -264,6 +375,7 @@ function readyAgent(kind: AgentHealth["kind"] = "claude-code"): AgentHealth {
 function settings(): AppSettings {
   return {
     roundLimitDefault: 2,
+    betaUpdates: false,
     cliAgentRunTimeoutMs: 86_400_000,
     chatParticipantRequestMaxDepth: 2,
     chatParticipantRequestPromptMaxChars: 50_000,

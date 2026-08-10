@@ -3,13 +3,18 @@ import {
   type PointerEvent as ReactPointerEvent,
   type RefObject,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState
 } from "react";
 
-const DEFAULT_PANEL_WIDTH = 460;
-const MIN_PANEL_WIDTH = 340;
-const MAX_PANEL_WIDTH = 960;
+import {
+  ARTIFACT_PANEL_DEFAULT_WIDTH,
+  CHAT_SIDE_PANEL_MAX_WIDTH,
+  CHAT_SIDE_PANEL_MIN_WIDTH,
+  chatSidePanelWidthLimits,
+  clampChatSidePanelWidth
+} from "../../lib/chat-split-sizing";
 
 interface ResizeLimits {
   min: number;
@@ -29,24 +34,41 @@ interface ArtifactsPanelResize {
 export function useArtifactsPanelResize(): ArtifactsPanelResize {
   const panelRef = useRef<HTMLDivElement>(null);
   const cleanupResizeRef = useRef<(() => void) | null>(null);
-  const [panelWidth, setPanelWidth] = useState(DEFAULT_PANEL_WIDTH);
+  const [panelWidth, setPanelWidth] = useState(ARTIFACT_PANEL_DEFAULT_WIDTH);
   const [resizing, setResizing] = useState(false);
 
   useEffect(() => () => cleanupResizeRef.current?.(), []);
 
   const getLimits = (): ResizeLimits => {
     const containerWidth = panelRef.current?.parentElement?.getBoundingClientRect().width ?? window.innerWidth;
-    const min = Math.min(MIN_PANEL_WIDTH, Math.floor(containerWidth * 0.88));
-    return {
-      min,
-      max: Math.max(min, Math.min(MAX_PANEL_WIDTH, Math.floor(containerWidth * 0.88)))
-    };
+    return chatSidePanelWidthLimits(containerWidth, {
+      minWidth: CHAT_SIDE_PANEL_MIN_WIDTH,
+      maxWidth: CHAT_SIDE_PANEL_MAX_WIDTH
+    });
   };
 
   const updatePanelWidth = (width: number): void => {
-    const { min, max } = getLimits();
-    setPanelWidth(Math.round(Math.min(max, Math.max(min, width))));
+    setPanelWidth(clampChatSidePanelWidth(width, getLimits()));
   };
+
+  useLayoutEffect(() => {
+    const parent = panelRef.current?.parentElement;
+    if (!parent) {
+      return undefined;
+    }
+    const clampCurrentWidth = (): void => {
+      const limits = getLimits();
+      setPanelWidth((current) => clampChatSidePanelWidth(current, limits));
+    };
+    clampCurrentWidth();
+    const resizeObserver = new ResizeObserver(clampCurrentWidth);
+    resizeObserver.observe(parent);
+    window.addEventListener("resize", clampCurrentWidth);
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", clampCurrentWidth);
+    };
+  }, []);
 
   const startResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
     const panel = panelRef.current;
@@ -92,6 +114,6 @@ export function useArtifactsPanelResize(): ArtifactsPanelResize {
     getLimits,
     startResize,
     resizeWithKeyboard,
-    resetWidth: () => updatePanelWidth(DEFAULT_PANEL_WIDTH)
+    resetWidth: () => updatePanelWidth(ARTIFACT_PANEL_DEFAULT_WIDTH)
   };
 }

@@ -1034,8 +1034,15 @@ try {
     output({ ok: true, status: "cancelled" });
   } else if (action === "authorize-stop") {
     const existing = drain();
-    if (existing) { output({ ok: false, status: "deny:draining" }); process.exitCode = 8; return; }
     const leaseId = payload.leaseId || crypto.randomUUID();
+    if (existing) {
+      if (existing.leaseId === leaseId && existing.ownerId === payload.ownerId && existing.bootId === bootId()) {
+        output({ ok: true, status: "allow", lease: existing });
+      } else {
+        output({ ok: false, status: "deny:draining" }); process.exitCode = 8;
+      }
+      return;
+    }
     const ttlMs = Math.max(5000, Number(payload.ttlMs || 30000));
     const lease = { leaseId, ownerId: payload.ownerId, bootId: bootId(), issuedAt: now(), expiresAt: new Date(Date.now() + ttlMs).toISOString(), protocolVersion: payload.protocolVersion };
     writeJsonAtomic(drainPath, lease);

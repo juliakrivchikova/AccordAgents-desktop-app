@@ -17,6 +17,7 @@ import type {
   ReplaceArtifactDraftRequest,
   ReviseArtifactRequest,
   SaveArtifactDraftRequest,
+  SetArtifactArchivedRequest,
   SignArtifactRequest,
   SubmitArtifactDraftRequest,
   UpdateArtifactDraftRosterRequest,
@@ -80,6 +81,7 @@ const bridge: AppBridge = {
   inspectLocalFile: (request: InspectLocalFileRequest) => ipcRenderer.invoke("app:inspect-local-file", request),
   openLocalFile: (request: OpenLocalFileRequest) => ipcRenderer.invoke("app:open-local-file", request),
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => ipcRenderer.invoke("settings:set-repo-file-open-preference", action),
+  setBetaUpdates: (enabled: boolean) => ipcRenderer.invoke("settings:set-beta-updates", enabled),
   setCliAgentRunTimeoutMs: (timeoutMs: number) => ipcRenderer.invoke("settings:set-cli-agent-run-timeout", timeoutMs),
   setChatParticipantRequestMaxDepth: (maxDepth: number) =>
     ipcRenderer.invoke("settings:set-chat-participant-request-max-depth", maxDepth),
@@ -182,6 +184,7 @@ const bridge: AppBridge = {
   renameArtifact: (request: RenameArtifactRequest) => ipcRenderer.invoke("artifacts:rename", request),
   signArtifact: (request: SignArtifactRequest) => ipcRenderer.invoke("artifacts:sign", request),
   updateArtifactAccess: (request: UpdateArtifactAccessRequest) => ipcRenderer.invoke("artifacts:set-access", request),
+  setArtifactArchived: (request: SetArtifactArchivedRequest) => ipcRenderer.invoke("artifacts:set-archived", request),
   listArtifactDrafts: (request: ListArtifactDraftsRequest) => ipcRenderer.invoke("artifacts:drafts:list", request),
   readArtifactDraft: (request: ReadArtifactDraftRequest) => ipcRenderer.invoke("artifacts:drafts:read", request),
   saveArtifactDraft: (request: SaveArtifactDraftRequest) => ipcRenderer.invoke("artifacts:drafts:save", request),

@@ -24,10 +24,12 @@ import {
 import { ChatMessageItem, type ChatChoiceResponse } from "./chat-message-item";
 import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 import { ChatThinkingRowItem } from "./chat-streaming";
+import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
 type ThreadSummaryMap = Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }>;
 
 export function ChatConversationTimeline(props: {
+  activityDisclosure: ChatActivityDisclosureState;
   conversationId: string;
   contextUsageByParticipant: Map<string, AgentContextUsage>;
   continuedMentionRequestIds: Set<string>;
@@ -45,7 +47,8 @@ export function ChatConversationTimeline(props: {
     approvalId: string,
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
-    draftOverride?: ChatAppToolApprovalRequest
+    draftOverride?: ChatAppToolApprovalRequest,
+    codexDecisionId?: string
   ) => Promise<void>;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void | Promise<void>;
   onScroll: () => void;
@@ -54,6 +57,7 @@ export function ChatConversationTimeline(props: {
   onToggleReaction: (messageId: string, emoji: string) => void;
   participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
   participants: ChatParticipant[];
+  approvalsByMessageId: ReadonlyMap<string, ChatAppToolApproval[]>;
   pendingApprovalRows: ChatAppToolApproval[];
   rows: ChatTimelineRow[];
   selectedThreadRootId?: string;
@@ -117,6 +121,7 @@ export function ChatConversationTimeline(props: {
                 />
               ) : (
                 <ChatMessageItem
+                  activityDisclosure={props.activityDisclosure}
                   message={row.message}
                   conversationId={props.conversationId}
                   participants={props.participants}
@@ -132,6 +137,10 @@ export function ChatConversationTimeline(props: {
                   hasContinuationReply={props.continuedMentionRequestIds.has(row.message.id)}
                   inferredParticipantRequests={props.inferredParticipantRequestsByTrigger.get(row.message.id)}
                   liveProgress={props.liveProgressById.get(row.message.id)}
+                  appToolApprovals={props.approvalsByMessageId.get(row.message.id)}
+                  savedParticipants={props.settings.chatParticipantConfigs}
+                  roles={props.settings.chatRoleConfigs}
+                  submittingApprovalIds={props.submittingApprovalIds}
                   onOpenThread={props.onOpenThread}
                   onApproveMentions={props.onApproveMentions}
                   onRejectMentions={props.onRejectMentions}
@@ -139,6 +148,7 @@ export function ChatConversationTimeline(props: {
                   onToggleReaction={props.onToggleReaction}
                   onCompactParticipant={props.onCompactParticipant}
                   onStopRun={props.onStopRun}
+                  onRespondToAppToolApproval={props.onRespondToAppToolApproval}
                 />
               )}
             </div>

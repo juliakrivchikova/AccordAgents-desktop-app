@@ -8,8 +8,10 @@ function read(path) {
 
 const conversationActions = read("src/renderer/app/use-conversation-actions.ts");
 const conversationViewport = read("src/renderer/components/chat/use-chat-conversation-viewport.ts");
+const approvalCard = read("src/renderer/components/chat/chat-app-tool-approval-card.tsx");
 const focusNavigation = read("src/renderer/components/chat/use-chat-focus-navigation.ts");
 const app = read("src/renderer/App.tsx");
+const activityView = read("src/renderer/components/activity/activity-view.tsx");
 const conversationPanel = read("src/renderer/components/conversation/conversation-panel.tsx");
 const activityStyles = read("src/renderer/styles/views/activity.css");
 const chatStyles = read("src/renderer/styles/views/chat-conversation.css");
@@ -40,7 +42,7 @@ test("chat viewport has one focus scroll owner", () => {
 
 test("Activity selection focuses the exact message while Open in chat uses the regular timeline", () => {
   assert.match(conversationActions, /options\?: \{ timelineOnly\?: boolean; markViewed\?: boolean \}/);
-  assert.match(conversationActions, /if \(options\.timelineOnly && threadRootId\) \{\s*return \{ messageId: threadRootId \};\s*\}/s);
+  assert.match(conversationActions, /if \(options\.timelineOnly && threadRootId\) \{\s*return \{ messageId: threadRootId, approvalId \};\s*\}/s);
   assert.equal(
     app.match(/openConversationAndFocusActivityItem\(item, \{ timelineOnly: true \}\)/g)?.length,
     1,
@@ -63,12 +65,27 @@ test("Activity selection focuses the exact message while Open in chat uses the r
 test("clicking outside the focused message dismisses the highlight and reads the finished item", () => {
   assert.match(conversationViewport, /function dismissMessageFocus/);
   assert.match(conversationViewport, /focusAttemptGenerationRef\.current \+= 1;/, "dismissal must invalidate in-flight focus retries");
-  assert.match(conversationViewport, /classList\.remove\("message-focused", "message-flash"\)/);
+  assert.match(conversationViewport, /classList\.remove\("message-focused", "message-flash", "approval-focused"\)/);
   assert.match(conversationPanel, /onDismissMessageFocus=/);
   assert.match(
     conversationPanel,
     /selected\?\.status === "recent"[\s\S]*?markActivityItemRead\(state, selected\.id\)/,
     "dismissal marks only the selected finished item read"
+  );
+});
+
+test("Codex Activity focus carries the approval id to a stable card target", () => {
+  assert.match(conversationActions, /item\.target\.approvalKind === "codex"/);
+  assert.match(conversationActions, /approvalId: initialTarget\.approvalId/);
+  assert.match(conversationActions, /approvalId: target\.approvalId/);
+  assert.match(conversationViewport, /scheduleFocusRenderedApproval\(request\.approvalId\)/);
+  assert.match(conversationViewport, /\[data-app-tool-approval-id\]/);
+  assert.match(approvalCard, /data-app-tool-approval-id=\{props\.approval\.id\}/);
+  assert.match(activityView, /chatActivityShowsGenericCancel\(item\)/);
+  assert.match(
+    app,
+    /if \(isCodexActivityApprovalItem\(item\)\) \{[\s\S]*?setRailView\("chats"\);[\s\S]*?requestAnimationFrame\(\(\) => \{[\s\S]*?openConversationAndFocusActivityItem\(item\);/,
+    "Codex focus must start after the Chats view has mounted"
   );
 });
 

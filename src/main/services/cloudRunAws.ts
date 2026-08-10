@@ -111,6 +111,7 @@ export class CloudRunAwsService {
           host: info.publicIp,
           user: WORKER_SSH_USER,
           identityFile: this.privateKeyPath(handle),
+          hostKeyAlias: `accordagents-${info.instanceId}`,
           workerRoot: WORKER_ROOT
         };
         const authorization = await gate.authorizeAutomaticWorkerStop(worker, this.automaticStopOwnerId);

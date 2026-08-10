@@ -44,8 +44,13 @@ const osxSignOptions = appleCodesignIdentity
     gatekeeperAssess: false,
     optionsForFile: (filePath: string) => {
       const isTopLevelAppBundle = filePath.endsWith(`${productName}.app`);
+      const isNestedAppBundle = !isTopLevelAppBundle && filePath.endsWith(".app");
       return {
-        entitlements: isTopLevelAppBundle ? entitlementsPath : entitlementsInheritPath,
+        ...(isTopLevelAppBundle
+          ? { entitlements: entitlementsPath }
+          : isNestedAppBundle
+            ? { entitlements: entitlementsInheritPath }
+            : {}),
         hardenedRuntime: true
       };
     }

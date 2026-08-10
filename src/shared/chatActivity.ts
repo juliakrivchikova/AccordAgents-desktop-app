@@ -86,7 +86,7 @@ export function buildChatActivityItems(
       status: "running",
       kind: "run",
       title: participant ? `@${participant.handle} is running` : "Run in progress",
-      preview: previewText(message?.content) || "A participant run is in progress.",
+      preview: previewText(message?.content) || "A member run is in progress.",
       createdAt: timestamp,
       updatedAt: timestamp,
       participant,
@@ -121,7 +121,7 @@ export function buildChatActivityItems(
       ...(lastViewedMs > 0 && updatedMs <= lastViewedMs ? { read: true } : {}),
       kind: "message",
       title: participant ? `@${participant.handle} recently finished` : "Recent activity",
-      preview: previewText(message.content) || "A participant posted an update.",
+      preview: previewText(message.content) || "A member posted an update.",
       createdAt: message.createdAt,
       updatedAt,
       participant,
@@ -199,6 +199,13 @@ export function resolveSelectedChatActivityItem(
     return undefined;
   }
   return items.find((item) => item.id === selectedItem.id) ?? selectedItem;
+}
+
+export function isCodexActivityApprovalItem(item: ChatActivityItem): boolean {
+  return item.kind === "approval" &&
+    item.status === "pending" &&
+    item.target.approvalKind === "codex" &&
+    Boolean(item.target.approvalId?.trim());
 }
 
 export function mergeChatActivityItems(
@@ -317,6 +324,9 @@ function pendingApprovalItems(
       participant,
       target: {
         approvalId: approval.id,
+        ...("kind" in approval.request && approval.request.kind === "codexApproval"
+          ? { approvalKind: "codex" as const }
+          : {}),
         runId: approval.resumeContext?.runId,
         messageId,
         threadRootId: threadRootIdForMessage(targetMessage) || messageId
@@ -407,7 +417,7 @@ function pendingMessageItems(
       status: "pending",
       kind: "choice",
       title: message.metadata.pendingChoice.title || "Choice required",
-      preview: previewText(targetMessage.content) || message.metadata.pendingChoice.question || "A participant is waiting for a choice.",
+      preview: previewText(targetMessage.content) || message.metadata.pendingChoice.question || "A member is waiting for a choice.",
       createdAt: message.createdAt,
       updatedAt,
       participant,
@@ -432,7 +442,7 @@ function pendingMessageItems(
       read: true,
       kind: "choice",
       title: message.metadata.pendingChoice.title || "Choice cancelled",
-      preview: previewText(targetMessage.content) || message.metadata.pendingChoice.question || "A participant choice was cancelled.",
+      preview: previewText(targetMessage.content) || message.metadata.pendingChoice.question || "A member choice was cancelled.",
       createdAt: message.createdAt,
       updatedAt: terminalAt,
       participant,
@@ -504,7 +514,7 @@ function pendingMessageItems(
       repoPath: conversation.repoPath,
       status: "pending",
       kind: "participant-request",
-      title: "Participant request approval required",
+      title: "Member request approval required",
       preview: previewText(targetMessage.content) || participantRequestPreview(message),
       createdAt: message.createdAt,
       updatedAt,
@@ -728,7 +738,7 @@ function threadRootIdForMessage(message: ChatMessage | undefined): string | unde
 function participantRequestPreview(message: ChatMessage): string {
   const requests = message.metadata?.participantRequest?.items;
   if (!Array.isArray(requests) || requests.length === 0) {
-    return "A participant request is waiting for approval.";
+    return "A member request is waiting for approval.";
   }
   return requests.map((request) => `@${cleanHandle(request.targetHandle)}`).filter(Boolean).join(", ");
 }

@@ -4,7 +4,18 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Copy, FileText, Li
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { canCompactParticipant } from "../../../shared/chatParticipantStatus";
-import type { AgentContextUsage, AgentRunProgress, ChatParticipant, ChatParticipantRequestBatch, Conversation } from "../../../shared/types";
+import type {
+  AgentContextUsage,
+  AgentRunProgress,
+  ChatAppToolApproval,
+  ChatAppToolApprovalRequest,
+  ChatAppToolApprovalScope,
+  ChatParticipant,
+  ChatParticipantConfig,
+  ChatParticipantRequestBatch,
+  ChatRoleConfig,
+  Conversation
+} from "../../../shared/types";
 import { CHAT_REACTION_EMOJIS } from "../../../shared/chatReactions";
 import { chatProcessingTranscriptView, chatProcessingTranscriptViewHasHidden } from "../../../shared/processingTranscript";
 import {
@@ -35,6 +46,8 @@ import { CHAT_ASSISTANT_ROLE_ID, authorForMessage, chatParticipantReference } fr
 import { IconButton, StatusBadge } from "../primitives";
 import { RosterStatusIndicator, type ChatParticipantRosterStatus } from "./chat-participant-menu";
 import { WorkedRow } from "./chat-worked-row";
+import { ChatAppToolApprovalList } from "./chat-app-tool-approvals";
+import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
 const MESSAGE_ACTION_CLASS = "message-action size-[26px] min-h-[26px] rounded-[8px] border-0 bg-transparent shadow-none";
 const MESSAGE_ACTION_STOP_CLASS = `${MESSAGE_ACTION_CLASS} message-action-stop`;
@@ -53,6 +66,7 @@ export type ChatChoiceResponse = {
 };
 
 export const ChatMessageItem = memo(function ChatMessageItem(props: {
+  activityDisclosure: ChatActivityDisclosureState;
   message: Conversation["messages"][number];
   conversationId: string;
   participants?: ChatParticipant[];
@@ -69,6 +83,10 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   hasContinuationReply?: boolean;
   inferredParticipantRequests?: ChatParticipantRequestBatch[];
   liveProgress?: AgentRunProgress;
+  appToolApprovals?: ChatAppToolApproval[];
+  savedParticipants?: ChatParticipantConfig[];
+  roles?: ChatRoleConfig[];
+  submittingApprovalIds?: ReadonlySet<string>;
   onOpenThread?: (messageId: string) => void;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
@@ -76,6 +94,13 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   onToggleReaction: (messageId: string, emoji: string) => void;
   onCompactParticipant?: ParticipantCompactHandler;
   onStopRun?: (runId: string) => void;
+  onRespondToAppToolApproval?: (
+    approvalId: string,
+    approve: boolean,
+    scope?: ChatAppToolApprovalScope,
+    draftOverride?: ChatAppToolApprovalRequest,
+    codexDecisionId?: string
+  ) => Promise<void>;
 }): JSX.Element {
   const { message } = props;
   if (typeof window !== "undefined" && typeof window.__accordAgentsChatMessageRenderProbe === "function") {
@@ -83,7 +108,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   }
   const [copied, setCopied] = useState(false);
   const [reactionPickerOpen, setReactionPickerOpen] = useState(false);
-  const [processingTranscriptOpen, setProcessingTranscriptOpen] = useState(false);
+  const processingTranscriptOpen = props.activityDisclosure.expandedProcessingTranscriptMessageIds.has(message.id);
   const author = authorForMessage(message, "chat");
   const isStreaming = message.status === "pending" && message.role === "participant";
   const rawDisplayContent = chatDisplayContent(message, author);
@@ -248,7 +273,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 label={processingTranscriptOpen ? "Hide full stream" : "Show full stream"}
                 tooltip={processingTranscriptOpen ? "Hide full stream" : "Show full stream"}
                 pressed={processingTranscriptOpen}
-                onClick={() => setProcessingTranscriptOpen((open) => !open)}
+                onClick={() => props.activityDisclosure.toggleProcessingTranscript(message.id)}
               />
             )}
             <IconButton
@@ -320,6 +345,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           <div className="message-content">
             {isStreaming ? (
               <StreamingMessageContent
+                activityDisclosure={props.activityDisclosure}
                 content={streamedContent}
                 activity={streamedActivity}
                 activityEvents={streamedActivityEvents}
@@ -329,13 +355,33 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             ) : (
               <>
                 {hasProcessingTranscript && processingTranscriptOpen && processingTranscriptView ? (
-                  <ChatExpandedProcessingTranscript view={processingTranscriptView} activityEvents={activityEvents} />
+                  <ChatExpandedProcessingTranscript
+                    activityDisclosure={props.activityDisclosure}
+                    view={processingTranscriptView}
+                    activityEvents={activityEvents}
+                  />
                 ) : (
-                  <MarkdownText content={displayContent} />
+                  <MarkdownText
+                    content={displayContent}
+                    recognizedCommand={message.role === "user" ? message.metadata?.nativeCommand?.name : undefined}
+                  />
                 )}
               </>
             )}
           </div>
+          {props.appToolApprovals && props.appToolApprovals.length > 0 && props.onRespondToAppToolApproval && (
+            <div className="chat-message-embedded-approvals">
+              <ChatAppToolApprovalList
+                approvals={props.appToolApprovals}
+                participants={props.participants ?? []}
+                savedParticipants={props.savedParticipants ?? []}
+                roles={props.roles ?? []}
+                submittingIds={props.submittingApprovalIds ?? new Set<string>()}
+                embedded
+                onRespond={props.onRespondToAppToolApproval}
+              />
+            </div>
+          )}
           {queuedBehind && (
             <div className="chat-queued-badge">
               <span>Queued — waiting for @{queuedBehind.handle} to finish</span>

@@ -53,6 +53,27 @@ test("control reclaims a lifecycle lock left by a dead process or previous boot"
   assert.equal(result.value.status, "allow");
 });
 
+test("authorize-stop retry with the same client lease returns the existing allowance", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-stop-lease-retry-"));
+  await mkdir(path.join(root, "sessions"), { recursive: true });
+  await writeFile(path.join(root, "session-control.js"), remoteSessionControlScript(), "utf8");
+  const payload = {
+    protocolVersion: REMOTE_SESSION_PROTOCOL_VERSION,
+    ownerId: "desktop",
+    leaseId: "lease-from-client",
+    ttlMs: 30_000
+  };
+
+  const first = await runControl(root, "authorize-stop", payload);
+  const second = await runControl(root, "authorize-stop", payload);
+
+  assert.equal(first.code, 0);
+  assert.equal(second.code, 0);
+  assert.equal(first.value.status, "allow");
+  assert.equal(second.value.status, "allow");
+  assert.equal((second.value.lease as { leaseId?: string }).leaseId, "lease-from-client");
+});
+
 test("concurrent stale-lock reclaimers preserve mutual exclusion at the stop gate", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "accordagents-stale-lock-race-"));
   const lockDir = path.join(root, "lifecycle.lock");

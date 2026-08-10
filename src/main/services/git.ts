@@ -35,6 +35,19 @@ function gitError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function filesystemErrorMessage(error: unknown): string {
+  const code = typeof error === "object" && error && "code" in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  if (code === "ENOENT") {
+    return "Folder does not exist.";
+  }
+  if (code === "EACCES" || code === "EPERM") {
+    return "Folder cannot be accessed.";
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
 interface RepoFileCacheEntry {
   indexMtimeMs?: number;
   paths: string[];
@@ -44,31 +57,75 @@ export class GitService {
   private readonly repoFileCache = new Map<string, RepoFileCacheEntry>();
 
   async inspectRepo(repoPath: string): Promise<GitRepoInfo> {
+    const normalizedRepoPath = repoPath.trim();
     try {
-      await runCommand("git", ["rev-parse", "--is-inside-work-tree"], { cwd: repoPath, timeoutMs: 8000 });
+      const repoStat = await stat(normalizedRepoPath);
+      if (!repoStat.isDirectory()) {
+        return {
+          repoPath: normalizedRepoPath,
+          isRepo: false,
+          branches: [],
+          statusLines: [],
+          error: "Selected path is not a folder."
+        };
+      }
+    } catch (error) {
+      return {
+        repoPath: normalizedRepoPath,
+        isRepo: false,
+        branches: [],
+        statusLines: [],
+        error: filesystemErrorMessage(error)
+      };
+    }
+
+    let gitMarkerFound = false;
+    try {
+      gitMarkerFound = await this.hasGitMarker(normalizedRepoPath);
+    } catch (error) {
+      return {
+        repoPath: normalizedRepoPath,
+        isRepo: false,
+        branches: [],
+        statusLines: [],
+        error: filesystemErrorMessage(error)
+      };
+    }
+    if (!gitMarkerFound) {
+      return {
+        repoPath: normalizedRepoPath,
+        isRepo: false,
+        branches: [],
+        statusLines: []
+      };
+    }
+
+    try {
+      await runCommand("git", ["rev-parse", "--is-inside-work-tree"], { cwd: normalizedRepoPath, timeoutMs: 8000 });
       const [branch, branches, status] = await Promise.all([
-        runCommand("git", ["branch", "--show-current"], { cwd: repoPath, timeoutMs: 8000 }).catch(() => ({ stdout: "" })),
+        runCommand("git", ["branch", "--show-current"], { cwd: normalizedRepoPath, timeoutMs: 8000 }).catch(() => ({ stdout: "" })),
         runCommand("git", ["for-each-ref", "--format=%(refname)%09%(refname:short)%09%(symref)", "refs/heads", "refs/remotes"], {
-          cwd: repoPath,
+          cwd: normalizedRepoPath,
           timeoutMs: 8000
         }).catch(() => ({ stdout: "" })),
-        runCommand("git", ["status", "--short"], { cwd: repoPath, timeoutMs: 8000 }).catch(() => ({ stdout: "" }))
+        runCommand("git", ["status", "--short"], { cwd: normalizedRepoPath, timeoutMs: 8000 }).catch(() => ({ stdout: "" }))
       ]);
 
       return {
-        repoPath,
+        repoPath: normalizedRepoPath,
         isRepo: true,
         currentBranch: branch.stdout.trim() || undefined,
         branches: cleanBranchRefs(branches.stdout),
         statusLines: cleanLines(status.stdout)
       };
     } catch (error) {
+      const message = gitError(error);
       return {
-        repoPath,
+        repoPath: normalizedRepoPath,
         isRepo: false,
         branches: [],
         statusLines: [],
-        error: gitError(error)
+        error: message
       };
     }
   }
@@ -139,6 +196,32 @@ export class GitService {
   private async gitOutput(repoPath: string, args: string[]): Promise<string> {
     const result = await runCommand("git", args, { cwd: repoPath, timeoutMs: 20_000 });
     return result.stdout.trim();
+  }
+
+  private async hasGitMarker(startPath: string): Promise<boolean> {
+    let currentPath = path.resolve(startPath);
+    while (true) {
+      const found = await stat(path.join(currentPath, ".git")).then(
+        () => true,
+        (error) => {
+          const code = typeof error === "object" && error && "code" in error
+            ? (error as { code?: unknown }).code
+            : undefined;
+          if (code === "ENOENT" || code === "ENOTDIR") {
+            return false;
+          }
+          throw error;
+        }
+      );
+      if (found) {
+        return true;
+      }
+      const parentPath = path.dirname(currentPath);
+      if (parentPath === currentPath) {
+        return false;
+      }
+      currentPath = parentPath;
+    }
   }
 
   private async listRepoFiles(repoPath: string): Promise<string[]> {

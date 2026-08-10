@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { StorageService } from "./storage";
 import type { ChatMessage, Conversation } from "../../shared/types";
+
+function hexJson(value: unknown): string {
+  return Buffer.from(JSON.stringify(value), "utf8").toString("hex").toUpperCase();
+}
 
 function fakeStorage(queryJson: (sql: string) => Promise<unknown[]>): StorageService {
   const storage = Object.create(StorageService.prototype) as any;
@@ -25,11 +32,11 @@ test("openConversation returns a message window consistent with messagePage", as
     metadata: {}
   });
   storage.queryJson = async (sql: string) => {
-    if (sql.includes("payloadJson")) {
+    if (sql.includes("hex(payload_json) as payloadHex")) {
       // newest-first; limit+1 rows so hasMoreBefore is true
       return [4, 3, 2].map((sequence) => ({
         sequence,
-        payloadJson: Buffer.from(JSON.stringify({ id: `m-${sequence}`, role: "user", content: `m${sequence}`, createdAt: "2026-01-01T00:00:0" + sequence + ".000Z" })).toString("hex")
+        payloadHex: hexJson({ id: `m-${sequence}`, role: "user", content: `m${sequence}`, createdAt: "2026-01-01T00:00:0" + sequence + ".000Z" })
       }));
     }
     if (sql.includes("count(*) as totalMessages")) {
@@ -83,11 +90,11 @@ test("listConversationMessages can page around a target message id", async () =>
     if (sql.includes("select sequence") && sql.includes("message_id")) {
       return [{ sequence: 3 }];
     }
-    if (sql.includes("payloadJson")) {
+    if (sql.includes("hex(payload_json) as payloadHex")) {
       return [
-        { sequence: 3, payloadJson: Buffer.from(JSON.stringify({ id: "target", role: "user", content: "target", createdAt: "2026-01-01T00:00:03.000Z" })).toString("hex") },
-        { sequence: 2, payloadJson: Buffer.from(JSON.stringify({ id: "before", role: "user", content: "before", createdAt: "2026-01-01T00:00:02.000Z" })).toString("hex") },
-        { sequence: 1, payloadJson: Buffer.from(JSON.stringify({ id: "older", role: "user", content: "older", createdAt: "2026-01-01T00:00:01.000Z" })).toString("hex") }
+        { sequence: 3, payloadHex: hexJson({ id: "target", role: "user", content: "target", createdAt: "2026-01-01T00:00:03.000Z" }) },
+        { sequence: 2, payloadHex: hexJson({ id: "before", role: "user", content: "before", createdAt: "2026-01-01T00:00:02.000Z" }) },
+        { sequence: 1, payloadHex: hexJson({ id: "older", role: "user", content: "older", createdAt: "2026-01-01T00:00:01.000Z" }) }
       ];
     }
     if (sql.includes("count(*) as totalMessages")) {
@@ -104,6 +111,84 @@ test("listConversationMessages can page around a target message id", async () =>
   assert.equal(page.newestSequence, 3);
   assert.equal(page.hasMoreBefore, true);
   assert.equal(page.totalMessages, 5);
+});
+
+test("listConversationMessages round-trips large escape-dense output across adjacent SQLite pages", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-messages-"));
+  const storage = Object.create(StorageService.prototype) as any;
+  storage.dbPath = path.join(directory, "accordagents.sqlite3");
+  storage.initialized = true;
+  const denseContent = `quotes "' slash \\\\ tabs\t lines\n separators \u001e\u001f unicode 🙂 lone \ud800 `
+    .repeat(12_000);
+  const messages: ChatMessage[] = [0, 1, 2, 3].map((sequence) => ({
+    id: `dense-${sequence}`,
+    role: sequence % 2 === 0 ? "user" : "participant",
+    ...(sequence % 2 === 0 ? {} : {
+      participantId: "participant-codex",
+      participantLabel: "@codex",
+      status: "done" as const
+    }),
+    content: sequence === 1 ? denseContent : `message-${sequence}`,
+    createdAt: `2026-01-01T00:00:0${sequence}.000Z`,
+    metadata: sequence === 1 ? { runId: "run-dense", nested: { ordered: ["a", "b"] } } : {}
+  }));
+  const chat = basicConversation("dense-chat", messages);
+
+  try {
+    await storage.runSql(`
+      create table conversations (
+        id text primary key, title text not null, kind text not null, created_at text not null,
+        updated_at text not null, repo_path text, body_json text, payload_json text not null
+      );
+      create table conversation_messages (
+        conversation_id text not null, sequence integer not null, message_id text not null,
+        created_at text not null, payload_json text not null,
+        primary key (conversation_id, sequence), unique (conversation_id, message_id)
+      );
+    `);
+    await storage.saveConversation(chat);
+
+    const newest = await storage.listConversationMessages({ conversationId: chat.id, limit: 2 });
+    const older = await storage.listConversationMessages({
+      conversationId: chat.id,
+      beforeSequence: newest.oldestSequence,
+      limit: 2
+    });
+
+    assert.deepEqual([...older.messages, ...newest.messages], messages);
+    assert.equal(older.hasMoreBefore, false);
+    assert.equal(newest.hasMoreBefore, true);
+    assert.equal(newest.totalMessages, messages.length);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("listConversationMessages rejects malformed hexadecimal transport", async (context) => {
+  const cases = [
+    { name: "non-hexadecimal", payloadHex: "not-hex", error: /Invalid hexadecimal JSON/ },
+    { name: "odd-length", payloadHex: "F", error: /Invalid hexadecimal JSON/ },
+    { name: "invalid UTF-8", payloadHex: "FF", error: /Invalid UTF-8 JSON/ },
+    { name: "invalid JSON", payloadHex: Buffer.from("not JSON", "utf8").toString("hex"), error: /Invalid JSON/ }
+  ];
+  for (const testCase of cases) {
+    await context.test(testCase.name, async () => {
+      const storage = fakeStorage(async (sql) => {
+        if (sql.includes("hex(payload_json) as payloadHex")) {
+          return [{ sequence: 1, payloadHex: testCase.payloadHex }];
+        }
+        if (sql.includes("count(*) as totalMessages")) {
+          return [{ totalMessages: 1 }];
+        }
+        return [];
+      });
+
+      await assert.rejects(
+        () => storage.listConversationMessages({ conversationId: "conversation", limit: 1 }),
+        testCase.error
+      );
+    });
+  }
 });
 
 test("listConversations normalizes the archived flag from json_extract values", async () => {

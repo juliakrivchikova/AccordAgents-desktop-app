@@ -1,3 +1,5 @@
+import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
+
 export type ProviderKind = "openai" | "anthropic" | "gemini" | "codex-cli" | "claude-code" | "gemini-cli";
 
 export type ConversationKind = "general" | "code-review" | "implementation-plan" | "chat";
@@ -323,6 +325,7 @@ export interface ChatPromptContextSettings {
 
 export interface AppSettings {
   roundLimitDefault: number;
+  betaUpdates: boolean;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
   chatParticipantRequestPromptMaxChars: number;
@@ -995,7 +998,7 @@ export interface ChatRosterAvailableOptions {
   };
 }
 
-export type ChatAppToolApprovalStatus = "pending" | "approved" | "denied" | "auto-applied";
+export type ChatAppToolApprovalStatus = "pending" | "approved" | "denied" | "cancelled" | "expired" | "auto-applied";
 
 export type ChatAppToolApprovalScope = "once" | "chat";
 
@@ -1026,7 +1029,69 @@ export type ChatAppToolApprovalRequest =
   | ChatPermissionChangeRequest
   | ChatToolPermissionRequest
   | ChatParticipantRequestApprovalRequest
-  | ChatSelfCompactionRequest;
+  | ChatSelfCompactionRequest
+  | ChatCodexApprovalRequest;
+
+export type ChatCodexApprovalMethod =
+  | "item/commandExecution/requestApproval"
+  | "item/fileChange/requestApproval"
+  | "item/permissions/requestApproval"
+  | "item/autoApprovalReview/denied"
+  | "item/autoApprovalReview/timedOut"
+  | "applyPatchApproval"
+  | "execCommandApproval";
+
+export interface ChatCodexApprovalOption {
+  id: string;
+  label: string;
+  detail?: string;
+  outcome: "approve" | "deny" | "cancel";
+}
+
+export interface ChatCodexCommandActionSummary {
+  type: "read" | "listFiles" | "search" | "unknown";
+  command: string;
+  name?: string;
+  path?: string;
+  query?: string;
+}
+
+export interface ChatCodexPermissionSummary {
+  network?: boolean;
+  readPaths?: string[];
+  writePaths?: string[];
+}
+
+export interface ChatCodexFileChangeSummary {
+  path: string;
+  change: "add" | "delete" | "update" | "unknown";
+}
+
+export interface ChatCodexApprovalRequest {
+  kind: "codexApproval";
+  method: ChatCodexApprovalMethod;
+  requestId: string | number;
+  threadId?: string;
+  turnId?: string;
+  itemId?: string;
+  approvalId?: string;
+  action: "command" | "fileChange" | "permissions" | "network" | "mcpToolCall";
+  command?: string;
+  commandActions?: ChatCodexCommandActionSummary[];
+  cwd?: string;
+  reason?: string;
+  grantRoot?: string;
+  fileChanges?: ChatCodexFileChangeSummary[];
+  permissions?: ChatCodexPermissionSummary;
+  networkTarget?: string;
+  networkProtocol?: string;
+  mcpServer?: string;
+  mcpToolName?: string;
+  guardianRiskLevel?: string;
+  guardianUserAuthorization?: string;
+  guardianDecisionSource?: string;
+  options: ChatCodexApprovalOption[];
+}
 
 export interface ChatSelfCompactionRequest {
   type: "self_compaction";
@@ -1092,6 +1157,10 @@ export interface ChatMessageMetadata {
   approvedContinuation?: boolean;
   syncedThroughMessageId?: string;
   runId?: string;
+  nativeCommand?: {
+    name: "goal";
+    objective: string;
+  };
   compaction?: {
     triggeredBy: "user" | "agent";
     participantId: string;
@@ -1136,6 +1205,7 @@ export type ChatAgentActivityKind = "tool" | "command" | "file-edit" | "web" | "
 export interface ChatAgentActivityEvent {
   id: string;
   sequence: number;
+  itemId?: string;
   kind: ChatAgentActivityKind;
   label: string;
   detail?: string;
@@ -1427,6 +1497,7 @@ export interface RespondToChatAppToolApprovalRequest {
   approve: boolean;
   scope?: ChatAppToolApprovalScope;
   draftOverride?: ChatAppToolApprovalRequest;
+  codexDecisionId?: string;
 }
 
 export interface ProviderSettingsUpdate {
@@ -1766,6 +1837,86 @@ export interface ChatParticipantCompactionState {
   startedAt: string;
 }
 
+export interface ChatParticipantActivityApprovalDependency {
+  type: "user" | "participant";
+  participantId?: string;
+  handle?: string;
+  summary?: string;
+}
+
+interface ChatParticipantActivityWorkBase {
+  messageId?: string;
+  threadId?: string;
+  parentMessageId?: string;
+  chatThreadRootId?: string;
+  startedAt: string;
+  lastActivityAt: string;
+  error?: string;
+  approvalDependency?: ChatParticipantActivityApprovalDependency;
+}
+
+export interface ChatParticipantActivityRunWork extends ChatParticipantActivityWorkBase {
+  kind: "run";
+  status: CloudRunStatus;
+  phase?: ChatRemoteRunPhase;
+  runId: string;
+}
+
+export interface ChatParticipantActivityCompactionWork extends ChatParticipantActivityWorkBase {
+  kind: "compaction";
+  status: "running";
+  phase: "compacting";
+  runId: string;
+}
+
+export interface ChatParticipantActivityRequestWork extends ChatParticipantActivityWorkBase {
+  kind: "participant_request";
+  status: ChatParticipantRequestStatus;
+  requestId: string;
+}
+
+export interface ChatParticipantActivityApprovalWork extends ChatParticipantActivityWorkBase {
+  kind: "approval";
+  status: "pending";
+  approvalType: "app_tool" | "pending_choice" | "pending_mention";
+  requestId?: string;
+}
+
+export type ChatParticipantActiveWork =
+  | ChatParticipantActivityRunWork
+  | ChatParticipantActivityCompactionWork
+  | ChatParticipantActivityRequestWork
+  | ChatParticipantActivityApprovalWork;
+
+export interface ChatParticipantLastFinishedMessage {
+  messageId: string;
+  threadId?: string;
+  parentMessageId?: string;
+  chatThreadRootId?: string;
+  sequence: number;
+  createdAt: string;
+  status: "done" | "error";
+  terminalReason?: string;
+  content: string;
+}
+
+export interface ChatParticipantActivityEntry {
+  participantId: string;
+  handle: string;
+  provider: ChatProviderKind;
+  model: string | null;
+  status: ChatParticipantRosterStatus;
+  activeWork: ChatParticipantActiveWork[];
+  lastFinishedMessage: ChatParticipantLastFinishedMessage | null;
+}
+
+export interface ChatParticipantActivitySnapshot {
+  snapshotAt: string;
+  hasActiveParticipants: boolean;
+  statusCounts: Record<ChatParticipantRosterStatus, number>;
+  participants: ChatParticipantActivityEntry[];
+}
+
 export type ChatParticipantWatcherPausedReason = "wake-limit" | "error";
 
 export interface ChatParticipantWatcherState {
@@ -1841,6 +1992,7 @@ export interface ChatActivityTarget {
   sourceMessageId?: string;
   threadRootId?: string;
   approvalId?: string;
+  approvalKind?: "codex";
   choiceId?: string;
   mentionTargetParticipantIds?: string[];
 }
@@ -1985,6 +2137,7 @@ export interface ArtifactSummary {
   submittedDraftCount: number;
   createdAt: string;
   updatedAt: string;
+  archivedAt?: string;
   approval: ArtifactApproval;
 }
 
@@ -2147,6 +2300,10 @@ export interface ArtifactReferenceRequest {
   name?: string;
 }
 
+export interface SetArtifactArchivedRequest extends ArtifactReferenceRequest {
+  archived: boolean;
+}
+
 export interface ListArtifactDraftsRequest extends ArtifactReferenceRequest {}
 
 export interface ReadArtifactDraftRequest extends ArtifactReferenceRequest {
@@ -2211,6 +2368,7 @@ export interface AppBridge {
   inspectLocalFile(request: InspectLocalFileRequest): Promise<InspectLocalFileResult>;
   openLocalFile(request: OpenLocalFileRequest): Promise<OpenLocalFileResult>;
   setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<AppSettings>;
+  setBetaUpdates(enabled: boolean): Promise<AppSettings>;
   setCliAgentRunTimeoutMs(timeoutMs: number): Promise<AppSettings>;
   setChatParticipantRequestMaxDepth(maxDepth: number): Promise<AppSettings>;
   setChatParticipantRequestPromptMaxChars(maxChars: number): Promise<AppSettings>;
@@ -2295,6 +2453,7 @@ export interface AppBridge {
   renameArtifact(request: RenameArtifactRequest): Promise<ArtifactResult<ArtifactSummary>>;
   signArtifact(request: SignArtifactRequest): Promise<ArtifactResult<ArtifactSummary>>;
   updateArtifactAccess(request: UpdateArtifactAccessRequest): Promise<ArtifactResult<ArtifactSummary>>;
+  setArtifactArchived(request: SetArtifactArchivedRequest): Promise<ArtifactResult<ArtifactSummary>>;
   listArtifactDrafts(request: ListArtifactDraftsRequest): Promise<ArtifactResult<ArtifactDraftView[]>>;
   readArtifactDraft(request: ReadArtifactDraftRequest): Promise<ArtifactResult<ArtifactDraftContent>>;
   saveArtifactDraft(request: SaveArtifactDraftRequest): Promise<ArtifactResult<ArtifactDraftContent>>;

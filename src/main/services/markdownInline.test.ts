@@ -56,6 +56,18 @@ function messageLinks(nodes: MarkdownInlineNode[]): Array<{ messageId: string; l
   });
 }
 
+function commands(nodes: MarkdownInlineNode[]): string[] {
+  return nodes.flatMap((node): string[] => {
+    if (node.type === "command") {
+      return [node.command];
+    }
+    if (node.type === "strong") {
+      return commands(node.children);
+    }
+    return [];
+  });
+}
+
 test("parseMarkdownInline links bare URLs and trims trailing punctuation", () => {
   const nodes = parseMarkdownInline("Visit https://example.com.");
   assert.deepEqual(externalLinks(nodes), [{ url: "https://example.com", label: "https://example.com" }]);
@@ -172,4 +184,13 @@ test("parseMarkdownInline keeps inline code as code for renderer-side linkificat
     { type: "code", text: "src/renderer/components/settings/general-settings-section.tsx" },
     { type: "text", text: "." }
   ]);
+});
+
+test("parseMarkdownInline recognizes /goal only when message metadata enables it", () => {
+  assert.deepEqual(commands(parseMarkdownInline("@drew finish it /goal")), []);
+  assert.deepEqual(commands(parseMarkdownInline("@drew finish it /goal", { recognizedCommand: "goal" })), ["goal"]);
+  assert.deepEqual(commands(parseMarkdownInline("**/goal** finish it", { recognizedCommand: "goal" })), ["goal"]);
+  assert.deepEqual(commands(parseMarkdownInline("Use `/goal` as text", { recognizedCommand: "goal" })), []);
+  assert.deepEqual(commands(parseMarkdownInline("/goalkeeper is not a command", { recognizedCommand: "goal" })), []);
+  assert.deepEqual(commands(parseMarkdownInline("/Goal is not the native command", { recognizedCommand: "goal" })), []);
 });

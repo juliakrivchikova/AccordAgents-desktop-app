@@ -25,6 +25,7 @@ export interface ConversationPanelProps {
   openingConversationDescription: string;
   accordDisabledReason?: string;
   onOpenAccord: () => void;
+  topBar?: React.ReactNode;
   artifacts: ArtifactsState;
 }
 
@@ -39,6 +40,7 @@ export function ConversationPanel({
   openingConversationDescription,
   accordDisabledReason,
   onOpenAccord,
+  topBar,
   artifacts
 }: ConversationPanelProps): JSX.Element | null {
   if (!view.hasResultContext) {
@@ -51,6 +53,7 @@ export function ConversationPanel({
       ) : view.conversationKind === "chat" && state.conversation ? (
         <ChatConversationView
           conversation={state.conversation}
+          topBar={topBar}
           settings={state.settings}
           artifacts={artifacts}
           progress={view.visibleProgressLog}
@@ -88,6 +91,7 @@ export function ConversationPanel({
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
           onCompactParticipant={(participantId) => chatActions.compactChatParticipant(participantId)}
           onStopRun={(runId) => void window.consensus.cancelReview(runId)}
+          onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
           onDismissMessageFocus={() => {
             // Dismissing the highlight by clicking outside it is the acknowledgment
             // gesture in the activity view: mark the selected finished item read.

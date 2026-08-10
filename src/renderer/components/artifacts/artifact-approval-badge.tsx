@@ -1,3 +1,5 @@
+import { CheckCheck } from "lucide-react";
+
 import type { ArtifactApproval } from "../../../shared/types";
 
 // Approval at a glance: unsigned / N of M signed / fully approved.
@@ -19,6 +21,14 @@ export function ArtifactApprovalBadge({ approval, compact }: { approval: Artifac
       title={`Required signers: ${approval.requiredSigners.join(", ")}`}
     >
       {approval.state === "unsigned" && !compact ? "unsigned" : label}
+    </span>
+  );
+}
+
+export function ArtifactApprovedMark(): JSX.Element {
+  return (
+    <span className="artifact-approved-mark" title="Fully approved">
+      <CheckCheck aria-hidden />
     </span>
   );
 }

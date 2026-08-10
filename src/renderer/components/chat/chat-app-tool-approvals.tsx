@@ -14,11 +14,13 @@ export function ChatAppToolApprovalList(props: {
   savedParticipants: ChatParticipantConfig[];
   roles: ChatRoleConfig[];
   submittingIds: ReadonlySet<string>;
+  embedded?: boolean;
   onRespond: (
     approvalId: string,
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
-    draftOverride?: ChatAppToolApprovalRequest
+    draftOverride?: ChatAppToolApprovalRequest,
+    codexDecisionId?: string
   ) => Promise<void>;
 }): JSX.Element {
   return (
@@ -30,6 +32,7 @@ export function ChatAppToolApprovalList(props: {
           savedParticipants={props.savedParticipants}
           roles={props.roles}
           submitting={props.submittingIds.has(approval.id)}
+          embedded={props.embedded}
           onRespond={props.onRespond}
           key={approval.id}
         />
@@ -37,4 +40,3 @@ export function ChatAppToolApprovalList(props: {
     </div>
   );
 }
-

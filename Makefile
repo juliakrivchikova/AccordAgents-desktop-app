@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install dev start build build-main package make-mac-arm64 signed-mac-arm64 release-patch release-minor release-major test-cloud-runs lint-colors lint-lines lint-unused typecheck clean
+.PHONY: help install dev start build build-main package make-mac-arm64 signed-mac-arm64 release-beta release-patch release-minor release-major test-chat-progress-renderer test-cloud-runs lint-colors lint-lines lint-unused typecheck clean
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*## "; print "Available targets:"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -29,6 +29,9 @@ make-mac-arm64: ## Build macOS arm64 DMG and ZIP artifacts
 signed-mac-arm64: ## Build signed and notarized macOS arm64 DMG into signed/
 	npm run signed:mac-arm64
 
+release-beta: ## Bump beta prerelease, sign macOS arm64 artifacts, and publish beta GitHub Release
+	npm run release:beta
+
 release-patch: ## Bump patch, sign macOS arm64 artifacts, and publish GitHub Release
 	npm run release:patch
 
@@ -40,6 +43,9 @@ release-major: ## Bump major, sign macOS arm64 artifacts, and publish GitHub Rel
 
 test-cloud-runs: ## Run focused shared AWS worker tests
 	npm run test:cloud-runs
+
+test-chat-progress-renderer: ## Run focused chat activity rendering tests
+	npm run test:chat-progress-renderer
 
 lint-colors: ## Check renderer style guardrails
 	npm run lint:renderer-styles

@@ -146,9 +146,21 @@ function requireCommand(command, args = ["--version"]) {
   }
 }
 
+function isAppleSiliconHardware() {
+  try {
+    return output("sysctl", ["-in", "hw.optional.arm64"]).trim() === "1";
+  } catch {
+    return output("uname", ["-m"]).trim() === "arm64";
+  }
+}
+
 function validateEnvironment() {
   if (process.platform !== "darwin") {
     fail("Signed macOS builds must run on macOS.");
+  }
+
+  if (isAppleSiliconHardware() && process.arch !== "arm64") {
+    fail(`Signed macOS arm64 builds on Apple Silicon must run with an arm64 Node.js binary. Current Node.js architecture: ${process.arch}.`);
   }
 
   requireCommand("xcode-select", ["-p"]);
@@ -176,8 +188,15 @@ function validateEnvironment() {
   }
 }
 
-function ensureDmgNativeDependencies() {
-  const result = spawnSync(process.execPath, ["-e", "require('macos-alias')"], {
+function shouldRebuildNativeDependency(output) {
+  return output.includes("NODE_MODULE_VERSION") ||
+    output.includes("Module did not self-register") ||
+    output.includes("incompatible architecture") ||
+    output.includes("was compiled against a different Node.js version");
+}
+
+function ensureDmgNativeDependency(packageName) {
+  const result = spawnSync(process.execPath, ["-e", `require(${JSON.stringify(packageName)})`], {
     cwd: rootDir,
     env: process.env,
     encoding: "utf8"
@@ -188,17 +207,17 @@ function ensureDmgNativeDependencies() {
   }
 
   const output = `${result.stdout || ""}${result.stderr || ""}`;
-  const shouldRebuild =
-    output.includes("NODE_MODULE_VERSION") ||
-    output.includes("Module did not self-register") ||
-    output.includes("was compiled against a different Node.js version");
-
-  if (!shouldRebuild) {
-    fail(`Could not load macos-alias, which is required by the DMG maker:\n${output}`);
+  if (!shouldRebuildNativeDependency(output)) {
+    fail(`Could not load ${packageName}, which is required by the DMG maker:\n${output}`);
   }
 
-  log("Rebuilding macos-alias for the current Node.js version");
-  run("npm", ["rebuild", "macos-alias"]);
+  log(`Rebuilding ${packageName} for the current Node.js version`);
+  run("npm", ["rebuild", packageName]);
+}
+
+function ensureDmgNativeDependencies() {
+  ensureDmgNativeDependency("macos-alias");
+  ensureDmgNativeDependency("fs-xattr");
 }
 
 function cleanOutputs() {

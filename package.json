@@ -1,7 +1,7 @@
 {
   "name": "accordagents",
   "productName": "AccordAgents",
-  "version": "1.9.3",
+  "version": "1.10.1-beta.2",
   "private": true,
   "description": "Desktop app for multi-participant AI chat that debates a question or code diff and converges on a consensus answer.",
   "license": "Apache-2.0",
@@ -11,6 +11,7 @@
     "build": "npm run build:main && vite build",
     "build:main": "tsc -p tsconfig.main.json && node scripts/copy-main-assets.mjs",
     "build:renderer-tests": "tsc -p tsconfig.renderer-tests.json",
+    "test:active-run-popover": "node scripts/build-new-chat-screen-test.mjs && node --test dist/renderer-tests-new-chat/chat-active-run-popover.test.mjs",
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && npm run build:main && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
     "package": "npm run build && electron-forge package",
     "make": "npm run build && electron-forge make",
@@ -23,6 +24,7 @@
     "test:file-opener": "npm run build:main && node --test dist/main/main/services/intellijLauncher.test.js dist/main/main/services/localFileOpener.test.js dist/main/main/services/settings.repoFileOpenAction.test.js",
     "test:links": "npm run build:main && node --test dist/main/main/services/externalLinks.test.js dist/main/main/services/markdownInline.test.js",
     "test:settings": "npm run build:main && node --test dist/main/main/services/settings.behaviorRules.test.js dist/main/main/services/settings.roleArchive.test.js dist/main/main/services/settings.savedPrompts.test.js dist/main/main/services/settings.agentEnvironment.test.js dist/main/main/services/slashSuggestions.test.js",
+    "test:beta-updates": "npm run build:main && node --test dist/main/main/services/settings.behaviorRules.test.js dist/main/main/services/appUpdater.test.js && node --test scripts/release-mac-arm64.dry-run.test.mjs",
     "test:agent-env": "npm run build:main && node --test dist/main/main/services/settings.agentEnvironment.test.js dist/main/main/services/toolchainRequirements.test.js dist/main/main/services/remoteRuns.test.js dist/main/main/services/cliAgents.permissions.test.js",
     "test:storage": "npm run build:main && node --test dist/main/main/services/storage.messages.test.js",
     "test:artifacts": "npm run build:main && node --test dist/main/main/services/artifacts.test.js dist/main/main/services/appMcp.artifacts.test.js dist/main/main/services/chat.rename.test.js && node --test scripts/artifact-boundary-guard.test.mjs",
@@ -34,11 +36,14 @@
     "test:accord": "npm run build:main && node --test dist/main/main/services/accordLauncherPreferences.test.js",
     "test:avatar-contract": "node --test scripts/avatar-contract.test.mjs",
     "test:clipboard": "npm run build:main && node --test dist/main/main/services/clipboard.test.js",
-    "test:renderer-components": "npm run build:renderer-tests && node scripts/build-new-chat-screen-test.mjs && node --test --test-force-exit dist/renderer-tests/renderer/components/chat/chat-composer-mention-token.test.js dist/renderer-tests/renderer/components/chat/chat-composer-plugin-token.test.js dist/renderer-tests/renderer/components/chat/chat-progress-rendering.test.js dist/renderer-tests/renderer/components/chat/cli-readiness-setup-panel.test.js dist/renderer-tests/renderer/components/artifacts/artifact-drafts.test.js dist/renderer-tests/renderer/components/artifacts/artifact-navigation.test.js dist/renderer-tests-new-chat/new-chat-screen.test.mjs dist/renderer-tests-new-chat/use-chat-actions.test.mjs dist/renderer-tests/renderer/components/settings/aws-worker-panel.test.js",
-    "test:cloud-runs": "npm run build:main && node --test dist/main/main/services/awsEc2Client.test.js dist/main/main/services/awsWorkerLifecycle.test.js dist/main/main/services/awsWorkerAccess.test.js dist/main/main/services/cloudRunAws.test.js dist/main/main/services/awsWorkerSetup.test.js dist/main/main/services/cloudRunDoctor.test.js dist/main/main/services/settings.atomic.test.js dist/main/main/services/remoteRuns.test.js && npm run test:renderer-components",
+    "test:renderer-components": "npm run build:renderer-tests && node scripts/build-new-chat-screen-test.mjs && node --test --test-force-exit dist/renderer-tests/renderer/components/chat/chat-composer-mention-token.test.js dist/renderer-tests/renderer/components/chat/chat-composer-plugin-token.test.js dist/renderer-tests/renderer/components/chat/chat-progress-rendering.test.js dist/renderer-tests/renderer/components/chat/cli-readiness-setup-panel.test.js dist/renderer-tests/renderer/components/artifacts/artifact-drafts.test.js dist/renderer-tests/renderer/components/artifacts/artifact-navigation.test.js dist/renderer-tests-new-chat/new-chat-screen.test.mjs dist/renderer-tests-new-chat/use-chat-actions.test.mjs dist/renderer-tests-new-chat/chat-active-run-popover.test.mjs dist/renderer-tests/renderer/components/settings/aws-worker-panel.test.js",
+    "test:chat-progress-renderer": "node scripts/build-chat-progress-renderer-test.mjs && node --test dist/renderer-tests-chat-progress/chat-progress-rendering.test.mjs dist/renderer-tests-chat-progress/chat-activity-rendering.test.mjs",
+    "test:codex-approval-renderer": "tsc -p tsconfig.codex-approval-renderer-test.json && node --test dist/codex-approval-renderer-test/renderer/components/chat/chat-codex-approval-rendering.test.js",
+    "test:chat-goal": "npm run build:main && node --test dist/main/main/services/nativeGoalCommand.test.js dist/main/main/services/markdownInline.test.js dist/main/main/services/cliAgents.gemini.test.js dist/main/main/services/command.test.js && node --test --test-name-pattern='native /goal|unbounded native-goal turn timeout|native goal|goal continuation' dist/main/main/services/chat.permissions.test.js dist/main/main/services/cliAgents.permissions.test.js && node scripts/build-native-goal-rendering-test.mjs && node --test dist/renderer-tests-native-goal/native-goal-rendering.test.mjs",
+    "test:cloud-runs": "npm run build:main && node --test dist/main/main/services/awsEc2Client.test.js dist/main/main/services/awsWorkerLifecycle.test.js dist/main/main/services/awsWorkerAccess.test.js dist/main/main/services/cloudRunAws.test.js dist/main/main/services/awsWorkerSetup.test.js dist/main/main/services/cloudRunDoctor.test.js dist/main/main/services/settings.atomic.test.js dist/main/main/services/remoteRuns.test.js dist/main/main/services/remoteMirrorSync.test.js && npm run test:renderer-components",
     "test:member-copy": "node --test scripts/member-copy-guard.test.mjs",
     "test:toggle-policy": "node --test scripts/toggle-policy-contract.test.mjs",
-    "test:permissions": "npm run build:main && node --test dist/main/main/services/chat.permissions.test.js dist/main/main/services/chat.rendererStreaming.test.js dist/main/main/services/toolchainRequirements.test.js dist/main/main/services/remoteRuns.test.js dist/main/main/services/remoteSessionSupervisorScript.test.js dist/main/main/services/cloudRunAws.test.js dist/main/main/services/cloudRunDoctor.test.js dist/main/main/services/awsEc2Client.test.js dist/main/main/services/awsWorkerKeyMaterial.test.js dist/main/main/services/awsWorkerLifecycle.test.js dist/main/main/services/awsWorkerAccess.test.js dist/main/main/services/awsWorkerSetup.test.js dist/main/main/services/settings.remoteSessions.test.js dist/main/main/services/chat.roleArchive.test.js dist/main/main/services/chat.repoFileMentions.test.js dist/main/main/services/repoFile.test.js dist/main/main/services/chat.participantRequestThreads.test.js dist/main/main/services/chat.rename.test.js dist/main/main/services/git.repoFiles.test.js dist/main/main/services/cliAgents.permissions.test.js dist/main/main/services/cliAgents.gemini.test.js dist/main/main/services/chatProviders.test.js dist/main/main/services/cliReadiness.test.js dist/main/main/services/command.test.js dist/main/main/services/warnings.test.js",
+    "test:permissions": "npm run build:main && node --test dist/main/main/services/chat.permissions.test.js dist/main/main/services/chatParticipantActivity.test.js dist/main/main/services/chat.rendererStreaming.test.js dist/main/main/services/toolchainRequirements.test.js dist/main/main/services/remoteRuns.test.js dist/main/main/services/remoteSessionSupervisorScript.test.js dist/main/main/services/cloudRunAws.test.js dist/main/main/services/cloudRunDoctor.test.js dist/main/main/services/awsEc2Client.test.js dist/main/main/services/awsWorkerKeyMaterial.test.js dist/main/main/services/awsWorkerLifecycle.test.js dist/main/main/services/awsWorkerAccess.test.js dist/main/main/services/awsWorkerSetup.test.js dist/main/main/services/settings.remoteSessions.test.js dist/main/main/services/chat.roleArchive.test.js dist/main/main/services/chat.repoFileMentions.test.js dist/main/main/services/repoFile.test.js dist/main/main/services/chat.participantRequestThreads.test.js dist/main/main/services/chat.rename.test.js dist/main/main/services/git.repoFiles.test.js dist/main/main/services/codexApprovals.test.js dist/main/main/services/cliAgents.permissions.test.js dist/main/main/services/cliAgents.gemini.test.js dist/main/main/services/chatProviders.test.js dist/main/main/services/cliReadiness.test.js dist/main/main/services/command.test.js dist/main/main/services/warnings.test.js",
     "lint:renderer-styles": "node scripts/check-renderer-style-guardrails.mjs",
     "lint:renderer-line-counts": "node scripts/check-renderer-line-counts.mjs",
     "lint:renderer-orphans": "node scripts/check-renderer-orphans.mjs",
@@ -46,6 +51,7 @@
     "lint:renderer-unused:locals": "tsc --noEmit -p tsconfig.renderer.json --noUnusedLocals --noUnusedParameters false",
     "typecheck": "tsc --noEmit -p tsconfig.renderer.json && tsc --noEmit -p tsconfig.main.json",
     "release:patch": "node scripts/release-mac-arm64.mjs patch",
+    "release:beta": "node scripts/release-mac-arm64.mjs beta",
     "release:minor": "node scripts/release-mac-arm64.mjs minor",
     "release:major": "node scripts/release-mac-arm64.mjs major",
     "bump:patch": "node scripts/bump-version.mjs patch",
@@ -100,6 +106,7 @@
   },
   "config": {
     "forge": "./forge.config.ts",
-    "releaseRepo": "juliakrivchikova/AccordAgents-Releases"
+    "releaseRepo": "juliakrivchikova/AccordAgents-Releases",
+    "betaReleaseRepo": "juliakrivchikova/AccordAgents-Beta-Releases"
   }
 }

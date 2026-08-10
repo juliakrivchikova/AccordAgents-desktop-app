@@ -1,5 +1,15 @@
-import { memo, useEffect, useMemo, useState } from "react";
-import { ChevronRight, FilePenLine, Globe, ShieldCheck, Terminal, type LucideIcon } from "lucide-react";
+import { memo, useEffect, useId, useMemo, useState } from "react";
+import {
+  Activity,
+  ChevronDown,
+  ChevronRight,
+  FilePenLine,
+  Globe,
+  ShieldCheck,
+  Terminal,
+  Wrench,
+  type LucideIcon
+} from "lucide-react";
 
 import { MarkdownText } from "../content/markdown-text";
 import type { ChatAgentActivityEvent, ChatAgentActivityKind } from "../../../shared/types";
@@ -9,7 +19,8 @@ import {
   type ChatProcessingTranscriptView,
   type ChatTranscriptSegment
 } from "../../../shared/processingTranscript";
-import type { ChatThinkingRow } from "./chat-conversation-data";
+import type { ChatThinkingRow } from "./chat-conversation-progress";
+import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
 export const ChatThinkingRowItem = memo(function ChatThinkingRowItem({ row }: { row: ChatThinkingRow }): JSX.Element {
   return (
@@ -24,6 +35,7 @@ export const ChatThinkingRowItem = memo(function ChatThinkingRowItem({ row }: { 
 });
 
 export const StreamingMessageContent = memo(function StreamingMessageContent(props: {
+  activityDisclosure: ChatActivityDisclosureState;
   content?: string;
   activity?: string;
   activityEvents?: ChatAgentActivityEvent[];
@@ -41,10 +53,18 @@ export const StreamingMessageContent = memo(function StreamingMessageContent(pro
         <span className="streaming-message-elapsed">{formatElapsed(elapsedSeconds)}</span>
       </div>
       {hasContent && (
-        <StreamingMarkdownText content={props.content ?? ""} activityEvents={props.activityEvents ?? []} />
+        <StreamingMarkdownText
+          activityDisclosure={props.activityDisclosure}
+          content={props.content ?? ""}
+          activityEvents={props.activityEvents ?? []}
+        />
       )}
       {!hasContent && props.activityEvents && props.activityEvents.length > 0 && (
-        <ChatInlineTranscript content="" activityEvents={props.activityEvents} />
+        <ChatInlineTranscript
+          activityDisclosure={props.activityDisclosure}
+          content=""
+          activityEvents={props.activityEvents}
+        />
       )}
       {!hasContent && activity && !props.activityEvents?.length && <div className="streaming-message-activity">{activity}</div>}
     </div>
@@ -52,6 +72,7 @@ export const StreamingMessageContent = memo(function StreamingMessageContent(pro
 });
 
 export const ChatInlineTranscript = memo(function ChatInlineTranscript(props: {
+  activityDisclosure: ChatActivityDisclosureState;
   content: string;
   activityEvents: ChatAgentActivityEvent[];
   segment?: ChatTranscriptSegment;
@@ -65,13 +86,18 @@ export const ChatInlineTranscript = memo(function ChatInlineTranscript(props: {
       {parts.map((part, index) => part.kind === "text" ? (
         part.text.trim() ? <MarkdownText content={part.text} key={`text-${index}`} /> : null
       ) : (
-        <ChatInlineActivityEvent event={part.event} key={part.event.id} />
+        <ChatInlineActivityEvent
+          activityDisclosure={props.activityDisclosure}
+          event={part.event}
+          key={part.event.id}
+        />
       ))}
     </div>
   );
 });
 
 export const ChatExpandedProcessingTranscript = memo(function ChatExpandedProcessingTranscript(props: {
+  activityDisclosure: ChatActivityDisclosureState;
   view: ChatProcessingTranscriptView;
   activityEvents: ChatAgentActivityEvent[];
 }): JSX.Element {
@@ -85,13 +111,24 @@ export const ChatExpandedProcessingTranscript = memo(function ChatExpandedProces
       {props.view.leadingSegments.length > 0 && (
         <div className="chat-processing-expanded-prefix">
           {props.view.leadingSegments.map((segment) => (
-            <ChatInlineTranscript content={segment.content} activityEvents={props.activityEvents} segment={segment} key={segment.key} />
+            <ChatInlineTranscript
+              activityDisclosure={props.activityDisclosure}
+              content={segment.content}
+              activityEvents={props.activityEvents}
+              segment={segment}
+              key={segment.key}
+            />
           ))}
         </div>
       )}
       {props.view.renderFinalContent && props.view.finalSegment && (
         chatActivityEventsForSegment(props.activityEvents, props.view.finalSegment).length > 0 ? (
-          <ChatInlineTranscript content={props.view.finalSegment.content} activityEvents={props.activityEvents} segment={props.view.finalSegment} />
+          <ChatInlineTranscript
+            activityDisclosure={props.activityDisclosure}
+            content={props.view.finalSegment.content}
+            activityEvents={props.activityEvents}
+            segment={props.view.finalSegment}
+          />
         ) : (
           <MarkdownText content={props.view.finalSegment.content} />
         )
@@ -100,17 +137,86 @@ export const ChatExpandedProcessingTranscript = memo(function ChatExpandedProces
   );
 });
 
-function ChatInlineActivityEvent({ event }: { event: ChatAgentActivityEvent }): JSX.Element {
+function ChatInlineActivityEvent(props: {
+  activityDisclosure: ChatActivityDisclosureState;
+  event: ChatAgentActivityEvent;
+}): JSX.Element {
+  const { activityDisclosure, event } = props;
   const Icon = iconForActivityKind(event.kind);
+  const detailId = useId();
+  const activityExpanded = activityDisclosure.expandedActivityIds.has(event.id);
+  const detailExpanded = activityDisclosure.fullyExpandedDetailIds.has(event.id);
+  const detailRevealed = activityDisclosure.revealedDetailIds.has(event.id);
+  const rawDetail = event.detail;
+  const maskedDetail = useMemo(() => rawDetail ? maskActivityDetailSecrets(rawDetail) : undefined, [rawDetail]);
+  const displayDetail = detailRevealed && activityExpanded ? rawDetail : maskedDetail;
+  const detailIsMasked = Boolean(rawDetail && maskedDetail && rawDetail !== maskedDetail);
+  const detailIsLong = Boolean(rawDetail && (rawDetail.length > 600 || rawDetail.split(/\n/).length > 6));
   return (
-    <div className={`chat-inline-activity-event is-${event.kind}`} title={event.detail ?? event.label}>
-      <Icon size={14} aria-hidden />
-      <span>{event.label}</span>
+    <div className={`chat-inline-activity-event is-${event.kind}`}>
+      {displayDetail ? (
+        <button
+          type="button"
+          className="chat-inline-activity-heading chat-inline-activity-toggle"
+          aria-controls={detailId}
+          aria-expanded={activityExpanded}
+          title={event.label}
+          onClick={() => activityDisclosure.toggleActivity(event.id)}
+        >
+          {activityExpanded
+            ? <ChevronDown className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />
+            : <ChevronRight className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />}
+          <span>{event.label}</span>
+        </button>
+      ) : (
+        <div className="chat-inline-activity-heading" title={event.label}>
+          <Icon className="chat-inline-activity-kind-icon" size={14} aria-hidden />
+          <span>{event.label}</span>
+        </div>
+      )}
+      {displayDetail && (
+        <div id={detailId} className="chat-inline-activity-content" hidden={!activityExpanded}>
+          <pre className={`chat-inline-activity-detail ${detailIsLong && !detailExpanded ? "is-collapsed" : ""}`}>{displayDetail}</pre>
+          {(detailIsMasked || detailIsLong) && (
+            <div className="chat-inline-activity-actions">
+              {detailIsMasked && (
+                <button
+                  type="button"
+                  className="chat-inline-activity-action"
+                  onClick={() => activityDisclosure.toggleDetailReveal(event.id)}
+                >
+                  <span>{detailRevealed ? "Hide" : "Reveal"}</span>
+                </button>
+              )}
+              {detailIsLong && (
+                <button
+                  type="button"
+                  className="chat-inline-activity-action is-detail-length-toggle"
+                  onClick={() => activityDisclosure.toggleDetailLength(event.id)}
+                >
+                  <span>{detailExpanded ? "Show less" : "Show more"}</span>
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-const StreamingMarkdownText = memo(function StreamingMarkdownText({ content, activityEvents }: { content: string; activityEvents: ChatAgentActivityEvent[] }): JSX.Element {
+function maskActivityDetailSecrets(detail: string): string {
+  return detail
+    .replace(/\b(Authorization\s*:\s*Bearer\s+)([^\s"',;]+)/gi, "$1••••")
+    .replace(/((?:^|[\s,{])["']?[A-Za-z0-9_.-]*(?:token|key|password|secret)[A-Za-z0-9_.-]*["']?\s*(?:=|:)\s*["']?)([^\s"',;}]+)/gim, "$1••••");
+}
+
+const StreamingMarkdownText = memo(function StreamingMarkdownText(props: {
+  activityDisclosure: ChatActivityDisclosureState;
+  content: string;
+  activityEvents: ChatAgentActivityEvent[];
+}): JSX.Element {
+  const { activityEvents, content } = props;
   const { completed, tail, tailOffset } = useMemo(() => splitStreamingMarkdown(content), [content]);
   const completedSegment = useMemo<ChatTranscriptSegment>(() => ({
     key: "prefix",
@@ -127,15 +233,28 @@ const StreamingMarkdownText = memo(function StreamingMarkdownText({ content, act
   return (
     <div className="streaming-message-text">
       {(completed || chatActivityEventsForSegment(activityEvents, completedSegment).length > 0) && (
-        <ChatInlineTranscript content={completed} activityEvents={activityEvents} segment={completedSegment} />
+        <ChatInlineTranscript
+          activityDisclosure={props.activityDisclosure}
+          content={completed}
+          activityEvents={activityEvents}
+          segment={completedSegment}
+        />
       )}
-      {tail && <StreamingTailTranscript content={tail} activityEvents={activityEvents} segment={tailSegment} />}
+      {tail && (
+        <StreamingTailTranscript
+          activityDisclosure={props.activityDisclosure}
+          content={tail}
+          activityEvents={activityEvents}
+          segment={tailSegment}
+        />
+      )}
       {!tail && <span className="streaming-caret" aria-hidden="true" />}
     </div>
   );
 });
 
 const StreamingTailTranscript = memo(function StreamingTailTranscript(props: {
+  activityDisclosure: ChatActivityDisclosureState;
   content: string;
   activityEvents: ChatAgentActivityEvent[];
   segment: ChatTranscriptSegment;
@@ -150,7 +269,11 @@ const StreamingTailTranscript = memo(function StreamingTailTranscript(props: {
           {index === parts.length - 1 && <span className="streaming-caret" aria-hidden="true" />}
         </div>
       ) : (
-        <ChatInlineActivityEvent event={part.event} key={part.event.id} />
+        <ChatInlineActivityEvent
+          activityDisclosure={props.activityDisclosure}
+          event={part.event}
+          key={part.event.id}
+        />
       ))}
       {lastPart?.kind === "activity" && <span className="streaming-caret" aria-hidden="true" />}
     </div>
@@ -178,6 +301,9 @@ function iconForActivityKind(kind: ChatAgentActivityKind): LucideIcon {
   if (kind === "command") {
     return Terminal;
   }
+  if (kind === "tool") {
+    return Wrench;
+  }
   if (kind === "file-edit") {
     return FilePenLine;
   }
@@ -187,7 +313,7 @@ function iconForActivityKind(kind: ChatAgentActivityKind): LucideIcon {
   if (kind === "approval") {
     return ShieldCheck;
   }
-  return ChevronRight;
+  return Activity;
 }
 
 function formatElapsed(totalSeconds: number): string {
@@ -199,8 +325,10 @@ function formatElapsed(totalSeconds: number): string {
 function useStreamingElapsedSeconds(startedAt: string): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const handle = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(handle);
+    const handle = globalThis.setInterval(() => setNow(Date.now()), 1000);
+    const nodeTimer = handle as unknown as { unref?: () => void };
+    nodeTimer.unref?.();
+    return () => globalThis.clearInterval(handle);
   }, []);
   const startMs = new Date(startedAt).getTime();
   return Math.max(0, Math.floor((now - startMs) / 1000));

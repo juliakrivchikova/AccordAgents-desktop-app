@@ -42,6 +42,8 @@ import {
   isGeneratedChatHandle
 } from "./chat-participant-draft-handles";
 import {
+  CHAT_ASSISTANT_HANDLE,
+  CHAT_ASSISTANT_ROLE_ID,
   isChatAssistantHandle,
   isChatAssistantParticipant
 } from "../conversation/conversation-display";
@@ -60,6 +62,53 @@ export interface ChatParticipantDraft {
   remoteExecution?: ChatParticipantConfig["remoteExecution"];
   skipToolchainPreflight: boolean;
   autoWatch: boolean;
+}
+
+export type ChatParticipantRuntimeOverride = Partial<Pick<
+  ChatParticipantDraft,
+  "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch"
+>>;
+
+export const NEW_CHAT_ASSISTANT_PARTICIPANT_ID = "__new-chat-assistant__";
+
+export function newChatAssistantParticipantConfig(kind: ChatProviderKind): ChatParticipantConfig {
+  return {
+    id: NEW_CHAT_ASSISTANT_PARTICIPANT_ID,
+    handle: CHAT_ASSISTANT_HANDLE,
+    roleConfigId: CHAT_ASSISTANT_ROLE_ID,
+    behaviorRuleIds: [],
+    kind,
+    agentMode: "default",
+    permissions: {
+      ...defaultChatAgentPermissions(),
+      repoRead: false,
+      workspaceWrite: false,
+      webAccess: false,
+      requestParticipants: "ask",
+      requestCompaction: "ask",
+      shell: {
+        enabled: false,
+        rules: []
+      }
+    },
+    remoteExecution: "local",
+    updatedAt: ""
+  };
+}
+
+export function hasChatParticipantRuntimeOverride(override: ChatParticipantRuntimeOverride | undefined): boolean {
+  return Boolean(override && Object.keys(override).length > 0);
+}
+
+export function newChatAssistantParticipantDraft(
+  kind: ChatProviderKind,
+  runtimeOverride: ChatParticipantRuntimeOverride | undefined
+): ChatParticipantDraft {
+  return chatParticipantConfigToDraftWithRuntimeOverrides(
+    newChatAssistantParticipantConfig(kind),
+    {},
+    runtimeOverride ? { [NEW_CHAT_ASSISTANT_PARTICIPANT_ID]: runtimeOverride } : {}
+  );
 }
 
 export interface AddableSavedParticipantConfig {
@@ -176,18 +225,24 @@ export function chatParticipantConfigToDraft(
 export function selectedChatParticipantDrafts(
   participants: ChatParticipantConfig[],
   selectedIds: Set<string>,
-  remoteExecutionByConfigId: Record<string, CloudRunRemoteExecutionMode> = {}
+  remoteExecutionByConfigId: Record<string, CloudRunRemoteExecutionMode> = {},
+  runtimeOverridesByConfigId: Record<string, ChatParticipantRuntimeOverride> = {}
 ): ChatParticipantDraft[] {
   return participants
     .filter((participant) => selectedIds.has(participant.id))
-    .map((participant) => chatParticipantConfigToDraftWithRunLocation(participant, remoteExecutionByConfigId));
+    .map((participant) => chatParticipantConfigToDraftWithRuntimeOverrides(
+      participant,
+      remoteExecutionByConfigId,
+      runtimeOverridesByConfigId
+    ));
 }
 
 export function selectedOrMentionedChatParticipantDrafts(
   participants: ChatParticipantConfig[],
   selectedIds: Set<string>,
   content: string,
-  remoteExecutionByConfigId: Record<string, CloudRunRemoteExecutionMode> = {}
+  remoteExecutionByConfigId: Record<string, CloudRunRemoteExecutionMode> = {},
+  runtimeOverridesByConfigId: Record<string, ChatParticipantRuntimeOverride> = {}
 ): ChatParticipantDraft[] {
   const nextSelectedIds = new Set(selectedIds);
   for (const participant of participants) {
@@ -201,7 +256,8 @@ export function selectedOrMentionedChatParticipantDrafts(
   return selectedChatParticipantDrafts(
     participants.filter((participant) => !isChatAssistantParticipant(participant)),
     nextSelectedIds,
-    remoteExecutionByConfigId
+    remoteExecutionByConfigId,
+    runtimeOverridesByConfigId
   );
 }
 
@@ -462,13 +518,16 @@ export function validateChatParticipantDrafts(
   return undefined;
 }
 
-function chatParticipantConfigToDraftWithRunLocation(
+function chatParticipantConfigToDraftWithRuntimeOverrides(
   participant: ChatParticipantConfig,
-  remoteExecutionByConfigId: Record<string, CloudRunRemoteExecutionMode>
+  remoteExecutionByConfigId: Record<string, CloudRunRemoteExecutionMode>,
+  runtimeOverridesByConfigId: Record<string, ChatParticipantRuntimeOverride>
 ): ChatParticipantDraft {
   const draft = chatParticipantConfigToDraft(participant);
-  const override = remoteExecutionByConfigId[participant.id];
-  return override ? { ...draft, remoteExecution: normalizeChatRunLocation(override) } : draft;
+  const runtimeOverride = runtimeOverridesByConfigId[participant.id];
+  const remoteExecutionOverride = remoteExecutionByConfigId[participant.id] ?? runtimeOverride?.remoteExecution;
+  const next = runtimeOverride ? { ...draft, ...runtimeOverride } : draft;
+  return remoteExecutionOverride ? { ...next, remoteExecution: normalizeChatRunLocation(remoteExecutionOverride) } : next;
 }
 
 export function validateChatStartupDrafts(

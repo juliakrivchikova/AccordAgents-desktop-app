@@ -68,6 +68,7 @@ import type {
   ReplaceArtifactDraftRequest,
   ReviseArtifactRequest,
   SaveArtifactDraftRequest,
+  SetArtifactArchivedRequest,
   SignArtifactRequest,
   SubmitArtifactDraftRequest,
   UpdateArtifactDraftRosterRequest,
@@ -99,6 +100,7 @@ import {
   APP_ARTIFACT_READ_TOOL,
   APP_ARTIFACT_RENAME_TOOL,
   APP_ARTIFACT_REVISE_TOOL,
+  APP_ARTIFACT_SET_ARCHIVED_TOOL,
   APP_ARTIFACT_SET_ACCESS_TOOL,
   APP_ARTIFACT_SIGN_TOOL
 } from "./services/appMcp";
@@ -106,7 +108,7 @@ import { AppSkillsService } from "./services/appSkills";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { bootstrapAppUpdater } from "./services/appUpdater";
 import { ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
-import { buildCloudRunSshTarget, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
+import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { CloudRunDoctorService } from "./services/cloudRunDoctor";
 import { CloudRunAwsService } from "./services/cloudRunAws";
 import { AwsWorkerSetupService } from "./services/awsWorkerSetup";
@@ -199,6 +201,7 @@ appMcpService.setPermissionChangeHandler((actor, request) => chatService.request
 appMcpService.setToolPermissionHandler((actor, request) => chatService.requestToolPermissionFromTool(actor, request));
 appMcpService.setChatContextHandler((actor) => chatService.describeChatContextForTool(actor));
 appMcpService.setChatParticipantsHandler((actor) => chatService.describeChatParticipantsForTool(actor));
+appMcpService.setChatParticipantActivityHandler((actor) => chatService.describeChatParticipantActivityForTool(actor));
 appMcpService.setChatMessagesHandler((actor, request) => chatService.readChatMessagesForTool(actor, request));
 appMcpService.setChatAttachmentListHandler((actor, request) => chatService.listChatAttachmentsForTool(actor, request));
 appMcpService.setChatAttachmentReadHandler((actor, request) => chatService.readChatAttachmentForTool(actor, request));
@@ -455,6 +458,12 @@ async function dispatchArtifactTool(
         requiredSigners: artifactToolStringArray(args.requiredSigners),
         labels: artifactToolStringArray(args.labels)
       });
+    case APP_ARTIFACT_SET_ARCHIVED_TOOL:
+      return artifactService.setArchived(member, {
+        conversationId,
+        ...ref,
+        archived: args.archived as boolean
+      });
     default:
       throw new Error(`Unknown artifact tool: ${toolName}.`);
   }
@@ -564,18 +573,10 @@ async function testCloudRunWorker(worker: CloudRunWorkerSettings): Promise<{ ok:
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
   const args = [
-    "-o",
-    "BatchMode=yes",
-    "-o",
-    "ConnectTimeout=10"
+    ...cloudRunSshOptionArgs(normalized as CloudRunWorkerSettings & { host: string }),
+    target,
+    "command -v codex >/dev/null && printf ok"
   ];
-  if (normalized.identityFile) {
-    args.push("-i", normalized.identityFile);
-  }
-  if (typeof normalized.port === "number" && Number.isFinite(normalized.port)) {
-    args.push("-p", String(normalized.port));
-  }
-  args.push(target, "command -v codex >/dev/null && printf ok");
   try {
     const result = await runCommand("ssh", args, { timeoutMs: 20_000 });
     return result.stdout.trim() === "ok"
@@ -640,6 +641,9 @@ function registerIpc(): void {
   ipcMain.handle("app:open-local-file", (_event, request: OpenLocalFileRequest) => localFileOpenerService.openLocalFile(request));
   ipcMain.handle("settings:get", () => settingsService.getPublicSettings());
   ipcMain.handle("settings:set-repo-file-open-preference", (_event, action: unknown) => localFileOpenerService.setOpenPreference(action));
+  ipcMain.handle("settings:set-beta-updates", (_event, enabled: boolean) => {
+    return settingsService.setBetaUpdates(enabled);
+  });
   ipcMain.handle("settings:set-cli-agent-run-timeout", async (_event, timeoutMs: number) => {
     const next = await settingsService.setCliAgentRunTimeoutMs(timeoutMs);
     cliAgentRunner.setRunTimeoutMs(next.cliAgentRunTimeoutMs);
@@ -659,19 +663,28 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:save-cloud-runs", (_event, update: CloudRunsSettingsUpdate) => settingsService.saveCloudRunsSettings(update));
   ipcMain.handle("cloud-runs:test-worker", async (_event, request?: CloudRunWorkerSettings) => {
-    return withCloudRunWorker(request, testCloudRunWorker);
+    const result = await withCloudRunWorker(request, testCloudRunWorker);
+    remoteRunService.clearToolchainPreflightCache();
+    await remoteRunService.clearMirrorSyncState();
+    return result;
   });
   ipcMain.handle("cloud-runs:diagnose-worker", async (_event, request?: CloudRunWorkerSettings) => {
     const managedAws = !request && (await settingsService.getPublicSettings()).cloudRuns.mode === "aws";
-    return withCloudRunWorker(request, (worker) => cloudRunDoctorService.diagnose(worker, {
+    const result = await withCloudRunWorker(request, (worker) => cloudRunDoctorService.diagnose(worker, {
       requirePersistentStorage: managedAws
     }));
+    remoteRunService.clearToolchainPreflightCache();
+    await remoteRunService.clearMirrorSyncState();
+    return result;
   });
   ipcMain.handle("cloud-runs:setup-worker", async (_event, request?: CloudRunWorkerSettings) => {
     const managedAws = !request && (await settingsService.getPublicSettings()).cloudRuns.mode === "aws";
-    return withCloudRunWorker(request, (worker) => cloudRunDoctorService.setup(worker, (progress) => {
+    const result = await withCloudRunWorker(request, (worker) => cloudRunDoctorService.setup(worker, (progress) => {
       mainWindow?.webContents.send("cloud-runs:setup-progress", progress);
     }, { requirePersistentStorage: managedAws }));
+    remoteRunService.clearToolchainPreflightCache();
+    await remoteRunService.clearMirrorSyncState();
+    return result;
   });
   ipcMain.handle("cloud-runs:aws-bootstrap-command", (_event, region: string) =>
     cloudRunAwsService.bootstrapCommand(String(region ?? "").trim() || "us-east-1"));
@@ -1238,6 +1251,8 @@ function registerIpc(): void {
     artifactService.sign(ARTIFACT_USER_MEMBER, request));
   ipcMain.handle("artifacts:set-access", (_event, request: UpdateArtifactAccessRequest) =>
     artifactService.updateAccess(ARTIFACT_USER_MEMBER, request));
+  ipcMain.handle("artifacts:set-archived", (_event, request: SetArtifactArchivedRequest) =>
+    artifactService.setArchived(ARTIFACT_USER_MEMBER, request));
   ipcMain.handle("artifacts:drafts:list", (_event, request: ListArtifactDraftsRequest) =>
     artifactService.listDrafts(ARTIFACT_USER_MEMBER, request));
   ipcMain.handle("artifacts:drafts:read", (_event, request: ReadArtifactDraftRequest) =>
@@ -1325,7 +1340,15 @@ async function resolvePluginListRequest(request?: PluginListRequest): Promise<{
 
 void app.whenReady().then(async () => {
   registerIpc();
-  bootstrapAppUpdater(debugLogService);
+  let betaUpdates = false;
+  try {
+    betaUpdates = await settingsService.getBetaUpdatesEnabled();
+  } catch (error) {
+    void debugLogService.write("app-updater-settings-read-error", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+  bootstrapAppUpdater(debugLogService, betaUpdates);
   await appMcpService.start();
   await storageService.init();
   await artifactService.flushPendingArtifactEvents().catch((error) => {

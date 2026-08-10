@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { CliAgentRunner, parseClaudeModelPickerOutput } from "./cliAgents";
+import { CliAgentRunner, CodexAppServerRunError, parseClaudeModelPickerOutput, resolveCodexCompactTimeoutMs } from "./cliAgents";
 import { CommandError } from "./command";
-import { CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
+import { buildCodexExecInvocation, CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 
 function makeRunner(): CliAgentRunner {
   return new CliAgentRunner();
 }
 
-function makeCodexPendingTurn(overrides: Partial<Record<string, unknown>> = {}) {
+function makeCodexPendingTurn(overrides: Partial<Record<string, unknown>> = {}): Record<string, any> {
   const timer = setTimeout(() => undefined, 1);
   clearTimeout(timer);
   return {
@@ -17,6 +20,8 @@ function makeCodexPendingTurn(overrides: Partial<Record<string, unknown>> = {}) 
     threadId: "thread-1",
     messages: [],
     streamedText: "",
+    visibleTranscript: "",
+    activityItems: new Map(),
     completedAgentMessages: [],
     nextAgentMessageStartsBlock: false,
     timer,
@@ -167,6 +172,31 @@ test("codex app-server stream keeps token deltas joined inside one agent message
   assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "hello");
 });
 
+test("codex app-server records provider acceptance from turn and item evidence", () => {
+  const runner = makeRunner() as any;
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const started = makeCodexPendingTurn();
+  runner.handleCodexAppServerNotification(
+    { method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } },
+    participant,
+    started,
+    () => started,
+    fail
+  );
+  assert.equal(started.acceptedByProvider, true);
+
+  const itemEvidence = makeCodexPendingTurn();
+  runner.handleCodexAppServerNotification(
+    { method: "item/started", params: { threadId: "thread-1", turnId: "turn-2", item: { id: "item-1", type: "commandExecution" } } },
+    participant,
+    itemEvidence,
+    () => itemEvidence,
+    fail
+  );
+  assert.equal(itemEvidence.acceptedByProvider, true);
+});
+
 test("codex app-server stream excludes paragraph-separated preamble from final content", () => {
   const runner = makeRunner() as any;
   const outputs: Array<{ kind: string; cumulative?: string }> = [];
@@ -244,6 +274,552 @@ test("codex app-server stream rejoins mid-sentence agent messages around tool us
   assert.equal(outputs.find((event) => event.kind === "tool")?.text, "Using web search\n");
   assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "Current EUR/RUB is about 1 EUR = 89.88 RUB.");
   assert.equal((resolved[0] as { content: string }).content, "Current EUR/RUB is about 1 EUR = 89.88 RUB.");
+});
+
+test("codex app-server stream emits completed native subagent activity", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; text: string; cumulative?: string; activityKind?: string; activityStatus?: string; activityItemId?: string }> = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: { kind: string; text: string; cumulative?: string; activityKind?: string; activityStatus?: string; activityItemId?: string }) => outputs.push(event)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+
+  runner.handleCodexAppServerNotification(
+    { method: "item/completed", params: { item: { type: "subAgentActivity", id: "call-1" } } },
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  assert.deepEqual(outputs, [{
+    kind: "tool",
+    text: "Using subagent\n",
+    cumulative: undefined,
+    activityKind: "tool",
+    activityStatus: "completed",
+    activityItemId: "call-1"
+  }]);
+});
+
+test("codex app-server stream ignores child thread completion while parent turn continues", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const resolved: unknown[] = [];
+  const pending = makeCodexPendingTurn({
+    turnId: "parent-turn",
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+    record,
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  send({ method: "item/started", params: { threadId: "child-thread", turnId: "child-turn", item: { type: "agentMessage" } } });
+  send({ method: "item/agentMessage/delta", params: { threadId: "child-thread", turnId: "child-turn", delta: "CHILD_RESULT" } });
+  send({ method: "item/completed", params: { threadId: "child-thread", turnId: "child-turn", item: { type: "agentMessage", text: "CHILD_RESULT" } } });
+  send({ method: "turn/completed", params: { threadId: "child-thread", turn: { id: "child-turn", status: "completed" } } });
+
+  assert.equal(resolved.length, 0);
+  assert.equal(outputs.length, 0);
+
+  send({ method: "item/started", params: { threadId: "thread-1", turnId: "parent-turn", item: { type: "agentMessage" } } });
+  send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "parent-turn", delta: "PARENT_FINAL" } });
+  send({ method: "item/completed", params: { threadId: "thread-1", turnId: "parent-turn", item: { type: "agentMessage", text: "PARENT_FINAL" } } });
+  send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "parent-turn", status: "completed" } } });
+
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "PARENT_FINAL");
+  assert.equal((resolved[0] as { content: string }).content, "PARENT_FINAL");
+});
+
+test("codex app-server stream accepts goal continuation root turn ids in the same thread", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const resolved: unknown[] = [];
+  const pending = makeCodexPendingTurn({
+    turnId: "requested-turn",
+    nativeGoal: { status: "active", turnCompleted: false },
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+    record,
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "requested-turn", status: "completed" } } });
+  assert.equal(resolved.length, 0);
+
+  send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "goal-continuation-turn" } } });
+  send({ method: "item/started", params: { threadId: "thread-1", turnId: "goal-continuation-turn", item: { type: "agentMessage" } } });
+  send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "goal-continuation-turn", delta: "Status: tests are running." } });
+  send({ method: "item/completed", params: { threadId: "thread-1", turnId: "goal-continuation-turn", item: { type: "agentMessage", text: "Status: tests are running." } } });
+  send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "goal-continuation-turn", status: "completed" } } });
+  assert.equal(resolved.length, 0);
+  send({
+    method: "thread/goal/updated",
+    params: {
+      threadId: "thread-1",
+      turnId: "goal-continuation-turn",
+      goal: { status: "complete", objective: "finish the task" }
+    }
+  });
+
+  assert.equal(pending.turnId, "goal-continuation-turn");
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "Status: tests are running.");
+  assert.equal((resolved[0] as { content: string }).content, "Status: tests are running.");
+});
+
+test("codex app-server surfaces non-success native goal terminal states", () => {
+  const runner = makeRunner() as any;
+  const resolved: unknown[] = [];
+  const pending = makeCodexPendingTurn({
+    nativeGoal: { status: "active", turnCompleted: false },
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+    record,
+    { id: "p1", label: "Agent" },
+    pending,
+    () => pending,
+    (error: Error) => { throw error; }
+  );
+
+  send({ method: "turn/completed", params: { threadId: "thread-1", turn: { status: "completed" } } });
+  send({ method: "thread/goal/updated", params: { threadId: "thread-1", goal: { status: "usageLimited" } } });
+
+  assert.equal((resolved[0] as { ok: boolean }).ok, false);
+  assert.match((resolved[0] as { error: string }).error, /usage limited/);
+});
+
+test("codex app-server stream keeps raw tool output out of agent text and completes bounded activities", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{
+    kind: string;
+    text?: string;
+    cumulative?: string;
+    activityStatus?: string;
+    activityItemId?: string;
+    activityDetail?: string;
+  }> = [];
+  const resolved: unknown[] = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: typeof outputs[number]) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+    record,
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "message-1", type: "agentMessage", phase: "commentary" }
+    }
+  });
+  send({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "message-1", type: "agentMessage", phase: "commentary", text: "I’ll inspect it." }
+    }
+  });
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "command-1", type: "commandExecution", command: "npm test" }
+    }
+  });
+  send({
+    method: "item/commandExecution/outputDelta",
+    params: { threadId: "thread-1", turnId: "turn-1", itemId: "command-1", delta: "RAW_COMMAND_DELTA\n" }
+  });
+  send({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        id: "command-1",
+        type: "commandExecution",
+        command: "npm test",
+        aggregatedOutput: "COMMAND_OUTPUT_FIRST\nCOMMAND_OUTPUT_LAST\n"
+      }
+    }
+  });
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        id: "file-1",
+        type: "fileChange",
+        changes: [{ kind: "update", path: "src/example.ts", diff: "RAW_FULL_DIFF" }]
+      }
+    }
+  });
+  send({
+    method: "item/fileChange/outputDelta",
+    params: { threadId: "thread-1", turnId: "turn-1", itemId: "file-1", delta: "RAW_FILE_DELTA\n" }
+  });
+  send({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        id: "file-1",
+        type: "fileChange",
+        changes: [{ kind: "update", path: "src/example.ts", diff: "RAW_FULL_DIFF" }]
+      }
+    }
+  });
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        id: "mcp-1",
+        type: "mcpToolCall",
+        tool: "app_roles_describe_options",
+        arguments: { role: "engineer" }
+      }
+    }
+  });
+  send({
+    method: "item/mcpToolCall/progress",
+    params: { threadId: "thread-1", turnId: "turn-1", itemId: "mcp-1", message: "RAW_MCP_PROGRESS" }
+  });
+  send({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        id: "mcp-1",
+        type: "mcpToolCall",
+        result: { content: [{ type: "text", text: "MCP_RESULT_LAST" }] }
+      }
+    }
+  });
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "message-2", type: "agentMessage", phase: "final_answer" }
+    }
+  });
+  send({
+    method: "item/agentMessage/delta",
+    params: { threadId: "thread-1", turnId: "turn-1", delta: "Done." }
+  });
+  send({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "message-2", type: "agentMessage", phase: "final_answer", text: "Done." }
+    }
+  });
+  send({
+    method: "turn/completed",
+    params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } }
+  });
+
+  const commandEvents = outputs.filter((event) => event.activityItemId === "command-1");
+  assert.deepEqual(commandEvents.map((event) => event.activityStatus), ["started", "completed"]);
+  assert.match(commandEvents.at(-1)?.activityDetail ?? "", /^npm test\n\nOutput tail:/);
+  assert.match(commandEvents.at(-1)?.activityDetail ?? "", /COMMAND_OUTPUT_LAST/);
+
+  const fileEvents = outputs.filter((event) => event.activityItemId === "file-1");
+  assert.deepEqual(fileEvents.map((event) => event.activityStatus), ["started", "completed"]);
+  assert.equal(fileEvents.at(-1)?.activityDetail, "update: src/example.ts");
+  assert.doesNotMatch(fileEvents.at(-1)?.activityDetail ?? "", /RAW_FULL_DIFF/);
+
+  const mcpEvents = outputs.filter((event) => event.activityItemId === "mcp-1");
+  assert.deepEqual(mcpEvents.map((event) => event.activityStatus), ["started", "completed"]);
+  assert.equal(mcpEvents[1]?.text, mcpEvents[0]?.text);
+  assert.match(mcpEvents.at(-1)?.activityDetail ?? "", /"role": "engineer"/);
+  assert.match(mcpEvents.at(-1)?.activityDetail ?? "", /MCP_RESULT_LAST/);
+
+  const visibleTranscript = outputs.filter((event) => event.kind === "text").at(-1)?.cumulative ?? "";
+  assert.equal(visibleTranscript, "I’ll inspect it.\n\nDone.");
+  assert.doesNotMatch(
+    visibleTranscript,
+    /RAW_COMMAND_DELTA|COMMAND_OUTPUT_FIRST|RAW_FILE_DELTA|RAW_FULL_DIFF|RAW_MCP_PROGRESS|MCP_RESULT_LAST/
+  );
+  assert.equal((resolved[0] as { content: string }).content, "Done.");
+});
+
+test("codex app-server completed activity output keeps only a marked 20-line 2,000-character tail", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{
+    kind: string;
+    activityStatus?: string;
+    activityDetail?: string;
+  }> = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: typeof outputs[number]) => outputs.push(event)
+  });
+  const aggregatedOutput = Array.from(
+    { length: 30 },
+    (_, index) => `line-${index.toString().padStart(2, "0")}:${"x".repeat(150)}`
+  ).join("\r\n");
+
+  runner.handleCodexAppServerNotification(
+    {
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        item: {
+          id: "command-1",
+          type: "commandExecution",
+          command: "generate lots of output",
+          aggregatedOutput
+        }
+      }
+    },
+    { id: "p1", label: "Agent" },
+    pending,
+    () => pending,
+    (error: Error): never => { throw error; }
+  );
+
+  const detail = outputs.find((event) => event.activityStatus === "completed")?.activityDetail ?? "";
+  const preview = detail.split("Output tail:\n")[1] ?? "";
+  assert.match(detail, /^generate lots of output\n\nOutput tail:/);
+  assert.ok(preview.length <= 2_000);
+  assert.match(preview, /earlier lines/);
+  assert.match(preview, /chars omitted/);
+  assert.doesNotMatch(preview, /line-00:/);
+  assert.match(preview, /line-29:/);
+});
+
+test("codex app-server bounds MCP and dynamic tool invocation summaries without starving output tails", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{
+    kind: string;
+    cumulative?: string;
+    activityStatus?: string;
+    activityItemId?: string;
+    activityDetail?: string;
+  }> = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: typeof outputs[number]) => outputs.push(event)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+    record,
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+  const argumentsPayload = {
+    path: "src/large.ts",
+    content: `INVOCATION_START_${"x".repeat(5_000)}_RAW_ARGUMENT_END`
+  };
+
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      item: {
+        id: "mcp-large",
+        type: "mcpToolCall",
+        tool: "write_file",
+        arguments: argumentsPayload
+      }
+    }
+  });
+  send({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      item: {
+        id: "mcp-large",
+        type: "mcpToolCall",
+        result: { content: [{ type: "text", text: "MCP_RESULT_LAST" }] }
+      }
+    }
+  });
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      item: {
+        id: "dynamic-large",
+        type: "dynamicToolCall",
+        tool: "write_file",
+        arguments: argumentsPayload
+      }
+    }
+  });
+
+  const mcpEvents = outputs.filter((event) => event.activityItemId === "mcp-large");
+  const startedDetail = mcpEvents[0]?.activityDetail ?? "";
+  const completedDetail = mcpEvents[1]?.activityDetail ?? "";
+  assert.ok(startedDetail.length <= 1_800);
+  assert.match(startedDetail, /"path": "src\/large\.ts"/);
+  assert.match(startedDetail, /INVOCATION_START/);
+  assert.match(startedDetail, /chars omitted/);
+  assert.doesNotMatch(startedDetail, /RAW_ARGUMENT_END/);
+  assert.ok(completedDetail.length < 4_000);
+  assert.match(completedDetail, /INVOCATION_START/);
+  assert.match(completedDetail, /Output tail:\nMCP_RESULT_LAST$/);
+
+  const dynamicDetail = outputs.find((event) => event.activityItemId === "dynamic-large")?.activityDetail ?? "";
+  assert.ok(dynamicDetail.length <= 1_800);
+  assert.match(dynamicDetail, /chars omitted/);
+  assert.doesNotMatch(dynamicDetail, /RAW_ARGUMENT_END/);
+  assert.equal(outputs.filter((event) => event.kind === "text").length, 0);
+});
+
+test("codex app-server keeps a stable fallback identity for no-id subagent completion", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{
+    kind: string;
+    activityStatus?: string;
+    activityItemId?: string;
+    activityDetail?: string;
+  }> = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: typeof outputs[number]) => outputs.push(event)
+  });
+  const send = (kind: string): void => runner.handleCodexAppServerNotification(
+    {
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        item: { type: "subAgentActivity", kind }
+      }
+    },
+    { id: "p1", label: "Agent" },
+    pending,
+    () => pending,
+    (error: Error): never => { throw error; }
+  );
+
+  send("thinking");
+  send("done");
+
+  assert.deepEqual(outputs.map((event) => event.activityStatus), ["completed", "completed"]);
+  assert.deepEqual(outputs.map((event) => event.activityItemId), ["subAgentActivity", "subAgentActivity"]);
+  assert.deepEqual(outputs.map((event) => event.activityDetail), ["thinking", "done"]);
+});
+
+test("codex app-server stream ignores same-thread completion for a different tracked turn", () => {
+  const runner = makeRunner() as any;
+  const resolved: unknown[] = [];
+  let cleanupCount = 0;
+  const pending = makeCodexPendingTurn({
+    turnId: "root-turn",
+    streamedText: "final",
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const cleanup = (): typeof pending => {
+    cleanupCount += 1;
+    return pending;
+  };
+
+  runner.handleCodexAppServerNotification(
+    { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "other-turn", status: "completed" } } },
+    participant,
+    pending,
+    cleanup,
+    fail
+  );
+  runner.handleCodexAppServerNotification(
+    { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "root-turn", status: "completed" } } },
+    participant,
+    pending,
+    cleanup,
+    fail
+  );
+
+  assert.equal(cleanupCount, 1);
+  assert.equal((resolved[0] as { content: string }).content, "final");
+});
+
+test("codex app-server stream keeps command output out of agent text when a turn is interrupted", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{
+    kind: string;
+    cumulative?: string;
+    activityStatus?: string;
+    activityDetail?: string;
+  }> = [];
+  const rejected: Error[] = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: typeof outputs[number]) => outputs.push(event),
+    reject: (error: Error) => rejected.push(error)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+    record,
+    participant,
+    pending,
+    () => pending,
+    (error: Error) => rejected.push(error)
+  );
+
+  send({
+    method: "item/started",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "command-1", type: "commandExecution", command: "printf READY; sleep 30" }
+    }
+  });
+  send({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "command-1", type: "commandExecution", aggregatedOutput: "READY\n" }
+    }
+  });
+  send({
+    method: "turn/completed",
+    params: { threadId: "thread-1", turn: { id: "turn-1", status: "interrupted" } }
+  });
+
+  assert.equal(outputs.filter((event) => event.kind === "text").length, 0);
+  assert.match(
+    outputs.find((event) => event.activityStatus === "completed")?.activityDetail ?? "",
+    /^printf READY; sleep 30\n\nOutput tail:\nREADY$/
+  );
+  assert.equal(rejected.length, 1);
+  assert.match(rejected[0]?.message ?? "", /interrupted/);
 });
 
 test("codex app-server stream keeps parenthetical citation boundaries as paragraph breaks outside final content", () => {
@@ -345,6 +921,125 @@ test("codex app-server keeps internal multi-paragraph final item complete", () =
   assert.equal((resolved[0] as { content: string }).content, final);
 });
 
+test("codex app-server keeps a fenced commentary block separate from a multi-paragraph final answer", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const resolved: unknown[] = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+  const commentary = [
+    "I’ll preserve the exact block.",
+    "```ts",
+    "const first = 1;",
+    "",
+    "const second = 2;",
+    "```"
+  ].join("\n");
+  const final = [
+    "The code block remains intact.",
+    "",
+    "The final answer keeps both paragraphs."
+  ].join("\n");
+  const sendAgentItem = (id: string, phase: string, text: string): void => {
+    runner.handleCodexAppServerNotification(
+      { method: "item/started", params: { item: { id, type: "agentMessage", phase } } },
+      participant,
+      pending,
+      () => pending,
+      fail
+    );
+    const splitAt = Math.floor(text.length / 2);
+    for (const delta of [text.slice(0, splitAt), text.slice(splitAt)]) {
+      runner.handleCodexAppServerNotification(
+        { method: "item/agentMessage/delta", params: { itemId: id, delta } },
+        participant,
+        pending,
+        () => pending,
+        fail
+      );
+    }
+    runner.handleCodexAppServerNotification(
+      { method: "item/completed", params: { item: { id, type: "agentMessage", phase, text } } },
+      participant,
+      pending,
+      () => pending,
+      fail
+    );
+  };
+
+  sendAgentItem("commentary-1", "commentary", commentary);
+  sendAgentItem("final-1", "final_answer", final);
+  runner.handleCodexAppServerNotification(
+    { method: "turn/completed", params: { turn: { status: "completed" } } },
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, `${commentary}\n\n${final}`);
+  assert.equal((resolved[0] as { content: string }).content, final);
+});
+
+test("codex app-server normalizes agent CRLF split across deltas and flushes a final carriage return", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const resolved: unknown[] = [];
+  const pending = makeCodexPendingTurn({
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent" };
+  const fail = (error: Error): never => { throw error; };
+
+  runner.handleCodexAppServerNotification(
+    { method: "item/started", params: { item: { id: "message-1", type: "agentMessage" } } },
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+  for (const delta of ["First line\r", "\nSecond line\r"]) {
+    runner.handleCodexAppServerNotification(
+      { method: "item/agentMessage/delta", params: { itemId: "message-1", delta } },
+      participant,
+      pending,
+      () => pending,
+      fail
+    );
+  }
+  runner.handleCodexAppServerNotification(
+    {
+      method: "item/completed",
+      params: {
+        item: {
+          id: "message-1",
+          type: "agentMessage",
+          text: "First line\r\nSecond line\r"
+        }
+      }
+    },
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+  runner.handleCodexAppServerNotification(
+    { method: "turn/completed", params: { turn: { status: "completed" } } },
+    participant,
+    pending,
+    () => pending,
+    fail
+  );
+
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "First line\nSecond line\r");
+  assert.equal((resolved[0] as { content: string }).content, "First line\nSecond line");
+});
+
 test("codex app-server falls back to trailing paragraph when completions are missing", () => {
   const runner = makeRunner() as any;
   const resolved: unknown[] = [];
@@ -377,6 +1072,55 @@ test("codex app-server falls back to trailing paragraph when completions are mis
   );
 
   assert.equal((resolved[0] as { content: string }).content, "Final answer.");
+});
+
+test("agent message fence boundaries remain opt-in for Codex", () => {
+  const runner = makeRunner() as any;
+  const previous = "Here is the helper:\n```ts\nconst value = 1;\n```";
+  const next = "Done — tests pass.";
+
+  assert.equal(runner.agentMessageBoundarySeparator(previous, next), " ");
+  assert.equal(
+    runner.agentMessageBoundarySeparator(previous, next, { fencedBlockEndsBlock: true }),
+    "\n\n"
+  );
+});
+
+test("claude warm stream and final content preserve the shipped fence boundary", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; cumulative?: string }> = [];
+  const resolved: unknown[] = [];
+  const pending = makeClaudeWarmPendingTurn({
+    onOutput: (event: { kind: string; cumulative?: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event),
+    participant,
+    {},
+    undefined,
+    pending,
+    () => pending,
+    fail
+  );
+  const fencedBlock = "Here is the helper:\n```ts\nconst value = 1;\n```";
+  const continuation = "Done — tests pass.";
+  const expected = `${fencedBlock} ${continuation}`;
+
+  send({ type: "stream_event", event: { type: "content_block_start", content_block: { type: "text" } } });
+  send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: fencedBlock } } });
+  send({ type: "stream_event", event: { type: "content_block_start", content_block: { type: "text" } } });
+  send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: continuation } } });
+  // This intentionally pins shipped Claude behavior until a dedicated CLI-parity
+  // change establishes the correct fence composition with current CLI evidence.
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: fencedBlock }] } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: continuation }] } });
+  send({ type: "result" });
+
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, expected);
+  assert.equal((resolved[0] as { content: string }).content, expected);
 });
 
 test("claude warm stream rejoins mid-sentence text blocks", () => {
@@ -826,6 +1570,7 @@ test("claude auto chat preauthorizes the eligible exposed app MCP inventory only
   const eligibleAppTools = [
     "mcp__accord_agents__app_chat_get_context",
     "mcp__accord_agents__app_chat_get_participants",
+    "mcp__accord_agents__app_chat_get_participant_activity",
     "mcp__accord_agents__app_chat_get_participant_request_status",
     "mcp__accord_agents__app_chat_read_messages",
     "mcp__accord_agents__app_chat_list_attachments",
@@ -843,6 +1588,7 @@ test("claude auto chat preauthorizes the eligible exposed app MCP inventory only
     appToolNames: [
       "app_chat_get_context",
       "app_chat_get_participants",
+      "app_chat_get_participant_activity",
       "app_chat_get_participant_request_status",
       "app_chat_read_messages",
       "app_chat_list_attachments",
@@ -993,6 +1739,50 @@ test("claude outside-directory parity fixture adds no app path denial or writabl
   assert.equal(serialized.includes("writable_roots"), false);
 });
 
+test("claude native goal uses one streaming print invocation", () => {
+  const runner = makeRunner() as any;
+  const options = {
+    ...chatOptions({
+      agentMode: "auto",
+      workspaceWrite: true,
+      webAccess: true
+    }),
+    nativeGoal: { name: "goal", objective: "finish the task" }
+  };
+  const config = runner.claudeToolConfig("chat", "/repo", [], options);
+  const args = runner.claudeLaunchArgs(
+    { id: "claude-1", kind: "claude-code", label: "@claude" },
+    "chat",
+    options,
+    config,
+    [],
+    "one-shot-stream",
+    "session-1"
+  ) as string[];
+
+  assert.equal(args.filter((value) => value === "-p").length, 1);
+  assert.equal(args.includes("--include-partial-messages"), true);
+  assert.equal(args[args.indexOf("--output-format") + 1], "stream-json");
+  assert.equal(args.includes("--input-format"), false);
+});
+
+test("native goal idle detector warns once per idle episode and rearms on activity", async () => {
+  const runner = makeRunner() as any;
+  const outputs: unknown[] = [];
+  const monitor = runner.createNativeGoalIdleMonitor(
+    { id: "p1", kind: "claude-code", label: "Claude" },
+    (event: unknown) => outputs.push(event),
+    15
+  );
+  await new Promise((resolve) => setTimeout(resolve, 45));
+  assert.equal(outputs.length, 1);
+  assert.equal((outputs[0] as { activityDetail?: string }).activityDetail, undefined);
+  monitor.touch();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(outputs.length, 2);
+  monitor.close();
+});
+
 test("claude auto chat without app MCP still omits allowedTools", () => {
   const runner = makeRunner() as any;
   const options = chatOptions({
@@ -1070,7 +1860,7 @@ test("claude non-chat keeps strict app MCP config and explicit tools", () => {
   assert.deepEqual(runner.claudeToolsArgs("code-review", config, options).slice(0, 1), ["--tools"]);
 });
 
-test("codex app-server auto mode applies workspace-write web preset and guardian reviewer", () => {
+test("codex app-server auto mode applies workspace-write web preset and native auto reviewer", () => {
   const runner = makeRunner() as any;
   const participant = {
     kind: "codex-cli",
@@ -1090,10 +1880,770 @@ test("codex app-server auto mode applies workspace-write web preset and guardian
   );
 
   assert.equal(params.approvalPolicy, "on-request");
-  assert.equal(params.approvalsReviewer, "guardian_subagent");
+  assert.equal(params.approvalsReviewer, "auto_review");
   assert.equal(params.sandbox, "workspace-write");
   assert.equal(params.config.web_search, "live");
   assert.equal(params.config.model_reasoning_effort, "xhigh");
+});
+
+test("Codex model catalog handles server requests and rejects external-token refresh contract drift", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-model-catalog-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+let initializeId;
+let modelListId;
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    if (message.params?.capabilities?.requestAttestation !== false) process.exit(61);
+    initializeId = message.id;
+    send({ id: "current-time", method: "currentTime/read", params: {} });
+  } else if (message.id === "current-time") {
+    if (typeof message.result?.currentTimeAt !== "number") process.exit(62);
+    send({ id: initializeId, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "model/list") {
+    modelListId = message.id;
+    send({ id: "token-refresh", method: "account/chatgptAuthTokens/refresh", params: { reason: "unauthorized", previousAccountId: null } });
+  } else if (message.id === "token-refresh") {
+    if (message.error?.code !== -32601 || !String(message.error?.message).includes("never supplies external ChatGPT tokens")) process.exit(63);
+    send({ id: modelListId, result: { data: [{ id: "gpt-fixture", displayName: "Fixture", isDefault: true }], nextCursor: null } });
+  } else if (message.method === "account/login/start") {
+    process.exit(64);
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath);
+  try {
+    const catalog = await runner.listModelCatalog("codex-cli");
+    assert.equal(catalog.authoritative, true, catalog.error);
+    assert.equal(catalog.models[0]?.id, "gpt-fixture");
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("every non-interactive Codex exec path explicitly disables approvals", () => {
+  for (const options of [
+    { agentMode: "default" as const },
+    { agentMode: "plan" as const, sessionId: "session-1" },
+    { agentMode: "auto" as const, remoteSandbox: { networkAccess: true, gitWritableRoot: "/tmp/repo" } }
+  ]) {
+    const invocation = buildCodexExecInvocation({
+      participant: { id: "participant", kind: "codex-cli", label: "Codex" },
+      prompt: "Prompt",
+      outputPath: "/tmp/output",
+      repoPath: "/tmp/repo",
+      kind: "chat",
+      options
+    });
+    assert.equal(invocation.args.includes('approval_policy="never"'), true, invocation.args.join(" "));
+  }
+});
+
+test("codex app-server production transport round-trips an approval and acknowledges delivery", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-app-server-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    if (message.params?.capabilities?.requestAttestation !== false) process.exit(21);
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+    return;
+  }
+  if (message.method === "thread/start" || message.method === "thread/resume") {
+    send({ id: message.id, result: { thread: { id: "thread-fixture" }, model: "gpt-5" } });
+    return;
+  }
+  if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-fixture" } } });
+    send({ method: "turn/started", params: { threadId: "thread-fixture", turn: { id: "turn-fixture" } } });
+    send({
+      id: "approval-fixture",
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "thread-fixture",
+        turnId: "turn-fixture",
+        itemId: "item-fixture",
+        startedAtMs: 1,
+        environmentId: null,
+        command: "git push origin scratch",
+        cwd: process.cwd(),
+        availableDecisions: ["accept", "decline"]
+      }
+    });
+    return;
+  }
+  if (message.id === "approval-fixture") {
+    if (message.result?.decision !== "accept") process.exit(22);
+    send({ method: "item/agentMessage/delta", params: { threadId: "thread-fixture", turnId: "turn-fixture", itemId: "agent-fixture", delta: "Approval delivered." } });
+    send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { id: "agent-fixture", type: "agentMessage", text: "Approval delivered." } } });
+    send({ method: "turn/completed", params: { threadId: "thread-fixture", turn: { id: "turn-fixture", status: "completed" } } });
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  let delivered = false;
+  try {
+    const result = await runner.runCodexAppServerWarmOrOneShot(
+      { id: "participant-fixture", kind: "codex-cli", label: "Codex" },
+      "Run the protected command.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      {
+        agentMode: "auto",
+        warm: {
+          conversationId: "conversation-fixture",
+          participantId: "participant-fixture",
+          contextKey: "context-fixture",
+          idleTimeoutMs: 60_000
+        },
+        onCodexServerRequest: async (request: { method: string; responseDelivered: Promise<void> }) => {
+          assert.equal(request.method, "item/commandExecution/requestApproval");
+          void request.responseDelivered.then(() => { delivered = true; });
+          return { decision: "accept" };
+        }
+      }
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.match(result.content, /Approval delivered/);
+    assert.equal(delivered, true);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("codex app-server production transport returns method-specific results for every direct approval method", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-direct-methods-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+const permissions = { network: { enabled: true }, fileSystem: null };
+const approvals = [
+  { id: "direct-command", method: "item/commandExecution/requestApproval", params: {
+    threadId: "thread-methods", turnId: "turn-methods", itemId: "item-command", startedAtMs: 1,
+    approvalId: "callback-a", environmentId: null, command: "git status", cwd: process.cwd(), availableDecisions: ["acceptForSession"]
+  }, expected: { decision: "acceptForSession" } },
+  { id: "direct-command-b", method: "item/commandExecution/requestApproval", params: {
+    threadId: "thread-methods", turnId: "turn-methods", itemId: "item-command", startedAtMs: 1,
+    approvalId: "callback-b", environmentId: null, command: "git status", cwd: process.cwd(), availableDecisions: ["decline"]
+  }, expected: { decision: "decline" } },
+  { id: "direct-file", method: "item/fileChange/requestApproval", params: {
+    threadId: "thread-methods", turnId: "turn-methods", itemId: "item-file", startedAtMs: 2,
+    reason: null, grantRoot: null
+  }, expected: { decision: "accept" } },
+  { id: "direct-permissions", method: "item/permissions/requestApproval", params: {
+    threadId: "thread-methods", turnId: "turn-methods", itemId: "item-permissions", environmentId: null,
+    startedAtMs: 3, cwd: process.cwd(), reason: "Need network", permissions
+  }, expected: { permissions, scope: "turn" } },
+  { id: "legacy-command", method: "execCommandApproval", params: {
+    conversationId: "thread-methods", callId: "call-command", approvalId: "subcommand-1",
+    command: ["printf", "two words"], cwd: process.cwd(), reason: null, parsedCmd: []
+  }, expected: { decision: "approved_for_session" } },
+  { id: "legacy-file", method: "applyPatchApproval", params: {
+    conversationId: "thread-methods", callId: "call-file",
+    fileChanges: { "scratch.txt": { type: "add", content: "safe" } }, reason: null, grantRoot: null
+  }, expected: { decision: "approved" } }
+];
+let next = 0;
+const sendNext = () => {
+  if (approvals[next].id === "direct-file") {
+    send({ method: "item/fileChange/patchUpdated", params: {
+      threadId: "thread-methods", turnId: "turn-methods", itemId: "item-file",
+      changes: [{ path: "scratch.txt", kind: { type: "update" } }]
+    } });
+  }
+  send(approvals[next]);
+};
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    if (message.params?.capabilities?.requestAttestation !== false) process.exit(31);
+    if (message.method === "account/login/start") process.exit(32);
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "thread/start") {
+    send({ id: message.id, result: { thread: { id: "thread-methods" }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-methods" } } });
+    send({ method: "turn/started", params: { threadId: "thread-methods", turn: { id: "turn-methods" } } });
+    sendNext();
+  } else if (next < approvals.length && message.id === approvals[next].id) {
+    if (JSON.stringify(message.result) !== JSON.stringify(approvals[next].expected)) process.exit(33 + next);
+    next += 1;
+    if (next < approvals.length) {
+      sendNext();
+    } else {
+      send({ method: "item/agentMessage/delta", params: { threadId: "thread-methods", turnId: "turn-methods", itemId: "agent-methods", delta: "All method-specific results delivered." } });
+      send({ method: "item/completed", params: { threadId: "thread-methods", turnId: "turn-methods", item: { id: "agent-methods", type: "agentMessage", text: "All method-specific results delivered." } } });
+      send({ method: "turn/completed", params: { threadId: "thread-methods", turn: { id: "turn-methods", status: "completed" } } });
+    }
+  } else if (message.method === "account/login/start") {
+    process.exit(38);
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  const seen: string[] = [];
+  try {
+    const result = await runner.runCodexAppServerWarmOrOneShot(
+      { id: "participant-methods", kind: "codex-cli", label: "Codex" },
+      "Exercise direct approvals.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      {
+        agentMode: "auto",
+        warm: {
+          conversationId: "conversation-methods",
+          participantId: "participant-methods",
+          contextKey: "context-methods",
+          idleTimeoutMs: 60_000
+        },
+        onCodexServerRequest: async (request: { method: string; params?: Record<string, unknown> }) => {
+          seen.push(request.method);
+          if (request.method === "item/commandExecution/requestApproval") {
+            return seen.filter((method) => method === request.method).length === 1
+              ? { decision: "acceptForSession" }
+              : { decision: "decline" };
+          }
+          if (request.method === "item/fileChange/requestApproval") {
+            assert.deepEqual(request.params?.fileChanges, [{ path: "scratch.txt", kind: { type: "update" } }]);
+            return { decision: "accept" };
+          }
+          if (request.method === "item/permissions/requestApproval") return { permissions: { network: { enabled: true }, fileSystem: null }, scope: "turn" };
+          if (request.method === "execCommandApproval") return { decision: "approved_for_session" };
+          return { decision: "approved" };
+        }
+      }
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(seen, [
+      "item/commandExecution/requestApproval",
+      "item/commandExecution/requestApproval",
+      "item/fileChange/requestApproval",
+      "item/permissions/requestApproval",
+      "execCommandApproval",
+      "applyPatchApproval"
+    ]);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("codex app-server production transport sends the exact same-session Guardian override", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-guardian-override-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "thread/start") {
+    send({ id: message.id, result: { thread: { id: "thread-guardian" }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-guardian" } } });
+    send({ method: "turn/started", params: { threadId: "thread-guardian", turn: { id: "turn-guardian" } } });
+    send({ method: "item/autoApprovalReview/completed", params: {
+      threadId: "thread-guardian", turnId: "turn-guardian", startedAtMs: 10, completedAtMs: 20,
+      reviewId: "review-guardian", targetItemId: "item-guardian", decisionSource: "agent",
+      review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: "Protected action" },
+      action: { type: "command", source: "unifiedExec", command: "git push origin scratch", cwd: process.cwd() }
+    } });
+    send({ method: "item/completed", params: { threadId: "thread-guardian", turnId: "turn-guardian", item: {
+      id: "item-guardian", type: "commandExecution", status: "failed", command: "git push origin scratch"
+    } } });
+    send({ method: "item/agentMessage/delta", params: {
+      threadId: "thread-guardian", turnId: "turn-guardian", itemId: "agent-guardian", delta: "Guardian denial recorded."
+    } });
+    send({ method: "item/completed", params: { threadId: "thread-guardian", turnId: "turn-guardian", item: {
+      id: "agent-guardian", type: "agentMessage", text: "Guardian denial recorded."
+    } } });
+    send({ method: "turn/completed", params: {
+      threadId: "thread-guardian", turn: { id: "turn-guardian", status: "completed" }
+    } });
+  } else if (message.method === "thread/approveGuardianDeniedAction") {
+    const event = message.params?.event;
+    if (message.params?.threadId !== "thread-guardian" || event?.type !== "guardian_assessment" ||
+      event?.id !== "review-guardian" || event?.target_item_id !== "item-guardian" || event?.turn_id !== "turn-guardian" ||
+      event?.action?.type !== "command" || event?.action?.source !== "unified_exec") process.exit(51);
+    send({ id: message.id, result: {} });
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  let deliveryAcknowledged = false;
+  let guardianSignal: AbortSignal | undefined;
+  let resolveDecision!: () => void;
+  let resolveDelivery!: () => void;
+  let rejectDelivery!: (error: unknown) => void;
+  const delivery = new Promise<void>((resolve, reject) => {
+    resolveDelivery = resolve;
+    rejectDelivery = reject;
+  });
+  void delivery.catch(() => undefined);
+  try {
+    const result = await runner.runCodexAppServerWarmOrOneShot(
+      { id: "participant-guardian", kind: "codex-cli", label: "Codex" },
+      "Retry the protected command.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      {
+        agentMode: "auto",
+        warm: {
+          conversationId: "conversation-guardian",
+          participantId: "participant-guardian",
+          contextKey: "context-guardian",
+          idleTimeoutMs: 60_000
+        },
+        onCodexServerRequest: (request: { method: string; signal: AbortSignal; responseDelivered: Promise<void> }) => {
+          assert.equal(request.method, "item/autoApprovalReview/denied");
+          guardianSignal = request.signal;
+          void request.responseDelivered.then(() => {
+            deliveryAcknowledged = true;
+            resolveDelivery();
+          }, rejectDelivery);
+          return new Promise((resolve, reject) => {
+            resolveDecision = () => resolve({ decision: "approveRetry" });
+            request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+          });
+        }
+      }
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.match(result.content, /Guardian denial recorded/);
+    assert.equal(guardianSignal?.aborted, false);
+    assert.equal(deliveryAcknowledged, false);
+    resolveDecision();
+    await Promise.race([
+      delivery,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Guardian override was not acknowledged")), 1_500))
+    ]);
+    assert.equal(deliveryAcknowledged, true);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("codex app-server expires a completed-turn Guardian denial before the next turn starts", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-guardian-next-turn-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+let turn = 0;
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "thread/start") {
+    send({ id: message.id, result: { thread: { id: "thread-guardian-next" }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    turn += 1;
+    const turnId = "turn-guardian-" + turn;
+    send({ id: message.id, result: { turn: { id: turnId } } });
+    send({ method: "turn/started", params: { threadId: "thread-guardian-next", turn: { id: turnId } } });
+    if (turn === 1) {
+      send({ method: "item/autoApprovalReview/completed", params: {
+        threadId: "thread-guardian-next", turnId, startedAtMs: 10, completedAtMs: 20,
+        reviewId: "review-guardian-next", targetItemId: "item-guardian-next", decisionSource: "agent",
+        review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: "Protected action" },
+        action: { type: "command", source: "unifiedExec", command: "git push origin scratch", cwd: process.cwd() }
+      } });
+      send({ method: "item/completed", params: { threadId: "thread-guardian-next", turnId, item: {
+        id: "item-guardian-next", type: "commandExecution", status: "failed", command: "git push origin scratch"
+      } } });
+    }
+    const text = turn === 1 ? "First turn completed." : "Second turn completed.";
+    send({ method: "item/agentMessage/delta", params: { threadId: "thread-guardian-next", turnId, itemId: "agent-" + turn, delta: text } });
+    send({ method: "item/completed", params: { threadId: "thread-guardian-next", turnId, item: { id: "agent-" + turn, type: "agentMessage", text } } });
+    send({ method: "turn/completed", params: { threadId: "thread-guardian-next", turn: { id: turnId, status: "completed" } } });
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  const participant = { id: "participant-guardian-next", kind: "codex-cli", label: "Codex" } as const;
+  const warm = {
+    conversationId: "conversation-guardian-next",
+    participantId: "participant-guardian-next",
+    contextKey: "context-guardian-next",
+    idleTimeoutMs: 60_000
+  };
+  let approvalAborted = false;
+  let guardianSignal: AbortSignal | undefined;
+  try {
+    const first = await runner.runCodexAppServerWarmOrOneShot(
+      participant,
+      "Attempt the protected command.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      {
+        agentMode: "auto",
+        warm,
+        onCodexServerRequest: (request: { signal: AbortSignal; responseDelivered: Promise<void> }) => {
+          guardianSignal = request.signal;
+          void request.responseDelivered.catch(() => undefined);
+          return new Promise((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => {
+              approvalAborted = true;
+              reject(request.signal.reason);
+            }, { once: true });
+          });
+        }
+      }
+    );
+    assert.equal(first.ok, true, JSON.stringify(first));
+    assert.match(first.content, /First turn completed/);
+    assert.equal(guardianSignal?.aborted, false);
+
+    const second = await runner.runCodexAppServerWarmOrOneShot(
+      participant,
+      "Start a fresh turn.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      { agentMode: "auto", warm }
+    );
+    assert.equal(second.ok, true, JSON.stringify(second));
+    assert.match(second.content, /Second turn completed/);
+    assert.equal(approvalAborted, true);
+    assert.equal(guardianSignal?.aborted, true);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("codex app-server expires a completed-turn Guardian denial before compaction", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-guardian-compact-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "thread/start" || message.method === "thread/resume") {
+    send({ id: message.id, result: { thread: { id: "thread-guardian-compact" }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-guardian-compact" } } });
+    send({ method: "turn/started", params: { threadId: "thread-guardian-compact", turn: { id: "turn-guardian-compact" } } });
+    send({ method: "item/autoApprovalReview/completed", params: {
+      threadId: "thread-guardian-compact", turnId: "turn-guardian-compact", startedAtMs: 10, completedAtMs: 20,
+      reviewId: "review-guardian-compact", targetItemId: "item-guardian-compact", decisionSource: "agent",
+      review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: "Protected action" },
+      action: { type: "command", source: "unifiedExec", command: "git push origin scratch", cwd: process.cwd() }
+    } });
+    send({ method: "item/completed", params: { threadId: "thread-guardian-compact", turnId: "turn-guardian-compact", item: {
+      id: "item-guardian-compact", type: "commandExecution", status: "failed", command: "git push origin scratch"
+    } } });
+    send({ method: "item/agentMessage/delta", params: { threadId: "thread-guardian-compact", turnId: "turn-guardian-compact", itemId: "agent-guardian-compact", delta: "Guardian denial recorded." } });
+    send({ method: "item/completed", params: { threadId: "thread-guardian-compact", turnId: "turn-guardian-compact", item: { id: "agent-guardian-compact", type: "agentMessage", text: "Guardian denial recorded." } } });
+    send({ method: "turn/completed", params: { threadId: "thread-guardian-compact", turn: { id: "turn-guardian-compact", status: "completed" } } });
+  } else if (message.method === "thread/compact/start") {
+    send({ id: message.id, result: {} });
+    send({ method: "turn/started", params: { threadId: "thread-guardian-compact", turn: { id: "compact-turn" } } });
+    send({ method: "turn/completed", params: { threadId: "thread-guardian-compact", turn: { id: "compact-turn", status: "completed" } } });
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  const participant = { id: "participant-guardian-compact", kind: "codex-cli", label: "Codex" } as const;
+  const warm = {
+    conversationId: "conversation-guardian-compact",
+    participantId: "participant-guardian-compact",
+    contextKey: "context-guardian-compact",
+    idleTimeoutMs: 60_000
+  };
+  let approvalAborted = false;
+  try {
+    const first = await runner.runCodexAppServerWarmOrOneShot(
+      participant,
+      "Attempt the protected command.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      {
+        agentMode: "auto",
+        warm,
+        onCodexServerRequest: (request: { signal: AbortSignal; responseDelivered: Promise<void> }) => {
+          void request.responseDelivered.catch(() => undefined);
+          return new Promise((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => {
+              approvalAborted = true;
+              reject(request.signal.reason);
+            }, { once: true });
+          });
+        }
+      }
+    );
+    assert.equal(first.ok, true, JSON.stringify(first));
+    assert.equal(approvalAborted, false);
+
+    const compact = await runner.compactSession(
+      participant,
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      { agentMode: "auto", sessionId: first.sessionId, warm }
+    );
+    assert.equal(compact.ok, true, JSON.stringify(compact));
+    assert.equal(approvalAborted, true);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("Codex Stop still terminates the turn when the approval refusal pipe is dead", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-dead-pipe-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "thread/start") {
+    send({ id: message.id, result: { thread: { id: "thread-dead-pipe" }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-dead-pipe" } } });
+    send({ method: "turn/started", params: { threadId: "thread-dead-pipe", turn: { id: "turn-dead-pipe" } } });
+    send({ id: "approval-dead-pipe", method: "item/fileChange/requestApproval", params: {
+      threadId: "thread-dead-pipe", turnId: "turn-dead-pipe", itemId: "item-dead-pipe", startedAtMs: 1, reason: null, grantRoot: null
+    } });
+    require("node:fs").closeSync(0);
+    setInterval(() => {}, 1000);
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  const controller = new AbortController();
+  let requestSeen!: () => void;
+  let approvalAborted = false;
+  const seen = new Promise<void>((resolve) => { requestSeen = resolve; });
+  try {
+    const run = runner.runCodexAppServerWarmOrOneShot(
+      { id: "participant-dead-pipe", kind: "codex-cli", label: "Codex" },
+      "Apply the protected change.",
+      fixtureDir,
+      undefined,
+      "chat",
+      controller.signal,
+      {
+        agentMode: "auto",
+        warm: {
+          conversationId: "conversation-dead-pipe",
+          participantId: "participant-dead-pipe",
+          contextKey: "context-dead-pipe",
+          idleTimeoutMs: 60_000
+        },
+        onCodexServerRequest: (request: { signal: AbortSignal }) => {
+          requestSeen();
+          return new Promise((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => {
+              approvalAborted = true;
+              reject(request.signal.reason);
+            }, { once: true });
+          });
+        }
+      }
+    );
+    await seen;
+    controller.abort(new Error("Stopped by user."));
+    const result = await Promise.race([
+      run,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Stop hung after dead approval pipe")), 1_500))
+    ]);
+    assert.equal(result.ok, false);
+    assert.equal(approvalAborted, true);
+    assert.match(result.error ?? "", /cancelled|Stopped by user|EPIPE/i);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("Codex ignores cross-thread resolution and retires approval when its item completes", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-retire-approval-"));
+  const codexPath = path.join(fixtureDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "thread/start") {
+    send({ id: message.id, result: { thread: { id: "thread-retire" }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-retire" } } });
+    send({ method: "turn/started", params: { threadId: "thread-retire", turn: { id: "turn-retire" } } });
+    send({ id: "approval-retire", method: "item/commandExecution/requestApproval", params: {
+      threadId: "thread-retire", turnId: "turn-retire", itemId: "item-retire", startedAtMs: 1,
+      environmentId: null, command: "git status", cwd: process.cwd(), availableDecisions: ["accept", "decline"]
+    } });
+    send({ method: "serverRequest/resolved", params: { threadId: "thread-other", requestId: "approval-retire" } });
+    setTimeout(() => {
+      send({ method: "item/completed", params: { threadId: "thread-retire", turnId: "turn-retire", item: {
+        id: "item-retire", type: "commandExecution", status: "completed", command: "git status"
+      } } });
+      send({ method: "turn/completed", params: { threadId: "thread-retire", turn: { id: "turn-retire", status: "completed" } } });
+    }, 75);
+  }
+});
+`, "utf8");
+  await chmod(codexPath, 0o755);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  let aborted = false;
+  const output: string[] = [];
+  try {
+    const result = await runner.runCodexAppServerWarmOrOneShot(
+      { id: "participant-retire", kind: "codex-cli", label: "Codex" },
+      "Run the protected command.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      {
+        agentMode: "auto",
+        warm: {
+          conversationId: "conversation-retire",
+          participantId: "participant-retire",
+          contextKey: "context-retire",
+          idleTimeoutMs: 60_000
+        },
+        onOutput: (event: { text?: string }) => { if (event.text) output.push(event.text); },
+        onCodexServerRequest: (request: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+          request.signal.addEventListener("abort", () => {
+            aborted = true;
+            reject(request.signal.reason);
+          }, { once: true });
+        })
+      }
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(aborted, true);
+    assert.match(output.join(""), /Ignored serverRequest\/resolved for thread thread-other/);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("codex app-server never replays a prompt after the provider accepted the turn", async () => {
+  const runner = makeRunner() as any;
+  let oneShotRuns = 0;
+  runner.createCodexAppServerWarmAgent = () => ({
+    key: "warm-key",
+    scopeKey: "conversation-1:participant-1",
+    providerKind: "codex-cli",
+    process: { exitCode: null },
+    queue: Promise.resolve(),
+    closed: false,
+    run: async () => {
+      throw new CodexAppServerRunError(new Error("app-server disconnected"), true);
+    }
+  });
+  runner.closeWarmAgent = async () => undefined;
+  runner.runCodexOneShot = async () => {
+    oneShotRuns += 1;
+    return { ok: true, content: "REPLAYED" };
+  };
+
+  const result = await runner.runCodexAppServerWarmOrOneShot(
+    { id: "participant-1", kind: "codex-cli", label: "Codex" },
+    "ONE_SHOT_PROMPT",
+    "/tmp/repo",
+    undefined,
+    "chat",
+    undefined,
+    {
+      warm: {
+        conversationId: "conversation-1",
+        participantId: "participant-1",
+        contextKey: "context-1",
+        idleTimeoutMs: 60_000
+      }
+    }
+  );
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /app-server disconnected/);
+  assert.equal(oneShotRuns, 0);
+});
+
+test("codex app-server retains one-shot fallback only before provider turn acceptance", async () => {
+  const runner = makeRunner() as any;
+  let oneShotRuns = 0;
+  runner.createCodexAppServerWarmAgent = () => ({
+    key: "warm-key",
+    scopeKey: "conversation-1:participant-1",
+    providerKind: "codex-cli",
+    process: { exitCode: null },
+    queue: Promise.resolve(),
+    closed: false,
+    run: async () => {
+      throw new CodexAppServerRunError(new Error("initialize failed"), false);
+    }
+  });
+  runner.closeWarmAgent = async () => undefined;
+  runner.runCodexOneShot = async () => {
+    oneShotRuns += 1;
+    return { ok: true, content: "FALLBACK" };
+  };
+
+  const result = await runner.runCodexAppServerWarmOrOneShot(
+    { id: "participant-1", kind: "codex-cli", label: "Codex" },
+    "PROMPT",
+    "/tmp/repo",
+    undefined,
+    "chat",
+    undefined,
+    {
+      warm: {
+        conversationId: "conversation-1",
+        participantId: "participant-1",
+        contextKey: "context-1",
+        idleTimeoutMs: 60_000
+      }
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.content, "FALLBACK");
+  assert.equal(oneShotRuns, 1);
 });
 
 test("reasoning effort mapping is provider-specific", () => {
@@ -1128,7 +2678,7 @@ test("codex app-server resume re-asserts the auto preset so a mode switch applie
   // so switching to auto mid-chat takes effect without dropping the session.
   assert.equal(params.threadId, "session-1");
   assert.equal(params.approvalPolicy, "on-request");
-  assert.equal(params.approvalsReviewer, "guardian_subagent");
+  assert.equal(params.approvalsReviewer, "auto_review");
   assert.equal(params.sandbox, "workspace-write");
   assert.equal(params.config.web_search, "live");
 });
@@ -1224,6 +2774,12 @@ test("codex app-server compact instructions become a scoped compact_prompt overr
   assert.equal(params.threadId, "session-1");
   assert.match(params.config.compact_prompt, /Compact the conversation context/);
   assert.match(params.config.compact_prompt, /keep focus on parser and CLI protocol details/);
+});
+
+test("codex app-server compact ignores the unbounded native-goal turn timeout", () => {
+  assert.equal(resolveCodexCompactTimeoutMs(0), 5 * 60_000);
+  assert.equal(resolveCodexCompactTimeoutMs(undefined), 5 * 60_000);
+  assert.equal(resolveCodexCompactTimeoutMs(42_000), 42_000);
 });
 
 test("codex app-server does not override compact_prompt unless compact instructions are scoped", () => {

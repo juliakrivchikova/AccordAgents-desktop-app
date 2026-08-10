@@ -10,6 +10,7 @@ import {
   APP_ARTIFACT_DRAFT_WITHDRAW_TOOL,
   APP_ARTIFACT_CREATE_TOOL,
   APP_ARTIFACT_PUBLISH_TOOL,
+  APP_ARTIFACT_SET_ARCHIVED_TOOL,
   artifactToolDefinitions
 } from "./appMcp";
 import { validateArtifactCreateToolRequest } from "./artifactToolRequest";
@@ -31,7 +32,8 @@ test("draft MCP tools expose lifecycle operations without caller-controlled iden
     APP_ARTIFACT_DRAFT_REPLACE_TOOL,
     APP_ARTIFACT_DRAFT_WITHDRAW_TOOL,
     APP_ARTIFACT_DRAFT_SET_ROSTER_TOOL,
-    APP_ARTIFACT_PUBLISH_TOOL
+    APP_ARTIFACT_PUBLISH_TOOL,
+    APP_ARTIFACT_SET_ARCHIVED_TOOL
   ];
   for (const name of expected) {
     const definition = definitions.find((candidate) => candidate.name === name);
@@ -61,6 +63,10 @@ test("draft MCP tools expose lifecycle operations without caller-controlled iden
   assert.match(replace?.title ?? "", /Editable/);
   assert.match(replace?.description ?? "", /does not submit or freeze/i);
   assert.match(replace?.description ?? "", /Submit Artifact Draft/);
+
+  const archive = definitions.find((candidate) => candidate.name === APP_ARTIFACT_SET_ARCHIVED_TOOL);
+  assert.match(JSON.stringify(archive?.inputSchema), /"archived"/);
+  assert.match(archive?.description ?? "", /without deleting/i);
 });
 
 test("create dispatch validation rejects mixed lifecycle fields", () => {

@@ -122,6 +122,50 @@ test("describeInstance translates InvalidInstanceID.NotFound to absence", async 
   assert.equal(await client.describeInstance("i-gone"), undefined);
 });
 
+test("terminateInstance treats InvalidInstanceID.NotFound as an idempotent success", async () => {
+  const ec2 = fakeClient(async () => {
+    const error = new Error("The instance ID 'i-gone' does not exist");
+    error.name = "InvalidInstanceID.NotFound";
+    throw error;
+  });
+  const client = new SdkEc2Client(ec2 as EC2Client, fakeClient(async () => ({})) as EC2InstanceConnectClient, "us-east-1");
+  await assert.doesNotReject(() => client.terminateInstance("i-gone"));
+});
+
+test("deleteKeyPair skips the doomed delete-by-name when the key is already gone", async () => {
+  const sent: string[] = [];
+  const ec2 = fakeClient(async (command) => {
+    sent.push(command.constructor.name);
+    if (command.constructor.name === "DescribeKeyPairsCommand") {
+      const error = new Error("does not exist");
+      error.name = "InvalidKeyPair.NotFound";
+      throw error;
+    }
+    // A scoped policy denies delete-by-name of an absent key; if we ever reach
+    // here the teardown would falsely fail. The skip must prevent that.
+    const denied = new Error("You are not authorized to perform this operation.");
+    denied.name = "UnauthorizedOperation";
+    throw denied;
+  });
+  const client = new SdkEc2Client(ec2 as EC2Client, fakeClient(async () => ({})) as EC2InstanceConnectClient, "us-east-1");
+  await assert.doesNotReject(() => client.deleteKeyPair("accordagents-worker-gone"));
+  assert.equal(sent.includes("DeleteKeyPairCommand"), false);
+});
+
+test("deleteKeyPair deletes the key when it still exists", async () => {
+  const sent: string[] = [];
+  const ec2 = fakeClient(async (command) => {
+    sent.push(command.constructor.name);
+    if (command.constructor.name === "DescribeKeyPairsCommand") {
+      return { KeyPairs: [{ KeyName: "accordagents-worker-live" }] };
+    }
+    return {};
+  });
+  const client = new SdkEc2Client(ec2 as EC2Client, fakeClient(async () => ({})) as EC2InstanceConnectClient, "us-east-1");
+  await client.deleteKeyPair("accordagents-worker-live");
+  assert.equal(sent.includes("DeleteKeyPairCommand"), true);
+});
+
 test("device ingress replacement revokes only this device's stale rule", async () => {
   const calls: Array<{ name: string; input: any }> = [];
   const ec2 = fakeClient(async (command) => {

@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type {
   AppSettings,
   ChatAppToolApprovalRequest,
@@ -18,12 +19,14 @@ export interface ChatMessageFocusRequest {
   conversationId?: string;
   messageId: string;
   threadRootId?: string;
+  approvalId?: string;
   nonce: number;
   pending?: boolean;
 }
 
 export interface ChatConversationViewProps {
   conversation: Conversation;
+  topBar?: ReactNode;
   settings: AppSettings;
   progress: ReviewProgress[];
   isRunning: boolean;
@@ -59,11 +62,13 @@ export interface ChatConversationViewProps {
     approvalId: string,
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
-    draftOverride?: ChatAppToolApprovalRequest
+    draftOverride?: ChatAppToolApprovalRequest,
+    codexDecisionId?: string
   ) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   onCompactParticipant: ParticipantCompactHandler;
   onStopRun?: (runId: string) => void;
+  onJumpToParticipantLastMessage: (participantId: string) => void;
   /** Called after a click outside the focused (highlighted) message dismisses that highlight. */
   onDismissMessageFocus?: () => void;
 }

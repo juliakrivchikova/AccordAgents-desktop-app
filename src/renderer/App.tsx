@@ -44,6 +44,8 @@ import { AppNotices } from "./app/app-notices";
 import { pluginNewChatDraft, pluginNewChatMentions } from "./app/plugin-new-chat";
 import { clearActivityItem, markActivityItemRead } from "./app/activity-item-state";
 import { errorText } from "./components/review/review-conversation-data";
+import { isCodexActivityApprovalItem } from "../shared/chatActivity";
+import { CHAT_SPLIT_WORKSPACE_MIN_WIDTH } from "./lib/chat-split-sizing";
 import "./styles/app.css";
 function App(): JSX.Element {
   const state = useAppState();
@@ -124,6 +126,9 @@ function App(): JSX.Element {
     state.setError(undefined);
     try {
       if (item.kind === "approval" && item.target.approvalId) {
+        if (isCodexActivityApprovalItem(item)) {
+          throw new Error("Open this Codex approval in chat and select one of its offered decisions.");
+        }
         const conversation = await window.consensus.respondToChatAppToolApproval({
           conversationId: item.conversationId,
           approvalId: item.target.approvalId,
@@ -250,6 +255,8 @@ function App(): JSX.Element {
       )}
     </>
   );
+  const chatUsesInlineTopBar = state.railView === "chats" && Boolean(view.activeChatConversation);
+  const chatTopBar = <TopBar leading={topBarLeading} title={topBarTitle} actions={topBarActions} className={isNewChatScreen ? "new-chat-topbar" : undefined} />;
   const conversationPanel = view.hasResultContext ? (
     <ConversationPanel
       state={state}
@@ -262,9 +269,13 @@ function App(): JSX.Element {
       openingConversationDescription={openingConversationDescription}
       accordDisabledReason={accordDisabledReason}
       onOpenAccord={() => setAccordDialogOpen(true)}
+      topBar={chatUsesInlineTopBar ? chatTopBar : undefined}
       artifacts={artifacts}
     />
   ) : undefined;
+  const shellTopBar = state.railView === "settings" || state.railView === "activity" || chatUsesInlineTopBar
+    ? null
+    : chatTopBar;
 
   return (
     <AppShell
@@ -311,6 +322,7 @@ function App(): JSX.Element {
       sidebarHidden={state.railView === "activity"}
       sidebarWidth={state.sidebarWidth}
       onSidebarWidthChange={state.setSidebarWidth}
+      minWorkspaceWidth={view.hasResultContext ? CHAT_SPLIT_WORKSPACE_MIN_WIDTH : undefined}
       className={isNewChatScreen ? "is-new-chat-screen" : undefined}
       sidebar={
         state.railView === "settings" ? (
@@ -339,7 +351,7 @@ function App(): JSX.Element {
           />
         )
       }
-      topBar={state.railView === "settings" || state.railView === "activity" ? null : <TopBar leading={topBarLeading} title={topBarTitle} actions={topBarActions} className={isNewChatScreen ? "new-chat-topbar" : undefined} />}
+      topBar={shellTopBar}
     >
       <AppNotices
         error={state.error}
@@ -378,6 +390,7 @@ function App(): JSX.Element {
           saveChatParticipantConfig={settingsActions.saveChatParticipantConfig}
           deleteChatParticipantConfig={settingsActions.deleteChatParticipantConfig}
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
+          setBetaUpdates={settingsActions.setBetaUpdates}
           setCliAgentRunTimeoutMs={settingsActions.setCliAgentRunTimeoutMs}
           setChatParticipantRequestMaxDepth={settingsActions.setChatParticipantRequestMaxDepth}
           setChatParticipantRequestPromptMaxChars={settingsActions.setChatParticipantRequestPromptMaxChars}
@@ -403,6 +416,15 @@ function App(): JSX.Element {
             {conversationPanel ?? <AppLoadingState title="Loading chat" description={openingConversationDescription} />}
           </div>}
           onSelect={(item) => {
+            if (isCodexActivityApprovalItem(item)) {
+              state.setRailView("chats");
+              state.setSidebarCollapsed(false);
+              state.setSelectedActivityItem(undefined);
+              window.requestAnimationFrame(() => {
+                void conversationActions.openConversationAndFocusActivityItem(item);
+              });
+              return;
+            }
             // Selecting an activity item never marks anything read: unread state only
             // clears through the explicit "Mark read" action (or by opening the chat
             // itself in the chats view). markViewed: false keeps the detail open from
@@ -439,6 +461,7 @@ function App(): JSX.Element {
                 repoInfo={state.repoInfo}
                 selectedParticipantIds={state.selectedChatParticipantConfigIds}
                 selectedParticipantRunLocations={state.selectedChatParticipantRunLocations}
+                selectedParticipantRuntimeOverrides={state.selectedChatParticipantRuntimeOverrides}
                 settings={state.settings}
                 summaries={state.summaries}
                 agents={state.agents}
@@ -462,6 +485,7 @@ function App(): JSX.Element {
                 onSelectRepo={() => void conversationActions.selectRepo()}
                 onSelectedParticipantIdsChange={conversationActions.updateSelectedChatParticipantConfigIds}
                 onSelectedParticipantRunLocationsChange={state.setSelectedChatParticipantRunLocations}
+                onSelectedParticipantRuntimeOverridesChange={state.setSelectedChatParticipantRuntimeOverrides}
                 onOpenParticipantsSettings={() => openSettingsSection("participants")}
                 onOpenProviderSettings={() => openSettingsSection("general")}
                 onRefreshAgents={() => conversationActions.refreshAgents({ force: true, trigger: "manual" })}

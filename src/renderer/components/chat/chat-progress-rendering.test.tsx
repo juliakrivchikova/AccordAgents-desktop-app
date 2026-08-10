@@ -120,7 +120,7 @@ test("stable chat message actions keep row callback identities while calling lat
     "second:choice:message-4:choice-1:true"
   ]);
 
-  renderer!.unmount();
+  await act(async () => renderer!.unmount());
 });
 
 function stableActionHandlers(label: string, calls: string[]): StableChatMessageActionHandlers {

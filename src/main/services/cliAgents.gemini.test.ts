@@ -1,12 +1,22 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { ParticipantConfig } from "../../shared/types";
-import { CliAgentRunner, geminiMcpProxyLaunchArgs, syncGeminiMcpConfig } from "./cliAgents";
+import {
+  antigravityInteractiveGoalAtPrompt,
+  antigravityInteractivePermissionPrompt,
+  CliAgentRunner,
+  geminiMcpProxyLaunchArgs,
+  syncGeminiMcpConfig
+} from "./cliAgents";
 import {
   buildGeminiExecInvocation,
+  buildGeminiInteractiveGoalInvocation,
   extractGeminiLogConversationId,
   geminiTranscriptPathForConversation,
   isGeminiResumeMissText,
@@ -118,6 +128,114 @@ test("buildGeminiExecInvocation: app MCP url/token travel through the process en
   });
   assert.equal(invocation.env?.ACCORD_AGENTS_MCP_URL, "http://127.0.0.1:5123/mcp");
   assert.equal(invocation.env?.ACCORD_AGENTS_MCP_TOKEN, "secret-token");
+});
+
+test("Gemini MCP proxy generically forwards the participant activity tool", async () => {
+  let forwardedBody = "";
+  let forwardedAuthorization = "";
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      forwardedBody = Buffer.concat(chunks).toString("utf8");
+      forwardedAuthorization = String(request.headers.authorization ?? "");
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        jsonrpc: "2.0",
+        id: 7,
+        result: { content: [{ type: "text", text: "forwarded" }] }
+      }));
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as { port: number };
+  const child = spawn(process.execPath, [path.join(__dirname, "geminiMcpProxy.js")], {
+    env: {
+      ...process.env,
+      ACCORD_AGENTS_MCP_URL: `http://127.0.0.1:${address.port}/mcp`,
+      ACCORD_AGENTS_MCP_TOKEN: "proxy-test-token"
+    },
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+  try {
+    child.stdout.setEncoding("utf8");
+    const response = new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Timed out waiting for Gemini MCP proxy response.")), 5_000);
+      child.stdout.once("data", (chunk: string) => {
+        clearTimeout(timeout);
+        resolve(chunk);
+      });
+      child.once("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+    });
+    child.stdin.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: {
+        name: "app_chat_get_participant_activity",
+        arguments: {}
+      }
+    })}\n`);
+
+    assert.deepEqual(JSON.parse(await response), {
+      jsonrpc: "2.0",
+      id: 7,
+      result: { content: [{ type: "text", text: "forwarded" }] }
+    });
+    assert.equal(forwardedAuthorization, "Bearer proxy-test-token");
+    assert.equal(JSON.parse(forwardedBody).params.name, "app_chat_get_participant_activity");
+  } finally {
+    child.kill();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("buildGeminiInteractiveGoalInvocation preserves native /goal and print-mode permission parity", () => {
+  const invocation = buildGeminiInteractiveGoalInvocation({
+    participant,
+    prompt: "Finish the task",
+    repoPath: "/repo/project",
+    kind: "chat",
+    logFilePath: "/tmp/run/goal.log",
+    options: {
+      sessionId: "11111111-2222-4333-8444-555555555555",
+      agentMode: "auto",
+      extraReadableDirs: ["/extra/history"]
+    }
+  });
+  assert.match(invocation.goalPrompt, /^\/goal /);
+  assert.match(invocation.goalPrompt, /Finish the task/);
+  assert.equal(flagValue(invocation.args, "--conversation"), "11111111-2222-4333-8444-555555555555");
+  assert.equal(flagValue(invocation.args, "--log-file"), "/tmp/run/goal.log");
+  assert.equal(invocation.args.includes("--print"), false);
+  assert.equal(invocation.args.includes("--dangerously-skip-permissions"), true);
+  assert.equal(invocation.args.includes("--model"), false);
+});
+
+test("Antigravity native goal waits for the returned interactive prompt", () => {
+  const initial = "? for shortcuts\n> /goal do work\nGenerating...";
+  assert.equal(antigravityInteractiveGoalAtPrompt("? for shortcuts"), false);
+  assert.equal(antigravityInteractiveGoalAtPrompt(initial), false);
+  assert.equal(antigravityInteractiveGoalAtPrompt(`${initial}\nFINAL\n? for shortcuts`), true);
+});
+
+test("Antigravity native goal recognizes the read-only TUI permission dialog", () => {
+  assert.equal(antigravityInteractivePermissionPrompt("Requesting permission for:\n pwd"), false);
+  assert.equal(
+    antigravityInteractivePermissionPrompt("Requesting permission for:\n pwd\nDo you want to proceed?"),
+    true
+  );
+});
+
+test("extractGeminiLogConversationId reads interactive PTY conversation creation", () => {
+  assert.equal(
+    extractGeminiLogConversationId("I0731 server.go:1007] Created conversation a092be41-dd4a-4577-b8d7-995c16cb8961"),
+    "a092be41-dd4a-4577-b8d7-995c16cb8961"
+  );
 });
 
 test("parseGeminiExecResult: parses the real success payload including usage", () => {

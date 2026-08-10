@@ -16,7 +16,7 @@ import type {
 } from "../../shared/types";
 import type { SettingsSection } from "../components/settings/settings-view";
 import type { ChatMessageFocusRequest } from "../components/chat/chat-conversation-view";
-import type { ChatParticipantDraft } from "../components/chat/chat-participant-drafts";
+import type { ChatParticipantDraft, ChatParticipantRuntimeOverride } from "../components/chat/chat-participant-drafts";
 import type { DraftPluginMention } from "../components/chat/chat-composer-draft-utils";
 import type { PendingChatImage } from "../components/chat/use-chat-composer-images";
 import { DEFAULT_SETTINGS } from "./constants";
@@ -117,6 +117,8 @@ export interface AppState {
   setSelectedChatParticipantConfigIds: StateSetter<Set<string>>;
   selectedChatParticipantRunLocations: Record<string, CloudRunRemoteExecutionMode>;
   setSelectedChatParticipantRunLocations: StateSetter<Record<string, CloudRunRemoteExecutionMode>>;
+  selectedChatParticipantRuntimeOverrides: Record<string, ChatParticipantRuntimeOverride>;
+  setSelectedChatParticipantRuntimeOverrides: StateSetter<Record<string, ChatParticipantRuntimeOverride>>;
   chatMessageDraft: string;
   setChatMessageDraft: StateSetter<string>;
   chatAddParticipantDraft: ChatParticipantDraft | undefined;
@@ -185,6 +187,7 @@ export function useAppState(): AppState {
   const [planCorrectionDraft, setPlanCorrectionDraft] = useState("");
   const [selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds] = useState<Set<string>>(new Set());
   const [selectedChatParticipantRunLocations, setSelectedChatParticipantRunLocations] = useState<Record<string, CloudRunRemoteExecutionMode>>({});
+  const [selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides] = useState<Record<string, ChatParticipantRuntimeOverride>>({});
   const [chatMessageDraft, setChatMessageDraft] = useState("");
   const [chatAddParticipantDraft, setChatAddParticipantDraft] = useState<ChatParticipantDraft | undefined>();
   const [chatMessageFocusRequest, setChatMessageFocusRequest] = useState<ChatMessageFocusRequest | undefined>();
@@ -235,6 +238,7 @@ export function useAppState(): AppState {
     setPendingClarifications, planItemReviewDrafts, setPlanItemReviewDrafts, planCorrectionDraft,
     setPlanCorrectionDraft, selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds,
     selectedChatParticipantRunLocations, setSelectedChatParticipantRunLocations,
+    selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides,
     chatMessageDraft, setChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
     setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef,

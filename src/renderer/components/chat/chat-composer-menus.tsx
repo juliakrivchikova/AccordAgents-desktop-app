@@ -1,5 +1,5 @@
 import { useEffect, useRef, type MutableRefObject, type ReactNode } from "react";
-import { FileBox, FileText, ListChecks, Minimize2, Plug } from "lucide-react";
+import { FileBox, FileText, ListChecks, Minimize2, Plug, Target } from "lucide-react";
 
 import type {
   ArtifactSummary,
@@ -22,7 +22,7 @@ export function ChatComposerMenus(props: {
   artifactOptions?: ArtifactSummary[];
   fileIndex: number;
   insertArtifactMention?: (artifact: ArtifactSummary) => void;
-  insertCompactCommand: () => void;
+  insertCommand: (command: "compact" | "goal") => void;
   insertFileMention: (file: RepoFileSearchResult) => void;
   insertMention: (participant: ChatParticipant) => void;
   insertSavedPrompt: (prompt: ChatSavedPromptConfig) => void;
@@ -141,13 +141,15 @@ export function ChatComposerMenus(props: {
                 className={index === props.skillIndex ? "selected" : ""}
                 onMouseDown={(event) => {
                   event.preventDefault();
-                  props.insertCompactCommand();
+                  props.insertCommand(option.item.id);
                 }}
                 role="option"
                 aria-selected={index === props.skillIndex}
                 key={`command:${option.item.id}`}
               >
-                <span className="file-mention-icon"><Minimize2 size={18} /></span>
+                <span className="file-mention-icon">
+                  {option.item.id === "goal" ? <Target size={18} /> : <Minimize2 size={18} />}
+                </span>
                 <strong>{option.item.label}</strong>
                 <span>{option.item.description}</span>
                 <small>Command</small>
