@@ -68,6 +68,7 @@ export interface ChatConversationViewProps {
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   onCompactParticipant: ParticipantCompactHandler;
   onStopRun?: (runId: string) => void;
+  onJumpToParticipantLastMessage: (participantId: string) => void;
   /** Called after a click outside the focused (highlighted) message dismisses that highlight. */
   onDismissMessageFocus?: () => void;
 }

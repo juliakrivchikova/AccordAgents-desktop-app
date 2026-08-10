@@ -8,7 +8,8 @@ await mkdir(outdir, { recursive: true });
 await build({
   entryPoints: {
     "new-chat-screen.test": path.join(process.cwd(), "src/renderer/components/chat/new-chat-screen.test.tsx"),
-    "use-chat-actions.test": path.join(process.cwd(), "src/renderer/app/use-chat-actions.test.tsx")
+    "use-chat-actions.test": path.join(process.cwd(), "src/renderer/app/use-chat-actions.test.tsx"),
+    "chat-active-run-popover.test": path.join(process.cwd(), "src/renderer/components/chat/chat-active-run-popover.test.tsx")
   },
   outdir,
   outExtension: { ".js": ".mjs" },
