@@ -27,6 +27,7 @@ design-diff-report.json
 design-diff.design.png
 design-diff.live.png
 .claude/worktrees/
+.worktrees/
 design_handoff/
 docs/product/
 
