@@ -72,10 +72,10 @@ test("listConversationMessages decodes an escape-heavy message recipe", async ()
   assert.equal(count(payloadJson, "\""), quoteCount);
   assert.equal(count(payloadJson, "\\"), backslashCount);
 
-  const storage = fakeStorage(async (sql) => sql.includes("payloadJson")
+  const storage = fakeStorage(async (sql) => sql.includes("hex(payload_json) as payloadHex")
     ? [{
         sequence,
-        payloadJson: Buffer.from(payloadJson, "utf8").toString("hex")
+        payloadHex: Buffer.from(payloadJson, "utf8").toString("hex")
       }]
     : [{ totalMessages: 1 }]);
   const page = await storage.listConversationMessages({ conversationId: "redacted-conversation", limit: 1 });
