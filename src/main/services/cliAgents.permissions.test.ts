@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -2422,8 +2422,15 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 
 test("Codex Stop still terminates the turn when the approval refusal pipe is dead", async () => {
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-dead-pipe-"));
+  const helperPidFile = path.join(fixtureDir, "dead-pipe-helper.pid");
   const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
 const readline = require("node:readline");
+if (process.platform === "win32") {
+  const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
+  writeFileSync(${JSON.stringify(helperPidFile)}, String(helper.pid));
+}
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
@@ -2446,6 +2453,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const controller = new AbortController();
   let requestSeen!: () => void;
   let approvalAborted = false;
+  let helperPid: number | undefined;
   const seen = new Promise<void>((resolve) => { requestSeen = resolve; });
   try {
     const run = runner.runCodexAppServerWarmOrOneShot(
@@ -2483,11 +2491,99 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(result.ok, false);
     assert.equal(approvalAborted, true);
     assert.match(result.error ?? "", /cancelled|Stopped by user|EPIPE/i);
+    if (process.platform === "win32") {
+      helperPid = Number.parseInt((await readFile(helperPidFile, "utf8")).trim(), 10);
+      await assertFixtureProcessStops(helperPid);
+    }
   } finally {
     await runner.shutdownWarmAgents();
+    if (helperPid && testProcessExists(helperPid)) {
+      process.kill(helperPid, "SIGKILL");
+    }
     await rm(fixtureDir, { recursive: true, force: true });
   }
 });
+
+test("Windows warm-agent shutdown terminates provider descendants", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("taskkill process-tree behavior is only available on Windows");
+    return;
+  }
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-warm-tree-"));
+  const helperPidFile = path.join(fixtureDir, "warm-helper.pid");
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const readline = require("node:readline");
+const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
+writeFileSync(${JSON.stringify(helperPidFile)}, String(helper.pid));
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "windows", platformOsName: "windows", platformArch: "x64" } });
+  } else if (message.method === "thread/start") {
+    send({ id: message.id, result: { thread: { id: "thread-warm-tree" }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-warm-tree" } } });
+    send({ method: "turn/started", params: { threadId: "thread-warm-tree", turn: { id: "turn-warm-tree" } } });
+    send({ method: "item/completed", params: { threadId: "thread-warm-tree", turnId: "turn-warm-tree", item: {
+      id: "message-warm-tree", type: "agentMessage", text: "done"
+    } } });
+    send({ method: "turn/completed", params: { threadId: "thread-warm-tree", turn: { id: "turn-warm-tree", status: "completed" } } });
+  }
+});
+`);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  let helperPid: number | undefined;
+  t.after(async () => {
+    await runner.shutdownWarmAgents();
+    if (helperPid && testProcessExists(helperPid)) {
+      process.kill(helperPid, "SIGKILL");
+    }
+    await rm(fixtureDir, { recursive: true, force: true });
+  });
+
+  const result = await runner.runCodexAppServerWarmOrOneShot(
+    { id: "participant-warm-tree", kind: "codex-cli", label: "Codex" },
+    "Reply with done.",
+    fixtureDir,
+    undefined,
+    "chat",
+    undefined,
+    {
+      agentMode: "default",
+      warm: {
+        conversationId: "conversation-warm-tree",
+        participantId: "participant-warm-tree",
+        contextKey: "context-warm-tree",
+        idleTimeoutMs: 60_000
+      }
+    }
+  );
+  assert.equal(result.ok, true, JSON.stringify(result));
+  helperPid = Number.parseInt((await readFile(helperPidFile, "utf8")).trim(), 10);
+  assert.equal(testProcessExists(helperPid), true);
+
+  await runner.shutdownWarmAgents();
+  await assertFixtureProcessStops(helperPid);
+});
+
+function testProcessExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+async function assertFixtureProcessStops(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 40 && testProcessExists(pid); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(testProcessExists(pid), false, `provider descendant ${pid} survived warm-agent shutdown`);
+}
 
 test("Codex ignores cross-thread resolution and retires approval when its item completes", async () => {
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-retire-approval-"));

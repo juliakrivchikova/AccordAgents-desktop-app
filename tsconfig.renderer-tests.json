@@ -3,11 +3,9 @@
   "compilerOptions": {
     "composite": false,
     "isolatedModules": false,
-    "module": "CommonJS",
+    "module": "ESNext",
     "moduleResolution": "Node",
-    "noEmit": false,
-    "outDir": "dist/renderer-tests",
-    "rootDir": "src",
+    "noEmit": true,
     "types": ["node"]
   },
   "include": [

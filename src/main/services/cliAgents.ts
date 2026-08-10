@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants, type Dirent } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -31,8 +31,17 @@ import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS, normalizeCliAgentRunTimeoutMs } from 
 import { chatTextEndsAtSentenceOrParagraphBoundary } from "../../shared/processingTranscript";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
 import { cliFailureNoticeText } from "../../shared/warnings";
-import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, runCommand, type CommandEnvironmentOptions } from "./command";
+import {
+  CommandError,
+  commandEnvironment,
+  ensureLoginShellEnvPrimed,
+  resolveCommandPath,
+  runCommand,
+  spawnCommand,
+  type CommandEnvironmentOptions
+} from "./command";
 import { CliReadinessService } from "./cliReadiness";
+import { terminateProcess } from "./processTermination";
 import {
   buildCodexExecInvocation,
   createCodexLineHandler,
@@ -71,6 +80,8 @@ const SESSION_LOG_RETRIES = 4;
 const MODEL_CATALOG_CACHE_MS = 5 * 60_000;
 const MODEL_CATALOG_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_TIMEOUT_MS = 8_000;
+const CLAUDE_EXECUTABLE_ENV = "ACCORD_AGENTS_CLAUDE_EXECUTABLE";
+const ANTIGRAVITY_EXECUTABLE_ENV = "ACCORD_AGENTS_ANTIGRAVITY_EXECUTABLE";
 const NATIVE_GOAL_IDLE_WARNING_MS = 5 * 60_000;
 const CODEX_APP_SERVER_DISABLED_ENV = "ACCORD_AGENTS_CODEX_APP_SERVER";
 const CODEX_APP_SERVER_MCP_TOKEN_ENV = "ACCORD_AGENTS_MCP_TOKEN";
@@ -111,7 +122,7 @@ const ANTIGRAVITY_EXPECT_PROGRAM = `
     lappend args $env($key)
   }
   set stty_init "rows 40 columns 120"
-  spawn -noecho agy {*}$args -i $goal
+  spawn -noecho -- $env(${ANTIGRAVITY_EXECUTABLE_ENV}) {*}$args -i $goal
   set child $spawn_id
   log_user 0
   fconfigure stdin -translation binary -encoding binary -blocking 0
@@ -596,6 +607,21 @@ export class CliAgentRunner {
     });
   }
 
+  private codexExecutableForRun(options: CliAgentRunOptions = {}): Promise<string> {
+    if (this.codexExecutable !== "codex") {
+      return Promise.resolve(this.codexExecutable);
+    }
+    return this.providerExecutableForRun("codex", options);
+  }
+
+  private providerExecutableForRun(
+    executable: "codex" | "claude" | "agy",
+    options: CliAgentRunOptions = {},
+    envOptions: CommandEnvironmentOptions = {}
+  ): Promise<string> {
+    return resolveCommandPath(executable, commandEnvironment(this.agentRunEnv(options), envOptions));
+  }
+
   setRunTimeoutMs(timeoutMs: number): void {
     this.runTimeoutMs = normalizeCliAgentRunTimeoutMs(timeoutMs);
   }
@@ -751,7 +777,8 @@ export class CliAgentRunner {
 
   private async listCodexModelCatalog(fetchedAt: string): Promise<ProviderModelCatalog> {
     await ensureLoginShellEnvPrimed();
-    const child = spawn(this.codexExecutable, ["app-server", "--listen", "stdio://"], {
+    const codexExecutable = await this.codexExecutableForRun();
+    const child = spawnCommand(codexExecutable, ["app-server", "--listen", "stdio://"], {
       env: commandEnvironment(),
       stdio: ["pipe", "pipe", "pipe"]
     });
@@ -955,9 +982,11 @@ export class CliAgentRunner {
 
   private async runClaudeModelProbe(): Promise<string> {
     await ensureLoginShellEnvPrimed();
+    const env = commandEnvironment(undefined, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
+    const claudeExecutable = await resolveCommandPath("claude", env);
     return new Promise<string>((resolve, reject) => {
-      const child = spawn("expect", ["-c", this.claudeModelProbeExpectScript()], {
-        env: commandEnvironment(undefined, CLAUDE_CODE_COMMAND_ENV_OPTIONS),
+      const child = spawnCommand("expect", ["-c", this.claudeModelProbeExpectScript()], {
+        env: { ...env, [CLAUDE_EXECUTABLE_ENV]: claudeExecutable },
         stdio: ["pipe", "pipe", "pipe"]
       });
       child.stdout.setEncoding("utf8");
@@ -1014,7 +1043,7 @@ export class CliAgentRunner {
     return [
       "set timeout 8",
       "log_user 1",
-      "spawn claude --safe-mode --no-chrome",
+      `spawn -- $env(${CLAUDE_EXECUTABLE_ENV}) --safe-mode --no-chrome`,
       "expect {",
       "  -re \".\" {}",
       "  timeout { exit 124 }",
@@ -1083,7 +1112,9 @@ export class CliAgentRunner {
 
   private async listGeminiModelCatalog(fetchedAt: string): Promise<ProviderModelCatalog> {
     await ensureLoginShellEnvPrimed();
-    const result = await runCommand("agy", ["models"], { timeoutMs: MODEL_CATALOG_TIMEOUT_MS, env: commandEnvironment() });
+    const env = commandEnvironment();
+    const agyExecutable = await resolveCommandPath("agy", env);
+    const result = await runCommand(agyExecutable, ["models"], { timeoutMs: MODEL_CATALOG_TIMEOUT_MS, env });
     const models: ProviderModel[] = result.stdout
       .split(/\r?\n/)
       .map((line) => stripAnsi(line).trim())
@@ -1175,8 +1206,10 @@ export class CliAgentRunner {
             geminiTranscriptPathForConversation(homedir(), options.sessionId)
           ))
         : 0;
+      const agyExecutable = await this.providerExecutableForRun("agy", options);
       const env = commandEnvironment({
         ...invocation.env,
+        [ANTIGRAVITY_EXECUTABLE_ENV]: agyExecutable,
         [ANTIGRAVITY_GOAL_ENV]: invocation.goalPrompt,
         [ANTIGRAVITY_GOAL_ARG_COUNT_ENV]: String(invocation.args.length),
         ...Object.fromEntries(
@@ -1184,7 +1217,7 @@ export class CliAgentRunner {
         ),
         TERM: "xterm-256color"
       });
-      child = spawn(ANTIGRAVITY_EXPECT_PATH, ["-c", ANTIGRAVITY_EXPECT_PROGRAM], {
+      child = spawnCommand(ANTIGRAVITY_EXPECT_PATH, ["-c", ANTIGRAVITY_EXPECT_PROGRAM], {
         cwd: repoPath,
         env,
         stdio: ["pipe", "pipe", "pipe"]
@@ -1413,10 +1446,12 @@ export class CliAgentRunner {
         : undefined;
       let result: Awaited<ReturnType<typeof runCommand>>;
       try {
-        result = await runCommand("agy", invocation.args, {
+        const agyExecutable = await resolveCommandPath("agy", commandEnvironment(invocation.env));
+        result = await runCommand(agyExecutable, invocation.args, {
           cwd: repoPath,
           timeoutMs: options.timeoutMs ?? this.runTimeoutMs,
           env: invocation.env,
+          killProcessGroup: true,
           signal
         });
       } finally {
@@ -1915,6 +1950,7 @@ export class CliAgentRunner {
     }
     try {
       await ensureLoginShellEnvPrimed();
+      const codexExecutable = await this.codexExecutableForRun(options);
       const entry = this.createCodexAppServerWarmAgent(
         `native-goal:${randomUUID()}`,
         `native-goal:${participant.id}`,
@@ -1922,7 +1958,8 @@ export class CliAgentRunner {
         repoPath,
         diffMode,
         kind,
-        this.withoutWarm(options)
+        this.withoutWarm(options),
+        codexExecutable
       );
       try {
         const result = await entry.run(
@@ -1984,7 +2021,8 @@ export class CliAgentRunner {
         }
         try {
           await ensureLoginShellEnvPrimed();
-          entry = this.createCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options);
+          const codexExecutable = await this.codexExecutableForRun(options);
+          entry = this.createCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options, codexExecutable);
           this.warmAgents.set(key, entry);
         } catch (error) {
           return this.failedCompact(participant, error);
@@ -1995,6 +2033,7 @@ export class CliAgentRunner {
 
     try {
       await ensureLoginShellEnvPrimed();
+      const codexExecutable = await this.codexExecutableForRun(options);
       const entry = this.createCodexAppServerWarmAgent(
         `compact:${options.sessionId}:${randomUUID()}`,
         `compact:${options.sessionId}`,
@@ -2002,7 +2041,8 @@ export class CliAgentRunner {
         repoPath,
         diffMode,
         kind,
-        this.withoutWarm(options)
+        this.withoutWarm(options),
+        codexExecutable
       );
       try {
         return await compactWithEntry(entry);
@@ -2045,7 +2085,8 @@ export class CliAgentRunner {
       }
       try {
         await ensureLoginShellEnvPrimed();
-        entry = this.createCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options);
+        const codexExecutable = await this.codexExecutableForRun(options);
+        entry = this.createCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options, codexExecutable);
         this.warmAgents.set(key, entry);
         void this.writeDebugLog("cli-agent-warm-started", {
           providerKind: participant.kind,
@@ -2127,9 +2168,10 @@ export class CliAgentRunner {
     repoPath: string | undefined,
     diffMode: GitDiffMode | undefined,
     kind: ConversationKind,
-    options: CliAgentRunOptions
+    options: CliAgentRunOptions,
+    codexExecutable: string
   ): WarmAgentEntry {
-    const child = spawn(this.codexExecutable, ["app-server", "--listen", "stdio://"], {
+    const child = spawnCommand(codexExecutable, ["app-server", "--listen", "stdio://"], {
       cwd: repoPath,
       env: commandEnvironment(this.agentRunEnv(options)),
       stdio: ["pipe", "pipe", "pipe"]
@@ -2340,10 +2382,15 @@ export class CliAgentRunner {
       turn.timeoutDeadline = Date.now() + delayMs;
       turn.timer = setTimeout(() => {
         void cancelPendingInboundApprovals(turn, "Codex approval expired because the turn timed out.")
-          .finally(() => {
-            rejectPendingGuardianApprovals(new Error("Codex Guardian approval expired because the provider turn timed out."));
-            rejectPendingTurn(new Error(`codex app-server timed out after ${delayMs}ms`));
+          .catch((error) => {
+            void this.debugLogs?.write("cli.codex-app-server.timeout-refusal-write-failed", {
+              threadId: turn.threadId,
+              turnId: turn.turnId,
+              message: this.errorText(error)
+            });
           });
+        rejectPendingGuardianApprovals(new Error("Codex Guardian approval expired because the provider turn timed out."));
+        rejectPendingTurn(new Error(`codex app-server timed out after ${delayMs}ms`));
       }, delayMs);
       turn.timer.unref();
     };
@@ -2400,19 +2447,18 @@ export class CliAgentRunner {
 
     cancelPendingInboundApprovals = async (turn: CodexAppServerPendingTurn, reason: string): Promise<void> => {
       const requests = [...pendingInboundRequests.values()].filter((request) => request.turn === turn);
-      const failures: Error[] = [];
+      const refusals: Array<Promise<boolean>> = [];
       for (const request of requests) {
         if (!isCodexApprovalMethod(request.method)) {
           continue;
         }
-        try {
-          await answerPendingInboundRequest(request, codexApprovalCancellationResult(request.method));
-        } catch (error) {
-          failures.push(error instanceof Error ? error : new Error(String(error)));
-        } finally {
-          request.controller.abort(new Error(reason));
-        }
+        request.controller.abort(new Error(reason));
+        refusals.push(answerPendingInboundRequest(request, codexApprovalCancellationResult(request.method)));
       }
+      const results = await Promise.allSettled(refusals);
+      const failures = results
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => result.reason instanceof Error ? result.reason : new Error(String(result.reason)));
       if (failures.length > 0) {
         throw new AggregateError(failures, "One or more Codex approval refusal frames could not be written.");
       }
@@ -3004,27 +3050,19 @@ export class CliAgentRunner {
           if (!current) {
             return;
           }
-          void (async () => {
-            try {
-              await cancelPendingInboundApprovals(current, "Stopped by user.");
-            } catch (error) {
+          void cancelPendingInboundApprovals(current, "Stopped by user.")
+            .catch((error) => {
               void this.debugLogs?.write("cli.codex-app-server.stop-refusal-write-failed", {
                 threadId: current.threadId,
                 turnId: current.turnId,
                 message: this.errorText(error)
               });
-            }
-            rejectPendingGuardianApprovals(new Error("Stopped by user."));
-            try {
-              if (current.turnId) {
-                await sendRequest("turn/interrupt", { threadId: current.threadId, turnId: current.turnId }).catch(() => undefined);
-              }
-            } finally {
-              rejectPendingTurn(new Error("codex app-server turn was cancelled"));
-            }
-          })().catch((error) => {
-            rejectPendingTurn(error instanceof Error ? error : new Error(String(error)));
-          });
+            });
+          rejectPendingGuardianApprovals(new Error("Stopped by user."));
+          if (current.turnId) {
+            void sendRequest("turn/interrupt", { threadId: current.threadId, turnId: current.turnId }).catch(() => undefined);
+          }
+          rejectPendingTurn(new Error("codex app-server turn was cancelled"));
         };
         const resultPromise = new Promise<ParticipantRunResult>((resolve, reject) => {
           pendingTurn = {
@@ -4088,11 +4126,13 @@ export class CliAgentRunner {
       const stdoutLines = createCodexLineHandler((line) =>
         emitCodexExecLiveOutput(line, options.onOutput, codexDeltaAccumulator, options.onSessionId)
       );
-      const result = await runCommand("codex", invocation.args, {
+      const codexExecutable = await this.codexExecutableForRun(options);
+      const result = await runCommand(codexExecutable, invocation.args, {
         cwd: repoPath,
         input: invocation.input,
         timeoutMs: options.timeoutMs ?? this.runTimeoutMs,
         env: invocation.env,
+        killProcessGroup: true,
         signal,
         onStdout: options.onOutput || options.onSessionId ? stdoutLines : undefined
       });
@@ -4258,8 +4298,9 @@ export class CliAgentRunner {
           }
         : undefined;
 
+      const claudeExecutable = await this.providerExecutableForRun("claude", options, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
       const result = await runCommand(
-        "claude",
+        claudeExecutable,
         args,
         {
           cwd: repoPath,
@@ -4268,6 +4309,7 @@ export class CliAgentRunner {
           allowNoTimeout: Boolean(options.nativeGoal),
           env: this.agentRunEnv(options),
           envOptions: CLAUDE_CODE_COMMAND_ENV_OPTIONS,
+          killProcessGroup: true,
           signal,
           onStdout: (chunk) => {
             options.onProviderActivity?.();
@@ -4409,7 +4451,8 @@ export class CliAgentRunner {
       }
       try {
         await ensureLoginShellEnvPrimed();
-        entry = this.createClaudeWarmAgent(key, scopeKey, participant, repoPath, kind, options);
+        const claudeExecutable = await this.providerExecutableForRun("claude", options, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
+        entry = this.createClaudeWarmAgent(key, scopeKey, participant, repoPath, kind, options, claudeExecutable);
         this.warmAgents.set(key, entry);
         void this.writeDebugLog("cli-agent-warm-started", {
           providerKind: participant.kind,
@@ -4465,7 +4508,8 @@ export class CliAgentRunner {
     participant: ParticipantConfig,
     repoPath: string | undefined,
     kind: ConversationKind,
-    options: CliAgentRunOptions
+    options: CliAgentRunOptions,
+    claudeExecutable: string
   ): WarmAgentEntry {
     const newSessionId = options.persistSession && !options.sessionId ? randomUUID() : undefined;
     const extraReadableDirs = this.normalizedExtraReadableDirs(options.extraReadableDirs);
@@ -4481,7 +4525,7 @@ export class CliAgentRunner {
     );
     this.logClaudeLaunch(participant, repoPath, kind, options, args, toolConfig, extraReadableDirs, "warm");
 
-    const child = spawn("claude", args, {
+    const child = spawnCommand(claudeExecutable, args, {
       cwd: repoPath,
       env: commandEnvironment(this.agentRunEnv(options), CLAUDE_CODE_COMMAND_ENV_OPTIONS),
       stdio: ["pipe", "pipe", "pipe"]
@@ -5034,11 +5078,11 @@ export class CliAgentRunner {
     if (entry.process.exitCode !== null || entry.process.signalCode !== null || entry.process.killed) {
       return;
     }
-    entry.process.kill("SIGTERM");
+    terminateProcess(entry.process, "SIGTERM", true);
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         if (entry.process.exitCode === null && entry.process.signalCode === null) {
-          entry.process.kill("SIGKILL");
+          terminateProcess(entry.process, "SIGKILL", true);
         }
         resolve();
       }, WARM_AGENT_KILL_GRACE_MS);
@@ -5462,10 +5506,13 @@ export class CliAgentRunner {
 
   private claudeVersionForDiagnostics(): Promise<string | undefined> {
     if (!this.claudeVersionRequest) {
-      this.claudeVersionRequest = runCommand("claude", ["--version"], {
-        timeoutMs: CLAUDE_MODEL_PROBE_TIMEOUT_MS,
-        envOptions: CLAUDE_CODE_COMMAND_ENV_OPTIONS
-      }).then((result) => result.stdout.trim() || undefined).catch(() => undefined);
+      this.claudeVersionRequest = this.providerExecutableForRun("claude", {}, CLAUDE_CODE_COMMAND_ENV_OPTIONS)
+        .then((claudeExecutable) => runCommand(claudeExecutable, ["--version"], {
+          timeoutMs: CLAUDE_MODEL_PROBE_TIMEOUT_MS,
+          envOptions: CLAUDE_CODE_COMMAND_ENV_OPTIONS
+        }))
+        .then((result) => result.stdout.trim() || undefined)
+        .catch(() => undefined);
     }
     return this.claudeVersionRequest;
   }
