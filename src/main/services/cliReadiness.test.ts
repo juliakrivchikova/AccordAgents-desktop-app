@@ -140,6 +140,43 @@ test("environment, lookup, and version failures produce distinct normalized fact
   assert.equal(authCalls, 0, "authentication must not run after a version failure");
 });
 
+test("readiness runs version and authentication probes through each resolved executable", async () => {
+  const resolvedPaths: Record<string, string> = {
+    claude: "C:\\Program Files\\Anthropic\\claude.exe",
+    codex: "C:\\Program Files\\OpenAI\\codex.exe",
+    agy: "C:\\Program Files\\Google\\agy.exe"
+  };
+  const runs: Array<{ command: string; args: string[] }> = [];
+  const service = new CliReadinessService(undefined, fakeDependencies({
+    lookup: async (command) => ({ status: "found", path: resolvedPaths[command] }),
+    run: async (command, args) => {
+      runs.push({ command, args });
+      if (args.includes("--version")) {
+        return successfulCommand(command, args);
+      }
+      if (args.join(" ") === "auth status") {
+        return { ...successfulCommand(command, args), stdout: JSON.stringify({ loggedIn: true }) };
+      }
+      if (args.join(" ") === "login status") {
+        return { ...successfulCommand(command, args), stdout: "Logged in using ChatGPT" };
+      }
+      return { ...successfulCommand(command, args), stdout: "gemini-2.5-pro" };
+    }
+  }));
+
+  const snapshot = await service.refresh({ force: true });
+
+  assert.ok(snapshot.every((health) => health.runnable === "ready" && health.authentication === "ready"));
+  assert.deepEqual(runs, [
+    { command: resolvedPaths.agy, args: ["--version"] },
+    { command: resolvedPaths.claude, args: ["--version"] },
+    { command: resolvedPaths.codex, args: ["--version"] },
+    { command: resolvedPaths.agy, args: ["models"] },
+    { command: resolvedPaths.claude, args: ["auth", "status"] },
+    { command: resolvedPaths.codex, args: ["login", "status"] }
+  ]);
+});
+
 test("a shared environment failure preserves the last complete readiness snapshot", async () => {
   let refreshCalls = 0;
   const checkedAt = [
@@ -169,9 +206,9 @@ test("readiness probes use the same filtered manual environment as local agent r
   const service = new CliReadinessService(undefined, fakeDependencies({
     refreshEnvironment: async () => ({ ok: true, env: { PATH: "/login/bin", SHARED: "login" } }),
     manualEnvironment: async () => ({ OPENAI_API_KEY: "manual-secret", SHARED: "manual" }),
-    lookup: async (_command, env) => {
+    lookup: async (command, env) => {
       observed.push({ ...env });
-      return { status: "found", path: "/fixture/bin/provider" };
+      return { status: "found", path: `/fixture/bin/${command}` };
     },
     run: async (command, args, options) => {
       observed.push({ ...options?.env });
@@ -285,11 +322,12 @@ function fakeDependencies(overrides: Partial<CliReadinessDependencies> = {}): Pa
 }
 
 function successfulCommand(command: string, args: string[]): CommandResult {
-  const authOutput = command === "claude"
+  const executable = command.replace(/^.*[\\/]/, "").replace(/\.exe$/i, "");
+  const authOutput = executable === "claude"
     ? JSON.stringify({ loggedIn: true })
-    : command === "codex"
+    : executable === "codex"
       ? "Logged in using ChatGPT"
-      : command === "agy"
+      : executable === "agy"
         ? "gemini-2.5-pro"
         : "";
   return {

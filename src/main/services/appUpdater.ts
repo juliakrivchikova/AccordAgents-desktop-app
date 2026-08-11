@@ -9,8 +9,12 @@ export function resolveUpdateRepo(betaUpdates: boolean): string {
   return betaUpdates === true ? BETA_UPDATE_REPO : STABLE_UPDATE_REPO;
 }
 
+export function supportsAutoUpdates(isPackaged: boolean, platform: NodeJS.Platform): boolean {
+  return isPackaged && (platform === "darwin" || platform === "win32");
+}
+
 export function bootstrapAppUpdater(debugLogs: DebugLogService, betaUpdates: boolean): void {
-  if (!app.isPackaged || process.platform !== "darwin") {
+  if (!supportsAutoUpdates(app.isPackaged, process.platform)) {
     return;
   }
 

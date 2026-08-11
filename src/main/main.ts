@@ -120,6 +120,12 @@ import { RemoteRunCoordinator } from "./services/remoteRunCoordinator";
 import { LocalFileOpenerService } from "./services/localFileOpener";
 import { SettingsService } from "./services/settings";
 import { StorageService } from "./services/storage";
+import {
+  BundledSqliteInstallationError,
+  DAMAGED_SQLITE_INSTALLATION_MESSAGE,
+  resolveSqliteExecutable,
+  validateSqliteExecutable
+} from "./services/sqliteCli";
 import { PluginService } from "./services/plugins";
 import { UserSkillsService } from "./services/userSkills";
 
@@ -135,7 +141,12 @@ if (userDataDirOverride) {
 const gitService = new GitService();
 const settingsService = new SettingsService();
 const agentEnvironmentService = new AgentEnvironmentService(settingsService);
-const storageService = new StorageService();
+const sqliteExecutable = resolveSqliteExecutable({
+  appPath: app.getAppPath(),
+  resourcesPath: process.resourcesPath,
+  isPackaged: app.isPackaged
+});
+const storageService = new StorageService({ sqliteExecutable });
 const localFileOpenerService = new LocalFileOpenerService(storageService, settingsService);
 const providerRunner = new ProviderRunner();
 const debugLogService = new DebugLogService();
@@ -214,7 +225,7 @@ appMcpService.setChatSendMessageHandler((actor, request) => chatService.sendChat
 appMcpService.setChatSetTitleHandler((actor, request) => chatService.setChatTitleFromTool(actor, request));
 // Artifacts persist in their own tables of the same SQLite database as
 // conversations, but independently of conversation payloads.
-const artifactStore = new ArtifactStore(path.join(app.getPath("userData"), "accordagents.sqlite3"));
+const artifactStore = new ArtifactStore(path.join(app.getPath("userData"), "accordagents.sqlite3"), sqliteExecutable);
 const artifactService = new ArtifactService({
   store: artifactStore,
   getMembers: async (conversationId) => {
@@ -754,7 +765,7 @@ function registerIpc(): void {
     if (kind === "codex-cli" || kind === "claude-code" || kind === "gemini-cli") {
       const settings = await settingsService.getPublicSettings();
       const configuredModel = settings.providers.find((provider) => provider.kind === kind)?.model;
-      return cliAgentRunner.listModelCatalog(kind, configuredModel);
+      return cliAgentRunner.listModelCatalog(kind, configuredModel, settings.lastRepoPath);
     }
     return providerRunner.listModelCatalog(kind);
   });
@@ -1339,6 +1350,7 @@ async function resolvePluginListRequest(request?: PluginListRequest): Promise<{
 }
 
 void app.whenReady().then(async () => {
+  await validateSqliteExecutable({ executable: sqliteExecutable });
   registerIpc();
   let betaUpdates = false;
   try {
@@ -1385,9 +1397,12 @@ void app.whenReady().then(async () => {
     }
   });
 }).catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
+  const damagedSqlite = error instanceof BundledSqliteInstallationError;
+  const message = damagedSqlite
+    ? DAMAGED_SQLITE_INSTALLATION_MESSAGE
+    : error instanceof Error ? error.message : String(error);
   console.error("Failed to start AccordAgents:", error);
-  dialog.showErrorBox("AccordAgents failed to start", message);
+  dialog.showErrorBox(damagedSqlite ? "AccordAgents installation is damaged" : "AccordAgents failed to start", message);
   app.quit();
 });
 

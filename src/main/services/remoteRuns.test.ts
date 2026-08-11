@@ -1867,7 +1867,9 @@ test("startup session backfill never overwrites a newer nonempty desktop session
   assert.equal(session.sessionId, desktopSessionId);
 });
 
-test("default SSH transport acquires and renews an operation lease without a Node protocol", async () => {
+test("default SSH transport acquires and renews an operation lease without a Node protocol", {
+  skip: process.platform === "win32" ? "POSIX fake SSH transport uses a sh executable fixture" : false
+}, async () => {
   const root = await mkdtemp(path.join(tmpdir(), "accordagents-posix-lease-transport-"));
   const fakeSsh = path.join(root, "ssh");
   await writeFile(fakeSsh, [

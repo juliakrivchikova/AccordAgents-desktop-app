@@ -1,12 +1,16 @@
 import path from "node:path";
 import { MakerDMG } from "@electron-forge/maker-dmg";
+import { MakerSquirrel } from "@electron-forge/maker-squirrel";
 import { MakerZIP } from "@electron-forge/maker-zip";
 import { FusesPlugin } from "@electron-forge/plugin-fuses";
 import { FuseV1Options, FuseVersion } from "@electron/fuses";
 
 const productName = "AccordAgents";
 const assetsDir = path.resolve(__dirname, "assets");
-const iconPath = path.join(assetsDir, "icon.icns");
+const iconBasePath = path.join(assetsDir, "icon");
+const iconPath = `${iconBasePath}.icns`;
+const windowsIconPath = `${iconBasePath}.ico`;
+const sqliteResourcePath = path.join(assetsDir, "sqlite");
 const dmgBackgroundPath = path.join(assetsDir, "dmg-background.png");
 const entitlementsPath = path.resolve(__dirname, "entitlements.mac.plist");
 const entitlementsInheritPath = path.resolve(__dirname, "entitlements.mac.inherit.plist");
@@ -70,8 +74,11 @@ const config = {
     name: productName,
     executableName: productName,
     appBundleId: process.env.MACOS_BUNDLE_ID || "com.juliakrivchikova.accordagents",
-    asar: true,
-    icon: iconPath,
+    asar: process.platform === "win32"
+      ? { unpack: path.join("**", "node_modules", "node-pty", "prebuilds", "win32-x64", "**", "*.{node,dll,exe}") }
+      : true,
+    icon: process.platform === "win32" ? iconBasePath : iconPath,
+    ...(process.platform === "win32" ? { extraResource: [sqliteResourcePath] } : {}),
     extendInfo: {
       CFBundleDisplayName: productName,
       CFBundleName: productName,
@@ -87,6 +94,7 @@ const config = {
       ignoredRootDirectory("assets"),
       ignoredRootDirectory("brand-research"),
       ignoredRootDirectory("docs"),
+      ignoredRootDirectory("lib"),
       ignoredRootDirectory("out"),
       ignoredRootDirectory("screenshots"),
       ignoredRootDirectory("scripts"),
@@ -108,15 +116,20 @@ const config = {
       ignoredRootFile("tsconfig.main.json"),
       ignoredRootFile("tsconfig.renderer.json"),
       ignoredRootFile("vite.config.mts"),
-      /[\\/]dist[\\/].*\.d\.ts$/,
-      /[\\/]dist[\\/].*\.test\.js$/,
-      /[\\/]node_modules[\\/]\.vite(?:[\\/]|$)/,
+      ...(process.platform === "win32" ? [] : [ignoredRootDirectory("node_modules/node-pty")]),
+      /^\/dist\/renderer-tests(?:-|\/|$)/,
+      /^\/dist\/codex-approval-renderer-test(?:\/|$)/,
+      /^\/dist\/.*\.d\.ts$/,
+      /\/(?:test|tests|__tests__)(?:\/|$)/,
+      /\/[^/]+\.test\.(?:[cm]?js)$/,
+      /^\/node_modules\/\.vite(?:\/|$)/,
       /\.tsbuildinfo$/
     ],
     ...(osxSignOptions ? { osxSign: osxSignOptions } : {}),
     ...(osxNotarizeOptions ? { osxNotarize: osxNotarizeOptions } : {})
   },
-  rebuildConfig: {},
+  // node-pty ships N-API Windows binaries, so rebuilding it on Windows is unnecessary.
+  rebuildConfig: process.platform === "win32" ? { onlyModules: [] } : {},
   makers: [
     new MakerZIP({}, ["darwin"]),
     new MakerDMG({
@@ -148,7 +161,10 @@ const config = {
           path: "/Applications"
         }
       ]
-    }, ["darwin"])
+    }, ["darwin"]),
+    new MakerSquirrel({
+      setupIcon: windowsIconPath
+    }, ["win32"])
   ],
   plugins: [
     new FusesPlugin({

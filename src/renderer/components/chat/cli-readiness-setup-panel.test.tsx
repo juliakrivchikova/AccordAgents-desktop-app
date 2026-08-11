@@ -271,6 +271,8 @@ test("unsupported platforms show guide-only installation without a macOS copy ac
   assert.doesNotMatch(textOf(expanded), /Open Terminal|Try sign-in|Sign in/);
   assert.match(textOf(expanded), /Official guide/);
   assert.match(textOf(renderer.root), /Check again/);
+  assert.match(textOf(renderer.root), /on this computer/);
+  assert.doesNotMatch(textOf(renderer.root), /on this Mac/);
   renderer.unmount();
 });
 

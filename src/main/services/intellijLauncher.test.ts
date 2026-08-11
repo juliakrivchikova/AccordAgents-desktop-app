@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import path from "node:path";
 import test from "node:test";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import {
@@ -34,15 +35,17 @@ test("buildIntellijLauncherArgs includes only positive integer line and column v
 });
 
 test("IntelliJ launcher spawns a PATH launcher detached and waits for spawn", async () => {
+  const toolsDir = path.join(path.parse(process.cwd()).root, "tools");
+  const ideaPath = path.join(toolsDir, "idea");
   let unrefCalled = false;
   let spawnCall: { command: string; args: string[]; options: SpawnOptions } | undefined;
   const launcher = new IntellijLauncherService({
     platform: "linux",
-    env: { PATH: "/tools" },
-    homeDir: "/home/test",
+    env: { PATH: toolsDir },
+    homeDir: path.join(path.parse(process.cwd()).root, "home", "test"),
     primeLoginShellEnv: async () => ({}),
     stat: async (filePath) => ({
-      isFile: () => filePath === "/tools/idea"
+      isFile: () => filePath === ideaPath
     }) as any,
     access: async () => undefined,
     readdir: async () => [] as any,
@@ -61,7 +64,7 @@ test("IntelliJ launcher spawns a PATH launcher detached and waits for spawn", as
   const result = await launcher.openFile({ filePath: "/repo/src/main.ts", line: 12, column: 4 });
 
   assert.deepEqual(result, { opened: true, lineNavigationSupported: true });
-  assert.deepEqual(spawnCall?.command, "/tools/idea");
+  assert.deepEqual(spawnCall?.command, ideaPath);
   assert.deepEqual(spawnCall?.args, ["--line", "12", "--column", "4", "/repo/src/main.ts"]);
   assert.equal(spawnCall?.options.detached, true);
   assert.equal(spawnCall?.options.stdio, "ignore");
@@ -70,13 +73,15 @@ test("IntelliJ launcher spawns a PATH launcher detached and waits for spawn", as
 });
 
 test("IntelliJ launcher reports spawn errors before success", async () => {
+  const toolsDir = path.join(path.parse(process.cwd()).root, "tools");
+  const ideaPath = path.join(toolsDir, "idea");
   const launcher = new IntellijLauncherService({
     platform: "linux",
-    env: { PATH: "/tools" },
-    homeDir: "/home/test",
+    env: { PATH: toolsDir },
+    homeDir: path.join(path.parse(process.cwd()).root, "home", "test"),
     primeLoginShellEnv: async () => ({}),
     stat: async (filePath) => ({
-      isFile: () => filePath === "/tools/idea"
+      isFile: () => filePath === ideaPath
     }) as any,
     access: async () => undefined,
     readdir: async () => [] as any,
@@ -95,19 +100,22 @@ test("IntelliJ launcher reports spawn errors before success", async () => {
 });
 
 test("macOS uses the app bundle launcher binary and ignores PATH Toolbox scripts", async () => {
-  const appPath = "/Users/test/Applications/IntelliJ IDEA 2025.3.2.app";
+  const homeDir = path.join(path.parse(process.cwd()).root, "Users", "test");
+  const applicationsDir = path.join(homeDir, "Applications");
+  const appPath = path.join(applicationsDir, "IntelliJ IDEA 2025.3.2.app");
+  const launcherPath = path.join(appPath, "Contents", "MacOS", "idea");
   let spawnCall: { command: string; args: string[]; options: SpawnOptions } | undefined;
   const launcher = new IntellijLauncherService({
     platform: "darwin",
-    env: { PATH: "/Users/test/Applications/IntelliJ IDEA 2025.3.2.app/Contents/MacOS:/usr/local/bin:/usr/bin" },
-    homeDir: "/Users/test",
+    env: { PATH: path.join(appPath, "Contents", "MacOS") },
+    homeDir,
     primeLoginShellEnv: async () => ({}),
     stat: async (filePath) => ({
-      isFile: () => filePath === `${appPath}/Contents/MacOS/idea`
+      isFile: () => filePath === launcherPath
     }) as any,
     access: async () => undefined,
     readdir: async (root) => {
-      if (root === "/Users/test/Applications") {
+      if (root === applicationsDir) {
         return [{
           name: "IntelliJ IDEA 2025.3.2.app",
           isDirectory: () => true
@@ -127,7 +135,7 @@ test("macOS uses the app bundle launcher binary and ignores PATH Toolbox scripts
   const result = await launcher.openFile({ filePath: "/repo/src/main.ts", line: 12, column: 4 });
 
   assert.deepEqual(result, { opened: true, lineNavigationSupported: true });
-  assert.deepEqual(spawnCall?.command, `${appPath}/Contents/MacOS/idea`);
+  assert.deepEqual(spawnCall?.command, launcherPath);
   assert.deepEqual(spawnCall?.args, ["--line", "12", "--column", "4", "/repo/src/main.ts"]);
   assert.equal(spawnCall?.options.shell, false);
 });
