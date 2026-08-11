@@ -1146,11 +1146,14 @@ test("migration initialization tolerates concurrent app processes", async () => 
     });
     const script = `
       const { ArtifactStore } = require("./dist/main/main/services/artifactStore.js");
-      new ArtifactStore(process.argv[1], process.argv[2]).init().catch((error) => { console.error(error); process.exit(1); });
+      const keepAlive = setInterval(() => undefined, 1_000);
+      new ArtifactStore(process.argv[1], process.argv[2]).init()
+        .then(() => clearInterval(keepAlive))
+        .catch((error) => { clearInterval(keepAlive); console.error(error); process.exitCode = 1; });
     `;
     await Promise.all([
-      runCommand("node", ["-e", script, dbPath, SQLITE_EXECUTABLE], { primeLoginShellEnv: false }),
-      runCommand("node", ["-e", script, dbPath, SQLITE_EXECUTABLE], { primeLoginShellEnv: false })
+      runCommand(process.execPath, ["-e", script, dbPath, SQLITE_EXECUTABLE], { primeLoginShellEnv: false }),
+      runCommand(process.execPath, ["-e", script, dbPath, SQLITE_EXECUTABLE], { primeLoginShellEnv: false })
     ]);
     const columns = await runCommand(SQLITE_EXECUTABLE, ["-json", dbPath, "pragma table_info(artifacts);"], {
       primeLoginShellEnv: false

@@ -25,7 +25,11 @@ export function terminateProcess(
   try {
     const windowsRoot = process.env.SystemRoot ?? process.env.WINDIR;
     const taskkillPath = windowsRoot ? path.join(windowsRoot, "System32", "taskkill.exe") : "taskkill.exe";
-    const taskkill = spawn(taskkillPath, ["/PID", String(child.pid), "/T", "/F"], {
+    const args = ["/PID", String(child.pid), "/T"];
+    if (signal === "SIGKILL") {
+      args.push("/F");
+    }
+    const taskkill = spawn(taskkillPath, args, {
       stdio: "ignore",
       windowsHide: true
     });

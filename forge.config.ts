@@ -74,8 +74,10 @@ const config = {
     name: productName,
     executableName: productName,
     appBundleId: process.env.MACOS_BUNDLE_ID || "com.juliakrivchikova.accordagents",
-    asar: true,
-    icon: iconBasePath,
+    asar: process.platform === "win32"
+      ? { unpack: path.join("**", "node_modules", "node-pty", "prebuilds", "win32-x64", "**", "*.{node,dll,exe}") }
+      : true,
+    icon: process.platform === "win32" ? iconBasePath : iconPath,
     ...(process.platform === "win32" ? { extraResource: [sqliteResourcePath] } : {}),
     extendInfo: {
       CFBundleDisplayName: productName,
@@ -92,6 +94,7 @@ const config = {
       ignoredRootDirectory("assets"),
       ignoredRootDirectory("brand-research"),
       ignoredRootDirectory("docs"),
+      ignoredRootDirectory("lib"),
       ignoredRootDirectory("out"),
       ignoredRootDirectory("screenshots"),
       ignoredRootDirectory("scripts"),
@@ -113,15 +116,20 @@ const config = {
       ignoredRootFile("tsconfig.main.json"),
       ignoredRootFile("tsconfig.renderer.json"),
       ignoredRootFile("vite.config.mts"),
-      /[\\/]dist[\\/].*\.d\.ts$/,
-      /[\\/]dist[\\/].*\.test\.js$/,
-      /[\\/]node_modules[\\/]\.vite(?:[\\/]|$)/,
+      ...(process.platform === "win32" ? [] : [ignoredRootDirectory("node_modules/node-pty")]),
+      /^\/dist\/renderer-tests(?:-|\/|$)/,
+      /^\/dist\/codex-approval-renderer-test(?:\/|$)/,
+      /^\/dist\/.*\.d\.ts$/,
+      /\/(?:test|tests|__tests__)(?:\/|$)/,
+      /\/[^/]+\.test\.(?:[cm]?js)$/,
+      /^\/node_modules\/\.vite(?:\/|$)/,
       /\.tsbuildinfo$/
     ],
     ...(osxSignOptions ? { osxSign: osxSignOptions } : {}),
     ...(osxNotarizeOptions ? { osxNotarize: osxNotarizeOptions } : {})
   },
-  rebuildConfig: {},
+  // node-pty ships N-API Windows binaries, so rebuilding it on Windows is unnecessary.
+  rebuildConfig: process.platform === "win32" ? { onlyModules: [] } : {},
   makers: [
     new MakerZIP({}, ["darwin"]),
     new MakerDMG({

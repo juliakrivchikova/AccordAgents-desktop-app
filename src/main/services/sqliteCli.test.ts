@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
-import { resolveSqliteExecutable } from "./sqliteCli";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import {
+  BundledSqliteInstallationError,
+  DAMAGED_SQLITE_INSTALLATION_MESSAGE,
+  resolveSqliteExecutable,
+  validateSqliteExecutable
+} from "./sqliteCli";
 
 test("resolveSqliteExecutable uses sqlite3 outside Windows", () => {
   assert.equal(resolveSqliteExecutable({ platform: "darwin", arch: "arm64" }), "sqlite3");
@@ -14,8 +21,7 @@ test("resolveSqliteExecutable resolves the unpackaged Windows runtime", () => {
   assert.equal(resolveSqliteExecutable({
     platform: "win32",
     arch: "x64",
-    appPath,
-    existsSync: (filePath) => filePath === expected
+    appPath
   }), expected);
 });
 
@@ -27,26 +33,45 @@ test("resolveSqliteExecutable resolves the packaged Windows runtime", () => {
     platform: "win32",
     arch: "x64",
     resourcesPath,
-    isPackaged: true,
-    existsSync: (filePath) => filePath === expected
+    isPackaged: true
   }), expected);
 });
 
-test("resolveSqliteExecutable rejects unsupported Windows architectures", () => {
-  assert.throws(
-    () => resolveSqliteExecutable({ platform: "win32", arch: "arm64" }),
-    /Windows x64 only; received arm64/
+test("resolveSqliteExecutable does not inspect the bundle during module initialization", () => {
+  assert.equal(
+    resolveSqliteExecutable({ platform: "win32", arch: "arm64", appPath: "C:\\work\\AccordAgents" }),
+    path.join("C:\\work\\AccordAgents", "assets", "sqlite", "win32-arm64", "sqlite3.exe")
   );
 });
 
-test("resolveSqliteExecutable rejects a missing bundled executable", () => {
-  assert.throws(
-    () => resolveSqliteExecutable({
+test("validateSqliteExecutable ignores the external macOS sqlite3 command", async () => {
+  await validateSqliteExecutable({ executable: "sqlite3", platform: "darwin", arch: "arm64" });
+});
+
+test("validateSqliteExecutable reports a missing Windows bundle as a damaged installation", async () => {
+  await assert.rejects(
+    validateSqliteExecutable({
+      executable: path.join(tmpdir(), "accordagents-missing-sqlite3.exe"),
       platform: "win32",
-      arch: "x64",
-      appPath: "C:\\work\\AccordAgents",
-      existsSync: () => false
+      arch: "x64"
     }),
-    /Bundled SQLite executable is missing/
+    (error: unknown) =>
+      error instanceof BundledSqliteInstallationError &&
+      error.message.includes(DAMAGED_SQLITE_INSTALLATION_MESSAGE)
+  );
+});
+
+test("validateSqliteExecutable reports a damaged Windows bundle and recommends reinstalling", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-damaged-sqlite-"));
+  const executable = path.join(root, "sqlite3.exe");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(executable, "not sqlite");
+
+  await assert.rejects(
+    validateSqliteExecutable({ executable, platform: "win32", arch: "x64" }),
+    (error: unknown) =>
+      error instanceof BundledSqliteInstallationError &&
+      /missing or damaged/.test(error.message) &&
+      /Reinstall AccordAgents/.test(error.message)
   );
 });

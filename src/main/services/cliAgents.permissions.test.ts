@@ -3,7 +3,13 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { CliAgentRunner, CodexAppServerRunError, parseClaudeModelPickerOutput, resolveCodexCompactTimeoutMs } from "./cliAgents";
+import {
+  CliAgentRunner,
+  CodexAppServerRunError,
+  parseClaudeModelPickerOutput,
+  resolveCodexCompactTimeoutMs,
+  runClaudeModelProbeInPty
+} from "./cliAgents";
 import { CommandError } from "./command";
 import { buildCodexExecInvocation, CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
@@ -129,7 +135,7 @@ test("parseClaudeModelPickerOutput extracts aliases and default model from picke
     "\u001b[5G4.\u001b[8GSonnet\u001b[33GSonnet\u001b[40G4.6",
     "\u001b[5G5.\u001b[8GSonnet\u001b[15G(1M\u001b[19Gcontext)\u001b[33GSonnet\u001b[40G4.6\u001b[44Gfor\u001b[48Glong\u001b[53Gsessions",
     "\u001b[5G6.\u001b[8GHaiku\u001b[33GHaiku\u001b[39G4.5",
-    "● Enter to set · Esc to cancel"
+    "● Enter to set · Esctocancel"
   ].join("\n");
 
   assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => ({
@@ -142,6 +148,191 @@ test("parseClaudeModelPickerOutput extracts aliases and default model from picke
     { id: "claude-sonnet-4-6[1m]", recommended: false },
     { id: "haiku", recommended: false }
   ]);
+});
+
+test("parseClaudeModelPickerOutput handles ConPTY rows without whitespace between items", () => {
+  const output = "Select model> 1. Default (recommended) √ Opus 5 with 1M context · Best for tasks2. Opus (1M context) Opus 5 with 1M context · Best for tasks3. Fable Fable 5 · Hard tasks4. Sonnet Sonnet 5 · Routine tasks5. Sonnet5(1Mcontext)Sonnet5forlongsessions6. Haiku Haiku 4.5 · Fast● High effort Enter to s t as defaul · Esctocancel";
+  assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), [
+    "opus",
+    "fable",
+    "sonnet",
+    "claude-sonnet-5[1m]",
+    "haiku"
+  ]);
+});
+
+test("parseClaudeModelPickerOutput uses the final ConPTY redraw", () => {
+  const output = [
+    "Select model 1. Default (recommended) ✔ Opus 5 2. Opus Opus 5 Enter to set · Esc to cancel",
+    "Select model 1. Default (recommended) ✔ Opus 5 2. Opus Opus 5 3. Fable Fable 5 4. Sonnet Sonnet 5 5. Sonnet5(1Mcontext) Sonnet 5 for long sessions 6. Haiku Haiku 4.5 Enter to set · Esc to cancel"
+  ].join("\n");
+
+  assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), [
+    "opus",
+    "fable",
+    "sonnet",
+    "claude-sonnet-5[1m]",
+    "haiku"
+  ]);
+});
+
+test("parseClaudeModelPickerOutput drops models removed by the final ConPTY redraw", () => {
+  const output = [
+    "Select model 1. Default (recommended) ✔ Opus 5 2. Opus Opus 5 3. Fable Fable 5 Enter to set · Esc to cancel",
+    "Select model 1. Default (recommended) ✔ Opus 5 2. Opus Opus 5 Enter to set · Esc to cancel"
+  ].join("\n");
+
+  assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), ["opus"]);
+});
+
+test("parseClaudeModelPickerOutput uses a final heading when its footer is fragmented", () => {
+  const output = [
+    "Select model 1. Default (recommended) ✔ Opus 5 2. Opus Opus 5 3. Fable Fable 5 Enter to set · Esc to cancel",
+    "Select model 1. Default (recommended) ✔ Opus 5 2. Sonnet Sonnet 5 Enter to s et · Esc to cancel"
+  ].join("\n");
+
+  assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), ["sonnet"]);
+});
+
+test("parseClaudeModelPickerOutput uses the preceding footer when the final heading is fragmented", () => {
+  const output = [
+    "Select model 1. Default (recommended) ✔ Opus 5 2. Opus Opus 5 3. Fable Fable 5 Enter to set · Esc to cancel",
+    "Sel ect model 1. Default (recommended) ✔ Opus 5 2. Haiku Haiku 4.5 Enter to set · Esc to cancel"
+  ].join("\n");
+
+  assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), ["haiku"]);
+});
+
+test("parseClaudeModelPickerOutput uses final rows when both redraw boundaries are fragmented", () => {
+  const output = [
+    "Select model 1. Default (recommended) ✔ Opus 5 2. Opus Opus 5 3. Fable Fable 5 Enter to set · Esc to cancel",
+    "Sel ect model 1. Default (recommended) ✔ Opus 5 2. Sonnet Sonnet 5 Enter to s et · Esc to cancel"
+  ].join("\n");
+
+  assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), ["sonnet"]);
+});
+
+test("parseClaudeModelPickerOutput recognizes a single picker with fragmented boundaries", () => {
+  const output = "Sel ect model 1. Default (recommended) ✔ Opus 5 2. Haiku Haiku 4.5 Enter to s et · Esc to cancel";
+
+  assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), ["haiku"]);
+});
+
+test("Windows Claude model discovery drives only the non-persistent interactive model picker", async () => {
+  const writes: string[] = [];
+  let launch: { executable: string; args: string[]; cwd: string; env: Record<string, string> } | undefined;
+  let onData: ((data: string) => void) | undefined;
+  let onExit: ((event: { exitCode: number }) => void) | undefined;
+  const output = [
+    "Select model",
+    "1. Default (recommended) ✔ Sonnet 4.6",
+    "2. Opus Opus 4.8",
+    "3. Sonnet Sonnet 4.6",
+    "● Enter to set · Esc to cancel"
+  ].join("\r\n");
+
+  const probe = runClaudeModelProbeInPty({
+    executable: "C:\\Program Files\\Claude\\claude.exe",
+    env: { PATH: "C:\\Windows\\System32", CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1" },
+    cwd: "C:\\trusted\\repo",
+    timeoutMs: 1_000,
+    initialDelayMs: 0,
+    pickerSettleDelayMs: 0,
+    exitDelayMs: 0,
+    spawnPty: (executable, args, options) => {
+      launch = { executable, args, cwd: options.cwd, env: options.env };
+      queueMicrotask(() => onData?.("Safe mode: customizations disabled\r\nTranscript saving is off"));
+      return {
+        write: (data) => {
+          writes.push(data);
+          if (data === "/model\r") {
+            queueMicrotask(() => onData?.(output));
+          } else if (data === "/exit\r") {
+            queueMicrotask(() => onExit?.({ exitCode: 0 }));
+          }
+        },
+        kill: () => undefined,
+        onData: (listener) => {
+          onData = listener;
+          return { dispose: () => undefined };
+        },
+        onExit: (listener) => {
+          onExit = listener;
+          return { dispose: () => undefined };
+        }
+      };
+    }
+  });
+
+  const transcript = await probe;
+  assert.deepEqual(launch, {
+    executable: "C:\\Program Files\\Claude\\claude.exe",
+    args: ["--safe-mode", "--no-chrome"],
+    cwd: "C:\\trusted\\repo",
+    env: {
+      PATH: "C:\\Windows\\System32",
+      CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1"
+    }
+  });
+  assert.deepEqual(writes, ["/model\r", "\u001b", "/exit\r"]);
+  assert.deepEqual(parseClaudeModelPickerOutput(transcript).map((model) => model.id), ["opus", "sonnet"]);
+  assert.equal(writes.some((value) => !["/model\r", "\u001b", "/exit\r"].includes(value)), false);
+});
+
+test("Windows Claude model discovery never accepts a folder trust prompt", async () => {
+  const writes: string[] = [];
+  let killed = false;
+  let onData: ((data: string) => void) | undefined;
+
+  const probe = runClaudeModelProbeInPty({
+    executable: "C:\\Program Files\\Claude\\claude.exe",
+    env: { PATH: "C:\\Windows\\System32" },
+    cwd: "C:\\untrusted\\repo",
+    timeoutMs: 1_000,
+    initialDelayMs: 0,
+    pickerSettleDelayMs: 0,
+    exitDelayMs: 0,
+    spawnPty: () => {
+      queueMicrotask(() => onData?.("Quick safety check: Is this a project you trust? 1. Yes, I trust this folder"));
+      return {
+        write: (data) => writes.push(data),
+        kill: () => { killed = true; },
+        onData: (listener) => {
+          onData = listener;
+          return { dispose: () => undefined };
+        },
+        onExit: () => ({ dispose: () => undefined })
+      };
+    }
+  });
+
+  await assert.rejects(probe, /requires this folder to be trusted/);
+  assert.deepEqual(writes, []);
+  assert.equal(killed, true);
+});
+
+test("Windows Claude catalogs never add configured or hard-coded fallback models", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("Windows-specific exact catalog behavior");
+    return;
+  }
+  const runner = makeRunner() as any;
+  runner.listClaudeModelCatalog = async (fetchedAt: string) => ({
+    kind: "claude-code",
+    models: [{ id: "account-offered", label: "Account offered", source: "cli" }],
+    authoritative: true,
+    fetchedAt
+  });
+  const catalog = await runner.listModelCatalog("claude-code", "configured-but-not-offered");
+  assert.deepEqual(catalog.models.map((model: { id: string }) => model.id), ["account-offered"]);
+  const cachedCatalog = await runner.listModelCatalog("claude-code", "configured-but-not-offered");
+  assert.deepEqual(cachedCatalog.models.map((model: { id: string }) => model.id), ["account-offered"]);
+
+  runner.modelCatalogs.clear();
+  runner.listClaudeModelCatalog = async () => { throw new Error("picker unavailable"); };
+  const failed = await runner.listModelCatalog("claude-code", "configured-but-not-offered");
+  assert.deepEqual(failed.models, []);
+  assert.equal(failed.authoritative, false);
 });
 
 test("codex app-server stream keeps token deltas joined inside one agent message", () => {
@@ -2500,7 +2691,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     if (helperPid && testProcessExists(helperPid)) {
       process.kill(helperPid, "SIGKILL");
     }
-    await rm(fixtureDir, { recursive: true, force: true });
+    await rm(fixtureDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -2511,6 +2702,7 @@ test("Windows warm-agent shutdown terminates provider descendants", async (t) =>
   }
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-warm-tree-"));
   const helperPidFile = path.join(fixtureDir, "warm-helper.pid");
+  const gracefulShutdownMarker = path.join(fixtureDir, "graceful-shutdown.marker");
   const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
 const { spawn } = require("node:child_process");
 const { writeFileSync } = require("node:fs");
@@ -2518,7 +2710,9 @@ const readline = require("node:readline");
 const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
 writeFileSync(${JSON.stringify(helperPidFile)}, String(helper.pid));
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
-readline.createInterface({ input: process.stdin }).on("line", (line) => {
+const input = readline.createInterface({ input: process.stdin });
+input.on("close", () => writeFileSync(${JSON.stringify(gracefulShutdownMarker)}, "stdin closed"));
+input.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
     send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "windows", platformOsName: "windows", platformArch: "x64" } });
@@ -2566,7 +2760,75 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   assert.equal(testProcessExists(helperPid), true);
 
   await runner.shutdownWarmAgents();
+  assert.equal(await readFile(gracefulShutdownMarker, "utf8"), "stdin closed");
   await assertFixtureProcessStops(helperPid);
+});
+
+test("closing AccordAgents terminates every warm agent process while responses are active", async (t) => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-close-active-agents-"));
+  const pidFile = path.join(fixtureDir, "active-agent-pids.txt");
+  const startedFile = path.join(fixtureDir, "active-agent-started.txt");
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
+const { appendFileSync } = require("node:fs");
+const readline = require("node:readline");
+appendFileSync(${JSON.stringify(pidFile)}, String(process.pid) + "\\n");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: process.platform, platformOsName: process.platform, platformArch: process.arch } });
+  } else if (message.method === "thread/start") {
+    send({ id: message.id, result: { thread: { id: "thread-" + process.pid }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-" + process.pid } } });
+    send({ method: "turn/started", params: { threadId: "thread-" + process.pid, turn: { id: "turn-" + process.pid } } });
+    appendFileSync(${JSON.stringify(startedFile)}, String(process.pid) + "\\n");
+  }
+});
+`);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  const participants = ["one", "two"].map((id) => ({ id: `participant-${id}`, kind: "codex-cli" as const, label: `Codex ${id}` }));
+  t.after(async () => {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  });
+
+  const runs = participants.map((participant) => runner.runCodexAppServerWarmOrOneShot(
+    participant,
+    "Keep responding until the app closes.",
+    fixtureDir,
+    undefined,
+    "chat",
+    undefined,
+    {
+      agentMode: "default",
+      warm: {
+        conversationId: `conversation-${participant.id}`,
+        participantId: participant.id,
+        contextKey: `context-${participant.id}`,
+        idleTimeoutMs: 60_000
+      }
+    }
+  ));
+
+  let startedPids: number[] = [];
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    startedPids = await readFile(startedFile, "utf8")
+      .then((value) => value.trim().split(/\r?\n/).filter(Boolean).map(Number))
+      .catch(() => []);
+    if (startedPids.length === participants.length) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(startedPids.length, participants.length, "both agent responses should be active before app shutdown");
+
+  await runner.shutdownWarmAgents();
+  const results = await Promise.all(runs);
+  assert.equal(results.every((result: { ok: boolean }) => result.ok === false), true);
+  for (const pid of startedPids) {
+    await assertFixtureProcessStops(pid);
+  }
 });
 
 function testProcessExists(pid: number): boolean {

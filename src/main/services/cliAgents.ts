@@ -75,11 +75,13 @@ const MAX_CLI_ERROR_LINES = 8;
 const MAX_CLI_EVENT_SUMMARIES = 2;
 const CLI_AGENT_COMPACT_TIMEOUT_MS = 5 * 60_000;
 const WARM_AGENT_KILL_GRACE_MS = 1500;
+const WINDOWS_WARM_AGENT_KILL_GRACE_MS = 750;
 const SESSION_LOG_RETRY_MS = 80;
 const SESSION_LOG_RETRIES = 4;
 const MODEL_CATALOG_CACHE_MS = 5 * 60_000;
 const MODEL_CATALOG_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_TIMEOUT_MS = 8_000;
+const CLAUDE_WINDOWS_MODEL_PROBE_TIMEOUT_MS = 12_000;
 const CLAUDE_EXECUTABLE_ENV = "ACCORD_AGENTS_CLAUDE_EXECUTABLE";
 const ANTIGRAVITY_EXECUTABLE_ENV = "ACCORD_AGENTS_ANTIGRAVITY_EXECUTABLE";
 const NATIVE_GOAL_IDLE_WARNING_MS = 5 * 60_000;
@@ -94,6 +96,8 @@ const CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS = [
   "CLAUDE_CODE_OAUTH_TOKEN",
   "ANTHROPIC_BASE_URL"
 ];
+const CLAUDE_CODE_SKIP_PROMPT_HISTORY_ENV = "CLAUDE_CODE_SKIP_PROMPT_HISTORY";
+const CLAUDE_CODE_FORCE_SESSION_PERSISTENCE_ENV = "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE";
 const CLAUDE_CODE_COMMAND_ENV_OPTIONS: CommandEnvironmentOptions = {
   dropProcessEnvKeysAbsentFromLoginShell: CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS
 };
@@ -451,6 +455,30 @@ interface ClaudeToolConfig {
   askTools: string[];
 }
 
+interface ClaudeModelProbePty {
+  write(data: string): void;
+  kill(): void;
+  onData(listener: (data: string) => void): { dispose(): void };
+  onExit(listener: (event: { exitCode: number; signal?: number }) => void): { dispose(): void };
+}
+
+type ClaudeModelProbePtySpawn = (
+  executable: string,
+  args: string[],
+  options: { name: string; cols: number; rows: number; cwd: string; env: Record<string, string> }
+) => ClaudeModelProbePty;
+
+interface ClaudeModelProbePtyOptions {
+  executable: string;
+  env: NodeJS.ProcessEnv;
+  cwd: string;
+  spawnPty: ClaudeModelProbePtySpawn;
+  timeoutMs?: number;
+  initialDelayMs?: number;
+  pickerSettleDelayMs?: number;
+  exitDelayMs?: number;
+}
+
 class CliGeminiResumeMissError extends Error {
   constructor(status: string, response: string | undefined) {
     super(`Antigravity CLI could not resume the conversation (status ${status})${response ? `: ${response.slice(0, 200)}` : "."}`);
@@ -473,12 +501,41 @@ export function parseClaudeModelPickerOutput(output: string): ProviderModel[] {
     .replace(/\r/g, "\n")
     .replace(/[ \t]+/g, " ")
     .replace(/\n+/g, "\n");
-  const start = text.indexOf("Select model");
-  const end = start >= 0 ? text.indexOf("Enter to set", start) : -1;
-  const body = start >= 0 ? text.slice(start, end > start ? end : undefined) : text;
+  const footerMarker = "Enter to set";
+  const footerIndexes = [...text.matchAll(/Enter to set/g)].map((match) => match.index ?? -1).filter((index) => index >= 0);
+  const pickerFooter = footerIndexes.at(-1) ?? -1;
+  let pickerHeading = -1;
+  for (const match of text.matchAll(/Select\s*m\s*odel/ig)) {
+    const index = match.index ?? -1;
+    if (index >= 0) {
+      pickerHeading = index;
+    }
+  }
+  const lastFooterEnd = pickerFooter >= 0 ? pickerFooter + footerMarker.length : 0;
+  const trailingText = text.slice(lastFooterEnd);
+  const trailingRows = [...trailingText.matchAll(/\d+\.\s+[A-Za-z]/g)];
+  const trailingRowsStart = trailingRows.length >= 2 && /Esc\s+to\s+cancel/i.test(trailingText)
+    ? lastFooterEnd + (trailingRows[0].index ?? 0)
+    : -1;
+  // ConPTY exposes terminal redraws as a linear transcript. Read only the
+  // latest identifiable frame. A redraw may fragment either boundary, so the
+  // preceding complete footer or guarded picker rows are also safe boundaries.
+  if (pickerHeading < 0 && pickerFooter < 0 && trailingRowsStart < 0) {
+    return [];
+  }
+  const precedingFooterEnd = footerIndexes.length > 1
+    ? footerIndexes[footerIndexes.length - 2] + footerMarker.length
+    : 0;
+  const start = Math.max(pickerHeading, precedingFooterEnd, trailingRowsStart, 0);
+  const end = pickerFooter >= start ? pickerFooter : -1;
+  const body = text.slice(start, end > start ? end : undefined);
   const models: ProviderModel[] = [];
   let defaultAlias: string | undefined;
-  const itemPattern = /(?:^|\n|\s)(?:[›>]\s*)?(\d+)\.\s+([A-Za-z][A-Za-z0-9_-]*)\s+([\s\S]*?)(?=(?:\n|\s)(?:[›>]\s*)?\d+\.\s+[A-Za-z]|(?:\n|\s)●\s+|Enter to set|$)/g;
+  // ConPTY reports cursor-positioned redraws as a linear byte stream, so the
+  // end of one description can touch the next numbered item ("tasks2.").
+  // Numbered picker rows are still authoritative boundaries even without
+  // intervening whitespace.
+  const itemPattern = /(?:[›>]\s*)?(\d+)\.\s+([A-Za-z][A-Za-z0-9_-]*)(?:\s+|(?=\())([\s\S]*?)(?=(?:[›>]\s*)?\d+\.\s+[A-Za-z]|●\s+|Enter\s+to|$)/g;
 
   for (const match of body.matchAll(itemPattern)) {
     const alias = match[2]?.trim();
@@ -492,8 +549,15 @@ export function parseClaudeModelPickerOutput(output: string): ProviderModel[] {
       defaultAlias = defaultMatch?.[1]?.toLowerCase();
       continue;
     }
-    const titleDetail = details.match(/^\(([^)]+)\)\s+(.*)$/);
-    const displayName = titleDetail ? `${alias} (${titleDetail[1]})` : alias;
+    const leadingSonnetVersion = id === "sonnet" ? details.match(/^(\d+(?:\.\d+)?)\s*(?=\()/)?.[1] : undefined;
+    const normalizedDetails = leadingSonnetVersion ? details.slice(leadingSonnetVersion.length).trim() : details;
+    const titleDetail = normalizedDetails.match(/^\(([^)]+)\)\s*(.*)$/);
+    const collapsedSonnetVersion = alias.match(/^Sonnet(\d+(?:\.\d+)?)$/i)?.[1];
+    const displayAlias = leadingSonnetVersion || collapsedSonnetVersion
+      ? `Sonnet ${leadingSonnetVersion ?? collapsedSonnetVersion}`
+      : alias;
+    const contextLabel = titleDetail?.[1].replace(/^1Mcontext$/i, "1M context");
+    const displayName = titleDetail ? `${displayAlias} (${contextLabel})` : displayAlias;
     const description = titleDetail ? titleDetail[2].trim() : details;
     const modelId = claudeModelIdFromPickerItem(id, displayName, description);
     models.push({
@@ -508,10 +572,141 @@ export function parseClaudeModelPickerOutput(output: string): ProviderModel[] {
   return dedupeProviderModels(models);
 }
 
+export function runClaudeModelProbeInPty({
+  executable,
+  env,
+  cwd,
+  spawnPty,
+  timeoutMs = CLAUDE_WINDOWS_MODEL_PROBE_TIMEOUT_MS,
+  initialDelayMs = 1_500,
+  pickerSettleDelayMs = 750,
+  exitDelayMs = 250
+}: ClaudeModelProbePtyOptions): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let output = "";
+    let modelCommandScheduled = false;
+    let pickerObserved = false;
+    let pickerClosed = false;
+    let exitRequested = false;
+    let finished = false;
+    let exited = false;
+    const timers = new Set<NodeJS.Timeout>();
+    const schedule = (callback: () => void, delayMs: number): void => {
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        callback();
+      }, delayMs);
+      timers.add(timer);
+    };
+
+    let terminal: ClaudeModelProbePty;
+    try {
+      const probeEnv: NodeJS.ProcessEnv = { ...env, [CLAUDE_CODE_SKIP_PROMPT_HISTORY_ENV]: "1" };
+      delete probeEnv[CLAUDE_CODE_FORCE_SESSION_PERSISTENCE_ENV];
+      terminal = spawnPty(executable, ["--safe-mode", "--no-chrome"], {
+        name: "xterm-256color",
+        cols: 120,
+        rows: 40,
+        cwd,
+        env: Object.fromEntries(Object.entries(probeEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    let dataSubscription: { dispose(): void } | undefined;
+    let exitSubscription: { dispose(): void } | undefined;
+    let pickerCloseTimer: NodeJS.Timeout | undefined;
+    const finish = (error?: Error): void => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      for (const timer of timers) {
+        clearTimeout(timer);
+      }
+      timers.clear();
+      dataSubscription?.dispose();
+      exitSubscription?.dispose();
+      if (!exited) {
+        try {
+          terminal.kill();
+        } catch {
+          // The short-lived picker process may have exited between the check and kill.
+        }
+      }
+      if (error) {
+        reject(error);
+      } else {
+        resolve(output);
+      }
+    };
+
+    const timeout = setTimeout(() => {
+      finish(new Error("Claude model picker probe timed out."));
+    }, timeoutMs);
+    timers.add(timeout);
+
+    dataSubscription = terminal.onData((data) => {
+      output += data;
+      const plainOutput = stripAnsi(output);
+      if (/Quick\s+safety\s+check|Yes,?\s+I\s+trust\s+this\s+folder/i.test(plainOutput)) {
+        finish(new Error("Claude Code requires this folder to be trusted. Open Claude Code in the folder and complete its trust prompt, then refresh models."));
+        return;
+      }
+      const mainPromptReady = /Safe\s+mode:/i.test(plainOutput)
+        && /Transcript\s+saving\s+is\s+off/i.test(plainOutput);
+      if (!modelCommandScheduled && mainPromptReady) {
+        modelCommandScheduled = true;
+        schedule(() => terminal.write("/model\r"), initialDelayMs);
+      }
+      if (/(?:Esc\s*to\s*cancel|\bcancel\b)/i.test(plainOutput)) {
+        pickerObserved = true;
+      }
+      if (pickerObserved && !pickerClosed) {
+        if (pickerCloseTimer) {
+          clearTimeout(pickerCloseTimer);
+          timers.delete(pickerCloseTimer);
+        }
+        pickerCloseTimer = setTimeout(() => {
+          timers.delete(pickerCloseTimer!);
+          pickerCloseTimer = undefined;
+          if (finished || pickerClosed) {
+            return;
+          }
+          pickerClosed = true;
+          terminal.write("\u001b");
+          schedule(() => {
+            exitRequested = true;
+            terminal.write("/exit\r");
+            // Match the existing macOS expect probe: once the authoritative
+            // picker was captured, a slow CLI exit must not turn discovery into
+            // a hard-coded fallback or leave a process behind.
+            schedule(() => finish(), 2_000);
+          }, exitDelayMs);
+        }, pickerSettleDelayMs);
+        timers.add(pickerCloseTimer);
+      }
+    });
+    exitSubscription = terminal.onExit(({ exitCode }) => {
+      exited = true;
+      if (pickerClosed && (exitRequested || exitCode === 0)) {
+        finish();
+      } else {
+        finish(new Error(`Claude model picker probe exited with code ${exitCode}.`));
+      }
+    });
+  });
+}
+
 function claudeModelIdFromPickerItem(alias: string, displayName: string, description: string): string {
-  const oneMillionContext = /\b1M\s+context\b|\(1M\s+context\)/i.test(`${displayName} ${description}`);
-  if (alias === "sonnet" && oneMillionContext) {
-    const version = description.match(/\bSonnet\s+(\d+(?:\.\d+)?)/i)?.[1];
+  const oneMillionContext = /\b1M\s*context\b/i.test(`${displayName} ${description}`);
+  const collapsedSonnetVersion = alias.match(/^sonnet(\d+(?:\.\d+)?)$/i)?.[1];
+  if ((alias === "sonnet" || collapsedSonnetVersion) && oneMillionContext) {
+    const version = `${displayName} ${description}`.match(/\bSonnet\s*(\d+(?:\.\d+)?)/i)?.[1]
+      ?? description.match(/^(\d+(?:\.\d+)?)/)?.[1]
+      ?? collapsedSonnetVersion;
     if (version) {
       return `claude-sonnet-${version.replace(/\./g, "-")}[1m]`;
     }
@@ -600,7 +795,8 @@ export class CliAgentRunner {
   constructor(
     private readonly debugLogs?: CliAgentDebugLogger,
     manualReadinessEnvironment?: () => Promise<{ env: NodeJS.ProcessEnv }>,
-    private readonly codexExecutable = "codex"
+    private readonly codexExecutable = "codex",
+    private readonly claudeModelProbePtySpawn?: ClaudeModelProbePtySpawn
   ) {
     this.readiness = new CliReadinessService(debugLogs, {
       manualEnvironment: async () => (await manualReadinessEnvironment?.())?.env ?? {}
@@ -638,10 +834,12 @@ export class CliAgentRunner {
     return this.readiness.invalidate();
   }
 
-  async listModelCatalog(kind: ChatProviderKind, configuredModel?: string): Promise<ProviderModelCatalog> {
+  async listModelCatalog(kind: ChatProviderKind, configuredModel?: string, probeCwd?: string): Promise<ProviderModelCatalog> {
     const cached = this.modelCatalogs.get(kind);
     if (cached && cached.expiresAt > Date.now()) {
-      return this.withConfiguredModel(cached.catalog, configuredModel);
+      return kind === "claude-code" && process.platform === "win32"
+        ? cached.catalog
+        : this.withConfiguredModel(cached.catalog, configuredModel);
     }
 
     const fetchedAt = new Date().toISOString();
@@ -651,7 +849,7 @@ export class CliAgentRunner {
         ? await this.listCodexModelCatalog(fetchedAt)
         : kind === "gemini-cli"
           ? await this.listGeminiModelCatalog(fetchedAt)
-          : await this.listClaudeModelCatalog(fetchedAt);
+          : await this.listClaudeModelCatalog(fetchedAt, probeCwd);
       const normalized = {
         ...catalog,
         models: this.dedupeModels(catalog.models)
@@ -668,17 +866,22 @@ export class CliAgentRunner {
 
     try {
       const normalized = await request;
-      return this.withConfiguredModel(normalized, configuredModel);
+      return kind === "claude-code" && process.platform === "win32"
+        ? normalized
+        : this.withConfiguredModel(normalized, configuredModel);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await this.debugLogs?.write("cli.model-catalog.error", { kind, message });
-      return this.withConfiguredModel({
+      const failedCatalog: ProviderModelCatalog = {
         kind,
-        models: this.fallbackModelsForKind(kind),
+        models: kind === "claude-code" && process.platform === "win32" ? [] : this.fallbackModelsForKind(kind),
         authoritative: false,
         fetchedAt,
         error: message
-      }, configuredModel);
+      };
+      return kind === "claude-code" && process.platform === "win32"
+        ? failedCatalog
+        : this.withConfiguredModel(failedCatalog, configuredModel);
     } finally {
       if (this.modelCatalogRequests.get(kind) === request) {
         this.modelCatalogRequests.delete(kind);
@@ -946,8 +1149,8 @@ export class CliAgentRunner {
     }
   }
 
-  private async listClaudeModelCatalog(fetchedAt: string): Promise<ProviderModelCatalog> {
-    const output = await this.runClaudeModelProbe();
+  private async listClaudeModelCatalog(fetchedAt: string, probeCwd?: string): Promise<ProviderModelCatalog> {
+    const output = await this.runClaudeModelProbe(probeCwd);
     const models = parseClaudeModelPickerOutput(output);
     if (models.length === 0) {
       throw new Error("Claude model picker did not expose parseable model choices.");
@@ -980,10 +1183,19 @@ export class CliAgentRunner {
     return options;
   }
 
-  private async runClaudeModelProbe(): Promise<string> {
+  private async runClaudeModelProbe(probeCwd?: string): Promise<string> {
     await ensureLoginShellEnvPrimed();
     const env = commandEnvironment(undefined, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
     const claudeExecutable = await resolveCommandPath("claude", env);
+    if (process.platform === "win32") {
+      const spawnPty = this.claudeModelProbePtySpawn ?? (await import("node-pty")).spawn;
+      return runClaudeModelProbeInPty({
+        executable: claudeExecutable,
+        env,
+        cwd: probeCwd?.trim() || process.cwd(),
+        spawnPty
+      });
+    }
     return new Promise<string>((resolve, reject) => {
       const child = spawnCommand("expect", ["-c", this.claudeModelProbeExpectScript()], {
         env: { ...env, [CLAUDE_EXECUTABLE_ENV]: claudeExecutable },
@@ -1067,8 +1279,11 @@ export class CliAgentRunner {
     ].join("\n");
   }
 
-  private fallbackModelsForKind(kind: ChatProviderKind): ProviderModel[] {
+  private fallbackModelsForKind(kind: ChatProviderKind, platform = process.platform): ProviderModel[] {
     if (kind === "claude-code") {
+      if (platform === "win32") {
+        return [];
+      }
       return [
         { id: "opus", label: "Opus", source: "builtin" },
         { id: "sonnet", label: "Sonnet", source: "builtin" },
@@ -5078,14 +5293,25 @@ export class CliAgentRunner {
     if (entry.process.exitCode !== null || entry.process.signalCode !== null || entry.process.killed) {
       return;
     }
-    terminateProcess(entry.process, "SIGTERM", true);
+    if (process.platform === "win32") {
+      // Closing stdin lets JSONL/app-server CLIs finish their current write and
+      // persist session state before the process-tree kill below is required.
+      try {
+        entry.process.stdin.end();
+      } catch {
+        // The provider may have already closed stdin; escalation remains below.
+      }
+    } else {
+      // Preserve the established macOS/POSIX shutdown behavior exactly.
+      terminateProcess(entry.process, "SIGTERM", true);
+    }
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         if (entry.process.exitCode === null && entry.process.signalCode === null) {
           terminateProcess(entry.process, "SIGKILL", true);
         }
         resolve();
-      }, WARM_AGENT_KILL_GRACE_MS);
+      }, process.platform === "win32" ? WINDOWS_WARM_AGENT_KILL_GRACE_MS : WARM_AGENT_KILL_GRACE_MS);
       timer.unref();
       entry.process.once("close", () => {
         clearTimeout(timer);
