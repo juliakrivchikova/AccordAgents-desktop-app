@@ -58,6 +58,34 @@ test("openConversation returns a message window consistent with messagePage", as
   assert.equal(result!.messagePage.oldestSequence, 3);
 });
 
+test("listConversationMessages decodes an escape-heavy message recipe", async () => {
+  const [sequence, quoteCount, backslashCount] = [32, 36_182, 66_535];
+  const count = (value: string, character: string) => value.length - value.replaceAll(character, "").length;
+  const generateData = (): string => {
+    const start = "{\"id\":\"x\",\"role\":\"participant\",\"content\":\"";
+    const end = "\",\"createdAt\":\"2026-01-01T00:00:00.000Z\"}";
+    const contentQuotes = quoteCount - count(start + end, "\"");
+    const remainingBackslashes = backslashCount - contentQuotes;
+    return start + "\\\"".repeat(contentQuotes)
+      + "\\\\".repeat(Math.floor(remainingBackslashes / 2))
+      + (remainingBackslashes % 2 ? "\\n" : "") + end;
+  };
+  const payloadJson = generateData();
+
+  assert.equal(count(payloadJson, "\""), quoteCount);
+  assert.equal(count(payloadJson, "\\"), backslashCount);
+
+  const storage = fakeStorage(async (sql) => sql.includes("hex(payload_json) as payloadHex")
+    ? [{
+        sequence,
+        payloadHex: Buffer.from(payloadJson, "utf8").toString("hex")
+      }]
+    : [{ totalMessages: 1 }]);
+  const page = await storage.listConversationMessages({ conversationId: "redacted-conversation", limit: 1 });
+
+  assert.deepEqual(page.messages, [JSON.parse(payloadJson) as ChatMessage]);
+});
+
 test("listConversationMessages can page around a target message id", async () => {
   const queries: string[] = [];
   const storage = fakeStorage(async (sql) => {
