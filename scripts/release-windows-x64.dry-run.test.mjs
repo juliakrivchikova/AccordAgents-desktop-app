@@ -72,7 +72,7 @@ function runSourceTagCheck(cwd) {
   });
 }
 
-test("Windows release rejects a local source tag that does not point at HEAD", (t) => {
+test("Windows release rejects a local source tag that does not point at HEAD", { skip: process.platform !== "win32" }, (t) => {
   const repoDir = releaseCheckFixture({ advanceAfterTag: true, pushTag: true });
   t.after(() => rmSync(path.dirname(repoDir), { recursive: true, force: true }));
   const result = runSourceTagCheck(repoDir);
@@ -81,7 +81,7 @@ test("Windows release rejects a local source tag that does not point at HEAD", (
   assert.match(result.stderr, /Local tag v1\.2\.3 points at .+, not current HEAD .+\./);
 });
 
-test("Windows release rejects a source tag missing from origin", (t) => {
+test("Windows release rejects a source tag missing from origin", { skip: process.platform !== "win32" }, (t) => {
   const repoDir = releaseCheckFixture();
   t.after(() => rmSync(path.dirname(repoDir), { recursive: true, force: true }));
   const result = runSourceTagCheck(repoDir);
