@@ -7649,6 +7649,543 @@ test("app_chat_send_message publishes a participant message and lets the author 
   assert.equal(storage.current.messages[1].metadata.reactions["✅"][0].actorLabel, "@codex");
 });
 
+test("app_chat_send_message infers one runnable request per mentioned target", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "allow" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  const { service, storage } = testService({ conversation });
+  const started: Array<{ requestMessageId: string; depth: number; source: string }> = [];
+  (service as any).startDeferredParticipantRequestRunners = (
+    _conversationId: string,
+    requests: Array<{ requestMessageId: string; depth: number; source: string }>
+  ) => started.push(...requests);
+  const actor = {
+    ...participantRequestActor(requester),
+    runId: "tool-inference-run",
+    turnSegmentId: "tool-inference-segment"
+  };
+
+  const sent = await service.sendChatMessageFromTool(actor, {
+    content: "@drew @drew please review this once."
+  });
+
+  const requestMessages = inferredRequestMessages(storage.current);
+  assert.equal(sent.sequence, 1);
+  assert.equal(storage.current.messages[1].id, sent.messageId);
+  assert.equal(storage.current.messages[1].metadata.turnSegmentId, actor.turnSegmentId);
+  assert.equal(requestMessages.length, 1);
+  assert.deepEqual(requestMessages[0].metadata?.participantRequest?.items.map((item) => item.targetHandle), [target.handle]);
+  assert.equal(requestMessages[0].metadata?.participantRequest?.status, "running");
+  assert.equal(started.length, 1);
+});
+
+test("tool-post inference deduplicates completed requests within one turn segment", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "ask" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  const { service, storage } = testService({ conversation });
+  const debugEntries: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  (service as any).debugLogs.write = async (event: string, payload: Record<string, unknown>) => {
+    debugEntries.push({ event, payload });
+  };
+  const actor = {
+    ...participantRequestActor(requester),
+    runId: "tool-dedupe-run",
+    turnSegmentId: "tool-dedupe-segment"
+  };
+
+  await service.sendChatMessageFromTool(actor, { content: "@drew please review X." });
+  completeParticipantRequest(inferredRequestMessages(storage.current)[0]);
+  await service.sendChatMessageFromTool(actor, { content: "@drew please review X again." });
+
+  assert.equal(storage.current.messages.filter((message: ChatMessage) => message.metadata?.appMessageSource === "app_chat_send_message").length, 2);
+  assert.equal(inferredRequestMessages(storage.current).length, 1);
+  assert.equal(
+    debugEntries.find((entry) => entry.event === "chat.participant-request.inferred-skipped-existing")?.payload.decidingScope,
+    "tool-source-segment"
+  );
+});
+
+test("tool provenance suppresses final restatements across permission resume but permits a new tool post", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "ask" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  const { service, storage } = testService({ conversation });
+  const debugEntries: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  (service as any).debugLogs.write = async (event: string, payload: Record<string, unknown>) => {
+    debugEntries.push({ event, payload });
+  };
+  const runId = "permission-resume-run";
+
+  await service.sendChatMessageFromTool({
+    ...participantRequestActor(requester),
+    runId,
+    turnSegmentId: "before-permission"
+  }, { content: "@drew do X." });
+  completeParticipantRequest(inferredRequestMessages(storage.current)[0]);
+
+  const resumedFinal = participantReplyMessage(requester, "resumed-final", "I asked @drew to do X.");
+  resumedFinal.metadata = {
+    ...resumedFinal.metadata,
+    runId,
+    turnSegmentId: "after-permission",
+    participantRequestDepth: 0
+  };
+  await (service as any).appendParticipantTurnMessages(storage.current, requester, [resumedFinal]);
+  assert.equal(inferredRequestMessages(storage.current).length, 1);
+  assert.equal(
+    debugEntries.find((entry) => entry.event === "chat.participant-request.inferred-skipped-existing")?.payload.decidingScope,
+    "final-source-tool-origin-run"
+  );
+
+  await service.sendChatMessageFromTool({
+    ...participantRequestActor(requester),
+    runId,
+    turnSegmentId: "after-permission"
+  }, { content: "@drew now do Y." });
+  assert.equal(inferredRequestMessages(storage.current).length, 2);
+});
+
+test("tool provenance suppresses sibling restatements after nested participant-request auto-resume", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "ask" });
+  const target = chatParticipant("claude-code");
+  const siblingTarget: ChatParticipant = {
+    ...chatParticipant("claude-code"),
+    id: "sibling-participant",
+    handle: "taylor"
+  };
+  const conversation = chatConversation([requester, target, siblingTarget]);
+  const { service, storage } = testService({ conversation });
+  const debugEntries: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  (service as any).debugLogs.write = async (event: string, payload: Record<string, unknown>) => {
+    debugEntries.push({ event, payload });
+  };
+
+  await service.sendChatMessageFromTool({
+    ...participantRequestActor(requester),
+    runId: "tool-origin-run",
+    turnSegmentId: "tool-origin-segment"
+  }, { content: "@drew do X." });
+  await service.sendChatMessageFromTool({
+    ...participantRequestActor(requester),
+    runId: "tool-origin-run",
+    turnSegmentId: "tool-origin-segment"
+  }, { content: "@taylor do Y." });
+  const [inferredRequest, siblingRequest] = inferredRequestMessages(storage.current);
+  const inferredBatchId = inferredRequest.metadata?.participantRequest?.id;
+  assert.equal(typeof inferredBatchId, "string");
+  completeParticipantRequest(inferredRequest);
+  completeParticipantRequest(siblingRequest);
+
+  const resumedFinal = participantReplyMessage(
+    requester,
+    "auto-resumed-final",
+    "@drew completed X; @taylor still owes Y."
+  );
+  resumedFinal.metadata = {
+    ...resumedFinal.metadata,
+    runId: "fresh-auto-resume-run",
+    turnSegmentId: "fresh-auto-resume-segment",
+    participantRequestDepth: 1,
+    participantRequestBatchId: inferredBatchId,
+    participantRequestChainRootId: "enclosing-request-chain"
+  };
+  await (service as any).appendParticipantTurnMessages(storage.current, requester, [resumedFinal]);
+
+  assert.equal(inferredRequestMessages(storage.current).length, 2);
+  assert.equal(
+    debugEntries.find((entry) => entry.event === "chat.participant-request.inferred-skipped-existing")?.payload.decidingScope,
+    "final-source-tool-origin-segment"
+  );
+
+  await service.sendChatMessageFromTool({
+    ...participantRequestActor(requester),
+    runId: "fresh-auto-resume-run",
+    turnSegmentId: "fresh-auto-resume-segment",
+    participantRequestDepth: 1,
+    participantRequestBatchId: inferredBatchId,
+    chainRootId: "enclosing-request-chain"
+  }, { content: "@taylor now do Z." });
+  assert.equal(inferredRequestMessages(storage.current).length, 3);
+});
+
+test("mixed tool provenance logs each suppressed target with its deciding scope", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "ask" });
+  const originTarget = chatParticipant("claude-code");
+  const resumedRunTarget: ChatParticipant = {
+    ...chatParticipant("claude-code"),
+    id: "mixed-run-target",
+    handle: "taylor"
+  };
+  const conversation = chatConversation([requester, originTarget, resumedRunTarget]);
+  const { service, storage } = testService({ conversation });
+  const debugEntries: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  (service as any).debugLogs.write = async (event: string, payload: Record<string, unknown>) => {
+    debugEntries.push({ event, payload });
+  };
+
+  await service.sendChatMessageFromTool({
+    ...participantRequestActor(requester),
+    runId: "mixed-origin-run",
+    turnSegmentId: "mixed-origin-segment"
+  }, { content: "@drew do X." });
+  const originRequest = inferredRequestMessages(storage.current)[0];
+  const originBatchId = originRequest.metadata?.participantRequest?.id;
+  assert.equal(typeof originBatchId, "string");
+  completeParticipantRequest(originRequest);
+
+  await service.sendChatMessageFromTool({
+    ...participantRequestActor(requester),
+    runId: "mixed-resume-run",
+    turnSegmentId: "mixed-resume-segment",
+    participantRequestBatchId: originBatchId
+  }, { content: "@taylor do Y." });
+  completeParticipantRequest(inferredRequestMessages(storage.current)[1]);
+
+  const resumedFinal = participantReplyMessage(
+    requester,
+    "mixed-resumed-final",
+    "@drew completed X; @taylor completed Y."
+  );
+  resumedFinal.metadata = {
+    ...resumedFinal.metadata,
+    runId: "mixed-resume-run",
+    turnSegmentId: "mixed-resume-segment",
+    participantRequestDepth: 1,
+    participantRequestBatchId: originBatchId
+  };
+  await (service as any).appendParticipantTurnMessages(storage.current, requester, [resumedFinal]);
+
+  assert.equal(inferredRequestMessages(storage.current).length, 2);
+  const suppressions = debugEntries.filter((entry) =>
+    entry.event === "chat.participant-request.inferred-skipped-existing" &&
+    entry.payload.messageId === resumedFinal.id
+  );
+  assert.deepEqual(
+    suppressions.map((entry) => ({
+      scope: entry.payload.decidingScope,
+      targets: entry.payload.targets
+    })),
+    [
+      { scope: "final-source-tool-origin-segment", targets: ["drew"] },
+      { scope: "final-source-tool-origin-run", targets: ["taylor"] }
+    ]
+  );
+});
+
+test("pure final-output inference remains unchanged across permission resume", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "ask" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  const { service } = testService({ conversation });
+  const runId = "pure-final-resume-run";
+  const first = participantReplyMessage(requester, "pure-final-one", "@drew do X.");
+  first.metadata = { ...first.metadata, runId, turnSegmentId: "pure-final-segment-one" };
+  await (service as any).appendParticipantTurnMessages(conversation, requester, [first]);
+  completeParticipantRequest(inferredRequestMessages(conversation)[0]);
+
+  const second = participantReplyMessage(requester, "pure-final-two", "@drew now do Y.");
+  second.metadata = { ...second.metadata, runId, turnSegmentId: "pure-final-segment-two" };
+  await (service as any).appendParticipantTurnMessages(conversation, requester, [second]);
+
+  assert.equal(inferredRequestMessages(conversation).length, 2);
+});
+
+test("inferred participant requests enforce a four-target cap across one turn segment", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "ask" });
+  const targets = ["one", "two", "three", "four", "five"].map((handle, index): ChatParticipant => ({
+    ...chatParticipant("claude-code"),
+    id: `target-${index}`,
+    handle
+  }));
+  const conversation = chatConversation([requester, ...targets]);
+  const { service } = testService({ conversation });
+  const debugEntries: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  (service as any).debugLogs.write = async (event: string, payload: Record<string, unknown>) => {
+    debugEntries.push({ event, payload });
+  };
+  const metadata = {
+    threadId: "user-message",
+    runId: "cap-run",
+    turnSegmentId: "cap-segment",
+    appMessageSource: "app_chat_send_message"
+  };
+  const first = participantReplyMessage(requester, "cap-one", "@one @two review.");
+  first.metadata = { ...metadata };
+  conversation.messages.push(first);
+  await (service as any).createImplicitParticipantRequestApproval(conversation, requester, [first]);
+  const second = participantReplyMessage(requester, "cap-two", "@three @four @five review.");
+  second.metadata = { ...metadata };
+  conversation.messages.push(second);
+  await (service as any).createImplicitParticipantRequestApproval(conversation, requester, [second]);
+
+  const items = inferredRequestMessages(conversation)
+    .flatMap((message) => message.metadata?.participantRequest?.items ?? []);
+  assert.deepEqual(items.map((item) => item.targetHandle), ["one", "two", "three", "four"]);
+  assert.deepEqual(
+    debugEntries.find((entry) => entry.event === "chat.participant-request.inferred-turn-cap")?.payload.targets,
+    ["five"]
+  );
+  assert.equal(conversation.metadata.warnings, undefined);
+});
+
+test("single tool-post inference logs targets omitted by the four-target cap", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "ask" });
+  const targets = ["one", "two", "three", "four", "five"].map((handle, index): ChatParticipant => ({
+    ...chatParticipant("claude-code"),
+    id: `single-cap-target-${index}`,
+    handle
+  }));
+  const conversation = chatConversation([requester, ...targets]);
+  const { service, storage } = testService({ conversation });
+  const debugEntries: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  (service as any).debugLogs.write = async (event: string, payload: Record<string, unknown>) => {
+    debugEntries.push({ event, payload });
+  };
+
+  await service.sendChatMessageFromTool({
+    ...participantRequestActor(requester),
+    runId: "single-cap-run",
+    turnSegmentId: "single-cap-segment"
+  }, { content: "@one @two @three @four @five review." });
+
+  const items = inferredRequestMessages(storage.current)
+    .flatMap((message) => message.metadata?.participantRequest?.items ?? []);
+  assert.deepEqual(items.map((item) => item.targetHandle), ["one", "two", "three", "four"]);
+  assert.deepEqual(
+    debugEntries.find((entry) => entry.event === "chat.participant-request.inferred-turn-cap")?.payload.targets,
+    ["five"]
+  );
+});
+
+test("tool-post inference preserves deny, ignored-text, self-mention, and depth guards", async () => {
+  const target = chatParticipant("claude-code");
+  const deniedRequester = chatParticipant("codex-cli", { requestParticipants: "deny" });
+  const deniedConversation = chatConversation([deniedRequester, target]);
+  const denied = testService({ conversation: deniedConversation });
+  await denied.service.sendChatMessageFromTool({
+    ...participantRequestActor(deniedRequester),
+    runId: "deny-run",
+    turnSegmentId: "deny-segment"
+  }, { content: "@drew review this." });
+  assert.equal(inferredRequestMessages(denied.storage.current).length, 0);
+  assert.match(
+    denied.storage.current.metadata.warnings?.[0] ?? "",
+    /participant requests are disabled/i
+  );
+
+  const requester = chatParticipant("codex-cli", { requestParticipants: "ask" });
+  const ignoredConversation = chatConversation([requester, target]);
+  const ignored = testService({ conversation: ignoredConversation });
+  await ignored.service.sendChatMessageFromTool({
+    ...participantRequestActor(requester),
+    runId: "ignored-run",
+    turnSegmentId: "ignored-segment"
+  }, {
+    content: [
+      "@codex self",
+      "> @drew quoted",
+      "`@drew inline`",
+      "```text",
+      "@drew fenced",
+      "```",
+      "Participant requests:",
+      "- @drew legacy request",
+      "Return to requester after replies:",
+      "- @drew legacy return"
+    ].join("\n")
+  });
+  assert.equal(inferredRequestMessages(ignored.storage.current).length, 0);
+
+  const depthConversation = chatConversation([requester, target]);
+  const depth = testService({ conversation: depthConversation });
+  await depth.service.sendChatMessageFromTool({
+    ...participantRequestActor(requester),
+    runId: "depth-run",
+    turnSegmentId: "depth-segment",
+    participantRequestDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+    chainRootId: "depth-chain"
+  }, { content: "@drew go deeper." });
+  assert.equal(depth.storage.current.messages[1].metadata.participantRequestDepth, CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT);
+  assert.equal(depth.storage.current.messages[1].metadata.participantRequestChainRootId, "depth-chain");
+  assert.equal(inferredRequestMessages(depth.storage.current).length, 0);
+  assert.match(
+    depth.storage.current.metadata.warnings?.[0] ?? "",
+    /participant-request depth limit was reached/i
+  );
+
+  const finalDepthConversation = chatConversation([requester, target]);
+  const finalDepth = testService({ conversation: finalDepthConversation });
+  for (const id of ["depth-final-one", "depth-final-two"]) {
+    const finalMessage = participantReplyMessage(requester, id, "@drew go deeper.");
+    finalMessage.metadata = {
+      ...finalMessage.metadata,
+      participantRequestDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
+      participantRequestChainRootId: "final-depth-chain"
+    };
+    await (finalDepth.service as any).appendParticipantTurnMessages(
+      finalDepth.storage.current,
+      requester,
+      [finalMessage]
+    );
+  }
+  assert.equal(inferredRequestMessages(finalDepth.storage.current).length, 0);
+  assert.equal(finalDepth.storage.current.metadata.warnings?.length, 1);
+  assert.match(
+    finalDepth.storage.current.metadata.warnings?.[0] ?? "",
+    /participant-request depth limit was reached/i
+  );
+});
+
+test("legacy protocol filtering ends at a blank line before later real mention lists", async () => {
+  const cases = [
+    {
+      content: [
+        "Participant requests:",
+        "- @drew run legacy QA",
+        "",
+        "- @taylor please review",
+        "- @alex sign off"
+      ].join("\n"),
+      expected: ["taylor", "alex"]
+    },
+    {
+      content: [
+        "Return to requester after replies: yes",
+        "",
+        "1. @taylor review",
+        "2. @drew run QA"
+      ].join("\n"),
+      expected: ["drew", "taylor"]
+    },
+    {
+      content: [
+        "Participant requests:",
+        "",
+        "- @taylor please review"
+      ].join("\n"),
+      expected: ["taylor"]
+    }
+  ];
+
+  for (const [index, item] of cases.entries()) {
+    const requester: ChatParticipant = {
+      ...chatParticipant("codex-cli", { requestParticipants: "allow" }),
+      id: `protocol-requester-${index}`,
+      handle: `requester-${index}`
+    };
+    const targets = ["drew", "taylor", "alex"].map((handle): ChatParticipant => ({
+      ...chatParticipant("claude-code"),
+      id: `protocol-${index}-${handle}`,
+      handle
+    }));
+    const conversation = chatConversation([requester, ...targets]);
+    const { service, storage } = testService({ conversation });
+    (service as any).startDeferredParticipantRequestRunners = () => undefined;
+
+    await service.sendChatMessageFromTool({
+      ...participantRequestActor(requester),
+      runId: `protocol-run-${index}`,
+      turnSegmentId: `protocol-segment-${index}`
+    }, { content: item.content });
+
+    const actual = inferredRequestMessages(storage.current)
+      .flatMap((message) => message.metadata?.participantRequest?.items ?? [])
+      .map((request) => request.targetHandle);
+    assert.deepEqual(actual, item.expected);
+  }
+});
+
+test("existing pending preparation preserves optional provenance unless replacement context is provided", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const pending = participantReplyMessage(participant, "existing-provenance-pending", "");
+  pending.status = "pending";
+  pending.metadata = {
+    ...pending.metadata,
+    participantRequestBatchId: "existing-batch",
+    participantRequestChainRootId: "existing-chain",
+    queuedBehind: { handle: participant.handle }
+  };
+  conversation.messages.push(pending);
+  const { service } = testService({ conversation });
+  const cliParticipant = {
+    id: participant.id,
+    kind: participant.kind,
+    label: `@${participant.handle}`,
+    model: participant.model
+  };
+
+  const preserved = await (service as any).prepareExistingPendingMessageForRun(
+    conversation,
+    pending,
+    cliParticipant,
+    conversation.messages[0],
+    false,
+    { turnSegmentId: "preserved-segment", participantRequestDepth: 1 }
+  );
+  assert.equal(preserved.metadata?.participantRequestBatchId, "existing-batch");
+  assert.equal(preserved.metadata?.participantRequestChainRootId, "existing-chain");
+  assert.equal(preserved.metadata?.queuedBehind, undefined);
+
+  const replaced = await (service as any).prepareExistingPendingMessageForRun(
+    conversation,
+    pending,
+    cliParticipant,
+    conversation.messages[0],
+    false,
+    {
+      turnSegmentId: "replacement-segment",
+      participantRequestDepth: 2,
+      participantRequestBatchId: "replacement-batch",
+      chainRootId: "replacement-chain"
+    }
+  );
+  assert.equal(replaced.metadata?.participantRequestBatchId, "replacement-batch");
+  assert.equal(replaced.metadata?.participantRequestChainRootId, "replacement-chain");
+});
+
+test("serialized participant turn invocations receive fresh segment ids even when runId is reused", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+  const segmentIds: string[] = [];
+  (service as any).runParticipantTurn = async (
+    _conversation: Conversation,
+    _participant: ChatParticipant,
+    _trigger: ChatMessage,
+    _runId: string,
+    _signal: AbortSignal,
+    _progress: unknown,
+    options: { turnSegmentId: string }
+  ) => {
+    segmentIds.push(options.turnSegmentId);
+    return [];
+  };
+
+  await (service as any).runParticipantTurnSerialized(
+    conversation,
+    participant,
+    conversation.messages[0],
+    "reused-run-id",
+    undefined,
+    undefined,
+    { warnings: [] }
+  );
+  await (service as any).runParticipantTurnSerialized(
+    conversation,
+    participant,
+    conversation.messages[0],
+    "reused-run-id",
+    undefined,
+    undefined,
+    { warnings: [] }
+  );
+
+  assert.equal(segmentIds.length, 2);
+  assert.notEqual(segmentIds[0], segmentIds[1]);
+});
+
 test("app_chat_send_message keeps participant /goal prose ordinary", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
@@ -7736,6 +8273,50 @@ test("app_chat_send_message imports image attachments and exposes them in the sa
       emoji: "✅"
     });
     assert.equal(reacted.status, "added");
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("app_chat_send_message keeps a visible post and attachment when inference throws", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-send-image-inference-error-"));
+  const repoPath = path.join(tempRoot, "repo");
+  const storageRoot = path.join(tempRoot, "storage");
+  await mkdir(repoPath, { recursive: true });
+  await writeFile(path.join(repoPath, "shot.png"), Buffer.from(ONE_BY_ONE_PNG_BASE64, "base64"));
+  const requester = chatParticipant("codex-cli", { requestParticipants: "allow", repoRead: true });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  conversation.repoPath = repoPath;
+  const { service, storage } = testService({ conversation });
+  (service as any).attachmentPath = (_conversationId: string, storageKey: string) => path.join(storageRoot, storageKey);
+  (service as any).createImplicitParticipantRequestApproval = async () => {
+    throw new Error("forced inference failure");
+  };
+
+  try {
+    const sent = await service.sendChatMessageFromTool({
+      ...participantRequestActor(requester),
+      runId: "inference-error-run",
+      turnSegmentId: "inference-error-segment",
+      runPermissions: normalizeChatAgentPermissions({
+        ...defaultChatAgentPermissions(),
+        repoRead: true
+      })
+    }, {
+      content: "@drew inspect the attached image.",
+      attachments: [{ kind: "image", sourcePath: "shot.png" }]
+    });
+
+    assert.equal(sent.ok, true);
+    assert.equal(storage.current.messages[1].content, "@drew inspect the attached image.");
+    const attachment = storage.current.messages[1].metadata.imageAttachments[0];
+    await stat(path.join(storageRoot, attachment.storageKey));
+    assert.equal(inferredRequestMessages(storage.current).length, 0);
+    assert.match(
+      storage.current.metadata.warnings?.[0] ?? "",
+      /inferred-request processing failed/i
+    );
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -8396,6 +8977,25 @@ test("refreshStoredChatState preserves stored completed messages over stale pend
   assert.equal(answer.content, "Finished answer.");
   assert.equal((service as any).recoverStaleChatRun(staleConversation), false);
   assert.equal(answer.metadata?.staleRunRecovery, undefined);
+});
+
+test("refreshStoredChatState unions warnings added by a concurrent tool mutation", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], {
+    warnings: ["Existing warning."]
+  });
+  const staleConversation = clone(conversation);
+  staleConversation.metadata.warnings = ["Existing warning.", "Requester warning."];
+  const { service, storage } = testService({ conversation });
+  storage.current.metadata.warnings = ["Existing warning.", "Inferred-request warning."];
+
+  await (service as any).refreshStoredChatState(staleConversation);
+
+  assert.deepEqual(staleConversation.metadata.warnings, [
+    "Existing warning.",
+    "Inferred-request warning.",
+    "Requester warning."
+  ]);
 });
 
 function pendingParticipantMessage(
@@ -9386,6 +9986,72 @@ test("inferred accord assignment allows facilitator participant requests before 
   assert.equal(nestedRequest?.metadata?.participantRequest?.items[0]?.targetParticipantId, taylor.id);
   assert.notEqual(nestedRequest?.metadata?.participantRequest?.items[0]?.status, "pending_approval");
   assert.equal(storage.current.metadata.pendingAppToolApprovals, undefined);
+});
+
+test("inferred accord keeps the single-facilitator guard before suppression and cap filtering", async () => {
+  const manager: ChatParticipant = {
+    ...chatParticipant("codex-cli", { requestParticipants: "allow" }),
+    id: "accord-guard-manager",
+    handle: "manager"
+  };
+  const drew: ChatParticipant = {
+    ...chatParticipant("codex-cli", { requestParticipants: "ask" }),
+    id: "accord-guard-drew",
+    handle: "drew"
+  };
+  const taylor: ChatParticipant = {
+    ...chatParticipant("claude-code", { requestParticipants: "ask" }),
+    id: "accord-guard-taylor",
+    handle: "taylor"
+  };
+  const suppressedConversation = chatConversation([manager, drew, taylor]);
+  const suppressed = testService({ conversation: suppressedConversation });
+  (suppressed.service as any).startDeferredParticipantRequestRunners = () => undefined;
+  const suppressedActor = {
+    ...participantRequestActor(manager),
+    runId: "accord-guard-suppressed-run",
+    turnSegmentId: "accord-guard-suppressed-segment"
+  };
+
+  await suppressed.service.sendChatMessageFromTool(suppressedActor, { content: "@drew inspect X." });
+  await suppressed.service.sendChatMessageFromTool(suppressedActor, {
+    content: "/accord @drew and @taylor should resolve this."
+  });
+
+  const suppressedParticipants = suppressed.storage.current.metadata.participants as ChatParticipant[];
+  assert.equal(
+    normalizeChatAgentPermissions(suppressedParticipants.find((participant) => participant.id === drew.id)?.permissions).requestParticipants,
+    "ask"
+  );
+  assert.equal(
+    normalizeChatAgentPermissions(suppressedParticipants.find((participant) => participant.id === taylor.id)?.permissions).requestParticipants,
+    "ask"
+  );
+
+  const cappedTargets = ["one", "two", "three", "four", "five"].map((handle): ChatParticipant => ({
+    ...chatParticipant("claude-code", { requestParticipants: "ask" }),
+    id: `accord-guard-${handle}`,
+    handle
+  }));
+  const cappedConversation = chatConversation([manager, ...cappedTargets]);
+  const capped = testService({ conversation: cappedConversation });
+  (capped.service as any).startDeferredParticipantRequestRunners = () => undefined;
+  const cappedActor = {
+    ...participantRequestActor(manager),
+    runId: "accord-guard-cap-run",
+    turnSegmentId: "accord-guard-cap-segment"
+  };
+
+  await capped.service.sendChatMessageFromTool(cappedActor, { content: "@one @two @three inspect X." });
+  await capped.service.sendChatMessageFromTool(cappedActor, { content: "/accord @four and @five resolve Y." });
+
+  const cappedParticipants = capped.storage.current.metadata.participants as ChatParticipant[];
+  for (const target of cappedTargets.slice(3)) {
+    assert.equal(
+      normalizeChatAgentPermissions(cappedParticipants.find((participant) => participant.id === target.id)?.permissions).requestParticipants,
+      "ask"
+    );
+  }
 });
 
 test("participant request stores prompt exactly up to configured max", async () => {
@@ -10954,6 +11620,17 @@ function participantReplyMessage(participant: ChatParticipant, id: string, conte
     participantLabel: `@${participant.handle}`,
     metadata: { threadId: "user-message" }
   });
+}
+
+function inferredRequestMessages(conversation: Conversation): ChatMessage[] {
+  return conversation.messages.filter((message) => message.metadata?.participantRequest?.source === "inferred");
+}
+
+function completeParticipantRequest(message: ChatMessage): void {
+  const batch = message.metadata?.participantRequest;
+  assert.ok(batch);
+  batch.status = "completed";
+  batch.items = batch.items.map((item) => ({ ...item, status: "completed" }));
 }
 
 function participantRequestCarrierMessage(

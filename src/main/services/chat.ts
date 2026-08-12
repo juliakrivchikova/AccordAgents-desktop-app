@@ -322,6 +322,10 @@ const GENERIC_PARTICIPANT_ROLE_ID = "generic-participant";
 // dispatch from a trigger message so skill validation never diverges from the
 // actual dispatch target.
 type ChatDispatchReplyContext = { parentMessageId?: string; threadId?: string; chatThreadRootId?: string };
+type InferredParticipantRequestSuppressionScope =
+  | "tool-source-segment"
+  | "final-source-tool-origin-run"
+  | "final-source-tool-origin-segment";
 const CHAT_LEGACY_ADMINISTRATOR_HANDLE = "admin";
 const CHAT_ROLE_LABEL_MAX_CHARS = 80;
 const CHAT_ROLE_INSTRUCTIONS_MAX_CHARS = 40_000;
@@ -391,6 +395,7 @@ interface ChatAppMcpGateway {
     snapshotMaxSequence?: number;
     continuation?: boolean;
     runId?: string;
+    turnSegmentId?: string;
     participantRequestDepth?: number;
     participantRequestBatchId?: string;
     chainRootId?: string;
@@ -417,6 +422,7 @@ interface ChatAppMcpActor {
   snapshotMaxSequence?: number;
   continuation?: boolean;
   runId?: string;
+  turnSegmentId?: string;
   participantRequestDepth?: number;
   participantRequestBatchId?: string;
   chainRootId?: string;
@@ -4036,6 +4042,11 @@ export class ChatService {
       }
     }
     let created: { id: string; sequence: number; threadId?: string } | undefined;
+    let participantRequestsToRun: Array<{
+      requestMessageId: string;
+      depth: number;
+      source: ChatParticipantRequestBatch["source"];
+    }> = [];
     try {
       await this.withChatMutation(conversation, async () => {
         const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
@@ -4095,6 +4106,10 @@ export class ChatService {
             appMessageSource: APP_CHAT_SEND_MESSAGE_TOOL,
             accordResolution: request.accordResolution,
             runId: actor.runId,
+            turnSegmentId: actor.turnSegmentId,
+            participantRequestDepth: actor.participantRequestDepth ?? 0,
+            participantRequestBatchId: actor.participantRequestBatchId,
+            participantRequestChainRootId: actor.chainRootId,
             ...(preparedImages.attachments.length > 0 ? { imageAttachments: preparedImages.attachments } : {})
           }
         };
@@ -4106,6 +4121,26 @@ export class ChatService {
         // bump persists for the rest of the turn.
         if (typeof actor.snapshotMaxSequence === "number" && sequence > actor.snapshotMaxSequence) {
           actor.snapshotMaxSequence = sequence;
+        }
+        try {
+          participantRequestsToRun = await this.createImplicitParticipantRequestApproval(
+            conversation,
+            requester,
+            [message]
+          );
+        } catch (error) {
+          participantRequestsToRun = [];
+          this.addConversationWarning(
+            conversation,
+            `Participant mentions in @${requester.handle}'s message were not triggered because inferred-request processing failed.`
+          );
+          void this.debugLogs.write("chat.participant-request.inferred-tool-error", {
+            conversationId: conversation.id,
+            messageId: message.id,
+            requesterParticipantId: requester.id,
+            requesterHandle: requester.handle,
+            message: error instanceof Error ? error.message : String(error)
+          });
         }
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
@@ -4127,6 +4162,7 @@ export class ChatService {
         );
       }
     }
+    this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
     return {
       ok: true,
       messageId: created.id,
@@ -6252,6 +6288,7 @@ export class ChatService {
       participantRequestDepth?: number;
       participantRequestBatchId?: string;
       chainRootId?: string;
+      turnSegmentId: string;
       queuedBehindHandle?: string;
       existingPendingMessage?: ChatMessage;
     }
@@ -6341,7 +6378,13 @@ export class ChatService {
         options.existingPendingMessage,
         cliParticipant,
         triggerMessage,
-        Boolean(options.continuation)
+        Boolean(options.continuation),
+        {
+          turnSegmentId: options.turnSegmentId,
+          participantRequestDepth: options.participantRequestDepth ?? 0,
+          participantRequestBatchId: options.participantRequestBatchId,
+          chainRootId: options.chainRootId
+        }
       );
     } else {
       pendingMessage = this.message(
@@ -6356,6 +6399,10 @@ export class ChatService {
           requesterParticipantId: options.continuation ? triggerMessage.participantId : undefined,
           approvedContinuation: options.continuation || undefined,
           runId,
+          turnSegmentId: options.turnSegmentId,
+          participantRequestDepth: options.participantRequestDepth ?? 0,
+          participantRequestBatchId: options.participantRequestBatchId,
+          participantRequestChainRootId: options.chainRootId,
           queuedBehind: options.queuedBehindHandle ? { handle: options.queuedBehindHandle } : undefined
         },
         "pending"
@@ -6402,6 +6449,7 @@ export class ChatService {
       snapshotMaxSequence: Math.max(0, promptConversation.messages.length - 1),
       continuation: Boolean(options.continuation),
       runId,
+      turnSegmentId: options.turnSegmentId,
       runPermissions: effectiveChatAgentPermissionsForProvider(participant.kind, agentMode, permissions),
       participantRequestDepth: options.participantRequestDepth ?? 0,
       participantRequestBatchId: options.participantRequestBatchId,
@@ -6771,7 +6819,13 @@ export class ChatService {
     existingPendingMessage: ChatMessage,
     cliParticipant: ParticipantConfig,
     triggerMessage: ChatMessage,
-    continuation: boolean
+    continuation: boolean,
+    inferenceContext: {
+      turnSegmentId: string;
+      participantRequestDepth: number;
+      participantRequestBatchId?: string;
+      chainRootId?: string;
+    }
   ): Promise<ChatMessage> {
     let pendingMessage = existingPendingMessage;
     await this.withChatMutation(conversation, async () => {
@@ -6783,7 +6837,15 @@ export class ChatService {
       const metadata: ChatMessageMetadata = {
         ...pendingMessage.metadata,
         requesterParticipantId: continuation ? triggerMessage.participantId : pendingMessage.metadata?.requesterParticipantId,
-        approvedContinuation: continuation || pendingMessage.metadata?.approvedContinuation
+        approvedContinuation: continuation || pendingMessage.metadata?.approvedContinuation,
+        turnSegmentId: inferenceContext.turnSegmentId,
+        participantRequestDepth: inferenceContext.participantRequestDepth,
+        ...(inferenceContext.participantRequestBatchId !== undefined
+          ? { participantRequestBatchId: inferenceContext.participantRequestBatchId }
+          : {}),
+        ...(inferenceContext.chainRootId !== undefined
+          ? { participantRequestChainRootId: inferenceContext.chainRootId }
+          : {})
       };
       delete metadata.queuedBehind;
       pendingMessage.metadata = Object.keys(metadata).length > 0 ? metadata : undefined;
@@ -8493,6 +8555,15 @@ export class ChatService {
     );
     if (contextUsage) {
       merged.agentContextUsageByParticipant = contextUsage;
+    }
+    const warnings = sanitizeWarningList([
+      ...sanitizeWarningList(storedMetadata.warnings),
+      ...sanitizeWarningList(currentMetadata.warnings)
+    ]);
+    if (warnings.length > 0) {
+      merged.warnings = warnings;
+    } else {
+      delete merged.warnings;
     }
     const removedMessageIds = this.mergeRemovedChatMessageIds(
       storedMetadata.removedChatMessageIds,
@@ -10699,15 +10770,82 @@ export class ChatService {
       if (inferred.length === 0) {
         continue;
       }
-      const targetHandles = inferred.map((item) => item.targetHandle);
+      const suppression = this.inferredParticipantRequestSuppression(
+        conversation,
+        participant,
+        sourceMessage
+      );
+      const suppressed = inferred.filter((item) => suppression.targetHandles.has(item.targetHandle.toLowerCase()));
+      let candidates = inferred.filter((item) => !suppression.targetHandles.has(item.targetHandle.toLowerCase()));
+      if (suppressed.length > 0) {
+        const targetsByScope = new Map<InferredParticipantRequestSuppressionScope, string[]>();
+        for (const item of suppressed) {
+          const scope = suppression.scopeByTarget.get(item.targetHandle.toLowerCase());
+          if (!scope) {
+            continue;
+          }
+          targetsByScope.set(scope, [...(targetsByScope.get(scope) ?? []), item.targetHandle]);
+        }
+        for (const [decidingScope, targets] of targetsByScope) {
+          void this.debugLogs.write("chat.participant-request.inferred-skipped-existing", {
+            conversationId: conversation.id,
+            messageId: sourceMessage.id,
+            requesterParticipantId: participant.id,
+            requesterHandle: participant.handle,
+            targets,
+            decidingScope
+          });
+        }
+      }
+      if (candidates.length === 0) {
+        continue;
+      }
+
+      const targetHandles = candidates.map((item) => item.targetHandle);
       if (this.hasActiveParticipantRequestForTargets(conversation, participant, sourceMessage.id, targetHandles)) {
         void this.debugLogs.write("chat.participant-request.inferred-skipped-existing", {
           conversationId: conversation.id,
           messageId: sourceMessage.id,
           requesterParticipantId: participant.id,
           requesterHandle: participant.handle,
-          targets: targetHandles
+          targets: targetHandles,
+          decidingScope: "active-overlap"
         });
+        continue;
+      }
+
+      const segmentTargets = this.inferredParticipantRequestTargetsForSegment(
+        conversation,
+        participant,
+        sourceMessage.metadata?.turnSegmentId
+      );
+      let remainingNewTargets = Math.max(0, CHAT_PARTICIPANT_REQUEST_MAX_ITEMS - segmentTargets.size);
+      const cappedTargets: string[] = [];
+      candidates = candidates.filter((item) => {
+        const handle = item.targetHandle.toLowerCase();
+        if (segmentTargets.has(handle)) {
+          return true;
+        }
+        if (remainingNewTargets <= 0) {
+          cappedTargets.push(item.targetHandle);
+          return false;
+        }
+        segmentTargets.add(handle);
+        remainingNewTargets -= 1;
+        return true;
+      });
+      if (cappedTargets.length > 0) {
+        void this.debugLogs.write("chat.participant-request.inferred-turn-cap", {
+          conversationId: conversation.id,
+          messageId: sourceMessage.id,
+          requesterParticipantId: participant.id,
+          requesterHandle: participant.handle,
+          turnSegmentId: sourceMessage.metadata?.turnSegmentId,
+          cap: CHAT_PARTICIPANT_REQUEST_MAX_ITEMS,
+          targets: cappedTargets
+        });
+      }
+      if (candidates.length === 0) {
         continue;
       }
 
@@ -10719,7 +10857,7 @@ export class ChatService {
           conversation,
           participant,
           {
-            requests: inferred.map((item) => ({
+            requests: candidates.map((item) => ({
               target: item.targetHandle,
               prompt: this.inferredParticipantRequestPrompt(participant.handle, item.snippet),
               reason: `Inferred from @${participant.handle}'s chat reply.`
@@ -10739,11 +10877,16 @@ export class ChatService {
             triggerChatThreadRootId: sourceMessage.metadata?.chatThreadRootId,
             snapshotMaxSequence: Math.max(0, conversation.messages.length - 1),
             continuation: false,
-            participantRequestDepth: 0
+            participantRequestDepth: sourceMessage.metadata?.participantRequestDepth ?? 0,
+            chainRootId: sourceMessage.metadata?.participantRequestChainRootId
           },
           "inferred"
         );
       } catch (error) {
+        this.addConversationWarning(
+          conversation,
+          this.inferredParticipantRequestWarning(participant.handle, candidates.map((item) => item.targetHandle), error)
+        );
         void this.debugLogs.write("chat.participant-request.inferred-create-error", {
           conversationId: conversation.id,
           messageId: sourceMessage.id,
@@ -10797,6 +10940,153 @@ export class ChatService {
       });
     }
     return participantRequestsToRun;
+  }
+
+  private inferredParticipantRequestSuppression(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    sourceMessage: ChatMessage
+  ): {
+    targetHandles: Set<string>;
+    scopeByTarget: Map<string, InferredParticipantRequestSuppressionScope>;
+  } {
+    const sourceIsToolPosted = sourceMessage.metadata?.appMessageSource === APP_CHAT_SEND_MESSAGE_TOOL;
+    const turnSegmentId = sourceMessage.metadata?.turnSegmentId;
+    const runId = sourceMessage.metadata?.runId;
+    const participantRequestBatchId = sourceMessage.metadata?.participantRequestBatchId;
+    if ((sourceIsToolPosted && !turnSegmentId) || (!sourceIsToolPosted && !runId && !participantRequestBatchId)) {
+      return { targetHandles: new Set(), scopeByTarget: new Map() };
+    }
+
+    const messageById = new Map(conversation.messages.map((message) => [message.id, message]));
+    const resumedBatch = !sourceIsToolPosted && participantRequestBatchId
+      ? this.participantRequestBatches(conversation).find((batch) =>
+          batch.id === participantRequestBatchId &&
+          batch.source === "inferred" &&
+          batch.requesterParticipantId === requester.id &&
+          Boolean(batch.triggerMessageId)
+        )
+      : undefined;
+    const resumedBatchSource = resumedBatch?.triggerMessageId
+      ? messageById.get(resumedBatch.triggerMessageId)
+      : undefined;
+    const originatingToolSegmentId = resumedBatchSource?.metadata?.appMessageSource === APP_CHAT_SEND_MESSAGE_TOOL
+      ? resumedBatchSource.metadata.turnSegmentId
+      : undefined;
+    const targetHandles = originatingToolSegmentId
+      ? this.inferredParticipantRequestTargetsForSegment(
+          conversation,
+          requester,
+          originatingToolSegmentId,
+          { toolPostedOnly: true, messageById }
+        )
+      : new Set<string>();
+    const scopeByTarget = new Map<string, InferredParticipantRequestSuppressionScope>();
+    for (const targetHandle of targetHandles) {
+      scopeByTarget.set(targetHandle, "final-source-tool-origin-segment");
+    }
+    for (const batch of this.participantRequestBatches(conversation)) {
+      if (
+        batch.source !== "inferred" ||
+        batch.requesterParticipantId !== requester.id ||
+        !batch.triggerMessageId
+      ) {
+        continue;
+      }
+      const priorSource = messageById.get(batch.triggerMessageId);
+      if (priorSource?.metadata?.appMessageSource !== APP_CHAT_SEND_MESSAGE_TOOL) {
+        continue;
+      }
+      const matchesRun = !sourceIsToolPosted && Boolean(runId) && priorSource.metadata?.runId === runId;
+      const matchesScope = sourceIsToolPosted
+        ? priorSource.metadata?.turnSegmentId === turnSegmentId
+        : matchesRun;
+      if (!matchesScope) {
+        continue;
+      }
+      const decidingScope: InferredParticipantRequestSuppressionScope = sourceIsToolPosted
+        ? "tool-source-segment"
+        : "final-source-tool-origin-run";
+      for (const item of batch.items) {
+        const handle = item.targetHandle.toLowerCase();
+        targetHandles.add(handle);
+        if (!scopeByTarget.has(handle)) {
+          scopeByTarget.set(handle, decidingScope);
+        }
+      }
+    }
+    return { targetHandles, scopeByTarget };
+  }
+
+  private inferredParticipantRequestTargetsForSegment(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    turnSegmentId: string | undefined,
+    options: { toolPostedOnly?: boolean; messageById?: ReadonlyMap<string, ChatMessage> } = {}
+  ): Set<string> {
+    const targetHandles = new Set<string>();
+    if (!turnSegmentId) {
+      return targetHandles;
+    }
+    const messageById = options.messageById ?? new Map(conversation.messages.map((message) => [message.id, message]));
+    for (const batch of this.participantRequestBatches(conversation)) {
+      if (
+        batch.source !== "inferred" ||
+        batch.requesterParticipantId !== requester.id ||
+        !batch.triggerMessageId
+      ) {
+        continue;
+      }
+      const source = messageById.get(batch.triggerMessageId);
+      if (
+        source?.metadata?.turnSegmentId !== turnSegmentId ||
+        (options.toolPostedOnly && source.metadata?.appMessageSource !== APP_CHAT_SEND_MESSAGE_TOOL)
+      ) {
+        continue;
+      }
+      for (const item of batch.items) {
+        targetHandles.add(item.targetHandle.toLowerCase());
+      }
+    }
+    return targetHandles;
+  }
+
+  private inferredParticipantRequestWarning(
+    requesterHandle: string,
+    targetHandles: string[],
+    error: unknown
+  ): string {
+    const targetSummary = this.formatHandleList(targetHandles.map((handle) => `@${handle}`));
+    const subject = targetSummary
+      ? `Participant ${targetHandles.length === 1 ? "mention" : "mentions"} from @${requesterHandle} to ${targetSummary}`
+      : `Participant mentions from @${requesterHandle}`;
+    const verb = targetHandles.length === 1 ? "was" : "were";
+    const message = error instanceof Error ? error.message : String(error);
+    if (/max depth/i.test(message)) {
+      return `${subject} ${verb} not triggered because the participant-request depth limit was reached.`;
+    }
+    if (/chain limit/i.test(message)) {
+      return `${subject} ${verb} not triggered because the participant-request chain limit was reached.`;
+    }
+    if (/rate limit/i.test(message)) {
+      return `${subject} ${verb} not triggered because the participant-request rate limit was reached.`;
+    }
+    if (/disabled/i.test(message)) {
+      return `${subject} ${verb} not triggered because participant requests are disabled for @${requesterHandle}.`;
+    }
+    return `${subject} ${verb} not triggered because the inferred request could not be prepared.`;
+  }
+
+  private addConversationWarning(conversation: Conversation, warning: string): void {
+    const sanitized = sanitizeWarningText(warning);
+    if (!sanitized) {
+      return;
+    }
+    const warnings = sanitizeWarningList(conversation.metadata.warnings);
+    if (warnings.includes(sanitized)) {
+      return;
+    }
+    conversation.metadata = { ...conversation.metadata, warnings: [...warnings, sanitized] };
   }
 
   private hasActiveParticipantRequestForTargets(
@@ -12361,6 +12651,7 @@ export class ChatService {
       turnReservation?: ParticipantTurnReservation;
     }
   ): Promise<ChatMessage[]> {
+    const turnSegmentId = randomUUID();
     const reservation = options.turnReservation ?? this.reserveParticipantTurn(conversation.id, participant.id);
     let turnController: { signal: AbortSignal; cleanup: () => void } | undefined;
     try {
@@ -12369,7 +12660,10 @@ export class ChatService {
       if (turnController.signal.aborted) {
         throw new Error("Chat run cancelled.");
       }
-      return await this.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, options);
+      return await this.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
+        ...options,
+        turnSegmentId
+      });
     } finally {
       reservation.release();
       turnController?.cleanup();
@@ -13884,23 +14178,33 @@ export class ChatService {
       const end = Math.min(cleaned.length, match.index + participant.handle.length + 1200);
       const snippet = cleaned.slice(start, end).replace(/\s+/g, " ").trim();
       inferred.push({ targetHandle: participant.handle, snippet });
-      if (inferred.length >= CHAT_PARTICIPANT_REQUEST_MAX_ITEMS) {
-        break;
-      }
     }
     return inferred;
   }
 
   private stripInferenceIgnoredText(content: string): string {
+    let inLegacyProtocolBlock = false;
     return this.withoutFencedCode(content)
       .replace(/`[^`\n]+`/g, "")
       .split(/\r?\n/)
       .filter((line) => {
         const trimmed = line.trim();
+        if (/^(?:participant requests|return to requester after replies)\s*:/i.test(trimmed)) {
+          inLegacyProtocolBlock = true;
+          return false;
+        }
+        if (inLegacyProtocolBlock) {
+          if (!trimmed) {
+            inLegacyProtocolBlock = false;
+            return true;
+          }
+          if (/^(?:[-*]|\d+[.)])\s+/.test(trimmed)) {
+            return false;
+          }
+          inLegacyProtocolBlock = false;
+        }
         return (
           !trimmed.startsWith(">") &&
-          !/^participant requests\s*:/i.test(trimmed) &&
-          !/^return to requester after replies\s*:/i.test(trimmed) &&
           !/^(?:user|system)\s*:\s+/i.test(trimmed)
         );
       })

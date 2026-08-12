@@ -543,6 +543,7 @@ export interface AppMcpActor {
   snapshotMaxSequence?: number;
   continuation?: boolean;
   runId?: string;
+  turnSegmentId?: string;
   participantRequestDepth?: number;
   participantRequestBatchId?: string;
   chainRootId?: string;
@@ -815,6 +816,7 @@ export class AppMcpService {
       snapshotMaxSequence: grant.snapshotMaxSequence,
       continuation: grant.continuation,
       runId: grant.runId,
+      turnSegmentId: grant.turnSegmentId,
       participantRequestDepth: grant.participantRequestDepth,
       participantRequestBatchId: grant.participantRequestBatchId,
       chainRootId: grant.chainRootId,
