@@ -406,6 +406,7 @@ interface ChatAppMcpGateway {
     chainRootId?: string;
     historyMarkdownPath?: string;
     historyJsonPath?: string;
+    agentMode?: ChatAgentMode;
     runPermissions?: ChatAgentPermissions;
   }): { url: string; token: string } | undefined;
   updateToken?(token: string, grant: ChatAppMcpTokenGrant): { url: string; token: string } | undefined;
@@ -433,6 +434,7 @@ interface ChatAppMcpActor {
   chainRootId?: string;
   historyMarkdownPath?: string;
   historyJsonPath?: string;
+  agentMode?: ChatAgentMode;
   runPermissions?: ChatAgentPermissions;
 }
 
@@ -525,6 +527,15 @@ interface ToolPermissionDecision {
   scope?: ChatAppToolApprovalScope;
   reason?: string;
   source: "user" | "policy" | "timeout" | "abort";
+}
+
+type ToolPermissionRequestRoute = "created" | "policy" | "pending-replay" | "terminal-replay";
+
+interface ToolPermissionRequestOutcome {
+  prepared: PreparedToolPermission;
+  route: ToolPermissionRequestRoute;
+  approval?: ChatAppToolApproval;
+  decision?: ToolPermissionDecision;
 }
 
 interface CodexApprovalResolver {
@@ -644,7 +655,7 @@ export class ChatService {
   private readonly participantRequestAutoResumes = new Set<string>();
   private readonly permissionApprovalAutoResumes = new Set<string>();
   private readonly codexApprovalContinuations = new Set<string>();
-  private readonly toolPermissionResolvers = new Map<string, (decision: ToolPermissionDecision) => void>();
+  private readonly toolPermissionResolvers = new Map<string, Set<(decision: ToolPermissionDecision) => void>>();
   private readonly codexApprovalResolvers = new Map<string, CodexApprovalResolver>();
   private readonly participantTurnQueues = new Map<string, Promise<void>>();
   private readonly chatRunControllers = new Map<string, Set<AbortController>>();
@@ -3093,68 +3104,122 @@ export class ChatService {
   }
 
   async requestToolPermissionFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
-    await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
-    const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
-    if (!requester) {
-      return { behavior: "deny", message: "The requesting member is no longer in this chat." };
-    }
     if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
       return { behavior: "deny", message: "This chat member is not allowed to request tool permissions." };
     }
 
-    let prepared: PreparedToolPermission;
+    let outcome: ToolPermissionRequestOutcome;
     try {
-      prepared = this.prepareToolPermissionRequest(
-        rawRequest,
-        this.participantAgentMode(conversation, requester)
-      );
-    } catch (error) {
-      return { behavior: "deny", message: error instanceof Error ? error.message : String(error) };
-    }
+      outcome = await this.withChatMutation(conversation, async () => {
+        const requester = this.chatParticipants(conversation)
+          .find((participant) => participant.id === actor.participantId);
+        if (!requester) {
+          throw new Error("The requesting member is no longer in this chat.");
+        }
+        // The token captures the mode resolved for this exact run. Legacy tokens have
+        // no mode, so fall back to the participant's current setting rather than a
+        // persisted provider session that may still describe the previous turn.
+        const agentMode = actor.agentMode
+          ? normalizeChatAgentMode(actor.agentMode)
+          : normalizeChatAgentMode(requester.agentMode);
+        const prepared = this.prepareToolPermissionRequest(rawRequest, agentMode);
+        const existing = this.toolPermissionApprovalForOccurrence(
+          conversation,
+          requester.id,
+          actor.runId,
+          prepared.request.nativeOccurrenceId
+        );
+        if (existing) {
+          const decision = this.toolPermissionDecisionForApproval(existing);
+          return {
+            prepared,
+            route: decision ? "terminal-replay" : "pending-replay",
+            approval: existing,
+            decision
+          };
+        }
 
-    const policy = prepared.request.agentMode === "auto"
-      ? undefined
-      : this.matchingAppToolApprovalPolicy(
+        const policy = prepared.request.agentMode === "auto"
+          ? undefined
+          : this.matchingAppToolApprovalPolicy(
+              conversation,
+              requester,
+              APP_TOOL_PERMISSION_TOOL,
+              "permissions.request",
+              undefined,
+              prepared.request.toolName
+            );
+        if (policy) {
+          return {
+            prepared,
+            route: "policy",
+            decision: { approve: true, scope: "chat", source: "policy" }
+          };
+        }
+
+        const approval = this.newAppToolApproval(
           conversation,
           requester,
           APP_TOOL_PERMISSION_TOOL,
           "permissions.request",
-          undefined,
-          prepared.request.toolName
+          prepared.request,
+          prepared.summary,
+          "pending"
         );
-    if (policy) {
+        if (actor.runId && actor.triggerMessageId) {
+          approval.resumeContext = {
+            runId: actor.runId,
+            triggerMessageId: actor.triggerMessageId,
+            participantRequestBatchId: actor.participantRequestBatchId
+          };
+        }
+        this.upsertAppToolApproval(conversation, approval);
+        conversation.messages.push(this.message(
+          "system",
+          `Tool approval needed for @${requester.handle}: ${prepared.summary}.`,
+          undefined,
+          { threadId: "system" }
+        ));
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+        return { prepared, route: "created", approval };
+      });
+    } catch (error) {
+      return { behavior: "deny", message: error instanceof Error ? error.message : String(error) };
+    }
+
+    void this.debugLogs.write("chat.claude.permission-prompt.invoked", {
+      conversationId: actor.conversationId,
+      participantId: actor.participantId,
+      runId: actor.runId,
+      agentMode: outcome.prepared.request.agentMode,
+      toolName: outcome.prepared.request.toolName,
+      nativeOccurrenceIdPresent: Boolean(outcome.prepared.request.nativeOccurrenceId),
+      route: outcome.route
+    });
+
+    if (outcome.decision?.approve) {
+      this.logToolPermissionResolution(actor, outcome, outcome.decision);
       return {
         behavior: "allow",
-        updatedInput: prepared.toolInput
+        updatedInput: outcome.prepared.toolInput
+      };
+    }
+    if (outcome.decision) {
+      this.logToolPermissionResolution(actor, outcome, outcome.decision);
+      return {
+        behavior: "deny",
+        message: outcome.decision.reason ?? "User denied this tool request."
       };
     }
 
-    const approval = this.newAppToolApproval(
-      conversation,
-      requester,
-      APP_TOOL_PERMISSION_TOOL,
-      "permissions.request",
-      prepared.request,
-      prepared.summary,
-      "pending"
-    );
-    if (actor.runId && actor.triggerMessageId) {
-      approval.resumeContext = {
-        runId: actor.runId,
-        triggerMessageId: actor.triggerMessageId,
-        participantRequestBatchId: actor.participantRequestBatchId
-      };
+    const approval = outcome.approval;
+    if (!approval) {
+      return { behavior: "deny", message: "Tool permission request could not be created." };
     }
-    this.upsertAppToolApproval(conversation, approval);
-    conversation.messages.push(this.message("system", `Tool approval needed for @${requester.handle}: ${prepared.summary}.`, undefined, {
-      threadId: "system"
-    }));
-    conversation.updatedAt = new Date().toISOString();
-    await this.saveConversation(conversation);
-    this.queueSnapshot(conversation);
-
-    const decision = await this.waitForToolPermissionDecision(approval.id, actor.runId);
+    const decision = await this.waitForToolPermissionDecision(actor.conversationId, approval.id, actor.runId);
     if (!decision.approve) {
       if (decision.source !== "user") {
         await this.denyPendingToolPermissionApproval(
@@ -3163,14 +3228,16 @@ export class ChatService {
           decision.reason ?? "Tool permission request did not receive approval."
         );
       }
+      this.logToolPermissionResolution(actor, outcome, decision);
       return {
         behavior: "deny",
         message: decision.reason ?? "User denied this tool request."
       };
     }
+    this.logToolPermissionResolution(actor, outcome, decision);
     return {
       behavior: "allow",
-      updatedInput: prepared.toolInput
+      updatedInput: outcome.prepared.toolInput
     };
   }
 
@@ -4426,6 +4493,101 @@ export class ChatService {
     };
   }
 
+  private async respondToToolPermissionApproval(
+    request: RespondToChatAppToolApprovalRequest
+  ): Promise<Conversation | undefined> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return conversation;
+    }
+    let decidedApproval: ChatAppToolApproval | undefined;
+    let decision: ToolPermissionDecision | undefined;
+    await this.withChatMutation(conversation, async () => {
+      const approval = this.chatAppToolApprovals(conversation)
+        .find((item) => item.id === request.approvalId);
+      if (!approval || approval.toolName !== APP_TOOL_PERMISSION_TOOL || !this.isToolPermissionRequest(approval.request)) {
+        throw new Error("App tool approval request was not found.");
+      }
+      if (approval.status !== "pending") {
+        throw new Error("App tool approval request has already been answered.");
+      }
+
+      const now = new Date().toISOString();
+      if (!request.approve) {
+        decidedApproval = {
+          ...approval,
+          status: "denied",
+          updatedAt: now
+        };
+        decision = {
+          approve: false,
+          source: "user",
+          reason: "User denied this tool request."
+        };
+      } else {
+        const requester = this.chatParticipants(conversation)
+          .find((participant) => participant.id === approval.requesterParticipantId);
+        if (!requester) {
+          throw new Error("The requesting member is no longer in this chat.");
+        }
+        // Legacy pending records did not persist the run mode. Their safe fallback is
+        // the member's current mode, never the provider session's previous-turn mode.
+        const agentMode = approval.request.agentMode ?? normalizeChatAgentMode(requester.agentMode);
+        const scope = agentMode === "auto" ? "once" : request.scope === "chat" ? "chat" : "once";
+        decidedApproval = {
+          ...approval,
+          status: "approved",
+          approvalScope: scope,
+          updatedAt: now
+        };
+        decision = { approve: true, scope, source: "user" };
+        if (scope === "chat") {
+          this.upsertAppToolApprovalPolicy(conversation, {
+            id: randomUUID(),
+            participantId: approval.requesterParticipantId,
+            roleConfigId: approval.requesterRoleConfigId,
+            toolName: approval.toolName,
+            capability: approval.capability,
+            targetToolName: approval.request.toolName,
+            scope: "chat",
+            createdAt: now,
+            updatedAt: now
+          });
+        }
+        conversation.messages.push(this.message(
+          "system",
+          scope === "chat"
+            ? `Allowed @${approval.requesterHandle} to use ${approval.request.toolName} for this chat.`
+            : `Allowed @${approval.requesterHandle} to use ${approval.request.toolName} once.`,
+          undefined,
+          { threadId: "system" }
+        ));
+      }
+      this.upsertAppToolApproval(conversation, decidedApproval);
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+    });
+
+    if (!decidedApproval || !decision) {
+      throw new Error("App tool approval request could not be resolved.");
+    }
+    if (!decision.approve) {
+      try {
+        await this.emitAppToolApprovalDecision({
+          conversationId: conversation.id,
+          approval: decidedApproval,
+          status: "denied"
+        });
+      } finally {
+        this.resolveToolPermissionApproval(request.approvalId, decision);
+      }
+    } else {
+      this.resolveToolPermissionApproval(request.approvalId, decision);
+    }
+    return conversation;
+  }
+
   async respondToAppToolApproval(
     request: RespondToChatAppToolApprovalRequest,
     progress?: ProgressCallback
@@ -4437,6 +4599,9 @@ export class ChatService {
     const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === request.approvalId);
     if (!approval) {
       throw new Error("App tool approval request was not found.");
+    }
+    if (approval.toolName === APP_TOOL_PERMISSION_TOOL && this.isToolPermissionRequest(approval.request)) {
+      return this.respondToToolPermissionApproval(request);
     }
     if (approval.status !== "pending") {
       throw new Error("App tool approval request has already been answered.");
@@ -4471,13 +4636,6 @@ export class ChatService {
             requestMessageId,
             message: error instanceof Error ? error.message : String(error)
           });
-        });
-      }
-      if (approval.toolName === APP_TOOL_PERMISSION_TOOL && this.isToolPermissionRequest(approval.request)) {
-        this.resolveToolPermissionApproval(approval.id, {
-          approve: false,
-          source: "user",
-          reason: "User denied this tool request."
         });
       }
       return conversation;
@@ -4547,50 +4705,6 @@ export class ChatService {
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
       this.startQueuedSelfCompaction(conversation.id, requester, approval.request, runId);
-      return conversation;
-    }
-
-    if (approval.toolName === APP_TOOL_PERMISSION_TOOL && this.isToolPermissionRequest(approval.request)) {
-      const requester = this.chatParticipants(conversation)
-        .find((participant) => participant.id === approval.requesterParticipantId);
-      const toolApprovalAgentMode = approval.request.agentMode ?? (
-        requester ? this.participantAgentMode(conversation, requester) : undefined
-      );
-      const toolApprovalScope = toolApprovalAgentMode === "auto" ? "once" : scope;
-      this.upsertAppToolApproval(conversation, {
-        ...approval,
-        status: "approved",
-        approvalScope: toolApprovalScope,
-        updatedAt: now
-      });
-      if (toolApprovalScope === "chat") {
-        this.upsertAppToolApprovalPolicy(conversation, {
-          id: randomUUID(),
-          participantId: approval.requesterParticipantId,
-          roleConfigId: approval.requesterRoleConfigId,
-          toolName: approval.toolName,
-          capability: approval.capability,
-          targetToolName: approval.request.toolName,
-          scope: "chat",
-          createdAt: now,
-          updatedAt: now
-        });
-      }
-      conversation.messages.push(this.message(
-        "system",
-        toolApprovalScope === "chat"
-          ? `Allowed @${approval.requesterHandle} to use ${approval.request.toolName} for this chat.`
-          : `Allowed @${approval.requesterHandle} to use ${approval.request.toolName} once.`,
-        undefined,
-        { threadId: "system" }
-      ));
-      conversation.updatedAt = now;
-      await this.saveConversation(conversation);
-      this.resolveToolPermissionApproval(approval.id, {
-        approve: true,
-        scope: toolApprovalScope,
-        source: "user"
-      });
       return conversation;
     }
 
@@ -6476,6 +6590,7 @@ export class ChatService {
       continuation: Boolean(options.continuation),
       runId,
       turnSegmentId: options.turnSegmentId,
+      agentMode,
       runPermissions: effectiveChatAgentPermissionsForProvider(participant.kind, agentMode, permissions),
       participantRequestDepth: options.participantRequestDepth ?? 0,
       participantRequestBatchId: options.participantRequestBatchId,
@@ -7825,14 +7940,6 @@ export class ChatService {
 
   private agentModeForSession(session: ChatParticipantSession, participant: ChatParticipant): ChatAgentMode {
     return normalizeChatAgentMode(session.participantAgentMode ?? participant.agentMode);
-  }
-
-  private participantAgentMode(conversation: Conversation, participant: ChatParticipant): ChatAgentMode {
-    const sessions = Array.isArray(conversation.metadata.participantSessions)
-      ? conversation.metadata.participantSessions as ChatParticipantSession[]
-      : [];
-    const session = sessions.find((item) => item.participantId === participant.id);
-    return session ? this.agentModeForSession(session, participant) : normalizeChatAgentMode(participant.agentMode);
   }
 
   private cliParticipantForSession(participant: ChatParticipant, session: ChatParticipantSession): ParticipantConfig {
@@ -11472,9 +11579,14 @@ export class ChatService {
     }
     const toolInput = record.input ?? record.tool_input ?? record.toolInput ?? {};
     const reason = this.normalizePermissionChangeReason(record.reason ?? record.description);
+    const rawNativeOccurrenceId = record.tool_use_id ?? record.toolUseId;
+    const nativeOccurrenceId = typeof rawNativeOccurrenceId === "string"
+      ? rawNativeOccurrenceId.trim().slice(0, 500) || undefined
+      : undefined;
     const request: ChatToolPermissionRequest = {
       kind: "toolPermission",
       agentMode,
+      nativeOccurrenceId,
       reason,
       toolName: toolName.slice(0, CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH),
       toolInput: this.toolPermissionInputPreview(toolInput)
@@ -11518,7 +11630,65 @@ export class ChatService {
     return `Use ${request.toolName}${reason}`;
   }
 
-  private waitForToolPermissionDecision(approvalId: string, runId: string | undefined): Promise<ToolPermissionDecision> {
+  private toolPermissionApprovalForOccurrence(
+    conversation: Conversation,
+    participantId: string,
+    runId: string | undefined,
+    nativeOccurrenceId: string | undefined
+  ): ChatAppToolApproval | undefined {
+    if (!runId || !nativeOccurrenceId) {
+      return undefined;
+    }
+    return this.chatAppToolApprovals(conversation).find((approval) =>
+      approval.requesterParticipantId === participantId &&
+      approval.toolName === APP_TOOL_PERMISSION_TOOL &&
+      approval.resumeContext?.runId === runId &&
+      this.isToolPermissionRequest(approval.request) &&
+      approval.request.nativeOccurrenceId === nativeOccurrenceId
+    );
+  }
+
+  private toolPermissionDecisionForApproval(approval: ChatAppToolApproval): ToolPermissionDecision | undefined {
+    if (approval.status === "approved" || approval.status === "auto-applied") {
+      return {
+        approve: true,
+        scope: approval.approvalScope,
+        source: approval.status === "auto-applied" ? "policy" : "user"
+      };
+    }
+    if (approval.status === "denied" || approval.status === "cancelled" || approval.status === "expired") {
+      return {
+        approve: false,
+        source: "user",
+        reason: approval.error ?? "User denied this tool request."
+      };
+    }
+    return undefined;
+  }
+
+  private logToolPermissionResolution(
+    actor: ChatAppMcpActor,
+    outcome: ToolPermissionRequestOutcome,
+    decision: ToolPermissionDecision
+  ): void {
+    void this.debugLogs.write("chat.claude.permission-prompt.resolved", {
+      conversationId: actor.conversationId,
+      participantId: actor.participantId,
+      runId: actor.runId,
+      agentMode: outcome.prepared.request.agentMode,
+      toolName: outcome.prepared.request.toolName,
+      nativeOccurrenceIdPresent: Boolean(outcome.prepared.request.nativeOccurrenceId),
+      route: outcome.route,
+      behavior: decision.approve ? "allow" : "deny",
+      source: decision.source
+    });
+  }
+
+  private waitForToolPermissionDecision(
+    conversationId: string,
+    approvalId: string,
+    runId: string | undefined
+  ): Promise<ToolPermissionDecision> {
     return new Promise<ToolPermissionDecision>((resolve) => {
       let settled = false;
       const controller = runId ? this.firstChatRunController(runId) : undefined;
@@ -11531,7 +11701,11 @@ export class ChatService {
         settled = true;
         clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
-        this.toolPermissionResolvers.delete(approvalId);
+        const resolvers = this.toolPermissionResolvers.get(approvalId);
+        resolvers?.delete(finish);
+        if (resolvers?.size === 0) {
+          this.toolPermissionResolvers.delete(approvalId);
+        }
         resolve(decision);
       };
       const onAbort = (): void => {
@@ -11548,17 +11722,37 @@ export class ChatService {
           reason: "Timed out waiting for User approval."
         });
       }, CHAT_TOOL_PERMISSION_WAIT_MS);
-      this.toolPermissionResolvers.set(approvalId, finish);
+      const resolvers = this.toolPermissionResolvers.get(approvalId) ?? new Set();
+      resolvers.add(finish);
+      this.toolPermissionResolvers.set(approvalId, resolvers);
       if (signal?.aborted) {
         onAbort();
       } else {
         signal?.addEventListener("abort", onAbort, { once: true });
       }
+      // A fast UI response can land after the pending approval is saved but before
+      // this waiter is registered. Re-read durable state after registration so that
+      // race resolves to the stored decision rather than timing out.
+      void this.storage.getConversation(conversationId).then((conversation) => {
+        if (!conversation || conversation.kind !== "chat") {
+          return;
+        }
+        const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
+        if (!approval) {
+          return;
+        }
+        const decision = this.toolPermissionDecisionForApproval(approval);
+        if (decision) {
+          finish(decision);
+        }
+      }).catch(() => undefined);
     });
   }
 
   private resolveToolPermissionApproval(approvalId: string, decision: ToolPermissionDecision): void {
-    this.toolPermissionResolvers.get(approvalId)?.(decision);
+    for (const resolve of Array.from(this.toolPermissionResolvers.get(approvalId) ?? [])) {
+      resolve(decision);
+    }
   }
 
   private async denyPendingToolPermissionApproval(conversationId: string, approvalId: string, reason: string): Promise<void> {
@@ -11566,23 +11760,25 @@ export class ChatService {
     if (!conversation || conversation.kind !== "chat") {
       return;
     }
-    const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
-    if (!approval || approval.status !== "pending" || approval.toolName !== APP_TOOL_PERMISSION_TOOL) {
-      return;
-    }
-    const now = new Date().toISOString();
-    this.upsertAppToolApproval(conversation, {
-      ...approval,
-      status: "denied",
-      error: reason,
-      updatedAt: now
+    await this.withChatMutation(conversation, async () => {
+      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
+      if (!approval || approval.status !== "pending" || approval.toolName !== APP_TOOL_PERMISSION_TOOL) {
+        return;
+      }
+      const now = new Date().toISOString();
+      this.upsertAppToolApproval(conversation, {
+        ...approval,
+        status: "denied",
+        error: reason,
+        updatedAt: now
+      });
+      conversation.messages.push(this.message("system", `Denied tool request from @${approval.requesterHandle}: ${reason}`, undefined, {
+        threadId: "system"
+      }));
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
     });
-    conversation.messages.push(this.message("system", `Denied tool request from @${approval.requesterHandle}: ${reason}`, undefined, {
-      threadId: "system"
-    }));
-    conversation.updatedAt = now;
-    await this.saveConversation(conversation);
-    this.queueSnapshot(conversation);
   }
 
   private preparePermissionChange(

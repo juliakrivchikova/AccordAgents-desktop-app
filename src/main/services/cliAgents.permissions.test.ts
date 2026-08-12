@@ -1892,6 +1892,7 @@ test("claude production launch-argv matrix preserves Auto authority across sessi
   }> = [
     { name: "cold", transport: "one-shot", options: base, newSessionId: "new-session" },
     { name: "warm", transport: "warm", options: base, newSessionId: "warm-session" },
+    { name: "idle-respawn", transport: "warm", options: base, newSessionId: "idle-respawn-session" },
     { name: "resume", transport: "one-shot", options: { ...base, sessionId: "resume-session" } },
     { name: "retry-fallback", transport: "one-shot", options: { ...base, warm: undefined }, newSessionId: "retry-session" },
     { name: "participant-request", transport: "warm", options: base, newSessionId: "request-session" },
@@ -1917,6 +1918,22 @@ test("claude production launch-argv matrix preserves Auto authority across sessi
     assert.equal(args.includes("/outside/explicit-target.txt"), false, scenario.name);
     assert.equal(args.includes("--add-dir"), true, scenario.name);
     assert.equal(args.includes("/chat-history"), true, scenario.name);
+    assert.equal(
+      args.filter((arg) => arg === "--permission-mode").length,
+      1,
+      `${scenario.name}: permission mode flag count`
+    );
+    assert.equal(args[args.indexOf("--permission-mode") + 1], "auto", scenario.name);
+    assert.equal(
+      args.filter((arg) => arg === "--permission-prompt-tool").length,
+      1,
+      `${scenario.name}: permission prompt flag count`
+    );
+    assert.equal(
+      args[args.indexOf("--permission-prompt-tool") + 1],
+      "mcp__accord_agents__app_tool_permission",
+      scenario.name
+    );
     for (const nativeTool of ["Bash", "Edit", "Write", "Read", "WebSearch", "Skill", "Agent", "Task"]) {
       assert.equal(allowedTools.includes(nativeTool), false, `${scenario.name}:${nativeTool}`);
     }

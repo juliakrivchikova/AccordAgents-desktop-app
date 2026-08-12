@@ -977,7 +977,9 @@ test("tool permission request waits for user approval and returns allow once", a
 
 test("tool permission chat approval reuses policy for the same participant and tool", async () => {
   const participant = chatParticipant("claude-code");
-  const conversation = chatConversation([participant]);
+  const conversation = chatConversation([participant], {
+    participantSessions: [{ participantId: participant.id, participantAgentMode: "auto" }]
+  });
   const { service, storage } = testService({ conversation });
   const actor = {
     conversationId: conversation.id,
@@ -985,6 +987,7 @@ test("tool permission chat approval reuses policy for the same participant and t
     roleConfigId: participant.roleConfigId,
     roleConfigVersion: 0,
     capabilities: ["permissions.request" as const],
+    agentMode: "default" as const,
     runId: "run-42",
     triggerMessageId: "user-message"
   };
@@ -1045,7 +1048,8 @@ test("Claude Auto tool permission approvals are per occurrence and never reuse c
     updatedAt: NOW
   };
   const conversation = chatConversation([participant], {
-    appToolApprovalPolicies: [staleDefaultPolicy]
+    appToolApprovalPolicies: [staleDefaultPolicy],
+    participantSessions: [{ participantId: participant.id, participantAgentMode: "default" }]
   });
   const { service, storage } = testService({ conversation });
   const actor = {
@@ -1054,6 +1058,7 @@ test("Claude Auto tool permission approvals are per occurrence and never reuse c
     roleConfigId: participant.roleConfigId,
     roleConfigVersion: 0,
     capabilities: ["permissions.request" as const],
+    agentMode: "auto" as const,
     runId: "run-auto-1",
     triggerMessageId: "user-message"
   };
@@ -1110,6 +1115,258 @@ test("Claude Auto tool permission approvals are per occurrence and never reuse c
     behavior: "deny",
     message: "User denied this tool request."
   });
+});
+
+test("tool permission retries deduplicate one native occurrence and replay its durable decision", async () => {
+  const participant = { ...chatParticipant("claude-code"), agentMode: "auto" as const };
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const],
+    agentMode: "auto" as const,
+    runId: "run-retry",
+    triggerMessageId: "user-message"
+  };
+  const request = {
+    tool_name: "Write",
+    tool_use_id: "toolu_same_occurrence",
+    input: { file_path: "/repo/retry.txt", content: "safe" }
+  };
+
+  const first = service.requestToolPermissionFromTool(actor, request);
+  const retry = service.requestToolPermissionFromTool(actor, request);
+  await waitFor(() =>
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .filter((approval) => approval.toolName === APP_TOOL_PERMISSION_TOOL).length === 1
+  );
+  const approval = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+    .find((item) => item.toolName === APP_TOOL_PERMISSION_TOOL)!;
+  assert.equal((approval.request as { nativeOccurrenceId?: string }).nativeOccurrenceId, "toolu_same_occurrence");
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: approval.id,
+    approve: true,
+    scope: "once"
+  });
+  const expected = {
+    behavior: "allow",
+    updatedInput: { file_path: "/repo/retry.txt", content: "safe" }
+  };
+  assert.deepEqual(await first, expected);
+  assert.deepEqual(await retry, expected);
+
+  assert.deepEqual(await service.requestToolPermissionFromTool(actor, request), expected);
+  assert.equal(
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .filter((item) => item.toolName === APP_TOOL_PERMISSION_TOOL).length,
+    1
+  );
+});
+
+test("synthetic 20-total native prompt approval does not poison the next Auto run", async () => {
+  const participant = { ...chatParticipant("claude-code"), agentMode: "auto" as const };
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const],
+    agentMode: "auto" as const,
+    runId: "run-total-threshold",
+    triggerMessageId: "user-total-threshold"
+  };
+  const atThreshold = service.requestToolPermissionFromTool(actor, {
+    tool_name: "mcp__auto-mode-fixture__publish_private_repo",
+    tool_use_id: "toolu_total_denial_20",
+    input: {}
+  });
+  await waitFor(() =>
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .some((approval) => approval.status === "pending")
+  );
+  const thresholdApproval = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+    .find((approval) => approval.status === "pending")!;
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: thresholdApproval.id,
+    approve: true,
+    scope: "once"
+  });
+  assert.equal((await atThreshold).behavior, "allow");
+  assert.deepEqual(storage.current.metadata.appToolApprovalPolicies ?? [], []);
+
+  const nextRun = service.requestToolPermissionFromTool({
+    ...actor,
+    runId: "run-after-total-threshold",
+    triggerMessageId: "user-after-total-threshold"
+  }, {
+    tool_name: "Write",
+    tool_use_id: "toolu_after_total_threshold",
+    input: { file_path: "/repo/after-total-threshold.txt", content: "safe" }
+  });
+  await waitFor(() =>
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .some((approval) => approval.status === "pending")
+  );
+  const nextApproval = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+    .find((approval) => approval.status === "pending")!;
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: nextApproval.id,
+    approve: true,
+    scope: "once"
+  });
+  assert.equal((await nextRun).behavior, "allow");
+  assert.deepEqual(storage.current.metadata.appToolApprovalPolicies ?? [], []);
+});
+
+test("identical tool inputs with different native occurrence ids remain distinct", async () => {
+  const participant = { ...chatParticipant("claude-code"), agentMode: "auto" as const };
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const],
+    agentMode: "auto" as const,
+    runId: "run-distinct",
+    triggerMessageId: "user-message"
+  };
+  const input = { file_path: "/repo/same.txt", content: "same" };
+  const first = service.requestToolPermissionFromTool(actor, {
+    tool_name: "Write",
+    tool_use_id: "toolu_first",
+    input
+  });
+  const second = service.requestToolPermissionFromTool(actor, {
+    tool_name: "Write",
+    tool_use_id: "toolu_second",
+    input
+  });
+  await waitFor(() =>
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .filter((approval) => approval.toolName === APP_TOOL_PERMISSION_TOOL).length === 2
+  );
+  const approvals = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+    .filter((item) => item.toolName === APP_TOOL_PERMISSION_TOOL);
+  assert.deepEqual(
+    approvals.map((approval) => (approval.request as { nativeOccurrenceId?: string }).nativeOccurrenceId).sort(),
+    ["toolu_first", "toolu_second"]
+  );
+  for (const approval of approvals) {
+    await service.respondToAppToolApproval({
+      conversationId: conversation.id,
+      approvalId: approval.id,
+      approve: false
+    });
+  }
+  assert.equal((await first).behavior, "deny");
+  assert.equal((await second).behavior, "deny");
+});
+
+test("tool permission creation preserves an overlapping queued chat mutation", async () => {
+  const participant = { ...chatParticipant("claude-code"), agentMode: "auto" as const };
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const concurrentConversation = await storage.getConversation(conversation.id) as Conversation;
+  let releaseMutation!: () => void;
+  let markMutationStarted!: () => void;
+  const mutationStarted = new Promise<void>((resolve) => { markMutationStarted = resolve; });
+  const release = new Promise<void>((resolve) => { releaseMutation = resolve; });
+  const concurrentMutation = (service as any).withChatMutation(concurrentConversation, async () => {
+    markMutationStarted();
+    await release;
+    concurrentConversation.messages.push({
+      id: "concurrent-message",
+      role: "system",
+      content: "Concurrent state survives.",
+      createdAt: NOW,
+      status: "done"
+    });
+    await (service as any).saveConversation(concurrentConversation);
+  });
+  await mutationStarted;
+
+  const pending = service.requestToolPermissionFromTool({
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request"],
+    agentMode: "auto",
+    runId: "run-concurrent",
+    triggerMessageId: "user-message"
+  }, {
+    tool_name: "Write",
+    tool_use_id: "toolu_concurrent",
+    input: { file_path: "/repo/concurrent.txt", content: "safe" }
+  });
+  releaseMutation();
+  await concurrentMutation;
+  await waitFor(() =>
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .some((approval) => approval.status === "pending")
+  );
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.id === "concurrent-message"));
+  const approval = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+    .find((item) => item.status === "pending")!;
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: approval.id,
+    approve: false
+  });
+  assert.equal((await pending).behavior, "deny");
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.id === "concurrent-message"));
+});
+
+test("tool permission diagnostics omit native input, reason, and occurrence id", async () => {
+  const participant = { ...chatParticipant("claude-code"), agentMode: "auto" as const };
+  const conversation = chatConversation([participant]);
+  const { service, storage, debugEvents } = testService({ conversation });
+  const secret = "CANARY_PRIVATE_INPUT";
+  const pending = service.requestToolPermissionFromTool({
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request"],
+    agentMode: "auto",
+    runId: "run-diagnostics",
+    triggerMessageId: "user-message"
+  }, {
+    tool_name: "Write",
+    tool_use_id: `toolu_${secret}`,
+    input: { file_path: `/repo/${secret}.txt`, content: secret },
+    reason: secret
+  });
+  await waitFor(() =>
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .some((approval) => approval.status === "pending")
+  );
+  const approval = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+    .find((item) => item.status === "pending")!;
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: approval.id,
+    approve: false
+  });
+  await pending;
+
+  const bridgeEvents = debugEvents.filter((event) => event.event.startsWith("chat.claude.permission-prompt."));
+  assert.deepEqual(bridgeEvents.map((event) => event.event), [
+    "chat.claude.permission-prompt.invoked",
+    "chat.claude.permission-prompt.resolved"
+  ]);
+  assert.equal(JSON.stringify(bridgeEvents).includes(secret), false);
+  assert.equal(bridgeEvents.every((event) => event.payload.nativeOccurrenceIdPresent === true), true);
 });
 
 test("tool permission request denies and marks approval when run is cancelled", async () => {
@@ -1178,6 +1435,10 @@ test("tool permission request denies and marks approval on timeout", async (t) =
       (item) => item.toolName === APP_TOOL_PERMISSION_TOOL
     );
     assert.equal(approval?.status, "pending");
+    for (let index = 0; index < 20 && !(service as any).toolPermissionResolvers.has(approval?.id); index += 1) {
+      await Promise.resolve();
+    }
+    assert.equal((service as any).toolPermissionResolvers.has(approval?.id), true);
 
     (t.mock.timers as any).tick(30 * 60_000);
     assert.deepEqual(await pending, {
@@ -9390,6 +9651,7 @@ test("app MCP advertises attachment and reaction tools to chat participants", ()
   const participantActivityTool = tools.find((tool) => tool.name === APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL);
   const exportTool = tools.find((tool) => tool.name === APP_CHAT_EXPORT_ATTACHMENT_TOOL);
   const titleTool = tools.find((tool) => tool.name === APP_CHAT_SET_TITLE_TOOL);
+  const toolPermissionTool = tools.find((tool) => tool.name === APP_TOOL_PERMISSION_TOOL);
 
   assert.ok(listTool);
   assert.equal(listTool.annotations?.readOnlyHint, true);
@@ -9417,7 +9679,9 @@ test("app MCP advertises attachment and reaction tools to chat participants", ()
   assert.ok(titleTool);
   assert.equal(titleTool.annotations?.readOnlyHint, false);
   assert.ok(titleTool.inputSchema?.properties?.title);
-  assert.ok(tools.find((tool) => tool.name === APP_TOOL_PERMISSION_TOOL));
+  assert.ok(toolPermissionTool);
+  assert.ok(toolPermissionTool.inputSchema?.properties?.tool_use_id);
+  assert.ok(toolPermissionTool.inputSchema?.properties?.toolUseId);
 });
 
 test("appMcpToolNames exposes request tools only with their capabilities", () => {
@@ -9508,12 +9772,18 @@ test("ChatService constructs classified Auto app MCP launch options for cold, re
       participantId: string;
       repoPath: string | undefined;
       options: any;
+      tokenAgentMode: string | undefined;
     }> = [];
     const { service, tempRoot } = testService({
       conversation,
       appMcp,
       run: async (participant, _prompt, repoPath, _diffMode, _kind, _signal, options) => {
-        runs.push({ participantId: participant.id, repoPath, options });
+        runs.push({
+          participantId: participant.id,
+          repoPath,
+          options,
+          tokenAgentMode: (appMcp as any).tokens.get(options.appMcp.token)?.agentMode
+        });
         return {
           participant,
           ok: true,
@@ -9554,6 +9824,7 @@ test("ChatService constructs classified Auto app MCP launch options for cold, re
       assert.ok(run.options.appMcp.autoPreauthorizedToolNames.includes(APP_ARTIFACT_CREATE_TOOL), `run ${index}`);
       assert.equal(run.options.appMcp.autoPreauthorizedToolNames.includes(APP_CHAT_EXPORT_ATTACHMENT_TOOL), false, `run ${index}`);
       assert.equal(run.options.appMcp.autoPreauthorizedToolNames.includes(APP_TOOL_PERMISSION_TOOL), false, `run ${index}`);
+      assert.equal(run.tokenAgentMode, "auto", `run ${index}`);
     }
   } finally {
     (appMcp as any).url = undefined;
@@ -11447,7 +11718,7 @@ function testService(options: {
   chatParticipantConfigs: ChatParticipantConfig[];
   batchWriteCount: number;
   recordedSuccessfulProviders: ChatProviderKind[];
-}; tempRoot: string } {
+}; tempRoot: string; debugEvents: Array<{ event: string; payload: Record<string, unknown> }> } {
   const tempRoot = path.join(tmpdir(), "accordagents-chat-permissions-test");
   const storage = {
     current: options.conversation ? clone(options.conversation) : undefined,
@@ -11654,16 +11925,18 @@ function testService(options: {
       durationMs: 1
     }))
   };
+  const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
   const debugLogs = {
-    async write(): Promise<void> {
-      return undefined;
+    async write(event: string, payload: Record<string, unknown>): Promise<void> {
+      debugEvents.push({ event, payload });
     }
   };
   return {
     service: new ChatService(storage as never, settings as never, cliRunner as never, debugLogs as never, options.appMcp as never, options.onSnapshot, options.userSkills as never),
     storage,
     settingsState,
-    tempRoot
+    tempRoot,
+    debugEvents
   };
 }
 

@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import type { ChatAgentPermissions, ChatAppToolCapability } from "../../shared/types";
-import { normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import type { ChatAgentMode, ChatAgentPermissions, ChatAppToolCapability } from "../../shared/types";
+import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { hasChatAppToolCapability } from "../../shared/appTools";
 import { CHAT_REACTION_EMOJIS } from "../../shared/chatReactions";
 
@@ -549,6 +549,7 @@ export interface AppMcpActor {
   chainRootId?: string;
   historyMarkdownPath?: string;
   historyJsonPath?: string;
+  agentMode?: ChatAgentMode;
   runPermissions?: ChatAgentPermissions;
 }
 
@@ -822,6 +823,7 @@ export class AppMcpService {
       chainRootId: grant.chainRootId,
       historyMarkdownPath: grant.historyMarkdownPath,
       historyJsonPath: grant.historyJsonPath,
+      agentMode: grant.agentMode ? normalizeChatAgentMode(grant.agentMode) : undefined,
       runPermissions: grant.runPermissions ? normalizeChatAgentPermissions(grant.runPermissions) : undefined
     };
   }
@@ -1017,6 +1019,14 @@ export class AppMcpService {
             toolName: {
               type: "string",
               description: "Alternate camelCase tool name field."
+            },
+            tool_use_id: {
+              type: "string",
+              description: "Claude Code's native invocation id for this permission occurrence."
+            },
+            toolUseId: {
+              type: "string",
+              description: "Alternate camelCase native invocation id field."
             },
             input: {
               type: "object",
