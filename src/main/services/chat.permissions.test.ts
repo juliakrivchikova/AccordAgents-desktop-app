@@ -63,6 +63,7 @@ import type {
   ParticipantConfig,
   ProviderSettings
 } from "../../shared/types";
+import { CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID } from "../../shared/codexApproval";
 import {
   chatActivityEventsForSegment,
   chatInlineTranscriptParts,
@@ -11024,6 +11025,13 @@ test("Guardian Keep denied compacts and starts the decision-specific continuatio
   await new Promise<void>((resolve) => setImmediate(resolve));
   const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
 
+  await assert.rejects(() => service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: false
+  }), /Select one of the decisions offered/);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
+
   await service.respondToAppToolApproval({
     conversationId: conversation.id,
     approvalId: pending.id,
@@ -11036,6 +11044,57 @@ test("Guardian Keep denied compacts and starts the decision-specific continuatio
   await waitFor(() => prompts.length === 1);
   assert.match(prompts[0], /Do not retry the action I just denied/);
   assert.equal(storage.current.messages.filter((message: ChatMessage) => message.metadata?.approvedContinuation).length, 1);
+});
+
+test("Guardian Cancel compacts the card without starting a continuation", async () => {
+  const participant = chatParticipant("codex-cli");
+  participant.agentMode = "auto";
+  const session: ChatParticipantSession = {
+    participantId: participant.id,
+    sessionId: "codex-thread-cancel",
+    roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version,
+    roleLabel: ROLE.label,
+    roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities,
+    participantKind: "codex-cli",
+    participantAgentMode: "auto",
+    participantPermissions: participant.permissions,
+    updatedAt: NOW
+  };
+  const prompts: string[] = [];
+  const conversation = chatConversation([participant], { participantSessions: [session] });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, prompt) => {
+      prompts.push(prompt);
+      return { participant: runParticipant, ok: true, content: "Unexpected continuation.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const decision = (service as any).requestCodexApprovalFromCli(
+    conversation,
+    participant,
+    session,
+    "run-guardian-cancel",
+    "user-message",
+    guardianDeniedRequest("codex-thread-cancel", Promise.resolve())
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: pending.id,
+    approve: false,
+    codexDecisionId: CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID
+  });
+
+  assert.deepEqual(await decision, { decision: "keepDenied" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "cancelled");
+  await waitFor(() => !(service as any).codexApprovalResolvers.has(pending.id));
+  assert.deepEqual(prompts, []);
+  assert.equal(storage.current.messages.filter((message: ChatMessage) => message.metadata?.approvedContinuation).length, 0);
 });
 
 test("Guardian decision queues one continuation while the original run finishes", async () => {

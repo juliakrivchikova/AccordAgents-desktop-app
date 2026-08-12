@@ -15,11 +15,14 @@ import type {
 import { chatParticipantReference } from "../conversation/conversation-display";
 import { CODEX_APPROVAL_TOOL_NAME, chatCodexApprovalRequest } from "./chat-codex-approval-presentation";
 
+export { CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID } from "../../../shared/codexApproval";
+
 export {
   CODEX_APPROVAL_TOOL_NAME,
   chatApprovalKeyboardAction,
   chatApprovalPlacement,
   chatApprovalShowsGenericSkip,
+  chatCodexApprovalShowsCancel,
   chatCodexApprovalRequest
 } from "./chat-codex-approval-presentation";
 export type { ChatApprovalKeyboardAction, ChatApprovalPlacement } from "./chat-codex-approval-presentation";

@@ -119,7 +119,12 @@ import {
   limitChatBehaviorRulePromptText
 } from "../../shared/chatBehaviorRules";
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../shared/reasoningEffort";
-import { CODEX_APPROVAL_TOOL_NAME, CODEX_GUARDIAN_DENIED_APPROVAL_METHOD, codexApprovalCancellationResult, prepareCodexApproval } from "./codexApprovals";
+import { CODEX_APPROVAL_TOOL_NAME, codexApprovalCancellationResult, prepareCodexApproval } from "./codexApprovals";
+import {
+  CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID,
+  isCodexGuardianDeniedApprovalMethod,
+  isCodexGuardianTimedOutApprovalMethod
+} from "../../shared/codexApproval";
 import {
   CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH,
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
@@ -4804,7 +4809,7 @@ export class ChatService {
     }
     const prepared = prepareCodexApproval(request);
     const now = new Date().toISOString();
-    const guardianTimedOut = prepared.request.method === "item/autoApprovalReview/timedOut";
+    const guardianTimedOut = isCodexGuardianTimedOutApprovalMethod(prepared.request.method);
     const approval: ChatAppToolApproval = {
       id: randomUUID(),
       conversationId: conversation.id,
@@ -4962,8 +4967,17 @@ export class ChatService {
         throw new Error("Codex approval request has already been answered.");
       }
       const decisionId = request.codexDecisionId?.trim();
-      const option = approval.request.options.find((item) => item.id === decisionId);
-      const response = decisionId ? resolver.responseByOptionId.get(decisionId) : undefined;
+      const cancelGuardian = decisionId === CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID &&
+        !request.approve &&
+        this.isEndedTurnGuardianApproval(approval);
+      const option: ChatCodexApprovalOption | undefined = cancelGuardian
+        ? { id: "cancel", label: "Cancel", outcome: "cancel" }
+        : approval.request.options.find((item) => item.id === decisionId);
+      const response = cancelGuardian
+        ? codexApprovalCancellationResult(approval.request.method)
+        : decisionId
+          ? resolver.responseByOptionId.get(decisionId)
+          : undefined;
       if (!option || response === undefined) {
         throw new Error("Select one of the decisions offered by this Codex approval request.");
       }
@@ -5057,7 +5071,8 @@ export class ChatService {
   }
 
   private isEndedTurnGuardianApproval(approval: ChatAppToolApproval): boolean {
-    return this.isCodexApprovalRequest(approval.request) && approval.request.method === CODEX_GUARDIAN_DENIED_APPROVAL_METHOD;
+    return this.isCodexApprovalRequest(approval.request) &&
+      isCodexGuardianDeniedApprovalMethod(approval.request.method);
   }
 
   private async autoResumeCodexGuardianDecision(
@@ -5282,7 +5297,7 @@ export class ChatService {
   }
 
   private codexApprovalSummary(request: ChatCodexApprovalRequest): string {
-    if (request.method === "item/autoApprovalReview/denied") {
+    if (isCodexGuardianDeniedApprovalMethod(request.method)) {
       return request.command
         ? `Codex Auto Review denied: ${request.command}`
         : request.networkTarget
@@ -16486,8 +16501,8 @@ export class ChatService {
         method === "item/commandExecution/requestApproval" ||
         method === "item/fileChange/requestApproval" ||
         method === "item/permissions/requestApproval" ||
-        method === "item/autoApprovalReview/denied" ||
-        method === "item/autoApprovalReview/timedOut" ||
+        isCodexGuardianDeniedApprovalMethod(method) ||
+        isCodexGuardianTimedOutApprovalMethod(method) ||
         method === "applyPatchApproval" ||
         method === "execCommandApproval"
       ) &&
@@ -16500,7 +16515,7 @@ export class ChatService {
         candidate.action === "mcpToolCall"
       ) &&
       Array.isArray(candidate.options) &&
-      (method === "item/autoApprovalReview/timedOut" ? candidate.options.length === 0 : candidate.options.length > 0) &&
+      (isCodexGuardianTimedOutApprovalMethod(method) ? candidate.options.length === 0 : candidate.options.length > 0) &&
       candidate.options.every((option) =>
         typeof option?.id === "string" &&
         typeof option.label === "string" &&

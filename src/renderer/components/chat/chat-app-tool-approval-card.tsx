@@ -18,7 +18,7 @@ import { chatParticipantDisplayName, chatParticipantReference } from "../convers
 import { MarkdownText } from "../content/markdown-text";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { formatChatTime } from "./chat-format";
-import { APP_ROSTER_REQUEST_CHANGE_TOOL, chatApprovalKeyboardAction, chatApprovalShowsGenericSkip, chatCodexApprovalRequest, chatParticipantChangeRequest, chatParticipantRequestApprovalRequest, chatPermissionChangeRequest, chatRoleChangeRequest, chatRoleParticipantChangeRequest, chatSelfCompactionRequest, chatToolPermissionRequest, participantProviderLabel } from "./chat-conversation-data";
+import { APP_ROSTER_REQUEST_CHANGE_TOOL, CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID, chatApprovalKeyboardAction, chatApprovalShowsGenericSkip, chatCodexApprovalRequest, chatCodexApprovalShowsCancel, chatParticipantChangeRequest, chatParticipantRequestApprovalRequest, chatPermissionChangeRequest, chatRoleChangeRequest, chatRoleParticipantChangeRequest, chatSelfCompactionRequest, chatToolPermissionRequest, participantProviderLabel } from "./chat-conversation-data";
 import { chatCodexApprovalShowsCompactResult } from "./chat-codex-approval-presentation";
 import { approvalOptions, approvalQuestion, approvalReason, ChatAppToolReviewFooter, ChatAppToolReviewResult, ChatAppToolReviewStatus, participantReviewChipLabel, reviewPrimaryLabel, roleReviewChipLabel, temporaryRolesForReview } from "./chat-app-tool-approval-review";
 import { ChatCodexApprovalResult } from "./chat-codex-approval-result";
@@ -51,6 +51,7 @@ export function ChatAppToolApprovalCard(props: {
   const participantRequest = chatParticipantRequestApprovalRequest(props.approval);
   const selfCompactionRequest = chatSelfCompactionRequest(props.approval);
   const codexRequest = chatCodexApprovalRequest(props.approval);
+  const showCodexCancel = chatCodexApprovalShowsCancel(codexRequest);
   const inferredParticipantRequest = participantRequest?.source === "inferred";
   const preferOnceApproval = Boolean(permissionRequest && permissionRequest.kind !== "portable");
   const added = props.approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL && "operations" in props.approval.request
@@ -105,7 +106,7 @@ export function ChatAppToolApprovalCard(props: {
     ? avatarForChatParticipant(requester, requesterLabel)
     : avatarForParticipant(requesterLabel, props.approval.requesterParticipantId);
   const approvalPrompt = codexRequest
-    ? codexRequest.method === "item/autoApprovalReview/denied"
+    ? showCodexCancel
       ? `${chatParticipantReference(props.approval.requesterHandle)} wants to retry an action denied by Codex Auto Review`
       : `${chatParticipantReference(props.approval.requesterHandle)} needs approval before Codex can continue`
     : effectiveCombinedRequest
@@ -368,14 +369,20 @@ export function ChatAppToolApprovalCard(props: {
                 ))}
               </div>
               <div className="chat-approval-footer">
-                {chatApprovalShowsGenericSkip(codexRequest) && (
+                {(showCodexCancel || chatApprovalShowsGenericSkip(codexRequest)) && (
                   <button
                     type="button"
                     className="chat-approval-skip"
                     disabled={props.submitting}
-                    onClick={() => void props.onRespond(props.approval.id, false)}
+                    onClick={() => void props.onRespond(
+                      props.approval.id,
+                      false,
+                      undefined,
+                      undefined,
+                      showCodexCancel ? CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID : undefined
+                    )}
                   >
-                    Skip
+                    {showCodexCancel ? "Cancel" : "Skip"}
                   </button>
                 )}
                 <Button variant="default" size="sm" className="chat-approval-submit" disabled={props.submitting} onClick={submit}>

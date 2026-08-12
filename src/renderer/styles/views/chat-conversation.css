@@ -1560,9 +1560,11 @@
 }
 
 .chat-app-tool-result-copy span {
+  min-width: 0;
   color: var(--app-muted);
   font-size: 13px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .chat-app-tool-review-participant-head {
