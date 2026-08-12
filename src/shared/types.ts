@@ -866,6 +866,7 @@ export type ChatPermissionChangeRequest =
 
 export interface ChatToolPermissionRequest {
   kind: "toolPermission";
+  agentMode?: ChatAgentMode;
   reason?: string;
   toolName: string;
   toolInput?: unknown;

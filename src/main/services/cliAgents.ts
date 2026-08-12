@@ -5609,9 +5609,10 @@ export class CliAgentRunner {
   }
 
   private claudePermissionPromptTool(kind: ConversationKind, options: CliAgentRunOptions): string | undefined {
+    const agentMode = this.agentModeForRun(kind, options);
     if (
       kind !== "chat" ||
-      this.agentModeForRun(kind, options) !== "default" ||
+      (agentMode !== "default" && agentMode !== "auto") ||
       !options.appMcp?.toolNames.includes(APP_TOOL_PERMISSION_TOOL)
     ) {
       return undefined;

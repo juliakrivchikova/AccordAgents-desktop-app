@@ -1,4 +1,5 @@
 import type {
+  ChatAgentMode,
   ChatAppToolApproval,
   ChatParticipantChangeRequest,
   ChatParticipantRequestApprovalRequest,
@@ -240,7 +241,10 @@ export function chatPermissionChangeRequest(approval: ChatAppToolApproval): Chat
   return undefined;
 }
 
-export function chatToolPermissionRequest(approval: ChatAppToolApproval): ChatToolPermissionRequest | undefined {
+export function chatToolPermissionRequest(
+  approval: ChatAppToolApproval,
+  fallbackAgentMode?: ChatAgentMode
+): ChatToolPermissionRequest | undefined {
   if (approval.toolName !== APP_TOOL_PERMISSION_TOOL) {
     return undefined;
   }
@@ -251,10 +255,17 @@ export function chatToolPermissionRequest(approval: ChatAppToolApproval): ChatTo
   }
   return {
     kind: "toolPermission",
+    agentMode: request.agentMode === "auto" || request.agentMode === "default" || request.agentMode === "plan"
+      ? request.agentMode
+      : fallbackAgentMode,
     reason: typeof request.reason === "string" ? request.reason : undefined,
     toolName,
     toolInput: request.toolInput
   };
+}
+
+export function chatToolPermissionAllowsChatScope(request: ChatToolPermissionRequest): boolean {
+  return request.agentMode !== "auto";
 }
 
 export function chatPermissionGrantLabel(permission: ChatPermissionGrant): string {

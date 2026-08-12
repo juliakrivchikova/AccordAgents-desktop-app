@@ -1816,7 +1816,27 @@ test("claude auto chat preauthorizes the eligible exposed app MCP inventory only
   ]) {
     assert.equal(allowedTools.includes(tool), false, `${tool} should not be auto-allowed`);
   }
-  assert.deepEqual(runner.claudePermissionPromptArgs("chat", options), []);
+  assert.deepEqual(runner.claudePermissionPromptArgs("chat", options), [
+    "--permission-prompt-tool",
+    "mcp__accord_agents__app_tool_permission"
+  ]);
+});
+
+test("claude Plan and non-chat runs do not receive the chat permission prompt bridge", () => {
+  const runner = makeRunner() as any;
+  const plan = chatOptions({
+    agentMode: "plan",
+    workspaceWrite: false,
+    appToolNames: ["app_tool_permission"]
+  });
+  const auto = chatOptions({
+    agentMode: "auto",
+    workspaceWrite: true,
+    appToolNames: ["app_tool_permission"]
+  });
+
+  assert.deepEqual(runner.claudePermissionPromptArgs("chat", plan), []);
+  assert.deepEqual(runner.claudePermissionPromptArgs("single", auto), []);
 });
 
 test("claude auto app MCP preauthorization is deny-by-default and intersects exposed tools", () => {

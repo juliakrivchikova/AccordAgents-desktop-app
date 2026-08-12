@@ -951,6 +951,7 @@ test("tool permission request waits for user approval and returns allow once", a
   )!;
   assert.deepEqual(approval.request, {
     kind: "toolPermission",
+    agentMode: "default",
     reason: "Send the approved update.",
     toolName: "mcp__slack__slack_send_message",
     toolInput: { channel_id: "C1", text: "Ship it" }
@@ -1028,6 +1029,87 @@ test("tool permission chat approval reuses policy for the same participant and t
   );
   assert.equal(toolApprovals.length, 1);
   assert.equal(((storage.current.metadata.appToolApprovalPolicies ?? []) as ChatAppToolApprovalPolicy[])[0].targetToolName, "mcp__atlassian__search");
+});
+
+test("Claude Auto tool permission approvals are per occurrence and never reuse chat policy", async () => {
+  const participant = { ...chatParticipant("claude-code"), agentMode: "auto" as const };
+  const staleDefaultPolicy: ChatAppToolApprovalPolicy = {
+    id: "default-policy",
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    toolName: APP_TOOL_PERMISSION_TOOL,
+    capability: "permissions.request",
+    targetToolName: "Write",
+    scope: "chat",
+    createdAt: NOW,
+    updatedAt: NOW
+  };
+  const conversation = chatConversation([participant], {
+    appToolApprovalPolicies: [staleDefaultPolicy]
+  });
+  const { service, storage } = testService({ conversation });
+  const actor = {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const],
+    runId: "run-auto-1",
+    triggerMessageId: "user-message"
+  };
+
+  const first = service.requestToolPermissionFromTool(actor, {
+    tool_name: "Write",
+    input: { file_path: "/repo/first.txt", content: "first" }
+  });
+  await waitFor(() =>
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).some(
+      (approval) => approval.status === "pending"
+    )
+  );
+  const firstApproval = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find(
+    (approval) => approval.status === "pending"
+  )!;
+  assert.equal((firstApproval.request as { agentMode?: string }).agentMode, "auto");
+  delete (firstApproval.request as { agentMode?: string }).agentMode;
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: firstApproval.id,
+    approve: true,
+    scope: "chat"
+  });
+  assert.deepEqual(await first, {
+    behavior: "allow",
+    updatedInput: { file_path: "/repo/first.txt", content: "first" }
+  });
+  assert.equal(
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+      .find((approval) => approval.id === firstApproval.id)?.approvalScope,
+    "once"
+  );
+  assert.deepEqual(storage.current.metadata.appToolApprovalPolicies, [staleDefaultPolicy]);
+
+  const second = service.requestToolPermissionFromTool({ ...actor, runId: "run-auto-2" }, {
+    tool_name: "Write",
+    input: { file_path: "/repo/second.txt", content: "second" }
+  });
+  await waitFor(() =>
+    ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).filter(
+      (approval) => approval.toolName === APP_TOOL_PERMISSION_TOOL
+    ).length === 2
+  );
+  const secondApproval = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find(
+    (approval) => approval.id !== firstApproval.id && approval.status === "pending"
+  )!;
+  await service.respondToAppToolApproval({
+    conversationId: conversation.id,
+    approvalId: secondApproval.id,
+    approve: false
+  });
+  assert.deepEqual(await second, {
+    behavior: "deny",
+    message: "User denied this tool request."
+  });
 });
 
 test("tool permission request denies and marks approval when run is cancelled", async () => {

@@ -14,6 +14,7 @@ import {
 } from "./chat-codex-approval-presentation";
 import { ChatCodexApprovalOperation } from "./chat-codex-approval-operation";
 import { ChatCodexApprovalResult } from "./chat-codex-approval-result";
+import { chatToolPermissionAllowsChatScope, chatToolPermissionRequest } from "./chat-app-tool-data";
 
 const NOW = "2026-08-01T05:00:00.000Z";
 
@@ -85,6 +86,21 @@ test("cancelled Guardian denial renders a compact result without the blocked com
   assert.match(text, /Closed without retrying/);
   assert.doesNotMatch(text, /very-long-command/);
   renderer.unmount();
+});
+
+test("Claude Auto permission prompts cannot offer chat-wide scope", () => {
+  const toolRequest = { kind: "toolPermission" as const, agentMode: "auto" as const, toolName: "Write" };
+  assert.equal(chatToolPermissionAllowsChatScope(toolRequest), false);
+  assert.equal(chatToolPermissionAllowsChatScope({ ...toolRequest, agentMode: "default" }), true);
+
+  const legacyApproval: ChatAppToolApproval = {
+    ...codexApproval("legacy-auto", "participant", "run"),
+    toolName: "app_tool_permission",
+    request: { kind: "toolPermission", toolName: "Write" }
+  };
+  const legacyToolRequest = chatToolPermissionRequest(legacyApproval, "auto");
+  assert.ok(legacyToolRequest);
+  assert.equal(chatToolPermissionAllowsChatScope(legacyToolRequest), false);
 });
 
 test("Codex approval keyboard selection stays within exact options and Enter submits", () => {

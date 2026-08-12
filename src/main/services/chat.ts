@@ -3105,19 +3105,24 @@ export class ChatService {
 
     let prepared: PreparedToolPermission;
     try {
-      prepared = this.prepareToolPermissionRequest(rawRequest);
+      prepared = this.prepareToolPermissionRequest(
+        rawRequest,
+        this.participantAgentMode(conversation, requester)
+      );
     } catch (error) {
       return { behavior: "deny", message: error instanceof Error ? error.message : String(error) };
     }
 
-    const policy = this.matchingAppToolApprovalPolicy(
-      conversation,
-      requester,
-      APP_TOOL_PERMISSION_TOOL,
-      "permissions.request",
-      undefined,
-      prepared.request.toolName
-    );
+    const policy = prepared.request.agentMode === "auto"
+      ? undefined
+      : this.matchingAppToolApprovalPolicy(
+          conversation,
+          requester,
+          APP_TOOL_PERMISSION_TOOL,
+          "permissions.request",
+          undefined,
+          prepared.request.toolName
+        );
     if (policy) {
       return {
         behavior: "allow",
@@ -4546,13 +4551,19 @@ export class ChatService {
     }
 
     if (approval.toolName === APP_TOOL_PERMISSION_TOOL && this.isToolPermissionRequest(approval.request)) {
+      const requester = this.chatParticipants(conversation)
+        .find((participant) => participant.id === approval.requesterParticipantId);
+      const toolApprovalAgentMode = approval.request.agentMode ?? (
+        requester ? this.participantAgentMode(conversation, requester) : undefined
+      );
+      const toolApprovalScope = toolApprovalAgentMode === "auto" ? "once" : scope;
       this.upsertAppToolApproval(conversation, {
         ...approval,
         status: "approved",
-        approvalScope: scope,
+        approvalScope: toolApprovalScope,
         updatedAt: now
       });
-      if (scope === "chat") {
+      if (toolApprovalScope === "chat") {
         this.upsertAppToolApprovalPolicy(conversation, {
           id: randomUUID(),
           participantId: approval.requesterParticipantId,
@@ -4567,7 +4578,7 @@ export class ChatService {
       }
       conversation.messages.push(this.message(
         "system",
-        scope === "chat"
+        toolApprovalScope === "chat"
           ? `Allowed @${approval.requesterHandle} to use ${approval.request.toolName} for this chat.`
           : `Allowed @${approval.requesterHandle} to use ${approval.request.toolName} once.`,
         undefined,
@@ -4577,7 +4588,7 @@ export class ChatService {
       await this.saveConversation(conversation);
       this.resolveToolPermissionApproval(approval.id, {
         approve: true,
-        scope,
+        scope: toolApprovalScope,
         source: "user"
       });
       return conversation;
@@ -6439,10 +6450,10 @@ export class ChatService {
     );
     const unregisterRunProgressCallback = this.registerRunProgressCallback(runId, progress);
     // `permissions.request` is force-added to every run's grant (independent of the
-    // role's configured capabilities). The default-mode tool-permission bridge depends
+    // role's configured capabilities). The Default/Auto tool-permission bridge depends
     // on this: `requestToolPermissionFromTool` and the appMcp `app_tool_permission`
     // handler both gate on `permissions.request`, so if this force-add is ever removed
-    // or scoped back to role config, default-mode escalation silently denies every
+    // or scoped back to role config, native escalation silently denies every
     // un-pre-approved tool call. Keep it always-on (or give the bridge its own
     // capability) if you change this.
     const appToolCapabilities = this.appToolCapabilitiesForRun(session, permissions);
@@ -7814,6 +7825,14 @@ export class ChatService {
 
   private agentModeForSession(session: ChatParticipantSession, participant: ChatParticipant): ChatAgentMode {
     return normalizeChatAgentMode(session.participantAgentMode ?? participant.agentMode);
+  }
+
+  private participantAgentMode(conversation: Conversation, participant: ChatParticipant): ChatAgentMode {
+    const sessions = Array.isArray(conversation.metadata.participantSessions)
+      ? conversation.metadata.participantSessions as ChatParticipantSession[]
+      : [];
+    const session = sessions.find((item) => item.participantId === participant.id);
+    return session ? this.agentModeForSession(session, participant) : normalizeChatAgentMode(participant.agentMode);
   }
 
   private cliParticipantForSession(participant: ChatParticipant, session: ChatParticipantSession): ParticipantConfig {
@@ -11441,7 +11460,7 @@ export class ChatService {
     return typeof reason === "string" ? reason.trim().slice(0, 500) || undefined : undefined;
   }
 
-  private prepareToolPermissionRequest(raw: unknown): PreparedToolPermission {
+  private prepareToolPermissionRequest(raw: unknown, agentMode: ChatAgentMode): PreparedToolPermission {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
       throw new Error("Tool permission request must be an object.");
     }
@@ -11455,6 +11474,7 @@ export class ChatService {
     const reason = this.normalizePermissionChangeReason(record.reason ?? record.description);
     const request: ChatToolPermissionRequest = {
       kind: "toolPermission",
+      agentMode,
       reason,
       toolName: toolName.slice(0, CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH),
       toolInput: this.toolPermissionInputPreview(toolInput)

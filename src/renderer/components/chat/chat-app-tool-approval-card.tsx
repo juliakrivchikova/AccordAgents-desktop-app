@@ -43,8 +43,9 @@ export function ChatAppToolApprovalCard(props: {
     codexDecisionId?: string
   ) => Promise<void>;
 }): JSX.Element {
+  const requester = props.participants.find((participant) => participant.id === props.approval.requesterParticipantId);
   const permissionRequest = chatPermissionChangeRequest(props.approval);
-  const toolPermissionRequest = chatToolPermissionRequest(props.approval);
+  const toolPermissionRequest = chatToolPermissionRequest(props.approval, requester?.agentMode);
   const combinedRequest = chatRoleParticipantChangeRequest(props.approval);
   const roleRequest = chatRoleChangeRequest(props.approval);
   const participantChange = chatParticipantChangeRequest(props.approval);
@@ -53,7 +54,10 @@ export function ChatAppToolApprovalCard(props: {
   const codexRequest = chatCodexApprovalRequest(props.approval);
   const showCodexCancel = chatCodexApprovalShowsCancel(codexRequest);
   const inferredParticipantRequest = participantRequest?.source === "inferred";
-  const preferOnceApproval = Boolean(permissionRequest && permissionRequest.kind !== "portable");
+  const preferOnceApproval = Boolean(
+    permissionRequest && permissionRequest.kind !== "portable" ||
+    toolPermissionRequest?.agentMode === "auto"
+  );
   const added = props.approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL && "operations" in props.approval.request
     ? props.approval.request.operations.filter((operation) => operation.type === "add")
     : [];
@@ -100,7 +104,6 @@ export function ChatAppToolApprovalCard(props: {
     );
   const defaultIndex = codexRequest || rosterApproval || preferOnceApproval || inferredParticipantRequest ? 0 : Math.min(1, options.length - 1);
   const [selectedIndex, setSelectedIndex] = useState(defaultIndex);
-  const requester = props.participants.find((participant) => participant.id === props.approval.requesterParticipantId);
   const requesterLabel = requester ? chatParticipantDisplayName(requester) : chatParticipantReference(props.approval.requesterHandle);
   const requesterAvatar = requester
     ? avatarForChatParticipant(requester, requesterLabel)
@@ -310,7 +313,9 @@ export function ChatAppToolApprovalCard(props: {
           )}
           {toolPermissionRequest && (
             <p className="chat-app-tool-scope-note">
-              Applies only to {requesterLabel}. Allow once approves this blocked call; chat grants apply to future {toolPermissionRequest.toolName} calls from this member in this chat.
+              {toolPermissionRequest.agentMode === "auto"
+                ? `Applies only to ${requesterLabel}. Claude Auto approvals are per occurrence and do not grant future calls.`
+                : `Applies only to ${requesterLabel}. Allow once approves this blocked call; chat grants apply to future ${toolPermissionRequest.toolName} calls from this member in this chat.`}
             </p>
           )}
           {participantRequest && (
