@@ -37,6 +37,15 @@ function isInside(parentPath, childPath) {
   return relative !== "" && !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
 }
 
+function packagedRuntimeDependencies(packageJson) {
+  const dependencies = Object.keys(packageJson.dependencies || {});
+  // node-pty is loaded only by the Windows Claude model-picker path and is
+  // intentionally excluded from non-Windows packages in forge.config.ts.
+  return process.platform === "win32"
+    ? dependencies
+    : dependencies.filter((dependency) => dependency !== "node-pty");
+}
+
 function verifyEnvironment() {
   if (process.platform !== "darwin") {
     fail(`Beta releases require macOS; current platform is ${process.platform}`);
@@ -130,7 +139,7 @@ async function verifyPackagedApp(appArgument) {
     "/dist/main/main/main.js",
     "/dist/main/main/services/appUpdater.js"
   ];
-  for (const dependency of Object.keys(packageJson.dependencies || {})) {
+  for (const dependency of packagedRuntimeDependencies(packageJson)) {
     requiredFiles.push(`/node_modules/${dependency}/package.json`);
   }
   for (const requiredFile of requiredFiles) {
