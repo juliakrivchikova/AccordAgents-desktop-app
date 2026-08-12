@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { validateWindowsUpdateResponse } from "./release-windows-x64.mjs";
+import { sourceTagFailure, validateWindowsUpdateResponse } from "./release-windows-x64.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -36,7 +36,7 @@ function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
-function releaseCheckFixture({ advanceAfterTag = false, pushTag = false } = {}) {
+function releaseCheckFixture({ createTag = true, advanceAfterTag = false, pushTag = false, retagAtHead = false } = {}) {
   const tempRoot = mkdtempSync(path.join(os.tmpdir(), "accordagents-windows-release-"));
   const repoDir = path.join(tempRoot, "repo");
   const remoteDir = path.join(tempRoot, "origin.git");
@@ -52,7 +52,9 @@ function releaseCheckFixture({ advanceAfterTag = false, pushTag = false } = {}) 
   }));
   git(repoDir, ["add", "package.json"]);
   git(repoDir, ["commit", "-m", "Initial"]);
-  git(repoDir, ["tag", "v1.2.3"]);
+  if (createTag) {
+    git(repoDir, ["tag", "v1.2.3"]);
+  }
   if (pushTag) {
     git(repoDir, ["push", "origin", "v1.2.3"]);
   }
@@ -61,33 +63,48 @@ function releaseCheckFixture({ advanceAfterTag = false, pushTag = false } = {}) 
     git(repoDir, ["add", "next.txt"]);
     git(repoDir, ["commit", "-m", "Advance"]);
   }
+  if (retagAtHead) {
+    git(repoDir, ["tag", "-f", "v1.2.3"]);
+  }
   return repoDir;
 }
 
-function runSourceTagCheck(cwd) {
-  return spawnSync(process.execPath, [path.join(rootDir, "scripts", "release-windows-x64.mjs"), "--skip-update-check"], {
-    cwd,
-    env: { ...process.env, RELEASE_REPO: "" },
-    encoding: "utf8"
-  });
+function sourceTagCheck(t, fixtureOptions) {
+  const repoDir = releaseCheckFixture(fixtureOptions);
+  t.after(() => rmSync(path.dirname(repoDir), { recursive: true, force: true }));
+  return sourceTagFailure("v1.2.3", repoDir);
 }
 
-test("Windows release rejects a local source tag that does not point at HEAD", { skip: process.platform !== "win32" }, (t) => {
-  const repoDir = releaseCheckFixture({ advanceAfterTag: true, pushTag: true });
-  t.after(() => rmSync(path.dirname(repoDir), { recursive: true, force: true }));
-  const result = runSourceTagCheck(repoDir);
-
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Local tag v1\.2\.3 points at .+, not current HEAD .+\./);
+test("Windows release accepts a source tag that matches HEAD locally and on origin", (t) => {
+  assert.equal(sourceTagCheck(t, { pushTag: true }), "");
 });
 
-test("Windows release rejects a source tag missing from origin", { skip: process.platform !== "win32" }, (t) => {
-  const repoDir = releaseCheckFixture();
-  t.after(() => rmSync(path.dirname(repoDir), { recursive: true, force: true }));
-  const result = runSourceTagCheck(repoDir);
+test("Windows release rejects a missing local source tag", (t) => {
+  assert.match(
+    sourceTagCheck(t, { createTag: false }),
+    /Source tag v1\.2\.3 must exist before publishing/
+  );
+});
 
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Source tag v1\.2\.3 must exist on origin/);
+test("Windows release rejects a local source tag that does not point at HEAD", (t) => {
+  assert.match(
+    sourceTagCheck(t, { advanceAfterTag: true, pushTag: true }),
+    /Local tag v1\.2\.3 points at .+, not current HEAD .+\./
+  );
+});
+
+test("Windows release rejects a source tag missing from origin", (t) => {
+  assert.match(
+    sourceTagCheck(t, {}),
+    /Source tag v1\.2\.3 must exist on origin/
+  );
+});
+
+test("Windows release rejects a remote source tag that does not point at HEAD", (t) => {
+  assert.match(
+    sourceTagCheck(t, { pushTag: true, advanceAfterTag: true, retagAtHead: true }),
+    /Remote tag v1\.2\.3 points at .+, not current HEAD .+\./
+  );
 });
 
 test("Windows update verification rejects a stale release feed", () => {

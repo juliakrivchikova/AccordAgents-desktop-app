@@ -34,7 +34,7 @@ Options:
 
 function run(command, args, options = {}) {
   return execFileSync(command, args, {
-    cwd: rootDir,
+    cwd: options.cwd || rootDir,
     env: process.env,
     encoding: options.encoding || "utf8",
     stdio: options.stdio || "pipe"
@@ -67,6 +67,9 @@ function commandSucceeds(command, args) {
 }
 
 function packageJson() {
+  if (!existsSync(packageJsonPath)) {
+    fail(`No package.json found in ${rootDir}. Run the Windows release from the repository root.`);
+  }
   return JSON.parse(readFileSync(packageJsonPath, "utf8"));
 }
 
@@ -167,22 +170,22 @@ function requireCommand(command, args = ["--version"]) {
   }
 }
 
-function localTagCommit(tagName) {
+function localTagCommit(tagName, cwd) {
   try {
-    return run("git", ["rev-list", "-n", "1", `refs/tags/${tagName}`]).trim();
+    return run("git", ["rev-list", "-n", "1", `refs/tags/${tagName}`], { cwd }).trim();
   } catch {
     return "";
   }
 }
 
-function remoteTagCommit(tagName) {
+function remoteTagCommit(tagName, cwd) {
   const output = run("git", [
     "ls-remote",
     "--tags",
     "origin",
     `refs/tags/${tagName}`,
     `refs/tags/${tagName}^{}`
-  ]).trim();
+  ], { cwd }).trim();
   if (!output) {
     return "";
   }
@@ -193,22 +196,30 @@ function remoteTagCommit(tagName) {
   return refs.get(`refs/tags/${tagName}^{}`) || refs.get(`refs/tags/${tagName}`) || "";
 }
 
-function verifySourceTag(tagName) {
-  const headCommit = run("git", ["rev-parse", "HEAD"]).trim();
-  const localCommit = localTagCommit(tagName);
+export function sourceTagFailure(tagName, cwd = rootDir) {
+  const headCommit = run("git", ["rev-parse", "HEAD"], { cwd }).trim();
+  const localCommit = localTagCommit(tagName, cwd);
   if (!localCommit) {
-    fail(`Source tag ${tagName} must exist before publishing Windows update artifacts.`);
+    return `Source tag ${tagName} must exist before publishing Windows update artifacts.`;
   }
   if (localCommit !== headCommit) {
-    fail(`Local tag ${tagName} points at ${localCommit}, not current HEAD ${headCommit}.`);
+    return `Local tag ${tagName} points at ${localCommit}, not current HEAD ${headCommit}.`;
   }
 
-  const remoteCommit = remoteTagCommit(tagName);
+  const remoteCommit = remoteTagCommit(tagName, cwd);
   if (!remoteCommit) {
-    fail(`Source tag ${tagName} must exist on origin before publishing Windows update artifacts.`);
+    return `Source tag ${tagName} must exist on origin before publishing Windows update artifacts.`;
   }
   if (remoteCommit !== headCommit) {
-    fail(`Remote tag ${tagName} points at ${remoteCommit}, not current HEAD ${headCommit}.`);
+    return `Remote tag ${tagName} points at ${remoteCommit}, not current HEAD ${headCommit}.`;
+  }
+  return "";
+}
+
+function verifySourceTag(tagName) {
+  const message = sourceTagFailure(tagName);
+  if (message) {
+    fail(message);
   }
 }
 
