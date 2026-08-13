@@ -570,12 +570,9 @@
 }
 
 .new-chat-input-wrap {
+  /* Keep this wrapper out of a stacking context so downward menus paint above the toolbar. */
   position: relative;
   min-width: 0;
-}
-
-.new-chat-input-wrap.has-skill-highlights {
-  isolation: isolate;
 }
 
 .new-chat-input-wrap .mention-menu {
@@ -585,6 +582,10 @@
   left: 0;
   width: min(420px, 100%);
   max-height: 220px;
+}
+
+.new-chat-input-wrap .member-mention-menu {
+  width: min(460px, 100%);
 }
 
 .new-chat-prompt {
