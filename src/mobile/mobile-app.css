@@ -1,8 +1,19 @@
 :root {
   color-scheme: light;
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #f7f8f3;
-  color: #1f2523;
+  --acc: #7d5fd3;
+  --accs: #efebfb;
+  --fg1: #16191f;
+  --fg: #424955;
+  --mut: #868d9b;
+  --bd: #e7e9ee;
+  --bdf: #f0f1f4;
+  --s2: #f6f7f8;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", system-ui, sans-serif;
+  --disp: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  font-family: var(--sans);
+  background: #eceef2;
+  color: var(--fg);
 }
 
 * {
@@ -12,9 +23,7 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background:
-    linear-gradient(180deg, rgba(247, 248, 243, 0.96), rgba(239, 242, 236, 0.98)),
-    #f7f8f3;
+  background: #eceef2;
 }
 
 button,
@@ -22,137 +31,896 @@ textarea {
   font: inherit;
 }
 
-.mobile-shell {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+.mobile-stage {
   min-height: 100vh;
   min-height: 100dvh;
-  width: min(100%, 720px);
-  margin: 0 auto;
-  padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
-  gap: 14px;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 56px 44px 72px;
+  background: #eceef2;
+  font-family: var(--sans);
+  color: var(--fg);
 }
 
-.mobile-header {
+@media (max-width: 620px) {
+  .mobile-stage {
+    padding: 0;
+    align-items: stretch;
+  }
+
+  .mobile-phone {
+    width: 100%;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  /* The real device already draws these. */
+  .mobile-status-bar,
+  .mobile-home-indicator {
+    display: none;
+  }
+}
+
+.mobile-phone {
+  width: 390px;
+  height: 844px;
+  border-radius: 44px;
+  background: #ffffff;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 2px 6px rgba(18, 24, 40, 0.08), 0 26px 60px -18px rgba(18, 24, 40, 0.28);
+  border: 1px solid #dcdee5;
+}
+
+.mobile-screen {
+  flex: 1;
+  min-height: 0;
+  display: none;
+  flex-direction: column;
+}
+
+.mobile-screen.is-active {
+  display: flex;
+}
+
+.mobile-home-indicator {
+  height: 24px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 6px;
+}
+
+.mobile-home-indicator span {
+  width: 96px;
+  height: 4px;
+  border-radius: 999px;
+  background: #cfd3dc;
+}
+
+.mobile-status-bar {
+  flex-shrink: 0;
+  height: 52px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 0 30px 8px;
+  color: var(--fg1);
+}
+
+.mobile-status-bar > span:first-child {
+  font: 600 14px var(--sans);
+  letter-spacing: -0.01em;
+}
+
+.mobile-status-icons {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 54px;
+  gap: 5px;
 }
 
-.mobile-mark {
-  flex: 0 0 auto;
-  border-radius: 12px;
-  box-shadow: 0 8px 24px rgba(31, 37, 35, 0.12);
+.mobile-signal {
+  width: 16px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--fg1);
+}
+
+.mobile-battery {
+  width: 22px;
+  height: 11px;
+  border-radius: 3px;
+  border: 1.5px solid var(--fg1);
+}
+
+.mobile-chats-header {
+  flex-shrink: 0;
+  padding: 6px 20px 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mobile-chats-header h1 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font: 700 30px var(--disp);
+  letter-spacing: -0.028em;
+  color: var(--fg1);
+}
+
+.mobile-round-button {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg);
+  background: var(--s2);
+  cursor: pointer;
+}
+
+.mobile-round-button.is-primary {
+  color: #ffffff;
+  background: var(--fg1);
+}
+
+.mobile-chat-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 18px;
+}
+
+.mobile-chat-group-title {
+  padding: 14px 20px 6px;
+  font: 600 12.5px var(--mono);
+  letter-spacing: 0.02em;
+  color: var(--mut);
+}
+
+.mobile-chat-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.mobile-chat-row {
+  min-height: 72px;
+  width: 100%;
+  border: 0;
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mobile-chat-row:active,
+.mobile-chat-row.is-active {
+  background: var(--s2);
+}
+
+.mobile-chat-avatars {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+}
+
+.mobile-chat-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  border: 2px solid #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--accs);
+  color: var(--acc);
+  font: 700 14px var(--disp);
+}
+
+.mobile-chat-avatar img,
+.message-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.mobile-chat-avatar + .mobile-chat-avatar {
+  margin-left: -13px;
+  box-shadow: 0 0 0 2.5px #ffffff;
+}
+
+.mobile-chat-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.mobile-chat-title-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mobile-chat-title-line strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 15.5px var(--disp);
+  letter-spacing: -0.012em;
+  color: var(--fg1);
+}
+
+.mobile-live-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: #24c17b;
+  box-shadow: 0 0 0 3px rgba(36, 193, 123, 0.14);
+}
+
+.mobile-chat-snippet {
+  margin-top: 4px;
+  display: flex;
+  min-width: 0;
+  gap: 4px;
+  font: 400 13.5px var(--sans);
+  color: var(--mut);
+}
+
+.mobile-chat-snippet span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-chat-snippet b {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.mobile-chat-time {
+  flex-shrink: 0;
+  align-self: flex-start;
+  padding-top: 2px;
+  font: 400 12.5px var(--sans);
+  color: var(--mut);
+}
+
+.mobile-empty {
+  margin: 34px 20px 0;
+  padding: 18px;
+  border-radius: 18px;
+  background: var(--s2);
+  color: var(--mut);
+  font: 400 14px var(--sans);
+  line-height: 1.45;
+}
+
+.mobile-chat-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 16px 12px;
+  border-bottom: 1px solid var(--bdf);
+}
+
+.mobile-icon-button {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  padding: 0;
+  color: var(--fg1);
+  background: transparent;
+  cursor: pointer;
+}
+
+.mobile-icon-button.is-muted {
+  color: var(--fg);
+}
+
+.mobile-header-spacer {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
 }
 
 .mobile-title {
+  flex: 1;
   min-width: 0;
 }
 
 .mobile-title h1 {
   margin: 0;
-  font-size: 1.1rem;
-  line-height: 1.2;
-  font-weight: 720;
+  font: 600 16.5px var(--disp);
+  letter-spacing: -0.018em;
+  color: var(--fg1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .mobile-title p {
-  margin: 3px 0 0;
+  margin: 1px 0 0;
   min-height: 1.2em;
-  color: #56615b;
-  font-size: 0.86rem;
+  font: 400 13px var(--sans);
+  color: var(--mut);
+}
+
+.mscroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .thread-surface {
+  flex: 1;
   min-height: 0;
-  overflow: auto;
-  border: 1px solid rgba(31, 37, 35, 0.1);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.72);
+  overflow-y: auto;
+  padding: 16px 18px 10px;
+  /* Scroll anchoring ON: the browser keeps the visible content still when rows
+     above it change height. Turning it off made the view drift up and back. */
+  overflow-anchor: auto;
+}
+
+#timeline-screen {
+  position: relative;
+}
+
+/* Secondary affordance, so it stays neutral rather than accent. */
+.thread-chip {
+  flex-basis: 100%;
+  align-self: flex-start;
+  margin: 6px 0 0 0;
+  padding: 5px 11px;
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.message-row[data-author="agent"] .thread-chip {
+  margin-left: 44px;
+}
+
+.thread-back {
+  display: none;
+}
+
+.thread-back.is-visible {
+  display: inline-flex;
+}
+
+/* Secondary affordance: neutral, never accent. It only appears when new
+   messages arrived while the reader was up in history. */
+.jump-to-latest {
+  position: absolute;
+  left: 50%;
+  bottom: 78px;
+  transform: translate(-50%, 0);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 13px 7px 11px;
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--fg1);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 6px 18px rgba(22, 25, 31, 0.12);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease;
+}
+
+.jump-to-latest.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jump-to-latest {
+    transition: none;
+  }
 }
 
 .message-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 20px;
   min-height: 100%;
   margin: 0;
-  padding: 14px;
+  padding: 0;
   list-style: none;
 }
 
 .message-row {
-  display: grid;
-  gap: 4px;
-  max-width: 88%;
-  padding: 10px 12px;
-  border: 1px solid rgba(31, 37, 35, 0.08);
-  border-radius: 8px;
-  background: #ffffff;
-  box-shadow: 0 6px 18px rgba(31, 37, 35, 0.07);
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 11px;
 }
 
-.message-row[data-status="acked"] {
-  align-self: flex-end;
-  border-color: rgba(64, 128, 96, 0.26);
-  background: #eef7f0;
+.message-row[data-author="you"] {
+  justify-content: flex-end;
 }
 
-.message-row[data-status="queued"],
-.message-row[data-status="waiting-to-sync"],
-.message-row[data-status="syncing"] {
-  align-self: flex-end;
-  border-color: rgba(170, 116, 40, 0.24);
-  background: #fff8e8;
+.message-bubble {
+  max-width: 82%;
+  background: #eceff3;
+  border-radius: 18px 18px 6px 18px;
+  padding: 11px 14px;
+  font: 400 15.5px var(--sans);
+  line-height: 1.45;
+  color: var(--fg1);
+}
+
+.message-row[data-author="agent"] .message-bubble {
+  max-width: none;
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+  color: var(--fg);
+  line-height: 1.5;
+}
+
+.message-avatar {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--accs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 13px var(--disp);
+  color: var(--acc);
+}
+
+/* Nobody has been picked yet: hold the slot so the row will not jump sideways
+   when the participant arrives, but show no identity — an accent disc with a
+   letter in it reads as a specific member. */
+.message-avatar[data-identified="0"] {
+  background: var(--s2);
+}
+
+.message-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.message-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.message-handle {
+  font: 600 13px var(--mono);
+  color: var(--fg1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.message-time,
+.message-status {
+  font: 400 12px var(--sans);
+  color: var(--mut);
+  flex-shrink: 0;
 }
 
 .message-content {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-size: 0.97rem;
-  line-height: 1.42;
 }
 
-.message-status {
-  color: #68746d;
-  font-size: 0.75rem;
+.message-content.markdown-text {
+  white-space: normal;
+}
+
+.message-content.markdown-text p,
+.message-content.markdown-text ul,
+.message-content.markdown-text ol,
+.message-content.markdown-text pre {
+  margin: 0;
+}
+
+.message-content.markdown-text p + p,
+.message-content.markdown-text p + ul,
+.message-content.markdown-text p + ol,
+.message-content.markdown-text ul + p,
+.message-content.markdown-text ol + p,
+.message-content.markdown-text pre + p,
+.message-content.markdown-text p + pre {
+  margin-top: 8px;
+}
+
+.message-content.markdown-text ul,
+.message-content.markdown-text ol {
+  padding-left: 20px;
+}
+
+.message-content.markdown-text li + li {
+  margin-top: 4px;
+}
+
+.message-content.markdown-text code {
+  border-radius: 5px;
+  padding: 1px 4px;
+  background: rgba(15, 23, 42, 0.08);
+  font: 500 13px var(--mono);
+}
+
+.message-content.markdown-text pre {
+  max-width: 100%;
+  overflow-x: auto;
+  border-radius: 9px;
+  padding: 9px 10px;
+  background: #111827;
+  color: #f9fafb;
+}
+
+.message-content.markdown-text pre code {
+  display: block;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  white-space: pre;
+}
+
+.message-content.markdown-text a {
+  color: #2563eb;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .composer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 8px;
+  flex-shrink: 0;
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--bdf);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+/* The pill used to be a <label> wrapping the textarea, with padding of its own.
+   A tap landing on that padding — most of the pill's left edge and the whole
+   right-hand "@" — focused the field by label activation rather than by
+   touching it. iOS shows a caret and the form accessory bar for that, but does
+   not raise the keyboard, which reads as a field you cannot type into. The pill
+   is now a plain container and the textarea fills it, so every tap inside the
+   pill lands on the textarea itself. */
+.composer-input-wrap {
+  flex: 1;
+  min-width: 0;
+  height: 46px;
+  border-radius: 23px;
+  background: var(--s2);
+  border: 1px solid var(--bd);
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0;
+  position: relative;
 }
 
 .composer textarea {
-  min-height: 46px;
-  max-height: 140px;
+  flex: 1;
+  min-width: 0;
+  height: 44px;
   resize: none;
-  border: 1px solid rgba(31, 37, 35, 0.15);
-  border-radius: 8px;
-  padding: 12px;
-  background: #ffffff;
-  color: #1f2523;
+  border: 0;
+  /* Padding lives on the field, not on the pill, so the whole pill is tappable
+     field. The right padding leaves room for the "@" hint. */
+  padding: 12px 49px 0 16px;
+  background: transparent;
+  color: var(--fg1);
   outline: none;
+  font: 400 15.5px var(--sans);
 }
 
-.composer textarea:focus {
-  border-color: #2c7a5a;
-  box-shadow: 0 0 0 3px rgba(44, 122, 90, 0.14);
+.composer textarea::placeholder {
+  color: var(--mut);
+  opacity: 1;
+}
+
+.composer-input-wrap > span {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 600 15px var(--mono);
+  color: var(--mut);
+  /* A hint, never a tap target: a tap here must reach the field beneath it. */
+  pointer-events: none;
 }
 
 .composer button {
-  min-width: 76px;
-  min-height: 46px;
+  width: 46px;
+  height: 46px;
+  flex-shrink: 0;
   border: 0;
-  border-radius: 8px;
-  background: #245c46;
+  border-radius: 50%;
+  background: var(--fg1);
   color: #ffffff;
-  font-weight: 680;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
 }
 
 .composer button:disabled {
-  background: #9aa49f;
+  background: var(--mut);
+}
+
+@media (max-width: 430px) {
+  .mobile-stage {
+    padding: 0;
+    align-items: stretch;
+  }
+
+  .mobile-phone {
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+}
+
+/* Scaffolding, before any member has been picked: the smallest honest
+   statement that something is happening. No avatar, no handle, no clock —
+   those belong to a real participant. */
+.message-row[data-scaffolding="1"] {
+  padding-left: 2px;
+}
+
+.message-typing {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+}
+
+.message-typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--mut);
+  opacity: 0.3;
+  animation: typing-pulse 1.3s ease-in-out infinite;
+}
+
+.message-typing span:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.message-typing span:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes typing-pulse {
+  0%, 65%, 100% { opacity: 0.28; transform: translateY(0); }
+  32% { opacity: 0.9; transform: translateY(-2px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-typing span {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+
+/* Matches the desktop's shimmering "Thinking" label. */
+.thinking-label {
+  display: inline-block;
+  background: linear-gradient(
+    90deg,
+    var(--mut) 0%,
+    var(--mut) 30%,
+    var(--fg1) 48%,
+    var(--mut) 66%,
+    var(--mut) 100%
+  );
+  background-size: 230% 100%;
+  background-position: 120% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: var(--mut);
+  -webkit-text-fill-color: transparent;
+  font-weight: 600;
+  animation: thinking-transfusion 1.8s ease-in-out infinite;
+}
+
+.thinking-elapsed {
+  margin-left: 8px;
+  color: var(--mut);
+  font-family: var(--mono);
+  font-size: 13px;
+  /* Fixed width so ticking seconds cannot reflow the row. */
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes thinking-transfusion {
+  0% { background-position: 120% 0; }
+  100% { background-position: -120% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-label {
+    animation: none;
+    -webkit-text-fill-color: currentColor;
+    color: var(--fg1);
+  }
+}
+
+.pairing-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 14px 20px 0;
+}
+
+.pairing-input {
+  width: 100%;
+  padding: 13px 14px;
+  border: 1px solid var(--bd);
+  border-radius: 14px;
+  background: #fff;
+  color: var(--fg1);
+  font: 400 15px var(--sans);
+}
+
+.pairing-submit {
+  padding: 13px 16px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--fg1);
+  color: #fff;
+  font: 600 15px var(--sans);
+}
+
+.pairing-error {
+  margin: 10px 20px 0;
+  color: #b4443a;
+  font: 400 13.5px var(--sans);
+}
+
+.pairing-scan {
+  margin: 14px 20px 0;
+  padding: 13px 16px;
+  border: 1px solid var(--bd);
+  border-radius: 14px;
+  background: #fff;
+  color: var(--fg1);
+  font: 600 15px var(--sans);
+}
+
+.pairing-scanner {
+  display: none;
+  margin: 12px 20px 0;
+  border-radius: 16px;
+  overflow: hidden;
+  background: #000;
+  aspect-ratio: 3 / 4;
+}
+
+.pairing-scanner.is-active {
+  display: block;
+}
+
+.pairing-scanner video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.sync-progress {
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+
+.mobile-alerts-banner {
+  margin: 8px 16px 0;
+  padding: 10px 14px;
+  border: 1px solid #d7dae1;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #23262d;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* W-M: the live reply gets its own surface. It covers the timeline rather than
+   expanding a row, so watching a reply arrive never moves the list underneath
+   and leaving it puts you back exactly where you were. */
+.stream-view {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+}
+
+.stream-view[hidden] {
+  display: none;
+}
+
+.stream-view-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--bdf);
+}
+
+.stream-view-title {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.stream-view-title strong {
+  font: 600 15px var(--sans);
+  color: var(--fg1);
+}
+
+.stream-view-title span {
+  font: 400 12px var(--sans);
+  color: var(--mut);
+}
+
+.stream-view-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 16px 24px;
+  font: 400 15.5px/1.55 var(--sans);
+  color: var(--fg1);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Only a row that can actually be opened looks like it can. */
+.message-row[data-streamable="1"] .message-copy {
+  cursor: pointer;
 }

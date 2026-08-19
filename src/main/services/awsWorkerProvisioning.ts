@@ -165,15 +165,34 @@ export function buildScopedWorkerPolicy(region: string): unknown {
 // mints an access key, and prints the paste blob. It never touches anything
 // outside that one IAM user + policy, and the app never sees the user's own
 // credentials — only the scoped key they paste back.
-export function buildBootstrapCommand(region: string, userSuffix: string): string {
+export function buildBootstrapCommand(
+  region: string,
+  userSuffix: string,
+  options: { targetUserName?: string } = {}
+): string {
   const safeRegion = assertToken("region", region);
-  const userName = `accordagents-worker-${assertToken("suffix", userSuffix)}`;
+  const targetUserName = options.targetUserName ? assertWorkerUserName(options.targetUserName) : undefined;
+  const userName = targetUserName ?? `accordagents-worker-${assertToken("suffix", userSuffix)}`;
   const policy = JSON.stringify(buildScopedWorkerPolicy(safeRegion));
   if (policy.length > 6_144) {
     throw new Error("AWS worker policy exceeds the IAM customer-managed policy size limit.");
   }
   // Single-quote the policy for the shell; escape embedded quotes.
   const policyLiteral = `'${policy.replace(/'/g, `'\\''`)}'`;
+  if (targetUserName) {
+    return [
+      "set -e",
+      `REGION=${safeRegion}`,
+      `USER=${userName}`,
+      `POLICY=${policyLiteral}`,
+      'if ! aws iam get-user --user-name "$USER" >/dev/null 2>&1; then printf "%s\\n" "Expected existing AccordAgents worker IAM user $USER was not found." >&2; exit 1; fi',
+      'POLICY_ARN=$(aws iam list-policies --scope Local --query "Policies[?PolicyName==\x27$USER\x27].Arn | [0]" --output text)',
+      'if [ -z "$POLICY_ARN" ] || [ "$POLICY_ARN" = None ]; then POLICY_ARN=$(aws iam create-policy --policy-name "$USER" --policy-document "$POLICY" --query "Policy.Arn" --output text); else for VERSION_ID in $(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query "Versions[?IsDefaultVersion==\x60false\x60].VersionId" --output text); do aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$VERSION_ID"; done; aws iam create-policy-version --policy-arn "$POLICY_ARN" --policy-document "$POLICY" --set-as-default >/dev/null; fi',
+      'aws iam attach-user-policy --user-name "$USER" --policy-arn "$POLICY_ARN"',
+      'aws iam delete-user-policy --user-name "$USER" --policy-name accordagents-worker >/dev/null 2>&1 || true',
+      'printf "\\nUpdated AccordAgents worker permissions for %s. Return to AccordAgents and select Retry existing permissions.\\n" "$USER"'
+    ].join("\n");
+  }
   return [
     "set -e",
     `REGION=${safeRegion}`,
@@ -252,10 +271,19 @@ export function buildWorkerCloudInit(): string {
     "  - curl",
     "  - cloud-guest-utils",
     "  - ec2-instance-connect",
+    // Virtual display for cloud-side Electron QA. Electron has no headless mode
+    // we can rely on, so a worker without Xvfb cannot start the app at all.
+    "  - xvfb",
+    // storage.ts shells out to the sqlite3 CLI; Ubuntu server does not ship it.
+    "  - sqlite3",
     "runcmd:",
     "  - [ bash, -lc, \"curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs\" ]",
     "  - [ bash, -lc, \"npm install -g @openai/codex\" ]",
     "  - [ bash, -lc, \"type gh >/dev/null 2>&1 || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' > /etc/apt/sources.list.d/github-cli.list && apt-get update && apt-get install -y gh)\" ]",
+    // Google's .deb rather than the snap-backed `chromium` package: it works
+    // headless on a bare EC2 box and pulls the GTK/NSS/ALSA libraries Electron
+    // needs, so this single install covers both browser and Electron QA.
+    "  - [ bash, -lc, \"type google-chrome >/dev/null 2>&1 || (tmp=$(mktemp -d) && curl -fsSL -o $tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && DEBIAN_FRONTEND=noninteractive apt-get install -y $tmp/chrome.deb && rm -rf $tmp)\" ]",
     "  - [ bash, -lc, \"sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 && echo kernel.apparmor_restrict_unprivileged_userns=0 > /etc/sysctl.d/99-accordagents-userns.conf\" ]",
     ""
   ].join("\n");
@@ -313,6 +341,14 @@ function assertToken(label: string, value: string): string {
   const trimmed = value.trim();
   if (!/^[A-Za-z0-9._-]+$/.test(trimmed)) {
     throw new Error(`Invalid ${label}: ${value}`);
+  }
+  return trimmed;
+}
+
+function assertWorkerUserName(value: string): string {
+  const trimmed = assertToken("AWS worker IAM user", value);
+  if (!trimmed.startsWith(`${AWS_WORKER_TAG_KEY}-`)) {
+    throw new Error(`Invalid AWS worker IAM user: ${value}`);
   }
   return trimmed;
 }

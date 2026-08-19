@@ -58,7 +58,13 @@ function mapEntries(map: Map<string, string>): [string, string][] {
 test("active run ids preserve activeRunIds, metadata runId fallback, and pending participant-message fallback", () => {
   const runIds = activeRunIdsForConversation(conversation({
     activeRunIds: ["stored-run", "stored-run"],
-    runId: "legacy-run"
+    runId: "legacy-run",
+    activeRunOwnersByRunId: {
+      "stored-run": { processId: 100, instanceId: "instance-1", startedAt: NOW, updatedAt: NOW }
+    },
+    activeRunParticipantIdsByRunId: {
+      "legacy-run": participant.id
+    }
   }, [
     participantMessage("pending", {
       status: "pending",
@@ -67,6 +73,39 @@ test("active run ids preserve activeRunIds, metadata runId fallback, and pending
   ]));
 
   assert.deepEqual(runIds, ["stored-run", "legacy-run", "pending-run"]);
+});
+
+test("active run ids drop stored ghosts with no owner, attribution, remote handle, or pending message", () => {
+  const runIds = activeRunIdsForConversation(conversation({
+    activeRunIds: ["ghost-run", "owned-run"],
+    runId: "ghost-run",
+    activeRunOwnersByRunId: {
+      "owned-run": { processId: 100, instanceId: "instance-1", startedAt: NOW, updatedAt: NOW }
+    }
+  }, [
+    participantMessage("pending", {
+      status: "pending",
+      metadata: { runId: "pending-run" }
+    })
+  ]));
+
+  assert.deepEqual(runIds, ["owned-run", "pending-run"]);
+});
+
+test("active run summary excludes ghost runs so the pill matches the running members", () => {
+  const summary = activeRunSummaryForConversation(conversation({
+    activeRunIds: ["ghost-run", "live-run"],
+    activeRunOwnersByRunId: {
+      "live-run": { processId: 100, instanceId: "instance-1", startedAt: NOW, updatedAt: NOW }
+    },
+    activeRunParticipantIdsByRunId: {
+      "live-run": participant.id
+    }
+  }));
+
+  assert.deepEqual(summary.runIds, ["live-run"]);
+  assert.deepEqual(summary.participantIds, [participant.id]);
+  assert.deepEqual(summary.unresolvedRunIds, []);
 });
 
 test("active run summary resolves local attributed runs", () => {
@@ -127,9 +166,10 @@ test("active run summary resolves only nonterminal remote handles", () => {
     }
   }, [], [participant, remoteParticipant]));
 
+  assert.deepEqual(summary.runIds, ["remote-run"]);
   assert.deepEqual(mapEntries(summary.participantIdsByRunId), [["remote-run", remoteParticipant.id]]);
   assert.deepEqual(summary.participantIds, [remoteParticipant.id]);
-  assert.deepEqual(summary.unresolvedRunIds, ["done-run", "failed-run", "cancelled-run"]);
+  assert.deepEqual(summary.unresolvedRunIds, []);
 });
 
 test("active run summary resolves compatibility runId-only metadata", () => {

@@ -689,7 +689,11 @@
   background: var(--app-surface);
 }
 
-.settings-view .gen-aws-specs strong {
+.settings-view .gen-aws-specs .gen-aws-spec-label {
+  color: var(--app-text-strong);
+}
+
+.settings-view .gen-aws-specs .gen-aws-running {
   color: var(--app-warning);
 }
 

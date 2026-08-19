@@ -4,6 +4,7 @@ import { act, create, type ReactTestInstance } from "react-test-renderer";
 
 import type { AgentHealth, AppSettings } from "../../../shared/types";
 import { CLI_PROVIDER_SETUP, resolveAssistantProviderKind } from "../../../shared/cliReadiness";
+import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../../shared/mobilePairing";
 import { CliReadinessSetupPanel } from "./cli-readiness-setup-panel";
 import { validateChatCliAgents } from "./chat-cli-readiness";
 
@@ -15,6 +16,7 @@ const SETTINGS: AppSettings = {
   chatParticipantRequestPromptMaxChars: 50_000,
   chatAutoWatchWakeLimit: 3,
   chatPromptContext: { thread: { mode: "off" }, timeline: { mode: "off" } },
+  mobileControl: EMPTY_MOBILE_CONTROL_SETTINGS,
   cloudRuns: {
     enabled: false,
     mode: "ssh",
@@ -271,6 +273,8 @@ test("unsupported platforms show guide-only installation without a macOS copy ac
   assert.doesNotMatch(textOf(expanded), /Open Terminal|Try sign-in|Sign in/);
   assert.match(textOf(expanded), /Official guide/);
   assert.match(textOf(renderer.root), /Check again/);
+  assert.match(textOf(renderer.root), /on this computer/);
+  assert.doesNotMatch(textOf(renderer.root), /on this Mac/);
   renderer.unmount();
 });
 

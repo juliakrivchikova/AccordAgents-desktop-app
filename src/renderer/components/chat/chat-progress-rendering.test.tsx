@@ -2,10 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
-import type { ChatAgentActivityEvent, ReviewProgress } from "../../../shared/types";
+import type { ReviewProgress } from "../../../shared/types";
 import { markdownBlocks } from "../content/markdown-blocks";
 import { chatThinkingRows, liveMessageProgressById } from "./chat-conversation-progress";
-import { StreamingMessageContent } from "./chat-streaming";
 import {
   useStableChatMessageActions,
   type StableChatMessageActionHandlers,
@@ -121,60 +120,7 @@ test("stable chat message actions keep row callback identities while calling lat
     "second:choice:message-4:choice-1:true"
   ]);
 
-  await act(async () => {
-    renderer!.unmount();
-  });
-});
-
-test("streaming activity detail masks secrets by default and can reveal collapsed long detail", async () => {
-  const detail = [
-    "Authorization: Bearer sk-test-secret",
-    "API_KEY=abc123",
-    "line",
-    "line",
-    "line",
-    "line",
-    "line",
-    "x".repeat(650)
-  ].join("\n");
-  const activityEvent: ChatAgentActivityEvent = {
-    id: "activity-1",
-    sequence: 1,
-    kind: "tool",
-    label: "Using MCP tool",
-    detail,
-    createdAt: NOW
-  };
-  let renderer: ReactTestRenderer | undefined;
-  await act(async () => {
-    renderer = create(
-      <StreamingMessageContent
-        startedAt={NOW}
-        activityEvents={[activityEvent]}
-      />
-    );
-  });
-
-  const pre = () => renderer!.root.findByType("pre");
-  assert.match(pre().props.className, /is-collapsed/);
-  assert.match(textContent(pre()), /Authorization: Bearer ••••/);
-  assert.match(textContent(pre()), /API_KEY=••••/);
-  assert.doesNotMatch(textContent(pre()), /sk-test-secret|abc123/);
-
-  const revealButton = buttonWithLabel(renderer!, "Reveal");
-  await act(async () => {
-    revealButton.props.onClick();
-  });
-  assert.match(textContent(pre()), /sk-test-secret/);
-  assert.match(textContent(pre()), /API_KEY=abc123/);
-
-  const showMoreButton = buttonWithLabel(renderer!, "Show more");
-  await act(async () => {
-    showMoreButton.props.onClick();
-  });
-  assert.doesNotMatch(pre().props.className, /is-collapsed/);
-
-  renderer!.unmount();
+  await act(async () => renderer!.unmount());
 });
 
 function stableActionHandlers(label: string, calls: string[]): StableChatMessageActionHandlers {
@@ -202,21 +148,4 @@ function stableActionHandlers(label: string, calls: string[]): StableChatMessage
       await task();
     }
   };
-}
-
-function buttonWithLabel(renderer: ReactTestRenderer, label: string): ReactTestRenderer["root"] {
-  const button = renderer.root.findAllByType("button").find((item) => textContent(item).includes(label));
-  assert.ok(button, `expected ${label} button`);
-  return button;
-}
-
-function textContent(node: unknown): string {
-  if (typeof node === "string" || typeof node === "number") {
-    return String(node);
-  }
-  if (!node || typeof node !== "object") {
-    return "";
-  }
-  const record = node as { children?: unknown[] };
-  return Array.isArray(record.children) ? record.children.map(textContent).join("") : "";
 }

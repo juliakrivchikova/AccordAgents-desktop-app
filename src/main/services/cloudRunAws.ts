@@ -140,7 +140,13 @@ export class CloudRunAwsService {
 
   async bootstrapCommand(region: string): Promise<string> {
     const deviceId = await this.settings.getCloudRunsDeviceId();
-    return buildBootstrapCommand(region, deviceId);
+    const operation = await (this.settings as SettingsService & {
+      getAwsWorkerOperation?: () => Promise<{ remediation?: string; awsPrincipalUserName?: string } | undefined>;
+    }).getAwsWorkerOperation?.();
+    const targetUserName = operation?.remediation === "refresh-aws-authorization"
+      ? operation.awsPrincipalUserName
+      : undefined;
+    return buildBootstrapCommand(region, deviceId, { targetUserName });
   }
 
   // Compatibility entry point for older renderer callers. The new UI calls
@@ -569,10 +575,31 @@ export class CloudRunAwsService {
       } catch (error) {
         const delayMs = AWS_AUTHORIZATION_RETRY_DELAYS_MS[attempt];
         if (!isAwsAuthorizationError(error) || delayMs === undefined) throw error;
-        this.log("aws-worker.discovery.authorization-retry", { operation, attempt: attempt + 1, delayMs });
+        this.log("aws-worker.discovery.authorization-retry", {
+          operation,
+          attempt: attempt + 1,
+          delayMs,
+          ...this.safeAwsErrorLogFields(error)
+        });
         await this.wait(delayMs);
       }
     }
+  }
+
+  private safeAwsErrorLogFields(error: unknown): Record<string, unknown> {
+    const record = error && typeof error === "object"
+      ? error as { name?: unknown; code?: unknown; Code?: unknown; message?: unknown }
+      : undefined;
+    const message = error instanceof Error
+      ? error.message
+      : typeof record?.message === "string"
+        ? record.message
+        : String(error ?? "");
+    return {
+      errorName: typeof record?.name === "string" ? record.name : undefined,
+      errorCode: typeof record?.code === "string" ? record.code : typeof record?.Code === "string" ? record.Code : undefined,
+      errorMessage: message.slice(0, 500)
+    };
   }
 
   private async reconcileCreatedWorker(
@@ -596,8 +623,16 @@ export class CloudRunAwsService {
   }
 
   private async capacityFor(credentials: AwsWorkerCredentials, instanceType: string): Promise<{ vCpu?: number; memoryMiB?: number }> {
-    const described = await this.createEc2Client(credentials).describeInstanceType?.(instanceType);
-    if (described) return described;
+    try {
+      const described = await this.createEc2Client(credentials).describeInstanceType?.(instanceType);
+      if (described) return described;
+    } catch (error) {
+      if (!isAwsAuthorizationError(error)) throw error;
+      this.log("aws-worker.capacity.authorization-fallback", {
+        instanceType,
+        ...this.safeAwsErrorLogFields(error)
+      });
+    }
     return knownInstanceCapacity(instanceType);
   }
 
@@ -726,8 +761,8 @@ function growRootFilesystemCommand(targetSizeGb: number): string {
   return [
     "set -eu",
     "root=$(findmnt -n -o SOURCE /)",
-    "parent=$(lsblk -n -o PKNAME \"$root\" | head -1)",
-    "if [ -n \"$parent\" ]; then part=$(lsblk -n -o PARTN \"$root\" | head -1); sudo -n env TMPDIR=/run growpart \"/dev/$parent\" \"$part\" || true; fi",
+    "parent=$(lsblk -n -o PKNAME \"$root\" | head -1 | tr -d '[:space:]')",
+    "if [ -n \"$parent\" ]; then part=$(lsblk -n -o PARTN \"$root\" | head -1 | tr -d '[:space:]'); sudo -n env TMPDIR=/run growpart \"/dev/$parent\" \"$part\" || true; fi",
     "fstype=$(findmnt -n -o FSTYPE /)",
     "if [ \"$fstype\" = ext4 ]; then sudo -n resize2fs \"$root\"; elif [ \"$fstype\" = xfs ]; then sudo -n xfs_growfs -d /; else echo \"Unsupported root filesystem: $fstype\" >&2; exit 2; fi",
     `size=$(df -B1 --output=size / | tail -1 | tr -d ' '); [ \"$size\" -ge ${minimumBytes} ] || { echo \"Root filesystem did not reach the requested size.\" >&2; exit 3; }`

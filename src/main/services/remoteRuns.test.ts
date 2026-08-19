@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,6 +12,7 @@ import {
 } from "../../shared/chatParticipantRequests";
 import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
+import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
 import type {
   AppSettings,
   ChatAppToolApproval,
@@ -43,6 +45,9 @@ import {
   REMOTE_SESSION_SSH_RETRY_ATTEMPTS,
   REMOTE_SESSION_SSH_TIMEOUT_MS,
   REMOTE_WARM_SESSION_PREPARE_TIMEOUT_MS,
+  detachedWorkerScript,
+  remoteSessionProtocolMatchesCurrent,
+  remoteSessionProtocolPayload,
   RemoteRunService
 } from "./remoteRuns";
 import type { MirrorSyncStateEntry, MirrorSyncStateFile } from "./remoteRuns";
@@ -73,7 +78,6 @@ import { issueFromRequirement } from "./toolchainRequirements";
 import type { ToolchainPreflightIssue } from "./toolchainRequirements";
 
 const NOW = "2026-06-26T12:00:00.000Z";
-
 const ROLE: ChatRoleConfig = {
   id: "engineer",
   label: "Engineer",
@@ -356,6 +360,171 @@ test("detached remote run launches without waiting and projects final output on 
     "detached-run:worker:4"
   ]);
   assert.equal((storage.current.metadata.remoteRunReplay as any)["detached-run"].terminalState, "completed");
+});
+
+test("detached remote run invokes Claude Code with the worker Claude path", async () => {
+  const participant = { ...chatParticipant(), kind: "claude-code" as const };
+  const conversation = chatConversation([participant]);
+  const worker = new FakeDetachedWorkerTransport();
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "claude-detached-run",
+    participant: participantConfig(participant),
+    prompt: "Run Claude detached.",
+    worker: {
+      host: "worker.example",
+      codexPath: "/opt/codex/bin/codex",
+      claudePath: "/opt/claude/bin/claude"
+    }
+  });
+
+  const launch = worker.launchRequests[0];
+  assert.equal(launch.invocation.providerKind, "claude-code");
+  assert.equal(launch.invocation.executablePath, "/opt/claude/bin/claude");
+  assert.deepEqual(launch.invocation.args.slice(0, 5), [
+    "-p",
+    "--output-format",
+    "json",
+    "--permission-mode",
+    "default"
+  ]);
+  assert.equal(launch.invocation.args.includes("/opt/codex/bin/codex"), false);
+});
+
+test("remote Claude auto mode keeps Bash available for provider-owned approval", async () => {
+  const participant = { ...chatParticipant(), kind: "claude-code" as const, agentMode: "auto" as const };
+  const conversation = chatConversation([participant]);
+  const worker = new FakeDetachedWorkerTransport();
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "claude-auto-tools-run",
+    participant: participantConfig(participant),
+    prompt: "Run Claude auto.",
+    worker: { host: "worker.example" },
+    options: { agentMode: "auto" }
+  });
+
+  const args = worker.launchRequests[0].invocation.args;
+  const permissionModeIndex = args.indexOf("--permission-mode");
+  const allowedToolsIndex = args.indexOf("--allowedTools");
+
+  assert.equal(args[permissionModeIndex + 1], "bypassPermissions");
+  assert.notEqual(allowedToolsIndex, -1);
+  assert.ok(String(args[allowedToolsIndex + 1]).split(",").includes("Bash"));
+});
+
+test("remote Claude resume resends the agent definition and agent name", async () => {
+  const participant = { ...chatParticipant(), kind: "claude-code" as const };
+  const conversation = chatConversation([participant]);
+  const worker = new FakeDetachedWorkerTransport();
+  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker });
+
+  await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "claude-resume-agent-run",
+    participant: participantConfig(participant),
+    prompt: "Resume Claude with role.",
+    worker: { host: "worker.example" },
+    options: {
+      sessionId: "01900000-0000-7000-8000-000000000001",
+      role: {
+        name: "accordagents-claude-test",
+        description: "Test role.",
+        instructions: "Answer as the test role."
+      } as any
+    }
+  });
+
+  const args = worker.launchRequests[0].invocation.args;
+
+  assert.ok(args.includes("--resume"));
+  assert.ok(args.includes("01900000-0000-7000-8000-000000000001"));
+  assert.ok(args.includes("--agents"));
+  assert.equal(args[args.indexOf("--agent") + 1], "accordagents-claude-test");
+});
+
+test("generated detached worker prefers commandPath over codexPath", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-detached-command-path-"));
+  const workerScript = path.join(root, "worker.js");
+  const commandPath = path.join(root, "claude-provider.js");
+  const codexPath = path.join(root, "codex-provider.js");
+  const finalPath = path.join(root, "final.txt");
+
+  await writeFile(commandPath, [
+    "#!/usr/bin/env node",
+    "const fs = require(\"node:fs\");",
+    "fs.writeFileSync(process.env.TEST_FINAL_PATH, \"command path final\");",
+    "process.stdout.write(\"command path stdout\");"
+  ].join("\n"), "utf8");
+  await chmod(commandPath, 0o755);
+  await writeFile(codexPath, [
+    "#!/usr/bin/env node",
+    "process.stderr.write(\"codex path was used\");",
+    "process.exit(42);"
+  ].join("\n"), "utf8");
+  await chmod(codexPath, 0o755);
+  await writeFile(workerScript, detachedWorkerScript(), "utf8");
+  await writeFile(path.join(root, "invocation.json"), JSON.stringify({
+    runId: "detached-command-path",
+    conversationId: "conversation",
+    participantId: "participant",
+    providerKind: "claude-code",
+    args: ["--provider-arg"],
+    input: "hello from test",
+    env: { TEST_FINAL_PATH: finalPath },
+    codexPath,
+    commandPath,
+    finalPath,
+    maxRuntimeMs: 5_000
+  }), "utf8");
+
+  const result = await runNodeProgram(workerScript, [], root);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(await readFile(finalPath, "utf8"), "command path final");
+  const exit = JSON.parse(await readFile(path.join(root, "exit.json"), "utf8")) as { status?: string };
+  assert.equal(exit.status, "completed");
+  assert.equal(await readFile(path.join(root, "stdout.log"), "utf8"), "command path stdout");
+});
+
+test("generated detached worker loads transient secret env and removes the file", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-detached-secret-env-"));
+  const workerScript = path.join(root, "worker.js");
+  const commandPath = path.join(root, "provider.js");
+  const finalPath = path.join(root, "final.txt");
+  const secretEnvPath = path.join(root, "secret-env.json");
+
+  await writeFile(commandPath, [
+    "#!/usr/bin/env node",
+    "const fs = require(\"node:fs\");",
+    "fs.writeFileSync(process.env.TEST_FINAL_PATH, process.env.GH_TOKEN || \"missing\");"
+  ].join("\n"), "utf8");
+  await chmod(commandPath, 0o755);
+  await writeFile(secretEnvPath, JSON.stringify({ GH_TOKEN: "gh-test-secret" }), "utf8");
+  await writeFile(workerScript, detachedWorkerScript(), "utf8");
+  await writeFile(path.join(root, "invocation.json"), JSON.stringify({
+    runId: "detached-secret-env",
+    conversationId: "conversation",
+    participantId: "participant",
+    providerKind: "claude-code",
+    args: [],
+    input: "hello from test",
+    env: { TEST_FINAL_PATH: finalPath },
+    commandPath,
+    finalPath,
+    secretEnvPath,
+    maxRuntimeMs: 5_000
+  }), "utf8");
+
+  const result = await runNodeProgram(workerScript, [], root);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(await readFile(finalPath, "utf8"), "gh-test-secret");
+  await assert.rejects(() => readFile(secretEnvPath, "utf8"), /ENOENT/);
+  const invocation = JSON.parse(await readFile(path.join(root, "invocation.json"), "utf8")) as Record<string, unknown>;
+  assert.equal(JSON.stringify(invocation).includes("gh-test-secret"), false);
 });
 
 test("remote terminal reply schedules auto-watch evaluation", async () => {
@@ -993,7 +1162,10 @@ test("mirror fingerprint excludes top-level build outputs but keeps nested sourc
   await writeFile(path.join(localDir, "src.ts"), "export const x = 1;\n", "utf8");
   const before = await computeLocalMirrorFingerprint(localDir);
   // Adding content under excluded dirs must not change the fingerprint.
-  for (const dir of ["node_modules", "out", "dist"]) {
+  for (const dir of [
+    "node_modules", "out", "dist", ".idea", ".wrangler", ".qa-user-data",
+    ".worktrees", "screenshots", "signed"
+  ]) {
     assert.ok((DEFAULT_MIRROR_EXCLUDES as readonly string[]).includes(dir));
     await mkdir(path.join(localDir, dir), { recursive: true });
     await writeFile(path.join(localDir, dir, "heavy.bin"), "x".repeat(10_000), "utf8");
@@ -1138,7 +1310,11 @@ test("mirror-sync detached run up-syncs before launch and runs codex in the mirr
     }
   }
   const worker = new OrderedTransport();
-  const { remote } = await testRemoteRun({ conversation, detachedWorkerTransport: worker, mirrorSync });
+  const { remote } = await testRemoteRun({
+    conversation,
+    detachedWorkerTransport: worker,
+    mirrorSync
+  });
 
   const expectedMirror = remoteMirrorPath("/srv/worker", localDir);
   const state = await remote.startDetachedRun({
@@ -1148,6 +1324,7 @@ test("mirror-sync detached run up-syncs before launch and runs codex in the mirr
     prompt: "Work in the mirror.",
     worker: { host: "worker.example", workerRoot: "/srv/worker" },
     sync: { localPath: localDir },
+    options: { agentMode: "auto" },
     onPhase: (status) => phases.push(status.label)
   });
 
@@ -1162,15 +1339,20 @@ test("mirror-sync detached run up-syncs before launch and runs codex in the mirr
     "Waiting for response"
   ]);
   assert.deepEqual(mirrorSync.calls, [{ kind: "up", localPath: localDir, remotePath: expectedMirror }]);
-  assert.deepEqual(state.sync, { localPath: localDir, remotePath: expectedMirror });
+  assert.deepEqual(state.sync, {
+    localPath: localDir,
+    remotePath: expectedMirror
+  });
+  assert.equal(worker.launched?.invocation.remoteCwd, expectedMirror);
   const args = worker.launched?.invocation.args ?? [];
   const cdIndex = args.indexOf("--cd");
   assert.ok(cdIndex >= 0);
   assert.equal(args[cdIndex + 1], expectedMirror);
-  assert.ok(args.includes("sandbox_workspace_write.network_access=true"));
-  // Mirror mode makes the per-project container (parent of /repo) writable, so
-  // the agent can create sibling worktrees scoped to this project + write .git.
-  assert.ok(args.some((arg) => arg === `sandbox_workspace_write.writable_roots=["${path.posix.dirname(expectedMirror)}"]`));
+  const sandboxIndex = args.indexOf("--sandbox");
+  assert.ok(sandboxIndex >= 0);
+  assert.equal(args[sandboxIndex + 1], "danger-full-access");
+  assert.ok(!args.includes("sandbox_workspace_write.network_access=true"));
+  assert.ok(!args.some((arg) => arg.startsWith("sandbox_workspace_write.writable_roots=")));
 });
 
 test("mirror-sync skips rsync for an unchanged project after durable state survives restart", async () => {
@@ -1260,7 +1442,6 @@ test("second run recomputes the mirror fingerprint inside the queue after a dela
   const participant = chatParticipant();
   const conversation = chatConversation([participant]);
   const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-src-"));
-  await mkdir(path.join(localDir, ".git"), { recursive: true });
   await writeFile(path.join(localDir, "file.txt"), "v1", "utf8");
   const mirrorSync = new GatedDownMirrorSync();
   const worker = { host: "worker.example", workerRoot: "/srv/worker" };
@@ -1656,6 +1837,23 @@ test("warm session prepare budget covers the full composed SSH retry schedule", 
   assert.ok(perOp < REMOTE_WARM_SESSION_PREPARE_TIMEOUT_MS);
 });
 
+test("warm session protocol freshness checks file hashes, not only version", () => {
+  const protocol = remoteSessionProtocolPayload();
+
+  assert.equal(remoteSessionProtocolMatchesCurrent({
+    version: protocol.version,
+    hashes: protocol.hashes
+  }), true);
+
+  assert.equal(remoteSessionProtocolMatchesCurrent({
+    version: protocol.version,
+    hashes: {
+      ...protocol.hashes,
+      "run-worker.js": "stale-worker-hash"
+    }
+  }), false);
+});
+
 test("warm participant session prepare failure falls back to cold detached launch", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant]);
@@ -1867,7 +2065,9 @@ test("startup session backfill never overwrites a newer nonempty desktop session
   assert.equal(session.sessionId, desktopSessionId);
 });
 
-test("default SSH transport acquires and renews an operation lease without a Node protocol", async () => {
+test("default SSH transport acquires and renews an operation lease without a Node protocol", {
+  skip: process.platform === "win32" ? "POSIX fake SSH transport uses a sh executable fixture" : false
+}, async () => {
   const root = await mkdtemp(path.join(tmpdir(), "accordagents-posix-lease-transport-"));
   const fakeSsh = path.join(root, "ssh");
   await writeFile(fakeSsh, [
@@ -2086,7 +2286,8 @@ test("pre-provisioned remoteCwd mode never touches the mirror sync", async () =>
     participant: participantConfig(participant),
     prompt: "Run in the pre-provisioned clone.",
     worker: { host: "worker.example" },
-    repoPath: "/home/ubuntu/work/repo"
+    repoPath: "/home/ubuntu/work/repo",
+    options: { agentMode: "auto" }
   });
 
   worker.push("provisioned-run", {
@@ -2099,8 +2300,11 @@ test("pre-provisioned remoteCwd mode never touches the mirror sync", async () =>
   assert.equal(state.sync, undefined);
   assert.deepEqual(mirrorSync.calls, []);
   const args = worker.launched?.invocation.args ?? [];
-  assert.ok(args.includes("sandbox_workspace_write.network_access=true"));
-  assert.ok(args.some((arg) => arg === 'sandbox_workspace_write.writable_roots=["/home/ubuntu/work/repo/.git"]'));
+  const sandboxIndex = args.indexOf("--sandbox");
+  assert.ok(sandboxIndex >= 0);
+  assert.equal(args[sandboxIndex + 1], "danger-full-access");
+  assert.ok(!args.includes("sandbox_workspace_write.network_access=true"));
+  assert.ok(!args.some((arg) => arg.startsWith("sandbox_workspace_write.writable_roots=")));
 });
 
 test("detached preflight blocks missing Java before mirror sync or launch", async () => {
@@ -2518,6 +2722,8 @@ test("detached run forwards desktop env with app-MCP token precedence", async ()
         extraEnv: {
           AA_TEST_FORWARDED_SECRET: "manual-override",
           AA_TEST_MANUAL_SECRET: "manual-secret",
+          GH_TOKEN: "gh-secret",
+          GITHUB_TOKEN: "github-secret",
           PATH: "/manual/bin",
           ACCORD_AGENTS_INTERNAL: "must-not-forward"
         },
@@ -2533,6 +2739,12 @@ test("detached run forwards desktop env with app-MCP token precedence", async ()
   assert.equal(env.AA_TEST_FORWARDED_SECRET, "manual-override");
   assert.equal(env.AA_TEST_MANUAL_SECRET, "manual-secret");
   assert.equal(env.ACCORD_AGENTS_MCP_TOKEN, "per-run-token");
+  assert.equal(env.GH_TOKEN, undefined);
+  assert.equal(env.GITHUB_TOKEN, undefined);
+  assert.deepEqual(worker.launched?.invocation.secretEnv, {
+    GH_TOKEN: "gh-secret",
+    GITHUB_TOKEN: "github-secret"
+  });
   assert.equal(env.ACCORD_AGENTS_INTERNAL, undefined);
   assert.equal(env.PATH, undefined);
   assert.equal(env.HOME, undefined);
@@ -2823,6 +3035,7 @@ async function testRemoteRun(options: {
           maxRuntimeMs: 24 * 60 * 60_000,
           pollIntervalMs: 2_500
         },
+        mobileControl: EMPTY_MOBILE_CONTROL_SETTINGS,
         providers: [
           { kind: "codex-cli", label: "Codex CLI", enabled: true },
           { kind: "claude-code", label: "Claude Code", enabled: true }
@@ -3025,6 +3238,7 @@ class FakeDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
   readonly decisions: RemoteDetachedWorkerDecisionRequest[] = [];
   readonly reaped: RemoteDetachedWorkerSnapshot[] = [];
   readonly preflightRequirements: string[][] = [];
+  readonly launchRequests: RemoteDetachedWorkerLaunchRequest[] = [];
   missingTools = new Set<string>();
   availableTools = new Set<string>();
   preflightIssues: ToolchainPreflightIssue[] | undefined;
@@ -3049,6 +3263,7 @@ class FakeDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
   }
 
   async launch(request: RemoteDetachedWorkerLaunchRequest): Promise<RemoteDetachedWorkerSnapshot> {
+    this.launchRequests.push(request);
     this.launches += 1;
     if (!this.eventsByRun.has(request.runId)) {
       this.eventsByRun.set(request.runId, [{
@@ -3248,6 +3463,7 @@ function coordinatorSettings(patch: { maxRuntimeMs: number; pollIntervalMs: numb
           maxRuntimeMs: patch.maxRuntimeMs,
           pollIntervalMs: patch.pollIntervalMs
         },
+        mobileControl: EMPTY_MOBILE_CONTROL_SETTINGS,
         providers: [],
         chatRoleConfigs: [],
         chatBehaviorRules: [],
@@ -3285,4 +3501,25 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("Timed out waiting for condition.");
+}
+
+async function runNodeProgram(
+  program: string,
+  args: string[],
+  cwd: string
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [program, ...args], {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code: code ?? -1, stdout, stderr }));
+  });
 }

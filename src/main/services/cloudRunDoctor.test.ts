@@ -19,10 +19,10 @@ function commandError(fields: { stderr?: string; exitCode?: number | null; timed
 const WORKER = { host: "worker.example", user: "ubuntu", identityFile: "/tmp/key.pem" };
 
 const FULLY_PROVISIONED = [
-  "rsync=ok", "git=ok", "gh=ok", "java=ok", "node=ok", "codex=ok",
+  "rsync=ok", "git=ok", "gh=ok", "java=ok", "node=ok", "codex=ok", "claude=ok",
   "build-essential=ok", "sudo=ok", "userns=0",
   "git-name=Dev Example", "git-email=dev@example.com", "persistent-storage=ok",
-  "storage-detail=/dev/root ext4 | /dev/root ext4", "codex-auth=ok"
+  "storage-detail=/dev/root ext4 | /dev/root ext4", "codex-auth=ok", "claude-auth=ok"
 ].join("\n");
 
 function doctorWith(handler: (request: CloudRunSshExecRequest) => Promise<string>, extra = {}): {
@@ -73,6 +73,22 @@ test("diagnose warns instead of blocking a manually managed SSH worker on volati
   const report = await service.diagnose(WORKER);
   assert.equal(report.ok, true);
   assert.equal(report.checks.find((check) => check.id === "persistent-storage")?.status, "warn");
+});
+
+test("diagnose treats Claude checks as optional until a Claude run requires them", async () => {
+  const missingClaude = FULLY_PROVISIONED
+    .replace("claude=ok", "claude=missing")
+    .replace("claude-auth=ok", "claude-auth=missing");
+  const { service } = doctorWith(async () => missingClaude);
+  const codexReport = await service.diagnose(WORKER);
+  assert.equal(codexReport.ok, true);
+  assert.equal(codexReport.checks.find((check) => check.id === "claude")?.status, "warn");
+  assert.equal(codexReport.checks.find((check) => check.id === "claude-auth")?.status, "warn");
+
+  const claudeReport = await service.diagnose(WORKER, { requiredProviderKind: "claude-code" });
+  assert.equal(claudeReport.ok, false);
+  assert.equal(claudeReport.checks.find((check) => check.id === "claude")?.status, "fail");
+  assert.equal(claudeReport.checks.find((check) => check.id === "claude-auth")?.status, "fail");
 });
 
 test("diagnose fails on required gaps and warns on optional gaps", async () => {
@@ -160,6 +176,44 @@ test("setup installs only the missing pieces and re-diagnoses", async () => {
   assert.match(joined, /apparmor_restrict_unprivileged_userns=0/);
   assert.match(joined, /git config --global user\.name 'Local Dev'/);
   assert.equal(report.ok, true);
+});
+
+test("setup installs Claude Code for Claude-required workers and surfaces auth as a user step", async () => {
+  let probes = 0;
+  const progress: string[] = [];
+  const { service, commands } = doctorWith(async (request) => {
+    if (request.command.includes("have rsync")) {
+      probes += 1;
+      return probes === 1
+        ? [
+            "rsync=ok", "git=ok", "gh=ok", "java=ok", "node=ok", "codex=missing", "claude=missing",
+            "build-essential=ok", "sudo=ok", "userns=0",
+            "git-name=Dev", "git-email=dev@example.com", "persistent-storage=ok",
+            "codex-auth=missing", "claude-auth=missing"
+          ].join("\n")
+        : FULLY_PROVISIONED
+          .replace("codex=ok", "codex=missing")
+          .replace("codex-auth=ok", "codex-auth=missing")
+          .replace("claude-auth=ok", "claude-auth=missing");
+    }
+    return "";
+  });
+
+  const report = await service.setup(WORKER, (event) => {
+    progress.push(`${event.stage}:${event.message}`);
+  }, { requiredProviderKind: "claude-code" });
+  const joined = commands.join("\n");
+
+  assert.match(joined, /npm install -g @anthropic-ai\/claude-code/);
+  assert.doesNotMatch(joined, /npm install -g @openai\/codex/);
+  assert.doesNotMatch(joined, /login --device-auth/);
+  assert.equal(report.ok, false);
+  assert.equal(report.checks.find((check) => check.id === "claude")?.status, "pass");
+  assert.equal(report.checks.find((check) => check.id === "claude-auth")?.status, "fail");
+  assert.equal(report.checks.find((check) => check.id === "codex")?.status, "warn");
+  assert.equal(report.checks.find((check) => check.id === "codex-auth")?.status, "warn");
+  assert.equal(progress.some((message) => message.includes("Installing the Claude Code CLI")), true);
+  assert.equal(progress.some((message) => message.includes("Run `claude auth login` on that worker")), true);
 });
 
 test("setup drives codex device-auth and surfaces url + code to the user", async () => {

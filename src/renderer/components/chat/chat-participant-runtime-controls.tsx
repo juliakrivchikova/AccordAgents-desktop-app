@@ -24,6 +24,7 @@ import type {
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import {
   CHAT_AGENT_MODE_OPTIONS,
+  chatProviderSupportsCloudRun,
   chatCliProviderLabel,
   chatInheritedCliSettingLabel,
   normalizeChatRunLocation
@@ -96,11 +97,12 @@ export function ParticipantRuntimeControls(props: {
     ?? (autoWatchOn ? "Auto-watch is enabled for this member." : "Let this member watch new chat messages and decide whether to act.");
   const autoWatchDisabled = props.disabled || Boolean(props.autoWatchDisabledReason);
   const cloudRunOn = runLocation === "remote";
-  const cloudRunDisabled = props.disabled || props.runLocationLocked || participant.kind !== "codex-cli";
+  const cloudRunSupported = chatProviderSupportsCloudRun(participant.kind);
+  const cloudRunDisabled = props.disabled || props.runLocationLocked || !cloudRunSupported;
   const cloudRunTooltip = props.runLocationLocked
     ? `Run location is locked because @${participant.handle} has already run in this chat.`
-    : participant.kind !== "codex-cli"
-    ? "Cloud Runs currently supports Codex members only."
+    : !cloudRunSupported
+    ? "Cloud Runs currently supports Codex and Claude members only."
     : cloudRunOn
     ? "Run this member on the Cloud Runs worker."
     : "Run this member locally.";

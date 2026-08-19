@@ -1,0 +1,71 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "accordagents-mobile-relay-staging",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": true,
+  "routes": [
+    {
+      "pattern": "relay.accordagents.com/*",
+      "zone_id": "a5cc8bf8af583fdb6f5a187449ef8978"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RELAY_ROOMS",
+        "class_name": "RelayRoom"
+      },
+      {
+        "name": "MAILBOXES",
+        "class_name": "SealedMailboxStore"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RelayRoom"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["MailboxStore"]
+    },
+    {
+      // Deploy 1 of 2. Introduces the locked class and repoints MAILBOXES to
+      // it. MailboxStore stays exported as a stub for this deploy only:
+      // Cloudflare rejects repointing away from a class the script no longer
+      // exports (10064) and rejects deleting one the live binding still
+      // references (10061), so the two steps cannot be one deploy.
+      // Exposure closes here — nothing routes to the old objects any more.
+      "tag": "v3",
+      "new_sqlite_classes": ["SealedMailboxStore"]
+    },
+    {
+      // Deploy 2 of 2. Permanently destroys every mailbox event stored while
+      // the mailbox path ran without credentials or sealing, and drops the
+      // transitional stub class along with it. That plaintext history must
+      // not survive the relay coming back.
+      "tag": "v4",
+      "deleted_classes": ["MailboxStore"]
+    }
+  ],
+  "vars": {
+    "ACCORD_RELAY_PROVIDER": "cloudflare-durable-object",
+    "ACCORD_RELAY_MAX_FRAME_BYTES": "10240",
+    // Re-enabled: mailbox reads and writes now require the per-pairing bearer
+    // token and sealed payloads (see SealedMailboxStore). Set to "1" only for
+    // an operational stop.
+    "ACCORD_RELAY_DISABLED": "0",
+    // W5 doorbell: VAPID public half. The private half exists only as the
+    // ACCORD_VAPID_PRIVATE_KEY_JWK deploy secret; pushes are empty wake
+    // signals, so no payload encryption keys are involved.
+    "ACCORD_VAPID_PUBLIC_KEY": "BFDhMf0by8r6MCGk63XN4I_H6UJdLCbTC9Llia7wGSwNzYrBGR9luCHy8crt9la4JKIaQy1mAGbwasFRM3xmIKE"
+  }
+}

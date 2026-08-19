@@ -36,15 +36,36 @@ DOM/CSS state in the desktop app.
    `listen EPERM`, rerun the same important command with the provider's
    escalation or approval mechanism. For Codex, use
    `sandbox_permissions: "require_escalated"` with a concrete justification.
+   On a cloud worker this escalation is unavailable: remote runs use
+   `approval_policy=never` and nothing can answer the prompt. Do not ask for it
+   there — if a command needs escalation on a worker, report that instead.
 4. Prefer a separate production Electron launch before using Vite:
 
    ```bash
    npm run build
-   node_modules/.bin/electron . --remote-debugging-port=9222
+   node_modules/.bin/electron --remote-debugging-port=9222 .
    ```
+
+   **On Linux (cloud worker)** there is no display, so wrap the launch in Xvfb
+   and skip the macOS repair section below:
+
+   ```bash
+   xvfb-run -a node_modules/.bin/electron --remote-debugging-port=9222 . \
+     --no-sandbox
+   ```
+
+   If `xvfb-run` or Chrome is missing, run Settings → Cloud Runs → Set up (or
+   the doctor's `headless-display` / `browser` fixes) before retrying. A cloud
+   run validates the **Linux** build: that is real evidence for renderer,
+   layout, and flow work, and it is not evidence about macOS main-process
+   behavior, native modules, signing, or packaging. Say which you validated.
 
    Keep the Electron command running while you test. If port 9222 is occupied,
    use another port such as 9223 and pass that port to `attach({ port: 9223 })`.
+   When the user asks for a separate instance they will keep using after the
+   turn, launch it detached with a dedicated `ACCORDAGENTS_USER_DATA_DIR`, a
+   unique CDP port, and a log file. Do not leave that user-facing instance tied
+   to the agent shell session.
 
 5. Verify attachment and capture proof:
 
@@ -82,7 +103,78 @@ DOM/CSS state in the desktop app.
    trying to prove.
 8. Save screenshots under `screenshots/qa-*.png` and inspect them before
    reporting.
-9. Stop any Electron process or tool session you started.
+9. Stop only temporary Electron processes or tool sessions you started for QA.
+   If the user explicitly asked for a separate app instance to keep using, leave
+   that detached process running and report its CDP port, user-data directory,
+   log path, and PID.
+
+## Isolated Worktree Launch And Restart
+
+When the current AccordAgents app is hosting the chat you are using, do not quit
+or restart it. Launch a separate worktree instance with its own user-data
+directory and debug port.
+
+Use the app-supported user-data override rather than the default profile:
+
+```bash
+ACCORDAGENTS_USER_DATA_DIR=/private/tmp/accordagents-qa-<name> \
+  node_modules/.bin/electron --remote-debugging-port=9223 . \
+  --disable-backgrounding-occluded-windows \
+  --disable-renderer-backgrounding \
+  --disable-background-timer-throttling
+```
+
+For a known staging profile, reuse that exact directory only when the test needs
+its settings. Otherwise create a fresh `/private/tmp/accordagents-qa-*`
+directory. Keep the command session running while the user or QA flow uses the
+instance.
+
+Before restarting an isolated instance, identify it by both the debug port and
+the worktree/user-data path. Never use broad commands such as `pkill -f electron`
+or kill `/Applications/AccordAgents.app` when it is the chat host.
+
+```bash
+ps -axo pid,ppid,command | rg "remote-debugging-port=9223|accordagents-qa-|/path/to/worktree"
+```
+
+Kill only the PIDs that match the isolated instance you started. If in doubt,
+leave the process running and ask the user.
+
+## macOS Electron Launch Repair
+
+On macOS, a worktree `node_modules/electron/dist/Electron.app` can be missing,
+incomplete, or blocked by Gatekeeper. Symptoms include:
+
+- `spawn ... Electron.app/Contents/MacOS/Electron ENOENT`
+- Electron starts, then exits with `SIGKILL`
+- `node_modules/electron/dist/Electron.app` disappears after launch
+- `/usr/bin/log show` reports `ASP: Security policy would not allow process`,
+  `has no CMS blob`, `Unrecoverable CT signature issue`, or `notarization ...
+  revoked`
+
+Repair only the worktree-local Electron dependency:
+
+```bash
+npm rebuild electron
+codesign --verify --deep --strict --verbose=2 node_modules/electron/dist/Electron.app
+spctl -a -vv node_modules/electron/dist/Electron.app
+```
+
+If Gatekeeper reports a revoked or invalid Electron build, ad-hoc sign only that
+local development Electron app and clear extended attributes:
+
+```bash
+codesign --force --deep --sign - node_modules/electron/dist/Electron.app
+xattr -cr node_modules/electron/dist/Electron.app
+codesign --verify --deep --strict --verbose=2 node_modules/electron/dist/Electron.app
+```
+
+Then relaunch with the isolated worktree command above and verify CDP with
+escalation if the sandbox cannot read localhost:
+
+```bash
+curl -s --max-time 2 http://127.0.0.1:9223/json/version
+```
 
 ## Blocked Standard
 
@@ -92,6 +184,8 @@ Only report `BLOCKED` for live desktop QA after all are true:
 - Separate production Electron launch failed, or launched but CDP could not be
   reached.
 - The failed localhost or launch command was retried with escalation/approval.
+- Worktree Electron ENOENT/SIGKILL/Gatekeeper failures were repaired or ruled
+  out using the macOS Electron launch repair checklist above.
 - The final report names the exact commands tried and the exact errors.
 
 If this standard is not met, keep working the CDP launch path instead of

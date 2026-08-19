@@ -224,6 +224,7 @@ function App(): JSX.Element {
         <>
           <ChatMobilePairingDialog
             conversationId={view.activeChatConversation.id}
+            mobileControl={state.settings.mobileControl}
             disabled={view.conversationRunning}
           />
           <IconButton

@@ -35,6 +35,7 @@ import {
   CHAT_RUN_LOCATION_OPTIONS,
   WORKFLOW_MANAGER_ROLE_ID,
   activeChatRoleConfigs,
+  chatProviderSupportsCloudRun,
   normalizeChatRunLocation,
   updateChatParticipantDraft
 } from "./chat-participant-drafts";
@@ -108,7 +109,7 @@ export function ChatParticipantDraftRow(props: {
           onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { kind: value as ChatProviderKind }))}
         />
       </FormRow>
-      {props.draft.kind === "codex-cli" && (
+      {chatProviderSupportsCloudRun(props.draft.kind) && (
         <FormRow label="Run location">
           <AppSelect
             value={normalizeChatRunLocation(props.draft.remoteExecution)}

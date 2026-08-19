@@ -6,8 +6,8 @@ import { CommandError, runCommand } from "./command";
 import type { RemoteRunWorkerTarget } from "./remoteRuns";
 
 export const REMOTE_MIRROR_DIRNAME = "mirrors";
-export const REMOTE_MIRROR_SYNC_TIMEOUT_MS = 15 * 60_000;
-export const REMOTE_MIRROR_FINGERPRINT_VERSION = "mirror-sync-v2";
+export const REMOTE_MIRROR_SYNC_TIMEOUT_MS = 30 * 60_000;
+export const REMOTE_MIRROR_FINGERPRINT_VERSION = "mirror-sync-v4";
 // Default heavy/build/dependency directories excluded from the mirror. Build
 // outputs are top-level only so source packages named "build" still sync;
 // dependency/cache noise is excluded at any depth. The fingerprint and rsync
@@ -17,7 +17,9 @@ const ANY_DEPTH_MIRROR_EXCLUDES = [
 ] as const;
 const TOP_LEVEL_MIRROR_EXCLUDES = [
   "out", "dist", "build", ".next", ".nuxt", ".svelte-kit", ".turbo",
-  ".gradle", "target", ".pytest_cache", ".mypy_cache", "coverage", ".cache"
+  ".gradle", "target", ".pytest_cache", ".mypy_cache", "coverage", ".cache",
+  ".idea", ".wrangler", ".qa-user-data", ".playwright-mcp", ".worktrees",
+  "screenshots", "signed"
 ] as const;
 export const DEFAULT_MIRROR_EXCLUDES = [
   ...ANY_DEPTH_MIRROR_EXCLUDES,
@@ -649,6 +651,7 @@ export function buildMirrorUpSyncRsyncArgs(params: {
   return [
     "-az",
     "--delete",
+    "--delete-excluded",
     ...params.progressArgs,
     ...REMOTE_MIRROR_UP_SYNC_PROTECT_FILTERS,
     ...UP_SYNC_EXCLUDE_ARGS,

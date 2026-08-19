@@ -1,4 +1,4 @@
-import { CommandError, runCommand } from "./command";
+import { CommandError, firstCommandLookupPath, runCommand } from "./command";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import type { GitDiffRequest, GitDiffResult, GitRepoInfo, RepoFileSearchResult } from "../../shared/types";
@@ -53,8 +53,44 @@ interface RepoFileCacheEntry {
   paths: string[];
 }
 
+export interface GitServiceOptions {
+  gitExecutable?: string;
+  resolveGitExecutable?: () => Promise<string>;
+}
+
+async function resolveWindowsGitExecutable(): Promise<string> {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR;
+  if (!systemRoot) {
+    throw new Error("Git executable lookup failed because the Windows system root is unavailable.");
+  }
+
+  const whereExecutable = path.join(systemRoot, "System32", "where.exe");
+  const lookupCwd = path.dirname(process.execPath);
+  const result = await runCommand(whereExecutable, ["git"], {
+    cwd: lookupCwd,
+    primeLoginShellEnv: false,
+    timeoutMs: 5000
+  });
+  const executable = firstCommandLookupPath(result.stdout, "win32", process.env.PATHEXT);
+  if (!executable || !path.isAbsolute(executable)) {
+    throw new Error("Git executable lookup did not return an absolute path.");
+  }
+  return path.resolve(executable);
+}
+
 export class GitService {
   private readonly repoFileCache = new Map<string, RepoFileCacheEntry>();
+  private readonly gitExecutable?: string;
+  private readonly resolveGitExecutable?: () => Promise<string>;
+  private gitExecutablePromise?: Promise<string>;
+
+  constructor(options: GitServiceOptions = {}) {
+    if (options.gitExecutable !== undefined && !path.isAbsolute(options.gitExecutable)) {
+      throw new Error("Git executable must be an absolute path.");
+    }
+    this.gitExecutable = options.gitExecutable;
+    this.resolveGitExecutable = options.resolveGitExecutable;
+  }
 
   async inspectRepo(repoPath: string): Promise<GitRepoInfo> {
     const normalizedRepoPath = repoPath.trim();
@@ -101,14 +137,15 @@ export class GitService {
     }
 
     try {
-      await runCommand("git", ["rev-parse", "--is-inside-work-tree"], { cwd: normalizedRepoPath, timeoutMs: 8000 });
+      const gitExecutable = await this.gitCommand();
+      await runCommand(gitExecutable, ["rev-parse", "--is-inside-work-tree"], { cwd: normalizedRepoPath, timeoutMs: 8000 });
       const [branch, branches, status] = await Promise.all([
-        runCommand("git", ["branch", "--show-current"], { cwd: normalizedRepoPath, timeoutMs: 8000 }).catch(() => ({ stdout: "" })),
-        runCommand("git", ["for-each-ref", "--format=%(refname)%09%(refname:short)%09%(symref)", "refs/heads", "refs/remotes"], {
+        runCommand(gitExecutable, ["branch", "--show-current"], { cwd: normalizedRepoPath, timeoutMs: 8000 }).catch(() => ({ stdout: "" })),
+        runCommand(gitExecutable, ["for-each-ref", "--format=%(refname)%09%(refname:short)%09%(symref)", "refs/heads", "refs/remotes"], {
           cwd: normalizedRepoPath,
           timeoutMs: 8000
         }).catch(() => ({ stdout: "" })),
-        runCommand("git", ["status", "--short"], { cwd: normalizedRepoPath, timeoutMs: 8000 }).catch(() => ({ stdout: "" }))
+        runCommand(gitExecutable, ["status", "--short"], { cwd: normalizedRepoPath, timeoutMs: 8000 }).catch(() => ({ stdout: "" }))
       ]);
 
       return {
@@ -194,8 +231,26 @@ export class GitService {
   }
 
   private async gitOutput(repoPath: string, args: string[]): Promise<string> {
-    const result = await runCommand("git", args, { cwd: repoPath, timeoutMs: 20_000 });
+    const result = await runCommand(await this.gitCommand(), args, { cwd: repoPath, timeoutMs: 20_000 });
     return result.stdout.trim();
+  }
+
+  private async gitCommand(): Promise<string> {
+    if (this.gitExecutable) {
+      return this.gitExecutable;
+    }
+    if (process.platform !== "win32") {
+      return "git";
+    }
+    if (!this.gitExecutablePromise) {
+      this.gitExecutablePromise = (this.resolveGitExecutable?.() ?? resolveWindowsGitExecutable()).then((executable) => {
+        if (!path.isAbsolute(executable)) {
+          throw new Error("Git executable must resolve to an absolute path.");
+        }
+        return path.resolve(executable);
+      });
+    }
+    return this.gitExecutablePromise;
   }
 
   private async hasGitMarker(startPath: string): Promise<boolean> {

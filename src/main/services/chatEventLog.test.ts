@@ -69,6 +69,34 @@ test("ChatEventLogService appends signed local events with scoped sequences", as
   }
 });
 
+test("ChatEventLogService serializes concurrent local appends in the same scope", async () => {
+  const { storage, cleanup } = await testStorage();
+  try {
+    const log = new ChatEventLogService(storage, fixedClock());
+    const appends = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+      log.appendLocalEvent({
+        conversationId: "conversation-1",
+        logScopeId: "conversation-1",
+        kind: "message.created",
+        payload: { message: message(`message-${index + 1}`, `message ${index + 1}`) }
+      })
+    ));
+
+    const sequences = appends.map((append) => append.event.originSeq).sort((left, right) => left - right);
+    const originIds = new Set(appends.map((append) => append.event.originId));
+    assert.equal(originIds.size, 1);
+    assert.deepEqual(sequences, Array.from({ length: 20 }, (_, index) => index + 1));
+    const stored = await storage.listChatEvents("conversation-1", "conversation-1");
+    assert.equal(stored.length, 20);
+    assert.deepEqual(
+      stored.map((event) => event.originSeq),
+      Array.from({ length: 20 }, (_, index) => index + 1)
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test("verifySignedChatEvent rejects payload tampering", () => {
   const identity = createChatEventDeviceIdentity("2026-08-06T00:00:00.000Z");
   const event = createSignedChatEvent(identity, {

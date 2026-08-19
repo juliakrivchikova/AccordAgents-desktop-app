@@ -1,0 +1,21 @@
+{
+  "sealKey": "5Vt3qY1uJ9wL7cP0aR8sD2fG4hK6mN1bX3zC5vB7nQk",
+  "expectedToken": "_DuhOL2ITRUiHYsT8Uwybl_sQURAKErdbZe91QE-p54",
+  "expectedScopeId": "mb-WzdL5EPsGCDPcSn5_PflSDkqxVEFssoV",
+  "sealedSample": {
+    "v": 1,
+    "alg": "A256GCM",
+    "iv": "AAECAwQFBgcICQoL",
+    "ct": "FeEyA0boE5eHQcZNjzerCruP_mXSTXn7IRc1SJkIJ4sVr8RK1yDk2K5Nwt4LMukocVP76Tade9QhYHdvAnoaLrQQNxn3xQoQ8_bjozYMwKwKqpBkzmMnNIGEQS0Mc8lDMTaGVVJLj4gYfPv1iLzCxhQ-3ABQJzWV46-u7dcZl2Ly6MaIii-JaOAN-nab7Q"
+  },
+  "sealedSamplePayload": {
+    "type": "mobile.timeline.events",
+    "conversationId": "vector-conversation",
+    "events": [
+      {
+        "id": "vector-1",
+        "content": "known answer"
+      }
+    ]
+  }
+}

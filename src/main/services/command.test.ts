@@ -5,12 +5,53 @@ import path from "node:path";
 import test from "node:test";
 import {
   CommandError,
+  commandLookupInvocation,
   commandExists,
   commandEnvironment,
+  firstCommandLookupPath,
   parseLoginShellEnvOutput,
+  resolveCommandPath,
   resolveCommandTimeoutMs,
   runCommand
 } from "./command";
+
+test("command lookup uses native Windows discovery and keeps the first path", () => {
+  assert.deepEqual(commandLookupInvocation("codex", "win32"), {
+    command: "where.exe",
+    args: ["codex"]
+  });
+  assert.deepEqual(commandLookupInvocation("codex", "linux"), {
+    command: "which",
+    args: ["codex"]
+  });
+  assert.equal(firstCommandLookupPath("\r\nC:\\Program Files\\OpenAI\\codex.exe\r\nC:\\Users\\private\\bin\\codex.cmd\r\n"), "C:\\Program Files\\OpenAI\\codex.exe");
+  assert.equal(firstCommandLookupPath(" \r\n\t\n"), undefined);
+});
+
+test("Windows command lookup prefers PATHEXT launchers over extensionless npm shims", () => {
+  const output = [
+    "C:\\Users\\private\\AppData\\Roaming\\npm\\codex",
+    "C:\\Users\\private\\AppData\\Roaming\\npm\\codex.cmd"
+  ].join("\r\n");
+  assert.equal(
+    firstCommandLookupPath(output, "win32", ".COM;.EXE;.BAT;.CMD"),
+    "C:\\Users\\private\\AppData\\Roaming\\npm\\codex.cmd"
+  );
+  assert.equal(firstCommandLookupPath(output, "linux"), "C:\\Users\\private\\AppData\\Roaming\\npm\\codex");
+});
+
+test("resolveCommandPath preserves an exact absolute executable", async () => {
+  assert.equal(await resolveCommandPath(process.execPath), process.execPath);
+});
+
+test("commandEnvironment preserves injected Windows PATH and PATHEXT", () => {
+  const env = commandEnvironment({
+    PATH: ["fixture-bin", "windows-system32"].join(path.delimiter),
+    PATHEXT: ".COM;.EXE;.BAT;.CMD"
+  });
+  assert.ok(env.PATH?.split(path.delimiter).includes("fixture-bin"));
+  assert.equal(env.PATHEXT, ".COM;.EXE;.BAT;.CMD");
+});
 
 test("parseLoginShellEnvOutput extracts valid env lines between sentinels", () => {
   const env = parseLoginShellEnvOutput([
@@ -106,15 +147,29 @@ test("commandEnvironment discovers nvm bins when versions root contains non-dire
   assert.equal(command.path, codexPath);
 });
 
+const stdioHoldingGrandchildScript = [
+  "const { spawn } = require('node:child_process');",
+  "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 15000)'], { stdio: 'inherit' });",
+  "setTimeout(() => {}, 15000);"
+].join("");
+
+const windowsDescendantScript = [
+  "const { spawn } = require('node:child_process');",
+  "const { writeFileSync } = require('node:fs');",
+  "const helper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });",
+  "writeFileSync(process.argv[1], String(helper.pid));",
+  "setInterval(() => {}, 1000);"
+].join("");
+
 test("aborted run settles even when a grandchild keeps the stdio pipes open", async () => {
   const controller = new AbortController();
   const startedAt = Date.now();
   setTimeout(() => controller.abort(), 300);
-  // `sh` dies on SIGTERM but both `sleep`s survive it and inherit the stdio
-  // pipes; without releasing our pipe ends the promise would settle only when
-  // the sleeps exit (~15s).
+  // The direct Node child dies on cancellation while its grandchild inherits
+  // the stdio pipes. Without releasing our pipe ends the promise would wait for
+  // the grandchild to exit.
   await assert.rejects(
-    runCommand("sh", ["-c", "sleep 15 & sleep 15"], {
+    runCommand(process.execPath, ["-e", stdioHoldingGrandchildScript], {
       timeoutMs: 30_000,
       killProcessGroup: true,
       primeLoginShellEnv: false,
@@ -129,7 +184,7 @@ test("aborted run settles even when a grandchild keeps the stdio pipes open", as
 test("timed-out run settles even when a grandchild keeps the stdio pipes open", async () => {
   const startedAt = Date.now();
   await assert.rejects(
-    runCommand("sh", ["-c", "sleep 15 & sleep 15"], {
+    runCommand(process.execPath, ["-e", stdioHoldingGrandchildScript], {
       timeoutMs: 300,
       killProcessGroup: true,
       primeLoginShellEnv: false
@@ -165,8 +220,110 @@ test("timed-out process-group run leaves no helper process", async (t) => {
   assert.equal(processExists(helperPid), false, `helper process ${helperPid} survived timeout`);
 });
 
+test("aborted Windows process-tree run leaves no descendant", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("taskkill process-tree behavior is only available on Windows");
+    return;
+  }
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-windows-tree-abort-"));
+  const pidFile = path.join(root, "helper.pid");
+  const controller = new AbortController();
+  let helperPid: number | undefined;
+  t.after(async () => {
+    controller.abort();
+    if (helperPid && processExists(helperPid)) {
+      process.kill(helperPid, "SIGKILL");
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const run = runCommand(process.execPath, ["-e", windowsDescendantScript, pidFile], {
+    timeoutMs: 30_000,
+    killProcessGroup: true,
+    primeLoginShellEnv: false,
+    signal: controller.signal
+  });
+  helperPid = await waitForPidFile(pidFile);
+  controller.abort();
+  await assert.rejects(
+    run,
+    (error: unknown) => error instanceof CommandError && /cancelled/.test(error.message)
+  );
+  await assertProcessStops(helperPid);
+});
+
+test("timed-out Windows process-tree run leaves no descendant", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("taskkill process-tree behavior is only available on Windows");
+    return;
+  }
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-windows-tree-timeout-"));
+  const pidFile = path.join(root, "helper.pid");
+  let helperPid: number | undefined;
+  t.after(async () => {
+    if (helperPid && processExists(helperPid)) {
+      process.kill(helperPid, "SIGKILL");
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const run = runCommand(process.execPath, ["-e", windowsDescendantScript, pidFile], {
+    timeoutMs: 1_000,
+    killProcessGroup: true,
+    primeLoginShellEnv: false
+  });
+  helperPid = await waitForPidFile(pidFile);
+  await assert.rejects(
+    run,
+    (error: unknown) => error instanceof CommandError && error.result.timedOut
+  );
+  await assertProcessStops(helperPid);
+});
+
+for (const extension of ["cmd", "bat"]) {
+  test(`Windows .${extension} launchers preserve path-with-spaces arguments without command injection`, async (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows batch launcher behavior is only available on Windows");
+      return;
+    }
+    const root = await mkdtemp(path.join(tmpdir(), `accord agents ${extension} launcher `));
+    const capturePath = path.join(root, "capture args.cjs");
+    const outputPath = path.join(root, "captured args.json");
+    const injectionMarker = path.join(root, "injected.txt");
+    const launcherPath = path.join(root, `provider launcher.${extension}`);
+    t.after(() => rm(root, { recursive: true, force: true }));
+
+    await writeFile(
+      capturePath,
+      "require('node:fs').writeFileSync(process.env.ACCORD_AGENTS_CAPTURE_PATH, JSON.stringify(process.argv.slice(2)), 'utf8');\n",
+      "utf8"
+    );
+    await writeFile(
+      launcherPath,
+      "@echo off\r\n\"%ACCORD_AGENTS_TEST_NODE%\" \"%~dp0capture args.cjs\" %*\r\n",
+      "utf8"
+    );
+    const args = [
+      "repo path with spaces",
+      `literal & echo injected>\"${injectionMarker}\"`,
+      "100% complete",
+      "quote\"inside"
+    ];
+    await runCommand(launcherPath, args, {
+      env: {
+        ACCORD_AGENTS_CAPTURE_PATH: outputPath,
+        ACCORD_AGENTS_TEST_NODE: process.execPath
+      },
+      primeLoginShellEnv: false
+    });
+
+    assert.deepEqual(JSON.parse(await readFile(outputPath, "utf8")), args);
+    await assert.rejects(readFile(injectionMarker, "utf8"), { code: "ENOENT" });
+  });
+}
+
 test("runCommand treats timeoutMs 0 as no wall-clock deadline", async () => {
-  const result = await runCommand("sh", ["-c", "sleep 0.05; printf done"], {
+  const result = await runCommand(process.execPath, ["-e", "setTimeout(() => process.stdout.write('done'), 50);"], {
     timeoutMs: 0,
     allowNoTimeout: true,
     primeLoginShellEnv: false
@@ -269,4 +426,19 @@ async function assertProcessStops(pid: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   assert.equal(processExists(pid), false, `helper process ${pid} survived`);
+}
+
+async function waitForPidFile(pidFile: string): Promise<number> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      const pid = Number.parseInt((await readFile(pidFile, "utf8")).trim(), 10);
+      if (Number.isInteger(pid) && pid > 0) {
+        return pid;
+      }
+    } catch {
+      // The parent fixture has not written its helper pid yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`fixture did not write helper pid to ${pidFile}`);
 }

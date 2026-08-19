@@ -3,6 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { app, safeStorage } from "electron";
 import type {
+  StoredMobilePairedDevice,
+  StoredPendingMailboxRevocation,
   AppSettings,
   AgentHealth,
   AgentEnvironmentValueProtection,
@@ -77,6 +79,7 @@ import {
   isValidChatSavedPromptTrigger,
   normalizeChatSavedPromptTrigger
 } from "../../shared/chatSavedPrompts";
+import { mobileControlSettingsFromEnvironment } from "../../shared/mobilePairing";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
 import { CLI_PROVIDER_SETUP, preferredReadyAssistantProviderKind } from "../../shared/cliReadiness";
 import { normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
@@ -1735,6 +1738,8 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
 
 export class SettingsService {
   private readonly settingsPath: string;
+  private readonly mobilePairedDevicesPath: string;
+  private readonly pendingMailboxRevocationsPath: string;
   private readonly remoteSessionCleanupPath: string;
   private remoteSessionCleanupMutation: Promise<void> = Promise.resolve();
   private storedState: StoredSettings | undefined;
@@ -1745,6 +1750,8 @@ export class SettingsService {
   constructor() {
     this.settingsPath = path.join(app.getPath("userData"), "settings.json");
     this.remoteSessionCleanupPath = path.join(app.getPath("userData"), "remote-session-cleanup.json");
+    this.mobilePairedDevicesPath = path.join(app.getPath("userData"), "mobile-paired-devices.json");
+    this.pendingMailboxRevocationsPath = path.join(app.getPath("userData"), "pending-mailbox-revocations.json");
   }
 
   async getPublicSettings(): Promise<AppSettings> {
@@ -1758,6 +1765,7 @@ export class SettingsService {
       chatAutoWatchWakeLimit: this.normalizeChatAutoWatchWakeLimit(stored.chatAutoWatchWakeLimit),
       chatPromptContext: this.normalizeChatPromptContextSettings(stored.chatPromptContext),
       cloudRuns: this.normalizeCloudRunsSettings(stored),
+      mobileControl: mobileControlSettingsFromEnvironment(process.env),
       assistantProviderKind: this.normalizeChatProviderKind(stored.assistantProviderKind),
       lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind),
       lastRepoPath: stored.lastRepoPath,
@@ -2957,6 +2965,64 @@ export class SettingsService {
       }
       return migrated;
     }
+  }
+
+  // A phone that has actually connected is remembered until the user revokes
+  // it, so one install keeps working across desktop restarts. The short-lived
+  // pairing link stays short-lived: it carries a key in a URL.
+  async readMobilePairedDevices(): Promise<StoredMobilePairedDevice[]> {
+    try {
+      const raw = await readFile(this.mobilePairedDevicesPath, "utf8");
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+      return parsed.filter((entry): entry is StoredMobilePairedDevice =>
+        Boolean(entry) && typeof entry === "object" &&
+        typeof (entry as StoredMobilePairedDevice).stableRoutingId === "string" &&
+        typeof (entry as StoredMobilePairedDevice).pairingJson === "string");
+    } catch {
+      return [];
+    }
+  }
+
+  async writeMobilePairedDevices(devices: StoredMobilePairedDevice[]): Promise<void> {
+    await mkdir(path.dirname(this.mobilePairedDevicesPath), { recursive: true });
+    const temporaryPath = `${this.mobilePairedDevicesPath}.${randomUUID()}.tmp`;
+    await writeFile(temporaryPath, `${JSON.stringify(devices, null, 2)}\n`, "utf8");
+    await rename(temporaryPath, this.mobilePairedDevicesPath);
+  }
+
+  async readPendingMailboxRevocations(): Promise<StoredPendingMailboxRevocation[]> {
+    try {
+      const raw = await readFile(this.pendingMailboxRevocationsPath, "utf8");
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+      return parsed.filter((entry): entry is StoredPendingMailboxRevocation =>
+        Boolean(entry) && typeof entry === "object" &&
+        typeof (entry as StoredPendingMailboxRevocation).outboxUrl === "string" &&
+        typeof (entry as StoredPendingMailboxRevocation).mailboxScopeId === "string" &&
+        typeof (entry as StoredPendingMailboxRevocation).encryptedToken === "string");
+    } catch {
+      return [];
+    }
+  }
+
+  async writePendingMailboxRevocations(items: StoredPendingMailboxRevocation[]): Promise<void> {
+    await mkdir(path.dirname(this.pendingMailboxRevocationsPath), { recursive: true });
+    const temporaryPath = `${this.pendingMailboxRevocationsPath}.${randomUUID()}.tmp`;
+    await writeFile(temporaryPath, `${JSON.stringify(items, null, 2)}\n`, "utf8");
+    await rename(temporaryPath, this.pendingMailboxRevocationsPath);
+  }
+
+  encodeMobilePairingSecret(value: string): { encryptedValue: string; protection: AgentEnvironmentValueProtection } {
+    return this.encodeAgentEnvironmentValue(value);
+  }
+
+  decodeMobilePairingSecret(encryptedValue: string, protection: AgentEnvironmentValueProtection): string | undefined {
+    return this.decodeAgentEnvironmentValue({ key: "mobile-pairing", encryptedValue, protection } as StoredAgentEnvironmentVariable);
   }
 
   private async writeRemoteSessionCleanupTombstones(items: RemoteSessionCleanupTombstone[]): Promise<void> {

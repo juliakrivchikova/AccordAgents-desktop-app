@@ -13,6 +13,7 @@ import type {
 import { CHAT_ASSISTANT_ROLE_ID, chatParticipantMentionHandle } from "../conversation/conversation-display";
 import {
   CHAT_RUN_LOCATION_OPTIONS,
+  chatProviderSupportsCloudRun,
   chatRunLocationLabel,
   normalizeChatRunLocation,
   type AddableSavedParticipantConfig
@@ -212,7 +213,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                         <span>{props.savedParticipantRoleLabel(config)} · {props.savedParticipantSummary(config)}</span>
                         {invalidReason && <small>{invalidReason}</small>}
                       </span>
-                      {config.kind === "codex-cli" && (
+                      {chatProviderSupportsCloudRun(config.kind) && (
                         <label className="chat-saved-run-location" title={`Run ${chatRunLocationLabel(savedRunLocation(config)).toLowerCase()}`}>
                           <span>Run</span>
                           <select

@@ -1,7 +1,7 @@
-export const AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT = 8;
+export const AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT = 20;
 export const AWS_WORKER_ROOT_VOLUME_SIZE_GB_MIN = 8;
 export const AWS_WORKER_ROOT_VOLUME_SIZE_GB_MAX = 1024;
-export const AWS_WORKER_ROOT_VOLUME_SIZE_GB_OPTIONS = [8, 16, 32, 64, 128, 256] as const;
+export const AWS_WORKER_ROOT_VOLUME_SIZE_GB_OPTIONS = [8, 16, 20, 32, 64, 128, 256] as const;
 export const AWS_WORKER_INSTANCE_TYPE_DEFAULT = "t3.small";
 export const AWS_WORKER_INSTANCE_TYPE_OPTIONS = ["t3.small", "t3.medium", "t3.large", "t3.xlarge"] as const;
 

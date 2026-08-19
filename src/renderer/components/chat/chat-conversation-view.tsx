@@ -40,6 +40,7 @@ import { ChatConversationTimeline } from "./chat-conversation-timeline";
 import type { ChatConversationViewProps } from "./chat-conversation-types";
 import { ChatThreadPanel } from "./chat-thread-panel";
 import { useChatConversationViewport } from "./use-chat-conversation-viewport";
+import { useChatActivityDisclosure } from "./use-chat-activity-disclosure";
 import { useChatLocalFileOpen } from "./use-chat-local-file-open";
 import { useSubmittingIdSet } from "./use-submitting-id-set";
 import { useStableChatMessageActions } from "./use-stable-chat-message-actions";
@@ -103,6 +104,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   const [isResizingThread, setIsResizingThread] = useState(false);
   const approvalSubmission = useSubmittingIdSet();
   const choiceSubmission = useSubmittingIdSet();
+  const activityDisclosure = useChatActivityDisclosure(props.conversation.id);
   const chatMessageActions = useStableChatMessageActions({
     onApproveMentions: props.onApproveMentions,
     onRejectMentions: props.onRejectMentions,
@@ -330,6 +332,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
           {props.topBar}
           <div className="chat-main">
             <ChatConversationTimeline
+              activityDisclosure={activityDisclosure}
               conversationId={props.conversation.id}
               contextUsageByParticipant={contextUsageByParticipant}
               continuedMentionRequestIds={continuedMentionRequestIds}
@@ -398,6 +401,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
                   props.onStopRun?.(runId);
                 }
               } : undefined}
+              onJumpToParticipantLastMessage={props.onJumpToParticipantLastMessage}
               placeholder="Message @name, /name, or #path..."
               status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
               testId="chat-main-composer"
@@ -408,6 +412,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
           {selectedThreadRoot && <div className="thread-resizer" role="separator" aria-orientation="vertical" onPointerDown={startThreadResize} />}
           {selectedThreadRoot && (
             <ChatThreadPanel
+              activityDisclosure={activityDisclosure}
               rootMessage={selectedThreadRoot}
               replies={selectedThreadSummary?.replies ?? []}
               participants={participants}

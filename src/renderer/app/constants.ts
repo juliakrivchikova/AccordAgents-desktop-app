@@ -10,6 +10,7 @@ import {
   AWS_WORKER_INSTANCE_TYPE_DEFAULT,
   AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT
 } from "../../shared/cloudRuns";
+import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
 
 export const DEFAULT_SETTINGS: AppSettings = {
   roundLimitDefault: 2,
@@ -29,6 +30,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     maxRuntimeMs: 24 * 60 * 60_000,
     pollIntervalMs: 2_500
   },
+  mobileControl: EMPTY_MOBILE_CONTROL_SETTINGS,
   providers: [],
   chatRoleConfigs: [],
   chatBehaviorRules: [],

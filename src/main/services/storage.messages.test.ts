@@ -9,12 +9,15 @@ import {
   StorageService,
   UnsupportedStorageSchemaVersionError
 } from "./storage";
+import { resolveSqliteExecutable } from "./sqliteCli";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { ChatMessage, Conversation } from "../../shared/types";
 
 function hexJson(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8").toString("hex").toUpperCase();
 }
+
+const SQLITE_EXECUTABLE = resolveSqliteExecutable({ appPath: process.cwd() });
 
 function fakeStorage(queryJson: (sql: string) => Promise<unknown[]>): StorageService {
   const storage = Object.create(StorageService.prototype) as any;
@@ -61,6 +64,34 @@ test("openConversation returns a message window consistent with messagePage", as
   assert.equal(result!.messagePage.oldestSequence, 3);
 });
 
+test("listConversationMessages decodes an escape-heavy message recipe", async () => {
+  const [sequence, quoteCount, backslashCount] = [32, 36_182, 66_535];
+  const count = (value: string, character: string) => value.length - value.replaceAll(character, "").length;
+  const generateData = (): string => {
+    const start = "{\"id\":\"x\",\"role\":\"participant\",\"content\":\"";
+    const end = "\",\"createdAt\":\"2026-01-01T00:00:00.000Z\"}";
+    const contentQuotes = quoteCount - count(start + end, "\"");
+    const remainingBackslashes = backslashCount - contentQuotes;
+    return start + "\\\"".repeat(contentQuotes)
+      + "\\\\".repeat(Math.floor(remainingBackslashes / 2))
+      + (remainingBackslashes % 2 ? "\\n" : "") + end;
+  };
+  const payloadJson = generateData();
+
+  assert.equal(count(payloadJson, "\""), quoteCount);
+  assert.equal(count(payloadJson, "\\"), backslashCount);
+
+  const storage = fakeStorage(async (sql) => sql.includes("hex(payload_json) as payloadHex")
+    ? [{
+        sequence,
+        payloadHex: Buffer.from(payloadJson, "utf8").toString("hex")
+      }]
+    : [{ totalMessages: 1 }]);
+  const page = await storage.listConversationMessages({ conversationId: "redacted-conversation", limit: 1 });
+
+  assert.deepEqual(page.messages, [JSON.parse(payloadJson) as ChatMessage]);
+});
+
 test("listConversationMessages can page around a target message id", async () => {
   const queries: string[] = [];
   const storage = fakeStorage(async (sql) => {
@@ -95,6 +126,7 @@ test("listConversationMessages round-trips large escape-dense output across adja
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-messages-"));
   const storage = Object.create(StorageService.prototype) as any;
   storage.dbPath = path.join(directory, "accordagents.sqlite3");
+  storage.sqliteExecutable = SQLITE_EXECUTABLE;
   storage.initialized = true;
   const denseContent = `quotes "' slash \\\\ tabs\t lines\n separators \u001e\u001f unicode 🙂 lone \ud800 `
     .repeat(12_000);

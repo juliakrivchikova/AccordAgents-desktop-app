@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import type { IncomingMessage } from "node:http";
 import {
   chunkRelayCiphertext,
   PUSHER_SIZED_RELAY_FLOOR,
@@ -47,6 +48,7 @@ interface MinimalWebSocket {
   on(event: "message", listener: (data: unknown) => void): this;
   on(event: "close", listener: (code: number, reason: Buffer) => void): this;
   on(event: "error", listener: (error: Error) => void): this;
+  on(event: "unexpected-response", listener: (request: unknown, response: IncomingMessage) => void): this;
 }
 
 interface MinimalWebSocketConstructor {
@@ -65,6 +67,11 @@ export class RelayTunnelClient {
   private state: RelayTunnelState = "idle";
   private closed = false;
   private cursor?: string;
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
+  // W-F(c): consecutive failed cycles widen the delay exponentially up to the
+  // cap; a successful open resets it. A fixed delay hammered the relay once a
+  // second for as long as an outage lasted.
+  private reconnectAttempts = 0;
 
   constructor(private readonly options: RelayTunnelClientOptions) {
     this.manifest = options.manifest ?? PUSHER_SIZED_RELAY_FLOOR;
@@ -90,6 +97,10 @@ export class RelayTunnelClient {
 
   close(): void {
     this.closed = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
     this.setState("closed");
     this.socket?.close(1000, "client closed");
     this.socket = undefined;
@@ -128,11 +139,12 @@ export class RelayTunnelClient {
       let settled = false;
       socket.on("open", () => {
         settled = true;
+        this.reconnectAttempts = 0;
         this.setState("connected");
         resolve();
       });
       socket.on("message", (data) => this.handleMessage(data));
-      socket.on("close", () => {
+      socket.on("close", (code, reason) => {
         if (this.socket === socket) {
           this.socket = undefined;
         }
@@ -140,10 +152,27 @@ export class RelayTunnelClient {
           reject(new Error("Relay tunnel closed before opening."));
           return;
         }
+        // An abnormal close carries the relay's reason ("duplicate relay
+        // role", "capability mismatch", …). Dropping it made a room lockout
+        // look like generic network flap; surface it so the log names the
+        // cause.
+        if (code !== 1000 && code !== 1001) {
+          this.emitError(new Error(`Relay tunnel closed: ${code} ${reason.toString() || "(no reason)"}`));
+        }
         this.scheduleReconnect();
       });
       socket.on("error", (error) => {
-        this.emitter.emit("error", error);
+        this.emitError(error);
+        if (!settled) {
+          settled = true;
+          reject(error);
+        }
+      });
+      socket.on("unexpected-response", (_request, response) => {
+        const status = response.statusCode ?? 0;
+        const error = new Error(`Relay tunnel rejected with HTTP ${status}.`);
+        response.resume();
+        this.emitError(error);
         if (!settled) {
           settled = true;
           reject(error);
@@ -152,20 +181,35 @@ export class RelayTunnelClient {
     });
   }
 
+  // Single-flight: a connection that fails before opening rejects the open
+  // promise AND fires its close event, so two callers arrive here for one
+  // socket. Without the pending-timer guard each of them started its own
+  // retry loop, every later failure doubled the loops again, and once the
+  // relay began seating the newest connection the surplus loops evicted each
+  // other's sockets once a second, forever.
   private scheduleReconnect(): void {
-    if (this.closed) {
+    if (this.closed || this.reconnectTimer) {
       return;
     }
     this.setState("tunnel-reconnecting");
-    setTimeout(() => {
+    // W-F(c): exponential backoff with jitter, capped at 60x the base delay
+    // (1s -> 60s at the default base), reset by a successful open. The jitter
+    // keeps a fleet of clients from re-dialing in lockstep after a relay
+    // restart.
+    const factor = Math.min(2 ** this.reconnectAttempts, 60);
+    const delay = Math.min(this.reconnectDelayMs * factor, this.reconnectDelayMs * 60);
+    const jittered = delay * (0.75 + Math.random() * 0.5);
+    this.reconnectAttempts = Math.min(this.reconnectAttempts + 1, 8);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
       if (this.closed) {
         return;
       }
       this.openSocket("tunnel-reconnecting").catch((error) => {
-        this.emitter.emit("error", error);
+        this.emitError(error);
         this.scheduleReconnect();
       });
-    }, this.reconnectDelayMs);
+    }, jittered);
   }
 
   private handleMessage(data: unknown): void {
@@ -173,7 +217,7 @@ export class RelayTunnelClient {
     try {
       parsed = JSON.parse(Buffer.isBuffer(data) ? data.toString("utf8") : String(data));
     } catch (error) {
-      this.emitter.emit("error", error instanceof Error ? error : new Error(String(error)));
+      this.emitError(error instanceof Error ? error : new Error(String(error)));
       return;
     }
     if (isRelayFrame(parsed)) {
@@ -195,7 +239,13 @@ export class RelayTunnelClient {
       } satisfies RelayTunnelMessage);
     } else if (result.status === "conflict") {
       this.frameBuffer.delete(key);
-      this.emitter.emit("error", new Error(`Relay frame conflict: ${result.reason}`));
+      this.emitError(new Error(`Relay frame conflict: ${result.reason}`));
+    }
+  }
+
+  private emitError(error: Error): void {
+    if (this.emitter.listenerCount("error") > 0) {
+      this.emitter.emit("error", error);
     }
   }
 

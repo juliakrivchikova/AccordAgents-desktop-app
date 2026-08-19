@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { CodexExecOptions } from "./codexExec";
 import type { ParticipantConfig } from "../../shared/types";
 
-export const REMOTE_SESSION_PROTOCOL_VERSION = 4;
+export const REMOTE_SESSION_PROTOCOL_VERSION = 5;
 export const REMOTE_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 export const REMOTE_STOP_DRAIN_LEASE_MS = 30_000;
 export const REMOTE_STOP_DRAIN_SHUTDOWN_LEASE_MS = 5 * 60_000;

@@ -605,6 +605,13 @@ export function useConversationActions(state: AppState): ConversationActions {
 
 function waitForNextFrame(): Promise<void> {
   return new Promise((resolve) => {
-    requestAnimationFrame(() => resolve());
+    let resolved = false;
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      resolve();
+    };
+    requestAnimationFrame(finish);
+    window.setTimeout(finish, 50);
   });
 }

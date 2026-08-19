@@ -47,6 +47,7 @@ import { IconButton, StatusBadge } from "../primitives";
 import { RosterStatusIndicator, type ChatParticipantRosterStatus } from "./chat-participant-menu";
 import { WorkedRow } from "./chat-worked-row";
 import { ChatAppToolApprovalList } from "./chat-app-tool-approvals";
+import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
 const MESSAGE_ACTION_CLASS = "message-action size-[26px] min-h-[26px] rounded-[8px] border-0 bg-transparent shadow-none";
 const MESSAGE_ACTION_STOP_CLASS = `${MESSAGE_ACTION_CLASS} message-action-stop`;
@@ -65,6 +66,7 @@ export type ChatChoiceResponse = {
 };
 
 export const ChatMessageItem = memo(function ChatMessageItem(props: {
+  activityDisclosure: ChatActivityDisclosureState;
   message: Conversation["messages"][number];
   conversationId: string;
   participants?: ChatParticipant[];
@@ -106,7 +108,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   }
   const [copied, setCopied] = useState(false);
   const [reactionPickerOpen, setReactionPickerOpen] = useState(false);
-  const [processingTranscriptOpen, setProcessingTranscriptOpen] = useState(false);
+  const processingTranscriptOpen = props.activityDisclosure.expandedProcessingTranscriptMessageIds.has(message.id);
   const author = authorForMessage(message, "chat");
   const isStreaming = message.status === "pending" && message.role === "participant";
   const rawDisplayContent = chatDisplayContent(message, author);
@@ -271,7 +273,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 label={processingTranscriptOpen ? "Hide full stream" : "Show full stream"}
                 tooltip={processingTranscriptOpen ? "Hide full stream" : "Show full stream"}
                 pressed={processingTranscriptOpen}
-                onClick={() => setProcessingTranscriptOpen((open) => !open)}
+                onClick={() => props.activityDisclosure.toggleProcessingTranscript(message.id)}
               />
             )}
             <IconButton
@@ -343,6 +345,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           <div className="message-content">
             {isStreaming ? (
               <StreamingMessageContent
+                activityDisclosure={props.activityDisclosure}
                 content={streamedContent}
                 activity={streamedActivity}
                 activityEvents={streamedActivityEvents}
@@ -352,7 +355,11 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             ) : (
               <>
                 {hasProcessingTranscript && processingTranscriptOpen && processingTranscriptView ? (
-                  <ChatExpandedProcessingTranscript view={processingTranscriptView} activityEvents={activityEvents} />
+                  <ChatExpandedProcessingTranscript
+                    activityDisclosure={props.activityDisclosure}
+                    view={processingTranscriptView}
+                    activityEvents={activityEvents}
+                  />
                 ) : (
                   <MarkdownText
                     content={displayContent}

@@ -9,6 +9,7 @@ import {
 import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS } from "../../shared/cliAgentRunSettings";
+import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
 
 function makeRole(over: Partial<ChatRoleConfig> = {}): ChatRoleConfig {
   return {
@@ -79,6 +80,7 @@ function settingsServiceWith(
     chatParticipantRequestPromptMaxChars: stored.chatParticipantRequestPromptMaxChars,
     chatPromptContext: service.normalizeChatPromptContextSettings(stored.chatPromptContext),
     cloudRuns: stored.cloudRuns,
+    mobileControl: EMPTY_MOBILE_CONTROL_SETTINGS,
     providers: stored.providers,
     chatRoleConfigs: stored.chatRoleConfigs,
     chatBehaviorRules: stored.chatBehaviorRules,

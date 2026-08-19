@@ -62,6 +62,17 @@ test("up-sync rsync argv pairs --delete with the git-state protect filters (P0-2
     destination: "worker:/srv/mirrors/app-1234/repo/"
   });
   assert.ok(args.includes("--delete"), "delete pass must be present for the guarantee to matter");
+  assert.ok(args.includes("--delete-excluded"), "excluded local-only cache dirs must be removed from stale mirrors");
+  for (const exclude of [
+    "--exclude=/.idea/***",
+    "--exclude=/.wrangler/***",
+    "--exclude=/.qa-user-data/***",
+    "--exclude=/.worktrees/***",
+    "--exclude=/signed/***",
+    "--exclude=/screenshots/***"
+  ]) {
+    assert.ok(args.includes(exclude), `missing local-only exclude: ${exclude}`);
+  }
   for (const filter of [
     "--filter=P .git/worktrees/***",
     "--filter=P .git/objects/***",

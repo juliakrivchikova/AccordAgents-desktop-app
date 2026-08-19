@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { foldChatConversationEvents } from "../../shared/chatEventProjection";
+import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { ChatMessage, Conversation } from "../../shared/types";
 import { ChatEventLogService } from "./chatEventLog";
 import {
@@ -114,6 +115,95 @@ test("ChatService queued snapshots use the event mirror when enabled", async () 
   }
 });
 
+test("ChatService imports canonical mailbox message.created events through the mutation queue", async () => {
+  const { storage, cleanup } = await testStorage("accordagents-chat-mailbox-message-import-");
+  try {
+    const service = new ChatService(
+      storage,
+      {} as never,
+      {} as never,
+      testLogger() as never
+    );
+    await storage.saveConversation(basicConversation());
+    const participantMessage: ChatMessage = {
+      id: "worker-message-1",
+      role: "participant",
+      participantId: "participant-codex",
+      participantLabel: "@codex",
+      content: "Worker result",
+      status: "done",
+      createdAt: "2026-08-06T00:00:05.000Z",
+      metadata: {
+        runId: "mobile-worker-event-1",
+        appMessageSource: "remote-run-provider-output"
+      }
+    };
+    const event = mailboxMessageEvent(participantMessage);
+
+    assert.equal(await service.acceptMobileMailboxMessageEvent(event), true);
+    assert.equal(await service.acceptMobileMailboxMessageEvent(event), false);
+
+    const conversation = await storage.getConversation("conversation-1");
+    const events = await storage.listChatEvents("conversation-1", "conversation-1");
+    assert.equal(conversation?.messages.filter((item) => item.id === participantMessage.id).length, 1);
+    assert.equal(conversation?.updatedAt, "2026-08-06T00:00:05.000Z");
+    assert.deepEqual(events.map((item) => item.eventId), ["mailbox-message-event-1"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("ChatService imports fulfilled mobile mailbox outbox events without retriggering a run", async () => {
+  const { storage, cleanup } = await testStorage("accordagents-chat-mailbox-mobile-fulfilled-");
+  try {
+    const service = new ChatService(
+      storage,
+      {} as never,
+      {} as never,
+      testLogger() as never
+    );
+    await storage.saveConversation(basicConversation());
+    const participantMessage: ChatMessage = {
+      id: "worker-message-closed-lid",
+      role: "participant",
+      participantId: "participant-codex",
+      participantLabel: "@codex",
+      content: "Worker result after lid closed",
+      status: "done",
+      createdAt: "2026-08-06T00:00:05.000Z",
+      metadata: {
+        runId: "mobile-mobile-event-1",
+        appMessageSource: "remote-run-provider-output",
+        sourceMessageId: "mobile-event-1",
+        mobileEventId: "mobile-event-1"
+      }
+    };
+    const mobileEvent = mobileOutboxEvent("mobile-event-1", "@codex run while desktop is closed");
+
+    assert.equal(await service.acceptMobileMailboxMessageEvent(mailboxMessageEvent(participantMessage)), true);
+    assert.equal(await service.hasMobileMailboxResultForMobileEvent("conversation-1", "mobile-event-1"), true);
+    assert.equal(await service.hasAcceptedMobileEvent("conversation-1", "mobile-event-1"), false);
+    assert.equal(await service.acceptMobileMailboxOutboxEvent(mobileEvent), true);
+    assert.equal(await service.acceptMobileMailboxOutboxEvent(mobileEvent), false);
+
+    const conversation = await storage.getConversation("conversation-1");
+    assert.equal(conversation?.messages.filter((item) =>
+      item.role === "user" &&
+        item.metadata?.appMessageSource === "mobile-relay" &&
+        item.metadata?.mobileEventId === "mobile-event-1"
+    ).length, 1);
+    assert.equal(conversation?.messages.filter((item) => item.id === participantMessage.id).length, 1);
+    assert.equal(await service.hasAcceptedMobileEvent("conversation-1", "mobile-event-1"), true);
+    assert.deepEqual(conversation?.messages.map((item) => item.id), [
+      "message-1",
+      "mobile-mobile-event-1",
+      "worker-message-closed-lid"
+    ]);
+  } finally {
+    await cleanup();
+  }
+});
+
 async function testStorage(prefix: string): Promise<{ storage: StorageService; cleanup: () => Promise<void> }> {
   const directory = await mkdtemp(path.join(tmpdir(), prefix));
   const storage = Object.create(StorageService.prototype) as any;
@@ -168,5 +258,41 @@ function message(id: string, content: string, createdAt: string): ChatMessage {
     content,
     createdAt,
     metadata: {}
+  };
+}
+
+function mailboxMessageEvent(message: ChatMessage): ChatEventEnvelope<{ message: ChatMessage }> {
+  return {
+    eventId: "mailbox-message-event-1",
+    conversationId: "conversation-1",
+    logScopeId: "conversation-1",
+    originId: "worker-origin-1",
+    originSeq: 1,
+    logicalTs: "0000000000000001:worker-origin-1:conversation-1",
+    kind: "message.created",
+    payload: { message },
+    payloadHash: "sha256:payload",
+    eventHash: "sha256:event",
+    keyId: "worker-origin-1",
+    signature: "test-signature",
+    createdAt: message.createdAt
+  };
+}
+
+function mobileOutboxEvent(eventId: string, content: string): ChatEventEnvelope<{ content: string }> {
+  return {
+    eventId,
+    conversationId: "conversation-1",
+    logScopeId: "conversation-1",
+    originId: "mobile-origin-1",
+    originSeq: 1,
+    logicalTs: "0000000000000001:mobile-origin-1:conversation-1",
+    kind: "message.created",
+    payload: { content },
+    payloadHash: "sha256:mobile-payload",
+    eventHash: "sha256:mobile-event",
+    keyId: "mobile-origin-1",
+    signature: "test-mobile-signature",
+    createdAt: "2026-08-06T00:00:04.000Z"
   };
 }

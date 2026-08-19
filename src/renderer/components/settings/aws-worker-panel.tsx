@@ -3,6 +3,7 @@ import { CheckCircle2, ChevronDown, Copy, Server } from "lucide-react";
 
 import type {
   AwsWorkerOperationSnapshot,
+  AwsWorkerSpec,
   AwsWorkerSpecResolution,
   AwsWorkerStatus,
   CloudRunsSettings
@@ -60,7 +61,10 @@ export function AwsWorkerPanel(props: {
     }
   };
 
-  const start = async (resolution?: AwsWorkerSpecResolution): Promise<void> => {
+  const start = async (
+    resolution?: AwsWorkerSpecResolution,
+    expected?: { instanceId: string; desired: Pick<AwsWorkerSpec, "instanceType" | "rootVolumeSizeGb"> }
+  ): Promise<void> => {
     const continuation = operation?.phase === "error" || operation?.phase === "needs-decision"
       ? operation
       : undefined;
@@ -78,8 +82,8 @@ export function AwsWorkerPanel(props: {
         instanceType: props.settings.awsInstanceType,
         rootVolumeSizeGb: props.settings.awsRootVolumeSizeGb,
         resolution,
-        expectedInstanceId: operation?.specMismatch?.instanceId,
-        expectedDesiredSpec: resolution ? operation?.specMismatch?.desired : undefined
+        expectedInstanceId: expected?.instanceId ?? operation?.specMismatch?.instanceId,
+        expectedDesiredSpec: resolution ? expected?.desired ?? operation?.specMismatch?.desired : undefined
       });
       setOperation(result.operation);
       setStatus(result.status);
@@ -143,11 +147,38 @@ export function AwsWorkerPanel(props: {
   };
 
   const actual = status?.actualSpec ?? operation?.specMismatch?.actual;
+  const desired = {
+    instanceType: props.settings.awsInstanceType,
+    rootVolumeSizeGb: props.settings.awsRootVolumeSizeGb
+  };
   const mismatch = operation?.specMismatch;
   const needsAuthorizationRefresh = operation?.remediation === "refresh-aws-authorization";
+  const updatesExistingWorkerUser = needsAuthorizationRefresh && Boolean(operation?.awsPrincipalUserName);
   const showInitialConnection = !needsAuthorizationRefresh && !props.settings.hasAwsCredentials && !status?.configured;
   const canStart = Boolean(blob.trim() || props.settings.hasAwsCredentials || status?.configured);
   const isRunning = status?.state === "running" || status?.state === "pending";
+  const desiredInstanceDiffers = Boolean(actual?.instanceType && actual.instanceType !== desired.instanceType);
+  const desiredDiskDiffers = Boolean(actual?.rootVolumeSizeGb && actual.rootVolumeSizeGb !== desired.rootVolumeSizeGb);
+  const desiredDiskCanGrow = Boolean(actual?.instanceId && actual.rootVolumeSizeGb && desired.rootVolumeSizeGb > actual.rootVolumeSizeGb && !desiredInstanceDiffers);
+  const desiredSizeDiffers = desiredInstanceDiffers || desiredDiskDiffers;
+  const primaryActionLabel = needsAuthorizationRefresh
+    ? "Retry existing permissions"
+    : operation?.phase === "error"
+      ? "Retry"
+      : desiredDiskCanGrow
+        ? `Apply disk resize to ${desired.rootVolumeSizeGb} GB`
+        : desiredSizeDiffers
+          ? "Review size change"
+          : status?.configured && isRunning
+            ? "Check worker"
+            : "Start worker";
+  const primaryAction = async (): Promise<void> => {
+    if (desiredDiskCanGrow && actual?.instanceId) {
+      await start("grow-disk", { instanceId: actual.instanceId, desired });
+      return;
+    }
+    await start();
+  };
   const connectionForm = (
     <>
       <div className="gen-row gen-row-stack" data-testid={needsAuthorizationRefresh ? "aws-worker-authorization-recovery" : "aws-worker-connect"}>
@@ -155,10 +186,21 @@ export function AwsWorkerPanel(props: {
           <div className="gen-row-title">{needsAuthorizationRefresh ? "AWS administrator update required" : "Connect AWS account"}</div>
           {needsAuthorizationRefresh ? (
             <div className="gen-row-desc" data-testid="aws-worker-authorization-steps">
-              The restricted worker credentials cannot update their own permissions.<br />
-              1. Select Show setup command, then Copy.<br />
-              2. Run it in Terminal using an AWS administrator account. If you do not have one, send the copied command to your AWS administrator.<br />
-              3. Paste its <code>accord-aws-v1:</code> result here, then select Apply update and Retry.
+              {updatesExistingWorkerUser ? (
+                <>
+                  The active worker IAM user <code>{operation?.awsPrincipalUserName}</code> is missing required permissions{operation?.missingAwsActions?.length ? <>: <code>{operation.missingAwsActions.join(", ")}</code></> : null}.<br />
+                  1. Select Show update command, then Copy.<br />
+                  2. Run it in Terminal using an AWS administrator account. It updates that user's policy in place and does not create a new key.<br />
+                  3. Return here and select Retry existing permissions.
+                </>
+              ) : (
+                <>
+                  The restricted worker credentials cannot update their own permissions.<br />
+                  1. Select Show setup command, then Copy.<br />
+                  2. Run it in Terminal using an AWS administrator account. If you do not have one, send the copied command to your AWS administrator.<br />
+                  3. Paste its <code>accord-aws-v1:</code> result here, then select Apply update and Retry.
+                </>
+              )}
             </div>
           ) : (
             <div className="gen-row-desc">Run this scoped setup command once, then paste its result before starting the worker.</div>
@@ -167,7 +209,7 @@ export function AwsWorkerPanel(props: {
         <div className="gen-grid-form gen-grid-form-compact">
           <input className="gen-input" aria-label="AWS region" value={region} onChange={(event) => setRegion(event.target.value)} />
           <button type="button" className="gen-pill" disabled={busy} onClick={() => void loadCommand()}>
-            <span className="gen-pill-label">Show setup command</span>
+            <span className="gen-pill-label">{updatesExistingWorkerUser ? "Show update command" : "Show setup command"}</span>
           </button>
         </div>
       </div>
@@ -180,21 +222,25 @@ export function AwsWorkerPanel(props: {
           <pre className="gen-aws-command" data-testid="aws-worker-command">{command}</pre>
         </div>
       ) : null}
-      <div className="gen-card-divider" />
-      <div className="gen-row gen-row-stack">
-        <div className="gen-row-text">
-          <div className="gen-row-title">{needsAuthorizationRefresh ? "Paste the updated result" : "Paste the result"}</div>
-          <div className="gen-row-desc">The command prints a line beginning with <code>accord-aws-v1:</code>.</div>
-        </div>
-        <textarea className="gen-input gen-aws-paste" aria-label="AWS setup result" value={blob} onChange={(event) => setBlob(event.target.value)} />
-        {needsAuthorizationRefresh ? (
-          <div className="gen-actions">
-            <button type="button" className="gen-pill" data-testid="aws-worker-apply-authorization" disabled={busy || !blob.trim()} onClick={() => void start()}>
-              <span className="gen-pill-label">Apply update and Retry</span>
-            </button>
+      {!updatesExistingWorkerUser ? (
+        <>
+          <div className="gen-card-divider" />
+          <div className="gen-row gen-row-stack">
+            <div className="gen-row-text">
+              <div className="gen-row-title">{needsAuthorizationRefresh ? "Paste the updated result" : "Paste the result"}</div>
+              <div className="gen-row-desc">The command prints a line beginning with <code>accord-aws-v1:</code>.</div>
+            </div>
+            <textarea className="gen-input gen-aws-paste" aria-label="AWS setup result" value={blob} onChange={(event) => setBlob(event.target.value)} />
+            {needsAuthorizationRefresh ? (
+              <div className="gen-actions">
+                <button type="button" className="gen-pill" data-testid="aws-worker-apply-authorization" disabled={busy || !blob.trim()} onClick={() => void start()}>
+                  <span className="gen-pill-label">Apply update and Retry</span>
+                </button>
+              </div>
+            ) : null}
           </div>
-        ) : null}
-      </div>
+        </>
+      ) : null}
     </>
   );
 
@@ -205,8 +251,8 @@ export function AwsWorkerPanel(props: {
       <div className="gen-card-divider" />
       <div className="gen-row gen-row-stack">
         <div className="gen-row-text">
-          <div className="gen-row-title">Required worker size</div>
-          <div className="gen-row-desc">Existing larger workers are adopted. Smaller workers always require your choice.</div>
+          <div className="gen-row-title">Desired worker size</div>
+          <div className="gen-row-desc">New workers use this size. Existing workers keep their actual size until you apply the change.</div>
         </div>
         <div className="gen-grid-form gen-grid-form-compact">
           <label className="gen-select-wrap">
@@ -224,13 +270,24 @@ export function AwsWorkerPanel(props: {
         </div>
       </div>
 
+      <div className="gen-aws-specs" data-testid="aws-worker-desired-specs">
+        <strong className="gen-aws-spec-label">Desired</strong><span>{desired.instanceType}</span><span>{desired.rootVolumeSizeGb} GB disk</span>
+      </div>
+
       {actual ? (
         <div className="gen-aws-specs" data-testid="aws-worker-actual-specs">
-          <span>{actual.instanceId}</span><span>{actual.region}</span><span>{actual.instanceType}</span>
+          <strong className="gen-aws-spec-label">Actual</strong><span>{actual.instanceId}</span><span>{actual.region}</span><span>{actual.instanceType}</span>
           {actual.vCpu ? <span>{actual.vCpu} vCPU</span> : null}
           {actual.memoryMiB ? <span>{Math.round(actual.memoryMiB / 1024)} GB RAM</span> : null}
           <span>{actual.rootVolumeSizeGb} GB disk</span>
-          {isRunning ? <strong>Running · billable</strong> : <span>{status?.state ?? "unknown"}</span>}
+          {isRunning ? <strong className="gen-aws-running">Running · billable</strong> : <span>{status?.state ?? "unknown"}</span>}
+        </div>
+      ) : null}
+
+      {actual && desiredSizeDiffers && operation?.phase !== "needs-decision" ? (
+        <div className="gen-aws-decision gen-aws-size-change" data-testid="aws-worker-unapplied-size">
+          <strong>Size change not applied.</strong>
+          <span>Actual worker is {actual.instanceType}, {actual.rootVolumeSizeGb} GB disk. Desired worker is {desired.instanceType}, {desired.rootVolumeSizeGb} GB disk.</span>
         </div>
       ) : null}
 
@@ -258,11 +315,11 @@ export function AwsWorkerPanel(props: {
           <div className="gen-row-desc">This worker is shared by every configured laptop and project. It does not stop automatically.</div>
         </div>
         <div className="gen-actions">
-          <button type="button" className="gen-pill" data-testid="aws-worker-start" disabled={busy || !canStart} onClick={() => void start()}>
+          <button type="button" className="gen-pill" data-testid="aws-worker-start" disabled={busy || !canStart} onClick={() => void primaryAction()}>
             <span className="gen-pill-lead"><Server size={16} /></span>
-            <span className="gen-pill-label">{needsAuthorizationRefresh ? "Retry existing permissions" : operation?.phase === "error" ? "Retry" : "Start worker"}</span>
+            <span className="gen-pill-label">{primaryActionLabel}</span>
           </button>
-          {status?.configured ? <button type="button" className="gen-pill" disabled={busy} onClick={() => void refresh()}><span className="gen-pill-label">Refresh</span></button> : null}
+          {status?.configured ? <button type="button" className="gen-pill" disabled={busy} onClick={() => void refresh()}><span className="gen-pill-label">Refresh status</span></button> : null}
           {status?.configured ? <button type="button" className="gen-pill" disabled={busy || !isRunning} onClick={() => void stop()}><span className="gen-pill-label">Stop</span></button> : null}
           {status?.configured ? <button type="button" className="gen-pill gen-pill-danger" disabled={busy} onClick={() => void remove()}><span className="gen-pill-label">Delete</span></button> : null}
         </div>

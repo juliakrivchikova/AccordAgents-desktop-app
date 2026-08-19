@@ -3,29 +3,99 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#f7f8f3" />
+    <meta name="theme-color" content="#eceef2" />
     <title>AccordAgents</title>
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="assets/accordagents-mark.png" />
-    <link rel="stylesheet" href="mobile-app.css" />
+    <link rel="stylesheet" href="mobile-app.css?v=2026-08-19-failed-run-ends-its-rows-v1" />
   </head>
   <body>
-    <main class="mobile-shell">
-      <header class="mobile-header">
-        <img class="mobile-mark" src="assets/accordagents-mark.png" alt="" width="44" height="44" />
-        <div class="mobile-title">
-          <h1>AccordAgents</h1>
-          <p id="connection-state">Waiting to sync</p>
+    <div class="mobile-stage">
+      <main class="mobile-phone" data-screen-label="Mobile control">
+        <div class="mobile-status-bar" aria-hidden="true">
+          <span>9:41</span>
+          <span class="mobile-status-icons">
+            <span class="mobile-signal"></span>
+            <span class="mobile-battery"></span>
+          </span>
         </div>
-      </header>
-      <section class="thread-surface" aria-live="polite">
-        <ol id="message-list" class="message-list"></ol>
-      </section>
-      <form id="composer-form" class="composer">
-        <textarea id="composer-input" name="message" rows="1" placeholder="Message" autocomplete="off"></textarea>
-        <button id="send-button" type="submit">Send</button>
-      </form>
-    </main>
-    <script src="mobile-app.js" defer></script>
+        <section id="chats-screen" class="mobile-screen is-active" aria-label="Chats">
+          <header class="mobile-chats-header">
+            <h1>Chats</h1>
+            <button class="mobile-round-button" type="button" aria-label="Search chats">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="8"></circle>
+                <path d="m21 21-4.3-4.3"></path>
+              </svg>
+            </button>
+            <button class="mobile-round-button is-primary" type="button" aria-label="New chat">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 5v14M5 12h14"></path>
+              </svg>
+            </button>
+          </header>
+          <button id="enable-alerts" class="mobile-alerts-banner" type="button" hidden>Enable message alerts</button>
+          <div id="chat-list" class="mobile-chat-list mscroll" aria-live="polite"></div>
+        </section>
+        <section id="timeline-screen" class="mobile-screen" aria-label="Chat timeline">
+          <header class="mobile-chat-header">
+            <button id="back-to-timeline" class="mobile-icon-button thread-back" type="button" aria-label="Back to the chat">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m15 18-6-6 6-6"></path>
+              </svg>
+            </button>
+            <button id="back-to-chats" class="mobile-icon-button" type="button" aria-label="Back to chats">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m15 18-6-6 6-6"></path>
+              </svg>
+            </button>
+            <div class="mobile-title">
+              <h1 id="chat-title">AccordAgents</h1>
+              <p id="connection-state">Waiting to sync</p>
+            </div>
+            <span class="mobile-header-spacer" aria-hidden="true"></span>
+          </header>
+          <section class="thread-surface mscroll" aria-live="polite">
+            <ol id="message-list" class="message-list"></ol>
+          </section>
+          <!-- W-M: tapping the in-progress row opens the reply as it is written.
+               A view of its own, so the timeline itself stays calm. -->
+          <section id="stream-view" class="stream-view" aria-label="Live reply" hidden>
+            <header class="stream-view-head">
+              <button id="stream-close" class="mobile-icon-button" type="button" aria-label="Back to the chat">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="m15 18-6-6 6-6"></path>
+                </svg>
+              </button>
+              <div class="stream-view-title">
+                <strong id="stream-label">Agent</strong>
+                <span id="stream-state">Writing…</span>
+              </div>
+            </header>
+            <div id="stream-body" class="stream-view-body mscroll"></div>
+          </section>
+          <button id="jump-to-latest" class="jump-to-latest" type="button" aria-label="Jump to latest message">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 5v14M19 12l-7 7-7-7"></path>
+            </svg>
+            Latest
+          </button>
+          <form id="composer-form" class="composer">
+            <div class="composer-input-wrap">
+              <textarea id="composer-input" name="message" rows="1" placeholder="Message the room..." aria-label="Message the room" autocomplete="off"></textarea>
+              <span aria-hidden="true">@</span>
+            </div>
+            <button id="send-button" type="submit" aria-label="Send message">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 19V5M5 12l7-7 7 7"></path>
+              </svg>
+            </button>
+          </form>
+        </section>
+        <div class="mobile-home-indicator" aria-hidden="true"><span></span></div>
+      </main>
+    </div>
+    <script src="jsqr.js?v=2026-08-19-failed-run-ends-its-rows-v1" defer></script>
+    <script src="mobile-app.js?v=2026-08-19-failed-run-ends-its-rows-v1" defer></script>
   </body>
 </html>

@@ -1,7 +1,19 @@
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
-import type { CreateMobilePairingRequest, CreateMobilePairingResult } from "./mobilePairing";
+import type {
+  CreateMobilePairingRequest,
+  CreateMobilePairingResult,
+  MobileControlSettings,
+  RevokeMobilePairingRequest,
+  RevokeMobilePairingResult
+} from "./mobilePairing";
 
-export type { CreateMobilePairingRequest, CreateMobilePairingResult } from "./mobilePairing";
+export type {
+  CreateMobilePairingRequest,
+  CreateMobilePairingResult,
+  MobileControlSettings,
+  RevokeMobilePairingRequest,
+  RevokeMobilePairingResult
+} from "./mobilePairing";
 
 export type ProviderKind = "openai" | "anthropic" | "gemini" | "codex-cli" | "claude-code" | "gemini-cli";
 
@@ -35,6 +47,7 @@ export interface CloudRunWorkerSettings {
   workerRoot?: string;
   remoteCwd?: string;
   codexPath?: string;
+  claudePath?: string;
 }
 
 export type CloudRunWorkerMode = "ssh" | "aws";
@@ -209,6 +222,9 @@ export interface AwsWorkerOperationSnapshot {
   authCode?: string;
   status?: AwsWorkerStatus;
   specMismatch?: AwsWorkerSpecMismatch;
+  missingAwsActions?: string[];
+  awsPrincipalArn?: string;
+  awsPrincipalUserName?: string;
 }
 
 export interface AwsWorkerVolumeExpansion {
@@ -229,6 +245,36 @@ export interface CloudRunWorkerTestResult {
   message: string;
 }
 
+/** A phone that completed pairing. Persisted so one install survives desktop
+ *  restarts; the relay seal key is stored through safeStorage like other
+ *  secrets. Removed only when the user revokes the device. */
+export interface StoredMobilePairedDevice {
+  stableRoutingId: string;
+  rendezvousId: string;
+  /** Pairing package JSON with relaySealKeyBase64 stripped out. */
+  pairingJson: string;
+  encryptedSealKey: string;
+  sealKeyProtection: AgentEnvironmentValueProtection;
+  claimedAt: string;
+  /** Mailbox arrival-cursor state (W1): one epoch + one number replaces
+   *  re-reading the whole box every poll. */
+  mailboxEpoch?: string;
+  mailboxCursor?: number;
+}
+
+/** A relay mailbox revoke that could not reach the relay when its pairing was
+ *  revoked. Retried on startup until the relay confirms, because until then a
+ *  revoked link holder could still use the mailbox. The bearer token is a
+ *  one-way derivation from the (already discarded) pairing seal key and is
+ *  stored through safeStorage like other secrets. */
+export interface StoredPendingMailboxRevocation {
+  outboxUrl: string;
+  mailboxScopeId: string;
+  encryptedToken: string;
+  tokenProtection: AgentEnvironmentValueProtection;
+  revokedAt: string;
+}
+
 export type CloudRunWorkerCheckId =
   | "connect"
   | "sudo"
@@ -240,9 +286,14 @@ export type CloudRunWorkerCheckId =
   | "build-essential"
   | "codex"
   | "codex-auth"
+  | "claude"
+  | "claude-auth"
   | "git-identity"
   | "persistent-storage"
-  | "userns";
+  | "userns"
+  | "browser"
+  | "headless-display"
+  | "sqlite3";
 
 export type CloudRunWorkerCheckStatus = "pass" | "warn" | "fail";
 
@@ -264,7 +315,7 @@ export interface CloudRunWorkerDoctorReport {
 export interface CloudRunWorkerSetupProgress {
   stage: string;
   message: string;
-  // Present while the codex device-auth fix waits for the user to approve the
+  // Present while a provider device-auth fix waits for the user to approve the
   // sign-in in their browser.
   authUrl?: string;
   authCode?: string;
@@ -272,6 +323,7 @@ export interface CloudRunWorkerSetupProgress {
 
 export interface RemoteRunSyncInfo {
   localPath: string;
+  // Stable per-project mirror repo on the worker.
   remotePath?: string;
 }
 
@@ -291,6 +343,7 @@ export interface RemoteRunHandle {
   error?: string;
   sync?: RemoteRunSyncInfo;
   promptContextPointerAdvance?: ChatPromptContextPointerAdvance;
+  executionLease?: ChatExecutionLeaseMetadata;
 }
 
 export interface RemoteParticipantSessionHandle {
@@ -335,6 +388,7 @@ export interface AppSettings {
   chatAutoWatchWakeLimit: number;
   chatPromptContext: ChatPromptContextSettings;
   cloudRuns: CloudRunsSettings;
+  mobileControl: MobileControlSettings;
   providers: ProviderSettings[];
   chatRoleConfigs: ChatRoleConfig[];
   chatBehaviorRules: ChatBehaviorRuleConfig[];
@@ -669,6 +723,7 @@ export interface ChatParticipant {
 export interface ChatParticipantSession {
   participantId: string;
   sessionId: string;
+  executionSessionId?: string;
   roleConfigId: string;
   roleConfigVersion: number;
   roleAppToolCapabilities?: ChatAppToolCapability[];
@@ -869,6 +924,8 @@ export type ChatPermissionChangeRequest =
 
 export interface ChatToolPermissionRequest {
   kind: "toolPermission";
+  agentMode?: ChatAgentMode;
+  nativeOccurrenceId?: string;
   reason?: string;
   toolName: string;
   toolInput?: unknown;
@@ -1160,6 +1217,11 @@ export interface ChatMessageMetadata {
   approvedContinuation?: boolean;
   syncedThroughMessageId?: string;
   runId?: string;
+  mobileEventId?: string;
+  turnSegmentId?: string;
+  participantRequestDepth?: number;
+  participantRequestBatchId?: string;
+  participantRequestChainRootId?: string;
   nativeCommand?: {
     name: "goal";
     objective: string;
@@ -1177,6 +1239,8 @@ export interface ChatMessageMetadata {
   activityEvents?: ChatAgentActivityEvent[];
   processingTranscript?: ChatProcessingTranscript;
   remoteRunStatus?: ChatRemoteRunStatus;
+  executionLease?: ChatExecutionLeaseMetadata;
+  executionLeaseSuperseded?: boolean;
   accordResolution?: ChatAccordResolutionMetadata;
   autoWatchTrigger?: {
     participantId: string;
@@ -1185,10 +1249,25 @@ export interface ChatMessageMetadata {
   };
 }
 
+export interface ChatExecutionLeaseMetadata {
+  conversationId: string;
+  participantId: string;
+  participantSessionId: string;
+  leaseId: string;
+  holderId: string;
+  generation: number;
+  status: "active" | "released" | "reclaimed" | "conflict";
+  acquiredAt: string;
+  heartbeatAt: string;
+  expiresAt: string;
+  releasedAt?: string;
+}
+
 export type ChatRemoteRunPhase =
   | "preparing-worker"
   | "syncing-files"
   | "launching-session"
+  | "waiting-for-runner"
   | "waiting-for-response"
   | "processing-request"
   | "waiting-for-approval"
@@ -1417,6 +1496,7 @@ export interface DismissConversationWarningsRequest {
 export interface SendChatMessageRequest {
   conversationId: string;
   runId?: string;
+  mobileEventId?: string;
   content: string;
   skillMentions?: ChatSkillMention[];
   repoFileMentions?: RepoFileMention[];
@@ -1762,6 +1842,11 @@ export interface AgentRunProgress {
   messageId?: string;
   partialContent?: string;
   remoteRunStatus?: ChatRemoteRunStatus;
+  /** The mobile event id of the phone-sent message this run is answering.
+   *  The phone keys its in-progress row by this id while the run itself gets
+   *  a fresh id, so live frames must carry it or a watcher can never bind
+   *  them to the row it follows. */
+  mobileEventId?: string;
 }
 
 export interface ChatMessage {
@@ -2441,6 +2526,7 @@ export interface AppBridge {
   respondToChatChoice(request: RespondToChatChoiceRequest): Promise<StartReviewResult>;
   respondToChatAppToolApproval(request: RespondToChatAppToolApprovalRequest): Promise<Conversation | undefined>;
   createMobilePairing(request: CreateMobilePairingRequest): Promise<CreateMobilePairingResult>;
+  revokeMobilePairing(request: RevokeMobilePairingRequest): Promise<RevokeMobilePairingResult>;
   startReview(request: ReviewRequest): Promise<StartReviewResult>;
   continueReview(request: ContinueReviewRequest): Promise<StartReviewResult>;
   askPlanDecisionClarification(request: PlanDecisionClarificationRequest): Promise<StartReviewResult>;

@@ -91,6 +91,7 @@ export function ConversationPanel({
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
           onCompactParticipant={(participantId) => chatActions.compactChatParticipant(participantId)}
           onStopRun={(runId) => void window.consensus.cancelReview(runId)}
+          onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
           onDismissMessageFocus={() => {
             // Dismissing the highlight by clicking outside it is the acknowledgment
             // gesture in the activity view: mark the selected finished item read.

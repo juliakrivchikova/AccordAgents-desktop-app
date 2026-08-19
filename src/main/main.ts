@@ -1,5 +1,5 @@
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { app, autoUpdater, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import type {
   AddChatParticipantRequest,
@@ -7,6 +7,7 @@ import type {
   DeleteAgentEnvironmentVariableRequest,
   AgentHealth,
   ChatBehaviorRuleConfigUpdate,
+  ChatMessage,
   ChatProviderKind,
   ChatPromptContextSettings,
   ChatSavedPromptConfigUpdate,
@@ -14,12 +15,16 @@ import type {
   CloudRunWorkerSettings,
   ConnectAwsWorkerRequest,
   CreateMobilePairingRequest,
+  RevokeMobilePairingRequest,
+  RevokeMobilePairingResult,
+  StoredPendingMailboxRevocation,
   AwsWorkerStartRequest,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
   ComposeImplementationPlanRequest,
   ContinueReviewRequest,
+  Conversation,
   ConversationMessagePageRequest,
   CreateChatConversationRequest,
   DeleteChatConversationRequest,
@@ -74,7 +79,8 @@ import type {
   SubmitArtifactDraftRequest,
   UpdateArtifactDraftRosterRequest,
   WithdrawArtifactDraftRequest,
-  UpdateArtifactAccessRequest
+  UpdateArtifactAccessRequest,
+  ReviewProgress
 } from "../shared/types";
 import { ARTIFACT_USER_MEMBER } from "../shared/types";
 import { artifactMembersForConversation } from "../shared/artifacts";
@@ -86,11 +92,42 @@ import { ChatEventLogService } from "./services/chatEventLog";
 import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "./services/chatEventMirror";
 import { ChatService } from "./services/chat";
 import { MobilePairingService } from "./services/mobilePairing";
-import { MobileRelayControlService } from "./services/mobileRelayControl";
-import type { MobilePairingPackage } from "../shared/mobilePairing";
+import { MobileProgressEnvelopeTracker } from "./services/mobileProgressEnvelopeTracker";
+import {
+  MobileRelayControlService,
+  type MobileRelayChatCatalog,
+  type MobileRelayChatListItem,
+  type MobileTimelineEvents,
+  type MobileTimelineSink
+} from "./services/mobileRelayControl";
+import {
+  collectMobileMailboxOutboxEvents,
+  fulfilledMobileEventKeysFromMailboxEvents,
+  mobileMailboxEventScopeKey
+} from "./services/mobileMailboxOutbox";
+import { mobilePairingRequestWithEndpointDefaults, type MobilePairingPackage } from "../shared/mobilePairing";
+import {
+  chatMessageVisualThreadRootId,
+  chatParticipantRequestReplyRootMap
+} from "../shared/chatParticipantRequestThreads";
+import type { ChatEventEnvelope } from "../shared/chatEvents";
+import type { ChatDeviceCapabilityGrantPayload, ChatDeviceCapabilityRevokedPayload } from "../shared/chatDeviceCapabilities";
 import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
+import { acquireMobileMailboxExecutionClaim } from "./services/mobileMailboxClaims";
+import {
+  deleteMailboxEvents,
+  mailboxAccessForSealKey,
+  mailboxAuthHeaders,
+  mailboxEndpointForSealKey,
+  openMailboxEventPayloads,
+  classifyMailboxRegistrationFailure,
+  registerMailboxForSealKey,
+  revokeMailboxForSealKey,
+  revokeMailboxWithToken,
+  sealMailboxEventPayloads
+} from "./services/mailboxAccess";
 import {
   APP_ARTIFACT_CREATE_TOOL,
   APP_ARTIFACT_DRAFT_LIST_TOOL,
@@ -113,19 +150,26 @@ import {
 import { AppSkillsService } from "./services/appSkills";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { bootstrapAppUpdater } from "./services/appUpdater";
-import { ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
+import { CommandError, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { CloudRunDoctorService } from "./services/cloudRunDoctor";
 import { CloudRunAwsService } from "./services/cloudRunAws";
 import { AwsWorkerSetupService } from "./services/awsWorkerSetup";
 import { DebugLogService } from "./services/debugLogs";
 import { GitService } from "./services/git";
+import { MOBILE_RUNNER_POLICY_KIND, mobileMailboxRunnerInstallCommand, mobileMailboxRunnerPolicyFromConversation } from "./services/mobileMailboxRunner";
 import { ProviderRunner } from "./services/providers";
 import { RemoteRunService } from "./services/remoteRuns";
 import { RemoteRunCoordinator } from "./services/remoteRunCoordinator";
 import { LocalFileOpenerService } from "./services/localFileOpener";
 import { SettingsService } from "./services/settings";
 import { StorageService } from "./services/storage";
+import {
+  BundledSqliteInstallationError,
+  DAMAGED_SQLITE_INSTALLATION_MESSAGE,
+  resolveSqliteExecutable,
+  validateSqliteExecutable
+} from "./services/sqliteCli";
 import { PluginService } from "./services/plugins";
 import { UserSkillsService } from "./services/userSkills";
 
@@ -133,6 +177,19 @@ let mainWindow: BrowserWindow | undefined;
 let quitCleanupStarted = false;
 let quitCleanupFinished = false;
 let quittingForUpdate = false;
+
+function sendToMainWindow(channel: string, ...args: unknown[]): boolean {
+  const window = mainWindow;
+  if (!window || window.isDestroyed() || window.webContents.isDestroyed()) {
+    return false;
+  }
+  try {
+    window.webContents.send(channel, ...args);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const userDataDirOverride = process.env.ACCORDAGENTS_USER_DATA_DIR?.trim();
 if (userDataDirOverride) {
@@ -142,11 +199,49 @@ if (userDataDirOverride) {
 const gitService = new GitService();
 const settingsService = new SettingsService();
 const agentEnvironmentService = new AgentEnvironmentService(settingsService);
-const storageService = new StorageService();
+const sqliteExecutable = resolveSqliteExecutable({
+  appPath: app.getAppPath(),
+  resourcesPath: process.resourcesPath,
+  isPackaged: app.isPackaged
+});
+const storageService = new StorageService({ sqliteExecutable });
 const localFileOpenerService = new LocalFileOpenerService(storageService, settingsService);
 const providerRunner = new ProviderRunner();
 const debugLogService = new DebugLogService();
 setCommandDebugLogger(debugLogService);
+
+function runtimeErrorDetails(error: unknown): { message: string; stack?: string } {
+  if (error instanceof Error) {
+    return {
+      message: error.message,
+      stack: error.stack
+    };
+  }
+  return { message: String(error) };
+}
+
+function recordMainProcessRuntimeError(kind: "uncaughtException" | "unhandledRejection", error: unknown, origin?: string): void {
+  const details = runtimeErrorDetails(error);
+  console.error(`Main process ${kind}:`, error);
+  void debugLogService.write("main.runtime-error", {
+    kind,
+    origin,
+    ...details
+  });
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    dialog.showErrorBox("AccordAgents failed", details.message);
+    app.quit();
+  }
+}
+
+process.on("uncaughtException", (error, origin) => {
+  recordMainProcessRuntimeError("uncaughtException", error, origin);
+});
+
+process.on("unhandledRejection", (reason) => {
+  recordMainProcessRuntimeError("unhandledRejection", reason);
+});
+
 const cliAgentRunner = new CliAgentRunner(debugLogService, () => settingsService.getManualAgentEnvironment());
 void settingsService.getCliAgentRunTimeoutMs()
   .then((timeoutMs) => cliAgentRunner.setRunTimeoutMs(timeoutMs))
@@ -176,12 +271,54 @@ const chatEventMirrorService = new ChatEventMirrorService(
 );
 const mobilePairingService = new MobilePairingService(chatEventLogService);
 const consensusService = new ConsensusService(gitService, storageService, providerRunner, cliAgentRunner, debugLogService, (conversation) => {
-  mainWindow?.webContents.send("conversations:updated", conversation);
+  sendToMainWindow("conversations:updated", conversation);
 });
-const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation) => {
-  mainWindow?.webContents.send("conversations:updated", conversation);
-}, userSkillsService, (progress) => mainWindow?.webContents.send("conversations:review-progress", progress), chatEventMirrorService);
+const MOBILE_RELAY_CONNECT_TIMEOUT_MS = 8_000;
+const MOBILE_MAILBOX_POLL_INTERVAL_MS = 2_500;
+const MOBILE_MAILBOX_OWNER_ACTION_BACKOFF_MS = 5 * 60_000;
+const MOBILE_EVENT_EXECUTION_CLAIM_TTL_MS = 45_000;
 const mobileRelayControls = new Map<string, MobileRelayControlService>();
+const mobileMailboxPollers = new Map<string, NodeJS.Timeout>();
+const mobilePairingsByKey = new Map<string, MobilePairingPackage>();
+// W1 arrival cursors, per pairing. Persisted with paired devices so a restart
+// does not re-read the whole mailbox.
+const mobileMailboxCursors = new Map<string, { epoch: string; cursor: number }>();
+// W3/W-A bookkeeping: which published envelopes may be deleted early, decided
+// per envelope rather than per run. See mobileProgressEnvelopeTracker.
+const mobileProgressEnvelopes = new MobileProgressEnvelopeTracker();
+// Phones that have actually connected, mapped to when they first connected.
+// These survive restarts and never expire on a timer; only an explicit revoke
+// removes them.
+const mobileClaimedPairingKeys = new Map<string, string>();
+const mobileMailboxRunnerStarts = new Map<string, Promise<boolean>>();
+const mobilePairingExpiryTimers = new Map<string, NodeJS.Timeout>();
+const mobileRevokedPairingKeys = new Set<string>();
+let mobileMailboxOwnerActionBackoffUntil = 0;
+const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation) => {
+  sendToMainWindow("conversations:updated", conversation);
+  for (const control of mobileRelayControls.values()) {
+    control.pushConversationSnapshot(conversation);
+  }
+  void publishMobileRunnerPoliciesForConversation(conversation);
+}, userSkillsService, (progress) => emitReviewProgress(progress), chatEventMirrorService, (conversation, messages) => {
+  // W-C: an interrupted run's recovered terminals are the only thing that will
+  // ever tell a paired phone that run is over.
+  for (const control of mobileRelayControls.values()) {
+    control.pushRecoveredRunTerminals(conversation, messages);
+  }
+});
+// W-M: every progress path must reach the paired phones, not only the
+// renderer. Interactive runs (chat:send, accord, compaction) pass their own
+// per-run callback, which used to carry only the window delivery — the
+// constructor-level fan-out was bypassed and phones went silent for every
+// interactively started run, which is all of them.
+function emitReviewProgress(progress: ReviewProgress): void {
+  sendToMainWindow("conversations:review-progress", progress);
+  for (const control of mobileRelayControls.values()) {
+    control.noteExternalChatProgress(progress);
+  }
+}
+
 const remoteRunService = new RemoteRunService(chatService, {
   syncLogger: (event, payload) => {
     void debugLogService.write(event, payload);
@@ -204,6 +341,7 @@ const cloudRunAwsService = new CloudRunAwsService(settingsService, {
 const awsWorkerSetupService = new AwsWorkerSetupService(cloudRunAwsService, cloudRunDoctorService, settingsService);
 void awsWorkerSetupService.recoverInterruptedOperation();
 chatService.setCloudRunAwsService(cloudRunAwsService);
+chatService.setCloudRunDoctorService(cloudRunDoctorService);
 const remoteRunCoordinator = new RemoteRunCoordinator(remoteRunService, chatService, settingsService, debugLogService);
 chatService.setRemoteRunService(remoteRunService);
 chatService.setRemoteRunCoordinator(remoteRunCoordinator);
@@ -230,7 +368,7 @@ appMcpService.setChatSendMessageHandler((actor, request) => chatService.sendChat
 appMcpService.setChatSetTitleHandler((actor, request) => chatService.setChatTitleFromTool(actor, request));
 // Artifacts persist in their own tables of the same SQLite database as
 // conversations, but independently of conversation payloads.
-const artifactStore = new ArtifactStore(path.join(app.getPath("userData"), "accordagents.sqlite3"));
+const artifactStore = new ArtifactStore(path.join(app.getPath("userData"), "accordagents.sqlite3"), sqliteExecutable);
 const artifactService = new ArtifactService({
   store: artifactStore,
   getMembers: async (conversationId) => {
@@ -242,7 +380,7 @@ const artifactService = new ArtifactService({
   },
   postNote: (conversationId, eventId, content) => chatService.postArtifactChatNote(conversationId, eventId, content),
   onChanged: (conversationId) => {
-    mainWindow?.webContents.send("artifacts:updated", { conversationId });
+    sendToMainWindow("artifacts:updated", { conversationId });
   },
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
@@ -541,7 +679,7 @@ async function openTerminal(): Promise<void> {
 
 function createWindow(): void {
   const windowTitle = process.env.ACCORDAGENTS_WINDOW_TITLE?.trim() || "AccordAgents";
-  mainWindow = new BrowserWindow({
+  const window = new BrowserWindow({
     width: 1080,
     height: 720,
     minWidth: 1080,
@@ -559,19 +697,35 @@ function createWindow(): void {
       sandbox: true
     }
   });
-  mainWindow.on("page-title-updated", (event) => {
+  mainWindow = window;
+  window.on("close", () => {
+    if (mainWindow === window) {
+      mainWindow = undefined;
+    }
+  });
+  window.webContents.on("destroyed", () => {
+    if (mainWindow === window) {
+      mainWindow = undefined;
+    }
+  });
+  window.webContents.on("render-process-gone", () => {
+    if (mainWindow === window) {
+      mainWindow = undefined;
+    }
+  });
+  window.on("page-title-updated", (event) => {
     if (windowTitle !== "AccordAgents") {
       event.preventDefault();
-      mainWindow?.setTitle(windowTitle);
+      window.setTitle(windowTitle);
     }
   });
 
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
   if (devServerUrl) {
-    void mainWindow.loadURL(devServerUrl);
-    mainWindow.webContents.openDevTools({ mode: "detach" });
+    void window.loadURL(devServerUrl);
+    window.webContents.openDevTools({ mode: "detach" });
   } else {
-    void mainWindow.loadFile(path.join(__dirname, "../../renderer/index.html"));
+    void window.loadFile(path.join(__dirname, "../../renderer/index.html"));
   }
 }
 
@@ -649,25 +803,1176 @@ async function withCloudRunWorker<T>(
   });
 }
 
+// W-I: a registration the relay refused outright can never succeed on retry —
+// registration is trust-on-first-use, so the scope id is already taken. The
+// lockout set stops the self-heal loop; the warning names the fix.
+const mobileRegistrationLockouts = new Set<string>();
+// W-G(e): remote-revoked handling runs once per pairing; the teardown below
+// is not idempotent against concurrent poll/publish failures.
+const mobileRemoteRevokedHandled = new Set<string>();
+
+function mobilePairingConversationId(pairing: MobilePairingPackage): string | undefined {
+  return pairing.capabilities.find((capability) => capability.scope === "conversation")?.conversationId;
+}
+
+/** W-G(e): the relay reports this mailbox as tombstoned. Terminal by design —
+ *  polling and self-heal registration stop, the pairing is dropped and
+ *  persisted as gone, and the paired conversation carries the warning. A
+ *  desktop restored from an old backup must not silently resurrect a revoked
+ *  mailbox. */
+async function handleRemoteMailboxRevoked(pairing: MobilePairingPackage): Promise<void> {
+  const key = mobilePairingKey(pairing);
+  if (mobileRemoteRevokedHandled.has(key)) {
+    return;
+  }
+  mobileRemoteRevokedHandled.add(key);
+  mobileRevokedPairingKeys.add(key);
+  mobileClaimedPairingKeys.delete(key);
+  mobilePairingsByKey.delete(key);
+  mobileMailboxCursors.delete(key);
+  mobileRelayControls.get(pairing.rendezvousId)?.close();
+  mobileRelayControls.delete(pairing.rendezvousId);
+  const poller = mobileMailboxPollers.get(key);
+  if (poller) {
+    clearInterval(poller);
+    mobileMailboxPollers.delete(key);
+  }
+  await persistMobilePairedDevices();
+  await debugLogService.write("mobile.pairing.revoked-remote", {
+    routingId: pairing.stableRoutingId,
+    rendezvousId: pairing.rendezvousId
+  });
+  const conversationId = mobilePairingConversationId(pairing);
+  if (conversationId) {
+    await chatService.recordConversationWarning(
+      conversationId,
+      "The relay reports the paired phone's mailbox as revoked, so the pairing was stopped. Create a new pairing link to reconnect the phone."
+    );
+  }
+}
+
+function isRemoteRevokedMailboxBody(body: string): boolean {
+  return body.includes("mailbox_revoked");
+}
+
+async function ensureMailboxRegisteredForPairing(pairing: MobilePairingPackage): Promise<boolean> {
+  if (!pairing.outboxUrl) {
+    return false;
+  }
+  const key = mobilePairingKey(pairing);
+  if (mobileRegistrationLockouts.has(key) || mobileRevokedPairingKeys.has(key)) {
+    return false;
+  }
+  try {
+    const result = await registerMailboxForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64);
+    if (!result.ok) {
+      await debugLogService.write("mobile.mailbox.register-error", {
+        routingId: pairing.stableRoutingId,
+        status: result.status,
+        message: result.error ?? ""
+      });
+      const failure = classifyMailboxRegistrationFailure(result);
+      if (failure === "revoked") {
+        await handleRemoteMailboxRevoked(pairing);
+      } else if (failure === "lockout") {
+        mobileRegistrationLockouts.add(key);
+        await debugLogService.write("mobile.mailbox.register-lockout", {
+          routingId: pairing.stableRoutingId
+        });
+        const conversationId = mobilePairingConversationId(pairing);
+        if (conversationId) {
+          await chatService.recordConversationWarning(
+            conversationId,
+            "The relay refused this pairing's mailbox registration, which can happen when the mailbox was claimed while the relay was unreachable. The phone cannot connect on this link; re-pair it with a fresh link."
+          );
+        }
+      }
+    }
+    return result.ok;
+  } catch (error) {
+    await debugLogService.write("mobile.mailbox.register-error", {
+      routingId: pairing.stableRoutingId,
+      message: error instanceof Error ? error.message : String(error)
+    });
+    return false;
+  }
+}
+
 async function startMobileRelayControlForPairing(pairing: MobilePairingPackage): Promise<void> {
   if (!pairing.relayUrl) {
     return;
   }
+  // Idempotent re-register: covers pairings created while the relay was
+  // unreachable and pairings persisted before mailboxes required a lock.
+  void ensureMailboxRegisteredForPairing(pairing);
+  const conversationCapability = pairing.capabilities.find((capability) => capability.scope === "conversation");
   mobileRelayControls.get(pairing.rendezvousId)?.close();
+  mobilePairingsByKey.set(mobilePairingKey(pairing), pairing);
+  scheduleMobilePairingExpiry(pairing);
+  const timelineSink = mobileTimelineSinkForPairing(pairing);
   const control = new MobileRelayControlService(
     {
       relayUrl: pairing.relayUrl,
       rendezvousId: pairing.rendezvousId,
       relayCapability: pairing.fingerprint,
       relaySealKeyBase64: pairing.relaySealKeyBase64,
-      conversationId: pairing.capabilities[0].conversationId,
-      streamId: `${pairing.stableRoutingId}:phone`
+      ...(conversationCapability ? { conversationId: conversationCapability.conversationId } : {}),
+      streamId: `${pairing.stableRoutingId}:phone`,
+      isActive: () => isMobilePairingActive(pairing),
+      onPhoneActivity: () => {
+        void noteMobilePairingClaimed(pairing);
+      }
     },
-    chatService,
-    (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+    {
+      sendMessage: (request, signal, progress) => chatService.sendMessage(request, signal, progress),
+      hasAcceptedMobileEvent: (conversationId, eventId) => chatService.hasAcceptedMobileEvent(conversationId, eventId),
+      hasMobileMailboxResultForMobileEvent: (conversationId, eventId) =>
+        hasFulfilledMobileMailboxEvent(pairing, conversationId, eventId),
+      tryAcquireMobileEventExecution: (event, runId) =>
+        acquireDesktopMobileExecutionClaim(pairing, event.conversationId, event.eventId, runId)
+    },
+    mobileRelayChatCatalog(),
+    (progress) => emitReviewProgress(progress),
+    timelineSink
   );
-  await control.connect();
+  control.onSnapshotDiagnostic = (detail) => {
+    void debugLogService.write("mobile.snapshot.run-state", {
+      routingId: pairing.stableRoutingId,
+      ...detail
+    });
+  };
+  control.onLiveDiagnostic = (detail) => {
+    void debugLogService.write("mobile.live.frame", {
+      routingId: pairing.stableRoutingId,
+      ...detail
+    });
+  };
   mobileRelayControls.set(pairing.rendezvousId, control);
+  startMobileMailboxPollingForPairing(pairing, control);
+  const connect = control.connect();
+  connect.catch(() => undefined);
+  try {
+    await promiseWithTimeout(connect, MOBILE_RELAY_CONNECT_TIMEOUT_MS, "Mobile relay tunnel connection timed out.");
+  } catch (error) {
+    await debugLogService.write("mobile.relay.connect-error", {
+      routingId: pairing.stableRoutingId,
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+async function recordMobilePairingCapabilityGrant(pairing: MobilePairingPackage): Promise<void> {
+  const conversationCapabilities = pairing.capabilities.filter((capability) => capability.scope === "conversation");
+  if (conversationCapabilities.length === 0) {
+    return;
+  }
+  const deviceOriginId = mobileOriginIdForPairing(pairing);
+  const grantId = mobilePairingGrantId(pairing);
+  const payload: ChatDeviceCapabilityGrantPayload = {
+    grantId,
+    deviceOriginId,
+    deviceKeyId: `mobile:${deviceOriginId}`,
+    capabilities: pairing.capabilities,
+    grantedAt: pairing.createdAt,
+    expiresAt: pairing.expiresAt
+  };
+  for (const capability of conversationCapabilities) {
+    await chatEventLogService.appendLocalEvent({
+      conversationId: capability.conversationId,
+      logScopeId: capability.conversationId,
+      kind: "device.capability.granted",
+      payload
+    });
+  }
+}
+
+async function revokeMobilePairingInternal(
+  pairing: MobilePairingPackage,
+  reason: string
+): Promise<RevokeMobilePairingResult> {
+  const key = mobilePairingKey(pairing);
+  const revokedAt = new Date().toISOString();
+  mobileRevokedPairingKeys.add(key);
+  mobileClaimedPairingKeys.delete(key);
+  mobilePairingsByKey.delete(key);
+  mobileMailboxCursors.delete(key);
+  mobileProgressEnvelopes.forgetPairing(key);
+  mobileRelayControls.get(pairing.rendezvousId)?.close();
+  mobileRelayControls.delete(pairing.rendezvousId);
+  const poller = mobileMailboxPollers.get(key);
+  if (poller) {
+    clearInterval(poller);
+    mobileMailboxPollers.delete(key);
+  }
+  const expiry = mobilePairingExpiryTimers.get(key);
+  if (expiry) {
+    clearTimeout(expiry);
+    mobilePairingExpiryTimers.delete(key);
+  }
+  await persistMobilePairedDevices();
+  await revokeMailboxForPairing(pairing);
+  await recordMobilePairingCapabilityRevocation(pairing, revokedAt, reason);
+  await debugLogService.write("mobile.pairing.revoked", {
+    routingId: pairing.stableRoutingId,
+    rendezvousId: pairing.rendezvousId,
+    reason
+  });
+  return {
+    revoked: true,
+    stableRoutingId: pairing.stableRoutingId,
+    rendezvousId: pairing.rendezvousId,
+    revokedAt,
+    reason
+  };
+}
+
+async function recordMobilePairingCapabilityRevocation(
+  pairing: MobilePairingPackage,
+  revokedAt: string,
+  reason: string
+): Promise<void> {
+  const conversationCapabilities = pairing.capabilities.filter((capability) => capability.scope === "conversation");
+  if (conversationCapabilities.length === 0) {
+    return;
+  }
+  const payload: ChatDeviceCapabilityRevokedPayload = {
+    grantId: mobilePairingGrantId(pairing),
+    deviceOriginId: mobileOriginIdForPairing(pairing),
+    revokedAt,
+    reason
+  };
+  for (const capability of conversationCapabilities) {
+    await chatEventLogService.appendLocalEvent({
+      conversationId: capability.conversationId,
+      logScopeId: capability.conversationId,
+      kind: "device.capability.revoked",
+      payload
+    });
+  }
+}
+
+// Destroying the relay mailbox is what makes revocation real for the link
+// holder: local bookkeeping alone leaves the mailbox readable with the old
+// token. If the relay is unreachable the revoke is persisted and retried on
+// startup until the relay confirms.
+async function revokeMailboxForPairing(pairing: MobilePairingPackage): Promise<void> {
+  if (!pairing.outboxUrl) {
+    return;
+  }
+  try {
+    const result = await revokeMailboxForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64);
+    if (result.ok) {
+      return;
+    }
+    await debugLogService.write("mobile.mailbox.revoke-error", {
+      routingId: pairing.stableRoutingId,
+      status: result.status,
+      message: result.error ?? ""
+    });
+  } catch (error) {
+    await debugLogService.write("mobile.mailbox.revoke-error", {
+      routingId: pairing.stableRoutingId,
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+  try {
+    const access = mailboxAccessForSealKey(pairing.relaySealKeyBase64);
+    const secret = settingsService.encodeMobilePairingSecret(access.token);
+    const pending = await settingsService.readPendingMailboxRevocations();
+    if (!pending.some((item) => item.mailboxScopeId === access.scopeId)) {
+      await settingsService.writePendingMailboxRevocations([...pending, {
+        outboxUrl: pairing.outboxUrl,
+        mailboxScopeId: access.scopeId,
+        encryptedToken: secret.encryptedValue,
+        tokenProtection: secret.protection,
+        revokedAt: new Date().toISOString()
+      }]);
+    }
+  } catch (error) {
+    await debugLogService.write("mobile.mailbox.revoke-persist-error", {
+      routingId: pairing.stableRoutingId,
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+async function retryPendingMailboxRevocations(): Promise<void> {
+  const pending = await settingsService.readPendingMailboxRevocations();
+  if (pending.length === 0) {
+    return;
+  }
+  const remaining: StoredPendingMailboxRevocation[] = [];
+  for (const item of pending) {
+    try {
+      const token = settingsService.decodeMobilePairingSecret(item.encryptedToken, item.tokenProtection);
+      if (!token) {
+        // decode returns undefined when safeStorage is merely unavailable
+        // right now, not only for corrupt records. Dropping the entry here
+        // would forget the revoke forever and leave the revoked phone's
+        // mailbox alive, so keep it for the next retry.
+        remaining.push(item);
+        continue;
+      }
+      const result = await revokeMailboxWithToken(item.outboxUrl, item.mailboxScopeId, token);
+      if (!result.ok) {
+        remaining.push(item);
+      }
+    } catch {
+      remaining.push(item);
+    }
+  }
+  if (remaining.length !== pending.length) {
+    await settingsService.writePendingMailboxRevocations(remaining);
+  }
+}
+
+function findMobilePairingForRevoke(request: RevokeMobilePairingRequest): MobilePairingPackage | undefined {
+  const stableRoutingId = request.stableRoutingId?.trim();
+  const rendezvousId = request.rendezvousId?.trim();
+  if (!stableRoutingId) {
+    throw new Error("Mobile pairing revoke requires stableRoutingId.");
+  }
+  if (rendezvousId) {
+    return mobilePairingsByKey.get(mobilePairingKeyFromIds(stableRoutingId, rendezvousId));
+  }
+  return [...mobilePairingsByKey.values()].find((pairing) => pairing.stableRoutingId === stableRoutingId);
+}
+
+function scheduleMobilePairingExpiry(pairing: MobilePairingPackage): void {
+  const key = mobilePairingKey(pairing);
+  // A device that already connected is remembered until revoked. Re-arming the
+  // invitation timer on restore killed it instantly, because expiresAt is the
+  // long-past moment the original link was minted.
+  if (mobileClaimedPairingKeys.has(key)) {
+    return;
+  }
+  const existing = mobilePairingExpiryTimers.get(key);
+  if (existing) {
+    clearTimeout(existing);
+  }
+  const expiresAtMs = Date.parse(pairing.expiresAt);
+  if (!Number.isFinite(expiresAtMs)) {
+    return;
+  }
+  const timer = setTimeout(() => {
+    void revokeMobilePairingInternal(pairing, "expired").catch((error) => {
+      void debugLogService.write("mobile.pairing.expire-error", {
+        routingId: pairing.stableRoutingId,
+        rendezvousId: pairing.rendezvousId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    });
+  }, Math.max(0, expiresAtMs - Date.now()));
+  timer.unref?.();
+  mobilePairingExpiryTimers.set(key, timer);
+}
+
+function isMobilePairingActive(pairing: MobilePairingPackage): boolean {
+  return !isMobilePairingExpired(pairing) && !mobileRevokedPairingKeys.has(mobilePairingKey(pairing));
+}
+
+function isMobilePairingExpired(pairing: MobilePairingPackage): boolean {
+  // expiresAt bounds how long an unused link is good for, not how long a phone
+  // stays paired. Once the phone has connected, only a revoke ends it.
+  if (mobileClaimedPairingKeys.has(mobilePairingKey(pairing))) {
+    return false;
+  }
+  const expiresAtMs = Date.parse(pairing.expiresAt);
+  return Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now();
+}
+
+async function noteMobilePairingClaimed(pairing: MobilePairingPackage): Promise<void> {
+  const key = mobilePairingKey(pairing);
+  if (mobileClaimedPairingKeys.has(key) || mobileRevokedPairingKeys.has(key)) {
+    return;
+  }
+  mobileClaimedPairingKeys.set(key, new Date().toISOString());
+  const expiry = mobilePairingExpiryTimers.get(key);
+  if (expiry) {
+    clearTimeout(expiry);
+    mobilePairingExpiryTimers.delete(key);
+  }
+  await persistMobilePairedDevices();
+  await debugLogService.write("mobile.pairing.claimed", {
+    routingId: pairing.stableRoutingId,
+    rendezvousId: pairing.rendezvousId
+  });
+}
+
+async function persistMobilePairedDevices(): Promise<void> {
+  try {
+    const devices = [...mobilePairingsByKey.entries()]
+      .filter(([key]) => mobileClaimedPairingKeys.has(key) && !mobileRevokedPairingKeys.has(key))
+      .map(([key, pairing]) => {
+        const { relaySealKeyBase64, ...rest } = pairing;
+        const secret = settingsService.encodeMobilePairingSecret(relaySealKeyBase64);
+        const cursor = mobileMailboxCursors.get(key);
+        return {
+          stableRoutingId: pairing.stableRoutingId,
+          rendezvousId: pairing.rendezvousId,
+          pairingJson: JSON.stringify(rest),
+          encryptedSealKey: secret.encryptedValue,
+          sealKeyProtection: secret.protection,
+          // The moment this phone first connected, carried across restarts.
+          // Stamping "now" on every rewrite would silently turn this into a
+          // last-saved timestamp.
+          claimedAt: mobileClaimedPairingKeys.get(key) ?? new Date().toISOString(),
+          ...(cursor ? { mailboxEpoch: cursor.epoch, mailboxCursor: cursor.cursor } : {})
+        };
+      });
+    await settingsService.writeMobilePairedDevices(devices);
+  } catch (error) {
+    await debugLogService.write("mobile.pairing.persist-error", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+async function restoreMobilePairedDevices(): Promise<void> {
+  // readMobilePairedDevices swallows its own read/parse errors and returns [].
+  const devices = await settingsService.readMobilePairedDevices();
+  // Each relay connect can burn its full timeout, so devices come back
+  // together rather than in turn, and one unreadable record cannot strand the
+  // phones behind it.
+  const restored = await Promise.all(devices.map(async (device) => {
+    try {
+      const sealKey = settingsService.decodeMobilePairingSecret(device.encryptedSealKey, device.sealKeyProtection);
+      if (!sealKey) {
+        return false;
+      }
+      const pairing = { ...JSON.parse(device.pairingJson), relaySealKeyBase64: sealKey } as MobilePairingPackage;
+      mobileClaimedPairingKeys.set(
+        mobilePairingKey(pairing),
+        typeof device.claimedAt === "string" && device.claimedAt ? device.claimedAt : new Date().toISOString()
+      );
+      if (typeof device.mailboxEpoch === "string" && Number.isFinite(device.mailboxCursor)) {
+        mobileMailboxCursors.set(mobilePairingKey(pairing), {
+          epoch: device.mailboxEpoch,
+          cursor: device.mailboxCursor ?? 0
+        });
+      }
+      await startMobileRelayControlForPairing(pairing);
+      return true;
+    } catch (error) {
+      await debugLogService.write("mobile.pairing.restore-device-error", {
+        routingId: device.stableRoutingId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return false;
+    }
+  }));
+  const count = restored.filter(Boolean).length;
+  if (count > 0) {
+    await debugLogService.write("mobile.pairing.restored", { count });
+  }
+}
+
+function acceptsMobileOutboxEnvelopeForPairing(pairing: MobilePairingPackage, event: ChatEventEnvelope): boolean {
+  if (!isMobilePairingActive(pairing)) {
+    return false;
+  }
+  if (event.originId !== mobileOriginIdForPairing(pairing)) {
+    return false;
+  }
+  // Traffic from the phone proves it holds the key, so the device is now
+  // remembered and the invitation window stops applying to it.
+  if (mobileClaimedPairingKeys.has(mobilePairingKey(pairing))) {
+    return true;
+  }
+  const eventCreatedAtMs = Date.parse(event.createdAt);
+  const expiresAtMs = Date.parse(pairing.expiresAt);
+  const withinWindow = !Number.isFinite(eventCreatedAtMs) ||
+    !Number.isFinite(expiresAtMs) ||
+    eventCreatedAtMs < expiresAtMs;
+  if (withinWindow) {
+    void noteMobilePairingClaimed(pairing);
+  }
+  return withinWindow;
+}
+
+function mobilePairingKey(pairing: MobilePairingPackage): string {
+  return mobilePairingKeyFromIds(pairing.stableRoutingId, pairing.rendezvousId);
+}
+
+function mobilePairingKeyFromIds(stableRoutingId: string, rendezvousId: string): string {
+  return `${stableRoutingId}\0${rendezvousId}`;
+}
+
+function mobilePairingGrantId(pairing: MobilePairingPackage): string {
+  return `grant-${sha256Hex(mobilePairingKey(pairing)).slice(0, 32)}`;
+}
+
+function mobileOriginIdForPairing(pairing: MobilePairingPackage): string {
+  return `mobile-${sha256Hex([
+    pairing.stableRoutingId,
+    pairing.rendezvousId,
+    pairing.fingerprint,
+    "mobile"
+  ].filter(Boolean).join(":")).slice(0, 32)}`;
+}
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function prepareMobileControlForPairing(pairing: MobilePairingPackage): void {
+  void startMobileRelayControlForPairing(pairing).catch((error) => {
+    void debugLogService.write("mobile.pairing.background-start-error", {
+      routingId: pairing.stableRoutingId,
+      message: error instanceof Error ? error.message : String(error)
+    });
+  });
+}
+
+function prepareMobileCloudFallbackForPairing(pairing: MobilePairingPackage): void {
+  void ensureMobileCloudFallbackReadyForPairing(pairing).catch((error) => {
+    void debugLogService.write("mobile.runner.background-ready-error", {
+      routingId: pairing.stableRoutingId,
+      message: error instanceof Error ? error.message : String(error)
+    });
+  });
+}
+
+async function ensureMobileCloudFallbackReadyForPairing(pairing: MobilePairingPackage): Promise<void> {
+  if (pairing.purpose !== "phone-control" || !pairing.outboxUrl || !pairingCanRunCloudParticipants(pairing)) {
+    return;
+  }
+  const started = await ensureMobileMailboxRunnerForPairing(pairing);
+  if (!started) {
+    return;
+  }
+  await publishMobileRunnerPoliciesForPairing(pairing);
+  await debugLogService.write("mobile.runner.ready", {
+    routingId: pairing.stableRoutingId
+  });
+}
+
+function ensureMobileMailboxRunnerForPairing(pairing: MobilePairingPackage): Promise<boolean> {
+  const existing = mobileMailboxRunnerStarts.get(pairing.stableRoutingId);
+  if (existing) {
+    return existing;
+  }
+  const promise = startMobileMailboxRunnerForPairing(pairing).finally(() => {
+    mobileMailboxRunnerStarts.delete(pairing.stableRoutingId);
+  });
+  mobileMailboxRunnerStarts.set(pairing.stableRoutingId, promise);
+  return promise;
+}
+
+async function startMobileMailboxRunnerForPairing(pairing: MobilePairingPackage): Promise<boolean> {
+  if (pairing.purpose !== "phone-control" || !pairing.outboxUrl || !pairingCanRunCloudParticipants(pairing)) {
+    return false;
+  }
+  const settings = await settingsService.getPublicSettings();
+  if (!settings.cloudRuns.enabled) {
+    await debugLogService.write("mobile.runner.not-started", {
+      routingId: pairing.stableRoutingId,
+      reason: "cloud-runs-disabled"
+    });
+    return false;
+  }
+  await withCloudRunWorker(undefined, async (workerSettings) => {
+    const worker = cloudRunWorkerTargetFromSettings(workerSettings);
+    if (!worker) {
+      throw new Error("Cloud Runs worker does not have a valid SSH target.");
+    }
+    validateCloudRunSshWorkerFields(worker);
+    const target = buildCloudRunSshTarget(worker);
+    const command = mobileMailboxRunnerInstallCommand({
+      routeId: pairing.stableRoutingId,
+      mailboxUrl: pairing.outboxUrl ? mailboxEndpointForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64) : "",
+      mailboxToken: mailboxAccessForSealKey(pairing.relaySealKeyBase64).token,
+      relaySealKeyBase64: pairing.relaySealKeyBase64,
+      workerRoot: workerSettings.workerRoot,
+      codexPath: workerSettings.codexPath,
+      claudePath: workerSettings.claudePath,
+      pollIntervalMs: 2_500,
+      timeoutMs: settings.cloudRuns.maxRuntimeMs
+    });
+    const result = await runCommand("ssh", [
+      ...cloudRunSshOptionArgs(worker),
+      target,
+      command
+    ], { timeoutMs: 60_000 });
+    await debugLogService.write("mobile.runner.started", {
+      routingId: pairing.stableRoutingId,
+      stdout: result.stdout.trim()
+    });
+  }).catch(async (error) => {
+    await debugLogService.write("mobile.runner.start-error", {
+      routingId: pairing.stableRoutingId,
+      message: error instanceof Error ? error.message : String(error),
+      exitCode: error instanceof CommandError ? error.result.exitCode : undefined,
+      timedOut: error instanceof CommandError ? error.result.timedOut : undefined,
+      stdout: error instanceof CommandError ? error.result.stdout.slice(-4000) : undefined,
+      stderr: error instanceof CommandError ? error.result.stderr.slice(-4000) : undefined
+    });
+    throw error;
+  });
+  return true;
+}
+
+function pairingCanRunCloudParticipants(pairing: MobilePairingPackage): boolean {
+  return pairing.capabilities.some((capability) => capability.canRunCloudParticipants === true);
+}
+
+async function publishMobileRunnerPoliciesForConversation(conversation: Conversation): Promise<void> {
+  if (conversation.kind !== "chat" || mobilePairingsByKey.size === 0) {
+    return;
+  }
+  for (const pairing of mobilePairingsByKey.values()) {
+    await publishMobileRunnerPolicyForPairing(pairing, conversation);
+  }
+}
+
+async function publishMobileRunnerPoliciesForPairing(pairing: MobilePairingPackage): Promise<void> {
+  if (!pairing.outboxUrl || !pairingCanRunCloudParticipants(pairing)) {
+    return;
+  }
+  if (isMobileMailboxOwnerActionBackoffActive()) {
+    return;
+  }
+  const summaries = await storageService.listConversations();
+  for (const summary of summaries.filter((item) => item.kind === "chat" && item.archived !== true).slice(0, 100)) {
+    if (isMobileMailboxOwnerActionBackoffActive()) {
+      return;
+    }
+    const conversation = await storageService.getConversation(summary.id);
+    if (conversation && conversation.kind === "chat") {
+      await publishMobileRunnerPolicyForPairing(pairing, conversation);
+    }
+  }
+}
+
+async function publishMobileRunnerPolicyForPairing(
+  pairing: MobilePairingPackage,
+  conversation: Conversation
+): Promise<void> {
+  if (!pairing.outboxUrl || !pairingCanRunCloudParticipants(pairing) || !pairingCanAccessConversation(pairing, conversation.id)) {
+    return;
+  }
+  try {
+    const append = await chatEventLogService.appendLocalEvent({
+      conversationId: conversation.id,
+      logScopeId: conversation.id,
+      kind: MOBILE_RUNNER_POLICY_KIND,
+      payload: mobileMailboxRunnerPolicyFromConversation(conversation, pairing)
+    });
+    await postMailboxEvents(pairing, [append.event]);
+  } catch (error) {
+    if (isOwnerActionMailboxError(error)) {
+      recordMobileMailboxOwnerActionBackoff();
+    }
+    await debugLogService.write("mobile.runner.policy-publish-error", {
+      routingId: pairing.stableRoutingId,
+      conversationId: conversation.id,
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+function pairingCanAccessConversation(pairing: MobilePairingPackage, conversationId: string): boolean {
+  return pairing.capabilities.some((capability) =>
+    capability.scope === "device"
+      ? capability.canRead === true
+      : capability.conversationId === conversationId && capability.canRead === true
+  );
+}
+
+function mobileTimelineSinkForPairing(pairing: MobilePairingPackage): MobileTimelineSink | undefined {
+  if (!pairing.outboxUrl) {
+    return undefined;
+  }
+  const pairingKey = mobilePairingKey(pairing);
+  return {
+    async publishTimeline(timeline: MobileTimelineEvents, publishOptions?: { runFinished?: boolean }) {
+      const conversationId = timeline.conversationId?.trim();
+      if (!conversationId || timeline.events.length === 0 || !pairing.outboxUrl) {
+        return;
+      }
+      const append = await chatEventLogService.appendLocalEvent({
+        conversationId,
+        logScopeId: conversationId,
+        kind: "mobile.timeline.events",
+        payload: timeline
+      });
+      const runFinished = publishOptions?.runFinished === true;
+      // W-C diagnostics: the marker has now been wrong in both directions, so
+      // record what was actually decided for each publication rather than
+      // reasoning about it from the outside.
+      await debugLogService.write("mobile.mailbox.ring-marker", {
+        routingId: pairing.stableRoutingId,
+        conversationId,
+        runFinished,
+        eventCount: timeline.events.length,
+        statuses: timeline.events.map((event) => `${event.role ?? "?"}:${event.status ?? "?"}`).slice(0, 10)
+      });
+      await postMailboxEvents(pairing, [append.event], { runFinished });
+      // W3/W-A: remember which envelopes carried nothing but pending progress,
+      // and once every run they were waiting on has a durable terminal
+      // snapshot, delete them so no reader can replay superseded progress. An
+      // envelope carrying any terminal event is never tracked.
+      const pendingRunIds = new Set<string>();
+      const terminalRunIds = new Set<string>();
+      for (const event of timeline.events) {
+        const runId = typeof event.runId === "string" ? event.runId.trim() : "";
+        if (!runId) {
+          continue;
+        }
+        (event.status === "pending" ? pendingRunIds : terminalRunIds).add(runId);
+      }
+      const superseded = mobileProgressEnvelopes.recordAppend(pairingKey, {
+        eventId: append.event.eventId,
+        pendingRunIds: [...pendingRunIds],
+        terminalRunIds: [...terminalRunIds]
+      });
+      if (superseded.length > 0) {
+        try {
+          await deleteMailboxEvents(pairing.outboxUrl, pairing.relaySealKeyBase64, superseded);
+        } catch (error) {
+          // Deletion is cleanup, not delivery: TTL remains the backstop.
+          await debugLogService.write("mobile.mailbox.progress-delete-error", {
+            routingId: pairing.stableRoutingId,
+            eventIds: superseded,
+            message: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+    }
+  };
+}
+
+function startMobileMailboxPollingForPairing(
+  pairing: MobilePairingPackage,
+  control: MobileRelayControlService
+): void {
+  if (!pairing.outboxUrl) {
+    return;
+  }
+  const pollerKey = mobilePairingKey(pairing);
+  const existing = mobileMailboxPollers.get(pollerKey);
+  if (existing) {
+    clearInterval(existing);
+  }
+  let active = false;
+  let backoffUntil = 0;
+  const poll = async () => {
+    if (active) {
+      return;
+    }
+    if (Date.now() < backoffUntil || isMobileMailboxOwnerActionBackoffActive()) {
+      return;
+    }
+    active = true;
+    try {
+      await pollMobileMailboxOutbox(pairing, control);
+    } catch (error) {
+      if (isOwnerActionMailboxError(error)) {
+        backoffUntil = Date.now() + MOBILE_MAILBOX_OWNER_ACTION_BACKOFF_MS;
+        recordMobileMailboxOwnerActionBackoff();
+      }
+      await debugLogService.write("mobile.mailbox.poll-error", {
+        routingId: pairing.stableRoutingId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      active = false;
+    }
+  };
+  const timer = setInterval(() => {
+    void poll();
+  }, MOBILE_MAILBOX_POLL_INTERVAL_MS);
+  timer.unref?.();
+  mobileMailboxPollers.set(pollerKey, timer);
+  void poll();
+}
+
+async function pollMobileMailboxOutbox(
+  pairing: MobilePairingPackage,
+  control: MobileRelayControlService
+): Promise<void> {
+  if (!pairing.outboxUrl || !isMobilePairingActive(pairing)) {
+    return;
+  }
+  const pairingKey = mobilePairingKey(pairing);
+  const fetchPage = async (afterArrival: number) => {
+    const url = new URL(mailboxEndpointForSealKey(pairing.outboxUrl ?? "", pairing.relaySealKeyBase64));
+    url.searchParams.set("limit", "1000");
+    url.searchParams.set("afterArrival", String(Math.max(0, afterArrival)));
+    const response = await fetch(url.toString(), {
+      headers: {
+        accept: "application/json",
+        ...mailboxAuthHeaders(pairing.relaySealKeyBase64)
+      },
+      signal: AbortSignal.timeout(8_000)
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      if (isOwnerActionMailboxMessage(response.status, body)) {
+        recordMobileMailboxOwnerActionBackoff();
+      }
+      // An unregistered mailbox means this pairing was created or restored
+      // while the relay was unreachable; registering now lets the next poll
+      // succeed without waiting for an app restart.
+      if (response.status === 401 && body.includes("mailbox_unregistered")) {
+        void ensureMailboxRegisteredForPairing(pairing);
+      }
+      // W-G(e): a tombstoned mailbox is terminal — stop instead of self-heal.
+      if (isRemoteRevokedMailboxBody(body)) {
+        void handleRemoteMailboxRevoked(pairing);
+      }
+      throw new Error(`Mailbox poll failed with HTTP ${response.status}: ${body}`);
+    }
+    return await response.json() as { events?: unknown; epoch?: unknown };
+  };
+  const stored = mobileMailboxCursors.get(pairingKey) ?? { epoch: "", cursor: 0 };
+  const startedCursor = stored.cursor;
+  const startedEpoch = stored.epoch;
+  let body = await fetchPage(stored.cursor);
+  const epoch = typeof body.epoch === "string" ? body.epoch : "";
+  if (epoch && epoch !== stored.epoch) {
+    // Box recreated: arrival numbering restarted. Re-read from zero and let
+    // the accepted-event dedupe absorb the replay. The desktop never refills
+    // — it is the system of record, not a reader with a gap.
+    stored.epoch = epoch;
+    stored.cursor = 0;
+    body = await fetchPage(0);
+  }
+  if (!Array.isArray(body.events)) {
+    return;
+  }
+  const opened = await openMailboxEventPayloads(body.events, pairing.relaySealKeyBase64);
+  if (opened.unreadableEventIds.length > 0) {
+    await debugLogService.write("mobile.mailbox.unreadable-events", {
+      routingId: pairing.stableRoutingId,
+      eventIds: opened.unreadableEventIds.slice(0, 20)
+    });
+  }
+  const catalog = mobileRelayChatCatalog();
+  const events = await collectMobileMailboxOutboxEvents(opened.events, {
+    acceptMailboxMessageEvent,
+    acceptMobileOutboxEnvelope: (event) => acceptsMobileOutboxEnvelopeForPairing(pairing, event),
+    acceptFulfilledMobileOutboxEvent: (event) => chatService.acceptMobileMailboxOutboxEvent(event),
+    hasAcceptedMobileEvent: (conversationId, eventId) => chatService.hasAcceptedMobileEvent(conversationId, eventId),
+    hasMobileMailboxResultForMobileEvent: (conversationId, eventId) =>
+      chatService.hasMobileMailboxResultForMobileEvent(conversationId, eventId),
+    tryAcquireMobileEventExecution: (event) =>
+      acquireDesktopMobileExecutionClaim(pairing, event.conversationId, event.eventId, `mobile-${event.eventId}`),
+    isConversationAllowed: (conversationId) => catalog.isConversationAllowed
+      ? catalog.isConversationAllowed(conversationId)
+      : false
+  });
+  if (events.length > 0) {
+    await control.acceptMobileOutboxEvents(events, `mailbox:${Date.now()}`);
+  }
+  // Advance the cursor only after this page is durably processed. Persisting it
+  // before decrypt/collection/delivery — or letting a mid-poll crash intervene —
+  // would skip these events forever; here, any failure above leaves the cursor
+  // and the next poll re-fetches, deduped by the accepted-event and
+  // execution-claim layers.
+  let advanced = stored.cursor;
+  for (const event of body.events) {
+    const arrivalSeq = (event as { arrivalSeq?: unknown }).arrivalSeq;
+    if (typeof arrivalSeq === "number" && arrivalSeq > advanced) {
+      advanced = arrivalSeq;
+    }
+  }
+  stored.cursor = advanced;
+  mobileMailboxCursors.set(pairingKey, stored);
+  if (stored.cursor !== startedCursor || stored.epoch !== startedEpoch) {
+    await persistMobilePairedDevices();
+  }
+}
+
+async function hasFulfilledMobileMailboxEvent(
+  pairing: MobilePairingPackage,
+  conversationId: string,
+  eventId: string
+): Promise<boolean> {
+  if (await chatService.hasMobileMailboxResultForMobileEvent(conversationId, eventId)) {
+    return true;
+  }
+  if (!pairing.outboxUrl) {
+    return false;
+  }
+  try {
+    const url = new URL(mailboxEndpointForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64));
+    url.searchParams.set("conversationId", conversationId);
+    url.searchParams.set("logScopeId", conversationId);
+    url.searchParams.set("limit", "100");
+    const response = await fetch(url.toString(), {
+      headers: {
+        accept: "application/json",
+        ...mailboxAuthHeaders(pairing.relaySealKeyBase64)
+      },
+      signal: AbortSignal.timeout(8_000)
+    });
+    if (!response.ok) {
+      return false;
+    }
+    const body = await response.json() as { events?: unknown };
+    if (!Array.isArray(body.events)) {
+      return false;
+    }
+    const opened = await openMailboxEventPayloads(body.events, pairing.relaySealKeyBase64);
+    return fulfilledMobileEventKeysFromMailboxEvents(opened.events)
+      .has(mobileMailboxEventScopeKey(conversationId, eventId));
+  } catch {
+    return false;
+  }
+}
+
+async function acquireDesktopMobileExecutionClaim(
+  pairing: MobilePairingPackage,
+  conversationId: string,
+  eventId: string,
+  runId: string
+): Promise<boolean> {
+  if (!pairing.outboxUrl || !pairingCanRunCloudParticipants(pairing)) {
+    return true;
+  }
+  const result = await acquireMobileMailboxExecutionClaim(
+    mailboxEndpointForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64),
+    {
+      conversationId,
+      eventId,
+      ownerId: `desktop:${pairing.stableRoutingId}`,
+      ownerRole: "desktop",
+      runId,
+      ttlMs: MOBILE_EVENT_EXECUTION_CLAIM_TTL_MS
+    },
+    AbortSignal.timeout(8_000),
+    mailboxAuthHeaders(pairing.relaySealKeyBase64)
+  );
+  if (!result.acquired) {
+    await debugLogService.write("mobile.execution-claim.skipped", {
+      routingId: pairing.stableRoutingId,
+      conversationId,
+      eventId,
+      runId,
+      ownerId: result.claim?.ownerId,
+      ownerRole: result.claim?.ownerRole,
+      expiresAt: result.claim?.expiresAt
+    });
+  }
+  return result.acquired;
+}
+
+async function acceptMailboxMessageEvent(value: unknown): Promise<boolean> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const event = value as Partial<ChatEventEnvelope>;
+  if (event.kind !== "message.created") {
+    return false;
+  }
+  const payload = event.payload;
+  const message = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as { message?: unknown }).message
+    : undefined;
+  if (!message || typeof message !== "object" || Array.isArray(message)) {
+    return false;
+  }
+  return chatService.acceptMobileMailboxMessageEvent(value as ChatEventEnvelope);
+}
+
+// W-C: runFinished is stated by the caller that knows a run finished, never
+// inferred from the batch. Inference rang twice per run — a phone-originated
+// user message comes back carrying the run's own id and a "done" status, and a
+// conversation snapshot is full of finished messages.
+async function postMailboxEvents(
+  pairing: MobilePairingPackage,
+  events: unknown[],
+  options?: { runFinished?: boolean }
+): Promise<void> {
+  if (events.length === 0 || !pairing.outboxUrl) {
+    return;
+  }
+  if (isMobileMailboxOwnerActionBackoffActive()) {
+    throw new Error("Mobile mailbox is temporarily suspended after an owner-action response.");
+  }
+  // The relay stores ciphertext only: payloads are sealed with the pairing
+  // key before they leave this process, and the request carries the derived
+  // mailbox bearer token for the pairing's own locked mailbox.
+  const runFinished = options?.runFinished === true;
+  const sealed = await sealMailboxEventPayloads(events, pairing.relaySealKeyBase64);
+  const response = await fetch(mailboxEndpointForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...mailboxAuthHeaders(pairing.relaySealKeyBase64)
+    },
+    // The marker is computed from the cleartext batch before sealing: the
+    // relay never sees which envelope is terminal, only that this append
+    // finished a run — the same bit it can already infer from append timing,
+    // size, and silence.
+    body: JSON.stringify({ events: sealed, ...(runFinished ? { runFinished: true } : {}) }),
+    signal: AbortSignal.timeout(8_000)
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    if (isOwnerActionMailboxMessage(response.status, body)) {
+      recordMobileMailboxOwnerActionBackoff();
+    }
+    if (response.status === 401 && body.includes("mailbox_unregistered")) {
+      void ensureMailboxRegisteredForPairing(pairing);
+    }
+    // W-G(e): a tombstoned mailbox is terminal — stop instead of self-heal.
+    if (isRemoteRevokedMailboxBody(body)) {
+      void handleRemoteMailboxRevoked(pairing);
+    }
+    throw new Error(`Mailbox append failed with HTTP ${response.status}: ${body}`);
+  }
+}
+
+function isMobileMailboxOwnerActionBackoffActive(): boolean {
+  return Date.now() < mobileMailboxOwnerActionBackoffUntil;
+}
+
+function recordMobileMailboxOwnerActionBackoff(): void {
+  mobileMailboxOwnerActionBackoffUntil = Math.max(
+    mobileMailboxOwnerActionBackoffUntil,
+    Date.now() + MOBILE_MAILBOX_OWNER_ACTION_BACKOFF_MS
+  );
+}
+
+function isOwnerActionMailboxError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return isOwnerActionMailboxMessage(/HTTP 429/.test(message) ? 429 : 0, message);
+}
+
+function isOwnerActionMailboxMessage(status: number, message: string): boolean {
+  return status === 429 && (
+    /workers_daily_limit/.test(message) ||
+    /owner_action_required/.test(message) ||
+    /Do not retry/.test(message)
+  );
+}
+
+function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then((value) => {
+      clearTimeout(timer);
+      resolve(value);
+    }, (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+function mobileRelayChatCatalog(): MobileRelayChatCatalog {
+  return {
+    async listChats() {
+      const summaries = await storageService.listConversations();
+      const visible = summaries.filter((summary) => summary.kind === "chat" && summary.archived !== true);
+      const items: MobileRelayChatListItem[] = [];
+      for (const summary of visible.slice(0, 100)) {
+        const conversation = await storageService.getConversation(summary.id);
+        const lastMessage = conversation?.messages.slice().reverse().find((message) => message.content.trim());
+        items.push({
+          id: summary.id,
+          title: summary.title || "Chat",
+          group: mobileChatGroupLabel(summary.repoPath),
+          snippet: mobileSnippet(lastMessage?.content),
+          who: mobileWhoLabel(lastMessage),
+          updatedAt: summary.updatedAt,
+          running: summary.running === true,
+          participants: (summary.chatParticipants ?? [])
+            .map((participant) => participant.handle.startsWith("@") ? participant.handle : `@${participant.handle}`)
+            .slice(0, 4)
+        });
+      }
+      return items;
+    },
+    async listTimeline(conversationId: string) {
+      const opened = await storageService.openConversation(conversationId, 80);
+      const messages = opened?.conversation.messages ?? [];
+      // Same helper the desktop renders threads with, so the phone groups
+      // replies exactly as the desktop does instead of showing one flat list.
+      const conversationForThreads = { messages };
+      const threadRoots = chatParticipantRequestReplyRootMap(conversationForThreads);
+      return messages
+        .filter((message) => message.content.trim())
+        .map((message) => {
+          const mobileEventId = mobileEventIdFromTimelineMessage(message);
+          const threadRootId = chatMessageVisualThreadRootId(conversationForThreads, message, threadRoots);
+          return {
+            id: message.id,
+            ...(threadRootId && threadRootId !== message.id ? { threadRootId } : {}),
+            role: mobileTimelineRole(message),
+            ...(message.participantLabel ? { participantLabel: message.participantLabel } : {}),
+            content: message.content,
+            status: message.status === "error" ? "error" as const : message.status === "pending" ? "pending" as const : "done" as const,
+            createdAt: message.createdAt,
+            ...(typeof message.metadata?.runId === "string" ? { runId: message.metadata.runId } : {}),
+            messageId: message.id,
+            ...(mobileEventId ? { mobileEventId } : {})
+          };
+        });
+    },
+    async isConversationAllowed(conversationId: string) {
+      const conversation = await storageService.getConversation(conversationId);
+      return conversation?.kind === "chat" && conversation.metadata.archived !== true;
+    }
+  };
+}
+
+function mobileChatGroupLabel(repoPath: string | undefined): string {
+  if (!repoPath) {
+    return "AccordAgents";
+  }
+  return path.basename(repoPath) || "AccordAgents";
+}
+
+function mobileSnippet(content: string | undefined): string {
+  const normalized = content?.replace(/\s+/g, " ").trim() ?? "";
+  if (!normalized) {
+    return "No messages yet";
+  }
+  return normalized.length > 84 ? `${normalized.slice(0, 81)}...` : normalized;
+}
+
+function mobileWhoLabel(message: ChatMessage | undefined): string | undefined {
+  if (!message) {
+    return undefined;
+  }
+  if (message.role === "user") {
+    return "you:";
+  }
+  if (message.participantLabel) {
+    return `${message.participantLabel.replace(/^@/, "")}:`;
+  }
+  return message.role === "system" ? "system:" : undefined;
+}
+
+function mobileTimelineRole(message: ChatMessage): "you" | "participant" | "system" {
+  if (message.role === "user") {
+    return "you";
+  }
+  if (message.role === "participant") {
+    return "participant";
+  }
+  return "system";
+}
+
+function mobileEventIdFromTimelineMessage(message: ChatMessage): string | undefined {
+  const explicit = message.metadata?.mobileEventId;
+  if (typeof explicit === "string" && explicit.trim()) {
+    return explicit.trim();
+  }
+  const sourceMessageId = message.metadata?.sourceMessageId;
+  const runId = message.metadata?.runId;
+  if (
+    typeof sourceMessageId === "string" &&
+    sourceMessageId.trim() &&
+    typeof runId === "string" &&
+    runId === `mobile-${sourceMessageId.trim()}`
+  ) {
+    return sourceMessageId.trim();
+  }
+  return undefined;
 }
 
 function registerIpc(): void {
@@ -717,7 +2022,7 @@ function registerIpc(): void {
   ipcMain.handle("cloud-runs:setup-worker", async (_event, request?: CloudRunWorkerSettings) => {
     const managedAws = !request && (await settingsService.getPublicSettings()).cloudRuns.mode === "aws";
     const result = await withCloudRunWorker(request, (worker) => cloudRunDoctorService.setup(worker, (progress) => {
-      mainWindow?.webContents.send("cloud-runs:setup-progress", progress);
+      sendToMainWindow("cloud-runs:setup-progress", progress);
     }, { requirePersistentStorage: managedAws }));
     remoteRunService.clearToolchainPreflightCache();
     await remoteRunService.clearMirrorSyncState();
@@ -791,7 +2096,7 @@ function registerIpc(): void {
     if (kind === "codex-cli" || kind === "claude-code" || kind === "gemini-cli") {
       const settings = await settingsService.getPublicSettings();
       const configuredModel = settings.providers.find((provider) => provider.kind === kind)?.model;
-      return cliAgentRunner.listModelCatalog(kind, configuredModel);
+      return cliAgentRunner.listModelCatalog(kind, configuredModel, settings.lastRepoPath);
     }
     return providerRunner.listModelCatalog(kind);
   });
@@ -971,11 +2276,11 @@ function registerIpc(): void {
       return await chatService.compactParticipant(
         { ...request, triggeredBy: "user", runId },
         controller.signal,
-        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+        (progress) => emitReviewProgress(progress)
       );
     } catch (error) {
       const phase = controller.signal.aborted ? "cancelled" : "error";
-      mainWindow?.webContents.send("conversations:review-progress", {
+      sendToMainWindow("conversations:review-progress", {
         runId,
         phase,
         message: error instanceof Error ? error.message : String(error),
@@ -995,12 +2300,12 @@ function registerIpc(): void {
       return await chatService.startAccord(
         request,
         controller.signal,
-        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress),
+        (progress) => emitReviewProgress(progress),
         runId
       );
     } catch (error) {
       const phase = controller.signal.aborted ? "cancelled" : "error";
-      mainWindow?.webContents.send("conversations:review-progress", {
+      sendToMainWindow("conversations:review-progress", {
         runId,
         phase,
         message: error instanceof Error ? error.message : String(error),
@@ -1020,11 +2325,11 @@ function registerIpc(): void {
       return await chatService.sendMessage(
         { ...request, runId },
         controller.signal,
-        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+        (progress) => emitReviewProgress(progress)
       );
     } catch (error) {
       const phase = controller.signal.aborted ? "cancelled" : "error";
-      mainWindow?.webContents.send("conversations:review-progress", {
+      sendToMainWindow("conversations:review-progress", {
         runId,
         phase,
         message: error instanceof Error ? error.message : String(error),
@@ -1050,11 +2355,11 @@ function registerIpc(): void {
       return await chatService.respondToMentions(
         { ...request, runId },
         controller.signal,
-        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+        (progress) => emitReviewProgress(progress)
       );
     } catch (error) {
       const phase = controller.signal.aborted ? "cancelled" : "error";
-      mainWindow?.webContents.send("conversations:review-progress", {
+      sendToMainWindow("conversations:review-progress", {
         runId,
         phase,
         message: error instanceof Error ? error.message : String(error),
@@ -1074,11 +2379,11 @@ function registerIpc(): void {
       return await chatService.respondToChoice(
         { ...request, runId },
         controller.signal,
-        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+        (progress) => emitReviewProgress(progress)
       );
     } catch (error) {
       const phase = controller.signal.aborted ? "cancelled" : "error";
-      mainWindow?.webContents.send("conversations:review-progress", {
+      sendToMainWindow("conversations:review-progress", {
         runId,
         phase,
         message: error instanceof Error ? error.message : String(error),
@@ -1092,13 +2397,42 @@ function registerIpc(): void {
   ipcMain.handle("chat:respond-to-app-tool-approval", async (_event, request: RespondToChatAppToolApprovalRequest) => {
     return chatService.respondToAppToolApproval(
       request,
-      (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+      (progress) => emitReviewProgress(progress)
     );
   });
   ipcMain.handle("mobile:create-pairing", async (_event, request: CreateMobilePairingRequest) => {
-    const result = await mobilePairingService.createPairing(request);
-    await startMobileRelayControlForPairing(result.package);
-    return result;
+    const settings = await settingsService.getPublicSettings();
+    const result = await mobilePairingService.createPairing(
+      mobilePairingRequestWithEndpointDefaults(request, settings.mobileControl.defaults)
+    );
+    // Lock the mailbox before the link leaves this machine: registration is
+    // trust-on-first-use, and only this process knows the scope id until the
+    // link is shown. A failure is surfaced on the result and retried both
+    // when the pairing reconnects and whenever mailbox traffic reports the
+    // mailbox as unregistered.
+    const mailboxRegistered = await ensureMailboxRegisteredForPairing(result.package);
+    await recordMobilePairingCapabilityGrant(result.package);
+    prepareMobileControlForPairing(result.package);
+    prepareMobileCloudFallbackForPairing(result.package);
+    return { ...result, mailboxRegistered };
+  });
+  ipcMain.handle("mobile:revoke-pairing", async (_event, request: RevokeMobilePairingRequest): Promise<RevokeMobilePairingResult> => {
+    const stableRoutingId = request.stableRoutingId?.trim();
+    const reason = request.reason?.trim() || "desktop-user";
+    if (!stableRoutingId) {
+      throw new Error("Mobile pairing revoke requires stableRoutingId.");
+    }
+    const pairing = findMobilePairingForRevoke(request);
+    if (!pairing) {
+      return {
+        revoked: false,
+        stableRoutingId,
+        ...(request.rendezvousId?.trim() ? { rendezvousId: request.rendezvousId.trim() } : {}),
+        revokedAt: new Date().toISOString(),
+        reason
+      };
+    }
+    return revokeMobilePairingInternal(pairing, reason);
   });
   ipcMain.handle("conversations:start-review", async (_event, request: ReviewRequest) => {
     const runId = request.runId ?? randomUUID();
@@ -1109,11 +2443,11 @@ function registerIpc(): void {
       return await consensusService.startReview(
         { ...request, runId },
         controller.signal,
-        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+        (progress) => emitReviewProgress(progress)
       );
     } catch (error) {
       const phase = controller.signal.aborted ? "cancelled" : "error";
-      mainWindow?.webContents.send("conversations:review-progress", {
+      sendToMainWindow("conversations:review-progress", {
         runId,
         phase,
         message: error instanceof Error ? error.message : String(error),
@@ -1133,11 +2467,11 @@ function registerIpc(): void {
       return await consensusService.continueReview(
         { ...request, runId },
         controller.signal,
-        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+        (progress) => emitReviewProgress(progress)
       );
     } catch (error) {
       const phase = controller.signal.aborted ? "cancelled" : "error";
-      mainWindow?.webContents.send("conversations:review-progress", {
+      sendToMainWindow("conversations:review-progress", {
         runId,
         phase,
         message: error instanceof Error ? error.message : String(error),
@@ -1157,11 +2491,11 @@ function registerIpc(): void {
       return await consensusService.composeImplementationPlan(
         { ...request, runId },
         controller.signal,
-        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+        (progress) => emitReviewProgress(progress)
       );
     } catch (error) {
       const phase = controller.signal.aborted ? "cancelled" : "error";
-      mainWindow?.webContents.send("conversations:review-progress", {
+      sendToMainWindow("conversations:review-progress", {
         runId,
         phase,
         message: error instanceof Error ? error.message : String(error),
@@ -1181,11 +2515,11 @@ function registerIpc(): void {
       return await consensusService.retryImplementationPlanSynthesis(
         { ...request, runId },
         controller.signal,
-        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+        (progress) => emitReviewProgress(progress)
       );
     } catch (error) {
       const phase = controller.signal.aborted ? "cancelled" : "error";
-      mainWindow?.webContents.send("conversations:review-progress", {
+      sendToMainWindow("conversations:review-progress", {
         runId,
         phase,
         message: error instanceof Error ? error.message : String(error),
@@ -1205,11 +2539,11 @@ function registerIpc(): void {
       return await consensusService.recoverImplementationPlan(
         { ...request, runId },
         controller.signal,
-        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+        (progress) => emitReviewProgress(progress)
       );
     } catch (error) {
       const phase = controller.signal.aborted ? "cancelled" : "error";
-      mainWindow?.webContents.send("conversations:review-progress", {
+      sendToMainWindow("conversations:review-progress", {
         runId,
         phase,
         message: error instanceof Error ? error.message : String(error),
@@ -1229,11 +2563,11 @@ function registerIpc(): void {
       return await consensusService.reviseImplementationPlan(
         { ...request, runId },
         controller.signal,
-        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+        (progress) => emitReviewProgress(progress)
       );
     } catch (error) {
       const phase = controller.signal.aborted ? "cancelled" : "error";
-      mainWindow?.webContents.send("conversations:review-progress", {
+      sendToMainWindow("conversations:review-progress", {
         runId,
         phase,
         message: error instanceof Error ? error.message : String(error),
@@ -1253,11 +2587,11 @@ function registerIpc(): void {
       return await consensusService.askPlanDecisionClarification(
         { ...request, runId },
         controller.signal,
-        (progress) => mainWindow?.webContents.send("conversations:review-progress", progress)
+        (progress) => emitReviewProgress(progress)
       );
     } catch (error) {
       const phase = controller.signal.aborted ? "cancelled" : "error";
-      mainWindow?.webContents.send("conversations:review-progress", {
+      sendToMainWindow("conversations:review-progress", {
         runId,
         phase,
         message: error instanceof Error ? error.message : String(error),
@@ -1381,6 +2715,7 @@ async function resolvePluginListRequest(request?: PluginListRequest): Promise<{
 }
 
 void app.whenReady().then(async () => {
+  await validateSqliteExecutable({ executable: sqliteExecutable });
   registerIpc();
   let betaUpdates = false;
   try {
@@ -1393,6 +2728,19 @@ void app.whenReady().then(async () => {
   bootstrapAppUpdater(debugLogService, betaUpdates);
   await appMcpService.start();
   await storageService.init();
+  // Deliberately not awaited: each paired phone reconnects through the relay
+  // with its own connect timeout, and blocking here left the app with no
+  // window at all while the relay was slow or unreachable.
+  void restoreMobilePairedDevices().catch((error) => {
+    void debugLogService.write("mobile.pairing.restore-error", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+  });
+  void retryPendingMailboxRevocations().catch((error) => {
+    void debugLogService.write("mobile.mailbox.revoke-retry-error", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+  });
   await artifactService.flushPendingArtifactEvents().catch((error) => {
     void debugLogService.write("artifacts.outbox.startup-error", {
       message: error instanceof Error ? error.message : String(error)
@@ -1427,9 +2775,12 @@ void app.whenReady().then(async () => {
     }
   });
 }).catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
+  const damagedSqlite = error instanceof BundledSqliteInstallationError;
+  const message = damagedSqlite
+    ? DAMAGED_SQLITE_INSTALLATION_MESSAGE
+    : error instanceof Error ? error.message : String(error);
   console.error("Failed to start AccordAgents:", error);
-  dialog.showErrorBox("AccordAgents failed to start", message);
+  dialog.showErrorBox(damagedSqlite ? "AccordAgents installation is damaged" : "AccordAgents failed to start", message);
   app.quit();
 });
 

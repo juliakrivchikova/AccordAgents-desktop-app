@@ -1,7 +1,8 @@
 import type { ChatCodexApprovalRequest } from "../../../shared/types";
+import { chatCodexApprovalShowsCancel } from "./chat-codex-approval-presentation";
 
 function actionLabel(request: ChatCodexApprovalRequest): string {
-  if (request.method === "item/autoApprovalReview/denied") return "Auto Review denied";
+  if (chatCodexApprovalShowsCancel(request)) return "Auto Review denied";
   if (request.action === "command") return "Protected command";
   if (request.action === "permissions") return "Additional permissions";
   if (request.action === "network") return "Protected network access";

@@ -1,4 +1,4 @@
-import { readActiveRunParticipants } from "./chatRunState";
+import { readActiveRunOwnerIds, readActiveRunParticipants } from "./chatRunState";
 import type { Conversation } from "./types";
 
 export interface ActiveChatRunSummary {
@@ -22,24 +22,64 @@ export function activeRunIdsForConversation(conversation: ConversationRunState):
     }
   };
 
+  // A stored run id with no owner record, no participant attribution, no live
+  // remote handle, and no pending message is a leftover from an interrupted
+  // cleanup: nothing can stop or attribute it, so counting it makes the
+  // composer pill claim more active runs than members are actually running.
+  const pendingRunIds = new Set<string>();
+  for (const message of conversation.messages) {
+    if (message.role === "participant" && message.status === "pending") {
+      const id = typeof message.metadata?.runId === "string" ? message.metadata.runId.trim() : "";
+      if (id) {
+        pendingRunIds.add(id);
+      }
+    }
+  }
+  const ownerRunIds = readActiveRunOwnerIds(conversation.metadata);
+  const attributedRunIds = readActiveRunParticipants(conversation.metadata);
+  const backed = (value: unknown): boolean => {
+    const id = typeof value === "string" ? value.trim() : "";
+    return Boolean(id) && (
+      ownerRunIds.has(id) ||
+      attributedRunIds.has(id) ||
+      pendingRunIds.has(id) ||
+      hasNonTerminalRemoteRunHandle(conversation.metadata, id)
+    );
+  };
+
   const active = conversation.metadata.activeRunIds;
   if (Array.isArray(active)) {
     for (const id of active) {
-      addRunId(id);
+      if (backed(id)) {
+        addRunId(id);
+      }
     }
   }
 
-  addRunId(conversation.metadata.runId);
+  if (backed(conversation.metadata.runId)) {
+    addRunId(conversation.metadata.runId);
+  }
 
   // Pending participant messages are intentionally included so the composer pill
   // remains visible while a legacy or partially-hydrated run is still streaming.
-  for (const message of conversation.messages) {
-    if (message.role === "participant" && message.status === "pending") {
-      addRunId(message.metadata?.runId);
-    }
+  for (const id of pendingRunIds) {
+    addRunId(id);
   }
 
   return ids;
+}
+
+function hasNonTerminalRemoteRunHandle(metadata: Record<string, unknown>, runId: string): boolean {
+  const handles = metadata.remoteRunHandles;
+  if (!handles || typeof handles !== "object" || Array.isArray(handles)) {
+    return false;
+  }
+  const raw = (handles as Record<string, unknown>)[runId];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return false;
+  }
+  const status = (raw as Record<string, unknown>).status;
+  return status !== "completed" && status !== "failed" && status !== "cancelled";
 }
 
 export function activeRunSummaryForConversation(conversation: ConversationRunState): ActiveChatRunSummary {

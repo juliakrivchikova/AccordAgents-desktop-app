@@ -78,10 +78,21 @@ export const PUSHER_CHANNELS_RELAY_MANIFEST: RelayCapabilityManifest = {
   providerHistory: "ignored-for-correctness"
 };
 
+export const CLOUDFLARE_DURABLE_OBJECT_RELAY_MANIFEST: RelayCapabilityManifest = {
+  provider: "cloudflare-durable-object",
+  maxFrameBytes: RELAY_PROTOCOL_MIN_FRAME_BYTES,
+  maxLogicalMessageBytes: RELAY_PROTOCOL_DEFAULT_LOGICAL_MESSAGE_BYTES,
+  oversizeCloseCode: 1009,
+  binaryFrames: false,
+  textFrames: true,
+  providerHistory: "none"
+};
+
 export const PUSHER_SIZED_RELAY_FLOOR: RelayCapabilityManifest = PUSHER_CHANNELS_RELAY_MANIFEST;
 
 export const KNOWN_RELAY_PROVIDER_MANIFESTS: RelayCapabilityManifest[] = [
   SELF_HOSTED_REFERENCE_RELAY_MANIFEST,
+  CLOUDFLARE_DURABLE_OBJECT_RELAY_MANIFEST,
   AWS_API_GATEWAY_WEBSOCKET_RELAY_MANIFEST,
   ABLY_LOWER_TIER_RELAY_MANIFEST,
   ABLY_HIGHER_TIER_RELAY_MANIFEST,

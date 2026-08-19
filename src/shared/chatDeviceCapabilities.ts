@@ -89,7 +89,13 @@ function capabilityMatches(
   capability: MobilePairingCapability,
   input: ChatDeviceEventAcceptanceInput
 ): boolean {
-  if (capability.scope !== "conversation" || capability.conversationId !== input.conversationId || !capability.canRead) {
+  if (capability.scope === "conversation" && capability.conversationId !== input.conversationId) {
+    return false;
+  }
+  if (capability.scope !== "conversation" && capability.scope !== "device") {
+    return false;
+  }
+  if (!capability.canRead) {
     return false;
   }
   if (input.requireWrite && !capability.canWrite) {

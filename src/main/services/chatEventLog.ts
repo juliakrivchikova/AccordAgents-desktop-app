@@ -30,23 +30,49 @@ export interface SignedChatEventAppendResult<Payload = unknown> {
 const LOCAL_APPEND_RETRY_LIMIT = 3;
 
 export class ChatEventLogService {
+  private deviceIdentity?: ChatEventDeviceIdentityRecord;
+  private deviceIdentityLoad?: Promise<ChatEventDeviceIdentityRecord>;
+  private readonly localAppendQueues = new Map<string, Promise<void>>();
+
   constructor(
     private readonly storage: StorageService,
     private readonly now: () => Date = () => new Date()
   ) {}
 
   async getOrCreateDeviceIdentity(): Promise<ChatEventDeviceIdentityRecord> {
+    if (this.deviceIdentity) {
+      return this.deviceIdentity;
+    }
+    if (this.deviceIdentityLoad) {
+      return this.deviceIdentityLoad;
+    }
+    this.deviceIdentityLoad = this.loadOrCreateDeviceIdentity().finally(() => {
+      this.deviceIdentityLoad = undefined;
+    });
+    return this.deviceIdentityLoad;
+  }
+
+  private async loadOrCreateDeviceIdentity(): Promise<ChatEventDeviceIdentityRecord> {
     const existing = await this.storage.getChatEventDeviceIdentityRecord();
     if (existing) {
+      this.deviceIdentity = existing;
       return existing;
     }
     const created = createChatEventDeviceIdentity(this.now().toISOString());
     await this.storage.saveChatEventDeviceIdentityRecord(created);
+    this.deviceIdentity = created;
     return created;
   }
 
   async appendLocalEvent<Payload>(request: CreateLocalChatEventRequest<Payload>): Promise<SignedChatEventAppendResult<Payload>> {
     const identity = await this.getOrCreateDeviceIdentity();
+    return this.enqueueLocalAppend(identity.originId, request.logScopeId, () => this.appendLocalEventWithIdentity(identity, request));
+  }
+
+  private async appendLocalEventWithIdentity<Payload>(
+    identity: ChatEventDeviceIdentityRecord,
+    request: CreateLocalChatEventRequest<Payload>
+  ): Promise<SignedChatEventAppendResult<Payload>> {
     for (let attempt = 0; attempt < LOCAL_APPEND_RETRY_LIMIT; attempt += 1) {
       const basis = await this.storage.getChatEventSequenceBasis(identity.originId, request.logScopeId);
       const event = createSignedChatEvent(identity, {
@@ -64,6 +90,23 @@ export class ChatEventLogService {
       }
     }
     throw new Error("Chat event append failed after retrying origin sequence conflicts.");
+  }
+
+  private enqueueLocalAppend<Payload>(
+    originId: string,
+    logScopeId: string,
+    append: () => Promise<SignedChatEventAppendResult<Payload>>
+  ): Promise<SignedChatEventAppendResult<Payload>> {
+    const queueKey = `${originId}\0${logScopeId}`;
+    const previous = this.localAppendQueues.get(queueKey) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(append);
+    const tail = next.then(() => undefined, () => undefined);
+    this.localAppendQueues.set(queueKey, tail);
+    return next.finally(() => {
+      if (this.localAppendQueues.get(queueKey) === tail) {
+        this.localAppendQueues.delete(queueKey);
+      }
+    });
   }
 }
 

@@ -210,7 +210,7 @@ export class ArtifactStore {
   private static readonly initByPath = new Map<string, Promise<void>>();
   private initialized = false;
 
-  constructor(private readonly dbPath: string) {}
+  constructor(private readonly dbPath: string, private readonly sqliteExecutable = "sqlite3") {}
 
   async init(): Promise<void> {
     if (this.initialized) {
@@ -1292,7 +1292,7 @@ export class ArtifactStore {
   }
 
   private async queryJson<T>(sql: string): Promise<T[]> {
-    const result = await runCommand("sqlite3", this.sqliteArgs(["-json", this.dbPath, sql]), {
+    const result = await runCommand(this.sqliteExecutable, this.sqliteArgs(["-json", this.dbPath, sql]), {
       timeoutMs: SQLITE_COMMAND_TIMEOUT_MS,
       primeLoginShellEnv: false
     });
@@ -1301,7 +1301,7 @@ export class ArtifactStore {
   }
 
   private async queryText(sql: string): Promise<string> {
-    const result = await runCommand("sqlite3", this.sqliteArgs(["-batch", "-noheader", this.dbPath, sql]), {
+    const result = await runCommand(this.sqliteExecutable, this.sqliteArgs(["-batch", "-noheader", this.dbPath, sql]), {
       timeoutMs: SQLITE_COMMAND_TIMEOUT_MS,
       primeLoginShellEnv: false
     });
@@ -1309,7 +1309,7 @@ export class ArtifactStore {
   }
 
   private async runSql(sql: string): Promise<void> {
-    await runCommand("sqlite3", this.sqliteArgs([this.dbPath]), {
+    await runCommand(this.sqliteExecutable, this.sqliteArgs([this.dbPath]), {
       input: sql,
       timeoutMs: SQLITE_COMMAND_TIMEOUT_MS,
       primeLoginShellEnv: false

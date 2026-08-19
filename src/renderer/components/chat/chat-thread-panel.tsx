@@ -28,8 +28,10 @@ import {
 } from "./chat-conversation-data";
 import { ChatMessageItem, type ChatChoiceResponse } from "./chat-message-item";
 import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
+import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
 export function ChatThreadPanel(props: {
+  activityDisclosure: ChatActivityDisclosureState;
   rootMessage: Conversation["messages"][number];
   replies: Conversation["messages"][number][];
   participants: ChatParticipant[];
@@ -85,6 +87,7 @@ export function ChatThreadPanel(props: {
       </header>
       <div className="chat-thread-body">
         <ChatMessageItem
+          activityDisclosure={props.activityDisclosure}
           message={props.rootMessage}
           conversationId={props.conversationId ?? ""}
           participants={props.participants}
@@ -116,6 +119,7 @@ export function ChatThreadPanel(props: {
             </div>
             {props.replies.map((message) => (
               <ChatMessageItem
+                activityDisclosure={props.activityDisclosure}
                 message={message}
                 conversationId={props.conversationId ?? ""}
                 participants={props.participants}

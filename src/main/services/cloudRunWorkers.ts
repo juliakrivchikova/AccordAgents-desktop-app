@@ -16,7 +16,8 @@ export function normalizeCloudRunWorkerSettings(value: unknown): CloudRunWorkerS
     hostKeyAlias: normalizeHostKeyAlias(record.hostKeyAlias),
     workerRoot: trimOptionalString(record.workerRoot),
     remoteCwd: trimOptionalString(record.remoteCwd),
-    codexPath: trimOptionalString(record.codexPath)
+    codexPath: trimOptionalString(record.codexPath),
+    claudePath: trimOptionalString(record.claudePath)
   };
 }
 
@@ -33,7 +34,8 @@ export function cloudRunWorkerTargetFromSettings(worker: CloudRunWorkerSettings)
     hostKeyAlias: worker.hostKeyAlias,
     workerRoot: worker.workerRoot,
     remoteCwd: worker.remoteCwd,
-    codexPath: worker.codexPath
+    codexPath: worker.codexPath,
+    claudePath: worker.claudePath
   };
 }
 

@@ -15,3 +15,9 @@ await cp(
   path.join(repoRoot, "src/renderer/assets/accordagents-mark.png"),
   path.join(assetTarget, "accordagents-mark.png")
 );
+// QR decoder for in-app pairing. Copied rather than bundled because the mobile
+// shell ships as plain static files with no build step.
+await cp(
+  path.join(repoRoot, "node_modules/jsqr/dist/jsQR.js"),
+  path.join(target, "jsqr.js")
+);

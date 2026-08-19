@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -49,6 +49,33 @@ test("inspectRepo still detects git repositories", async () => {
     assert.equal(info.isRepo, true);
     assert.equal(info.error, undefined);
     assert.deepEqual(info.statusLines, ["?? readme.md"]);
+  } finally {
+    await rm(repoPath, { recursive: true, force: true });
+  }
+});
+
+test("inspectRepo does not execute a repository-local git.cmd on Windows", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("repository-local command shadowing is Windows-specific");
+    return;
+  }
+
+  const repoPath = await mkdtemp(path.join(tmpdir(), "accordagents-git-hijack-"));
+  try {
+    await runCommand("git", ["init"], { cwd: repoPath, timeoutMs: 8000 });
+    const markerPath = path.join(repoPath, "git-hijacker-executed.txt");
+    await writeFile(
+      path.join(repoPath, "git.cmd"),
+      `@echo hijacked>"${markerPath}"\r\n@exit /b 1\r\n`,
+      "utf8"
+    );
+
+    const info = await new GitService().inspectRepo(repoPath);
+
+    assert.equal(info.isRepo, true);
+    await assert.rejects(stat(markerPath), (error: unknown) => {
+      return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+    });
   } finally {
     await rm(repoPath, { recursive: true, force: true });
   }

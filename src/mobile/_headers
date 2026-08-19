@@ -1,0 +1,33 @@
+# W-E: the mobile origin holds a phone's pairing seal key in localStorage, so
+# the cost of any injected script here is the whole pairing. The policy below is
+# strict everywhere it can be without foreclosing a designed capability.
+#
+# connect-src deliberately does NOT name a single relay: pairing packages carry
+# their own relay and outbox URLs, and a self-hosted relay runs the same locked
+# contract, so pinning would make that unreachable from this origin. CSP grammar
+# cannot express "any host, but only the relay this pairing names"; that
+# policing lives where it already is — the app connects only to URLs the pairing
+# package carries, which the harness proves behaviourally with a decoy endpoint.
+# A deployment wanting a stricter pin ships its own _headers.
+#
+# wss: is listed explicitly and is not redundant: the phone's live path opens a
+# raw WebSocket, and whether an https: scheme-source also matches wss: is
+# engine-dependent under CSP3 — our gate runs Chromium while the field runs iOS
+# Safari, so omitting it could pass here and kill the phone's transport there.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' https: wss:; img-src 'self' data:; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(self), microphone=(), geolocation=(), payment=(), usb=()
+
+/
+  Cache-Control: public, max-age=0, must-revalidate
+
+/index.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+/service-worker.js
+  Cache-Control: public, max-age=0, must-revalidate
+
+/mobile-app.js
+  Cache-Control: public, max-age=0, must-revalidate

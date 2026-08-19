@@ -1,5 +1,9 @@
 import type { ChatActivityItem, ChatAppToolApproval, ChatCodexApprovalRequest, Conversation } from "../../../shared/types";
 import { isCodexActivityApprovalItem } from "../../../shared/chatActivity";
+import {
+  isCodexGuardianDeniedApprovalMethod,
+  isCodexGuardianTimedOutApprovalMethod
+} from "../../../shared/codexApproval";
 
 export const CODEX_APPROVAL_TOOL_NAME = "codex_auto_review_approval";
 
@@ -10,6 +14,14 @@ export interface ChatApprovalPlacement {
 
 export function chatApprovalShowsGenericSkip(codexRequest: ChatCodexApprovalRequest | undefined): boolean {
   return codexRequest === undefined;
+}
+
+export function chatCodexApprovalShowsCancel(codexRequest: ChatCodexApprovalRequest | undefined): boolean {
+  return isCodexGuardianDeniedApprovalMethod(codexRequest?.method);
+}
+
+export function chatCodexApprovalShowsCompactResult(approval: ChatAppToolApproval): boolean {
+  return approval.status !== "pending" && chatCodexApprovalRequest(approval) !== undefined;
 }
 
 export function chatActivityShowsGenericCancel(item: ChatActivityItem): boolean {
@@ -93,7 +105,7 @@ export function chatCodexApprovalRequest(approval: ChatAppToolApproval): ChatCod
       request.action === "mcpToolCall"
     ) &&
     Array.isArray(request.options) &&
-    (request.method === "item/autoApprovalReview/timedOut" ? request.options.length === 0 : request.options.length > 0) &&
+    (isCodexGuardianTimedOutApprovalMethod(request.method) ? request.options.length === 0 : request.options.length > 0) &&
     request.options.every((option) =>
       typeof option?.id === "string" &&
       typeof option.label === "string" &&

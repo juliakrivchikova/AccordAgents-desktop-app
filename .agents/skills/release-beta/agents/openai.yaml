@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release Beta"
+  short_description: "Safely publish and verify AccordAgents beta releases"
+  default_prompt: "Use $release-beta to publish and verify a safe AccordAgents beta release."

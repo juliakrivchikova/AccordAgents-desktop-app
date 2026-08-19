@@ -8,7 +8,7 @@ export interface MobilePairingIssuer {
   publicKeyDerBase64: string;
 }
 
-export interface MobilePairingCapability {
+export interface MobilePairingConversationCapability {
   scope: "conversation";
   conversationId: string;
   canRead: boolean;
@@ -16,6 +16,17 @@ export interface MobilePairingCapability {
   canRunCloudParticipants: boolean;
   canInviteOthers?: boolean;
 }
+
+export interface MobilePairingDeviceCapability {
+  scope: "device";
+  canRead: boolean;
+  canWrite: boolean;
+  canRunCloudParticipants: boolean;
+  canListConversations: boolean;
+  canInviteOthers?: boolean;
+}
+
+export type MobilePairingCapability = MobilePairingConversationCapability | MobilePairingDeviceCapability;
 
 export interface MobilePairingPackage {
   version: typeof MOBILE_PAIRING_VERSION;
@@ -35,7 +46,7 @@ export interface MobilePairingPackage {
 }
 
 export interface CreateMobilePairingRequest {
-  conversationId: string;
+  conversationId?: string;
   purpose?: MobilePairingPurpose;
   relayUrl?: string;
   mailboxUrl?: string;
@@ -50,6 +61,92 @@ export interface CreateMobilePairingResult {
   package: MobilePairingPackage;
   qrPayload: string;
   pwaUrl?: string;
+  /** False when the relay could not be reached to register the mailbox lock
+   *  at creation time; the link starts working once registration succeeds
+   *  (retried on reconnect and on unregistered mailbox responses). */
+  mailboxRegistered?: boolean;
+}
+
+export interface RevokeMobilePairingRequest {
+  stableRoutingId: string;
+  rendezvousId?: string;
+  reason?: string;
+}
+
+export interface RevokeMobilePairingResult {
+  revoked: boolean;
+  stableRoutingId: string;
+  rendezvousId?: string;
+  revokedAt: string;
+  reason: string;
+}
+
+export interface MobileControlEndpointDefaults {
+  relayUrl?: string;
+  mailboxUrl?: string;
+  outboxUrl?: string;
+  staticOriginUrl?: string;
+}
+
+export interface MobileControlSettings {
+  provider: "none" | "accord-managed";
+  defaults: MobileControlEndpointDefaults;
+}
+
+export const ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS: MobileControlEndpointDefaults = {
+  relayUrl: "wss://relay.accordagents.com/v1/relay",
+  mailboxUrl: "https://relay.accordagents.com/",
+  outboxUrl: "https://relay.accordagents.com/v1/mailbox/events",
+  staticOriginUrl: "https://mobile.accordagents.com/"
+};
+
+export const EMPTY_MOBILE_CONTROL_SETTINGS: MobileControlSettings = {
+  provider: "none",
+  defaults: {}
+};
+
+export function mobileControlSettingsFromEnvironment(env: Record<string, string | undefined>): MobileControlSettings {
+  const defaults: MobileControlEndpointDefaults =
+    env.ACCORDAGENTS_DISABLE_MANAGED_MOBILE_DEFAULTS === "1"
+      ? {}
+      : { ...ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS };
+  const relayUrl = normalizedOptionalEnvironmentUrl(env.ACCORDAGENTS_MOBILE_RELAY_URL, "wss:");
+  const mailboxUrl = normalizedOptionalEnvironmentUrl(env.ACCORDAGENTS_MOBILE_MAILBOX_URL, "https:");
+  const outboxUrl = normalizedOptionalEnvironmentUrl(env.ACCORDAGENTS_MOBILE_OUTBOX_URL, "https:");
+  const staticOriginUrl = normalizedOptionalEnvironmentUrl(env.ACCORDAGENTS_MOBILE_STATIC_ORIGIN_URL, "https:");
+  if (relayUrl) {
+    defaults.relayUrl = relayUrl;
+  }
+  if (mailboxUrl) {
+    defaults.mailboxUrl = mailboxUrl;
+  }
+  if (outboxUrl) {
+    defaults.outboxUrl = outboxUrl;
+  }
+  if (staticOriginUrl) {
+    defaults.staticOriginUrl = staticOriginUrl;
+  }
+  const hasManagedRelay = defaults.relayUrl === ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS.relayUrl;
+  const hasManagedStatic = defaults.staticOriginUrl === ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS.staticOriginUrl;
+  return {
+    provider: defaults.relayUrl && defaults.staticOriginUrl ? "accord-managed" : EMPTY_MOBILE_CONTROL_SETTINGS.provider,
+    defaults: hasManagedRelay && hasManagedStatic
+      ? { ...ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS, ...defaults }
+      : defaults
+  };
+}
+
+export function mobilePairingRequestWithEndpointDefaults(
+  request: CreateMobilePairingRequest,
+  defaults: MobileControlEndpointDefaults | undefined
+): CreateMobilePairingRequest {
+  return {
+    ...request,
+    relayUrl: nonEmptyOrDefault(request.relayUrl, defaults?.relayUrl),
+    mailboxUrl: nonEmptyOrDefault(request.mailboxUrl, defaults?.mailboxUrl),
+    outboxUrl: nonEmptyOrDefault(request.outboxUrl, defaults?.outboxUrl),
+    staticOriginUrl: nonEmptyOrDefault(request.staticOriginUrl, defaults?.staticOriginUrl)
+  };
 }
 
 export function mobilePairingPayloadForQr(pairing: MobilePairingPackage): string {
@@ -64,10 +161,27 @@ export function mobilePairingPwaUrl(pairing: MobilePairingPackage, staticOriginU
   }
   assertHttpsUrl(staticOriginUrl, "staticOriginUrl");
   const url = new URL(staticOriginUrl);
-  url.searchParams.set("conversationId", pairing.capabilities[0].conversationId);
-  url.searchParams.set("routingId", pairing.stableRoutingId);
-  url.searchParams.set("fingerprint", pairing.fingerprint);
-  url.hash = `pairing=${base64UrlEncode(JSON.stringify(pairing))}`;
+  const conversationCapability = pairing.capabilities.find(
+    (capability): capability is MobilePairingConversationCapability => capability.scope === "conversation"
+  );
+  url.searchParams.set("v", String(pairing.version));
+  url.searchParams.set("rid", pairing.rendezvousId);
+  url.searchParams.set("route", pairing.stableRoutingId);
+  url.searchParams.set("cap", pairing.fingerprint);
+  if (conversationCapability) {
+    url.searchParams.set("conversationId", conversationCapability.conversationId);
+  }
+  if (pairing.relayUrl && pairing.relayUrl !== ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS.relayUrl) {
+    url.searchParams.set("relay", pairing.relayUrl);
+  }
+  if (pairing.mailboxUrl) {
+    url.searchParams.set("mailbox", pairing.mailboxUrl);
+  }
+  if (pairing.outboxUrl) {
+    url.searchParams.set("outbox", pairing.outboxUrl);
+  }
+  // Keep the sealing key in the URL fragment so it is never sent to the static origin.
+  url.hash = `k=${pairing.relaySealKeyBase64}`;
   return url.toString();
 }
 
@@ -136,10 +250,14 @@ export function assertMobilePairingPackage(value: unknown, now?: Date): asserts 
 
 function assertMobilePairingCapability(value: unknown): asserts value is MobilePairingCapability {
   assertRecord(value, "Mobile pairing capability");
-  if (value.scope !== "conversation") {
+  if (value.scope !== "conversation" && value.scope !== "device") {
     throw new Error("Mobile pairing capability scope is invalid.");
   }
-  assertNonEmptyString(value.conversationId, "capability.conversationId");
+  if (value.scope === "conversation") {
+    assertNonEmptyString(value.conversationId, "capability.conversationId");
+  } else if (typeof value.canListConversations !== "boolean") {
+    throw new Error("Mobile pairing capability canListConversations must be boolean.");
+  }
   for (const field of ["canRead", "canWrite", "canRunCloudParticipants"] as const) {
     if (typeof value[field] !== "boolean") {
       throw new Error(`Mobile pairing capability ${field} must be boolean.`);
@@ -153,6 +271,24 @@ function assertMobilePairingCapability(value: unknown): asserts value is MobileP
 function assertRecord(value: unknown, label: string): asserts value is Record<string, unknown> {
   if (!isRecord(value)) {
     throw new Error(`${label} must be an object.`);
+  }
+}
+
+function nonEmptyOrDefault(value: string | undefined, fallback: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || fallback;
+}
+
+function normalizedOptionalEnvironmentUrl(value: string | undefined, protocol: "https:" | "wss:"): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === protocol ? parsed.toString() : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -191,13 +327,4 @@ function assertHttpsUrl(value: string, label: string): void {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-function base64UrlEncode(value: string): string {
-  const maybeBuffer = (globalThis as { Buffer?: { from(value: string, encoding: string): { toString(encoding: string): string } } }).Buffer;
-  if (maybeBuffer) {
-    return maybeBuffer.from(value, "utf8").toString("base64url");
-  }
-  const binary = btoa(unescape(encodeURIComponent(value)));
-  return binary.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }

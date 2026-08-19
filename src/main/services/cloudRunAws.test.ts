@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AppSettings, AwsWorkerHandleInfo } from "../../shared/types";
+import type { AppSettings, AwsWorkerHandleInfo, AwsWorkerOperationSnapshot } from "../../shared/types";
 import { CloudRunAwsService } from "./cloudRunAws";
 import type { CloudRunAwsServiceOptions } from "./cloudRunAws";
 import { encodeWorkerBlob } from "./awsWorkerProvisioning";
@@ -27,6 +27,7 @@ class FakeSettings {
   deviceId = "device-a";
   volumeExpansion: { instanceId: string; volumeId: string; targetSizeGb: number; updatedAt: string } | undefined;
   provisioningToken: string | undefined;
+  operation: AwsWorkerOperationSnapshot | undefined;
 
   async getAwsWorkerCredentials(): Promise<AwsWorkerCredentials | undefined> {
     return this.credentials;
@@ -90,6 +91,10 @@ class FakeSettings {
   async getAwsWorkerProvisioningToken(): Promise<string | undefined> {
     return this.provisioningToken;
   }
+
+  async getAwsWorkerOperation(): Promise<AwsWorkerOperationSnapshot | undefined> {
+    return this.operation;
+  }
 }
 
 class FakeEc2Client implements Ec2Client {
@@ -102,6 +107,7 @@ class FakeEc2Client implements Ec2Client {
   revokedSecurityGroups: string[] = [];
   importError: Error | undefined;
   describeError: Error | undefined;
+  describeTypeError: Error | undefined;
   terminateError: Error | undefined;
   stopError: Error | undefined;
   findErrors: Error[] = [];
@@ -137,6 +143,9 @@ class FakeEc2Client implements Ec2Client {
   }
 
   async describeInstanceType(instanceType: string): Promise<{ vCpu: number; memoryMiB: number }> {
+    if (this.describeTypeError) {
+      throw this.describeTypeError;
+    }
     return instanceType === "t3.medium" ? { vCpu: 2, memoryMiB: 4096 } : { vCpu: 2, memoryMiB: 2048 };
   }
 
@@ -264,6 +273,30 @@ test("bootstrap command reuses a stable device-scoped IAM identity", async () =>
   assert.match(second, /REGION=eu-west-1/);
 });
 
+test("bootstrap command updates the active authorization-denied worker user in place", async () => {
+  const settings = new FakeSettings();
+  settings.operation = {
+    operationId: "op-auth",
+    phase: "error",
+    message: "Cloud Run cannot access required AWS APIs",
+    updatedAt: "2026-08-13T00:00:00.000Z",
+    remediation: "refresh-aws-authorization",
+    missingAwsActions: ["ec2:DescribeInstanceTypes"],
+    awsPrincipalUserName: "accordagents-worker-pna6gbah"
+  };
+  const service = serviceWith(settings, new Map());
+
+  const command = await service.bootstrapCommand("us-east-1");
+
+  assert.match(command, /USER=accordagents-worker-pna6gbah/);
+  assert.match(command, /aws iam create-policy-version --policy-arn "\$POLICY_ARN"/);
+  assert.match(command, /aws iam attach-user-policy --user-name "\$USER" --policy-arn "\$POLICY_ARN"/);
+  assert.match(command, /aws iam delete-user-policy --user-name "\$USER" --policy-name accordagents-worker/);
+  assert.doesNotMatch(command, /UPDATE_EXISTING_USER/);
+  assert.doesNotMatch(command, /aws iam create-access-key/);
+  assert.doesNotMatch(command, /accord-aws-v1:/);
+});
+
 test("connectWorker refuses to overwrite an active existing worker", async () => {
   const settings = new FakeSettings();
   settings.credentials = OLD_CREDS;
@@ -370,6 +403,35 @@ test("ensureWorkerForRun uses the current device SSH identity", async () => {
   assert.equal(worker.hostKeyAlias, "accordagents-i-old");
   assert.deepEqual(oldClient.revokedSecurityGroups, []);
   assert.deepEqual(oldClient.authorizedCidrs, ["203.0.113.9/32"]);
+});
+
+test("ensureWorkerForRun uses an existing running worker when instance-type metadata is unauthorized", async () => {
+  const settings = new FakeSettings();
+  settings.credentials = OLD_CREDS;
+  settings.handle = { ...OLD_HANDLE, rootVolumeSizeGb: 8, vCpu: 2, memoryMiB: 2048 };
+  settings.mode = "aws";
+  const client = new FakeEc2Client({
+    instanceId: "i-old",
+    state: "running",
+    publicIp: "198.51.100.10",
+    instanceType: "t3.small"
+  });
+  client.describeTypeError = Object.assign(
+    new Error("not authorized to perform ec2:DescribeInstanceTypes"),
+    { name: "UnauthorizedOperation" }
+  );
+  const logs: string[] = [];
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), {
+    logger: (event) => logs.push(event)
+  });
+
+  const worker = await service.ensureWorkerForRun();
+
+  assert.equal(worker.host, "198.51.100.10");
+  assert.equal(worker.hostKeyAlias, "accordagents-i-old");
+  assert.deepEqual(client.authorizedCidrs, ["203.0.113.9/32"]);
+  assert.deepEqual(client.runTokens, []);
+  assert.equal(logs.includes("aws-worker.capacity.authorization-fallback"), true);
 });
 
 test("AWS run references are acquired and released exactly once per run id", async () => {
@@ -758,9 +820,11 @@ test("disk expansion retry resumes only filesystem work after EBS already grew",
   };
   const client = new FakeEc2Client(info);
   let filesystemAttempts = 0;
+  const filesystemCommands: string[] = [];
   const service = serviceWith(settings, new Map([[NEW_CREDS.accessKeyId, client]]), {
-    sshExec: async () => {
+    sshExec: async (_worker, command) => {
       filesystemAttempts += 1;
+      filesystemCommands.push(command);
       if (filesystemAttempts === 1) throw new Error("resize failed");
     }
   });
@@ -782,6 +846,8 @@ test("disk expansion retry resumes only filesystem work after EBS already grew",
   await assert.rejects(() => service.growDisk(prepared), /resize failed/);
   assert.equal(settings.volumeExpansion?.targetSizeGb, 16);
   assert.deepEqual(client.modifiedSizes, [16]);
+  assert.ok(filesystemCommands[0].includes("PKNAME \"$root\" | head -1 | tr -d '[:space:]'"));
+  assert.ok(filesystemCommands[0].includes("PARTN \"$root\" | head -1 | tr -d '[:space:]'"));
   settings.handle = prepared.handle;
   settings.awsRootVolumeSizeGb = 16;
   await service.ensureWorkerForRun();

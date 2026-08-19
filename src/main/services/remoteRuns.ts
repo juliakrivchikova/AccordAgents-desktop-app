@@ -3,18 +3,24 @@ import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises
 import path from "node:path";
 import { app } from "electron";
 import type {
+  ChatAgentMode,
   ChatAgentPermissions,
   ChatAppToolApprovalScope,
   ChatPermissionChangeRequest,
   ChatPermissionRequestToolResult,
+  ChatProviderKind,
   ChatRemoteRunStatus,
+  ChatReasoningEffort,
+  ChatShellPermissionRule,
   ConversationKind,
   GitDiffMode,
   ParticipantConfig,
   RemoteParticipantSessionHandle,
   RemoteRunSyncInfo
 } from "../../shared/types";
+import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
+import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
 import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
 import type { ChatAppToolApprovalDecisionEvent, ChatService } from "./chat";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs } from "./cloudRunWorkers";
@@ -87,6 +93,7 @@ export const REMOTE_WARM_SESSION_PREPARE_TIMEOUT_MS =
   5_000;
 export const MAX_MIRROR_SYNC_STATE_ENTRIES = 200;
 const MIRROR_SYNC_STATE_FILENAME = "mirror-sync-state.json";
+const REMOTE_SECRET_ENV_KEYS = new Set(["GH_TOKEN", "GITHUB_TOKEN"]);
 // Upper bound on paths a single opportunistic worker-mirror reclaim pass will
 // delete, so a worker that has accumulated many orphans is drained gradually
 // over several runs rather than in one large blocking rm.
@@ -114,6 +121,46 @@ const REMOTE_ENV_DENYLIST_PREFIXES = [
   "ACCORD_AGENTS_"
 ];
 
+export function remoteSessionProtocolPayload(): {
+  version: number;
+  files: Record<string, string>;
+  hashes: Record<string, string>;
+} {
+  const files = {
+    "session-control.js": remoteSessionControlScript(),
+    "session-supervisor.js": remoteSessionSupervisorScript(),
+    "run-worker.js": detachedWorkerScript()
+  };
+  return {
+    version: REMOTE_SESSION_PROTOCOL_VERSION,
+    files,
+    hashes: Object.fromEntries(
+      Object.entries(files).map(([name, body]) => [
+        name,
+        createHash("sha256").update(body).digest("hex")
+      ])
+    )
+  };
+}
+
+export function remoteSessionProtocolMatchesCurrent(current: unknown): boolean {
+  if (!current || typeof current !== "object" || Array.isArray(current)) {
+    return false;
+  }
+  const record = current as Record<string, unknown>;
+  if (record.version !== REMOTE_SESSION_PROTOCOL_VERSION) {
+    return false;
+  }
+  const currentHashes = record.hashes;
+  if (!currentHashes || typeof currentHashes !== "object" || Array.isArray(currentHashes)) {
+    return false;
+  }
+  const { hashes } = remoteSessionProtocolPayload();
+  return Object.entries(hashes).every(([name, value]) =>
+    (currentHashes as Record<string, unknown>)[name] === value
+  );
+}
+
 export function forwardedDesktopEnvironment(base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const source = base ?? commandEnvironment();
   const result: NodeJS.ProcessEnv = {};
@@ -139,6 +186,7 @@ export type RemoteRunSpoolRecordKind =
   | "provider_result"
   | "permission_pending"
   | "permission_decision"
+  | "chat_message"
   | "terminal_state";
 
 interface RemoteRunRecordBase {
@@ -301,6 +349,7 @@ export interface RemoteRunWorkerTarget {
   hostKeyAlias?: string;
   sshPath?: string;
   codexPath?: string;
+  claudePath?: string;
   remoteCwd?: string;
   workerRoot?: string;
 }
@@ -355,7 +404,7 @@ export interface RemoteRunDetachedReapRequest {
 
 export interface RemoteCodexExecutorRequest {
   worker: RemoteRunWorkerTarget;
-  invocation: CodexExecInvocation;
+  invocation: RemoteAgentInvocation;
   remoteFinalPath: string;
   timeoutMs: number;
   signal?: AbortSignal;
@@ -378,6 +427,14 @@ export type RemoteCodexExecutor = (
   request: RemoteCodexExecutorRequest,
   callbacks: RemoteCodexExecutorCallbacks
 ) => Promise<RemoteCodexExecutionResult>;
+
+export interface RemoteAgentInvocation extends CodexExecInvocation {
+  providerKind: ChatProviderKind;
+  executablePath: string;
+  remoteCwd?: string;
+  secretEnv?: NodeJS.ProcessEnv;
+  fallbackSessionId?: string;
+}
 
 export type RemoteDetachedRunStatus = "running" | "completed" | "failed" | "cancelled" | "unknown";
 
@@ -505,6 +562,17 @@ export interface RemoteWorkerPermissionPendingEvent extends RemoteWorkerEventBas
   runPermissions?: ChatAgentPermissions;
 }
 
+/** A member speaking to the room while it is still working. Distinct from
+ *  provider_output on purpose: that is a stream, this is one deliberate
+ *  message, and only one of the two should ever be posted as chat. */
+export interface RemoteWorkerChatMessageEvent extends RemoteWorkerEventBase {
+  kind: "chat_message";
+  content: string;
+  sourceMessageId?: string;
+  threadId?: string;
+  chatThreadRootId?: string;
+}
+
 export interface RemoteWorkerTerminalStateEvent extends RemoteWorkerEventBase {
   kind: "terminal_state";
   status: RemoteRunTerminalStateRecord["status"];
@@ -516,6 +584,7 @@ export type RemoteWorkerEvent =
   | RemoteWorkerProviderOutputEvent
   | RemoteWorkerProviderResultEvent
   | RemoteWorkerPermissionPendingEvent
+  | RemoteWorkerChatMessageEvent
   | RemoteWorkerTerminalStateEvent;
 
 export interface RemoteDetachedWorkerLaunchRequest {
@@ -523,7 +592,7 @@ export interface RemoteDetachedWorkerLaunchRequest {
   runId: string;
   participant: ParticipantConfig;
   worker: RemoteRunWorkerTarget;
-  invocation: CodexExecInvocation;
+  invocation: RemoteAgentInvocation;
   remoteRunDir: string;
   remoteFinalPath: string;
   timeoutMs: number;
@@ -694,13 +763,14 @@ export class RemoteRunService {
       state: "started"
     });
 
-    const invocation = buildCodexExecInvocation({
+    const invocation = buildRemoteAgentInvocation({
       participant: request.participant,
       prompt: request.prompt,
       outputPath: remoteFinalPath,
       repoPath: request.repoPath,
       diffMode: request.diffMode,
       kind: request.kind ?? "chat",
+      worker: request.worker,
       options: {
         ...request.options,
         persistSession: true,
@@ -715,18 +785,20 @@ export class RemoteRunService {
     let stderr = "";
     let sessionId = request.options?.sessionId;
     const pendingOutputWrites: Promise<unknown>[] = [];
-    const lineHandler = createCodexLineHandler((line) =>
-      emitCodexLiveOutput(line, undefined, undefined, (nextSessionId) => {
-        sessionId = nextSessionId;
-      })
-    );
+    const lineHandler = request.participant.kind === "codex-cli"
+      ? createCodexLineHandler((line) =>
+          emitCodexLiveOutput(line, undefined, undefined, (nextSessionId) => {
+            sessionId = nextSessionId;
+          })
+        )
+      : undefined;
     const appendOutput = (stream: RemoteRunProviderOutputRecord["stream"], chunk: string): void => {
       if (!chunk) {
         return;
       }
       if (stream === "stdout") {
         stdout += chunk;
-        lineHandler(chunk);
+        lineHandler?.(chunk);
       } else {
         stderr += chunk;
       }
@@ -759,15 +831,15 @@ export class RemoteRunService {
       });
       stdout ||= execution.stdout;
       stderr ||= execution.stderr;
-      sessionId = extractCodexSessionId(stdout) ?? sessionId;
+      sessionId = extractRemoteAgentSessionId(request.participant.kind, stdout) ?? invocation.fallbackSessionId ?? sessionId;
       await Promise.all(pendingOutputWrites);
-      const error = this.remoteExecutionError(execution);
+      const error = this.remoteExecutionError(execution, request.participant.kind);
       return await this.appendProviderResult({
         conversationId: request.conversationId,
         runId,
         participantId: request.participant.id,
         ok: !error,
-        content: execution.finalMessage.trim() || extractCodexText(stdout) || stderr.trim() || error || "",
+        content: execution.finalMessage.trim() || extractRemoteAgentText(request.participant.kind, stdout) || stderr.trim() || error || "",
         exitCode: execution.exitCode,
         error,
         sessionId,
@@ -818,7 +890,7 @@ export class RemoteRunService {
       repoPath: request.repoPath ?? request.sync?.localPath,
       kind: request.kind ?? "chat",
       options: request.options,
-      codexPath: request.worker.codexPath
+      codexPath: remoteAgentExecutablePath(request.participant.kind, request.worker)
     });
     let participantSession: RemoteParticipantSessionEnsureResult | undefined;
     if (this.detachedWorkerTransport.ensureParticipantSession) {
@@ -856,13 +928,14 @@ export class RemoteRunService {
     );
     const remoteSandbox = await this.remoteSandboxOptionsForRun(request, sync, effectiveRepoPath);
 
-    const invocation = buildCodexExecInvocation({
+    const invocation = buildRemoteAgentInvocation({
       participant: request.participant,
       prompt: request.prompt,
       outputPath: remoteFinalPath,
       repoPath: effectiveRepoPath,
       diffMode: request.diffMode,
       kind: request.kind ?? "chat",
+      worker: request.worker,
       options: {
         ...request.options,
         persistSession: true,
@@ -1484,6 +1557,22 @@ export class RemoteRunService {
         message: event.message
       };
     }
+    if (event.kind === "chat_message") {
+      // A member posting mid-run is saying something to the room, not streaming
+      // provider output — but the desktop already knows how to turn one text
+      // into one participant message, so it maps onto that record rather than
+      // inventing a second way to post.
+      return {
+        kind: "output_text",
+        conversationId,
+        runId,
+        participantId,
+        content: event.content,
+        sourceMessageId: event.sourceMessageId,
+        threadId: event.threadId,
+        chatThreadRootId: event.chatThreadRootId
+      };
+    }
     if (event.kind === "provider_output") {
       return {
         kind: "provider_output",
@@ -1856,10 +1945,11 @@ export class RemoteRunService {
       // writable for commits. The container holds only this project's repo +
       // its worktrees, so widening it does not expose other mirrors.
       const hasGitDir = localProjectHasGitDir(sync.localPath);
-      const container = path.posix.dirname(effectiveRepoPath);
+      const container = sync.remotePath ? path.posix.dirname(sync.remotePath) : path.posix.dirname(effectiveRepoPath);
       return {
         networkAccess: true,
-        gitWritableRoot: hasGitDir ? container : undefined
+        gitWritableRoot: hasGitDir ? container : undefined,
+        dangerFullAccess: hasGitDir
       };
     }
     // Pre-provisioned repo on a user-managed box: stay conservative and only
@@ -1872,7 +1962,8 @@ export class RemoteRunService {
     }
     return {
       networkAccess: true,
-      gitWritableRoot: hasGitDir ? `${effectiveRepoPath}/.git` : undefined
+      gitWritableRoot: hasGitDir ? `${effectiveRepoPath}/.git` : undefined,
+      dangerFullAccess: hasGitDir
     };
   }
 
@@ -2246,15 +2337,16 @@ export class RemoteRunService {
     return record.kind === "portable" || record.kind === "shellRules" || record.kind === "providerNative";
   }
 
-  private remoteExecutionError(execution: RemoteCodexExecutionResult): string | undefined {
+  private remoteExecutionError(execution: RemoteCodexExecutionResult, kind: ParticipantConfig["kind"]): string | undefined {
+    const label = kind === "claude-code" ? "Claude" : "Codex";
     if (execution.timedOut) {
-      return "Remote Codex run timed out.";
+      return `Remote ${label} run timed out.`;
     }
     if (execution.exitCode !== 0) {
       const diagnostic = execution.stderr.trim() || execution.stdout.trim();
       return diagnostic
-        ? `Remote Codex exited with code ${execution.exitCode}: ${diagnostic}`
-        : `Remote Codex exited with code ${execution.exitCode}.`;
+        ? `Remote ${label} exited with code ${execution.exitCode}: ${diagnostic}`
+        : `Remote ${label} exited with code ${execution.exitCode}.`;
     }
     return undefined;
   }
@@ -2314,36 +2406,46 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
     if (!session) {
       throw new Error("Remote member session handle is missing.");
     }
+    const sshPath = request.worker.sshPath?.trim() || "ssh";
+    const sshBaseArgs = remoteSshBaseArgs(request.worker, remoteSshTarget(request.worker));
     const root = await resolveRemoteRunDir(
-      request.worker.sshPath?.trim() || "ssh",
-      remoteSshBaseArgs(request.worker, remoteSshTarget(request.worker)),
+      sshPath,
+      sshBaseArgs,
       remoteWorkerRootForTarget(request.worker),
       request.signal
     );
     const resolvedRunDir = await resolveRemoteRunDir(
-      request.worker.sshPath?.trim() || "ssh",
-      remoteSshBaseArgs(request.worker, remoteSshTarget(request.worker)),
+      sshPath,
+      sshBaseArgs,
       request.remoteRunDir,
       request.signal
     );
     const resolvedFinalPath = `${resolvedRunDir}/final.txt`;
+    const secretEnvPath = request.invocation.secretEnv ? `${resolvedRunDir}/secret-env.json` : undefined;
     const invocationArgs = replaceArgValue(request.invocation.args, request.remoteFinalPath, resolvedFinalPath);
     const invocation = {
       runId: request.runId,
       conversationId: request.conversationId,
       participantId: request.participant.id,
+      providerKind: request.invocation.providerKind,
       args: invocationArgs,
       input: request.invocation.input,
       env: request.invocation.env ?? {},
       codexPath: request.worker.codexPath?.trim() || "codex",
-      remoteCwd: request.worker.remoteCwd?.trim(),
+      commandPath: request.invocation.executablePath,
+      remoteCwd: request.worker.remoteCwd?.trim() || request.invocation.remoteCwd?.trim(),
       finalPath: resolvedFinalPath,
+      ...(secretEnvPath ? { secretEnvPath } : {}),
       maxRuntimeMs: request.maxRuntimeMs,
       resumeSessionId: resumeSessionIdFromArgs(invocationArgs),
+      fallbackSessionId: request.invocation.fallbackSessionId,
       sourceMessageId: request.sourceMessageId,
       threadId: request.threadId,
       chatThreadRootId: request.chatThreadRootId
     };
+    if (secretEnvPath) {
+      await writeRemoteFile(sshPath, sshBaseArgs, secretEnvPath, JSON.stringify(request.invocation.secretEnv), request.signal);
+    }
     const result = await this.runSessionControl(request.worker, root, "submit", {
       sessionDir: session.sessionDir,
       runId: request.runId,
@@ -2550,19 +2652,24 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
     const sshBaseArgs = remoteSshBaseArgs(request.worker, target);
     const resolvedRunDir = await resolveRemoteRunDir(sshPath, sshBaseArgs, request.remoteRunDir, request.signal);
     const resolvedFinalPath = `${resolvedRunDir}/final.txt`;
+    const secretEnvPath = request.invocation.secretEnv ? `${resolvedRunDir}/secret-env.json` : undefined;
     const invocationArgs = replaceArgValue(request.invocation.args, request.remoteFinalPath, resolvedFinalPath);
     const config = {
       runId: request.runId,
       conversationId: request.conversationId,
       participantId: request.participant.id,
+      providerKind: request.invocation.providerKind,
       args: invocationArgs,
       input: request.invocation.input,
       env: request.invocation.env ?? {},
       codexPath: request.worker.codexPath?.trim() || "codex",
-      remoteCwd: request.worker.remoteCwd?.trim(),
+      commandPath: request.invocation.executablePath,
+      remoteCwd: request.worker.remoteCwd?.trim() || request.invocation.remoteCwd?.trim(),
       finalPath: resolvedFinalPath,
+      ...(secretEnvPath ? { secretEnvPath } : {}),
       maxRuntimeMs: request.maxRuntimeMs,
       resumeSessionId: resumeSessionIdFromArgs(invocationArgs),
+      fallbackSessionId: request.invocation.fallbackSessionId,
       sourceMessageId: request.sourceMessageId,
       threadId: request.threadId,
       chatThreadRootId: request.chatThreadRootId
@@ -2575,6 +2682,9 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
     await writeRemoteFile(sshPath, sshBaseArgs, `${resolvedRunDir}/invocation.json`, JSON.stringify(config), request.signal);
     await writeRemoteFile(sshPath, sshBaseArgs, `${resolvedRunDir}/context-snapshot.json`, JSON.stringify(request.contextSnapshot ?? null), request.signal);
     await writeRemoteFile(sshPath, sshBaseArgs, `${resolvedRunDir}/worker.js`, detachedWorkerScript(), request.signal);
+    if (secretEnvPath) {
+      await writeRemoteFile(sshPath, sshBaseArgs, secretEnvPath, JSON.stringify(request.invocation.secretEnv), request.signal);
+    }
     const start = [
       `cd ${shellQuote(resolvedRunDir)} || exit 125`,
       "rm -f exit.json",
@@ -2788,18 +2898,19 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
     const target = remoteSshTarget(worker);
     const sshBaseArgs = remoteSshBaseArgs(worker, target);
     const root = await resolveRemoteRunDir(sshPath, sshBaseArgs, remoteWorkerRootForTarget(worker), signal);
-    let currentVersion = 0;
+    const protocol = remoteSessionProtocolPayload();
+    let protocolCurrent = false;
     try {
       const result = await runCommand(sshPath, [...sshBaseArgs, `cat ${shellQuote(`${root}/protocol.json`)}`], {
         timeoutMs: 30_000,
         signal
       });
       const parsed = JSON.parse(result.stdout) as { version?: unknown };
-      currentVersion = typeof parsed.version === "number" ? parsed.version : 0;
+      protocolCurrent = remoteSessionProtocolMatchesCurrent(parsed);
     } catch {
-      currentVersion = 0;
+      protocolCurrent = false;
     }
-    if (currentVersion !== REMOTE_SESSION_PROTOCOL_VERSION) {
+    if (!protocolCurrent) {
       await runCommand(sshPath, [...sshBaseArgs, `mkdir -p ${shellQuote(root)}`], {
         timeoutMs: 30_000,
         signal
@@ -2812,12 +2923,8 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
           `node ${shellQuote(installerPath)} ${shellQuote(root)}`
         ], {
           input: JSON.stringify({
-            version: REMOTE_SESSION_PROTOCOL_VERSION,
-            files: {
-              "session-control.js": remoteSessionControlScript(),
-              "session-supervisor.js": remoteSessionSupervisorScript(),
-              "run-worker.js": detachedWorkerScript()
-            }
+            version: protocol.version,
+            files: protocol.files
           }),
           timeoutMs: 60_000,
           signal
@@ -3017,6 +3124,423 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+interface BuildRemoteAgentInvocationRequest {
+  participant: ParticipantConfig;
+  prompt: string;
+  outputPath: string;
+  worker: RemoteRunWorkerTarget;
+  repoPath?: string;
+  diffMode?: GitDiffMode;
+  kind: ConversationKind;
+  options?: CodexExecOptions;
+}
+
+interface RemoteClaudeToolConfig {
+  permissionMode: "default" | "plan" | "acceptEdits" | "auto" | "bypassPermissions";
+  allowedTools: string[];
+  disallowedTools: string[];
+  askTools: string[];
+}
+
+function buildRemoteAgentInvocation(request: BuildRemoteAgentInvocationRequest): RemoteAgentInvocation {
+  const remoteCwd = request.worker.remoteCwd?.trim() || request.repoPath;
+  if (request.participant.kind === "codex-cli") {
+    const invocation = splitRemoteAgentInvocationSecrets({
+      ...buildCodexExecInvocation(request),
+      providerKind: "codex-cli",
+      executablePath: remoteAgentExecutablePath("codex-cli", request.worker),
+      remoteCwd
+    });
+    return {
+      ...invocation
+    };
+  }
+  if (request.participant.kind === "claude-code") {
+    return splitRemoteAgentInvocationSecrets({
+      ...buildRemoteClaudeInvocation(request),
+      remoteCwd
+    });
+  }
+  throw new Error(`Cloud Runs does not support ${request.participant.kind}.`);
+}
+
+function splitRemoteAgentInvocationSecrets(invocation: RemoteAgentInvocation): RemoteAgentInvocation {
+  const env = invocation.env;
+  if (!env) {
+    return invocation;
+  }
+  const publicEnv: NodeJS.ProcessEnv = {};
+  const secretEnv: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) {
+      continue;
+    }
+    if (REMOTE_SECRET_ENV_KEYS.has(key)) {
+      secretEnv[key] = value;
+    } else {
+      publicEnv[key] = value;
+    }
+  }
+  return {
+    ...invocation,
+    env: Object.keys(publicEnv).length > 0 ? publicEnv : undefined,
+    secretEnv: Object.keys(secretEnv).length > 0 ? secretEnv : undefined
+  };
+}
+
+function buildRemoteClaudeInvocation(request: BuildRemoteAgentInvocationRequest): RemoteAgentInvocation {
+  const options = request.options ?? {};
+  const extraReadableDirs = normalizedExtraReadableDirs(options.extraReadableDirs);
+  const toolConfig = remoteClaudeToolConfig(request.kind, request.repoPath, extraReadableDirs, options);
+  const newSessionId = options.persistSession && !options.sessionId ? randomUUID() : undefined;
+  const args = [
+    "-p",
+    "--output-format",
+    "json",
+    "--permission-mode",
+    toolConfig.permissionMode
+  ];
+  const allowedTools = remoteClaudeAllowedTools(toolConfig);
+  if (allowedTools.length > 0) {
+    args.push("--allowedTools", allowedTools.join(","));
+  }
+  if (toolConfig.disallowedTools.length > 0) {
+    args.push("--disallowedTools", toolConfig.disallowedTools.join(","));
+  }
+  if (toolConfig.askTools.length > 0) {
+    args.push("--settings", JSON.stringify({ permissions: { ask: toolConfig.askTools } }));
+  }
+  if (options.sessionId) {
+    args.push("--resume", options.sessionId);
+  } else if (newSessionId) {
+    args.push("--session-id", newSessionId);
+  }
+  if (request.participant.model) {
+    args.push("--model", request.participant.model);
+  }
+  const reasoningEffort = remoteClaudeReasoningEffort(request.participant.reasoningEffort);
+  if (reasoningEffort) {
+    args.push("--effort", reasoningEffort);
+  }
+  const role = remoteClaudeRole(options);
+  if (role) {
+    args.push("--agents", JSON.stringify({
+      [role.name]: {
+        description: role.description,
+        prompt: role.instructions
+      }
+    }), "--agent", role.name);
+  }
+  if (options.appMcp) {
+    args.push("--mcp-config", remoteClaudeMcpConfigJson(options.appMcp));
+    if (request.kind !== "chat") {
+      args.push("--strict-mcp-config");
+    }
+  }
+  if (extraReadableDirs.length > 0) {
+    args.push("--add-dir", ...extraReadableDirs);
+  }
+  return {
+    args,
+    input: remoteAgentPrompt(
+      role ? request.prompt : remotePromptWithRoleInstructions(request.prompt, options.role?.instructions),
+      request.repoPath,
+      request.diffMode,
+      request.kind,
+      options
+    ),
+    env: remoteAgentInvocationEnv(options),
+    providerKind: "claude-code",
+    executablePath: remoteAgentExecutablePath("claude-code", request.worker),
+    fallbackSessionId: newSessionId
+  };
+}
+
+function remoteClaudeRole(options: CodexExecOptions): { name: string; description: string; instructions: string } | undefined {
+  const role = options.role as { name?: unknown; description?: unknown; instructions?: unknown } | undefined;
+  if (
+    typeof role?.name === "string" &&
+    role.name.trim() &&
+    typeof role.description === "string" &&
+    typeof role.instructions === "string" &&
+    role.instructions.trim()
+  ) {
+    return {
+      name: role.name.trim(),
+      description: role.description.trim(),
+      instructions: role.instructions
+    };
+  }
+  return undefined;
+}
+
+function remotePromptWithRoleInstructions(prompt: string, instructions: string | undefined): string {
+  const trimmed = instructions?.trim();
+  if (!trimmed) {
+    return prompt;
+  }
+  return [
+    "Role instructions for this AccordAgents participant:",
+    trimmed,
+    "",
+    prompt
+  ].join("\n");
+}
+
+function remoteClaudeToolConfig(
+  kind: ConversationKind,
+  repoPath: string | undefined,
+  extraReadableDirs: string[],
+  options: CodexExecOptions
+): RemoteClaudeToolConfig {
+  const agentMode = agentModeForRun(kind, options);
+  const permissions = permissionsForRun("claude-code", agentMode, options);
+  const allowedTools: string[] = [];
+  const disallowedTools: string[] = [];
+  const askTools: string[] = [];
+  const readContextAvailable = Boolean(repoPath) || extraReadableDirs.length > 0;
+  const readTools = ["Read", "Grep", "Glob", "LS"];
+  const editTools = ["Edit", "Write", "NotebookEdit"];
+  const webTools = ["WebSearch", "WebFetch"];
+
+  if (readContextAvailable) {
+    allowedTools.push(...readTools);
+  }
+  if (permissions.webAccess) {
+    allowedTools.push(...webTools);
+  } else {
+    disallowedTools.push(...webTools);
+  }
+  if (permissions.workspaceWrite) {
+    allowedTools.push(...editTools);
+  } else {
+    disallowedTools.push(...editTools);
+  }
+  if (permissions.shell.enabled) {
+    allowedTools.push("Bash");
+    for (const rule of permissions.shell.rules) {
+      const toolRule = remoteClaudeBashPermissionRule(rule);
+      if (agentMode !== "auto") {
+        if (rule.action === "deny") {
+          disallowedTools.push(toolRule);
+        } else if (rule.action === "allow") {
+          allowedTools.push(toolRule);
+        } else {
+          askTools.push(toolRule);
+        }
+      }
+    }
+  } else {
+    disallowedTools.push("Bash");
+  }
+  for (const toolRule of permissions.providerNative?.["claude-code"]?.allowedTools ?? []) {
+    allowedTools.push(toolRule);
+  }
+  for (const toolName of remoteAppMcpToolNames(options)) {
+    allowedTools.push(`mcp__accord_agents__${toolName}`);
+  }
+  allowedTools.push("Skill", "Agent", "Task");
+
+  return {
+    permissionMode: remoteClaudePermissionMode(kind, options, permissions),
+    allowedTools: Array.from(new Set(allowedTools)),
+    disallowedTools: Array.from(new Set(disallowedTools)),
+    askTools: Array.from(new Set(askTools))
+  };
+}
+
+function remoteClaudePermissionMode(
+  kind: ConversationKind,
+  options: CodexExecOptions,
+  permissions: ChatAgentPermissions
+): RemoteClaudeToolConfig["permissionMode"] {
+  const mode = agentModeForRun(kind, options);
+  if (mode === "plan") {
+    return "plan";
+  }
+  if (mode === "auto") {
+    return "bypassPermissions";
+  }
+  return permissions.workspaceWrite ? "acceptEdits" : "default";
+}
+
+function remoteClaudeAllowedTools(toolConfig: RemoteClaudeToolConfig): string[] {
+  return toolConfig.allowedTools;
+}
+
+function remoteAppMcpToolNames(options: CodexExecOptions): string[] {
+  const explicit = (options.appMcp as { toolNames?: unknown } | undefined)?.toolNames;
+  if (Array.isArray(explicit)) {
+    return explicit.filter((item): item is string => typeof item === "string" && Boolean(item.trim()));
+  }
+  return options.appMcp
+    ? [
+      "app_permissions_request_change",
+      "app_chat_get_context",
+      "app_chat_get_participants",
+      "app_chat_read_messages",
+      "app_chat_list_attachments",
+      "app_chat_read_attachment",
+      "app_chat_send_message"
+    ]
+    : [];
+}
+
+function remoteClaudeMcpConfigJson(appMcp: NonNullable<CodexExecOptions["appMcp"]>): string {
+  return JSON.stringify({
+    mcpServers: {
+      accord_agents: {
+        type: "http",
+        url: appMcp.url,
+        headers: {
+          Authorization: `Bearer ${appMcp.token}`
+        }
+      }
+    }
+  });
+}
+
+function remoteClaudeBashPermissionRule(rule: ChatShellPermissionRule): string {
+  const pattern = rule.pattern.trim();
+  return rule.match === "prefix" ? `Bash(${pattern}:*)` : `Bash(${pattern})`;
+}
+
+function remoteClaudeReasoningEffort(value: ChatReasoningEffort | undefined): ChatReasoningEffort | undefined {
+  const normalized = normalizeChatReasoningEffort(value, "claude-code");
+  return normalized && normalized !== "none" ? normalized : undefined;
+}
+
+function remoteAgentInvocationEnv(options: CodexExecOptions): NodeJS.ProcessEnv | undefined {
+  const appMcpEnv = options.appMcp
+    ? { [CODEX_APP_SERVER_MCP_TOKEN_ENV]: options.appMcp.token }
+    : undefined;
+  if (!options.extraEnv && !appMcpEnv) {
+    return undefined;
+  }
+  return { ...options.extraEnv, ...(appMcpEnv ?? {}) };
+}
+
+function remoteAgentPrompt(
+  prompt: string,
+  repoPath: string | undefined,
+  diffMode: GitDiffMode | undefined,
+  kind: ConversationKind,
+  options: CodexExecOptions = {}
+): string {
+  if (kind === "implementation-plan") {
+    return [
+      "You are running inside the selected repository in plan mode and read-only sandbox mode.",
+      "Inspect files and git state as needed. Do not edit files, run mutating commands, install dependencies, or wait for terminal confirmation.",
+      "If a blocking product or technical decision is needed, report it in the requested output format instead of asking interactively.",
+      prompt
+    ].join("\n\n");
+  }
+
+  if (kind === "chat") {
+    const mode = agentModeForRun(kind, options);
+    const readContextAvailable = Boolean(repoPath) || normalizedExtraReadableDirs(options.extraReadableDirs).length > 0;
+    return [
+      `You are running for AccordAgents Chat in ${mode} mode.`,
+      readContextAvailable
+        ? "Read-only file inspection, search, and listing are allowed for the selected repository and app-managed history files described in the prompt. Use these only to gather context."
+        : "No repository or app-managed readable directory is available for this run.",
+      prompt
+    ].join("\n\n");
+  }
+
+  const hasRepoContext = Boolean(repoPath) && (kind === "code-review" || Boolean(diffMode));
+  return [
+    hasRepoContext
+      ? "You are running inside the selected repository in read-only mode. Inspect files and git state as needed. Do not edit files."
+      : diffMode
+        ? "Use the provided diff context. Do not inspect local files unless repository context is explicitly provided."
+        : "Answer the user's question directly. Do not inspect local files unless context is explicitly provided.",
+    diffMode ? `The user selected diff mode: ${diffMode}.` : "",
+    prompt
+  ].filter(Boolean).join("\n\n");
+}
+
+function agentModeForRun(kind: ConversationKind, options: CodexExecOptions): ChatAgentMode {
+  return kind === "chat" ? normalizeChatAgentMode(options.agentMode) : "plan";
+}
+
+function permissionsForRun(
+  providerKind: ChatProviderKind | undefined,
+  mode: ChatAgentMode,
+  options: CodexExecOptions
+): ChatAgentPermissions {
+  return effectiveChatAgentPermissionsForProvider(providerKind, mode, normalizeChatAgentPermissions(options.permissions));
+}
+
+function normalizedExtraReadableDirs(dirs: string[] | undefined): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const dir of dirs ?? []) {
+    const trimmed = dir.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+  return normalized;
+}
+
+function remoteAgentExecutablePath(kind: ParticipantConfig["kind"], worker: RemoteRunWorkerTarget): string {
+  return kind === "claude-code"
+    ? worker.claudePath?.trim() || "claude"
+    : worker.codexPath?.trim() || "codex";
+}
+
+function extractRemoteAgentSessionId(kind: ParticipantConfig["kind"], stdout: string): string | undefined {
+  if (kind === "claude-code") {
+    return extractRemoteClaudeSessionId(stdout);
+  }
+  return extractCodexSessionId(stdout);
+}
+
+function extractRemoteAgentText(kind: ParticipantConfig["kind"], stdout: string): string {
+  if (kind === "claude-code") {
+    return extractRemoteClaudeText(stdout);
+  }
+  return extractCodexText(stdout);
+}
+
+function extractRemoteClaudeText(stdout: string): string {
+  for (const candidate of [stdout, ...stdout.split(/\r?\n/).reverse()]) {
+    const trimmed = candidate.trim();
+    if (!trimmed) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as { result?: string; content?: string; message?: string };
+      return parsed.result ?? parsed.content ?? parsed.message ?? trimmed;
+    } catch {
+      // Try the next line before falling back to raw stdout.
+    }
+  }
+  return stdout.trim();
+}
+
+function extractRemoteClaudeSessionId(stdout: string): string | undefined {
+  for (const candidate of [stdout, ...stdout.split(/\r?\n/).reverse()]) {
+    const trimmed = candidate.trim();
+    if (!trimmed) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as { session_id?: string; sessionId?: string };
+      const sessionId = parsed.session_id ?? parsed.sessionId;
+      if (sessionId?.trim()) {
+        return sessionId.trim();
+      }
+    } catch {
+      // Try the next line.
+    }
+  }
+  return undefined;
+}
+
 async function defaultRemoteCodexExecutor(
   request: RemoteCodexExecutorRequest,
   callbacks: RemoteCodexExecutorCallbacks
@@ -3056,7 +3580,8 @@ function workerSettingsFromTarget(worker: RemoteRunWorkerTarget): RemoteParticip
     hostKeyAlias: worker.hostKeyAlias,
     workerRoot: worker.workerRoot,
     remoteCwd: worker.remoteCwd,
-    codexPath: worker.codexPath
+    codexPath: worker.codexPath,
+    claudePath: worker.claudePath
   };
 }
 
@@ -3408,7 +3933,7 @@ async function runRemoteCodexCommand(
 }
 
 function remoteCodexCommand(request: RemoteCodexExecutorRequest, tokenPath: string | undefined): string {
-  const codexPath = request.worker.codexPath?.trim() || "codex";
+  const executablePath = request.invocation.executablePath?.trim() || remoteAgentExecutablePath(request.invocation.providerKind, request.worker);
   const cd = request.worker.remoteCwd?.trim()
     ? `cd ${shellQuote(request.worker.remoteCwd.trim())} || exit 125; `
     : "";
@@ -3418,7 +3943,7 @@ function remoteCodexCommand(request: RemoteCodexExecutorRequest, tokenPath: stri
   const codexArgs = request.invocation.args.map((arg) => shellQuote(arg)).join(" ");
   return [
     `rm -f ${shellQuote(request.remoteFinalPath)}`,
-    `${cd}${tokenEnv}${shellQuote(codexPath)} ${codexArgs}`
+    `${cd}${tokenEnv}${shellQuote(executablePath)} ${codexArgs}`
   ].join("; ");
 }
 
@@ -3546,6 +4071,7 @@ const http = require("node:http");
 
 const runDir = process.cwd();
 const config = JSON.parse(fs.readFileSync("invocation.json", "utf8"));
+const providerKind = config.providerKind || "codex-cli";
 let workerSeq = 0;
 let stdout = "";
 let stderr = "";
@@ -3559,6 +4085,10 @@ let terminalWritten = false;
 let resumeInFlight = false;
 const pendingPermissionRequests = new Map();
 const consumedDecisionIds = new Set();
+
+function providerLabel() {
+  return providerKind === "claude-code" ? "Claude" : "Codex";
+}
 
 function now() {
   return new Date().toISOString();
@@ -3588,6 +4118,37 @@ function appendEvent(event) {
   };
   fs.appendFileSync("events.jsonl", JSON.stringify(next) + "\n");
   return next;
+}
+
+function loadSecretEnvOnce() {
+  const secretEnvPath = typeof config.secretEnvPath === "string" ? config.secretEnvPath : "";
+  if (!secretEnvPath) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(secretEnvPath, "utf8"));
+    try { fs.unlinkSync(secretEnvPath); } catch {}
+    const env = {};
+    for (const [key, value] of Object.entries(parsed || {})) {
+      if (typeof value === "string") {
+        env[key] = value;
+      }
+    }
+    return env;
+  } catch (error) {
+    try { fs.unlinkSync(secretEnvPath); } catch {}
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error("Remote secret env file could not be loaded: " + message);
+  }
+}
+
+let runSecretEnv;
+let startupError;
+try {
+  runSecretEnv = loadSecretEnvOnce();
+} catch (error) {
+  runSecretEnv = {};
+  startupError = error instanceof Error ? error.message : String(error);
 }
 
 function toolTextResult(result) {
@@ -3814,6 +4375,10 @@ function maybeResumeFromDecision() {
   if (terminalWritten || activeChild || resumeInFlight || cancelled || timedOut || !hasOutstandingPermission()) {
     return;
   }
+  if (providerKind !== "codex-cli") {
+    finishRun(null, undefined, false, "Remote " + providerLabel() + " permission approval cannot be resumed on the worker yet.");
+    return;
+  }
   if (!sessionId) {
     finishRun(null, undefined, false, "Remote Codex requested permission before emitting a resumable session id.");
     return;
@@ -3831,7 +4396,7 @@ function maybeResumeFromDecision() {
     consumedDecisionIds.add(decisionKey(decision));
     appendEvent({ kind: "lifecycle", state: "connected", message: "Permission decision received; resuming remote Codex." });
     resumeInFlight = true;
-    startCodex(permissionResumePrompt(requestId, pending.request, decision), resumeArgsForDecision(pending.request, decision), true);
+    startProvider(permissionResumePrompt(requestId, pending.request, decision), resumeArgsForDecision(pending.request, decision), true);
     resumeInFlight = false;
     return;
   }
@@ -3874,6 +4439,58 @@ async function handleRpcRequest(raw) {
           title: "Get Chat Members Snapshot",
           description: "Read member data from the run-start context snapshot.",
           inputSchema: { type: "object", additionalProperties: false, properties: {} }
+        },
+        {
+          name: "app_chat_read_messages",
+          title: "Read Chat Messages",
+          description: "Read paginated chat messages from the run-start snapshot, optionally filtered to one thread or one message id. Same result shape as the desktop tool. The window is fixed at run start: messages posted after this run began are not in it, and the page counts describe the snapshot, not the live conversation.",
+          inputSchema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              messageId: { type: "string" },
+              threadId: { type: "string" },
+              beforeSequence: { type: "integer", minimum: 0 },
+              afterSequence: { type: "integer", minimum: 0 },
+              limit: { type: "integer", minimum: 1, maximum: 200 }
+            }
+          }
+        },
+        {
+          name: "app_chat_send_message",
+          title: "Post A Message Mid-Run",
+          description: "Post a message to the chat while this run is still working. The post is queued on the worker and appears when the desktop next drains this run, so it is not instant and returns no message id. Text only.",
+          inputSchema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["content"],
+            properties: { content: { type: "string" } }
+          }
+        },
+        {
+          name: "app_chat_list_attachments",
+          title: "List Chat Image Attachments",
+          description: "List image attachments visible in the run-start snapshot, oldest first. Use this for attachment ids, then app_chat_read_attachment to see one.",
+          inputSchema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              messageId: { type: "string" },
+              threadId: { type: "string" },
+              limit: { type: "integer", minimum: 1, maximum: 50 }
+            }
+          }
+        },
+        {
+          name: "app_chat_read_attachment",
+          title: "Read Chat Image Attachment",
+          description: "Read one image attachment bundled with this run and return it as image content. Only attachments visible at run start are available.",
+          inputSchema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["attachmentId"],
+            properties: { attachmentId: { type: "string" } }
+          }
         }
       ]
     });
@@ -3906,10 +4523,180 @@ async function handleRpcRequest(raw) {
       updatedAt: event.createdAt
     }));
   }
+  if (name === "app_chat_send_message") {
+    if (notify) {
+      return undefined;
+    }
+    const content = typeof args.content === "string" ? args.content.trim() : "";
+    if (!content) {
+      return rpcError(id, -32602, "ChatSendMessageDenied. Problem: content was empty. Cause: a mid-run post must carry text. Fix: pass a non-empty content string.");
+    }
+    if (content.length > 20000) {
+      return rpcError(id, -32602, "ChatSendMessageDenied. Problem: content is too long for a mid-run post. Cause: the limit is 20000 characters. Fix: post a shorter update, or put the long form in an artifact when the run is over.");
+    }
+    if (args.attachments !== undefined) {
+      // Refused rather than silently dropped: a member that believes it sent an
+      // image and did not is worse than one told it cannot.
+      return rpcError(id, -32602, "ChatSendMessageDenied. Problem: attachments cannot be sent from a cloud run yet. Cause: this run posts through the desktop's event spool, which carries text. Fix: post the text now and attach the image from a desktop turn.");
+    }
+    const event = appendEvent({
+      kind: "chat_message",
+      content,
+      sourceMessageId: config.sourceMessageId,
+      threadId: config.threadId,
+      chatThreadRootId: config.chatThreadRootId
+    });
+    return rpcResult(id, toolTextResult({
+      ok: true,
+      // No message id: the message does not exist yet. Saying "sent" with a
+      // fabricated id would be a lie the member would then quote.
+      status: "queued_for_desktop",
+      queuedAt: event.createdAt,
+      workerSeq: event.workerSeq,
+      note: "The post is queued on the worker and appears in the chat when the desktop next drains this run."
+    }));
+  }
   if (name === "app_chat_get_context") {
     return notify ? undefined : rpcResult(id, toolTextResult({
       ok: true,
       snapshot: contextSnapshot()
+    }));
+  }
+  if (name === "app_chat_read_messages") {
+    if (notify) {
+      return undefined;
+    }
+    const snapshot = contextSnapshot();
+    const record = snapshot && typeof snapshot === "object" ? snapshot : {};
+    const all = Array.isArray(record.messages) ? record.messages : [];
+    const window = record.messageWindow && typeof record.messageWindow === "object" ? record.messageWindow : {};
+    const messageId = typeof args.messageId === "string" && args.messageId.trim() ? args.messageId.trim() : undefined;
+    const threadId = typeof args.threadId === "string" && args.threadId.trim() ? args.threadId.trim() : undefined;
+    const before = typeof args.beforeSequence === "number" && isFinite(args.beforeSequence) ? args.beforeSequence : undefined;
+    const after = typeof args.afterSequence === "number" && isFinite(args.afterSequence) ? args.afterSequence : undefined;
+    const limit = typeof args.limit === "number" && isFinite(args.limit) && args.limit > 0
+      ? Math.min(200, Math.floor(args.limit))
+      : 40;
+    // Same precedence as the desktop tool: an explicit message id ignores every
+    // other filter, and a forward page reads from the start of the match rather
+    // than the end.
+    const matched = all.filter((message) => {
+      if (!message || typeof message !== "object") {
+        return false;
+      }
+      if (messageId) {
+        return message.id === messageId;
+      }
+      if (threadId && (!message.metadata || message.metadata.threadId !== threadId)) {
+        return false;
+      }
+      const sequence = typeof message.sequence === "number" ? message.sequence : undefined;
+      if (before !== undefined && sequence !== undefined && sequence >= before) {
+        return false;
+      }
+      if (after !== undefined && sequence !== undefined && sequence <= after) {
+        return false;
+      }
+      return true;
+    });
+    const selected = after !== undefined
+      ? matched.slice(0, limit)
+      : matched.slice(Math.max(0, matched.length - limit));
+    const oldest = selected.length > 0 ? selected[0].sequence : undefined;
+    const newest = selected.length > 0 ? selected[selected.length - 1].sequence : undefined;
+    return rpcResult(id, toolTextResult({
+      ok: true,
+      conversationId: record.conversationId,
+      requesterParticipantId: record.participantId,
+      // Stated, not implied: a reader must be able to tell a quiet chat from a
+      // stale window without comparing counts by hand.
+      snapshotAtRunStart: true,
+      filters: { messageId, threadId, beforeSequence: before, afterSequence: after, limit },
+      messages: selected,
+      page: {
+        oldestSequence: oldest,
+        newestSequence: newest,
+        hasMoreBefore: oldest !== undefined
+          ? matched.some((message) => typeof message.sequence === "number" && message.sequence < oldest)
+          : false,
+        hasMoreAfter: newest !== undefined
+          ? matched.some((message) => typeof message.sequence === "number" && message.sequence > newest)
+          : false,
+        totalMessages: typeof window.totalMessages === "number" ? window.totalMessages : all.length,
+        totalMatchingMessages: matched.length,
+        oldestIncludedSequence: window.oldestIncludedSequence
+      }
+    }));
+  }
+  if (name === "app_chat_list_attachments" || name === "app_chat_read_attachment") {
+    if (notify) {
+      return undefined;
+    }
+    const snapshot = contextSnapshot();
+    const record = snapshot && typeof snapshot === "object" ? snapshot : {};
+    const bundled = Array.isArray(record.attachments) ? record.attachments : [];
+    const window = record.attachmentWindow && typeof record.attachmentWindow === "object" ? record.attachmentWindow : {};
+    if (name === "app_chat_read_attachment") {
+      const attachmentId = typeof args.attachmentId === "string" ? args.attachmentId.trim() : "";
+      const found = bundled.find((item) => item && item.attachment && item.attachment.id === attachmentId);
+      if (!found) {
+        // Same shape of refusal as the desktop: say why, and say what to call
+        // next, rather than returning an empty image.
+        return rpcError(id, -32602, "AttachmentReadDenied. Problem: this attachment was not bundled with this run. Cause: the id is absent, belongs to another conversation, is newer than this run, or fell outside the run's attachment budget. Fix: call app_chat_list_attachments for the ids that are available.");
+      }
+      const mimeType = found.attachment && typeof found.attachment.mimeType === "string"
+        ? found.attachment.mimeType
+        : "image/png";
+      const summary = {
+        conversationId: record.conversationId,
+        requesterParticipantId: record.participantId,
+        messageId: found.messageId,
+        sequence: found.sequence,
+        author: found.author,
+        threadId: found.threadId,
+        attachment: found.attachment,
+        snapshotAtRunStart: true,
+        dataBase64: "[omitted: returned as MCP image content]"
+      };
+      return rpcResult(id, {
+        content: [
+          { type: "text", text: JSON.stringify(summary, null, 2) },
+          { type: "image", data: found.dataBase64, mimeType }
+        ]
+      });
+    }
+    const messageId = typeof args.messageId === "string" && args.messageId.trim() ? args.messageId.trim() : undefined;
+    const threadId = typeof args.threadId === "string" && args.threadId.trim() ? args.threadId.trim() : undefined;
+    const limit = typeof args.limit === "number" && isFinite(args.limit) && args.limit > 0
+      ? Math.min(50, Math.floor(args.limit))
+      : 20;
+    const matched = bundled.filter((item) => {
+      if (!item || typeof item !== "object") {
+        return false;
+      }
+      if (messageId && item.messageId !== messageId) {
+        return false;
+      }
+      if (threadId && item.threadId !== threadId) {
+        return false;
+      }
+      return true;
+    }).slice(-limit);
+    return rpcResult(id, toolTextResult({
+      ok: true,
+      conversationId: record.conversationId,
+      requesterParticipantId: record.participantId,
+      snapshotAtRunStart: true,
+      filters: { messageId, threadId, limit },
+      attachments: matched.map((item) => ({
+        messageId: item.messageId,
+        sequence: item.sequence,
+        author: item.author,
+        threadId: item.threadId,
+        attachment: item.attachment
+      })),
+      // Silence about a dropped image reads as "there were none".
+      omittedCount: typeof window.omittedCount === "number" ? window.omittedCount : 0
     }));
   }
   if (name === "app_chat_get_participants") {
@@ -4060,6 +4847,10 @@ function extractedStdoutText() {
       const event = JSON.parse(line);
       if (typeof event.message === "string") {
         messages.push(event.message);
+      } else if (typeof event.result === "string") {
+        messages.push(event.result);
+      } else if (typeof event.content === "string") {
+        messages.push(event.content);
       } else if (typeof event.text === "string") {
         messages.push(event.text);
       } else if (event.type === "item.completed" && typeof event.item?.text === "string") {
@@ -4091,7 +4882,7 @@ const timeout = setTimeout(() => {
     setTimeout(() => killGroup("SIGKILL"), 2000).unref();
     return;
   }
-  finishRun(null, undefined, false, "Remote Codex run timed out.");
+  finishRun(null, undefined, false, "Remote " + providerLabel() + " run timed out.");
 }, Math.max(1, Number(config.maxRuntimeMs || 86400000)));
 timeout.unref();
 
@@ -4103,10 +4894,10 @@ process.on("SIGTERM", () => {
     setTimeout(() => killGroup("SIGKILL"), 2000).unref();
     return;
   }
-  finishRun(null, "SIGTERM", false, "Remote Codex run was cancelled.");
+  finishRun(null, "SIGTERM", false, "Remote " + providerLabel() + " run was cancelled.");
 });
 
-startRelay(() => startCodex(config.input || "", config.args || [], false));
+startRelay(() => startProvider(config.input || "", config.args || [], false));
 
 function finishRun(exitCode, signal, forcedOk, forcedError) {
   if (terminalWritten) {
@@ -4128,13 +4919,13 @@ function finishRun(exitCode, signal, forcedOk, forcedError) {
     : forcedError
       ? forcedError
       : timedOut
-      ? "Remote Codex run timed out."
+      ? "Remote " + providerLabel() + " run timed out."
       : cancelled
-        ? "Remote Codex run was cancelled."
-        : stderr.trim() || (signal ? "Remote Codex exited from signal " + signal + "." : "Remote Codex exited with code " + exitCode + ".");
+        ? "Remote " + providerLabel() + " run was cancelled."
+        : stderr.trim() || (signal ? "Remote " + providerLabel() + " exited from signal " + signal + "." : "Remote " + providerLabel() + " exited with code " + exitCode + ".");
   const startedAtMs = Date.parse(state.startedAt);
   const workerDurationMs = Number.isFinite(startedAtMs) ? Math.max(0, Date.now() - startedAtMs) : undefined;
-  const effectiveSessionId = sessionId || attemptedSessionId;
+  const effectiveSessionId = sessionId || attemptedSessionId || config.fallbackSessionId;
   const resumeDiagnostic = (String(error || "") + "\n" + String(stderr || "")).toLowerCase();
   const resumeMiss = Boolean(attemptedSessionId && !ok &&
     /resume|session|conversation|thread/.test(resumeDiagnostic) &&
@@ -4177,12 +4968,16 @@ function finishRun(exitCode, signal, forcedOk, forcedError) {
   process.exit(0);
 }
 
-function startCodex(input, args, resuming) {
+function startProvider(input, args, resuming) {
+if (startupError) {
+  finishRun(null, undefined, false, startupError);
+  return;
+}
 let child;
 try {
-child = cp.spawn(config.codexPath || "codex", args || [], {
+child = cp.spawn(config.commandPath || config.codexPath || "codex", args || [], {
   cwd: config.remoteCwd || undefined,
-  env: { ...process.env, ...(config.env || {}) },
+  env: { ...process.env, ...(config.env || {}), ...runSecretEnv },
   detached: true,
   stdio: ["pipe", "pipe", "pipe"]
 });
@@ -4220,8 +5015,8 @@ child.on("close", (exitCode, signal) => {
       kind: "lifecycle",
       state: "disconnected",
       message: resuming
-        ? "Remote Codex is waiting for another permission decision."
-        : "Remote Codex is waiting for a permission decision."
+        ? "Remote " + providerLabel() + " is waiting for another permission decision."
+        : "Remote " + providerLabel() + " is waiting for a permission decision."
     });
     maybeResumeFromDecision();
     return;

@@ -83,7 +83,7 @@ test("scans shallow monorepo subdirectories and skips excluded dependency dirs",
   const requirements = await detectRepoToolchainRequirements(repo);
 
   assert.deepEqual(tools(requirements), ["java", "maven"]);
-  assert.deepEqual(requirements.find((requirement) => requirement.tool === "java")?.sources, ["services/api/pom.xml"]);
+  assert.deepEqual(requirements.find((requirement) => requirement.tool === "java")?.sources, [path.join("services", "api", "pom.xml")]);
 });
 
 test("empty or missing repositories produce no requirements", async () => {

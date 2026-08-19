@@ -1,4 +1,5 @@
 import type {
+  ChatProviderKind,
   CloudRunWorkerCheck,
   CloudRunWorkerCheckId,
   CloudRunWorkerDoctorReport,
@@ -22,8 +23,8 @@ const DEVICE_AUTH_TIMEOUT_MS = 5 * 60_000;
 // Checks whose failure blocks remote runs outright. The rest degrade a
 // specific capability (gh → no PR flow, build-essential → no native builds,
 // sudo → no auto-fix, git identity → commits fail) and surface as warnings.
-const REQUIRED_CHECKS: ReadonlySet<CloudRunWorkerCheckId> = new Set([
-  "connect", "rsync", "git", "node", "codex", "codex-auth", "persistent-storage", "userns"
+const BASE_REQUIRED_CHECKS: ReadonlySet<CloudRunWorkerCheckId> = new Set([
+  "connect", "rsync", "git", "node", "persistent-storage", "userns"
 ]);
 
 const CHECK_LABELS: Record<CloudRunWorkerCheckId, string> = {
@@ -37,10 +38,20 @@ const CHECK_LABELS: Record<CloudRunWorkerCheckId, string> = {
   "build-essential": "Build tools",
   "codex": "Codex CLI",
   "codex-auth": "Codex signed in",
+  "claude": "Claude Code CLI",
+  "claude-auth": "Claude Code signed in",
   "git-identity": "Git identity",
   "persistent-storage": "Persistent session storage",
-  "userns": "Sandbox kernel setting"
+  "userns": "Sandbox kernel setting",
+  "browser": "Headless browser",
+  "headless-display": "Virtual display (Xvfb)",
+  "sqlite3": "sqlite3 CLI"
 };
+
+interface CloudRunDoctorOptions {
+  requirePersistentStorage?: boolean;
+  requiredProviderKind?: ChatProviderKind;
+}
 
 export interface CloudRunSshExecRequest {
   worker: RemoteRunWorkerTarget;
@@ -74,7 +85,7 @@ export class CloudRunDoctorService {
 
   async diagnose(
     settings: CloudRunWorkerSettings,
-    options: { requirePersistentStorage?: boolean } = {}
+    options: CloudRunDoctorOptions = {}
   ): Promise<CloudRunWorkerDoctorReport> {
     const worker = workerTarget(settings);
     if (!worker) {
@@ -91,7 +102,7 @@ export class CloudRunDoctorService {
     } catch (error) {
       return failedReport("connect", sshConnectionFailureDetail(errorMessage(error)));
     }
-    const checks = parseProbeOutput(output, options.requirePersistentStorage === true);
+    const checks = parseProbeOutput(output, options);
     const failing = checks.filter((check) => check.status === "fail");
     const warning = checks.filter((check) => check.status === "warn");
     const ok = failing.length === 0;
@@ -106,7 +117,7 @@ export class CloudRunDoctorService {
   async setup(
     settings: CloudRunWorkerSettings,
     onProgress?: (progress: CloudRunWorkerSetupProgress) => void,
-    options: { requirePersistentStorage?: boolean } = {}
+    options: CloudRunDoctorOptions = {}
   ): Promise<CloudRunWorkerDoctorReport> {
     const worker = workerTarget(settings);
     if (!worker) {
@@ -124,6 +135,7 @@ export class CloudRunDoctorService {
     }
     const status = new Map(before.checks.map((check) => [check.id, check.status] as const));
     const failing = (id: CloudRunWorkerCheckId): boolean => status.get(id) !== "pass" && status.get(id) !== undefined;
+    const blocking = (id: CloudRunWorkerCheckId): boolean => status.get(id) === "fail";
     if (failing("connect")) {
       return before;
     }
@@ -135,8 +147,10 @@ export class CloudRunDoctorService {
     if (failing("gh")) aptPackages.push("gh");
     if (failing("java")) aptPackages.push("openjdk-21-jdk");
     if (failing("build-essential")) aptPackages.push("build-essential");
+    if (failing("headless-display")) aptPackages.push("xvfb");
+    if (failing("sqlite3")) aptPackages.push("sqlite3");
 
-    if ((aptPackages.length > 0 || failing("node") || failing("codex") || failing("userns")) && !hasSudo) {
+    if ((aptPackages.length > 0 || failing("node") || blocking("codex") || blocking("claude") || failing("userns")) && !hasSudo) {
       progress("sudo", "Missing tools need passwordless sudo to install; ask whoever owns the box to install the failing items.");
     }
 
@@ -151,9 +165,20 @@ export class CloudRunDoctorService {
         progress("node", "Installing Node.js 22 (NodeSource)…");
         await this.fix(worker, "curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -nE bash - && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs");
       }
-      if (failing("codex")) {
+      if (failing("browser")) {
+        // Ubuntu's `chromium` is snap-backed and unreliable on a headless EC2
+        // box, so install Google's .deb. It also pulls the GTK/NSS/ALSA stack
+        // Electron needs, which is why this runs before any Electron QA.
+        progress("browser", "Installing Google Chrome (headless browser QA)…");
+        await this.fix(worker, "tmp=\"$(mktemp -d)\" && curl -fsSL -o \"$tmp/chrome.deb\" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \"$tmp/chrome.deb\" && rm -rf \"$tmp\"");
+      }
+      if (blocking("codex")) {
         progress("codex", "Installing the Codex CLI…");
         await this.fix(worker, "sudo -n npm install -g @openai/codex");
+      }
+      if (blocking("claude")) {
+        progress("claude", "Installing the Claude Code CLI…");
+        await this.fix(worker, "sudo -n npm install -g @anthropic-ai/claude-code");
       }
       if (failing("userns")) {
         progress("userns", "Allowing unprivileged user namespaces (required by the Codex sandbox)…");
@@ -169,8 +194,11 @@ export class CloudRunDoctorService {
       await this.fix(worker, `git config --global user.name ${shellQuotePosix(name)} && git config --global user.email ${shellQuotePosix(email)}`);
     }
 
-    if (failing("codex-auth") && (!failing("codex") || hasSudo)) {
+    if (blocking("codex-auth") && (!failing("codex") || hasSudo)) {
       await this.runDeviceAuth(worker, progress);
+    }
+    if (blocking("claude-auth") && (!failing("claude") || hasSudo)) {
+      progress("claude-auth", "Claude Code sign-in is required on the worker. Run `claude auth login` on that worker and retry.");
     }
 
     progress("diagnose", "Re-checking the worker…");
@@ -255,6 +283,7 @@ function workerTarget(settings: CloudRunWorkerSettings): RemoteRunWorkerTarget |
 // One SSH round-trip probing everything; each line is `key=value`.
 function probeScript(worker: RemoteRunWorkerTarget): string {
   const codexPath = worker.codexPath?.trim() || "codex";
+  const claudePath = worker.claudePath?.trim() || "claude";
   const workerRoot = worker.workerRoot?.trim() || "~/.accordagents/remote-runs";
   const workerRootExpression = workerRoot.startsWith("/")
     ? shellQuotePosix(workerRoot)
@@ -269,17 +298,27 @@ function probeScript(worker: RemoteRunWorkerTarget): string {
     "have java java",
     "have node node",
     `have codex ${shellQuotePosix(codexPath)}`,
+    `have claude ${shellQuotePosix(claudePath)}`,
     "dpkg -s build-essential >/dev/null 2>&1 && printf 'build-essential=ok\\n' || printf 'build-essential=missing\\n'",
+    // Browser and virtual display back cloud-side UI QA. Both are warn-level:
+    // a worker without them still runs every non-UI task.
+    "(command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1) && printf 'browser=ok\\n' || printf 'browser=missing\\n'",
+    "have headless-display xvfb-run",
+    // Only needed when the worker runs the Electron app itself for QA:
+    // storage.ts shells out to the sqlite3 CLI, and Ubuntu server does not
+    // ship it, so the app dies at boot with `spawn sqlite3 ENOENT`.
+    "have sqlite3 sqlite3",
     "sudo -n true 2>/dev/null && printf 'sudo=ok\\n' || printf 'sudo=missing\\n'",
     "printf 'userns=%s\\n' \"$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || printf unknown)\"",
     "printf 'git-name=%s\\n' \"$(git config --global user.name 2>/dev/null | head -c 80)\"",
     "printf 'git-email=%s\\n' \"$(git config --global user.email 2>/dev/null | head -c 80)\"",
     `is_ebs_path() { source="$(findmnt -n -o SOURCE -T "$1" 2>/dev/null)"; [ -n "$source" ] || return 1; device="$(readlink -f "$source" 2>/dev/null || printf '%s' "$source")"; lsblk -s -n -o SERIAL "$device" 2>/dev/null | tr -d '-' | grep -Eq '^vol[0-9a-fA-F]+'; }; worker_root=${workerRootExpression}; codex_home="\${CODEX_HOME:-$HOME/.codex}"; mkdir -p "$worker_root" "$codex_home"; worker_mount="$(findmnt -n -o SOURCE,FSTYPE -T "$worker_root" 2>/dev/null | head -c 200)"; codex_mount="$(findmnt -n -o SOURCE,FSTYPE -T "$codex_home" 2>/dev/null | head -c 200)"; if is_ebs_path "$worker_root" && is_ebs_path "$codex_home"; then printf 'persistent-storage=ok\\n'; else printf 'persistent-storage=missing\\n'; fi; printf 'storage-detail=%s | %s\\n' "$worker_mount" "$codex_mount"`,
-    `${shellQuotePosix(codexPath)} login status >/dev/null 2>&1 && printf 'codex-auth=ok\\n' || printf 'codex-auth=missing\\n'`
+    `${shellQuotePosix(codexPath)} login status >/dev/null 2>&1 && printf 'codex-auth=ok\\n' || printf 'codex-auth=missing\\n'`,
+    `${shellQuotePosix(claudePath)} auth status 2>/dev/null | grep -Eq '"loggedIn"[[:space:]]*:[[:space:]]*true' && printf 'claude-auth=ok\\n' || printf 'claude-auth=missing\\n'`
   ].join("; ");
 }
 
-function parseProbeOutput(output: string, requirePersistentStorage: boolean): CloudRunWorkerCheck[] {
+function parseProbeOutput(output: string, options: CloudRunDoctorOptions): CloudRunWorkerCheck[] {
   const values = new Map<string, string>();
   for (const line of output.split("\n")) {
     const separator = line.indexOf("=");
@@ -287,10 +326,11 @@ function parseProbeOutput(output: string, requirePersistentStorage: boolean): Cl
       values.set(line.slice(0, separator).trim(), line.slice(separator + 1).trim());
     }
   }
+  const requiredChecks = requiredChecksForOptions(options);
   const tool = (id: CloudRunWorkerCheckId, fixable: boolean, missingDetail: string): CloudRunWorkerCheck => ({
     id,
     label: CHECK_LABELS[id],
-    status: values.get(id) === "ok" ? "pass" : REQUIRED_CHECKS.has(id) ? "fail" : "warn",
+    status: values.get(id) === "ok" ? "pass" : requiredChecks.has(id) ? "fail" : "warn",
     detail: values.get(id) === "ok" ? undefined : missingDetail,
     fixable
   });
@@ -305,11 +345,15 @@ function parseProbeOutput(output: string, requirePersistentStorage: boolean): Cl
   checks.push(tool("java", true, "Needed to verify Java, Maven, and Gradle projects."));
   checks.push(tool("node", true, "Needed to run the detached worker."));
   checks.push(tool("build-essential", true, "Needed to build native npm dependencies."));
+  checks.push(tool("browser", true, "Needed for cloud-side browser QA (headless Chrome over CDP)."));
+  checks.push(tool("headless-display", true, "Needed for cloud-side Electron QA; Electron cannot start without a display."));
+  checks.push(tool("sqlite3", true, "Needed for cloud-side Electron QA; the app fails to start without the sqlite3 CLI."));
   checks.push(tool("codex", true, "The remote agent runtime."));
+  checks.push(tool("claude", true, "Needed to run Claude Code participants on the worker."));
   checks.push({
     id: "persistent-storage",
     label: CHECK_LABELS["persistent-storage"],
-    status: values.get("persistent-storage") === "ok" ? "pass" : requirePersistentStorage ? "fail" : "warn",
+    status: values.get("persistent-storage") === "ok" ? "pass" : options.requirePersistentStorage === true ? "fail" : "warn",
     detail: values.get("persistent-storage") === "ok"
       ? values.get("storage-detail") || "Worker and Codex session paths use persistent storage."
       : "workerRoot and the Codex session store must not use tmpfs, overlay, instance-store, or another volatile filesystem.",
@@ -339,11 +383,32 @@ function parseProbeOutput(output: string, requirePersistentStorage: boolean): Cl
   checks.push({
     id: "codex-auth",
     label: CHECK_LABELS["codex-auth"],
-    status: values.get("codex-auth") === "ok" ? "pass" : "fail",
+    status: values.get("codex-auth") === "ok" ? "pass" : requiredChecks.has("codex-auth") ? "fail" : "warn",
     detail: values.get("codex-auth") === "ok" ? undefined : "Codex is not signed in on the worker.",
     fixable: true
   });
+  checks.push({
+    id: "claude-auth",
+    label: CHECK_LABELS["claude-auth"],
+    status: values.get("claude-auth") === "ok" ? "pass" : requiredChecks.has("claude-auth") ? "fail" : "warn",
+    detail: values.get("claude-auth") === "ok"
+      ? undefined
+      : "Claude Code is not signed in on the worker. Run `claude auth login` on the worker and retry.",
+    fixable: false
+  });
   return checks;
+}
+
+function requiredChecksForOptions(options: CloudRunDoctorOptions): ReadonlySet<CloudRunWorkerCheckId> {
+  const required = new Set(BASE_REQUIRED_CHECKS);
+  if (options.requiredProviderKind === "claude-code") {
+    required.add("claude");
+    required.add("claude-auth");
+  } else {
+    required.add("codex");
+    required.add("codex-auth");
+  }
+  return required;
 }
 
 function failedReport(id: CloudRunWorkerCheckId, detail: string): CloudRunWorkerDoctorReport {

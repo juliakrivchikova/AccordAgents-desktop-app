@@ -66,17 +66,23 @@ test("reference relay closes frames above the provider floor with 1009", async (
   }
 });
 
-test("reference relay rejects a duplicate role for a rendezvous", async () => {
+// Parity with the worker room: a silently dead socket reads as OPEN forever,
+// so the newest connection must win the seat — refusing it locks the real
+// client out behind its own ghost.
+test("reference relay seats the newest connection and evicts the previous holder", async () => {
   const relay = createReferenceRelayServer();
   const address = await relay.listen();
   try {
     const first = await connect(`${address.url}?rid=pair-4&role=phone&cap=cap-4`);
     await first.nextJson();
+    const firstClosed = first.closedWith();
     const second = await connect(`${address.url}?rid=pair-4&role=phone&cap=cap-4`);
-    const closed = await second.closedWith();
+    const seated = await second.nextJson();
 
-    assert.deepEqual(closed, { code: 1008, reason: "duplicate relay role" });
-    first.socket.close();
+    assert.deepEqual(await firstClosed, { code: 4001, reason: "replaced by newer connection" });
+    assert.equal(seated.type, "relay.ready");
+    assert.equal(seated.role, "phone");
+    second.socket.close();
   } finally {
     await relay.close();
   }

@@ -167,10 +167,23 @@ export class CliReadinessService {
       this.logProbe(health, trigger, startedAt);
       return health;
     }
+    if (!lookup.path) {
+      const health = this.health(metadata.kind, checkedAt, generation, {
+        detection: "unknown",
+        runnable: "unknown",
+        authentication: "unknown",
+        installed: false,
+        diagnosticCode: "environment-check-failed"
+      });
+      this.logProbe(health, trigger, startedAt);
+      return health;
+    }
+
+    const executablePath = lookup.path;
 
     let version: string | undefined;
     try {
-      const result = await this.dependencies.run(metadata.executable, metadata.versionArgs, {
+      const result = await this.dependencies.run(executablePath, metadata.versionArgs, {
         env,
         killProcessGroup: true,
         primeLoginShellEnv: false,
@@ -189,7 +202,7 @@ export class CliReadinessService {
       return health;
     }
 
-    const auth = await this.probeAuthentication(metadata, env);
+    const auth = await this.probeAuthentication(metadata, executablePath, env);
     const health = this.health(metadata.kind, checkedAt, generation, {
       detection: "detected",
       runnable: "ready",
@@ -202,14 +215,18 @@ export class CliReadinessService {
     return health;
   }
 
-  private async probeAuthentication(metadata: CliProviderSetupMetadata, env: NodeJS.ProcessEnv): Promise<AuthClassification> {
+  private async probeAuthentication(
+    metadata: CliProviderSetupMetadata,
+    executablePath: string,
+    env: NodeJS.ProcessEnv
+  ): Promise<AuthClassification> {
     if (metadata.probeStrategy === "claude-auth-status") {
-      return classifyClaudeAuth(await this.captureCommand("claude", ["auth", "status"], env));
+      return classifyClaudeAuth(await this.captureCommand(executablePath, ["auth", "status"], env));
     }
     if (metadata.probeStrategy === "codex-login-status") {
-      return classifyCodexAuth(await this.captureCommand("codex", ["login", "status"], env));
+      return classifyCodexAuth(await this.captureCommand(executablePath, ["login", "status"], env));
     }
-    return classifyAntigravityAuth(await this.captureCommand("agy", ["models"], env));
+    return classifyAntigravityAuth(await this.captureCommand(executablePath, ["models"], env));
   }
 
   private async captureCommand(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<CliReadinessCommandResult> {

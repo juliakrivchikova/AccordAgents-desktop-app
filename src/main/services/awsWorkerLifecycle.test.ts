@@ -4,6 +4,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT } from "../../shared/cloudRuns";
 import {
   AWS_WORKER_BLOB_PREFIX,
   AWS_WORKER_TAG_KEY,
@@ -271,7 +272,7 @@ test("cloud-init and instance spec carry the toolchain and tag", () => {
   assert.doesNotMatch(init, /ip link set dev "\$IF" mtu 1200/);
   const spec = buildWorkerInstanceSpec({ imageId: "ami-1", rootDeviceName: "/dev/sda1", keyName: "k", securityGroupId: "sg-1" });
   assert.equal(spec.instanceType, "t3.small");
-  assert.equal(spec.rootVolumeSizeGb, 8);
+  assert.equal(spec.rootVolumeSizeGb, AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT);
   assert.equal(
     buildWorkerInstanceSpec({
       imageId: "ami-1",

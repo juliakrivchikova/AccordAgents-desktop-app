@@ -7,6 +7,7 @@ import { ArtifactService } from "./artifacts";
 import { ArtifactStore } from "./artifactStore";
 import type { ArtifactDraftRecord, ArtifactOperationRecord } from "./artifactStore";
 import { runCommand } from "./command";
+import { resolveSqliteExecutable } from "./sqliteCli";
 import { parseMarkdownInline } from "../../shared/markdownInline";
 import { unifiedLineDiff } from "../../shared/artifactDiff";
 import type { ArtifactError, ArtifactReadResult, ArtifactResult, PublishedArtifactReadResult } from "../../shared/types";
@@ -14,6 +15,7 @@ import type { ArtifactError, ArtifactReadResult, ArtifactResult, PublishedArtifa
 const CONVERSATION_ID = "chat-1";
 const MEMBERS = ["user", "gera", "codex", "drew"];
 const NOW_FOR_LEGACY = "2026-07-13T12:00:00.000Z";
+const SQLITE_EXECUTABLE = resolveSqliteExecutable({ appPath: process.cwd() });
 
 interface Harness {
   dbPath: string;
@@ -46,7 +48,7 @@ function attach(
     conversationId === CONVERSATION_ID ? [...MEMBERS] : undefined
   )
 ): { store: ArtifactStore; service: ArtifactService; notes: string[]; changed: string[] } {
-  const store = new ArtifactStore(dbPath);
+  const store = new ArtifactStore(dbPath, SQLITE_EXECUTABLE);
   const notes: string[] = [];
   const changed: string[] = [];
   const service = new ArtifactService({
@@ -357,7 +359,7 @@ test("rename and its outbox note commit or roll back together", async () => {
       name: "Atomic rename",
       content: "body"
     })));
-    await runCommand("sqlite3", [h.dbPath], {
+    await runCommand(SQLITE_EXECUTABLE, [h.dbPath], {
       input: `
         create trigger fail_rename_note before insert on artifact_event_outbox
         when new.kind = 'rename_fail'
@@ -1114,7 +1116,7 @@ test("roster updates use optimistic concurrency and migration init is rerun-safe
     assert.equal(stale.currentRosterRevision, 1);
 
     await h.store.init();
-    await new ArtifactStore(h.dbPath).init();
+    await new ArtifactStore(h.dbPath, SQLITE_EXECUTABLE).init();
     const restarted = attach(h.dbPath);
     const read = expectOk(await restarted.service.read("user", {
       conversationId: CONVERSATION_ID,
@@ -1131,7 +1133,7 @@ test("migration initialization tolerates concurrent app processes", async () => 
   const dir = await mkdtemp(path.join(tmpdir(), "artifact-service-init-race-"));
   const dbPath = path.join(dir, "artifacts.sqlite3");
   try {
-    await runCommand("sqlite3", [dbPath], {
+    await runCommand(SQLITE_EXECUTABLE, [dbPath], {
       input: `
         create table artifacts (
           id text primary key, conversation_id text not null, name text not null,
@@ -1144,18 +1146,24 @@ test("migration initialization tolerates concurrent app processes", async () => 
     });
     const script = `
       const { ArtifactStore } = require("./dist/main/main/services/artifactStore.js");
-      new ArtifactStore(process.argv[1]).init().catch((error) => { console.error(error); process.exit(1); });
+      const keepAlive = setInterval(() => undefined, 1_000);
+      new ArtifactStore(process.argv[1], process.argv[2]).init()
+        .then(() => clearInterval(keepAlive))
+        .catch((error) => { clearInterval(keepAlive); console.error(error); process.exitCode = 1; });
     `;
     await Promise.all([
-      runCommand("node", ["-e", script, dbPath], { primeLoginShellEnv: false }),
-      runCommand("node", ["-e", script, dbPath], { primeLoginShellEnv: false })
+      runCommand(process.execPath, ["-e", script, dbPath, SQLITE_EXECUTABLE], { primeLoginShellEnv: false }),
+      runCommand(process.execPath, ["-e", script, dbPath, SQLITE_EXECUTABLE], { primeLoginShellEnv: false })
     ]);
-    const columns = await runCommand("sqlite3", ["-json", dbPath, "pragma table_info(artifacts);"], {
+    const columns = await runCommand(SQLITE_EXECUTABLE, ["-json", dbPath, "pragma table_info(artifacts);"], {
       primeLoginShellEnv: false
     });
     const names = (JSON.parse(columns.stdout) as Array<{ name: string }>).map((column) => column.name);
     assert.equal(names.filter((name) => name === "lifecycle").length, 1);
-    await Promise.all([new ArtifactStore(dbPath).init(), new ArtifactStore(dbPath).init()]);
+    await Promise.all([
+      new ArtifactStore(dbPath, SQLITE_EXECUTABLE).init(),
+      new ArtifactStore(dbPath, SQLITE_EXECUTABLE).init()
+    ]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1380,7 +1388,7 @@ test("legacy published artifacts migrate without changing v1 read or signing beh
   const dir = await mkdtemp(path.join(tmpdir(), "artifact-service-legacy-"));
   const dbPath = path.join(dir, "legacy.sqlite3");
   try {
-    await runCommand("sqlite3", [dbPath], {
+    await runCommand(SQLITE_EXECUTABLE, [dbPath], {
       input: `
         create table artifacts (
           id text primary key, conversation_id text not null, name text not null,
@@ -1420,7 +1428,7 @@ test("legacy published artifacts migrate without changing v1 read or signing beh
       artifactId: "legacy-id"
     }));
     assert.equal(signed.approval.state, "approved");
-    await new ArtifactStore(dbPath).init();
+    await new ArtifactStore(dbPath, SQLITE_EXECUTABLE).init();
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1455,7 +1463,7 @@ test("outbox retries after response loss without duplicating the visible note", 
     assert.equal((await h.store.listPendingEvents()).length, 1, "lost response leaves the event pending");
 
     const restarted = new ArtifactService({
-      store: new ArtifactStore(h.dbPath),
+      store: new ArtifactStore(h.dbPath, SQLITE_EXECUTABLE),
       getMembers: async (conversationId) => (conversationId === CONVERSATION_ID ? [...MEMBERS] : undefined),
       postNote: async (_conversationId, eventId) => {
         visibleEventIds.add(eventId);
@@ -1478,7 +1486,7 @@ test("outbox drains more than one page without an early failure starving later n
       const id = `event-${String(index).padStart(3, "0")}`;
       return `('${id}', '${CONVERSATION_ID}', 'artifact', 'test', 'gera', 'note ${index}', '2026-07-13T14:00:00.000Z', null)`;
     }).join(",\n");
-    await runCommand("sqlite3", [h.dbPath], {
+    await runCommand(SQLITE_EXECUTABLE, [h.dbPath], {
       input: `insert into artifact_event_outbox (id, conversation_id, artifact_id, kind, actor, content, created_at, delivered_at) values ${rows};`,
       primeLoginShellEnv: false
     });
@@ -1496,7 +1504,7 @@ test("outbox drains more than one page without an early failure starving later n
     assert.deepEqual((await h.store.listPendingEvents()).map((event) => event.id), ["event-000"]);
 
     const retry = new ArtifactService({
-      store: new ArtifactStore(h.dbPath),
+      store: new ArtifactStore(h.dbPath, SQLITE_EXECUTABLE),
       getMembers: async () => [...MEMBERS],
       postNote: async () => undefined
     });

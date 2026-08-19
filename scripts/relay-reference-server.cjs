@@ -83,9 +83,18 @@ function attachPeer(ws, rooms, request) {
     ws.close(1008, "capability mismatch");
     return;
   }
-  if (isOpen(room[request.role])) {
-    ws.close(1008, "duplicate relay role");
-    return;
+  // Parity with the worker room: nothing pings these sockets, so a dead one
+  // can read as OPEN indefinitely. The newest connection is the live one —
+  // seat it and dismiss the previous holder instead of locking the real
+  // client out behind a ghost.
+  const previous = room[request.role];
+  if (previous) {
+    delete room[request.role];
+    try {
+      previous.close(4001, "replaced by newer connection");
+    } catch {
+      // Already unreachable — which is exactly why it lost the seat.
+    }
   }
 
   room[request.role] = ws;
@@ -120,9 +129,12 @@ function attachPeer(ws, rooms, request) {
   });
 
   ws.on("close", () => {
-    if (room?.[request.role] === ws) {
-      delete room[request.role];
+    if (room?.[request.role] !== ws) {
+      // Replaced earlier: the seat belongs to a newer connection, so this
+      // close must not read as the role leaving the room.
+      return;
     }
+    delete room[request.role];
     peerFor(room, request.role)?.send(JSON.stringify({
       type: "relay.peer-disconnected",
       role: request.role,

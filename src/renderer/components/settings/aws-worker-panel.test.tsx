@@ -84,6 +84,34 @@ test("authorization recovery exposes the setup command and applies the refreshed
   renderer.unmount();
 });
 
+test("authorization recovery for the active IAM user updates policy in place without paste", async () => {
+  const operation: AwsWorkerOperationSnapshot = {
+    operationId: "op-auth",
+    clientToken: "token-auth",
+    phase: "error",
+    message: "Cloud Run cannot access required AWS APIs",
+    updatedAt: "2026-08-13T00:00:00.000Z",
+    retryable: true,
+    remediation: "refresh-aws-authorization",
+    missingAwsActions: ["ec2:DescribeInstanceTypes"],
+    awsPrincipalUserName: "accordagents-worker-pna6gbah"
+  };
+  const renderer = await renderPanel({
+    status: { configured: true, state: "running", operation }
+  });
+
+  const steps = textOf(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-steps" }));
+  assert.match(steps, /accordagents-worker-pna6gbah/);
+  assert.match(steps, /ec2:DescribeInstanceTypes/);
+  assert.match(steps, /updates that user's policy in place/);
+  await click(findButton(renderer, "Show update command"));
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-command" })), "command");
+  assert.equal(renderer.root.findAllByProps({ "aria-label": "AWS setup result" }).length, 0);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-apply-authorization" }).length, 0);
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-start" })), "Retry existing permissions");
+  renderer.unmount();
+});
+
 test("failed Stop remains visible with the observed worker state", async () => {
   const renderer = await renderPanel({
     status: { configured: true, state: "running" },
@@ -97,6 +125,42 @@ test("failed Stop remains visible with the observed worker state", async () => {
   await click(findButton(renderer, "Confirm stop"));
   assert.equal(textOf(renderer.root).includes("The shared worker was not stopped"), true);
   assert.equal(textOf(renderer.root).includes("running"), true);
+  renderer.unmount();
+});
+
+test("larger desired disk shows an unapplied change and submits grow-disk directly", async () => {
+  const requests: any[] = [];
+  const renderer = await renderPanel({
+    settings: { ...SETTINGS, awsRootVolumeSizeGb: 20 },
+    status: {
+      configured: true,
+      state: "running",
+      actualSpec: {
+        instanceId: "i-shared",
+        region: "us-east-1",
+        instanceType: "t3.small",
+        rootVolumeSizeGb: 8
+      }
+    },
+    start: async (request) => {
+      requests.push(request);
+      return {
+        operation: { operationId: request.operationId, phase: "ready", message: "Ready", updatedAt: "2026-08-14T00:00:00.000Z" },
+        status: { configured: true, state: "running" }
+      };
+    }
+  });
+
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-desired-specs" })), /Desiredt3\.small20 GB disk/);
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-actual-specs" })), /Actuali-sharedus-east-1t3\.small8 GB disk/);
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-unapplied-size" })), /Size change not applied/);
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-start" })), "Apply disk resize to 20 GB");
+  assert.equal(textOf(findButton(renderer, "Refresh status")), "Refresh status");
+
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-start" }));
+  assert.equal(requests[0].resolution, "grow-disk");
+  assert.equal(requests[0].expectedInstanceId, "i-shared");
+  assert.deepEqual(requests[0].expectedDesiredSpec, { instanceType: "t3.small", rootVolumeSizeGb: 20 });
   renderer.unmount();
 });
 

@@ -54,7 +54,7 @@ export function ChatComposerMenus(props: {
   return (
     <>
       {props.mentionOptions.length > 0 && (
-        <div className="mention-menu" role="listbox" aria-label="Members">
+        <div className="mention-menu member-mention-menu" role="listbox" aria-label="Members">
           <div className="chat-popover-section-title">Members</div>
           {props.mentionOptions.map((participant, index) => (
             <button

@@ -4,8 +4,8 @@
   "start_url": ".",
   "scope": ".",
   "display": "standalone",
-  "background_color": "#f7f8f3",
-  "theme_color": "#f7f8f3",
+  "background_color": "#eceef2",
+  "theme_color": "#eceef2",
   "icons": [
     {
       "src": "assets/accordagents-mark.png",

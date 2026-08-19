@@ -6,10 +6,19 @@ import type {
   ChatCodexFileChangeSummary,
   ChatCodexPermissionSummary
 } from "../../shared/types";
+import {
+  CODEX_GUARDIAN_DENIED_APPROVAL_METHOD,
+  CODEX_GUARDIAN_TIMED_OUT_APPROVAL_METHOD,
+  isCodexGuardianDeniedApprovalMethod,
+  isCodexGuardianTimedOutApprovalMethod
+} from "../../shared/codexApproval";
+
+export {
+  CODEX_GUARDIAN_DENIED_APPROVAL_METHOD,
+  CODEX_GUARDIAN_TIMED_OUT_APPROVAL_METHOD
+} from "../../shared/codexApproval";
 
 export const CODEX_APPROVAL_TOOL_NAME = "codex_auto_review_approval";
-export const CODEX_GUARDIAN_DENIED_APPROVAL_METHOD = "item/autoApprovalReview/denied";
-export const CODEX_GUARDIAN_TIMED_OUT_APPROVAL_METHOD = "item/autoApprovalReview/timedOut";
 
 const MAX_DISPLAY_TEXT = 2_000;
 const MAX_DISPLAY_PATH = 600;
@@ -44,7 +53,7 @@ export function isCodexApprovalMethod(method: string): method is ChatCodexApprov
 }
 
 export function codexApprovalCancellationResult(method: ChatCodexApprovalMethod): unknown {
-  if (method === CODEX_GUARDIAN_DENIED_APPROVAL_METHOD || method === CODEX_GUARDIAN_TIMED_OUT_APPROVAL_METHOD) {
+  if (isCodexGuardianDeniedApprovalMethod(method) || isCodexGuardianTimedOutApprovalMethod(method)) {
     return { decision: "keepDenied" };
   }
   if (method === "item/permissions/requestApproval") {
@@ -57,10 +66,10 @@ export function codexApprovalCancellationResult(method: ChatCodexApprovalMethod)
 }
 
 export function prepareCodexApproval(input: Pick<CodexInboundServerRequest, "id" | "method" | "params">): PreparedCodexApproval {
-  if (input.method === CODEX_GUARDIAN_DENIED_APPROVAL_METHOD) {
+  if (isCodexGuardianDeniedApprovalMethod(input.method)) {
     return prepareGuardianDeniedApproval(input.id, input.params);
   }
-  if (input.method === CODEX_GUARDIAN_TIMED_OUT_APPROVAL_METHOD) {
+  if (isCodexGuardianTimedOutApprovalMethod(input.method)) {
     return prepareGuardianTimedOutApproval(input.id, input.params);
   }
   if (!isCodexApprovalMethod(input.method)) {

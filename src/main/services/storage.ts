@@ -201,12 +201,19 @@ function withRemoteRunMetadata(metadata: Record<string, unknown>, runIds: string
   };
 }
 
+export interface StorageServiceOptions {
+  dbPath?: string;
+  sqliteExecutable?: string;
+}
+
 export class StorageService {
   private readonly dbPath: string;
+  private readonly sqliteExecutable: string;
   private initialized = false;
 
-  constructor() {
-    this.dbPath = path.join(app.getPath("userData"), "accordagents.sqlite3");
+  constructor(options: StorageServiceOptions = {}) {
+    this.dbPath = options.dbPath ?? path.join(app.getPath("userData"), "accordagents.sqlite3");
+    this.sqliteExecutable = options.sqliteExecutable ?? "sqlite3";
   }
 
   async init(): Promise<void> {
@@ -1230,7 +1237,7 @@ export class StorageService {
   }
 
   private async queryJson<T>(sql: string): Promise<T[]> {
-    const result = await runCommand("sqlite3", this.sqliteArgs(["-json", this.dbPath, sql]), {
+    const result = await runCommand(this.sqliteExecutable ?? "sqlite3", this.sqliteArgs(["-json", this.dbPath, sql]), {
       timeoutMs: SQLITE_COMMAND_TIMEOUT_MS,
       primeLoginShellEnv: false
     });
@@ -1239,7 +1246,7 @@ export class StorageService {
   }
 
   private async queryText(sql: string): Promise<string> {
-    const result = await runCommand("sqlite3", this.sqliteArgs(["-batch", "-noheader", this.dbPath, sql]), {
+    const result = await runCommand(this.sqliteExecutable ?? "sqlite3", this.sqliteArgs(["-batch", "-noheader", this.dbPath, sql]), {
       timeoutMs: SQLITE_COMMAND_TIMEOUT_MS,
       primeLoginShellEnv: false
     });
@@ -1247,7 +1254,11 @@ export class StorageService {
   }
 
   private async runSql(sql: string, timeoutMs = SQLITE_COMMAND_TIMEOUT_MS): Promise<void> {
-    await runCommand("sqlite3", this.sqliteArgs([this.dbPath]), { input: sql, timeoutMs, primeLoginShellEnv: false });
+    await runCommand(this.sqliteExecutable ?? "sqlite3", this.sqliteArgs([this.dbPath]), {
+      input: sql,
+      timeoutMs,
+      primeLoginShellEnv: false
+    });
   }
 
   private sqliteArgs(args: string[]): string[] {

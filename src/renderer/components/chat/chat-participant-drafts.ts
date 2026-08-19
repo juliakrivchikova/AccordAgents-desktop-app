@@ -156,6 +156,10 @@ export const CHAT_RUN_LOCATION_OPTIONS: Array<{ value: Extract<CloudRunRemoteExe
   { value: "remote", label: "Remote" }
 ];
 
+export function chatProviderSupportsCloudRun(kind: ChatProviderKind | undefined): boolean {
+  return kind === "codex-cli" || kind === "claude-code";
+}
+
 export const WORKFLOW_MANAGER_ROLE_ID = "workflow-manager";
 
 export function normalizeChatRunLocation(value: unknown): Extract<CloudRunRemoteExecutionMode, "local" | "remote"> {
@@ -369,7 +373,7 @@ export function updateChatParticipantDraft(
       reasoningEffort: normalizeChatReasoningEffort(next.reasoningEffort, next.kind)
     };
   }
-  if (kindChanged && next.kind !== "codex-cli") {
+  if (kindChanged && !chatProviderSupportsCloudRun(next.kind)) {
     next = {
       ...next,
       remoteExecution: "local"

@@ -17,6 +17,7 @@ import type {
   ChatBehaviorRuleSnapshot,
   ChatAppToolCapability,
   ChatChoiceOption,
+  ChatCodexApprovalOption,
   ChatCodexApprovalRequest,
   ChatAccordResolutionMetadata,
   ChatAgentActivityEvent,
@@ -26,6 +27,7 @@ import type {
   ChatLastMessageByParticipant,
   ChatMessage,
   ChatMessageMetadata,
+  ChatExecutionLeaseMetadata,
   ChatMessageReactions,
   ChatParticipant,
   ChatParticipantActivitySnapshot,
@@ -34,6 +36,7 @@ import type {
   ChatParticipantInput,
   ChatParticipantRequestPermission,
   ChatParticipantWatcherState,
+  CloudRunWorkerMode,
   CloudRunRemoteExecutionMode,
   ChatExistingParticipantOverrides,
   ChatParticipantChangeRequest,
@@ -76,6 +79,7 @@ import type {
   Conversation,
   CloudRunsSettings,
   CloudRunStatus,
+  CloudRunWorkerDoctorReport,
   CloudRunWorkerSettings,
   CreateChatConversationRequest,
   DeleteChatConversationRequest,
@@ -104,6 +108,7 @@ import type {
   RemoteRunSyncInfo
 } from "../../shared/types";
 import { isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
+import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES,
@@ -119,6 +124,11 @@ import {
 } from "../../shared/chatBehaviorRules";
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../shared/reasoningEffort";
 import { CODEX_APPROVAL_TOOL_NAME, codexApprovalCancellationResult, prepareCodexApproval } from "./codexApprovals";
+import {
+  CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID,
+  isCodexGuardianDeniedApprovalMethod,
+  isCodexGuardianTimedOutApprovalMethod
+} from "../../shared/codexApproval";
 import {
   CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH,
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
@@ -211,6 +221,7 @@ import {
   readyProviderKinds,
   resolveAssistantProviderKind
 } from "../../shared/cliReadiness";
+import type { ChatExecutorLeaseKey } from "../../shared/chatExecutionLeases";
 
 type ProgressCallback = (progress: ReviewProgress) => void;
 
@@ -318,6 +329,7 @@ interface CompactChatCommand {
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 20;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
+const CHAT_EXECUTOR_LEASE_TTL_MS = 15 * 60_000;
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 const CHAT_ADMINISTRATOR_ROLE_ID = "administrator";
 const CHAT_ADMINISTRATOR_HANDLE = "assistant";
@@ -329,6 +341,10 @@ const GENERIC_PARTICIPANT_ROLE_ID = "generic-participant";
 // dispatch from a trigger message so skill validation never diverges from the
 // actual dispatch target.
 type ChatDispatchReplyContext = { parentMessageId?: string; threadId?: string; chatThreadRootId?: string };
+type InferredParticipantRequestSuppressionScope =
+  | "tool-source-segment"
+  | "final-source-tool-origin-run"
+  | "final-source-tool-origin-segment";
 const CHAT_LEGACY_ADMINISTRATOR_HANDLE = "admin";
 const CHAT_ROLE_LABEL_MAX_CHARS = 80;
 const CHAT_ROLE_INSTRUCTIONS_MAX_CHARS = 40_000;
@@ -345,6 +361,8 @@ const CHAT_TOOL_PERMISSION_WAIT_MS = 30 * 60_000;
 // Mirrors the dedicated CLI's bounded human approval wait. The provider turn
 // timer is paused separately while a direct callback is outstanding.
 const CHAT_CODEX_APPROVAL_WAIT_MS = 30 * 60_000;
+const CHAT_CODEX_APPROVAL_CONTROL_APPROVE = "[AccordAgents approval control] Retry exactly the action I just approved, once. If it succeeds, continue the unfinished work from my original request that directly depends on it. Do not broaden the approved action or start unrelated work. If the retry cannot run, clearly explain why.";
+const CHAT_CODEX_APPROVAL_CONTROL_DENY = "[AccordAgents approval control] Do not retry the action I just denied. Continue the unfinished work from my original request without it. If you cannot continue, clearly explain why.";
 const CHAT_AUTO_WATCH_EVALUATION_DEBOUNCE_MS = 75;
 const CHAT_GITHUB_APP_REPOSITORY_MAX_LENGTH = 200;
 const CHAT_GITHUB_APP_PERMISSION_MAX_LENGTH = 80;
@@ -403,11 +421,13 @@ interface ChatAppMcpGateway {
     snapshotMaxSequence?: number;
     continuation?: boolean;
     runId?: string;
+    turnSegmentId?: string;
     participantRequestDepth?: number;
     participantRequestBatchId?: string;
     chainRootId?: string;
     historyMarkdownPath?: string;
     historyJsonPath?: string;
+    agentMode?: ChatAgentMode;
     runPermissions?: ChatAgentPermissions;
   }): { url: string; token: string } | undefined;
   updateToken?(token: string, grant: ChatAppMcpTokenGrant): { url: string; token: string } | undefined;
@@ -429,11 +449,13 @@ interface ChatAppMcpActor {
   snapshotMaxSequence?: number;
   continuation?: boolean;
   runId?: string;
+  turnSegmentId?: string;
   participantRequestDepth?: number;
   participantRequestBatchId?: string;
   chainRootId?: string;
   historyMarkdownPath?: string;
   historyJsonPath?: string;
+  agentMode?: ChatAgentMode;
   runPermissions?: ChatAgentPermissions;
 }
 
@@ -526,6 +548,15 @@ interface ToolPermissionDecision {
   scope?: ChatAppToolApprovalScope;
   reason?: string;
   source: "user" | "policy" | "timeout" | "abort";
+}
+
+type ToolPermissionRequestRoute = "created" | "policy" | "pending-replay" | "terminal-replay";
+
+interface ToolPermissionRequestOutcome {
+  prepared: PreparedToolPermission;
+  route: ToolPermissionRequestRoute;
+  approval?: ChatAppToolApproval;
+  decision?: ToolPermissionDecision;
 }
 
 interface CodexApprovalResolver {
@@ -631,6 +662,13 @@ interface CloudRunAwsResolver {
   noteRunEnded(runId: string): Promise<void>;
 }
 
+interface CloudRunDoctorProbe {
+  diagnose(
+    settings: CloudRunWorkerSettings,
+    options?: { requirePersistentStorage?: boolean; requiredProviderKind?: ChatProviderKind }
+  ): Promise<CloudRunWorkerDoctorReport>;
+}
+
 export class ChatService {
   private readonly saveQueues = new Map<string, Promise<void>>();
   private readonly runQueues = new Map<string, Promise<void>>();
@@ -644,7 +682,8 @@ export class ChatService {
   private readonly participantRequestRunners = new Map<string, Promise<ParticipantRequestRunResult>>();
   private readonly participantRequestAutoResumes = new Set<string>();
   private readonly permissionApprovalAutoResumes = new Set<string>();
-  private readonly toolPermissionResolvers = new Map<string, (decision: ToolPermissionDecision) => void>();
+  private readonly codexApprovalContinuations = new Set<string>();
+  private readonly toolPermissionResolvers = new Map<string, Set<(decision: ToolPermissionDecision) => void>>();
   private readonly codexApprovalResolvers = new Map<string, CodexApprovalResolver>();
   private readonly participantTurnQueues = new Map<string, Promise<void>>();
   private readonly chatRunControllers = new Map<string, Set<AbortController>>();
@@ -662,6 +701,7 @@ export class ChatService {
   private remoteRuns?: RemoteRunStarter;
   private remoteRunCoordinator?: RemoteRunCoordinatorControl;
   private cloudRunAws?: CloudRunAwsResolver;
+  private cloudRunDoctor?: CloudRunDoctorProbe;
   private artifactCleanup?: (conversationId: string) => Promise<void>;
   private codexApprovalWaitMs = CHAT_CODEX_APPROVAL_WAIT_MS;
 
@@ -674,7 +714,16 @@ export class ChatService {
     private readonly onConversationSnapshot?: (conversation: Conversation) => void,
     private readonly userSkills?: UserSkillsService,
     private readonly onReviewProgress?: ProgressCallback,
-    private readonly chatEventMirror?: ChatEventMirrorService
+    private readonly chatEventMirror?: ChatEventMirrorService,
+    /** W-C: an interrupted run has no terminal snapshot of its own — nothing
+     *  finished, the process died. Recovery is the only thing that can tell a
+     *  paired phone the run is over, so it is published explicitly here rather
+     *  than left to a conversation snapshot, whose first-delivery guard would
+     *  suppress it at exactly the moment it matters (process start). */
+    private readonly onInterruptedRunsRecovered?: (
+      conversation: Conversation,
+      messages: ChatMessage[]
+    ) => void
   ) {}
 
   private async manualAgentEnvironmentForRun(): Promise<{ env: NodeJS.ProcessEnv; version: string }> {
@@ -695,6 +744,10 @@ export class ChatService {
 
   setCloudRunAwsService(service: CloudRunAwsResolver): void {
     this.cloudRunAws = service;
+  }
+
+  setCloudRunDoctorService(service: CloudRunDoctorProbe): void {
+    this.cloudRunDoctor = service;
   }
 
   setArtifactCleanup(handler: (conversationId: string) => Promise<void>): void {
@@ -2214,6 +2267,8 @@ export class ChatService {
       autoResumeRequestMessageIds: []
     };
     for (const [runId, terminal] of this.terminalRemoteRunOutcomes(conversation)) {
+      const handle = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles)[runId];
+      this.releaseParticipantExecutorLease(conversation, handle?.executionLease);
       const finalized = this.finalizeRemoteRunPendingMessage(conversation, runId, terminal.outcome, terminal.reason);
       result.changed = result.changed || finalized.changed;
       result.autoResumeRequestMessageIds.push(...finalized.autoResumeRequestMessageIds);
@@ -2266,6 +2321,7 @@ export class ChatService {
         void this.cloudRunAws?.noteRunEnded(runId);
         nextHandle = current;
         const beforeMetadata = this.stableJson(conversation.metadata);
+        this.releaseParticipantExecutorLease(conversation, current.executionLease);
         const terminal = this.finalizeRemoteRunPendingMessage(conversation, runId, current.status, current.error);
         for (const requestMessageId of terminal.autoResumeRequestMessageIds) {
           autoResumeRequestMessageIds.add(requestMessageId);
@@ -2288,6 +2344,7 @@ export class ChatService {
       };
       if (this.isRemoteRunTerminal(nextHandle.status)) {
         const beforeTerminalMetadata = this.stableJson(conversation.metadata);
+        this.releaseParticipantExecutorLease(conversation, nextHandle.executionLease);
         const terminal = this.finalizeRemoteRunPendingMessage(conversation, runId, nextHandle.status, nextHandle.error);
         for (const requestMessageId of terminal.autoResumeRequestMessageIds) {
           autoResumeRequestMessageIds.add(requestMessageId);
@@ -2340,7 +2397,8 @@ export class ChatService {
         message.metadata = {
           ...message.metadata,
           runId: handle.runId,
-          appMessageSource: "remote-run-provider-output"
+          appMessageSource: "remote-run-provider-output",
+          executionLease: handle.executionLease
         };
         message.status = "pending";
         this.recordLastMessageByParticipant(conversation, message);
@@ -2402,6 +2460,7 @@ export class ChatService {
       };
       void this.cloudRunAws?.noteRunEnded(runId);
     }
+    this.releaseParticipantExecutorLease(conversation, next.executionLease);
     this.registerRemoteRunHandle(next);
     if (effectiveStatus === "completed") {
       this.commitPromptContextPointerAdvance(conversation, next.participantId, next.promptContextPointerAdvance);
@@ -2454,6 +2513,44 @@ export class ChatService {
     return remotePath ? { localPath, remotePath } : { localPath };
   }
 
+  private normalizeExecutionLeaseMetadata(value: unknown): ChatExecutionLeaseMetadata | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+    const record = value as Partial<ChatExecutionLeaseMetadata>;
+    const conversationId = typeof record.conversationId === "string" ? record.conversationId.trim() : "";
+    const participantId = typeof record.participantId === "string" ? record.participantId.trim() : "";
+    const participantSessionId = typeof record.participantSessionId === "string" ? record.participantSessionId.trim() : "";
+    const leaseId = typeof record.leaseId === "string" ? record.leaseId.trim() : "";
+    const holderId = typeof record.holderId === "string" ? record.holderId.trim() : "";
+    const generation = typeof record.generation === "number" && Number.isFinite(record.generation)
+      ? Math.max(1, Math.floor(record.generation))
+      : 0;
+    const status = record.status === "active" || record.status === "released" ||
+      record.status === "reclaimed" || record.status === "conflict"
+      ? record.status
+      : undefined;
+    const acquiredAt = typeof record.acquiredAt === "string" ? record.acquiredAt : "";
+    const heartbeatAt = typeof record.heartbeatAt === "string" ? record.heartbeatAt : "";
+    const expiresAt = typeof record.expiresAt === "string" ? record.expiresAt : "";
+    if (!conversationId || !participantId || !participantSessionId || !leaseId || !holderId || !generation || !status || !acquiredAt || !heartbeatAt || !expiresAt) {
+      return undefined;
+    }
+    return {
+      conversationId,
+      participantId,
+      participantSessionId,
+      leaseId,
+      holderId,
+      generation,
+      status,
+      acquiredAt,
+      heartbeatAt,
+      expiresAt,
+      releasedAt: typeof record.releasedAt === "string" ? record.releasedAt : undefined
+    };
+  }
+
   private remoteRunHandleByRun(value: unknown): Record<string, RemoteRunHandle> {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       return {};
@@ -2486,7 +2583,8 @@ export class ChatService {
         lastPolledAt: typeof record.lastPolledAt === "string" ? record.lastPolledAt : undefined,
         error: typeof record.error === "string" ? record.error : undefined,
         sync: this.normalizeRemoteRunSyncInfo(record.sync),
-        promptContextPointerAdvance: this.normalizedPromptContextPointerAdvance(record.promptContextPointerAdvance)
+        promptContextPointerAdvance: this.normalizedPromptContextPointerAdvance(record.promptContextPointerAdvance),
+        executionLease: this.normalizeExecutionLeaseMetadata(record.executionLease)
       };
     }
     return handles;
@@ -2858,6 +2956,8 @@ export class ChatService {
     remoteRunStatus: ChatRemoteRunStatus | undefined,
     activityEvents: ChatAgentActivityEvent[]
   ): string | undefined {
+    const executionLease = this.remoteRunExecutionLease(conversation, record.runId);
+    const executionLeaseSuperseded = !this.executorOwnedEventIsCurrent(conversation, executionLease);
     const existingId = messageId ?? this.remoteProviderProgressMessageId(conversation, record.runId, record.participantId);
     const existing = existingId
       ? conversation.messages.find((message) => message.id === existingId && message.role === "participant")
@@ -2870,6 +2970,8 @@ export class ChatService {
         runId: record.runId,
         appMessageSource: "remote-run-provider-output",
         activityEvents: activityEvents.length > 0 ? activityEvents : undefined,
+        executionLease,
+        executionLeaseSuperseded: executionLeaseSuperseded || undefined,
         ...(remoteRunStatus ? { remoteRunStatus: this.normalizedRemoteRunStatus(remoteRunStatus, existing.metadata?.remoteRunStatus) } : {})
       };
       this.recordLastMessageByParticipant(conversation, existing);
@@ -2889,6 +2991,8 @@ export class ChatService {
         runId: record.runId,
         appMessageSource: "remote-run-provider-output",
         activityEvents: activityEvents.length > 0 ? activityEvents : undefined,
+        executionLease,
+        executionLeaseSuperseded: executionLeaseSuperseded || undefined,
         ...(remoteRunStatus ? { remoteRunStatus: this.normalizedRemoteRunStatus(remoteRunStatus) } : {})
       },
       "pending"
@@ -2909,6 +3013,8 @@ export class ChatService {
       ? conversation.messages.find((message) => message.id === existingId && message.role === "participant")
       : undefined;
     const resumeMiss = this.isConfirmedRemoteResumeMiss(record);
+    const executionLease = this.remoteRunExecutionLease(conversation, record.runId);
+    const executionLeaseSuperseded = !this.executorOwnedEventIsCurrent(conversation, executionLease);
     const rawContent = record.content.trim() || (record.ok ? existing?.content ?? "" : `@${participant.handle} remote run failed.`);
     const content = resumeMiss
       ? `The previous Codex session could not be resumed, so this turn stopped to avoid silently losing context. Retry explicitly to start a fresh session.\n\n${rawContent}`
@@ -2924,7 +3030,9 @@ export class ChatService {
       // handle's startedAt -> completedAt so the "Worked for ..." chip renders
       // for remote runs like it does for local ones.
       workedMs: this.remoteRunWorkedMs(conversation, record.runId, record.durationMs),
-      appMessageSource: "remote-run-provider"
+      appMessageSource: "remote-run-provider",
+      executionLease,
+      executionLeaseSuperseded: executionLeaseSuperseded || undefined
     };
     if (existing) {
       existing.content = content;
@@ -3094,63 +3202,122 @@ export class ChatService {
   }
 
   async requestToolPermissionFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
-    await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
-    const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
-    if (!requester) {
-      return { behavior: "deny", message: "The requesting member is no longer in this chat." };
-    }
     if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
       return { behavior: "deny", message: "This chat member is not allowed to request tool permissions." };
     }
 
-    let prepared: PreparedToolPermission;
+    let outcome: ToolPermissionRequestOutcome;
     try {
-      prepared = this.prepareToolPermissionRequest(rawRequest);
+      outcome = await this.withChatMutation(conversation, async () => {
+        const requester = this.chatParticipants(conversation)
+          .find((participant) => participant.id === actor.participantId);
+        if (!requester) {
+          throw new Error("The requesting member is no longer in this chat.");
+        }
+        // The token captures the mode resolved for this exact run. Legacy tokens have
+        // no mode, so fall back to the participant's current setting rather than a
+        // persisted provider session that may still describe the previous turn.
+        const agentMode = actor.agentMode
+          ? normalizeChatAgentMode(actor.agentMode)
+          : normalizeChatAgentMode(requester.agentMode);
+        const prepared = this.prepareToolPermissionRequest(rawRequest, agentMode);
+        const existing = this.toolPermissionApprovalForOccurrence(
+          conversation,
+          requester.id,
+          actor.runId,
+          prepared.request.nativeOccurrenceId
+        );
+        if (existing) {
+          const decision = this.toolPermissionDecisionForApproval(existing);
+          return {
+            prepared,
+            route: decision ? "terminal-replay" : "pending-replay",
+            approval: existing,
+            decision
+          };
+        }
+
+        const policy = prepared.request.agentMode === "auto"
+          ? undefined
+          : this.matchingAppToolApprovalPolicy(
+              conversation,
+              requester,
+              APP_TOOL_PERMISSION_TOOL,
+              "permissions.request",
+              undefined,
+              prepared.request.toolName
+            );
+        if (policy) {
+          return {
+            prepared,
+            route: "policy",
+            decision: { approve: true, scope: "chat", source: "policy" }
+          };
+        }
+
+        const approval = this.newAppToolApproval(
+          conversation,
+          requester,
+          APP_TOOL_PERMISSION_TOOL,
+          "permissions.request",
+          prepared.request,
+          prepared.summary,
+          "pending"
+        );
+        if (actor.runId && actor.triggerMessageId) {
+          approval.resumeContext = {
+            runId: actor.runId,
+            triggerMessageId: actor.triggerMessageId,
+            participantRequestBatchId: actor.participantRequestBatchId
+          };
+        }
+        this.upsertAppToolApproval(conversation, approval);
+        conversation.messages.push(this.message(
+          "system",
+          `Tool approval needed for @${requester.handle}: ${prepared.summary}.`,
+          undefined,
+          { threadId: "system" }
+        ));
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+        return { prepared, route: "created", approval };
+      });
     } catch (error) {
       return { behavior: "deny", message: error instanceof Error ? error.message : String(error) };
     }
 
-    const policy = this.matchingAppToolApprovalPolicy(
-      conversation,
-      requester,
-      APP_TOOL_PERMISSION_TOOL,
-      "permissions.request",
-      undefined,
-      prepared.request.toolName
-    );
-    if (policy) {
+    void this.debugLogs.write("chat.claude.permission-prompt.invoked", {
+      conversationId: actor.conversationId,
+      participantId: actor.participantId,
+      runId: actor.runId,
+      agentMode: outcome.prepared.request.agentMode,
+      toolName: outcome.prepared.request.toolName,
+      nativeOccurrenceIdPresent: Boolean(outcome.prepared.request.nativeOccurrenceId),
+      route: outcome.route
+    });
+
+    if (outcome.decision?.approve) {
+      this.logToolPermissionResolution(actor, outcome, outcome.decision);
       return {
         behavior: "allow",
-        updatedInput: prepared.toolInput
+        updatedInput: outcome.prepared.toolInput
+      };
+    }
+    if (outcome.decision) {
+      this.logToolPermissionResolution(actor, outcome, outcome.decision);
+      return {
+        behavior: "deny",
+        message: outcome.decision.reason ?? "User denied this tool request."
       };
     }
 
-    const approval = this.newAppToolApproval(
-      conversation,
-      requester,
-      APP_TOOL_PERMISSION_TOOL,
-      "permissions.request",
-      prepared.request,
-      prepared.summary,
-      "pending"
-    );
-    if (actor.runId && actor.triggerMessageId) {
-      approval.resumeContext = {
-        runId: actor.runId,
-        triggerMessageId: actor.triggerMessageId,
-        participantRequestBatchId: actor.participantRequestBatchId
-      };
+    const approval = outcome.approval;
+    if (!approval) {
+      return { behavior: "deny", message: "Tool permission request could not be created." };
     }
-    this.upsertAppToolApproval(conversation, approval);
-    conversation.messages.push(this.message("system", `Tool approval needed for @${requester.handle}: ${prepared.summary}.`, undefined, {
-      threadId: "system"
-    }));
-    conversation.updatedAt = new Date().toISOString();
-    await this.saveConversation(conversation);
-    this.queueSnapshot(conversation);
-
-    const decision = await this.waitForToolPermissionDecision(approval.id, actor.runId);
+    const decision = await this.waitForToolPermissionDecision(actor.conversationId, approval.id, actor.runId);
     if (!decision.approve) {
       if (decision.source !== "user") {
         await this.denyPendingToolPermissionApproval(
@@ -3159,14 +3326,16 @@ export class ChatService {
           decision.reason ?? "Tool permission request did not receive approval."
         );
       }
+      this.logToolPermissionResolution(actor, outcome, decision);
       return {
         behavior: "deny",
         message: decision.reason ?? "User denied this tool request."
       };
     }
+    this.logToolPermissionResolution(actor, outcome, decision);
     return {
       behavior: "allow",
-      updatedInput: prepared.toolInput
+      updatedInput: outcome.prepared.toolInput
     };
   }
 
@@ -4048,6 +4217,11 @@ export class ChatService {
       }
     }
     let created: { id: string; sequence: number; threadId?: string } | undefined;
+    let participantRequestsToRun: Array<{
+      requestMessageId: string;
+      depth: number;
+      source: ChatParticipantRequestBatch["source"];
+    }> = [];
     try {
       await this.withChatMutation(conversation, async () => {
         const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
@@ -4107,6 +4281,10 @@ export class ChatService {
             appMessageSource: APP_CHAT_SEND_MESSAGE_TOOL,
             accordResolution: request.accordResolution,
             runId: actor.runId,
+            turnSegmentId: actor.turnSegmentId,
+            participantRequestDepth: actor.participantRequestDepth ?? 0,
+            participantRequestBatchId: actor.participantRequestBatchId,
+            participantRequestChainRootId: actor.chainRootId,
             ...(preparedImages.attachments.length > 0 ? { imageAttachments: preparedImages.attachments } : {})
           }
         };
@@ -4118,6 +4296,26 @@ export class ChatService {
         // bump persists for the rest of the turn.
         if (typeof actor.snapshotMaxSequence === "number" && sequence > actor.snapshotMaxSequence) {
           actor.snapshotMaxSequence = sequence;
+        }
+        try {
+          participantRequestsToRun = await this.createImplicitParticipantRequestApproval(
+            conversation,
+            requester,
+            [message]
+          );
+        } catch (error) {
+          participantRequestsToRun = [];
+          this.addConversationWarning(
+            conversation,
+            `Participant mentions in @${requester.handle}'s message were not triggered because inferred-request processing failed.`
+          );
+          void this.debugLogs.write("chat.participant-request.inferred-tool-error", {
+            conversationId: conversation.id,
+            messageId: message.id,
+            requesterParticipantId: requester.id,
+            requesterHandle: requester.handle,
+            message: error instanceof Error ? error.message : String(error)
+          });
         }
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
@@ -4139,6 +4337,7 @@ export class ChatService {
         );
       }
     }
+    this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
     return {
       ok: true,
       messageId: created.id,
@@ -4392,6 +4591,101 @@ export class ChatService {
     };
   }
 
+  private async respondToToolPermissionApproval(
+    request: RespondToChatAppToolApprovalRequest
+  ): Promise<Conversation | undefined> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return conversation;
+    }
+    let decidedApproval: ChatAppToolApproval | undefined;
+    let decision: ToolPermissionDecision | undefined;
+    await this.withChatMutation(conversation, async () => {
+      const approval = this.chatAppToolApprovals(conversation)
+        .find((item) => item.id === request.approvalId);
+      if (!approval || approval.toolName !== APP_TOOL_PERMISSION_TOOL || !this.isToolPermissionRequest(approval.request)) {
+        throw new Error("App tool approval request was not found.");
+      }
+      if (approval.status !== "pending") {
+        throw new Error("App tool approval request has already been answered.");
+      }
+
+      const now = new Date().toISOString();
+      if (!request.approve) {
+        decidedApproval = {
+          ...approval,
+          status: "denied",
+          updatedAt: now
+        };
+        decision = {
+          approve: false,
+          source: "user",
+          reason: "User denied this tool request."
+        };
+      } else {
+        const requester = this.chatParticipants(conversation)
+          .find((participant) => participant.id === approval.requesterParticipantId);
+        if (!requester) {
+          throw new Error("The requesting member is no longer in this chat.");
+        }
+        // Legacy pending records did not persist the run mode. Their safe fallback is
+        // the member's current mode, never the provider session's previous-turn mode.
+        const agentMode = approval.request.agentMode ?? normalizeChatAgentMode(requester.agentMode);
+        const scope = agentMode === "auto" ? "once" : request.scope === "chat" ? "chat" : "once";
+        decidedApproval = {
+          ...approval,
+          status: "approved",
+          approvalScope: scope,
+          updatedAt: now
+        };
+        decision = { approve: true, scope, source: "user" };
+        if (scope === "chat") {
+          this.upsertAppToolApprovalPolicy(conversation, {
+            id: randomUUID(),
+            participantId: approval.requesterParticipantId,
+            roleConfigId: approval.requesterRoleConfigId,
+            toolName: approval.toolName,
+            capability: approval.capability,
+            targetToolName: approval.request.toolName,
+            scope: "chat",
+            createdAt: now,
+            updatedAt: now
+          });
+        }
+        conversation.messages.push(this.message(
+          "system",
+          scope === "chat"
+            ? `Allowed @${approval.requesterHandle} to use ${approval.request.toolName} for this chat.`
+            : `Allowed @${approval.requesterHandle} to use ${approval.request.toolName} once.`,
+          undefined,
+          { threadId: "system" }
+        ));
+      }
+      this.upsertAppToolApproval(conversation, decidedApproval);
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+    });
+
+    if (!decidedApproval || !decision) {
+      throw new Error("App tool approval request could not be resolved.");
+    }
+    if (!decision.approve) {
+      try {
+        await this.emitAppToolApprovalDecision({
+          conversationId: conversation.id,
+          approval: decidedApproval,
+          status: "denied"
+        });
+      } finally {
+        this.resolveToolPermissionApproval(request.approvalId, decision);
+      }
+    } else {
+      this.resolveToolPermissionApproval(request.approvalId, decision);
+    }
+    return conversation;
+  }
+
   async respondToAppToolApproval(
     request: RespondToChatAppToolApprovalRequest,
     progress?: ProgressCallback
@@ -4404,11 +4698,14 @@ export class ChatService {
     if (!approval) {
       throw new Error("App tool approval request was not found.");
     }
+    if (approval.toolName === APP_TOOL_PERMISSION_TOOL && this.isToolPermissionRequest(approval.request)) {
+      return this.respondToToolPermissionApproval(request);
+    }
     if (approval.status !== "pending") {
       throw new Error("App tool approval request has already been answered.");
     }
     if (approval.toolName === CODEX_APPROVAL_TOOL_NAME && this.isCodexApprovalRequest(approval.request)) {
-      return this.respondToCodexApproval(conversation, request);
+      return this.respondToCodexApproval(conversation, request, progress);
     }
     const now = new Date().toISOString();
     if (!request.approve) {
@@ -4437,13 +4734,6 @@ export class ChatService {
             requestMessageId,
             message: error instanceof Error ? error.message : String(error)
           });
-        });
-      }
-      if (approval.toolName === APP_TOOL_PERMISSION_TOOL && this.isToolPermissionRequest(approval.request)) {
-        this.resolveToolPermissionApproval(approval.id, {
-          approve: false,
-          source: "user",
-          reason: "User denied this tool request."
         });
       }
       return conversation;
@@ -4513,44 +4803,6 @@ export class ChatService {
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
       this.startQueuedSelfCompaction(conversation.id, requester, approval.request, runId);
-      return conversation;
-    }
-
-    if (approval.toolName === APP_TOOL_PERMISSION_TOOL && this.isToolPermissionRequest(approval.request)) {
-      this.upsertAppToolApproval(conversation, {
-        ...approval,
-        status: "approved",
-        approvalScope: scope,
-        updatedAt: now
-      });
-      if (scope === "chat") {
-        this.upsertAppToolApprovalPolicy(conversation, {
-          id: randomUUID(),
-          participantId: approval.requesterParticipantId,
-          roleConfigId: approval.requesterRoleConfigId,
-          toolName: approval.toolName,
-          capability: approval.capability,
-          targetToolName: approval.request.toolName,
-          scope: "chat",
-          createdAt: now,
-          updatedAt: now
-        });
-      }
-      conversation.messages.push(this.message(
-        "system",
-        scope === "chat"
-          ? `Allowed @${approval.requesterHandle} to use ${approval.request.toolName} for this chat.`
-          : `Allowed @${approval.requesterHandle} to use ${approval.request.toolName} once.`,
-        undefined,
-        { threadId: "system" }
-      ));
-      conversation.updatedAt = now;
-      await this.saveConversation(conversation);
-      this.resolveToolPermissionApproval(approval.id, {
-        approve: true,
-        scope,
-        source: "user"
-      });
       return conversation;
     }
 
@@ -4780,7 +5032,7 @@ export class ChatService {
     }
     const prepared = prepareCodexApproval(request);
     const now = new Date().toISOString();
-    const guardianTimedOut = prepared.request.method === "item/autoApprovalReview/timedOut";
+    const guardianTimedOut = isCodexGuardianTimedOutApprovalMethod(prepared.request.method);
     const approval: ChatAppToolApproval = {
       id: randomUUID(),
       conversationId: conversation.id,
@@ -4909,7 +5161,8 @@ export class ChatService {
 
   private async respondToCodexApproval(
     conversation: Conversation,
-    request: RespondToChatAppToolApprovalRequest
+    request: RespondToChatAppToolApprovalRequest,
+    progress?: ProgressCallback
   ): Promise<Conversation> {
     const selected = await this.withChatMutation(conversation, async () => {
       const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === request.approvalId);
@@ -4937,8 +5190,17 @@ export class ChatService {
         throw new Error("Codex approval request has already been answered.");
       }
       const decisionId = request.codexDecisionId?.trim();
-      const option = approval.request.options.find((item) => item.id === decisionId);
-      const response = decisionId ? resolver.responseByOptionId.get(decisionId) : undefined;
+      const cancelGuardian = decisionId === CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID &&
+        !request.approve &&
+        this.isEndedTurnGuardianApproval(approval);
+      const option: ChatCodexApprovalOption | undefined = cancelGuardian
+        ? { id: "cancel", label: "Cancel", outcome: "cancel" }
+        : approval.request.options.find((item) => item.id === decisionId);
+      const response = cancelGuardian
+        ? codexApprovalCancellationResult(approval.request.method)
+        : decisionId
+          ? resolver.responseByOptionId.get(decisionId)
+          : undefined;
       if (!option || response === undefined) {
         throw new Error("Select one of the decisions offered by this Codex approval request.");
       }
@@ -4955,37 +5217,281 @@ export class ChatService {
         clearTimeout(resolver.timer);
         resolver.timer = undefined;
       }
-      return { approval, option, response, resolver, status };
-    });
-    selected.resolver.resolve(selected.response);
-    try {
-      await selected.resolver.responseDelivered;
-    } catch (error) {
-      selected.resolver.cleanup();
-      const message = `Codex could not receive this decision: ${error instanceof Error ? error.message : String(error)}`;
-      await this.markCodexApprovalTerminal(conversation, selected.approval.id, message, "expired");
-      throw new Error(message);
-    }
-    selected.resolver.cleanup();
-    return this.withChatMutation(conversation, async () => {
-      const current = this.chatAppToolApprovals(conversation).find((item) => item.id === selected.approval.id);
-      if (!current || current.status !== "pending" || !this.isCodexApprovalRequest(current.request)) {
-        throw new Error("Codex approval request is no longer active.");
-      }
       const now = new Date().toISOString();
-      const completed = { ...current, status: selected.status, updatedAt: now };
+      const completed: ChatAppToolApproval = { ...approval, status, updatedAt: now };
       this.upsertAppToolApproval(conversation, completed);
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
       this.queueSnapshot(conversation);
-      void this.debugLogs.write("chat.codex-approval.responded", {
+      return { approval: completed, option, response, resolver, method: approval.request.method };
+    });
+    selected.resolver.resolve(selected.response);
+    void this.finishCodexApprovalDecision(
+      conversation.id,
+      selected.approval,
+      selected.option.outcome,
+      selected.resolver,
+      progress
+    ).catch((error) => {
+      void this.debugLogs.write("chat.codex-approval.completion.error", {
         conversationId: conversation.id,
         runId: selected.resolver.runId,
-        approvalId: current.id,
-        method: current.request.method,
-        outcome: selected.option.outcome
+        approvalId: selected.approval.id,
+        message: error instanceof Error ? error.message : String(error)
       });
-      return conversation;
+    });
+    void this.debugLogs.write("chat.codex-approval.responded", {
+      conversationId: conversation.id,
+      runId: selected.resolver.runId,
+      approvalId: selected.approval.id,
+      method: selected.method,
+      outcome: selected.option.outcome
+    });
+    return conversation;
+  }
+
+  private async finishCodexApprovalDecision(
+    conversationId: string,
+    approval: ChatAppToolApproval,
+    outcome: ChatCodexApprovalOption["outcome"],
+    resolver: CodexApprovalResolver,
+    progress?: ProgressCallback
+  ): Promise<void> {
+    try {
+      await resolver.responseDelivered;
+    } catch (error) {
+      resolver.cleanup();
+      const message = `Codex could not receive this decision: ${error instanceof Error ? error.message : String(error)}`;
+      if (this.isEndedTurnGuardianApproval(approval)) {
+        await this.appendCodexContinuationStartFailure(conversationId, approval, message);
+      } else {
+        this.emitProgress(resolver.runId, progress, "error", message);
+      }
+      void this.debugLogs.write("chat.codex-approval.delivery-failed", {
+        conversationId,
+        runId: resolver.runId,
+        approvalId: approval.id,
+        message
+      });
+      return;
+    }
+    resolver.cleanup();
+    if (!this.isEndedTurnGuardianApproval(approval) || (outcome !== "approve" && outcome !== "deny")) {
+      return;
+    }
+    try {
+      await this.autoResumeCodexGuardianDecision(conversationId, approval.id, progress);
+    } catch (error) {
+      const message = `Codex could not start the continuation: ${error instanceof Error ? error.message : String(error)}`;
+      await this.appendCodexContinuationStartFailure(conversationId, approval, message);
+      void this.debugLogs.write("chat.codex-approval.continuation-start-failed", {
+        conversationId,
+        runId: resolver.runId,
+        approvalId: approval.id,
+        message
+      });
+    }
+  }
+
+  private isEndedTurnGuardianApproval(approval: ChatAppToolApproval): boolean {
+    return this.isCodexApprovalRequest(approval.request) &&
+      isCodexGuardianDeniedApprovalMethod(approval.request.method);
+  }
+
+  private async autoResumeCodexGuardianDecision(
+    conversationId: string,
+    approvalId: string,
+    progress?: ProgressCallback
+  ): Promise<void> {
+    if (this.codexApprovalContinuations.has(approvalId)) {
+      return;
+    }
+    this.codexApprovalContinuations.add(approvalId);
+    let backgroundStarted = false;
+    let releaseReservation: (() => void) | undefined;
+    try {
+      const ingest = await this.withChatRunLock(conversationId, async () => {
+        const conversation = await this.requireChat(conversationId);
+        const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
+        if (
+          !approval ||
+          (approval.status !== "approved" && approval.status !== "denied") ||
+          !this.isEndedTurnGuardianApproval(approval) ||
+          !approval.resumeContext
+        ) {
+          return;
+        }
+        const participant = this.chatParticipants(conversation).find((item) => item.id === approval.requesterParticipantId);
+        const trigger = conversation.messages.find((message) => message.id === approval.resumeContext?.triggerMessageId);
+        if (!participant) {
+          throw new Error("The participant that requested this decision is no longer in the chat.");
+        }
+        if (!trigger) {
+          throw new Error("The original request for this decision is no longer available.");
+        }
+        const instruction = approval.status === "approved"
+          ? CHAT_CODEX_APPROVAL_CONTROL_APPROVE
+          : CHAT_CODEX_APPROVAL_CONTROL_DENY;
+        const controlMessage = this.message("user", instruction, undefined, {
+          threadId: trigger.metadata?.threadId ?? trigger.id,
+          parentMessageId: trigger.id,
+          chatThreadRootId: trigger.metadata?.chatThreadRootId,
+          sourceMessageId: trigger.id,
+          hiddenFromTimeline: true
+        });
+        const resumeRunId = randomUUID();
+        const turnReservation = this.reserveParticipantTurn(conversation.id, participant.id);
+        releaseReservation = turnReservation.release;
+        const pendingMessage = this.message(
+          "participant",
+          "",
+          { id: participant.id, kind: participant.kind, label: `@${participant.handle}`, model: participant.model },
+          {
+            threadId: controlMessage.metadata?.threadId ?? controlMessage.id,
+            parentMessageId: controlMessage.id,
+            chatThreadRootId: controlMessage.metadata?.chatThreadRootId,
+            sourceMessageId: controlMessage.id,
+            approvedContinuation: true,
+            runId: resumeRunId,
+            queuedBehind: turnReservation.queued ? { handle: participant.handle } : undefined
+          },
+          "pending"
+        );
+        this.setTargetRunPendingMessageId(resumeRunId, pendingMessage.id);
+        await this.beginChatRun(conversation, resumeRunId);
+        try {
+          await this.withChatMutation(conversation, async () => {
+            conversation.messages.push(controlMessage, pendingMessage);
+            this.recordLastMessageByParticipant(conversation, pendingMessage);
+            conversation.updatedAt = new Date().toISOString();
+            this.queueSnapshot(conversation);
+          });
+          await this.waitForQueuedSave(conversation.id);
+        } catch (error) {
+          await this.endChatRun(conversation, resumeRunId);
+          throw error;
+        }
+        return { conversation, approval, participant, controlMessage, pendingMessage, resumeRunId, turnReservation };
+      });
+      if (!ingest) {
+        return;
+      }
+      backgroundStarted = true;
+      releaseReservation = undefined;
+      void this.runCodexGuardianDecisionContinuation(
+        ingest.conversation,
+        ingest.participant,
+        ingest.controlMessage,
+        ingest.pendingMessage,
+        ingest.resumeRunId,
+        ingest.turnReservation,
+        approvalId,
+        progress
+      )
+        .catch((error) => {
+          void this.debugLogs.write("chat.codex-approval.continuation.background.error", {
+            conversationId,
+            runId: ingest.resumeRunId,
+            approvalId,
+            message: error instanceof Error ? error.message : String(error)
+          });
+        })
+        .finally(() => {
+          this.codexApprovalContinuations.delete(approvalId);
+        });
+    } finally {
+      if (!backgroundStarted) {
+        releaseReservation?.();
+        this.codexApprovalContinuations.delete(approvalId);
+      }
+    }
+  }
+
+  private async runCodexGuardianDecisionContinuation(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    controlMessage: ChatMessage,
+    pendingMessage: ChatMessage,
+    resumeRunId: string,
+    turnReservation: ParticipantTurnReservation,
+    approvalId: string,
+    progress?: ProgressCallback
+  ): Promise<void> {
+    try {
+      const messages = await this.runParticipantTurnSerialized(
+        conversation,
+        participant,
+        controlMessage,
+        resumeRunId,
+        undefined,
+        progress,
+        {
+          continuation: true,
+          warnings: [],
+          existingPendingMessage: pendingMessage,
+          turnReservation
+        }
+      );
+      await this.refreshStoredChatState(conversation);
+      const participantRequestsToRun = await this.appendParticipantTurnMessages(conversation, participant, messages);
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+      this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
+      await this.ensureHistoryFiles(conversation);
+      this.emitProgress(resumeRunId, progress, "done", "Codex approval continuation finished.");
+    } catch (error) {
+      await this.finalizeFailedPrecreatedPendingMessage(conversation, pendingMessage.id, participant, error);
+      await this.withChatMutation(conversation, async () => {
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+      this.emitChatRunFailure(resumeRunId, progress, error);
+      void this.debugLogs.write("chat.codex-approval.continuation.error", {
+        conversationId: conversation.id,
+        runId: resumeRunId,
+        approvalId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      await this.endChatRun(conversation, resumeRunId);
+    }
+  }
+
+  private async appendCodexContinuationStartFailure(
+    conversationId: string,
+    approvalSnapshot: ChatAppToolApproval,
+    message: string
+  ): Promise<void> {
+    await this.withChatRunLock(conversationId, async () => {
+      const conversation = await this.requireChat(conversationId);
+      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalSnapshot.id) ?? approvalSnapshot;
+      const participant = this.chatParticipants(conversation).find((item) => item.id === approval.requesterParticipantId);
+      const trigger = conversation.messages.find((item) => item.id === approval.resumeContext?.triggerMessageId);
+      const content = `@${approval.requesterHandle} could not continue after this ${approval.status === "approved" ? "approval" : "denial"}: ${sanitizeWarningText(message)}`;
+      const failure = participant
+        ? this.message(
+            "participant",
+            content,
+            { id: participant.id, kind: participant.kind, label: `@${participant.handle}`, model: participant.model },
+            {
+              threadId: trigger?.metadata?.threadId ?? trigger?.id ?? "system",
+              parentMessageId: trigger?.id,
+              chatThreadRootId: trigger?.metadata?.chatThreadRootId,
+              sourceMessageId: trigger?.id,
+              runId: randomUUID()
+            },
+            "error"
+          )
+        : this.message("system", content, undefined, { threadId: trigger?.metadata?.threadId ?? "system" });
+      await this.withChatMutation(conversation, async () => {
+        conversation.messages.push(failure);
+        if (participant) {
+          this.recordLastMessageByParticipant(conversation, failure);
+        }
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+      });
     });
   }
 
@@ -5014,7 +5520,7 @@ export class ChatService {
   }
 
   private codexApprovalSummary(request: ChatCodexApprovalRequest): string {
-    if (request.method === "item/autoApprovalReview/denied") {
+    if (isCodexGuardianDeniedApprovalMethod(request.method)) {
       return request.command
         ? `Codex Auto Review denied: ${request.command}`
         : request.networkTarget
@@ -5135,6 +5641,121 @@ export class ChatService {
     };
   }
 
+  async hasAcceptedMobileEvent(conversationId: string, eventId: string): Promise<boolean> {
+    const mobileEventId = this.normalizedMobileEventId(eventId);
+    if (!mobileEventId) {
+      return false;
+    }
+    const conversation = await this.storage.getConversation(conversationId);
+    return Boolean(conversation && this.hasMobileEventMessage(conversation, mobileEventId));
+  }
+
+  async hasMobileMailboxResultForMobileEvent(conversationId: string, eventId: string): Promise<boolean> {
+    const mobileEventId = this.normalizedMobileEventId(eventId);
+    if (!mobileEventId) {
+      return false;
+    }
+    const conversation = await this.storage.getConversation(conversationId);
+    return Boolean(conversation && this.hasMobileMailboxResultMessage(conversation, mobileEventId));
+  }
+
+  async acceptMobileMailboxOutboxEvent(event: ChatEventEnvelope): Promise<boolean> {
+    if (event.kind !== "message.created") {
+      return false;
+    }
+    const content = this.mobileMailboxOutboxPayload(event.payload);
+    const mobileEventId = this.normalizedMobileEventId(event.eventId);
+    if (!content || !mobileEventId) {
+      return false;
+    }
+    const append = await this.storage.appendChatEvent(event);
+    if (append.status === "conflict") {
+      await this.debugLogs.write("mobile.mailbox.outbox-event-conflict", {
+        conversationId: event.conversationId,
+        eventId: event.eventId,
+        conflictReason: append.conflictReason
+      });
+      return false;
+    }
+    const conversation = await this.storage.getConversation(event.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return false;
+    }
+    return this.withChatMutation(conversation, async () => {
+      if (this.hasMobileEventMessage(conversation, mobileEventId)) {
+        return false;
+      }
+      const createdAt = typeof event.createdAt === "string" && event.createdAt.trim()
+        ? event.createdAt
+        : new Date().toISOString();
+      const messageId = `mobile-${mobileEventId}`;
+      const userMessage: ChatMessage = {
+        id: messageId,
+        role: "user",
+        content,
+        createdAt,
+        status: "done",
+        metadata: {
+          appMessageSource: "mobile-relay",
+          mobileEventId,
+          threadId: messageId
+        }
+      };
+      const messageTime = this.lastMessageTimestamp(createdAt);
+      const insertIndex = messageTime === undefined
+        ? -1
+        : conversation.messages.findIndex((message) => {
+          const existingTime = this.lastMessageTimestamp(message.createdAt);
+          return existingTime !== undefined && existingTime > messageTime;
+        });
+      if (insertIndex >= 0) {
+        conversation.messages.splice(insertIndex, 0, userMessage);
+      } else {
+        conversation.messages.push(userMessage);
+      }
+      conversation.updatedAt = this.maxIsoTimestamp(conversation.updatedAt, createdAt, event.createdAt);
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+      return true;
+    });
+  }
+
+  async acceptMobileMailboxMessageEvent(event: ChatEventEnvelope): Promise<boolean> {
+    if (event.kind !== "message.created") {
+      return false;
+    }
+    const message = this.mobileMailboxMessagePayload(event.payload);
+    if (!message) {
+      return false;
+    }
+    const append = await this.storage.appendChatEvent(event);
+    if (append.status === "conflict") {
+      await this.debugLogs.write("mobile.mailbox.message-event-conflict", {
+        conversationId: event.conversationId,
+        eventId: event.eventId,
+        conflictReason: append.conflictReason
+      });
+      return false;
+    }
+    const conversation = await this.storage.getConversation(event.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return false;
+    }
+    return this.withChatMutation(conversation, async () => {
+      if (conversation.messages.some((item) => item.id === message.id)) {
+        return false;
+      }
+      conversation.messages.push(JSON.parse(JSON.stringify(message)) as ChatMessage);
+      if (message.role === "participant") {
+        this.recordLastMessageByParticipant(conversation, message);
+      }
+      conversation.updatedAt = this.maxIsoTimestamp(conversation.updatedAt, message.createdAt, event.createdAt);
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
+      return true;
+    });
+  }
+
   async sendMessage(request: SendChatMessageRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
     const runId = request.runId ?? randomUUID();
     const compactCommand = this.compactCommand(request.content);
@@ -5158,6 +5779,16 @@ export class ChatService {
     const warnings: string[] = [];
     const ingest = await this.withChatRunLock(request.conversationId, async () => {
       const conversation = await this.requireChat(request.conversationId);
+      const mobileEventId = this.normalizedMobileEventId(request.mobileEventId);
+      if (mobileEventId && this.hasMobileEventMessage(conversation, mobileEventId)) {
+        return {
+          conversation,
+          duplicateMobileEvent: true as const,
+          dispatch: { targets: [], unknownHandles: [] },
+          userMessage: undefined,
+          autoTitleTargetRunIds: undefined
+        };
+      }
       let content = request.content.trim();
       const requestedSkillMentions = this.chatSkillMentionsFromRaw(request.skillMentions);
       const preparedImages = await this.prepareImageAttachments(conversation.id, request.imageAttachments);
@@ -5208,6 +5839,8 @@ export class ChatService {
         threadId,
         parentMessageId: request.parentMessageId,
         chatThreadRootId,
+        ...(this.isMobileOriginRun(runId) ? { appMessageSource: "mobile-relay" } : {}),
+        ...(mobileEventId ? { mobileEventId } : {}),
         ...(skillValidation.skillMentions.length > 0 ? { skillMentions: skillValidation.skillMentions } : {}),
         ...(repoFileMentions.length > 0 ? { repoFileMentions } : {}),
         ...(preparedImages.attachments.length > 0 ? { imageAttachments: preparedImages.attachments } : {})
@@ -5268,6 +5901,10 @@ export class ChatService {
       }
       return { conversation, dispatch, userMessage, autoTitleTargetRunIds };
     });
+
+    if (ingest.duplicateMobileEvent) {
+      return { conversation: ingest.conversation, warnings };
+    }
 
     if (ingest.dispatch.targets.length === 0) {
       this.scheduleAutoWatchEvaluation(ingest.conversation.id, "user-message");
@@ -6020,6 +6657,7 @@ export class ChatService {
       participantRequestDepth?: number;
       participantRequestBatchId?: string;
       chainRootId?: string;
+      turnSegmentId: string;
       queuedBehindHandle?: string;
       existingPendingMessage?: ChatMessage;
     }
@@ -6109,7 +6747,13 @@ export class ChatService {
         options.existingPendingMessage,
         cliParticipant,
         triggerMessage,
-        Boolean(options.continuation)
+        Boolean(options.continuation),
+        {
+          turnSegmentId: options.turnSegmentId,
+          participantRequestDepth: options.participantRequestDepth ?? 0,
+          participantRequestBatchId: options.participantRequestBatchId,
+          chainRootId: options.chainRootId
+        }
       );
     } else {
       pendingMessage = this.message(
@@ -6124,6 +6768,10 @@ export class ChatService {
           requesterParticipantId: options.continuation ? triggerMessage.participantId : undefined,
           approvedContinuation: options.continuation || undefined,
           runId,
+          turnSegmentId: options.turnSegmentId,
+          participantRequestDepth: options.participantRequestDepth ?? 0,
+          participantRequestBatchId: options.participantRequestBatchId,
+          participantRequestChainRootId: options.chainRootId,
           queuedBehind: options.queuedBehindHandle ? { handle: options.queuedBehindHandle } : undefined
         },
         "pending"
@@ -6141,14 +6789,15 @@ export class ChatService {
       runId,
       progress,
       participant,
-      pendingMessage.id
+      pendingMessage.id,
+      mobileEventIdFromChatTrigger(triggerMessage)
     );
     const unregisterRunProgressCallback = this.registerRunProgressCallback(runId, progress);
     // `permissions.request` is force-added to every run's grant (independent of the
-    // role's configured capabilities). The default-mode tool-permission bridge depends
+    // role's configured capabilities). The Default/Auto tool-permission bridge depends
     // on this: `requestToolPermissionFromTool` and the appMcp `app_tool_permission`
     // handler both gate on `permissions.request`, so if this force-add is ever removed
-    // or scoped back to role config, default-mode escalation silently denies every
+    // or scoped back to role config, native escalation silently denies every
     // un-pre-approved tool call. Keep it always-on (or give the bridge its own
     // capability) if you change this.
     const appToolCapabilities = this.appToolCapabilitiesForRun(session, permissions);
@@ -6170,6 +6819,8 @@ export class ChatService {
       snapshotMaxSequence: Math.max(0, promptConversation.messages.length - 1),
       continuation: Boolean(options.continuation),
       runId,
+      turnSegmentId: options.turnSegmentId,
+      agentMode,
       runPermissions: effectiveChatAgentPermissionsForProvider(participant.kind, agentMode, permissions),
       participantRequestDepth: options.participantRequestDepth ?? 0,
       participantRequestBatchId: options.participantRequestBatchId,
@@ -6205,6 +6856,7 @@ export class ChatService {
     };
     let remoteDetachedStarted = false;
     let awsRemoteRunRefHeld = false;
+    let executionLease: ChatExecutionLeaseMetadata | undefined;
     try {
       progressSink.beginAttempt();
       const participantRunsRemotely = this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution) === "remote";
@@ -6222,6 +6874,11 @@ export class ChatService {
       const remoteRunTarget = await this.remoteRunTargetForParticipant(participant, runId);
       if (remoteRunTarget) {
         if (!remoteRunTarget.ok) {
+          if (this.isMobileRelayTrigger(triggerMessage, runId) && this.shouldWaitForRunnerOnMobile(remoteRunTarget)) {
+            this.markMobileRunWaitingForRunner(pendingMessage, participant, runId, progress, remoteRunTarget.message);
+            this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, remoteRunTarget.message);
+            return [pendingMessage];
+          }
           pendingMessage.status = "error";
           pendingMessage.content = remoteRunTarget.message;
           this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, remoteRunTarget.message);
@@ -6238,6 +6895,16 @@ export class ChatService {
         {
           awsRemoteRunRefHeld = remoteRunTarget.settings.mode === "aws";
           const now = new Date().toISOString();
+          executionLease = this.acquireParticipantExecutorLease(
+            conversation,
+            participant,
+            session,
+            this.remoteExecutorHolderId(remoteRunTarget.settings.mode, remoteRunTarget.workerSettings)
+          );
+          pendingMessage.metadata = {
+            ...pendingMessage.metadata,
+            executionLease
+          };
           // Mirror-sync mode: no pre-provisioned remote cwd, and the run has a
           // readable local repo — the project dir is rsynced one-way to a
           // per-project mirror on the worker before launch. Results come back
@@ -6258,11 +6925,16 @@ export class ChatService {
             startedAt: now,
             updatedAt: now,
             sync: remoteSyncLocalPath ? { localPath: remoteSyncLocalPath } : undefined,
-            promptContextPointerAdvance: preparedPromptContext.pointerAdvance
+            promptContextPointerAdvance: preparedPromptContext.pointerAdvance,
+            executionLease
           };
           await this.recordRemoteRunHandle(conversation, handle, pendingMessage.id);
           let detachedState: RemoteDetachedRunState | undefined;
           let latestRemoteRunStatus: ChatRemoteRunStatus | undefined;
+          // Built once, before the per-worker request factory: it now reads
+          // attachment bytes, and a retry against a second worker must not
+          // re-read them.
+          const remoteContextSnapshot = await this.remoteRunContextSnapshot(promptConversation, participant, triggerMessage);
           const detachedRequest = (worker: RemoteRunWorkerTarget): RemoteRunDetachedStartRequest => ({
             conversationId: conversation.id,
             runId,
@@ -6297,7 +6969,7 @@ export class ChatService {
             sourceMessageId: triggerMessage.id,
             threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
             chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
-            contextSnapshot: this.remoteRunContextSnapshot(promptConversation, participant, triggerMessage),
+            contextSnapshot: remoteContextSnapshot,
             signal,
             onPhase: (status) => {
               latestRemoteRunStatus = status;
@@ -6393,6 +7065,11 @@ export class ChatService {
           return [pendingMessage];
         }
       }
+      executionLease = this.acquireParticipantExecutorLease(conversation, participant, session, "desktop");
+      pendingMessage.metadata = {
+        ...pendingMessage.metadata,
+        executionLease
+      };
       let result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
         persistSession: true,
         sessionId: session.sessionId,
@@ -6496,7 +7173,7 @@ export class ChatService {
         void this.cloudRunAws?.noteRunEnded(runId);
       }
       unregisterRunProgressCallback();
-      if (!remoteDetachedStarted && pendingMessage.status === "pending") {
+      if (!remoteDetachedStarted && pendingMessage.status === "pending" && !this.isWaitingForRunnerMessage(pendingMessage)) {
         if (signal?.aborted) {
           this.markParticipantMessageStoppedByUser(pendingMessage, participant);
         } else {
@@ -6521,6 +7198,7 @@ export class ChatService {
         // Remote replay owns finalization. Keep the pending bubble active until
         // provider output/result records arrive through the durable spool.
       } else if (signal?.aborted && !options.existingPendingMessage) {
+        this.releaseParticipantExecutorLease(conversation, executionLease);
         this.markPendingAppToolApprovalsForRunTerminal(
           conversation,
           runId,
@@ -6528,7 +7206,10 @@ export class ChatService {
         );
         await this.finalizePendingParticipantMessage(conversation, participant, pendingMessage);
       } else if (!signal?.aborted && !options.existingPendingMessage) {
+        this.releaseParticipantExecutorLease(conversation, executionLease);
         await this.finalizePendingParticipantMessage(conversation, participant, pendingMessage);
+      } else if (!remoteDetachedStarted) {
+        this.releaseParticipantExecutorLease(conversation, executionLease);
       }
       progressSink.finish();
     }
@@ -6539,7 +7220,13 @@ export class ChatService {
     existingPendingMessage: ChatMessage,
     cliParticipant: ParticipantConfig,
     triggerMessage: ChatMessage,
-    continuation: boolean
+    continuation: boolean,
+    inferenceContext: {
+      turnSegmentId: string;
+      participantRequestDepth: number;
+      participantRequestBatchId?: string;
+      chainRootId?: string;
+    }
   ): Promise<ChatMessage> {
     let pendingMessage = existingPendingMessage;
     await this.withChatMutation(conversation, async () => {
@@ -6551,7 +7238,15 @@ export class ChatService {
       const metadata: ChatMessageMetadata = {
         ...pendingMessage.metadata,
         requesterParticipantId: continuation ? triggerMessage.participantId : pendingMessage.metadata?.requesterParticipantId,
-        approvedContinuation: continuation || pendingMessage.metadata?.approvedContinuation
+        approvedContinuation: continuation || pendingMessage.metadata?.approvedContinuation,
+        turnSegmentId: inferenceContext.turnSegmentId,
+        participantRequestDepth: inferenceContext.participantRequestDepth,
+        ...(inferenceContext.participantRequestBatchId !== undefined
+          ? { participantRequestBatchId: inferenceContext.participantRequestBatchId }
+          : {}),
+        ...(inferenceContext.chainRootId !== undefined
+          ? { participantRequestChainRootId: inferenceContext.chainRootId }
+          : {})
       };
       delete metadata.queuedBehind;
       pendingMessage.metadata = Object.keys(metadata).length > 0 ? metadata : undefined;
@@ -7411,6 +8106,7 @@ export class ChatService {
     return {
       participantId: participant.id,
       sessionId: "",
+      executionSessionId: randomUUID(),
       roleConfigId: role.id,
       roleConfigVersion: role.version,
       roleAppToolCapabilities: normalizeChatAppToolCapabilities(role.appToolCapabilities),
@@ -7439,6 +8135,7 @@ export class ChatService {
     const participantKind = existing.participantKind ?? participant.kind;
     return {
       ...existing,
+      executionSessionId: existing.executionSessionId?.trim() || randomUUID(),
       roleConfigVersion: role?.version ?? existing.roleConfigVersion,
       roleAppToolCapabilities: role
         ? normalizeChatAppToolCapabilities(role.appToolCapabilities)
@@ -7741,6 +8438,136 @@ export class ChatService {
     return this.normalizeRemoteExecutionMode(value) === "remote" ? "remote" : "local";
   }
 
+  private isMobileOriginRun(runId: string): boolean {
+    return runId.startsWith("mobile-");
+  }
+
+  private normalizedMobileEventId(value: string | undefined): string | undefined {
+    const eventId = value?.trim();
+    return eventId || undefined;
+  }
+
+  private mobileMailboxMessagePayload(payload: unknown): ChatMessage | undefined {
+    const message = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as { message?: unknown }).message
+      : undefined;
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      return undefined;
+    }
+    const candidate = message as Partial<ChatMessage>;
+    if (
+      typeof candidate.id !== "string" ||
+      typeof candidate.role !== "string" ||
+      typeof candidate.content !== "string" ||
+      typeof candidate.createdAt !== "string"
+    ) {
+      return undefined;
+    }
+    if (!["user", "participant", "system"].includes(candidate.role)) {
+      return undefined;
+    }
+    return JSON.parse(JSON.stringify(candidate)) as ChatMessage;
+  }
+
+  private mobileMailboxOutboxPayload(payload: unknown): string | undefined {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return undefined;
+    }
+    const content = (payload as { content?: unknown }).content;
+    return typeof content === "string" && content.trim() ? content.trim() : undefined;
+  }
+
+  private hasMobileMailboxResultMessage(conversation: Conversation, mobileEventId: string): boolean {
+    return conversation.messages.some((message) => {
+      if (message.role !== "participant" || (message.status !== "done" && message.status !== "error")) {
+        return false;
+      }
+      const metadata = message.metadata;
+      if (!metadata) {
+        return false;
+      }
+      if (metadata.mobileEventId === mobileEventId) {
+        return true;
+      }
+      return metadata.sourceMessageId === mobileEventId &&
+        metadata.runId === `mobile-${mobileEventId}` &&
+        (
+          metadata.appMessageSource === "remote-run-provider-output" ||
+          metadata.appMessageSource === "remote-run-provider"
+        );
+    });
+  }
+
+  private maxIsoTimestamp(...values: Array<string | undefined>): string {
+    let selected = "";
+    let selectedTime = -Infinity;
+    for (const value of values) {
+      if (!value) {
+        continue;
+      }
+      const time = Date.parse(value);
+      if (Number.isFinite(time) && time > selectedTime) {
+        selected = value;
+        selectedTime = time;
+      }
+    }
+    return selected || new Date().toISOString();
+  }
+
+  private hasMobileEventMessage(conversation: Conversation, mobileEventId: string): boolean {
+    return conversation.messages.some((message) =>
+      message.role === "user" &&
+      message.metadata?.appMessageSource === "mobile-relay" &&
+      message.metadata?.mobileEventId === mobileEventId
+    );
+  }
+
+  private isMobileRelayTrigger(triggerMessage: ChatMessage, runId: string): boolean {
+    return this.isMobileOriginRun(runId) || triggerMessage.metadata?.appMessageSource === "mobile-relay";
+  }
+
+  private shouldWaitForRunnerOnMobile(remoteRunTarget: RemoteRunParticipantTarget): boolean {
+    if (remoteRunTarget.ok) {
+      return false;
+    }
+    return /Cloud Runs is disabled|Cloud Runs is not available|AWS worker is not available|AWS worker could not be started|Cloud Runs worker host is not configured/i
+      .test(remoteRunTarget.message);
+  }
+
+  private markMobileRunWaitingForRunner(
+    pendingMessage: ChatMessage,
+    participant: ChatParticipant,
+    runId: string,
+    progress: ProgressCallback | undefined,
+    reason: string
+  ): void {
+    const status = this.remoteRunStatus("waiting-for-runner", "Waiting for runner", reason);
+    pendingMessage.status = "pending";
+    pendingMessage.content = `@${participant.handle} is waiting for a cloud runner.`;
+    pendingMessage.metadata = {
+      ...pendingMessage.metadata,
+      runId,
+      appMessageSource: pendingMessage.metadata?.appMessageSource ?? "remote-run-provider-output",
+      remoteRunStatus: status
+    };
+    this.emitProgress(runId, progress, "debate", status.label, {
+      participantLabel: `@${participant.handle}`,
+      agentProgress: {
+        participantId: participant.id,
+        participantLabel: `@${participant.handle}`,
+        state: "running",
+        messageId: pendingMessage.id,
+        activity: status.label,
+        partialContent: pendingMessage.content,
+        remoteRunStatus: status
+      }
+    });
+  }
+
+  private isWaitingForRunnerMessage(message: ChatMessage): boolean {
+    return message.metadata?.remoteRunStatus?.phase === "waiting-for-runner";
+  }
+
   private async remoteRunTargetForParticipant(
     participant: ChatParticipant,
     runId: string
@@ -7756,10 +8583,10 @@ export class ChatService {
         message: `@${participant.handle} requested remote execution, but Cloud Runs is disabled.`
       };
     }
-    if (participant.kind !== "codex-cli") {
+    if (participant.kind !== "codex-cli" && participant.kind !== "claude-code") {
       return {
         ok: false,
-        message: `@${participant.handle} requested remote execution, but Cloud Runs currently supports Codex members only.`
+        message: `@${participant.handle} requested remote execution, but Cloud Runs currently supports Codex and Claude members only.`
       };
     }
     if (settings.mode === "aws" && !this.remoteRuns) {
@@ -7802,6 +8629,35 @@ export class ChatService {
         message: `@${participant.handle} requested remote execution, but the Cloud Runs worker host is not configured.`
       };
     }
+    if (participant.kind === "claude-code" && this.cloudRunDoctor) {
+      try {
+        const report = await this.cloudRunDoctor.diagnose(workerSettings, {
+          requirePersistentStorage: settings.mode === "aws",
+          requiredProviderKind: "claude-code"
+        });
+        if (!report.ok) {
+          if (settings.mode === "aws") {
+            await this.cloudRunAws?.noteRunEnded(runId);
+          }
+          const details = report.checks
+            .filter((check) => check.status === "fail" && check.detail)
+            .map((check) => `${check.label}: ${check.detail}`)
+            .join(" ");
+          return {
+            ok: false,
+            message: `@${participant.handle} requested remote execution, but the Cloud Runs worker is not ready for Claude Code: ${details || report.message}`
+          };
+        }
+      } catch (error) {
+        if (settings.mode === "aws") {
+          await this.cloudRunAws?.noteRunEnded(runId);
+        }
+        return {
+          ok: false,
+          message: `@${participant.handle} requested remote execution, but Claude Code worker preflight failed: ${error instanceof Error ? error.message : String(error)}`
+        };
+      }
+    }
     if (!this.remoteRuns) {
       return {
         ok: false,
@@ -7823,11 +8679,101 @@ export class ChatService {
     return /drain|stale-session|connection|connect timed out|ssh|did not acknowledge launch/i.test(message);
   }
 
-  private remoteRunContextSnapshot(
+  /** A remote member reads the chat from this snapshot, so the window has to be
+   *  worth reading and small enough to ship. Bounded twice: by count, and by
+   *  serialized bytes, dropping oldest first. A run that carries no history at
+   *  all is why a cloud member could not act on a bug report — the report was a
+   *  message it could not see. */
+  private static readonly REMOTE_SNAPSHOT_MESSAGE_LIMIT = 200;
+  private static readonly REMOTE_SNAPSHOT_MESSAGE_BYTES = 1_500_000;
+
+  private remoteRunSnapshotMessages(
+    conversation: Conversation,
+    triggerMessage: ChatMessage
+  ): { messages: Record<string, unknown>[]; maxSequence: number; totalMessages: number } {
+    const sequenced = conversation.messages.map((message, sequence) => ({ message, sequence }));
+    const triggerIndex = sequenced.findIndex((item) => item.message.id === triggerMessage.id);
+    // The turn cannot see messages newer than the one that started it, exactly
+    // as a local run cannot.
+    const maxSequence = triggerIndex >= 0 ? triggerIndex : sequenced.length - 1;
+    const visible = sequenced.filter((item) => item.sequence <= maxSequence);
+    const windowed = visible.slice(Math.max(0, visible.length - ChatService.REMOTE_SNAPSHOT_MESSAGE_LIMIT));
+    const projected = windowed.map(({ message, sequence }) => this.chatMessageForTool(message, sequence));
+    while (projected.length > 1 && JSON.stringify(projected).length > ChatService.REMOTE_SNAPSHOT_MESSAGE_BYTES) {
+      projected.shift();
+    }
+    return {
+      messages: projected,
+      maxSequence,
+      totalMessages: Math.min(conversation.messages.length, maxSequence + 1)
+    };
+  }
+
+  /** Images ship as bytes or not at all: a member on a box has no filesystem in
+   *  common with this one. Newest first, because the attachment that matters is
+   *  almost always the one on the message that started the run — User's
+   *  screenshot was the entire bug report. Bounded hard; a run request that
+   *  carries a gallery is a run request that fails to launch. */
+  private static readonly REMOTE_SNAPSHOT_ATTACHMENT_LIMIT = 6;
+  private static readonly REMOTE_SNAPSHOT_ATTACHMENT_BYTES = 8_000_000;
+
+  private async remoteRunSnapshotAttachments(
+    conversation: Conversation,
+    maxSequence: number
+  ): Promise<{ attachments: Record<string, unknown>[]; omittedCount: number }> {
+    const records: ChatAttachmentRecord[] = [];
+    conversation.messages.forEach((message, sequence) => {
+      if (sequence > maxSequence) {
+        return;
+      }
+      for (const attachment of this.imageAttachments(message)) {
+        records.push({ message, sequence, attachment });
+      }
+    });
+    const newestFirst = records.slice().reverse();
+    const attachments: Record<string, unknown>[] = [];
+    let bytes = 0;
+    let omittedCount = 0;
+    for (const record of newestFirst) {
+      if (attachments.length >= ChatService.REMOTE_SNAPSHOT_ATTACHMENT_LIMIT) {
+        omittedCount += 1;
+        continue;
+      }
+      let dataBase64: string;
+      try {
+        dataBase64 = await this.readAttachmentBase64(conversation.id, record.attachment);
+      } catch {
+        // An unreadable attachment is not a reason to fail the run; the member
+        // simply will not see that one, and the count says so.
+        omittedCount += 1;
+        continue;
+      }
+      if (bytes + dataBase64.length > ChatService.REMOTE_SNAPSHOT_ATTACHMENT_BYTES) {
+        omittedCount += 1;
+        continue;
+      }
+      bytes += dataBase64.length;
+      attachments.push({
+        messageId: record.message.id,
+        sequence: record.sequence,
+        author: this.messageAuthor(record.message),
+        threadId: record.message.metadata?.threadId,
+        attachment: this.chatImageAttachmentForTool(record.attachment),
+        dataBase64
+      });
+    }
+    // Oldest first on the wire, matching how the desktop lists them.
+    attachments.reverse();
+    return { attachments, omittedCount };
+  }
+
+  private async remoteRunContextSnapshot(
     conversation: Conversation,
     participant: ChatParticipant,
     triggerMessage: ChatMessage
-  ): Record<string, unknown> {
+  ): Promise<Record<string, unknown>> {
+    const window = this.remoteRunSnapshotMessages(conversation, triggerMessage);
+    const images = await this.remoteRunSnapshotAttachments(conversation, window.maxSequence);
     return {
       conversationId: conversation.id,
       title: conversation.title,
@@ -7835,6 +8781,19 @@ export class ChatService {
       participantId: participant.id,
       participantHandle: participant.handle,
       triggerMessageId: triggerMessage.id,
+      messages: window.messages,
+      attachments: images.attachments,
+      attachmentWindow: {
+        omittedCount: images.omittedCount,
+        limit: ChatService.REMOTE_SNAPSHOT_ATTACHMENT_LIMIT
+      },
+      messageWindow: {
+        maxSequence: window.maxSequence,
+        totalMessages: window.totalMessages,
+        oldestIncludedSequence: window.messages.length > 0
+          ? (window.messages[0] as { sequence?: number }).sequence
+          : undefined
+      },
       participants: this.chatParticipants(conversation).map((item) => ({
         id: item.id,
         handle: item.handle,
@@ -7879,11 +8838,199 @@ export class ChatService {
   }
 
   private upsertSession(conversation: Conversation, session: ChatParticipantSession): void {
+    if (!session.executionSessionId) {
+      session.executionSessionId = randomUUID();
+    }
     const sessions = this.chatSessions(conversation);
     const next = sessions.some((item) => item.participantId === session.participantId)
       ? sessions.map((item) => (item.participantId === session.participantId ? session : item))
       : [...sessions, session];
     conversation.metadata = { ...conversation.metadata, participantSessions: next };
+  }
+
+  private participantExecutorLeaseKey(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    session: ChatParticipantSession
+  ): ChatExecutorLeaseKey {
+    if (!session.executionSessionId) {
+      session.executionSessionId = randomUUID();
+    }
+    return {
+      conversationId: conversation.id,
+      participantId: participant.id,
+      participantSessionId: session.executionSessionId
+    };
+  }
+
+  private executorLeaseStorageKey(key: ChatExecutorLeaseKey): string {
+    return `${key.conversationId}:${key.participantId}:${key.participantSessionId}`;
+  }
+
+  private executorLeasesByKey(conversation: Conversation): Record<string, ChatExecutionLeaseMetadata> {
+    const raw = conversation.metadata.executorLeasesByKey;
+    if (!this.isMetadataRecord(raw)) {
+      return {};
+    }
+    const leases: Record<string, ChatExecutionLeaseMetadata> = {};
+    for (const [key, value] of Object.entries(raw)) {
+      const lease = this.normalizeExecutionLeaseMetadata(value);
+      if (lease) {
+        leases[key] = lease;
+      }
+    }
+    return leases;
+  }
+
+  private acquireParticipantExecutorLease(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    session: ChatParticipantSession,
+    holderId: string
+  ): ChatExecutionLeaseMetadata {
+    const key = this.participantExecutorLeaseKey(conversation, participant, session);
+    const storageKey = this.executorLeaseStorageKey(key);
+    const leases = this.executorLeasesByKey(conversation);
+    const previous = leases[storageKey];
+    const now = new Date().toISOString();
+    const previousOwnsSession = previous?.status === "active" || previous?.status === "reclaimed";
+    const previousExpiresAt = previous ? Date.parse(previous.expiresAt) : NaN;
+    const previousExpired = previousOwnsSession && Number.isFinite(previousExpiresAt) && Date.parse(now) > previousExpiresAt;
+    if (previousOwnsSession && !previousExpired) {
+      if (previous.holderId === holderId) {
+        const renewed: ChatExecutionLeaseMetadata = {
+          ...previous,
+          heartbeatAt: now,
+          expiresAt: new Date(Date.parse(now) + CHAT_EXECUTOR_LEASE_TTL_MS).toISOString()
+        };
+        conversation.metadata = {
+          ...conversation.metadata,
+          executorLeasesByKey: {
+            ...leases,
+            [storageKey]: renewed
+          }
+        };
+        return renewed;
+      }
+      throw new Error(`@${participant.handle} is waiting for current executor ${previous.holderId} until ${previous.expiresAt}.`);
+    }
+    const generation = previous ? previous.generation + 1 : 1;
+    const lease: ChatExecutionLeaseMetadata = {
+      ...key,
+      leaseId: randomUUID(),
+      holderId,
+      generation,
+      status: previousExpired ? "reclaimed" : "active",
+      acquiredAt: now,
+      heartbeatAt: now,
+      expiresAt: new Date(Date.parse(now) + CHAT_EXECUTOR_LEASE_TTL_MS).toISOString()
+    };
+    conversation.metadata = {
+      ...conversation.metadata,
+      executorLeasesByKey: {
+        ...leases,
+        [storageKey]: lease
+      }
+    };
+    return lease;
+  }
+
+  private remoteExecutorHolderId(mode: CloudRunWorkerMode, worker: CloudRunWorkerSettings): string {
+    return `remote:${mode}:${worker.host?.trim() || worker.hostKeyAlias?.trim() || "worker"}`;
+  }
+
+  private releaseParticipantExecutorLease(
+    conversation: Conversation,
+    lease: ChatExecutionLeaseMetadata | undefined
+  ): void {
+    if (!lease) {
+      return;
+    }
+    const storageKey = this.executorLeaseStorageKey(lease);
+    const leases = this.executorLeasesByKey(conversation);
+    const current = leases[storageKey];
+    if (!current || current.leaseId !== lease.leaseId || current.generation !== lease.generation) {
+      return;
+    }
+    const releasedAt = new Date().toISOString();
+    conversation.metadata = {
+      ...conversation.metadata,
+      executorLeasesByKey: {
+        ...leases,
+        [storageKey]: {
+          ...current,
+          status: "released",
+          releasedAt,
+          heartbeatAt: releasedAt,
+          expiresAt: releasedAt
+        }
+      }
+    };
+  }
+
+  private heartbeatParticipantExecutorLease(
+    conversation: Conversation,
+    lease: ChatExecutionLeaseMetadata | undefined,
+    now = new Date().toISOString()
+  ): ChatExecutionLeaseMetadata | undefined {
+    if (!lease) {
+      return undefined;
+    }
+    const storageKey = this.executorLeaseStorageKey(lease);
+    const leases = this.executorLeasesByKey(conversation);
+    const current = leases[storageKey];
+    if (
+      !current ||
+      current.leaseId !== lease.leaseId ||
+      current.generation !== lease.generation ||
+      (current.status !== "active" && current.status !== "reclaimed")
+    ) {
+      return undefined;
+    }
+    const renewed: ChatExecutionLeaseMetadata = {
+      ...current,
+      heartbeatAt: now,
+      expiresAt: new Date(Date.parse(now) + CHAT_EXECUTOR_LEASE_TTL_MS).toISOString()
+    };
+    conversation.metadata = {
+      ...conversation.metadata,
+      executorLeasesByKey: {
+        ...leases,
+        [storageKey]: renewed
+      }
+    };
+    return renewed;
+  }
+
+  private remoteRunExecutionLease(conversation: Conversation, runId: string): ChatExecutionLeaseMetadata | undefined {
+    return this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles)[runId]?.executionLease;
+  }
+
+  private executionLeaseForRun(conversation: Conversation, runId: string): ChatExecutionLeaseMetadata | undefined {
+    const remoteLease = this.remoteRunExecutionLease(conversation, runId);
+    if (remoteLease) {
+      return remoteLease;
+    }
+    for (const message of conversation.messages) {
+      if (message.metadata?.runId === runId) {
+        const lease = this.normalizeExecutionLeaseMetadata(message.metadata.executionLease);
+        if (lease) {
+          return lease;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  private executorOwnedEventIsCurrent(
+    conversation: Conversation,
+    metadata: ChatExecutionLeaseMetadata | undefined
+  ): boolean {
+    if (!metadata) {
+      return true;
+    }
+    const current = this.executorLeasesByKey(conversation)[this.executorLeaseStorageKey(metadata)];
+    return Boolean(current && current.leaseId === metadata.leaseId && current.generation === metadata.generation);
   }
 
   private updateParticipantContextUsage(
@@ -8262,6 +9409,15 @@ export class ChatService {
     if (contextUsage) {
       merged.agentContextUsageByParticipant = contextUsage;
     }
+    const warnings = sanitizeWarningList([
+      ...sanitizeWarningList(storedMetadata.warnings),
+      ...sanitizeWarningList(currentMetadata.warnings)
+    ]);
+    if (warnings.length > 0) {
+      merged.warnings = warnings;
+    } else {
+      delete merged.warnings;
+    }
     const removedMessageIds = this.mergeRemovedChatMessageIds(
       storedMetadata.removedChatMessageIds,
       currentMetadata.removedChatMessageIds
@@ -8381,6 +9537,7 @@ export class ChatService {
     const merged = { ...stored, ...current };
     for (const key of [
       "sessionId",
+      "executionSessionId",
       "remoteSession",
       "invalidatedRemoteSessionId",
       "invalidatedRemoteSessionAt"
@@ -10465,15 +11622,82 @@ export class ChatService {
       if (inferred.length === 0) {
         continue;
       }
-      const targetHandles = inferred.map((item) => item.targetHandle);
+      const suppression = this.inferredParticipantRequestSuppression(
+        conversation,
+        participant,
+        sourceMessage
+      );
+      const suppressed = inferred.filter((item) => suppression.targetHandles.has(item.targetHandle.toLowerCase()));
+      let candidates = inferred.filter((item) => !suppression.targetHandles.has(item.targetHandle.toLowerCase()));
+      if (suppressed.length > 0) {
+        const targetsByScope = new Map<InferredParticipantRequestSuppressionScope, string[]>();
+        for (const item of suppressed) {
+          const scope = suppression.scopeByTarget.get(item.targetHandle.toLowerCase());
+          if (!scope) {
+            continue;
+          }
+          targetsByScope.set(scope, [...(targetsByScope.get(scope) ?? []), item.targetHandle]);
+        }
+        for (const [decidingScope, targets] of targetsByScope) {
+          void this.debugLogs.write("chat.participant-request.inferred-skipped-existing", {
+            conversationId: conversation.id,
+            messageId: sourceMessage.id,
+            requesterParticipantId: participant.id,
+            requesterHandle: participant.handle,
+            targets,
+            decidingScope
+          });
+        }
+      }
+      if (candidates.length === 0) {
+        continue;
+      }
+
+      const targetHandles = candidates.map((item) => item.targetHandle);
       if (this.hasActiveParticipantRequestForTargets(conversation, participant, sourceMessage.id, targetHandles)) {
         void this.debugLogs.write("chat.participant-request.inferred-skipped-existing", {
           conversationId: conversation.id,
           messageId: sourceMessage.id,
           requesterParticipantId: participant.id,
           requesterHandle: participant.handle,
-          targets: targetHandles
+          targets: targetHandles,
+          decidingScope: "active-overlap"
         });
+        continue;
+      }
+
+      const segmentTargets = this.inferredParticipantRequestTargetsForSegment(
+        conversation,
+        participant,
+        sourceMessage.metadata?.turnSegmentId
+      );
+      let remainingNewTargets = Math.max(0, CHAT_PARTICIPANT_REQUEST_MAX_ITEMS - segmentTargets.size);
+      const cappedTargets: string[] = [];
+      candidates = candidates.filter((item) => {
+        const handle = item.targetHandle.toLowerCase();
+        if (segmentTargets.has(handle)) {
+          return true;
+        }
+        if (remainingNewTargets <= 0) {
+          cappedTargets.push(item.targetHandle);
+          return false;
+        }
+        segmentTargets.add(handle);
+        remainingNewTargets -= 1;
+        return true;
+      });
+      if (cappedTargets.length > 0) {
+        void this.debugLogs.write("chat.participant-request.inferred-turn-cap", {
+          conversationId: conversation.id,
+          messageId: sourceMessage.id,
+          requesterParticipantId: participant.id,
+          requesterHandle: participant.handle,
+          turnSegmentId: sourceMessage.metadata?.turnSegmentId,
+          cap: CHAT_PARTICIPANT_REQUEST_MAX_ITEMS,
+          targets: cappedTargets
+        });
+      }
+      if (candidates.length === 0) {
         continue;
       }
 
@@ -10485,7 +11709,7 @@ export class ChatService {
           conversation,
           participant,
           {
-            requests: inferred.map((item) => ({
+            requests: candidates.map((item) => ({
               target: item.targetHandle,
               prompt: this.inferredParticipantRequestPrompt(participant.handle, item.snippet),
               reason: `Inferred from @${participant.handle}'s chat reply.`
@@ -10505,11 +11729,16 @@ export class ChatService {
             triggerChatThreadRootId: sourceMessage.metadata?.chatThreadRootId,
             snapshotMaxSequence: Math.max(0, conversation.messages.length - 1),
             continuation: false,
-            participantRequestDepth: 0
+            participantRequestDepth: sourceMessage.metadata?.participantRequestDepth ?? 0,
+            chainRootId: sourceMessage.metadata?.participantRequestChainRootId
           },
           "inferred"
         );
       } catch (error) {
+        this.addConversationWarning(
+          conversation,
+          this.inferredParticipantRequestWarning(participant.handle, candidates.map((item) => item.targetHandle), error)
+        );
         void this.debugLogs.write("chat.participant-request.inferred-create-error", {
           conversationId: conversation.id,
           messageId: sourceMessage.id,
@@ -10563,6 +11792,171 @@ export class ChatService {
       });
     }
     return participantRequestsToRun;
+  }
+
+  private inferredParticipantRequestSuppression(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    sourceMessage: ChatMessage
+  ): {
+    targetHandles: Set<string>;
+    scopeByTarget: Map<string, InferredParticipantRequestSuppressionScope>;
+  } {
+    const sourceIsToolPosted = sourceMessage.metadata?.appMessageSource === APP_CHAT_SEND_MESSAGE_TOOL;
+    const turnSegmentId = sourceMessage.metadata?.turnSegmentId;
+    const runId = sourceMessage.metadata?.runId;
+    const participantRequestBatchId = sourceMessage.metadata?.participantRequestBatchId;
+    if ((sourceIsToolPosted && !turnSegmentId) || (!sourceIsToolPosted && !runId && !participantRequestBatchId)) {
+      return { targetHandles: new Set(), scopeByTarget: new Map() };
+    }
+
+    const messageById = new Map(conversation.messages.map((message) => [message.id, message]));
+    const resumedBatch = !sourceIsToolPosted && participantRequestBatchId
+      ? this.participantRequestBatches(conversation).find((batch) =>
+          batch.id === participantRequestBatchId &&
+          batch.source === "inferred" &&
+          batch.requesterParticipantId === requester.id &&
+          Boolean(batch.triggerMessageId)
+        )
+      : undefined;
+    const resumedBatchSource = resumedBatch?.triggerMessageId
+      ? messageById.get(resumedBatch.triggerMessageId)
+      : undefined;
+    const originatingToolSegmentId = resumedBatchSource?.metadata?.appMessageSource === APP_CHAT_SEND_MESSAGE_TOOL
+      ? resumedBatchSource.metadata.turnSegmentId
+      : undefined;
+    const targetHandles = originatingToolSegmentId
+      ? this.inferredParticipantRequestTargetsForSegment(
+          conversation,
+          requester,
+          originatingToolSegmentId,
+          { toolPostedOnly: true, messageById }
+        )
+      : new Set<string>();
+    const scopeByTarget = new Map<string, InferredParticipantRequestSuppressionScope>();
+    for (const targetHandle of targetHandles) {
+      scopeByTarget.set(targetHandle, "final-source-tool-origin-segment");
+    }
+    for (const batch of this.participantRequestBatches(conversation)) {
+      if (
+        batch.source !== "inferred" ||
+        batch.requesterParticipantId !== requester.id ||
+        !batch.triggerMessageId
+      ) {
+        continue;
+      }
+      const priorSource = messageById.get(batch.triggerMessageId);
+      if (priorSource?.metadata?.appMessageSource !== APP_CHAT_SEND_MESSAGE_TOOL) {
+        continue;
+      }
+      const matchesRun = !sourceIsToolPosted && Boolean(runId) && priorSource.metadata?.runId === runId;
+      const matchesScope = sourceIsToolPosted
+        ? priorSource.metadata?.turnSegmentId === turnSegmentId
+        : matchesRun;
+      if (!matchesScope) {
+        continue;
+      }
+      const decidingScope: InferredParticipantRequestSuppressionScope = sourceIsToolPosted
+        ? "tool-source-segment"
+        : "final-source-tool-origin-run";
+      for (const item of batch.items) {
+        const handle = item.targetHandle.toLowerCase();
+        targetHandles.add(handle);
+        if (!scopeByTarget.has(handle)) {
+          scopeByTarget.set(handle, decidingScope);
+        }
+      }
+    }
+    return { targetHandles, scopeByTarget };
+  }
+
+  private inferredParticipantRequestTargetsForSegment(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    turnSegmentId: string | undefined,
+    options: { toolPostedOnly?: boolean; messageById?: ReadonlyMap<string, ChatMessage> } = {}
+  ): Set<string> {
+    const targetHandles = new Set<string>();
+    if (!turnSegmentId) {
+      return targetHandles;
+    }
+    const messageById = options.messageById ?? new Map(conversation.messages.map((message) => [message.id, message]));
+    for (const batch of this.participantRequestBatches(conversation)) {
+      if (
+        batch.source !== "inferred" ||
+        batch.requesterParticipantId !== requester.id ||
+        !batch.triggerMessageId
+      ) {
+        continue;
+      }
+      const source = messageById.get(batch.triggerMessageId);
+      if (
+        source?.metadata?.turnSegmentId !== turnSegmentId ||
+        (options.toolPostedOnly && source.metadata?.appMessageSource !== APP_CHAT_SEND_MESSAGE_TOOL)
+      ) {
+        continue;
+      }
+      for (const item of batch.items) {
+        targetHandles.add(item.targetHandle.toLowerCase());
+      }
+    }
+    return targetHandles;
+  }
+
+  private inferredParticipantRequestWarning(
+    requesterHandle: string,
+    targetHandles: string[],
+    error: unknown
+  ): string {
+    const targetSummary = this.formatHandleList(targetHandles.map((handle) => `@${handle}`));
+    const subject = targetSummary
+      ? `Participant ${targetHandles.length === 1 ? "mention" : "mentions"} from @${requesterHandle} to ${targetSummary}`
+      : `Participant mentions from @${requesterHandle}`;
+    const verb = targetHandles.length === 1 ? "was" : "were";
+    const message = error instanceof Error ? error.message : String(error);
+    if (/max depth/i.test(message)) {
+      return `${subject} ${verb} not triggered because the participant-request depth limit was reached.`;
+    }
+    if (/chain limit/i.test(message)) {
+      return `${subject} ${verb} not triggered because the participant-request chain limit was reached.`;
+    }
+    if (/rate limit/i.test(message)) {
+      return `${subject} ${verb} not triggered because the participant-request rate limit was reached.`;
+    }
+    if (/disabled/i.test(message)) {
+      return `${subject} ${verb} not triggered because participant requests are disabled for @${requesterHandle}.`;
+    }
+    return `${subject} ${verb} not triggered because the inferred request could not be prepared.`;
+  }
+
+  /** W-G(e)/W-I: pairing-lifecycle warnings surface on the paired
+   *  conversation — the one place the user looks when the phone goes quiet.
+   *  Callers outside the service (the pairing lifecycle lives in main.ts)
+   *  get this narrow door instead of the private internals. */
+  async recordConversationWarning(conversationId: string, warning: string): Promise<void> {
+    let conversation: Conversation;
+    try {
+      conversation = await this.requireChat(conversationId);
+    } catch {
+      return;
+    }
+    await this.withChatMutation(conversation, async () => {
+      this.addConversationWarning(conversation, warning);
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
+  }
+
+  private addConversationWarning(conversation: Conversation, warning: string): void {
+    const sanitized = sanitizeWarningText(warning);
+    if (!sanitized) {
+      return;
+    }
+    const warnings = sanitizeWarningList(conversation.metadata.warnings);
+    if (warnings.includes(sanitized)) {
+      return;
+    }
+    conversation.metadata = { ...conversation.metadata, warnings: [...warnings, sanitized] };
   }
 
   private hasActiveParticipantRequestForTargets(
@@ -10902,7 +12296,7 @@ export class ChatService {
     return typeof reason === "string" ? reason.trim().slice(0, 500) || undefined : undefined;
   }
 
-  private prepareToolPermissionRequest(raw: unknown): PreparedToolPermission {
+  private prepareToolPermissionRequest(raw: unknown, agentMode: ChatAgentMode): PreparedToolPermission {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
       throw new Error("Tool permission request must be an object.");
     }
@@ -10914,8 +12308,14 @@ export class ChatService {
     }
     const toolInput = record.input ?? record.tool_input ?? record.toolInput ?? {};
     const reason = this.normalizePermissionChangeReason(record.reason ?? record.description);
+    const rawNativeOccurrenceId = record.tool_use_id ?? record.toolUseId;
+    const nativeOccurrenceId = typeof rawNativeOccurrenceId === "string"
+      ? rawNativeOccurrenceId.trim().slice(0, 500) || undefined
+      : undefined;
     const request: ChatToolPermissionRequest = {
       kind: "toolPermission",
+      agentMode,
+      nativeOccurrenceId,
       reason,
       toolName: toolName.slice(0, CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH),
       toolInput: this.toolPermissionInputPreview(toolInput)
@@ -10959,7 +12359,65 @@ export class ChatService {
     return `Use ${request.toolName}${reason}`;
   }
 
-  private waitForToolPermissionDecision(approvalId: string, runId: string | undefined): Promise<ToolPermissionDecision> {
+  private toolPermissionApprovalForOccurrence(
+    conversation: Conversation,
+    participantId: string,
+    runId: string | undefined,
+    nativeOccurrenceId: string | undefined
+  ): ChatAppToolApproval | undefined {
+    if (!runId || !nativeOccurrenceId) {
+      return undefined;
+    }
+    return this.chatAppToolApprovals(conversation).find((approval) =>
+      approval.requesterParticipantId === participantId &&
+      approval.toolName === APP_TOOL_PERMISSION_TOOL &&
+      approval.resumeContext?.runId === runId &&
+      this.isToolPermissionRequest(approval.request) &&
+      approval.request.nativeOccurrenceId === nativeOccurrenceId
+    );
+  }
+
+  private toolPermissionDecisionForApproval(approval: ChatAppToolApproval): ToolPermissionDecision | undefined {
+    if (approval.status === "approved" || approval.status === "auto-applied") {
+      return {
+        approve: true,
+        scope: approval.approvalScope,
+        source: approval.status === "auto-applied" ? "policy" : "user"
+      };
+    }
+    if (approval.status === "denied" || approval.status === "cancelled" || approval.status === "expired") {
+      return {
+        approve: false,
+        source: "user",
+        reason: approval.error ?? "User denied this tool request."
+      };
+    }
+    return undefined;
+  }
+
+  private logToolPermissionResolution(
+    actor: ChatAppMcpActor,
+    outcome: ToolPermissionRequestOutcome,
+    decision: ToolPermissionDecision
+  ): void {
+    void this.debugLogs.write("chat.claude.permission-prompt.resolved", {
+      conversationId: actor.conversationId,
+      participantId: actor.participantId,
+      runId: actor.runId,
+      agentMode: outcome.prepared.request.agentMode,
+      toolName: outcome.prepared.request.toolName,
+      nativeOccurrenceIdPresent: Boolean(outcome.prepared.request.nativeOccurrenceId),
+      route: outcome.route,
+      behavior: decision.approve ? "allow" : "deny",
+      source: decision.source
+    });
+  }
+
+  private waitForToolPermissionDecision(
+    conversationId: string,
+    approvalId: string,
+    runId: string | undefined
+  ): Promise<ToolPermissionDecision> {
     return new Promise<ToolPermissionDecision>((resolve) => {
       let settled = false;
       const controller = runId ? this.firstChatRunController(runId) : undefined;
@@ -10972,7 +12430,11 @@ export class ChatService {
         settled = true;
         clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
-        this.toolPermissionResolvers.delete(approvalId);
+        const resolvers = this.toolPermissionResolvers.get(approvalId);
+        resolvers?.delete(finish);
+        if (resolvers?.size === 0) {
+          this.toolPermissionResolvers.delete(approvalId);
+        }
         resolve(decision);
       };
       const onAbort = (): void => {
@@ -10989,17 +12451,37 @@ export class ChatService {
           reason: "Timed out waiting for User approval."
         });
       }, CHAT_TOOL_PERMISSION_WAIT_MS);
-      this.toolPermissionResolvers.set(approvalId, finish);
+      const resolvers = this.toolPermissionResolvers.get(approvalId) ?? new Set();
+      resolvers.add(finish);
+      this.toolPermissionResolvers.set(approvalId, resolvers);
       if (signal?.aborted) {
         onAbort();
       } else {
         signal?.addEventListener("abort", onAbort, { once: true });
       }
+      // A fast UI response can land after the pending approval is saved but before
+      // this waiter is registered. Re-read durable state after registration so that
+      // race resolves to the stored decision rather than timing out.
+      void this.storage.getConversation(conversationId).then((conversation) => {
+        if (!conversation || conversation.kind !== "chat") {
+          return;
+        }
+        const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
+        if (!approval) {
+          return;
+        }
+        const decision = this.toolPermissionDecisionForApproval(approval);
+        if (decision) {
+          finish(decision);
+        }
+      }).catch(() => undefined);
     });
   }
 
   private resolveToolPermissionApproval(approvalId: string, decision: ToolPermissionDecision): void {
-    this.toolPermissionResolvers.get(approvalId)?.(decision);
+    for (const resolve of Array.from(this.toolPermissionResolvers.get(approvalId) ?? [])) {
+      resolve(decision);
+    }
   }
 
   private async denyPendingToolPermissionApproval(conversationId: string, approvalId: string, reason: string): Promise<void> {
@@ -11007,23 +12489,25 @@ export class ChatService {
     if (!conversation || conversation.kind !== "chat") {
       return;
     }
-    const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
-    if (!approval || approval.status !== "pending" || approval.toolName !== APP_TOOL_PERMISSION_TOOL) {
-      return;
-    }
-    const now = new Date().toISOString();
-    this.upsertAppToolApproval(conversation, {
-      ...approval,
-      status: "denied",
-      error: reason,
-      updatedAt: now
+    await this.withChatMutation(conversation, async () => {
+      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
+      if (!approval || approval.status !== "pending" || approval.toolName !== APP_TOOL_PERMISSION_TOOL) {
+        return;
+      }
+      const now = new Date().toISOString();
+      this.upsertAppToolApproval(conversation, {
+        ...approval,
+        status: "denied",
+        error: reason,
+        updatedAt: now
+      });
+      conversation.messages.push(this.message("system", `Denied tool request from @${approval.requesterHandle}: ${reason}`, undefined, {
+        threadId: "system"
+      }));
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      this.queueSnapshot(conversation);
     });
-    conversation.messages.push(this.message("system", `Denied tool request from @${approval.requesterHandle}: ${reason}`, undefined, {
-      threadId: "system"
-    }));
-    conversation.updatedAt = now;
-    await this.saveConversation(conversation);
-    this.queueSnapshot(conversation);
   }
 
   private preparePermissionChange(
@@ -12127,6 +13611,7 @@ export class ChatService {
       turnReservation?: ParticipantTurnReservation;
     }
   ): Promise<ChatMessage[]> {
+    const turnSegmentId = randomUUID();
     const reservation = options.turnReservation ?? this.reserveParticipantTurn(conversation.id, participant.id);
     let turnController: { signal: AbortSignal; cleanup: () => void } | undefined;
     try {
@@ -12135,7 +13620,10 @@ export class ChatService {
       if (turnController.signal.aborted) {
         throw new Error("Chat run cancelled.");
       }
-      return await this.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, options);
+      return await this.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
+        ...options,
+        turnSegmentId
+      });
     } finally {
       reservation.release();
       turnController?.cleanup();
@@ -13650,23 +15138,33 @@ export class ChatService {
       const end = Math.min(cleaned.length, match.index + participant.handle.length + 1200);
       const snippet = cleaned.slice(start, end).replace(/\s+/g, " ").trim();
       inferred.push({ targetHandle: participant.handle, snippet });
-      if (inferred.length >= CHAT_PARTICIPANT_REQUEST_MAX_ITEMS) {
-        break;
-      }
     }
     return inferred;
   }
 
   private stripInferenceIgnoredText(content: string): string {
+    let inLegacyProtocolBlock = false;
     return this.withoutFencedCode(content)
       .replace(/`[^`\n]+`/g, "")
       .split(/\r?\n/)
       .filter((line) => {
         const trimmed = line.trim();
+        if (/^(?:participant requests|return to requester after replies)\s*:/i.test(trimmed)) {
+          inLegacyProtocolBlock = true;
+          return false;
+        }
+        if (inLegacyProtocolBlock) {
+          if (!trimmed) {
+            inLegacyProtocolBlock = false;
+            return true;
+          }
+          if (/^(?:[-*]|\d+[.)])\s+/.test(trimmed)) {
+            return false;
+          }
+          inLegacyProtocolBlock = false;
+        }
         return (
           !trimmed.startsWith(">") &&
-          !/^participant requests\s*:/i.test(trimmed) &&
-          !/^return to requester after replies\s*:/i.test(trimmed) &&
           !/^(?:user|system)\s*:\s+/i.test(trimmed)
         );
       })
@@ -15916,8 +17414,8 @@ export class ChatService {
         method === "item/commandExecution/requestApproval" ||
         method === "item/fileChange/requestApproval" ||
         method === "item/permissions/requestApproval" ||
-        method === "item/autoApprovalReview/denied" ||
-        method === "item/autoApprovalReview/timedOut" ||
+        isCodexGuardianDeniedApprovalMethod(method) ||
+        isCodexGuardianTimedOutApprovalMethod(method) ||
         method === "applyPatchApproval" ||
         method === "execCommandApproval"
       ) &&
@@ -15930,7 +17428,7 @@ export class ChatService {
         candidate.action === "mcpToolCall"
       ) &&
       Array.isArray(candidate.options) &&
-      (method === "item/autoApprovalReview/timedOut" ? candidate.options.length === 0 : candidate.options.length > 0) &&
+      (isCodexGuardianTimedOutApprovalMethod(method) ? candidate.options.length === 0 : candidate.options.length > 0) &&
       candidate.options.every((option) =>
         typeof option?.id === "string" &&
         typeof option.label === "string" &&
@@ -16112,6 +17610,7 @@ export class ChatService {
       ignoreLocalRequestLocks: true
     });
     const wasRunning = conversation.metadata.running === true || activeIds.length > 0;
+    const sweptMessages: ChatMessage[] = [];
     let pendingSwept = false;
     let hasLivePending = false;
     for (const message of conversation.messages) {
@@ -16141,6 +17640,7 @@ export class ChatService {
             at: new Date().toISOString()
           }
         };
+        sweptMessages.push(message);
         pendingSwept = true;
       }
     }
@@ -16163,6 +17663,8 @@ export class ChatService {
     }
     if (pendingSwept) {
       conversation.metadata = this.metadataWithInterruptedRunWarning(conversation.metadata);
+      // Told once, on the recovery that produced them.
+      this.onInterruptedRunsRecovered?.(conversation, sweptMessages);
     }
     if (refreshedRunMetadata) {
       conversation.metadata = this.metadataWithoutAutoTitleEligibility(conversation.metadata);
@@ -16451,17 +17953,6 @@ export class ChatService {
       }
     }
     return owners;
-  }
-
-  private metadataWithLocalRunOwner(metadata: Record<string, unknown>, runId: string, now = new Date().toISOString()): Record<string, unknown> {
-    const owners = this.chatRunOwners(metadata);
-    return {
-      ...metadata,
-      [ACTIVE_RUN_OWNERS_KEY]: {
-        ...owners,
-        [runId]: this.currentRunOwner(owners[runId], now)
-      }
-    };
   }
 
   private localRunOwnerState(metadata: Record<string, unknown>, runId: string): "current" | "external-live" | "external-dead" | "unknown" {
@@ -17109,13 +18600,15 @@ export class ChatService {
         continue;
       }
       await this.withChatMutation(conversation, async () => {
-        let nextMetadata = conversation.metadata;
         for (const runId of runIds) {
-          if (!this.isNonTerminalRemoteRun(nextMetadata, runId)) {
-            nextMetadata = this.metadataWithLocalRunOwner(nextMetadata, runId, now);
-          }
+          this.heartbeatParticipantExecutorLease(conversation, this.executionLeaseForRun(conversation, runId), now);
         }
-        conversation.metadata = nextMetadata;
+        // Rebuild instead of patching owners in place: a raced or failed
+        // cleanup can leave a finished run id in stored activeRunIds with no
+        // owner, which the composer pill then counts forever. The rebuild
+        // stamps fresh owners for this instance's live runs and sweeps stored
+        // ids that are neither live here, externally owned, nor remote.
+        conversation.metadata = this.metadataWithLiveRunState(conversationId, conversation.metadata);
         conversation.updatedAt = now;
         await this.saveConversation(conversation);
       });
@@ -17351,7 +18844,8 @@ export class ChatService {
     runId: string,
     progress: ProgressCallback | undefined,
     participant: ChatParticipant,
-    messageId: string
+    messageId: string,
+    mobileEventId?: string
   ): {
     emit: (event: CliAgentOutputEvent) => void;
     beginAttempt: () => void;
@@ -17394,7 +18888,8 @@ export class ChatService {
           messageId,
           activity: activity.label,
           activityEvents: activity.events,
-          partialContent
+          partialContent,
+          ...(mobileEventId ? { mobileEventId } : {})
         }
       });
     };
@@ -17471,7 +18966,8 @@ export class ChatService {
           participantId: participant.id,
           participantLabel,
           state: "finished",
-          messageId
+          messageId,
+          ...(mobileEventId ? { mobileEventId } : {})
         }
       });
     };
@@ -17565,4 +19061,12 @@ export class ChatService {
       ...details
     });
   }
+}
+
+function mobileEventIdFromChatTrigger(triggerMessage: ChatMessage): string | undefined {
+  if (triggerMessage.metadata?.appMessageSource !== "mobile-relay") {
+    return undefined;
+  }
+  const id = triggerMessage.metadata?.mobileEventId;
+  return typeof id === "string" && id.trim() ? id.trim() : undefined;
 }

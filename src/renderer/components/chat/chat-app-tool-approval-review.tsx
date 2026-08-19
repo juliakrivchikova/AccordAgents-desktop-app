@@ -16,6 +16,7 @@ import type {
   ChatToolPermissionRequest
 } from "../../../shared/types";
 import { chatParticipantReference } from "../conversation/conversation-display";
+import { chatToolPermissionAllowsChatScope } from "./chat-app-tool-data";
 
 export function roleReviewChipLabel(request: ChatRoleChangeRequest): string {
   if (request.operations.length !== 1) {
@@ -288,6 +289,13 @@ export function approvalOptions(
       { key: "once", label: added.length === 1 ? "Add to this chat" : "Add these members to this chat", approve: true, scope: "once" },
       { key: "chat", label: "Add and remember for this chat", approve: true, scope: "chat" },
       { key: "deny", label: added.length === 1 ? `No, don't add ${target}` : "No, don't add these members", approve: false }
+    ];
+  }
+
+  if (toolPermissionRequest && !chatToolPermissionAllowsChatScope(toolPermissionRequest)) {
+    return [
+      { key: "once", label: "Yes, allow once", approve: true, scope: "once" },
+      { key: "deny", label: `No, tell ${chatParticipantReference(approval.requesterHandle)} what to do differently`, approve: false }
     ];
   }
 

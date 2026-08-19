@@ -87,6 +87,29 @@ export function isAwsAuthorizationError(error: unknown): boolean {
   return /not authorized to perform|no identity-based policy allows/i.test(message);
 }
 
+export interface AwsAuthorizationErrorDetails {
+  missingActions: string[];
+  principalArn?: string;
+  principalUserName?: string;
+}
+
+export function awsAuthorizationErrorDetails(error: unknown): AwsAuthorizationErrorDetails {
+  const record = error && typeof error === "object"
+    ? error as { message?: unknown }
+    : undefined;
+  const message = error instanceof Error
+    ? error.message
+    : typeof record?.message === "string"
+      ? record.message
+      : String(error ?? "");
+  const missingActions = [...new Set([...message.matchAll(/not authorized to perform(?::|\s+this operation\.)?\s*([a-z0-9-]+:[A-Za-z0-9*]+)/gi)]
+    .map((match) => match[1])
+    .filter(Boolean))].sort();
+  const principalArn = message.match(/User:\s*(arn:aws:iam::\d+:user\/[A-Za-z0-9+=,.@_/-]+)/)?.[1];
+  const principalUserName = principalArn?.split("/").at(-1);
+  return { missingActions, principalArn, principalUserName };
+}
+
 export class SdkEc2Client implements Ec2Client {
   constructor(
     private readonly client: EC2Client,
@@ -390,9 +413,9 @@ export class SdkEc2Client implements Ec2Client {
       .filter((groupId): groupId is string => Boolean(groupId));
     const [volumeResult, typeInfo, groupResult] = await Promise.all([
       rootVolumeId
-        ? this.describeVolume(rootVolumeId)
+        ? this.describeVolumeMetadata(rootVolumeId)
         : Promise.resolve(undefined),
-      instance.InstanceType ? this.describeInstanceType(instance.InstanceType) : Promise.resolve(undefined),
+      instance.InstanceType ? this.describeInstanceTypeMetadata(instance.InstanceType) : Promise.resolve(undefined),
       groupIds.length > 0
         ? this.client.send(new DescribeSecurityGroupsCommand({ GroupIds: groupIds }))
         : Promise.resolve(undefined)
@@ -419,6 +442,24 @@ export class SdkEc2Client implements Ec2Client {
       return await this.client.send(new DescribeVolumesCommand({ VolumeIds: [volumeId] }));
     } catch (error) {
       if (isAwsError(error, "InvalidVolume.NotFound")) return undefined;
+      throw error;
+    }
+  }
+
+  private async describeVolumeMetadata(volumeId: string): Promise<DescribeVolumesCommandOutput | undefined> {
+    try {
+      return await this.describeVolume(volumeId);
+    } catch (error) {
+      if (isAwsAuthorizationError(error)) return undefined;
+      throw error;
+    }
+  }
+
+  private async describeInstanceTypeMetadata(instanceType: string): Promise<{ vCpu: number; memoryMiB: number } | undefined> {
+    try {
+      return await this.describeInstanceType(instanceType);
+    } catch (error) {
+      if (isAwsAuthorizationError(error)) return undefined;
       throw error;
     }
   }

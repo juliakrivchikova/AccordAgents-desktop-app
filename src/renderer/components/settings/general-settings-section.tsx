@@ -446,6 +446,7 @@ function CloudRunsControl(props: {
             <input className="gen-input" placeholder="Worker root" value={draft.worker.workerRoot ?? ""} onChange={(event) => patch({ worker: { workerRoot: event.target.value } })} />
             <input className="gen-input" placeholder="Remote repo/cwd" value={draft.worker.remoteCwd ?? ""} onChange={(event) => patch({ worker: { remoteCwd: event.target.value } })} />
             <input className="gen-input" placeholder="Codex path" value={draft.worker.codexPath ?? ""} onChange={(event) => patch({ worker: { codexPath: event.target.value } })} />
+            <input className="gen-input" placeholder="Claude path" value={draft.worker.claudePath ?? ""} onChange={(event) => patch({ worker: { claudePath: event.target.value } })} />
           </div>
         </div>
         <div className="gen-card-divider" />

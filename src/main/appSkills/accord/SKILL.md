@@ -41,6 +41,10 @@ version — you have signed it too, and no selected participant has an open
 objection against that version. Approval is signature identity on the current
 version, never reply prose: a reply can raise a concern but is not a second
 approval step, and a concern raised in a reply without signing is a non-approval.
+A signature is the signer's binding statement that the resolution is correct and
+complete and that they request no changes — nothing less. Signing while
+requesting any change is a protocol violation by the signer: reply with the
+changes and withhold the signature instead.
 
 **Signature/version semantics (stated once):** `app_artifact_revise` creates a new
 version that starts **unsigned**; signatures on earlier versions stay in history
@@ -115,9 +119,14 @@ the resolution's size to the decision; never skip independent draft submission.
    to read the published artifact and sign it (see Approval Prompt).
 8. **Verify.** `app_artifact_read` and confirm `approval.state === "approved"` and
    `signedCurrent` covers you and every selected participant (identity, not count).
-   Also read replies: address any concern raised without a signature before
-   claiming consensus. If a reply corrects the resolution, do not re-ask for a
-   signature on that version — revise and run a fresh sign round.
+   Then read every reply from the sign round: if any reply requests changes to
+   the resolution's text — corrections, additions, new open questions — the
+   round is not complete regardless of signatures. A signer who requested
+   changes violated the signing rule; do not claim consensus over known
+   requested changes. Revise (folding accepted findings into the body and
+   rejected ones into Reasoning / Dispositions) and run a fresh sign round.
+   Consensus is reached only when the current version is fully signed and no
+   reply from its sign round requested changes.
 
 ## Participant Selection
 
@@ -146,6 +155,11 @@ impact. A participant's signature approves both the resolution and its
 dispositions. Never present a version for signing with an unresolved objection in
 it; reframing or rejecting a concern is not unilateral — it must be visible and
 signed off.
+
+Review findings follow the same rule as drafts: they live in the artifact, never
+only in chat. A finding accepted during a sign round is folded into the body; a
+finding rejected or reframed is recorded here with reasoning. A finding that
+exists only in a chat reply is an unfinished round, not a footnote.
 
 ## User-Owned Decisions
 
@@ -200,9 +214,24 @@ only version under approval.
 
 Stay skeptical — do not accept the reasoning by default. Read the artifact, check
 the Reasoning / Dispositions, and whether your concerns were preserved or
-correctly resolved. If you approve it as complete, sign the current version.
-Otherwise do not sign — reply with the concrete concern or disputed disposition.
-Your reply reaches everyone; do not repost it separately.
+correctly resolved.
+
+Answer three questions explicitly in your reply before deciding:
+1. Would you add to or change anything in the document's text — including
+   additions to open-questions lists, factual corrections, or implementation
+   constraints?
+2. Did you check the document's factual claims, and did any fail or resist
+   verification?
+3. Do you dispute any commitment or disposition?
+
+Then exactly one outcome:
+- Approve — all three answers are clean: sign the current version.
+- Amend — something belongs in the document: do not sign; reply with the exact
+  text-level changes.
+- Dispute — a commitment or disposition is wrong: do not sign; name it.
+
+Sign only if you request no changes: a signature states the resolution is correct
+and complete. Your reply reaches everyone; do not repost it separately.
 ```
 
 ## Resume

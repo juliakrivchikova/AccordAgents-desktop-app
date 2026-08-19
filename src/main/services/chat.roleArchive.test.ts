@@ -6,6 +6,7 @@ import {
 } from "../../shared/chatParticipantRequests";
 import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
+import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
 import { ChatService } from "./chat";
 import type { AppSettings, ChatParticipant, ChatRoleConfig } from "../../shared/types";
 
@@ -44,6 +45,7 @@ function chatServiceWithRoles(roles: ChatRoleConfig[]) {
           maxRuntimeMs: 24 * 60 * 60_000,
           pollIntervalMs: 2_500
         },
+        mobileControl: EMPTY_MOBILE_CONTROL_SETTINGS,
         providers: [],
         chatRoleConfigs: roles,
         chatBehaviorRules: [],

@@ -61,6 +61,20 @@ export function conversationIsRunning(metadata: Record<string, unknown>): boolea
   return metadata.running === true;
 }
 
+export function readActiveRunOwnerIds(metadata: Record<string, unknown>): Set<string> {
+  const raw = metadata[ACTIVE_RUN_OWNERS_KEY];
+  const ids = new Set<string>();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return ids;
+  }
+  for (const [runId, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (runId.trim() && value && typeof value === "object" && !Array.isArray(value)) {
+      ids.add(runId);
+    }
+  }
+  return ids;
+}
+
 export function readActiveRunParticipants(metadata: Record<string, unknown>): Map<string, string> {
   const raw = metadata[ACTIVE_RUN_PARTICIPANTS_KEY];
   const participants = new Map<string, string>();

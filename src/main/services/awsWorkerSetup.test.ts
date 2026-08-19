@@ -128,10 +128,32 @@ test("DescribeRegions authorization denial requests an AWS authorization refresh
   const failed = await service.start({ operationId: "op-auth", clientToken: "token-auth" });
   assert.equal(failed.operation.phase, "error");
   assert.equal(failed.operation.remediation, "refresh-aws-authorization");
-  assert.match(failed.operation.message, /AWS administrator update shown next/);
+  assert.match(failed.operation.message, /ec2:DescribeRegions/);
+  assert.deepEqual(failed.operation.missingAwsActions, ["ec2:DescribeRegions"]);
   const recovered = await service.start({ operationId: "op-auth" });
   assert.equal(recovered.operation.phase, "ready");
   assert.deepEqual(tokens, ["token-auth", "token-auth"]);
+});
+
+test("authorization denial records the active scoped worker IAM user", async () => {
+  const aws = {
+    prepareWorker: async () => {
+      throw new Error("You are not authorized to perform this operation. User: arn:aws:iam::018089055817:user/accordagents-worker-pna6gbah is not authorized to perform: ec2:DescribeInstanceTypes because no identity-based policy allows the ec2:DescribeInstanceTypes action");
+    },
+    status: async () => ({ configured: true, state: "running" })
+  };
+  const settings = {
+    saveAwsWorkerOperation: async () => undefined,
+    getAwsWorkerOperation: async () => undefined
+  };
+  const service = new AwsWorkerSetupService(aws as any, {} as any, settings as any);
+
+  const failed = await service.start({ operationId: "op-active-auth" });
+
+  assert.equal(failed.operation.remediation, "refresh-aws-authorization");
+  assert.equal(failed.operation.awsPrincipalArn, "arn:aws:iam::018089055817:user/accordagents-worker-pna6gbah");
+  assert.equal(failed.operation.awsPrincipalUserName, "accordagents-worker-pna6gbah");
+  assert.deepEqual(failed.operation.missingAwsActions, ["ec2:DescribeInstanceTypes"]);
 });
 
 test("non-authorization setup failures do not request an AWS authorization refresh", async () => {

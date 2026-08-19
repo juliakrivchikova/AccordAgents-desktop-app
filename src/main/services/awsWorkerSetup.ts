@@ -6,7 +6,7 @@ import type {
   CloudRunWorkerSetupProgress
 } from "../../shared/types";
 import type { CloudRunDoctorService } from "./cloudRunDoctor";
-import { isAwsAuthorizationError } from "./awsEc2Client";
+import { awsAuthorizationErrorDetails, isAwsAuthorizationError } from "./awsEc2Client";
 import type { CloudRunAwsService, PreparedAwsWorker } from "./cloudRunAws";
 import type { SettingsService } from "./settings";
 
@@ -114,11 +114,17 @@ export class AwsWorkerSetupService {
       return { operation, status: await this.aws.status(), report };
     } catch (error) {
       const needsAuthorizationRefresh = isAwsAuthorizationError(error);
-      const message = actionableError(error, needsAuthorizationRefresh);
+      const authorization = needsAuthorizationRefresh ? awsAuthorizationErrorDetails(error) : undefined;
+      const message = actionableError(error, authorization);
       const operation = await emit("error", message, {
         error: message,
         retryable: true,
-        ...(needsAuthorizationRefresh ? { remediation: "refresh-aws-authorization" as const } : {})
+        ...(needsAuthorizationRefresh ? {
+          remediation: "refresh-aws-authorization" as const,
+          missingAwsActions: authorization?.missingActions,
+          awsPrincipalArn: authorization?.principalArn,
+          awsPrincipalUserName: authorization?.principalUserName
+        } : {})
       });
       return { operation, status: await this.aws.status() };
     }
@@ -162,9 +168,11 @@ function mismatchMessage(prepared: PreparedAwsWorker): string {
   return `The existing shared worker's ${gaps} is smaller than configured. Choose what to do.`;
 }
 
-function actionableError(error: unknown, needsAuthorizationRefresh = isAwsAuthorizationError(error)): string {
+function actionableError(error: unknown, authorization?: ReturnType<typeof awsAuthorizationErrorDetails>): string {
+  const needsAuthorizationRefresh = authorization || isAwsAuthorizationError(error);
   const message = error instanceof Error ? error.message : String(error);
-  return needsAuthorizationRefresh
-    ? "Cloud Run cannot access required AWS APIs. First try Retry existing permissions. If it fails again, complete the AWS administrator update shown next."
-    : message;
+  if (!needsAuthorizationRefresh) return message;
+  const actions = authorization?.missingActions ?? [];
+  const actionText = actions.length > 0 ? ` (${actions.join(", ")})` : "";
+  return `Cloud Run cannot access required AWS APIs${actionText}. Update the existing worker permissions, then retry.`;
 }

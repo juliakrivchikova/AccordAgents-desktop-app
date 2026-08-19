@@ -3,8 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { resolveSqliteExecutable } from "./sqliteCli";
 import { StorageService } from "./storage";
 import type { ChatAppToolApproval, ChatMessage, Conversation } from "../../shared/types";
+
+const SQLITE_EXECUTABLE = resolveSqliteExecutable({ appPath: process.cwd() });
 
 function hexText(value: string): string {
   return Buffer.from(value, "utf8").toString("hex").toUpperCase();
@@ -82,6 +85,7 @@ test("listChatActivity uses the payload fallback when body_json is empty", async
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-activity-"));
   const storage = Object.create(StorageService.prototype) as any;
   storage.dbPath = path.join(directory, "accordagents.sqlite3");
+  storage.sqliteExecutable = SQLITE_EXECUTABLE;
   storage.initialized = true;
   const chat = conversation("fallback-chat", "Fallback chat");
   chat.messages = [participantMessage("fallback-choice", {
@@ -126,6 +130,7 @@ test("listChatActivity skips a malformed conversation body and keeps remaining a
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-activity-"));
   const storage = Object.create(StorageService.prototype) as any;
   storage.dbPath = path.join(directory, "accordagents.sqlite3");
+  storage.sqliteExecutable = SQLITE_EXECUTABLE;
   storage.initialized = true;
   const goodChat = conversation("good-chat", "Good chat");
   goodChat.messages = [participantMessage("good-choice", {

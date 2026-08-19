@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import crossSpawn from "cross-spawn";
+import { terminateProcess } from "./processTermination";
 
 const LOGIN_SHELL_ENV_TIMEOUT_MS = 8000;
 const LOGIN_SHELL_ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -42,6 +43,8 @@ export interface CommandEnvironmentOptions {
 let loginShellEnv: NodeJS.ProcessEnv | undefined;
 let loginShellEnvRefresh: Promise<LoginShellEnvironmentRefresh> | undefined;
 let debugLogger: CommandDebugLogger | undefined;
+
+export const spawnCommand: typeof import("node:child_process").spawn = crossSpawn.spawn;
 
 export function setCommandDebugLogger(logger: CommandDebugLogger | undefined): void {
   debugLogger = logger;
@@ -131,8 +134,9 @@ export async function runCommand(command: string, args: string[], options: Comma
   const timeoutMs = resolveCommandTimeoutMs(options.timeoutMs, options.allowNoTimeout === true);
 
   return new Promise((resolve, reject) => {
-    const useProcessGroup = options.killProcessGroup === true && process.platform !== "win32";
-    const child = spawn(command, args, {
+    const killProcessTree = options.killProcessGroup === true;
+    const useProcessGroup = killProcessTree && process.platform !== "win32";
+    const child = spawnCommand(command, args, {
       cwd: options.cwd,
       env: commandEnvironment(options.env, options.envOptions),
       detached: useProcessGroup,
@@ -164,7 +168,7 @@ export async function runCommand(command: string, args: string[], options: Comma
           // or the current platform cannot signal it.
         }
       }
-      child.kill(signal);
+      terminateProcess(child, signal, killProcessTree);
     };
 
     const scheduleForceKill = (): void => {
@@ -311,15 +315,46 @@ export interface CommandLookupResult {
   timedOut?: boolean;
 }
 
+export interface CommandLookupInvocation {
+  command: string;
+  args: string[];
+}
+
+export function commandLookupInvocation(command: string, platform = process.platform): CommandLookupInvocation {
+  return platform === "win32"
+    ? { command: "where.exe", args: [command] }
+    : { command: "which", args: [command] };
+}
+
+export function firstCommandLookupPath(
+  stdout: string,
+  platform = process.platform,
+  pathExt = process.env.PATHEXT
+): string | undefined {
+  const candidates = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (platform !== "win32") {
+    return candidates[0];
+  }
+  const runnableExtensions = new Set(
+    (pathExt?.trim() || ".COM;.EXE;.BAT;.CMD")
+      .split(";")
+      .map((extension) => extension.trim().toLowerCase())
+      .filter(Boolean)
+      .map((extension) => extension.startsWith(".") ? extension : `.${extension}`)
+  );
+  return candidates.find((candidate) => runnableExtensions.has(path.extname(candidate).toLowerCase())) ?? candidates[0];
+}
+
 export async function lookupCommand(command: string, env?: NodeJS.ProcessEnv): Promise<CommandLookupResult> {
+  const lookup = commandLookupInvocation(command);
   try {
-    const which = await runCommand("which", [command], {
+    const result = await runCommand(lookup.command, lookup.args, {
       env,
       killProcessGroup: true,
       primeLoginShellEnv: env ? false : undefined,
       timeoutMs: 5000
     });
-    const commandPath = which.stdout.trim();
+    const commandPath = firstCommandLookupPath(result.stdout, process.platform, env?.PATHEXT);
     return commandPath ? { status: "found", path: commandPath } : { status: "not-found" };
   } catch (error) {
     if (error instanceof CommandError && error.result.exitCode === 1 && !error.result.timedOut) {
@@ -330,6 +365,20 @@ export async function lookupCommand(command: string, env?: NodeJS.ProcessEnv): P
       timedOut: error instanceof CommandError ? error.result.timedOut : false
     };
   }
+}
+
+export async function resolveCommandPath(command: string, env?: NodeJS.ProcessEnv): Promise<string> {
+  if (path.isAbsolute(command)) {
+    return command;
+  }
+  const result = await lookupCommand(command, env);
+  if (result.status === "found" && result.path) {
+    return result.path;
+  }
+  if (result.status === "not-found") {
+    throw new Error(`${command} was not found on PATH.`);
+  }
+  throw new Error(`${command} executable lookup failed${result.timedOut ? " because it timed out" : ""}.`);
 }
 
 export async function commandExists(command: string): Promise<{ path?: string; version?: string; error?: string }> {

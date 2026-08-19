@@ -23,12 +23,18 @@ debug-logs/
 .history
 .gstack/
 .playwright-mcp/
+.wrangler/
 design-diff-report.json
 design-diff.design.png
 design-diff.live.png
 .claude/worktrees/
+.worktrees/
 design_handoff/
 docs/product/
+
+# Throwaway probes and experiment output: local only, never committed
+.scratch/
+artifacts/vectorization/
 
 # Local analysis reports
 security-check-summary.md

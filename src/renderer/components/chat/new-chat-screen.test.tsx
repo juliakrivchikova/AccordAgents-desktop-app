@@ -13,6 +13,7 @@ import type {
 import { NewChatScreen } from "./new-chat-screen";
 import type { DraftPluginMention } from "./chat-composer-draft-utils";
 import type { PendingChatImage } from "./use-chat-composer-images";
+import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../../shared/mobilePairing";
 
 const SETTINGS: AppSettings = {
   roundLimitDefault: 2,
@@ -22,6 +23,7 @@ const SETTINGS: AppSettings = {
   chatParticipantRequestPromptMaxChars: 50_000,
   chatAutoWatchWakeLimit: 3,
   chatPromptContext: { thread: { mode: "off" }, timeline: { mode: "off" } },
+  mobileControl: EMPTY_MOBILE_CONTROL_SETTINGS,
   cloudRuns: {
     enabled: false,
     mode: "ssh",
