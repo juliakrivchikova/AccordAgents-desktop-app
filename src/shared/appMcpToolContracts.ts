@@ -2373,7 +2373,13 @@ export function remoteAppMcpToolContracts(): Array<{
     .sort((left, right) => (left.worker?.order ?? 0) - (right.worker?.order ?? 0))
     .map((contract) => ({
       handler: contract.worker!.handler,
-      definition: { name: contract.name, ...contract.worker!.definition }
+      definition: {
+        name: contract.name,
+        ...contract.worker!.definition,
+        ...(contract.worker!.definition.annotations
+          ? {}
+          : contract.desktop.annotations ? { annotations: contract.desktop.annotations } : {})
+      }
     }));
 }
 

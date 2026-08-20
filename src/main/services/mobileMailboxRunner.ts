@@ -999,6 +999,8 @@ function runCodex(prompt, runId, appMcp) {
       "--output-last-message",
       finalPath,
       "-c",
+      "approval_policy=\"never\"",
+      "-c",
       "mcp_servers.accord_agents.url=\"" + appMcp.url + "\"",
       "-c",
       "mcp_servers.accord_agents.bearer_token_env_var=\"ACCORD_AGENTS_MCP_TOKEN\"",

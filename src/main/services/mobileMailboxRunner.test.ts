@@ -91,6 +91,19 @@ test("mobile mailbox runner policy snapshot carries cloud participants and recen
 
 test("mobile mailbox runner embeds the generated worker App MCP contract", () => {
   assert.ok(mobileMailboxRunnerScript().includes(REMOTE_APP_MCP_WORKER_CONTRACT_SNIPPET));
+  for (const contract of REMOTE_APP_MCP_TOOL_CONTRACTS) {
+    assert.ok(contract.definition.annotations, `${contract.definition.name} must declare MCP safety annotations`);
+  }
+  assert.equal(
+    REMOTE_APP_MCP_TOOL_CONTRACTS.find((contract) => contract.handler === "chat-get-participants")
+      ?.definition.annotations?.readOnlyHint,
+    true
+  );
+  assert.equal(
+    REMOTE_APP_MCP_TOOL_CONTRACTS.find((contract) => contract.handler === "chat-send-message")
+      ?.definition.annotations?.readOnlyHint,
+    false
+  );
 });
 
 test("mobile mailbox runner policy carries the desktop-built App MCP context snapshot", () => {
