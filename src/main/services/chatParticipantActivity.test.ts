@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildChatParticipantActivitySnapshot } from "../../shared/chatParticipantActivity";
+import { remoteAppMcpToolContracts } from "../../shared/appMcpToolContracts";
 import type {
   ChatAppToolApproval,
   ChatMessage,
@@ -15,7 +16,6 @@ import {
   AppMcpService
 } from "./appMcp";
 import { ChatService } from "./chat";
-import { detachedWorkerScript } from "./remoteRuns";
 
 const SNAPSHOT_AT = "2026-07-31T09:00:00.000Z";
 
@@ -799,15 +799,11 @@ test("participant activity guidance is local-only and absent from detached remot
 });
 
 test("detached worker relay does not advertise the live participant activity tool", () => {
-  const script = detachedWorkerScript();
-  const listStart = script.indexOf('if (method === "tools/list")');
-  const callStart = script.indexOf('if (method !== "tools/call")', listStart);
-  const listBlock = script.slice(listStart, callStart);
+  const names = remoteAppMcpToolContracts().map((contract) => contract.definition.name);
 
-  assert.ok(listStart >= 0 && callStart > listStart);
-  assert.match(listBlock, /app_chat_get_context/);
-  assert.match(listBlock, /app_chat_get_participants/);
-  assert.doesNotMatch(listBlock, new RegExp(APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL));
+  assert.ok(names.includes("app_chat_get_context"));
+  assert.ok(names.includes("app_chat_get_participants"));
+  assert.equal(names.includes(APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL), false);
 });
 
 function chatServiceHarness(conversations: Conversation[]): {

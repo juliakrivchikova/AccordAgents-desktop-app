@@ -20,6 +20,7 @@ import type {
 } from "../../shared/types";
 import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
+import { REMOTE_APP_MCP_TOOL_NAMES } from "../../shared/appMcpToolContracts";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
 import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
 import type { ChatAppToolApprovalDecisionEvent, ChatService } from "./chat";
@@ -35,6 +36,7 @@ import {
   extractCodexText
 } from "./codexExec";
 import type { CodexExecOptions, CodexExecInvocation, CodexExecRemoteSandboxOptions } from "./codexExec";
+import { REMOTE_APP_MCP_WORKER_CONTRACT_SNIPPET } from "./remoteAppMcpTools.generated";
 import {
   REMOTE_MIRROR_DIRNAME,
   REMOTE_MIRROR_FINGERPRINT_VERSION,
@@ -3374,15 +3376,7 @@ function remoteAppMcpToolNames(options: CodexExecOptions): string[] {
     return explicit.filter((item): item is string => typeof item === "string" && Boolean(item.trim()));
   }
   return options.appMcp
-    ? [
-      "app_permissions_request_change",
-      "app_chat_get_context",
-      "app_chat_get_participants",
-      "app_chat_read_messages",
-      "app_chat_list_attachments",
-      "app_chat_read_attachment",
-      "app_chat_send_message"
-    ]
+    ? [...REMOTE_APP_MCP_TOOL_NAMES]
     : [];
 }
 
@@ -4069,6 +4063,8 @@ const cp = require("node:child_process");
 const crypto = require("node:crypto");
 const http = require("node:http");
 
+${REMOTE_APP_MCP_WORKER_CONTRACT_SNIPPET}
+
 const runDir = process.cwd();
 const config = JSON.parse(fs.readFileSync("invocation.json", "utf8"));
 const providerKind = config.providerKind || "codex-cli";
@@ -4421,78 +4417,7 @@ async function handleRpcRequest(raw) {
   }
   if (method === "tools/list") {
     return notify ? undefined : rpcResult(id, {
-      tools: [
-        {
-          name: "app_permissions_request_change",
-          title: "Request Permission Change",
-          description: "Queue a permission request for desktop approval when the desktop reconnects. Supports portable, shellRules, providerNative, and githubApp request kinds.",
-          inputSchema: { type: "object", additionalProperties: true }
-        },
-        {
-          name: "app_chat_get_context",
-          title: "Get Chat Context Snapshot",
-          description: "Read the run-start chat context snapshot stored on the worker.",
-          inputSchema: { type: "object", additionalProperties: false, properties: {} }
-        },
-        {
-          name: "app_chat_get_participants",
-          title: "Get Chat Members Snapshot",
-          description: "Read member data from the run-start context snapshot.",
-          inputSchema: { type: "object", additionalProperties: false, properties: {} }
-        },
-        {
-          name: "app_chat_read_messages",
-          title: "Read Chat Messages",
-          description: "Read paginated chat messages from the run-start snapshot, optionally filtered to one thread or one message id. Same result shape as the desktop tool. The window is fixed at run start: messages posted after this run began are not in it, and the page counts describe the snapshot, not the live conversation.",
-          inputSchema: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              messageId: { type: "string" },
-              threadId: { type: "string" },
-              beforeSequence: { type: "integer", minimum: 0 },
-              afterSequence: { type: "integer", minimum: 0 },
-              limit: { type: "integer", minimum: 1, maximum: 200 }
-            }
-          }
-        },
-        {
-          name: "app_chat_send_message",
-          title: "Post A Message Mid-Run",
-          description: "Post a message to the chat while this run is still working. The post is queued on the worker and appears when the desktop next drains this run, so it is not instant and returns no message id. Text only.",
-          inputSchema: {
-            type: "object",
-            additionalProperties: false,
-            required: ["content"],
-            properties: { content: { type: "string" } }
-          }
-        },
-        {
-          name: "app_chat_list_attachments",
-          title: "List Chat Image Attachments",
-          description: "List image attachments visible in the run-start snapshot, oldest first. Use this for attachment ids, then app_chat_read_attachment to see one.",
-          inputSchema: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              messageId: { type: "string" },
-              threadId: { type: "string" },
-              limit: { type: "integer", minimum: 1, maximum: 50 }
-            }
-          }
-        },
-        {
-          name: "app_chat_read_attachment",
-          title: "Read Chat Image Attachment",
-          description: "Read one image attachment bundled with this run and return it as image content. Only attachments visible at run start are available.",
-          inputSchema: {
-            type: "object",
-            additionalProperties: false,
-            required: ["attachmentId"],
-            properties: { attachmentId: { type: "string" } }
-          }
-        }
-      ]
+      tools: REMOTE_APP_MCP_TOOL_CONTRACTS.map((contract) => contract.definition)
     });
   }
   if (method !== "tools/call") {
@@ -4501,7 +4426,8 @@ async function handleRpcRequest(raw) {
   const params = raw.params && typeof raw.params === "object" ? raw.params : {};
   const name = params.name;
   const args = params.arguments || {};
-  if (name === "app_permissions_request_change") {
+  const toolHandler = REMOTE_APP_MCP_TOOL_HANDLER_BY_NAME[name];
+  if (toolHandler === "permissions-request") {
     const requestId = crypto.randomUUID();
     const event = appendEvent({
       kind: "permission_pending",
@@ -4523,7 +4449,7 @@ async function handleRpcRequest(raw) {
       updatedAt: event.createdAt
     }));
   }
-  if (name === "app_chat_send_message") {
+  if (toolHandler === "chat-send-message") {
     if (notify) {
       return undefined;
     }
@@ -4556,13 +4482,13 @@ async function handleRpcRequest(raw) {
       note: "The post is queued on the worker and appears in the chat when the desktop next drains this run."
     }));
   }
-  if (name === "app_chat_get_context") {
+  if (toolHandler === "chat-get-context") {
     return notify ? undefined : rpcResult(id, toolTextResult({
       ok: true,
       snapshot: contextSnapshot()
     }));
   }
-  if (name === "app_chat_read_messages") {
+  if (toolHandler === "chat-read-messages") {
     if (notify) {
       return undefined;
     }
@@ -4628,7 +4554,7 @@ async function handleRpcRequest(raw) {
       }
     }));
   }
-  if (name === "app_chat_list_attachments" || name === "app_chat_read_attachment") {
+  if (toolHandler === "chat-list-attachments" || toolHandler === "chat-read-attachment") {
     if (notify) {
       return undefined;
     }
@@ -4636,7 +4562,7 @@ async function handleRpcRequest(raw) {
     const record = snapshot && typeof snapshot === "object" ? snapshot : {};
     const bundled = Array.isArray(record.attachments) ? record.attachments : [];
     const window = record.attachmentWindow && typeof record.attachmentWindow === "object" ? record.attachmentWindow : {};
-    if (name === "app_chat_read_attachment") {
+    if (toolHandler === "chat-read-attachment") {
       const attachmentId = typeof args.attachmentId === "string" ? args.attachmentId.trim() : "";
       const found = bundled.find((item) => item && item.attachment && item.attachment.id === attachmentId);
       if (!found) {
@@ -4699,7 +4625,7 @@ async function handleRpcRequest(raw) {
       omittedCount: typeof window.omittedCount === "number" ? window.omittedCount : 0
     }));
   }
-  if (name === "app_chat_get_participants") {
+  if (toolHandler === "chat-get-participants") {
     const snapshot = contextSnapshot();
     return notify ? undefined : rpcResult(id, toolTextResult({
       ok: true,
