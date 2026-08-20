@@ -50,6 +50,52 @@ test("MobileRelayControlService routes sealed mobile outbox events through ChatS
   service.close();
 });
 
+test("MobileRelayControlService routes run.cancel.requested to the existing cancel path without creating a message", async () => {
+  const key = Buffer.from("z".repeat(32)).toString("base64url");
+  const cancelled: Array<{ conversationId: string; runId: string }> = [];
+  const sent: unknown[] = [];
+  const published: MobileTimelineEvents[] = [];
+  const service = new MobileRelayControlService(
+    {
+      relayUrl: "ws://127.0.0.1:1/v1/relay",
+      rendezvousId: "rv-cancel",
+      relayCapability: "PAIRING-FINGERPRINT",
+      relaySealKeyBase64: key,
+      conversationId: "conversation-1",
+      streamId: "route-cancel:phone"
+    },
+    {
+      ...sender(sent),
+      cancelRun(conversationId, runId) {
+        cancelled.push({ conversationId, runId });
+        return true;
+      }
+    },
+    undefined,
+    undefined,
+    { async publishTimeline(timeline) { published.push(timeline); } }
+  );
+
+  try {
+    const result = await service.acceptSealedMobileOutbox(await sealMobileRelayPayload({
+      type: "mobile.outbox.events",
+      events: [{
+        eventId: "event-cancel-1",
+        conversationId: "conversation-1",
+        kind: "run.cancel.requested",
+        payload: { runId: "participant-run-1" }
+      }]
+    }, key));
+
+    assert.deepEqual(result, { eventIds: ["event-cancel-1"], runIds: [] });
+    assert.deepEqual(cancelled, [{ conversationId: "conversation-1", runId: "participant-run-1" }]);
+    assert.deepEqual(sent, []);
+    assert.deepEqual(published, []);
+  } finally {
+    service.close();
+  }
+});
+
 test("MobileRelayControlService ignores outbox events after pairing becomes inactive", async () => {
   const key = Buffer.from("n".repeat(32)).toString("base64url");
   const sent: unknown[] = [];

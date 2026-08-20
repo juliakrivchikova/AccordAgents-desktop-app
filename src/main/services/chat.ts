@@ -18097,6 +18097,21 @@ export class ChatService {
     return true;
   }
 
+  hasActiveRunForConversation(conversationId: string, runId: string): boolean {
+    const targetConversationId = conversationId.trim();
+    const targetRunId = runId.trim();
+    if (!targetConversationId || !targetRunId) {
+      return false;
+    }
+    if (this.activeConversationRunIds.get(targetConversationId)?.has(targetRunId)) {
+      return true;
+    }
+    if (this.chatRunMeta.get(targetRunId)?.conversationId === targetConversationId) {
+      return true;
+    }
+    return this.remoteRunHandlesByRun.get(targetRunId)?.conversationId === targetConversationId;
+  }
+
   private async cancelStoredRun(runId: string): Promise<boolean> {
     const targetRunId = runId.trim();
     if (!targetRunId) {

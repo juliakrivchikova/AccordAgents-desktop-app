@@ -1359,7 +1359,8 @@
     const logScopeId = input.logScopeId || conversationId;
     const originId = await mobileOriginId(pairing);
     const originSeq = await nextOriginSeq(originId, logScopeId);
-    const payload = {
+    const kind = input.kind || "message.created";
+    const payload = input.payload || {
       content: input.content,
       ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {})
     };
@@ -1378,7 +1379,7 @@
       originId,
       originSeq,
       logicalTs,
-      kind: "message.created",
+      kind,
       payloadHash,
       prevHash: prevHash || null,
       keyId,
@@ -1392,7 +1393,7 @@
       originId,
       originSeq,
       logicalTs,
-      kind: "message.created",
+      kind,
       payload,
       payloadHash,
       ...(prevHash ? { prevHash } : {}),
@@ -1413,6 +1414,36 @@
         return entry;
       });
     });
+  }
+
+  function enqueueRunCancel(input) {
+    return createOutboxEvent({
+      conversationId: input.conversationId,
+      kind: "run.cancel.requested",
+      payload: { runId: input.runId }
+    }).then(function (entry) {
+      return putOutboxEntry(entry).then(function () {
+        return entry;
+      });
+    });
+  }
+
+  function isMessageOutboxEntry(entry) {
+    return !entry.kind || entry.kind === "message.created";
+  }
+
+  async function stopRunFromPhone(runId) {
+    const conversationId = selectedConversationId();
+    if (!conversationId || typeof runId !== "string" || !runId.trim()) {
+      return;
+    }
+    await enqueueRunCancel({ conversationId, runId: runId.trim() });
+    await render("waiting-to-sync");
+    const flushResult = await flushOutbox();
+    await pollMailboxTimeline().catch(function () {
+      return 0;
+    });
+    await render(flushResult.status);
   }
 
   async function mobileOriginId(pairing) {
@@ -2935,7 +2966,13 @@
     }
     const entries = await listOutboxEntries(activeId);
     const timelineEntries = await listTimelineEntries(activeId);
-    const outboxContent = new Set(entries.map(function (entry) {
+    const messageEntries = entries.filter(isMessageOutboxEntry);
+    const requestedStopRunIds = new Set(entries.filter(function (entry) {
+      return entry.kind === "run.cancel.requested";
+    }).map(function (entry) {
+      return entry.payload.runId;
+    }));
+    const outboxContent = new Set(messageEntries.map(function (entry) {
       return entry.payload.content.trim();
     }));
     const visibleTimelineEntries = dedupeTimelineEntries(timelineEntries.filter(function (entry) {
@@ -2947,7 +2984,7 @@
     state.textContent = connectionStatus
       ? connectionStatusText(connectionStatus)
       : pending > 0 ? "Waiting to sync" : "Synced";
-    let rows = entries.map(function (entry) {
+    let rows = messageEntries.map(function (entry) {
       return {
         rowKey: "outbox\0" + entry.eventId,
         id: entry.eventId,
@@ -2978,6 +3015,7 @@
         // empty — it says who is working, which is exactly what the desktop
         // shows — so it keeps the member row, the clock and the shimmer.
         scaffolding: isScaffoldingEntry(entry) && !entry.participantLabel,
+        cancellable: !isScaffoldingEntry(entry),
         content: entry.content,
         status: entry.status === "error" ? "Error" : entry.status === "done" ? "Done" : "Running",
         createdAt: entry.createdAt,
@@ -2989,6 +3027,7 @@
         // own: the frames it streams can only be bound to this row through the
         // source event they both answer.
         runId: entry.runId,
+        stopRequested: requestedStopRunIds.has(entry.runId),
         mobileEventId: entry.mobileEventId
       };
     }));
@@ -3043,7 +3082,8 @@
     const body = document.getElementById("stream-body");
     const label = document.getElementById("stream-label");
     const state = document.getElementById("stream-state");
-    if (!view || !body || !label || !state) {
+    const stop = document.getElementById("stream-stop");
+    if (!view || !body || !label || !state || !stop) {
       return;
     }
     const follow = openStreamFollow();
@@ -3072,6 +3112,11 @@
     }
     view.hidden = false;
     label.textContent = row.participantLabel || "Agent";
+    stop.hidden = !isCancellableMobileRow(row);
+    stop.disabled = row.stopRequested === true;
+    stop.dataset.runId = row.runId || "";
+    stop.textContent = row.stopRequested ? "Stopping…" : "Stop";
+    stop.setAttribute("aria-label", "Stop response from " + (row.participantLabel || "Agent"));
     // (e) When the run finishes the view stays and shows the finished answer;
     // leaving is the reader's decision, not ours.
     state.textContent = row.status === "Running"
@@ -3092,14 +3137,24 @@
     const view = document.getElementById("stream-view");
     const body = document.getElementById("stream-body");
     const close = document.getElementById("stream-close");
+    const stop = document.getElementById("stream-stop");
     const list = document.getElementById("message-list");
-    if (!view || !body || !close || !list || view.dataset.wired === "1") {
+    if (!view || !body || !close || !stop || !list || view.dataset.wired === "1") {
       return;
     }
     view.dataset.wired = "1";
     close.addEventListener("click", function () {
       setOpenStreamRunId(undefined);
       view.hidden = true;
+    });
+    stop.addEventListener("click", function () {
+      const runId = stop.dataset.runId;
+      if (!runId || stop.disabled) {
+        return;
+      }
+      stop.disabled = true;
+      stop.textContent = "Stopping…";
+      void stopRunFromPhone(runId);
     });
     // Scrolling away from the tail stops the view yanking itself back down.
     body.addEventListener("scroll", function () {
@@ -3182,7 +3237,9 @@
       identified: entry.identified,
       scaffolding: entry.scaffolding,
       content: entry.content,
-      status: entry.status
+      status: entry.status,
+      runId: entry.runId,
+      stopRequested: entry.stopRequested
     });
   }
 
@@ -3284,6 +3341,43 @@
     item.append(dots);
   }
 
+  function isCancellableMobileRow(entry) {
+    return entry.author === "agent" &&
+      entry.status === "Running" &&
+      Boolean(entry.runId) &&
+      entry.cancellable !== false;
+  }
+
+  function syncMessageStopButton(meta, entry) {
+    let button = meta.querySelector(".message-stop");
+    const visible = isCancellableMobileRow(entry);
+    if (!visible) {
+      button?.remove();
+      return;
+    }
+    if (!button) {
+      button = document.createElement("button");
+      button.type = "button";
+      button.className = "message-stop";
+      button.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        const targetRunId = button.dataset.runId;
+        if (!targetRunId || button.disabled) {
+          return;
+        }
+        button.disabled = true;
+        button.textContent = "Stopping…";
+        void stopRunFromPhone(targetRunId);
+      });
+      meta.append(button);
+    }
+    button.dataset.runId = entry.runId;
+    button.disabled = entry.stopRequested === true;
+    button.textContent = entry.stopRequested ? "Stopping…" : "Stop";
+    button.setAttribute("aria-label", "Stop response from " + rowHandleText(entry));
+  }
+
   function createMessageRow(entry) {
     const item = document.createElement("li");
     item.className = "message-row";
@@ -3319,6 +3413,7 @@
         renderMessageContentIfChanged(content, entry.content);
       }
       meta.append(handle, status);
+      syncMessageStopButton(meta, entry);
       copy.append(meta, content);
       item.append(avatar, copy);
     } else {
@@ -3383,6 +3478,11 @@
       applyRowIdentity(avatar, entry);
       handle.textContent = rowHandleText(entry);
       status.textContent = entry.status;
+      const meta = status.parentElement;
+      if (!meta) {
+        return false;
+      }
+      syncMessageStopButton(meta, entry);
       renderMessageContentIfChanged(content, entry.content);
       return true;
     }
@@ -3636,6 +3736,8 @@
     ensureLiveRelayForOpenConversation,
     createOutboxEvent,
     enqueueMessage,
+    enqueueRunCancel,
+    stopRunFromPhone,
     flushOutbox,
     flushOutboxViaMailbox,
     flushOutboxViaRelay,
@@ -3644,6 +3746,7 @@
     activeMentionQuery,
     mentionOptions,
     replaceActiveMention,
+    isCancellableMobileRow,
     requestChatListViaRelay,
     requestTimelineViaRelay,
     openRelayPayload,

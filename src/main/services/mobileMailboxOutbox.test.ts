@@ -35,6 +35,37 @@ test("collectMobileMailboxOutboxEvents skips stale route events without blocking
   assert.deepEqual(acceptedFulfilled, []);
 });
 
+test("collectMobileMailboxOutboxEvents carries run.cancel.requested to desktop without message execution claims", async () => {
+  const claimAttempts: string[] = [];
+  const events = await collectMobileMailboxOutboxEvents([
+    mailboxRunCancelEvent({
+      eventId: "mobile-cancel-1",
+      conversationId: "current-conversation",
+      runId: "participant-run-1"
+    })
+  ], {
+    acceptMailboxMessageEvent: () => false,
+    acceptMobileOutboxEnvelope: () => true,
+    acceptFulfilledMobileOutboxEvent: () => undefined,
+    hasAcceptedMobileEvent: () => false,
+    hasMobileMailboxResultForMobileEvent: () => false,
+    tryAcquireMobileEventExecution: (event) => {
+      claimAttempts.push(event.eventId);
+      return true;
+    },
+    isConversationAllowed: () => true
+  });
+
+  assert.deepEqual(events, [{
+    eventId: "mobile-cancel-1",
+    conversationId: "current-conversation",
+    kind: "run.cancel.requested",
+    createdAt: "2026-08-13T00:00:00.000Z",
+    payload: { runId: "participant-run-1" }
+  }]);
+  assert.deepEqual(claimAttempts, []);
+});
+
 test("collectMobileMailboxOutboxEvents skips revoked or stale pairing envelopes before claiming", async () => {
   const checked: string[] = [];
   const claimAttempts: string[] = [];
@@ -245,6 +276,26 @@ function mailboxOutboxEvent(input: {
     logicalTs: `0000000000000001:mobile-test:${input.conversationId}`,
     kind: "message.created",
     payload: { content: input.content },
+    payloadHash: `sha256:${input.eventId}:payload`,
+    eventHash: `sha256:${input.eventId}:event`,
+    createdAt: "2026-08-13T00:00:00.000Z"
+  };
+}
+
+function mailboxRunCancelEvent(input: {
+  eventId: string;
+  conversationId: string;
+  runId: string;
+}): ChatEventEnvelope<{ runId: string }> {
+  return {
+    eventId: input.eventId,
+    conversationId: input.conversationId,
+    logScopeId: input.conversationId,
+    originId: "mobile-test",
+    originSeq: 1,
+    logicalTs: `0000000000000001:mobile-test:${input.conversationId}`,
+    kind: "run.cancel.requested",
+    payload: { runId: input.runId },
     payloadHash: `sha256:${input.eventId}:payload`,
     eventHash: `sha256:${input.eventId}:event`,
     createdAt: "2026-08-13T00:00:00.000Z"

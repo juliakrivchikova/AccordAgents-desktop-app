@@ -112,6 +112,7 @@ import {
   chatParticipantRequestReplyRootMap
 } from "../shared/chatParticipantRequestThreads";
 import type { ChatEventEnvelope } from "../shared/chatEvents";
+import { readActiveRunIds } from "../shared/chatRunState";
 import type { ChatDeviceCapabilityGrantPayload, ChatDeviceCapabilityRevokedPayload } from "../shared/chatDeviceCapabilities";
 import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
@@ -930,7 +931,8 @@ async function startMobileRelayControlForPairing(pairing: MobilePairingPackage):
       hasMobileMailboxResultForMobileEvent: (conversationId, eventId) =>
         hasFulfilledMobileMailboxEvent(pairing, conversationId, eventId),
       tryAcquireMobileEventExecution: (event, runId) =>
-        acquireDesktopMobileExecutionClaim(pairing, event.conversationId, event.eventId, runId)
+        acquireDesktopMobileExecutionClaim(pairing, event.conversationId, event.eventId, runId),
+      cancelRun: (conversationId, runId) => cancelMobileChatRun(conversationId, runId)
     },
     mobileRelayChatCatalog(),
     (progress) => emitReviewProgress(progress),
@@ -1935,6 +1937,24 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
       return conversation?.kind === "chat" && conversation.metadata.archived !== true;
     }
   };
+}
+
+async function cancelMobileChatRun(conversationId: string, runId: string): Promise<boolean> {
+  const targetRunId = runId.trim();
+  if (chatService.hasActiveRunForConversation(conversationId, targetRunId)) {
+    return chatService.cancelRun(targetRunId);
+  }
+  const conversation = await storageService.getConversation(conversationId);
+  if (!targetRunId || !conversation || conversation.kind !== "chat") {
+    return false;
+  }
+  const belongsToConversation = readActiveRunIds(conversation.metadata).includes(targetRunId) ||
+    conversation.metadata.runId === targetRunId ||
+    conversation.messages.some((message) =>
+      message.status === "pending" && message.metadata?.runId === targetRunId
+    ) ||
+    Boolean((conversation.metadata.remoteRunHandles as Record<string, unknown> | undefined)?.[targetRunId]);
+  return belongsToConversation ? chatService.cancelRun(targetRunId) : false;
 }
 
 function mobileRelayChatMembers(conversation: Conversation | undefined): ChatParticipant[] {

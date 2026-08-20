@@ -35,6 +35,10 @@ export async function collectMobileMailboxOutboxEvents(
     if (selection.acceptMobileOutboxEnvelope && !await selection.acceptMobileOutboxEnvelope(event as ChatEventEnvelope)) {
       continue;
     }
+    if (outboxEvent.kind === "run.cancel.requested") {
+      events.push(outboxEvent);
+      continue;
+    }
     if (await selection.hasAcceptedMobileEvent(outboxEvent.conversationId, outboxEvent.eventId)) {
       continue;
     }
@@ -182,17 +186,31 @@ export function mailboxEnvelopeToMobileOutboxEvent(value: unknown): MobileOutbox
     return undefined;
   }
   const envelope = value as Record<string, unknown>;
-  if (envelope.kind !== "message.created") {
+  if (envelope.kind !== "message.created" && envelope.kind !== "run.cancel.requested") {
     return undefined;
   }
   const eventId = typeof envelope.eventId === "string" ? envelope.eventId.trim() : "";
   const conversationId = typeof envelope.conversationId === "string" ? envelope.conversationId.trim() : "";
   const payload = envelope.payload;
-  const content = payload && typeof payload === "object" && !Array.isArray(payload) &&
-    typeof (payload as { content?: unknown }).content === "string"
+  if (!eventId || !conversationId || !payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return undefined;
+  }
+  if (envelope.kind === "run.cancel.requested") {
+    const runId = typeof (payload as { runId?: unknown }).runId === "string"
+      ? (payload as { runId: string }).runId.trim()
+      : "";
+    return runId ? {
+      eventId,
+      conversationId,
+      kind: "run.cancel.requested",
+      ...(typeof envelope.createdAt === "string" ? { createdAt: envelope.createdAt } : {}),
+      payload: { runId }
+    } : undefined;
+  }
+  const content = typeof (payload as { content?: unknown }).content === "string"
     ? (payload as { content: string }).content.trim()
     : "";
-  if (!eventId || !conversationId || !content) {
+  if (!content) {
     return undefined;
   }
   return {
