@@ -21,6 +21,40 @@ export function normalizeCloudRunWorkerSettings(value: unknown): CloudRunWorkerS
   };
 }
 
+// A worker target recorded inside a run handle, a session handle or a cleanup
+// tombstone carries the public address the box had at the time. An AWS worker
+// gets a NEW public address every stop/start, so those stored addresses go dead
+// while the machine itself is alive and reachable at a new one. Dialling a dead
+// address costs a full SSH timeout (15s) per attempt, on every reconcile pass.
+//
+// `hostKeyAlias` ("accordagents-<instanceId>") identifies the machine and does
+// not change with the address, so it decides what a stored target means now:
+//   - same machine as the configured worker -> use the current address;
+//   - a different machine -> we no longer manage it, do not dial it at all;
+//   - no alias on either side (manual SSH worker) -> leave it untouched.
+export function resolveCurrentWorkerAddress(
+  remembered: RemoteRunWorkerTarget,
+  current: RemoteRunWorkerTarget | undefined
+): RemoteRunWorkerTarget | undefined {
+  const rememberedAlias = remembered.hostKeyAlias?.trim();
+  const currentAlias = current?.hostKeyAlias?.trim();
+  if (!rememberedAlias || !current || !currentAlias) {
+    return remembered;
+  }
+  if (rememberedAlias !== currentAlias) {
+    return undefined;
+  }
+  if (remembered.host === current.host && remembered.port === current.port) {
+    return remembered;
+  }
+  return {
+    ...remembered,
+    host: current.host,
+    port: current.port,
+    identityFile: current.identityFile ?? remembered.identityFile
+  };
+}
+
 export function cloudRunWorkerTargetFromSettings(worker: CloudRunWorkerSettings): RemoteRunWorkerTarget | undefined {
   const host = worker.host?.trim();
   if (!host) {

@@ -1,6 +1,6 @@
 import type { CloudRunStatus, CloudRunWorkerSettings, RemoteRunHandle } from "../../shared/types";
 import type { ChatService } from "./chat";
-import { cloudRunWorkerTargetFromSettings } from "./cloudRunWorkers";
+import { cloudRunWorkerTargetFromSettings, resolveCurrentWorkerAddress } from "./cloudRunWorkers";
 import type { DebugLogService } from "./debugLogs";
 import type { RemoteDetachedRunState, RemoteRunService, RemoteRunWorkerTarget } from "./remoteRuns";
 import type { SettingsService } from "./settings";
@@ -80,7 +80,10 @@ export class RemoteRunCoordinator {
       return;
     }
     const handle = this.handles.get(runId);
-    const worker = handle ? cloudRunWorkerTargetFromSettings(handle.worker) : undefined;
+    const recorded = handle ? cloudRunWorkerTargetFromSettings(handle.worker) : undefined;
+    // The worker may have stopped and restarted since the run began — exactly
+    // the lid-closed case — and come back on a different public address.
+    const worker = recorded ? resolveCurrentWorkerAddress(recorded, await this.currentWorkerTarget()) : undefined;
     if (!handle || !worker || this.isTerminal(handle.status)) {
       this.stopRun(runId);
       return;
@@ -140,13 +143,49 @@ export class RemoteRunCoordinator {
     return settings.cloudRuns.pollIntervalMs;
   }
 
+  // The worker as it is reachable right now, not as some stored handle remembers
+  // it. An AWS box changes its public address on every stop/start; the handle
+  // carries the address from the last time a run actually reached it. Reading
+  // settings only — this must never start an instance on a housekeeping pass.
+  private async currentWorkerTarget(): Promise<RemoteRunWorkerTarget | undefined> {
+    try {
+      const settings = await this.settings.getPublicSettings();
+      if (settings.cloudRuns.mode !== "aws") {
+        return cloudRunWorkerTargetFromSettings(settings.cloudRuns.worker);
+      }
+      const handle = settings.cloudRuns.awsHandle;
+      if (!handle?.lastKnownHost) {
+        return undefined;
+      }
+      return cloudRunWorkerTargetFromSettings({
+        ...settings.cloudRuns.worker,
+        host: handle.lastKnownHost,
+        hostKeyAlias: `accordagents-${handle.instanceId}`
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
   private async reconcileParticipantSessions(activeRunHandles: readonly RemoteRunHandle[]): Promise<void> {
     const activeRunIds = new Set(activeRunHandles.map((handle) => handle.runId));
     const sessions = await this.chat.listRemoteParticipantSessionHandles();
     const persistedSessionDirs = new Set(sessions.map((session) => session.handle.sessionDir));
+    const currentWorker = await this.currentWorkerTarget();
     for (const session of sessions) {
+      const sessionWorker = resolveCurrentWorkerAddress(session.handle.worker as RemoteRunWorkerTarget, currentWorker);
+      if (!sessionWorker) {
+        // Recorded against a worker that is not the current one: its address is
+        // dead and dialling it would only spend an SSH timeout.
+        await this.debugLogs.write("remote-session.reconcile.skipped-stale-worker", {
+          conversationId: session.conversationId,
+          participantId: session.participantId,
+          workerHost: session.handle.worker.host
+        });
+        continue;
+      }
       try {
-        const state = await this.remoteRuns.inspectParticipantSession(session.handle);
+        const state = await this.remoteRuns.inspectParticipantSession({ ...session.handle, worker: sessionWorker });
         if (state.providerSessionId) {
           await this.chat.backfillRemoteParticipantSessionId(
             session.conversationId,
@@ -166,7 +205,7 @@ export class RemoteRunCoordinator {
           continue;
         }
         if (state.status === "live") {
-          await this.remoteRuns.stopParticipantSessionIfIdle(session.handle, false);
+          await this.remoteRuns.stopParticipantSessionIfIdle({ ...session.handle, worker: sessionWorker }, false);
         }
       } catch (error) {
         await this.debugLogs.write("remote-session.reconcile.error", {
@@ -179,7 +218,11 @@ export class RemoteRunCoordinator {
 
     const workers = new Map<string, RemoteRunWorkerTarget>();
     const rememberWorker = (settings: CloudRunWorkerSettings): void => {
-      const worker = cloudRunWorkerTargetFromSettings(settings);
+      const recorded = cloudRunWorkerTargetFromSettings(settings);
+      if (!recorded) {
+        return;
+      }
+      const worker = resolveCurrentWorkerAddress(recorded, currentWorker);
       if (!worker) {
         return;
       }

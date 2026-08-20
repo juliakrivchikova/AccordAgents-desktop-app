@@ -3275,6 +3275,7 @@ export class SettingsService {
       ...(typeof record.vCpu === "number" && record.vCpu > 0 ? { vCpu: Math.floor(record.vCpu) } : {}),
       ...(typeof record.memoryMiB === "number" && record.memoryMiB > 0 ? { memoryMiB: Math.floor(record.memoryMiB) } : {}),
       ...(typeof record.adopted === "boolean" ? { adopted: record.adopted } : {}),
+      ...(typeof record.lastKnownHost === "string" && record.lastKnownHost.trim() ? { lastKnownHost: record.lastKnownHost.trim() } : {}),
       createdAt: typeof record.createdAt === "string" && record.createdAt ? record.createdAt : new Date().toISOString()
     };
   }

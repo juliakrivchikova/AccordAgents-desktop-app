@@ -1355,7 +1355,7 @@ test("mirror-sync detached run up-syncs before launch and runs codex in the mirr
   assert.ok(!args.some((arg) => arg.startsWith("sandbox_workspace_write.writable_roots=")));
 });
 
-test("mirror-sync skips rsync for an unchanged project after durable state survives restart", async () => {
+test("the established-mirror record survives an app restart, so a new instance does not re-sync", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant]);
   const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-src-"));
@@ -1393,40 +1393,84 @@ test("mirror-sync skips rsync for an unchanged project after durable state survi
   });
 
   assert.equal(mirrorSync.calls.filter((call) => call.kind === "up").length, 1);
-  assert.ok(phases.includes("Project files up to date"));
+  assert.ok(phases.includes("Project files already on the worker"));
 });
 
-test("mirror-sync resyncs after the local project fingerprint changes", async () => {
+test("an established mirror is never re-synced mid-conversation, even after local edits", async () => {
+  // User's rule: the mirror is set up once, when the cloud participant starts
+  // working, and never refreshed again during the chat. Later local edits reach
+  // it through git, and its results come back as a pull request. Re-syncing
+  // between turns only spends the user's time.
   const participant = chatParticipant();
   const conversation = chatConversation([participant]);
   const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-src-"));
   await writeFile(path.join(localDir, "file.txt"), "hello", "utf8");
   const mirrorSync = new FakeMirrorSync();
-  const firstWorker = new FakeDetachedWorkerTransport();
-  const first = await testRemoteRun({ conversation, detachedWorkerTransport: firstWorker, mirrorSync });
+  const first = await testRemoteRun({ conversation, detachedWorkerTransport: new FakeDetachedWorkerTransport(), mirrorSync });
   const target = { host: "worker.example", workerRoot: "/srv/worker" };
 
   await first.remote.startDetachedRun({
     conversationId: conversation.id,
-    runId: "mirror-changed-first",
+    runId: "mirror-established-first",
     participant: participantConfig(participant),
     prompt: "First remote turn.",
     worker: target,
     sync: { localPath: localDir }
   });
   await writeFile(path.join(localDir, "file.txt"), "changed", "utf8");
+  await writeFile(path.join(localDir, "added.txt"), "new file", "utf8");
 
-  const secondWorker = new FakeDetachedWorkerTransport();
-  const afterRestart = new RemoteRunService(first.service, {
+  const second = new RemoteRunService(first.service, {
     spoolRoot: first.root,
-    detachedWorkerTransport: secondWorker,
+    detachedWorkerTransport: new FakeDetachedWorkerTransport(),
     mirrorSync,
     remoteMirrorProbe: async () => true
   });
   const phases: string[] = [];
-  await afterRestart.startDetachedRun({
+  await second.startDetachedRun({
     conversationId: conversation.id,
-    runId: "mirror-changed-second",
+    runId: "mirror-established-second",
+    participant: participantConfig(participant),
+    prompt: "Second remote turn.",
+    worker: target,
+    sync: { localPath: localDir },
+    onPhase: (status) => phases.push(status.label)
+  });
+
+  assert.equal(mirrorSync.calls.filter((call) => call.kind === "up").length, 1, "the mirror is synced once, not once per turn");
+  assert.ok(phases.includes("Project files already on the worker"));
+  assert.ok(!phases.includes("Syncing project files"));
+});
+
+test("a mirror that is gone from the worker is set up again", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-src-"));
+  await writeFile(path.join(localDir, "file.txt"), "hello", "utf8");
+  const mirrorSync = new FakeMirrorSync();
+  const first = await testRemoteRun({ conversation, detachedWorkerTransport: new FakeDetachedWorkerTransport(), mirrorSync });
+  const target = { host: "worker.example", workerRoot: "/srv/worker" };
+
+  await first.remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "mirror-missing-first",
+    participant: participantConfig(participant),
+    prompt: "First remote turn.",
+    worker: target,
+    sync: { localPath: localDir }
+  });
+
+  // The worker was recreated: nothing at that path any more.
+  const second = new RemoteRunService(first.service, {
+    spoolRoot: first.root,
+    detachedWorkerTransport: new FakeDetachedWorkerTransport(),
+    mirrorSync,
+    remoteMirrorProbe: async () => false
+  });
+  const phases: string[] = [];
+  await second.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "mirror-missing-second",
     participant: participantConfig(participant),
     prompt: "Second remote turn.",
     worker: target,
@@ -1438,7 +1482,7 @@ test("mirror-sync resyncs after the local project fingerprint changes", async ()
   assert.ok(phases.includes("Syncing project files"));
 });
 
-test("second run recomputes the mirror fingerprint inside the queue after a delaying op (P1-5)", async () => {
+test("a run queued behind a slow mirror op still reuses the established mirror instead of syncing", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant]);
   const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-src-"));
@@ -1492,9 +1536,9 @@ test("second run recomputes the mirror fingerprint inside the queue after a dela
   }
   await new Promise((resolve) => setTimeout(resolve, 100));
 
-  // Edit the project AFTER the second run parked but BEFORE its queued op runs. A
-  // stale pre-queue fingerprint misses this and wrongly skips the sync; an
-  // in-queue fingerprint catches it and resyncs.
+  // Edit the project AFTER the second run parked but BEFORE its queued op runs.
+  // It changes nothing: once the mirror exists, the conversation does not resync
+  // it, so this edit reaches the worker through git, not through rsync.
   await writeFile(path.join(localDir, "file.txt"), "changed-content", "utf8");
 
   mirrorSync.releaseDown();
@@ -1502,9 +1546,8 @@ test("second run recomputes the mirror fingerprint inside the queue after a dela
   await second;
 
   const upCalls = mirrorSync.calls.filter((call) => call.kind === "up");
-  assert.equal(upCalls.length, 2, "second run must up-sync the edited state, not skip on a stale fingerprint");
-  assert.ok(phases.includes("Syncing project files"));
-  assert.ok(!phases.includes("Project files up to date"));
+  assert.equal(upCalls.length, 1, "the established mirror is used as-is, whatever changed locally");
+  assert.ok(phases.includes("Project files already on the worker"));
 });
 
 test("reclaimWorkerMirrorStorage removes old-layout + orphaned worktrees under the mirrors dir only (P1-8)", async () => {
@@ -1590,7 +1633,7 @@ test("mirror-sync skip survives AWS stop/start public IP changes through host al
   });
 
   assert.equal(mirrorSync.calls.filter((call) => call.kind === "up").length, 1);
-  assert.ok(phases.includes("Project files up to date"));
+  assert.ok(phases.includes("Project files already on the worker"));
 });
 
 test("mirror-sync resyncs after AWS worker delete and recreate changes instance alias", async () => {
@@ -2189,18 +2232,23 @@ test("terminal state releases the mirror without ever writing back automatically
 
   assert.equal(mirrorSync.calls.filter((call) => call.kind === "down").length, 0);
 
-  // The finished run no longer counts toward mirror busyness: a changed project
-  // up-syncs again instead of being skipped as an active mirror.
+  // The finished run no longer counts toward mirror busyness. It is visible in
+  // the phase the next run reports: an established mirror ("already on the
+  // worker"), not a mirror still held by a live run ("using active mirror").
   await writeFile(path.join(localDir, "changed.txt"), "changed", "utf8");
+  const phases: string[] = [];
   await remote.startDetachedRun({
     conversationId: conversation.id,
     runId: "mirror-terminal-run-2",
     participant: participantConfig(participant),
     prompt: "Run again.",
     worker: target,
-    sync: { localPath: localDir }
+    sync: { localPath: localDir },
+    onPhase: (status) => phases.push(status.label)
   });
-  assert.equal(mirrorSync.calls.filter((call) => call.kind === "up").length, 2);
+  assert.ok(phases.includes("Project files already on the worker"));
+  assert.ok(!phases.includes("Using active project mirror"));
+  assert.equal(mirrorSync.calls.filter((call) => call.kind === "up").length, 1, "an established mirror is not re-synced");
 });
 
 test("pullMirrorForRun writes back only on demand and can run repeatedly", async () => {

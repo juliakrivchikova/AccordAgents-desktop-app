@@ -386,9 +386,20 @@ export class CloudRunAwsService {
     const running = await this.lifecycle.ensureRunning(this.credentialsForHandle(prepared.credentials, prepared.handle), this.toHandle(prepared.handle), deviceId);
     const key = await this.keyForHandle(prepared.handle);
     await this.workerAccess.ensureAccess(this.clientForRegion(prepared.credentials, prepared.handle.region), running, key);
-    if (key.keyName !== prepared.handle.keyName) {
+    const keyChanged = key.keyName !== prepared.handle.keyName;
+    if (keyChanged) {
       prepared.handle.keyName = key.keyName;
       prepared.handle.accessKeyName = key.keyName;
+    }
+    // Record where the box actually is. Run and session handles keep the address
+    // they were created with, and a stop/start hands out a new one; without this
+    // the app keeps dialling dead addresses and pays an SSH timeout each time.
+    const publicIp = typeof running.publicIp === "string" ? running.publicIp.trim() : "";
+    const hostChanged = publicIp.length > 0 && prepared.handle.lastKnownHost !== publicIp;
+    if (hostChanged) {
+      prepared.handle.lastKnownHost = publicIp;
+    }
+    if (keyChanged || hostChanged) {
       await this.settings.saveAwsWorkerHandle(prepared.handle);
     }
     return workerSettings(running.publicIp as string, key.privateKeyPath, deviceId, running.instanceId);

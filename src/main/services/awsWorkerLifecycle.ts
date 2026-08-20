@@ -111,7 +111,10 @@ export interface AwsWorkerDeleteResult {
 const RUNNING_WAIT_TIMEOUT_MS = 3 * 60_000;
 const STOPPED_WAIT_TIMEOUT_MS = 3 * 60_000;
 const TERMINATED_WAIT_TIMEOUT_MS = 3 * 60_000;
-const DEFAULT_IDLE_STOP_MS = 20 * 60_000;
+// The worker stops itself after this much idle time. Kept generous on purpose:
+// a stopped box has to boot and re-sync the project mirror before the next turn
+// can start, and that wait is paid by the user, not by the idle instance.
+const DEFAULT_IDLE_STOP_MS = 3 * 60 * 60_000;
 
 export class AwsWorkerLifecycle {
   private readonly options: Required<Pick<AwsWorkerLifecycleOptions,

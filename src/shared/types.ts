@@ -68,6 +68,10 @@ export interface AwsWorkerHandleInfo {
   vCpu?: number;
   memoryMiB?: number;
   adopted?: boolean;
+  // The public address the instance had when it was last seen running. An AWS
+  // box gets a new one on every stop/start, so stored run/session handles go
+  // stale; this is the one place that tracks where the machine is NOW.
+  lastKnownHost?: string;
   createdAt: string;
 }
 

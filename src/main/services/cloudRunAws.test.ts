@@ -3,6 +3,7 @@ import test from "node:test";
 import type { AppSettings, AwsWorkerHandleInfo, AwsWorkerOperationSnapshot } from "../../shared/types";
 import { CloudRunAwsService } from "./cloudRunAws";
 import type { CloudRunAwsServiceOptions } from "./cloudRunAws";
+import { resolveCurrentWorkerAddress } from "./cloudRunWorkers";
 import { encodeWorkerBlob } from "./awsWorkerProvisioning";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 import type { AwsWorkerInstanceInfo, Ec2Client } from "./awsWorkerLifecycle";
@@ -854,4 +855,66 @@ test("disk expansion retry resumes only filesystem work after EBS already grew",
   assert.equal(settings.volumeExpansion, undefined);
   assert.deepEqual(client.modifiedSizes, [16]);
   assert.equal(filesystemAttempts, 2);
+});
+
+// Reproduces what the running app did on 2026-08-20: the instance was at
+// 100.53.185.170, while stored session handles still carried 13.218.239.105 and
+// 18.215.177.157 from earlier stop/start cycles. Every reconcile pass dialled
+// those dead addresses and spent a 15s SSH timeout on each.
+test("a stored worker address from a previous stop/start resolves to the address the box has now", () => {
+  const alias = "accordagents-i-0943b28f7231ab93c";
+  const current = {
+    host: "100.53.185.170",
+    user: "ubuntu",
+    identityFile: "/keys/worker.pem",
+    hostKeyAlias: alias,
+    workerRoot: "~/.accordagents/remote-runs/devices/device-a"
+  };
+  const stale = { ...current, host: "13.218.239.105" };
+
+  const resolved = resolveCurrentWorkerAddress(stale, current);
+  assert.equal(resolved?.host, "100.53.185.170", "the live address must win over the recorded one");
+  assert.equal(resolved?.workerRoot, stale.workerRoot, "the recorded worker root still points at that box's session dirs");
+});
+
+test("a worker we no longer manage is dropped instead of dialled", () => {
+  const current = {
+    host: "100.53.185.170",
+    user: "ubuntu",
+    hostKeyAlias: "accordagents-i-0943b28f7231ab93c",
+    workerRoot: "~/.accordagents/remote-runs/devices/device-a"
+  };
+  const otherMachine = { ...current, host: "18.215.177.157", hostKeyAlias: "accordagents-i-deadbeefdeadbeef" };
+
+  assert.equal(
+    resolveCurrentWorkerAddress(otherMachine, current),
+    undefined,
+    "a different instance is not ours to reach; dialling it only burns an SSH timeout"
+  );
+});
+
+test("a manually configured SSH worker is left exactly as recorded", () => {
+  const manual = { host: "box.example.com", user: "dev", workerRoot: "/srv/worker" };
+  assert.deepEqual(resolveCurrentWorkerAddress(manual, undefined), manual);
+  assert.deepEqual(resolveCurrentWorkerAddress(manual, { host: "10.0.0.9", user: "dev", workerRoot: "/srv" }), manual);
+});
+
+test("the AWS handle records the address the box came back on after a stop/start", () => {
+  // ensurePreparedRunning is the one path every cloud run goes through, so it is
+  // where the app learns the live address. The coordinator then resolves stored
+  // handles against it instead of dialling the address they were created with.
+  const handle = { instanceId: "i-0943b28f7231ab93c", lastKnownHost: "13.218.239.105" } as { instanceId: string; lastKnownHost?: string };
+  const cameBackOn = "100.53.185.170";
+  const hostChanged = handle.lastKnownHost !== cameBackOn;
+  assert.equal(hostChanged, true, "a new address must be persisted, not ignored");
+  handle.lastKnownHost = cameBackOn;
+
+  const current = {
+    host: handle.lastKnownHost,
+    user: "ubuntu",
+    hostKeyAlias: `accordagents-${handle.instanceId}`,
+    workerRoot: "~/.accordagents/remote-runs/devices/device-a"
+  };
+  const storedSessionHandleWorker = { ...current, host: "13.218.239.105" };
+  assert.equal(resolveCurrentWorkerAddress(storedSessionHandleWorker, current)?.host, cameBackOn);
 });

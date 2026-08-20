@@ -2,13 +2,24 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## NON-NEGOTIABLE PRODUCT INVARIANT: DEDICATED CLI PARITY
+> **Read `docs/parity-requirements.md` first. It is the most important document in this project.**
+> It states the two parity requirements every decision here must satisfy, and it is the only place an exception to them may exist — approved personally by the User, never by an engineer, a review, or an accord. Anything in this file or elsewhere that conflicts with it is wrong.
 
-**WORKING WITH ONE SPECIFIC PARTICIPANT IN ACCORDAGENTS CHAT MUST FEEL LIKE WORKING WITH THAT AGENT THROUGH ITS REGULAR, DEDICATED CLI.**
+## NON-NEGOTIABLE PRODUCT INVARIANTS: PARITY
+
+**1. WORKING WITH ONE SPECIFIC PARTICIPANT IN ACCORDAGENTS CHAT MUST FEEL LIKE WORKING WITH THAT AGENT THROUGH ITS REGULAR, DEDICATED CLI.**
+
+**2. FOR THE USER THERE MUST BE NO DIFFERENCE BETWEEN A PARTICIPANT THAT RUNS LOCALLY AND ONE THAT RUNS IN THE CLOUD.** Same controls, same feedback, same capabilities, same consequences for the same action. Transport, provisioning, and authentication may differ; what the user does, sees, and gets must not.
+
+Both are stated by the User and may not be weakened by an engineering trade-off. **Any divergence from either requires the User's personal approval and must be recorded in `docs/parity-requirements.md`.** An unapproved divergence is a defect, not a design decision — that document also carries the register of known open ones.
 
 Before every product, architecture, implementation, UI, and commit decision, explicitly check that this invariant still holds. AccordAgents must mirror the current CLI behavior at the time a feature is implemented, including output rendering and streaming, permissions and approvals, sandboxing, model selection, sessions and resume behavior, compaction, goals, skills and rules, MCPs and tools, cancellation, errors, warnings, and user controls. The user should not need to learn different single-agent behavior merely because the agent is running inside AccordAgents.
 
 Treat the dedicated CLI as the source of truth. Do not invent app-specific semantics for a single participant when the CLI already defines them. If multi-participant coordination inherently requires a difference, keep the divergence as narrow as possible, make it visible to the user, document why it exists, and add verification for both the parity path and the divergence. CLI behavior can evolve; verify the current behavior when implementing or revisiting a feature rather than relying on an old assumption. Any unexplained mismatch is a product correctness bug.
+
+**Approved exception — code delivery from the cloud.** A participant running in the cloud hands over code changes the way a remote colleague does: it pushes a branch and opens a GitHub pull request. It does not write into the user's working tree, and there is deliberately no automatic write-back from the worker mirror. Credentials for that come from the user's Settings environment variables, which apply to cloud participants exactly as they do to local ones. Recorded in `docs/parity-requirements.md`.
+
+**AccordAgents does not manage git worktrees.** The app never creates, moves, or deletes a worktree — not locally, not on a cloud worker, not per participant, not per run. When a task needs isolation, the User asks the participant for it and the participant creates the worktree itself with ordinary git commands, exactly as it would in its dedicated CLI. Do not propose or build app-managed worktrees; do not let any app operation destroy a participant-created worktree or its uncommitted changes. Recorded in `docs/parity-requirements.md`.
 
 ## Commands
 
@@ -89,6 +100,8 @@ Key routing rules:
 - Architecture → invoke /plan-eng-review
 - Design system/plan review → invoke /design-consultation or /plan-design-review
 - Full review pipeline → invoke /autoplan
+- Fix a reported defect → invoke /fix-with-e2e-repro (reproduce end-to-end first, prove the fix with the same reproduction)
+- Make a main-process change go live → invoke /restart-the-app (build, restart through launchd, verify the process actually came back)
 - Bugs/errors → invoke /investigate
 - QA/testing site behavior → invoke /qa or /qa-only
 - Code review/diff check → invoke /review

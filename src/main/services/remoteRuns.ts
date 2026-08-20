@@ -892,11 +892,28 @@ export class RemoteRunService {
       options: request.options,
       codexPath: remoteAgentExecutablePath(request.participant.kind, request.worker)
     });
+    // Per-stage timings for the wait a user sees before their agent starts
+    // talking. Cheap (a Date.now() per stage) and the only way to attribute that
+    // wait without guessing which SSH round trip is the expensive one.
+    const launchStartedAt = Date.now();
+    let stageMark = launchStartedAt;
+    const markStage = (stage: string): void => {
+      const now = Date.now();
+      this.syncLogger?.("remote-run.launch.stage", {
+        runId,
+        stage,
+        ms: now - stageMark,
+        sinceStartMs: now - launchStartedAt
+      });
+      stageMark = now;
+    };
     let participantSession: RemoteParticipantSessionEnsureResult | undefined;
     if (this.detachedWorkerTransport.ensureParticipantSession) {
       participantSession = await this.prepareWarmParticipantSession(runId, request, runtimeFingerprint);
+      markStage("warm-session");
     } else {
       await this.emitDetachedPhase(runId, request, "launching-session", "Checking remote environment");
+      markStage("no-warm-session");
     }
     const advisoryIssues = await this.ensureRemoteToolchainPreflight(
       request.worker,
@@ -918,7 +935,9 @@ export class RemoteRunService {
       );
     }
 
+    markStage("toolchain-preflight");
     const sync = await this.prepareMirrorForRun(runId, request);
+    markStage("mirror");
     const effectiveRepoPath = sync?.remotePath ?? request.repoPath;
     await this.emitDetachedPhase(
       runId,
@@ -927,6 +946,7 @@ export class RemoteRunService {
       "Preparing remote sandbox"
     );
     const remoteSandbox = await this.remoteSandboxOptionsForRun(request, sync, effectiveRepoPath);
+    markStage("sandbox-options");
 
     const invocation = buildRemoteAgentInvocation({
       participant: request.participant,
@@ -972,6 +992,7 @@ export class RemoteRunService {
       if (participantSession && this.detachedWorkerTransport.submitTurn) {
         try {
           snapshot = await this.detachedWorkerTransport.submitTurn(launchRequest);
+          markStage("submit-turn");
         } catch (error) {
           try {
             const relaunched = await this.detachedWorkerTransport.ensureParticipantSession?.({
@@ -1694,12 +1715,19 @@ export class RemoteRunService {
         await this.emitDetachedPhase(runId, request, "syncing-files", "Using active project mirror");
         return;
       }
-      const fingerprint = await this.computeMirrorFingerprintForSync(runId, sync.localPath, remotePath, request.signal);
-      if (fingerprint && await this.isMirrorSyncStateCurrent(request.worker, remotePath, sync.localPath, fingerprint, request.signal)) {
-        this.syncLogger?.("remote-run.sync.up.skipped-current", { runId, remotePath });
-        await this.emitDetachedPhase(runId, request, "syncing-files", "Project files up to date");
+      // The mirror is established ONCE, when a cloud participant starts working
+      // on this project, and is not refreshed again for the rest of the
+      // conversation. A remote colleague does not re-clone the repo between two
+      // messages either: they work from what they have and hand results back
+      // through a pull request. Re-syncing mid-chat only spends the user's time,
+      // so a sync happens again only when there is nothing usable on the worker:
+      // no mirror recorded for this worker+path, or the mirror is gone.
+      if (await this.mirrorSyncAlreadyEstablished(request.worker, remotePath, sync.localPath, request.signal)) {
+        this.syncLogger?.("remote-run.sync.up.skipped-established", { runId, remotePath });
+        await this.emitDetachedPhase(runId, request, "syncing-files", "Project files already on the worker");
         return;
       }
+      const fingerprint = await this.computeMirrorFingerprintForSync(runId, sync.localPath, remotePath, request.signal);
       const startedAt = Date.now();
       let lastProgress = -1;
       await this.emitDetachedPhase(runId, request, "syncing-files", "Syncing project files");
@@ -1796,19 +1824,19 @@ export class RemoteRunService {
     }
   }
 
-  private async isMirrorSyncStateCurrent(
+  // "Is there already a usable mirror for this worker and path?" — deliberately
+  // NOT "does it still match the local tree". Local edits made after the cloud
+  // participant joined reach it through git, not through another mid-chat rsync.
+  private async mirrorSyncAlreadyEstablished(
     worker: RemoteRunWorkerTarget,
     remotePath: string,
     localPath: string,
-    fingerprint: LocalMirrorFingerprint,
     signal: AbortSignal | undefined
   ): Promise<boolean> {
     await this.mirrorSyncStateChain.catch(() => undefined);
     const state = await this.readMirrorSyncState();
     const entry = state.mirrors[this.mirrorSyncStateKey(worker, remotePath)];
-    if (!(entry?.fingerprintVersion === fingerprint.version &&
-      entry.fingerprintDigest === fingerprint.digest &&
-      entry.remotePath === remotePath)) {
+    if (!entry || entry.remotePath !== remotePath) {
       return false;
     }
     return this.remoteMirrorLooksCurrent(worker, remotePath, localProjectHasGitDir(localPath), signal);
@@ -2353,6 +2381,10 @@ export class RemoteRunService {
 }
 
 class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
+  // Workers whose on-box session scripts have already been confirmed to match
+  // this app build, so the confirmation is not re-fetched every turn.
+  private readonly verifiedSessionProtocols = new Set<string>();
+
   async preflight(request: RemoteToolchainPreflightProbeRequest): Promise<ToolchainPreflightIssue[]> {
     if (request.requirements.length === 0) {
       return [];
@@ -2898,6 +2930,16 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
     const target = remoteSshTarget(worker);
     const sshBaseArgs = remoteSshBaseArgs(worker, target);
     const root = await resolveRemoteRunDir(sshPath, sshBaseArgs, remoteWorkerRootForTarget(worker), signal);
+    // The scripts on the box are compared against the ones this app ships, so
+    // once they match they keep matching until the app itself is replaced —
+    // which means a restart, which clears this. Re-reading protocol.json on
+    // every turn costs an SSH round trip and can never return a new answer.
+    // Cleared for this worker whenever a session-control call fails, so a wiped
+    // or recreated box reinstalls instead of trusting a stale confirmation.
+    const protocolCacheKey = `${sshBaseArgs.join("\u0000")}\u0000${root}`;
+    if (this.verifiedSessionProtocols.has(protocolCacheKey)) {
+      return root;
+    }
     const protocol = remoteSessionProtocolPayload();
     let protocolCurrent = false;
     try {
@@ -2940,7 +2982,19 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
         }).catch(() => undefined);
       }
     }
+    this.verifiedSessionProtocols.add(protocolCacheKey);
     return root;
+  }
+
+  // A failed session-control call is the signal that what we believe about the
+  // box may no longer hold: make the next turn verify the protocol again.
+  private forgetVerifiedSessionProtocol(worker: RemoteRunWorkerTarget): void {
+    const sshBaseArgs = remoteSshBaseArgs(worker, remoteSshTarget(worker)).join("\u0000");
+    for (const key of this.verifiedSessionProtocols) {
+      if (key.startsWith(`${sshBaseArgs}\u0000`)) {
+        this.verifiedSessionProtocols.delete(key);
+      }
+    }
   }
 
   private parseOperationLease(
@@ -2998,6 +3052,9 @@ class SshDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
       });
       return JSON.parse(result.stdout || "{}") as Record<string, unknown>;
     } catch (error) {
+      // Whatever went wrong, stop trusting the cached "the scripts on that box
+      // are current" answer: the box may have been wiped or recreated.
+      this.forgetVerifiedSessionProtocol(worker);
       if (error instanceof CommandError) {
         let parsed: Record<string, unknown> = {};
         try {
@@ -3645,6 +3702,14 @@ function resumeSessionIdFromArgs(args: string[]): string | undefined {
   return candidate && !candidate.startsWith("-") ? candidate : undefined;
 }
 
+// Expanding "~" on the worker is a full SSH round trip (~2s on a cloud box) and
+// the answer — that user's home directory — cannot change while the app runs.
+// A turn asks for it four times (session protocol, submit turn twice, mirror),
+// so memoising it per worker+path removes most of the wait before an agent
+// starts. Keyed by the SSH args, so a new address re-resolves rather than
+// reusing another machine's answer.
+const remoteRunDirCache = new Map<string, string>();
+
 async function resolveRemoteRunDir(
   sshPath: string,
   sshBaseArgs: string[],
@@ -3657,6 +3722,11 @@ async function resolveRemoteRunDir(
   }
   if (trimmed.startsWith("/")) {
     return trimmed.replace(/\/+$/g, "") || "/";
+  }
+  const cacheKey = `${sshPath}\u0000${sshBaseArgs.join("\u0000")}\u0000${trimmed}`;
+  const cached = remoteRunDirCache.get(cacheKey);
+  if (cached) {
+    return cached;
   }
   const homeRelative = trimmed === "~"
     ? ""
@@ -3678,7 +3748,9 @@ async function resolveRemoteRunDir(
   if (!resolved.startsWith("/")) {
     throw new Error(`Remote worker path did not resolve to an absolute path: ${remotePath}`);
   }
-  return resolved.replace(/\/+$/g, "") || "/";
+  const normalized = resolved.replace(/\/+$/g, "") || "/";
+  remoteRunDirCache.set(cacheKey, normalized);
+  return normalized;
 }
 
 async function readRemotePid(
