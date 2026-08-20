@@ -56,6 +56,17 @@ export interface MobileRelayChatListItem {
   updatedAt: string;
   running: boolean;
   participants: string[];
+  members?: MobileRelayChatMember[];
+}
+
+export interface MobileRelayChatMember {
+  id: string;
+  handle: string;
+  mentionHandle: string;
+  displayName: string;
+  roleLabel: string;
+  kind: "claude-code" | "codex-cli" | "gemini-cli";
+  avatarId?: string;
 }
 
 export interface MobileRelayChatCatalog {

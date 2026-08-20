@@ -8,6 +8,7 @@ import type {
   AgentHealth,
   ChatBehaviorRuleConfigUpdate,
   ChatMessage,
+  ChatParticipant,
   ChatProviderKind,
   ChatPromptContextSettings,
   ChatSavedPromptConfigUpdate,
@@ -1867,10 +1868,18 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
     async listChats() {
       const summaries = await storageService.listConversations();
       const visible = summaries.filter((summary) => summary.kind === "chat" && summary.archived !== true);
+      const settings = await settingsService.getPublicSettings();
+      const roleLabels = new Map(settings.chatRoleConfigs.map((role) => [
+        role.id,
+        role.id === "generic-participant" && role.label === "Generic Participant"
+          ? "Generic Member"
+          : role.label
+      ]));
       const items: MobileRelayChatListItem[] = [];
       for (const summary of visible.slice(0, 100)) {
         const conversation = await storageService.getConversation(summary.id);
         const lastMessage = conversation?.messages.slice().reverse().find((message) => message.content.trim());
+        const members = mobileRelayChatMembers(conversation);
         items.push({
           id: summary.id,
           title: summary.title || "Chat",
@@ -1881,7 +1890,16 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
           running: summary.running === true,
           participants: (summary.chatParticipants ?? [])
             .map((participant) => participant.handle.startsWith("@") ? participant.handle : `@${participant.handle}`)
-            .slice(0, 4)
+            .slice(0, 4),
+          members: members.map((participant) => ({
+            id: participant.id,
+            handle: participant.handle,
+            mentionHandle: mobileParticipantMentionHandle(participant, members),
+            displayName: mobileParticipantDisplayName(participant),
+            roleLabel: roleLabels.get(participant.roleConfigId) ?? participant.roleConfigId,
+            kind: participant.kind,
+            ...(participant.avatarId ? { avatarId: participant.avatarId } : {})
+          }))
         });
       }
       return items;
@@ -1917,6 +1935,45 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
       return conversation?.kind === "chat" && conversation.metadata.archived !== true;
     }
   };
+}
+
+function mobileRelayChatMembers(conversation: Conversation | undefined): ChatParticipant[] {
+  const participants = conversation?.metadata.participants;
+  return Array.isArray(participants)
+    ? participants.filter((participant): participant is ChatParticipant => Boolean(
+      participant &&
+      typeof participant === "object" &&
+      typeof participant.id === "string" &&
+      typeof participant.handle === "string" &&
+      typeof participant.roleConfigId === "string" &&
+      (participant.kind === "claude-code" || participant.kind === "codex-cli" || participant.kind === "gemini-cli")
+    ))
+    : [];
+}
+
+function mobileParticipantIsAssistant(participant: Pick<ChatParticipant, "handle" | "roleConfigId">): boolean {
+  return participant.roleConfigId === "administrator" ||
+    participant.handle.trim().replace(/^@/, "").toLowerCase() === "admin";
+}
+
+function mobileParticipantMentionHandle(
+  participant: Pick<ChatParticipant, "handle" | "roleConfigId">,
+  participants: Array<Pick<ChatParticipant, "handle" | "roleConfigId">>
+): string {
+  if (!mobileParticipantIsAssistant(participant)) {
+    return participant.handle;
+  }
+  const normalizedHandle = participant.handle.trim().replace(/^@/, "").toLowerCase();
+  const assistantAliasTaken = participants.some((item) =>
+    item !== participant &&
+    item.handle.trim().replace(/^@/, "").toLowerCase() === "assistant" &&
+    item.roleConfigId !== "administrator"
+  );
+  return normalizedHandle === "admin" && !assistantAliasTaken ? "assistant" : participant.handle;
+}
+
+function mobileParticipantDisplayName(participant: Pick<ChatParticipant, "handle" | "roleConfigId">): string {
+  return mobileParticipantIsAssistant(participant) ? "Chat Assistant" : `@${participant.handle}`;
 }
 
 function mobileChatGroupLabel(repoPath: string | undefined): string {

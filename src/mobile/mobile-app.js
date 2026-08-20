@@ -1141,11 +1141,79 @@
         running: chat.running === true,
         participants: Array.isArray(chat.participants) ? chat.participants.filter(function (item) {
           return typeof item === "string" && item.trim();
-        }).slice(0, 4) : []
+        }).slice(0, 4) : [],
+        members: Array.isArray(chat.members) ? chat.members.map(normalizeMobileMember).filter(Boolean) : []
       };
     }) : [];
     localStorage.setItem(CHAT_LIST_KEY, JSON.stringify(normalized));
     return normalized;
+  }
+
+  function normalizeMobileMember(value) {
+    if (!value || typeof value !== "object") {
+      return undefined;
+    }
+    const handle = typeof value.handle === "string" ? value.handle.trim().replace(/^@/, "") : "";
+    if (!handle) {
+      return undefined;
+    }
+    return {
+      id: typeof value.id === "string" && value.id.trim() ? value.id : handle,
+      handle,
+      mentionHandle: typeof value.mentionHandle === "string" && value.mentionHandle.trim()
+        ? value.mentionHandle.trim().replace(/^@/, "")
+        : handle,
+      displayName: typeof value.displayName === "string" && value.displayName.trim()
+        ? value.displayName.trim()
+        : "@" + handle,
+      roleLabel: typeof value.roleLabel === "string" ? value.roleLabel.trim() : "",
+      kind: typeof value.kind === "string" ? value.kind : "",
+      avatarId: typeof value.avatarId === "string" ? value.avatarId : undefined
+    };
+  }
+
+  function activeMentionQuery(value) {
+    const match = String(value || "").match(/(?:^|\s)@([A-Za-z0-9_-]*)$/);
+    return match ? match[1] : undefined;
+  }
+
+  function mentionOptions(value, members) {
+    const query = activeMentionQuery(value);
+    if (query === undefined) {
+      return [];
+    }
+    const normalizedQuery = query.toLowerCase();
+    return (Array.isArray(members) ? members : []).filter(function (member) {
+      return member.handle.toLowerCase().includes(normalizedQuery) ||
+        member.displayName.toLowerCase().includes(normalizedQuery);
+    });
+  }
+
+  function replaceActiveMention(value, handle) {
+    const source = String(value || "");
+    const match = source.match(/(?:^|\s)@([A-Za-z0-9_-]*)$/);
+    if (!match || match.index === undefined) {
+      return source + (source.endsWith(" ") || !source ? "" : " ") + "@" + handle + " ";
+    }
+    const prefix = source.slice(0, match.index);
+    const leadingSpace = match[0].startsWith(" ") ? " " : "";
+    return prefix + leadingSpace + "@" + handle + " ";
+  }
+
+  function selectedConversationMembers() {
+    const conversationId = selectedConversationId();
+    const chat = loadChats().find(function (item) {
+      return item.id === conversationId;
+    });
+    if (!chat) {
+      return [];
+    }
+    if (Array.isArray(chat.members) && chat.members.length > 0) {
+      return chat.members;
+    }
+    return (chat.participants || []).map(function (handle) {
+      return normalizeMobileMember({ handle });
+    }).filter(Boolean);
   }
 
   function loadPairing() {
@@ -3415,6 +3483,104 @@
       });
     }
     if (form && input) {
+      let mentionIndex = 0;
+      const mentionMenu = document.getElementById("mention-menu");
+
+      function closeMentionMenu() {
+        if (mentionMenu) {
+          mentionMenu.hidden = true;
+          mentionMenu.textContent = "";
+        }
+        input.setAttribute("aria-expanded", "false");
+        input.removeAttribute("aria-activedescendant");
+      }
+
+      function insertMention(member) {
+        input.value = replaceActiveMention(input.value, member.mentionHandle);
+        mentionIndex = 0;
+        closeMentionMenu();
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+
+      function renderMentionMenu() {
+        if (!mentionMenu) {
+          return [];
+        }
+        const options = mentionOptions(input.value, selectedConversationMembers());
+        mentionMenu.textContent = "";
+        if (options.length === 0) {
+          closeMentionMenu();
+          return [];
+        }
+        mentionIndex = Math.min(mentionIndex, options.length - 1);
+        const title = document.createElement("div");
+        title.className = "mobile-mention-title";
+        title.textContent = "Members";
+        mentionMenu.append(title);
+        options.forEach(function (member, index) {
+          const option = document.createElement("button");
+          option.type = "button";
+          option.id = "mention-option-" + index;
+          option.className = "mobile-mention-option" + (index === mentionIndex ? " is-selected" : "");
+          option.setAttribute("role", "option");
+          option.setAttribute("aria-selected", index === mentionIndex ? "true" : "false");
+          option.addEventListener("pointerdown", function (event) {
+            event.preventDefault();
+          });
+          option.addEventListener("click", function () {
+            insertMention(member);
+          });
+          const avatar = document.createElement("span");
+          avatar.className = "mobile-mention-avatar";
+          fillAvatar(avatar, member.displayName, index);
+          const copy = document.createElement("span");
+          copy.className = "mobile-mention-copy";
+          const name = document.createElement("strong");
+          name.textContent = member.displayName;
+          const role = document.createElement("span");
+          role.textContent = member.roleLabel;
+          copy.append(name, role);
+          option.append(avatar, copy);
+          mentionMenu.append(option);
+        });
+        mentionMenu.hidden = false;
+        input.setAttribute("aria-expanded", "true");
+        input.setAttribute("aria-activedescendant", "mention-option-" + mentionIndex);
+        mentionMenu.querySelector(".is-selected")?.scrollIntoView({ block: "nearest" });
+        return options;
+      }
+
+      input.addEventListener("input", function () {
+        mentionIndex = 0;
+        renderMentionMenu();
+      });
+      input.addEventListener("keydown", function (event) {
+        const options = mentionOptions(input.value, selectedConversationMembers());
+        if (options.length > 0 && event.key === "ArrowDown") {
+          event.preventDefault();
+          mentionIndex = (mentionIndex + 1) % options.length;
+          renderMentionMenu();
+          return;
+        }
+        if (options.length > 0 && event.key === "ArrowUp") {
+          event.preventDefault();
+          mentionIndex = (mentionIndex - 1 + options.length) % options.length;
+          renderMentionMenu();
+          return;
+        }
+        if (options.length > 0 && (event.key === "Enter" || event.key === "Tab")) {
+          event.preventDefault();
+          insertMention(options[mentionIndex] || options[0]);
+          return;
+        }
+        if (event.key === "Escape") {
+          closeMentionMenu();
+        }
+      });
+      input.addEventListener("blur", function () {
+        setTimeout(closeMentionMenu, 0);
+      });
       form.addEventListener("submit", async function (event) {
         event.preventDefault();
         const content = input.value.trim();
@@ -3475,6 +3641,9 @@
     flushOutboxViaRelay,
     handleRelayChatListPayload,
     handleRelayTimelinePayload,
+    activeMentionQuery,
+    mentionOptions,
+    replaceActiveMention,
     requestChatListViaRelay,
     requestTimelineViaRelay,
     openRelayPayload,

@@ -460,7 +460,16 @@ test("MobileRelayControlService returns the device chat list over the sealed rel
           who: "taylor:",
           updatedAt: "2026-08-07T00:00:00.000Z",
           running: false,
-          participants: ["@taylor-claude-engineer", "@drew-codex-engineer"]
+          participants: ["@taylor-claude-engineer", "@drew-codex-engineer"],
+          members: [{
+            id: "participant-taylor",
+            handle: "taylor-claude-engineer",
+            mentionHandle: "taylor-claude-engineer",
+            displayName: "@taylor-claude-engineer",
+            roleLabel: "Software Engineer",
+            kind: "claude-code",
+            avatarId: "claude-bunny"
+          }]
         }];
       },
       async listTimeline() {
@@ -495,7 +504,16 @@ test("MobileRelayControlService returns the device chat list over the sealed rel
         who: "taylor:",
         updatedAt: "2026-08-07T00:00:00.000Z",
         running: false,
-        participants: ["@taylor-claude-engineer", "@drew-codex-engineer"]
+        participants: ["@taylor-claude-engineer", "@drew-codex-engineer"],
+        members: [{
+          id: "participant-taylor",
+          handle: "taylor-claude-engineer",
+          mentionHandle: "taylor-claude-engineer",
+          displayName: "@taylor-claude-engineer",
+          roleLabel: "Software Engineer",
+          kind: "claude-code",
+          avatarId: "claude-bunny"
+        }]
       }]
     });
   } finally {

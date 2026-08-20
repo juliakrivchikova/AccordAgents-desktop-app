@@ -7,7 +7,7 @@
     <title>AccordAgents</title>
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="assets/accordagents-mark.png" />
-    <link rel="stylesheet" href="mobile-app.css?v=2026-08-19-failed-run-ends-its-rows-v1" />
+    <link rel="stylesheet" href="mobile-app.css?v=2026-08-20-mobile-mentions-v1" />
   </head>
   <body>
     <div class="mobile-stage">
@@ -81,8 +81,9 @@
             Latest
           </button>
           <form id="composer-form" class="composer">
+            <div id="mention-menu" class="mobile-mention-menu" role="listbox" aria-label="Members" hidden></div>
             <div class="composer-input-wrap">
-              <textarea id="composer-input" name="message" rows="1" placeholder="Message the room..." aria-label="Message the room" autocomplete="off"></textarea>
+              <textarea id="composer-input" name="message" rows="1" placeholder="Message the room..." aria-label="Message the room" aria-autocomplete="list" aria-controls="mention-menu" aria-expanded="false" autocomplete="off"></textarea>
               <span aria-hidden="true">@</span>
             </div>
             <button id="send-button" type="submit" aria-label="Send message">
@@ -95,7 +96,7 @@
         <div class="mobile-home-indicator" aria-hidden="true"><span></span></div>
       </main>
     </div>
-    <script src="jsqr.js?v=2026-08-19-failed-run-ends-its-rows-v1" defer></script>
-    <script src="mobile-app.js?v=2026-08-19-failed-run-ends-its-rows-v1" defer></script>
+    <script src="jsqr.js?v=2026-08-20-mobile-mentions-v1" defer></script>
+    <script src="mobile-app.js?v=2026-08-20-mobile-mentions-v1" defer></script>
   </body>
 </html>
