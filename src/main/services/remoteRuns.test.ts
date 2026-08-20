@@ -1071,6 +1071,27 @@ test("AWS host key aliases avoid recycled-IP conflicts without disabling verific
   );
 });
 
+test("worker SSH calls share one connection and keep the socket path bindable", () => {
+  const args = cloudRunSshOptionArgs({ host: "198.51.100.10", user: "ubuntu" });
+  assert.ok(args.includes("ControlMaster=auto"));
+  const controlPath = args.find((arg) => arg.startsWith("ControlPath="))?.slice("ControlPath=".length);
+  assert.ok(controlPath);
+  // ssh appends a temporary suffix while binding, and a Unix socket path is
+  // capped at 104 bytes; overrunning it fails the call outright.
+  assert.ok(Buffer.byteLength(controlPath) + 17 <= 104, `control path too long: ${controlPath}`);
+  // One socket per destination, not one per call.
+  assert.equal(
+    controlPath,
+    cloudRunSshOptionArgs({ host: "198.51.100.10", user: "ubuntu" })
+      .find((arg) => arg.startsWith("ControlPath="))?.slice("ControlPath=".length)
+  );
+  assert.notEqual(
+    controlPath,
+    cloudRunSshOptionArgs({ host: "198.51.100.11", user: "ubuntu" })
+      .find((arg) => arg.startsWith("ControlPath="))?.slice("ControlPath=".length)
+  );
+});
+
 test("real remote codex run spools raw provider output and renders final output", async () => {
   const participant = chatParticipant({ webAccess: false });
   const conversation = chatConversation([participant]);
@@ -1452,6 +1473,57 @@ test("an established mirror is never re-synced mid-conversation, even after loca
   assert.ok(!phases.includes("Syncing project files"));
 });
 
+test("a checkout already on the worker is never overwritten by an app instance that has no record of it", async () => {
+  // The defect this reproduces: whether to sync was decided from a local state
+  // file, so any app instance without that record — a second instance, a
+  // reinstall, a cleared profile — treated a worker that already held the
+  // project as empty ground and ran `rsync --delete` into it, deleting whatever
+  // the cloud participant had not committed yet.
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-src-"));
+  await writeFile(path.join(localDir, "file.txt"), "hello", "utf8");
+  const mirrorSync = new FakeMirrorSync();
+  const established = await testRemoteRun({ conversation, detachedWorkerTransport: new FakeDetachedWorkerTransport(), mirrorSync });
+  const target = { host: "worker.example", workerRoot: "/srv/worker" };
+
+  await established.remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "mirror-shared-first",
+    participant: participantConfig(participant),
+    prompt: "First remote turn.",
+    worker: target,
+    sync: { localPath: localDir }
+  });
+
+  // A different app instance: its own spool root, so none of the first one's
+  // bookkeeping. The worker still holds the checkout.
+  const otherInstance = new RemoteRunService(established.service, {
+    spoolRoot: await mkdtemp(path.join(tmpdir(), "accordagents-other-instance-")),
+    detachedWorkerTransport: new FakeDetachedWorkerTransport(),
+    mirrorSync,
+    remoteMirrorProbe: async () => true
+  });
+  const phases: string[] = [];
+  await otherInstance.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "mirror-shared-second",
+    participant: participantConfig(participant),
+    prompt: "Turn from a second app instance.",
+    worker: target,
+    sync: { localPath: localDir },
+    onPhase: (status) => phases.push(status.label)
+  });
+
+  assert.equal(
+    mirrorSync.calls.filter((call) => call.kind === "up").length,
+    1,
+    "the second instance must reuse the checkout on the worker, not sync over it"
+  );
+  assert.ok(phases.includes("Project files already on the worker"));
+  assert.ok(!phases.includes("Syncing project files"));
+});
+
 test("a mirror that is gone from the worker is set up again", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant]);
@@ -1502,8 +1574,7 @@ test("a run queued behind a slow mirror op still reuses the established mirror i
   const { remote } = await testRemoteRun({
     conversation,
     detachedWorkerTransport: new FakeDetachedWorkerTransport(),
-    mirrorSync,
-    remoteMirrorProbe: async () => true
+    mirrorSync
   });
 
   // Seed run up-syncs v1 and persists the skip-state fingerprint. Cancel it so the
@@ -1671,11 +1742,14 @@ test("mirror-sync resyncs after AWS worker delete and recreate changes instance 
     sync: { localPath: localDir }
   });
 
+  // A recreated machine is a new disk: the project is not on it. That absence is
+  // what makes the next turn sync again — nothing is overwritten, because there
+  // is nothing there.
   const afterRecreate = new RemoteRunService(first.service, {
     spoolRoot: first.root,
     detachedWorkerTransport: new FakeDetachedWorkerTransport(),
     mirrorSync,
-    remoteMirrorProbe: async () => true
+    remoteMirrorProbe: async () => false
   });
   await afterRecreate.startDetachedRun({
     conversationId: conversation.id,
@@ -1740,7 +1814,12 @@ test("mirror-sync resyncs when durable state matches but the remote mirror is mi
   assert.ok(phases.includes("Syncing project files"));
 });
 
-test("clearing mirror sync state forces the next unchanged project to resync", async () => {
+test("clearing mirror sync state does not overwrite a checkout that is on the worker", async () => {
+  // This cache is cleared by the Test / Diagnose / Set up worker buttons in
+  // Settings. It used to license a full `rsync --delete` on the next turn, so
+  // pressing a diagnostic button could delete work a cloud participant had not
+  // committed yet. The worker's own contents decide now, so those buttons are
+  // safe to press mid-conversation.
   const participant = chatParticipant();
   const conversation = chatConversation([participant]);
   const localDir = await mkdtemp(path.join(tmpdir(), "accordagents-mirror-src-"));
@@ -1777,7 +1856,11 @@ test("clearing mirror sync state forces the next unchanged project to resync", a
     sync: { localPath: localDir }
   });
 
-  assert.equal(mirrorSync.calls.filter((call) => call.kind === "up").length, 2);
+  assert.equal(
+    mirrorSync.calls.filter((call) => call.kind === "up").length,
+    1,
+    "clearing the cache must not cause a second, destructive sync"
+  );
 });
 
 test("mirror-sync rechecks active mirrors inside the queue before destructive up-sync", async () => {
@@ -3129,7 +3212,13 @@ async function testRemoteRun(options: {
     detachedWorkerTransport: options.detachedWorkerTransport,
     mirrorSync: options.mirrorSync,
     remoteGitDirProbe: options.remoteGitDirProbe as never,
-    remoteMirrorProbe: (options.remoteMirrorProbe ?? (async () => true)) as never,
+    // A worker only holds what was actually put there. Defaulting this to "yes,
+    // it is there" made every first run look like a re-run, which hid the fact
+    // that the sync decision is now taken from the worker rather than from local
+    // bookkeeping. Tests that need a specific answer still inject their own.
+    remoteMirrorProbe: (options.remoteMirrorProbe
+      ?? (async (_worker: unknown, remotePath: string) =>
+        (options.mirrorSync as Partial<FakeMirrorSync> | undefined)?.hasSyncedUp?.(remotePath) ?? true)) as never,
     // Default to a no-op worker-mirror enumeration so full-sync reclaim never
     // spawns real ssh in unit tests; individual tests can inject a snapshot.
     enumerateWorkerMirrors: (options.enumerateWorkerMirrors ?? (async () => [])) as never,
@@ -3141,8 +3230,15 @@ async function testRemoteRun(options: {
 class FakeMirrorSync implements RemoteMirrorSyncRunner {
   readonly calls: Array<{ kind: "up" | "down"; localPath: string; remotePath: string }> = [];
 
+  private readonly syncedUpPaths = new Set<string>();
+
   async syncUp(request: RemoteMirrorSyncRequest): Promise<void> {
     this.calls.push({ kind: "up", localPath: request.localPath, remotePath: request.remotePath });
+    this.syncedUpPaths.add(request.remotePath);
+  }
+
+  hasSyncedUp(remotePath: string): boolean {
+    return this.syncedUpPaths.has(remotePath);
   }
 
   async syncDown(request: RemoteMirrorSyncRequest): Promise<void> {

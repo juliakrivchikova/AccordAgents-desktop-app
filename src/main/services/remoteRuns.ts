@@ -1835,12 +1835,12 @@ export class RemoteRunService {
     localPath: string,
     signal: AbortSignal | undefined
   ): Promise<boolean> {
-    await this.mirrorSyncStateChain.catch(() => undefined);
-    const state = await this.readMirrorSyncState();
-    const entry = state.mirrors[this.mirrorSyncStateKey(worker, remotePath)];
-    if (!entry || entry.remotePath !== remotePath) {
-      return false;
-    }
+    // The worker decides this, not our local bookkeeping. A checkout already on
+    // the box may have been put there by a different app instance, or by an
+    // install whose state file is gone, and it may hold work the participant has
+    // not committed yet. Syncing into it runs `rsync --delete`, which deletes
+    // exactly that work — so whatever is already there is reused as-is and never
+    // overwritten. Only genuinely empty ground gets a first sync.
     return this.remoteMirrorLooksCurrent(worker, remotePath, localProjectHasGitDir(localPath), signal);
   }
 

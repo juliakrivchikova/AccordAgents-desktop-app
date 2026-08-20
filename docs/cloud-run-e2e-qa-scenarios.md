@@ -114,7 +114,7 @@ Validates the Linux build (see the decision note in §0).
 
 | ID | Scenario | Must be true | Status |
 |---|---|---|---|
-| EQA-01 | Electron can start on the worker | `xvfb-run node_modules/.bin/electron . --remote-debugging-port=9222` starts and `/json/version` responds. | SMALL-FIX (B7) — add `xvfb` + `libgtk-3-0`, `libnss3`, `libasound2`, `libgbm1`, `libxss1` to provisioning |
+| EQA-01 | Electron can start on the worker | `xvfb-run node_modules/.bin/electron . --remote-debugging-port=9222` starts and `/json/version` responds. | VERIFIED (2026-08-15) — Electron 31.7.7, the app's exact version, starts under `xvfb-run` on the live box with a BrowserWindow and a CDP page target. `xvfb` and the GTK/NSS/ALSA libraries are provisioned (B7 cleared). Re-confirmed 2026-08-20: `xvfb-run` and `google-chrome` present on the worker. |
 | EQA-02 | `npm ci` produces a Linux Electron | The linux-x64 Electron binary installs on the box. | CODE-OK — npm resolves per-platform; verify, since the mirror carries a macOS-built `node_modules` if `.gitignore` ever slips |
 | EQA-03 | Renderer QA end to end | A cloud member opens a conversation, clicks through a flow, screenshots, and reads computed styles over CDP. | SMALL-FIX — follows from EQA-01 |
 | EQA-04 | The skill has a Linux path | `/electron-desktop-qa` currently prescribes macOS repair (`codesign`, `spctl`, `xattr`) and forbids macOS screenshots. On Linux it must prescribe `xvfb-run` and skip the Gatekeeper section. | SMALL-FIX — SKILL.md edit |
@@ -222,6 +222,8 @@ New on this branch. Nothing here is QA-proven beyond Drew's single live PASS, an
 | W-20 | Mirror storage growth | Growth is observable and reclaimable. | SMALL-FIX — `reclaimWorkerMirrorStorage` exists but has no UI path |
 | W-21 | More than one tagged worker | Clear error naming both. | CODE-OK |
 | W-22 | Cost visibility | The user can see what is running and what it costs; stopped instances still bill EBS. | REAL-WORK |
+| W-23 | **A full worker disk must say so** | When the worker's filesystem is full, the run must fail with "no space left on the worker" and what to do about it. Today it surfaces as `Remote worker process exited without writing exit.json` — the worker cannot write its own terminal marker, so the desktop reports the symptom and the user has no way to reach the cause. W-14 covers ENOSPC during rsync; this is ENOSPC during the run itself, which is a different path. | **REAL-WORK — observed live 2026-08-20**: a cloud member's turn failed at 20:12:50 with the exit.json message; the box was at 15G/15G with 4 MB free and a zero-byte `state.json.tmp` in the run directory. |
+| W-24 | **Disk fills from accumulated leftovers, not from one run** | Repeated cloud work leaves per-run context snapshots, abandoned worktrees with their own `node_modules`, npm caches, and old QA checkouts. Something must reclaim them, or the box wedges again on a schedule nobody is watching. | **REAL-WORK — measured 2026-08-20** on a 16 GB box: old QA checkout 2.8 G, two agent worktrees in `/tmp` 1.2 G + 264 M, run dirs and mirrors 3.0 G, npm cache 432 M. Volume grown to 40 GB as a stopgap; nothing reclaims automatically. |
 
 ---
 
