@@ -66,6 +66,33 @@ test("collectMobileMailboxOutboxEvents carries run.cancel.requested to desktop w
   assert.deepEqual(claimAttempts, []);
 });
 
+test("collectMobileMailboxOutboxEvents skips a run cancellation already accepted by desktop", async () => {
+  const acceptedChecks: string[] = [];
+  const events = await collectMobileMailboxOutboxEvents([
+    mailboxRunCancelEvent({
+      eventId: "mobile-cancel-accepted",
+      conversationId: "current-conversation",
+      runId: "participant-run-finished"
+    })
+  ], {
+    acceptMailboxMessageEvent: () => false,
+    acceptMobileOutboxEnvelope: () => true,
+    acceptFulfilledMobileOutboxEvent: () => undefined,
+    hasAcceptedMobileEvent: (_conversationId, eventId) => {
+      acceptedChecks.push(eventId);
+      return true;
+    },
+    hasMobileMailboxResultForMobileEvent: () => false,
+    tryAcquireMobileEventExecution: () => {
+      throw new Error("accepted cancellation must not acquire a message execution claim");
+    },
+    isConversationAllowed: () => true
+  });
+
+  assert.deepEqual(events, []);
+  assert.deepEqual(acceptedChecks, ["mobile-cancel-accepted"]);
+});
+
 test("collectMobileMailboxOutboxEvents skips revoked or stale pairing envelopes before claiming", async () => {
   const checked: string[] = [];
   const claimAttempts: string[] = [];

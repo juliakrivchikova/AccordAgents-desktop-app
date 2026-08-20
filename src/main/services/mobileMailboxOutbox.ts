@@ -35,11 +35,11 @@ export async function collectMobileMailboxOutboxEvents(
     if (selection.acceptMobileOutboxEnvelope && !await selection.acceptMobileOutboxEnvelope(event as ChatEventEnvelope)) {
       continue;
     }
-    if (outboxEvent.kind === "run.cancel.requested") {
-      events.push(outboxEvent);
+    if (await selection.hasAcceptedMobileEvent(outboxEvent.conversationId, outboxEvent.eventId)) {
       continue;
     }
-    if (await selection.hasAcceptedMobileEvent(outboxEvent.conversationId, outboxEvent.eventId)) {
+    if (outboxEvent.kind === "run.cancel.requested") {
+      events.push(outboxEvent);
       continue;
     }
     const outboxEventKey = mobileMailboxEventScopeKey(outboxEvent.conversationId, outboxEvent.eventId);

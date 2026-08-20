@@ -1666,7 +1666,16 @@ async function pollMobileMailboxOutbox(
       : false
   });
   if (events.length > 0) {
-    await control.acceptMobileOutboxEvents(events, `mailbox:${Date.now()}`);
+    const accepted = await control.acceptMobileOutboxEvents(events, `mailbox:${Date.now()}`);
+    const acceptedEventIds = new Set(accepted.eventIds);
+    for (const event of opened.events) {
+      if (
+        event.kind === "run.cancel.requested" &&
+        acceptedEventIds.has(event.eventId)
+      ) {
+        await chatService.acceptMobileMailboxOutboxEvent(event);
+      }
+    }
   }
   // Advance the cursor only after this page is durably processed. Persisting it
   // before decrypt/collection/delivery — or letting a mid-poll crash intervene —

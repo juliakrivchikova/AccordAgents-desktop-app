@@ -688,6 +688,25 @@ export class StorageService {
     return rows.map((row) => parseHexJson<ChatEventEnvelope>(row.envelopeHex, `chat event ${conversationId}:${logScopeId}`));
   }
 
+  async hasChatEvent(conversationId: string, eventId: string): Promise<boolean> {
+    await this.init();
+    const normalizedConversationId = conversationId.trim();
+    const normalizedEventId = eventId.trim();
+    if (!normalizedConversationId || !normalizedEventId) {
+      return false;
+    }
+    const rows = await this.queryJson<{ found: number }>(
+      `
+        select 1 as found
+        from chat_events
+        where conversation_id = ${sqlString(normalizedConversationId)}
+          and event_id = ${sqlString(normalizedEventId)}
+        limit 1;
+      `
+    );
+    return rows.length > 0;
+  }
+
   async saveChatEventProjection(row: ChatEventProjectionRow): Promise<void> {
     await this.init();
     if (!row.conversationId.trim() || !row.projectionKey.trim()) {
