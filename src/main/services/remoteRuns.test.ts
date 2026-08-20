@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { remoteAppMcpToolContracts } from "../../shared/appMcpToolContracts";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
   CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT
@@ -25,6 +26,10 @@ import type {
   RemoteRunHandle
 } from "../../shared/types";
 import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "./appMcp";
+import {
+  REMOTE_APP_MCP_TOOL_CONTRACTS,
+  REMOTE_APP_MCP_WORKER_CONTRACT_SNIPPET
+} from "./remoteAppMcpTools.generated";
 import { ChatService } from "./chat";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, validateCloudRunSshWorkerFields } from "./cloudRunWorkers";
 import { CommandError } from "./command";
@@ -78,6 +83,11 @@ import { issueFromRequirement } from "./toolchainRequirements";
 import type { ToolchainPreflightIssue } from "./toolchainRequirements";
 
 const NOW = "2026-06-26T12:00:00.000Z";
+
+test("detached worker embeds the current shared app MCP contract", () => {
+  assert.deepEqual(REMOTE_APP_MCP_TOOL_CONTRACTS, remoteAppMcpToolContracts());
+  assert.ok(detachedWorkerScript().includes(REMOTE_APP_MCP_WORKER_CONTRACT_SNIPPET));
+});
 const ROLE: ChatRoleConfig = {
   id: "engineer",
   label: "Engineer",
