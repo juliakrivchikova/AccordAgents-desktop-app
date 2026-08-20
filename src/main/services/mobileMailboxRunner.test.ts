@@ -9,6 +9,10 @@ import test from "node:test";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { ChatMessage, Conversation } from "../../shared/types";
 import {
+  REMOTE_APP_MCP_TOOL_CONTRACTS,
+  REMOTE_APP_MCP_WORKER_CONTRACT_SNIPPET
+} from "./remoteAppMcpTools.generated";
+import {
   MOBILE_RUNNER_POLICY_KIND,
   mobileMailboxRunnerInstallCommand,
   mobileMailboxRunnerPolicyFromConversation,
@@ -83,6 +87,21 @@ test("mobile mailbox runner policy snapshot carries cloud participants and recen
     remoteExecution: "remote"
   }]);
   assert.deepEqual(snapshot.recentMessages.map((message) => message.content), ["previous"]);
+});
+
+test("mobile mailbox runner embeds the generated worker App MCP contract", () => {
+  assert.ok(mobileMailboxRunnerScript().includes(REMOTE_APP_MCP_WORKER_CONTRACT_SNIPPET));
+});
+
+test("mobile mailbox runner policy carries the desktop-built App MCP context snapshot", () => {
+  const contextSnapshot = {
+    conversationId: "conversation-1",
+    messages: [{ id: "message-1", sequence: 0, content: "previous" }],
+    attachments: [{ attachment: { id: "attachment-1" }, dataBase64: "cG5n" }]
+  };
+  const snapshot = mobileMailboxRunnerPolicyFromConversation(conversation(), undefined, contextSnapshot);
+
+  assert.equal(snapshot.contextSnapshot, contextSnapshot);
 });
 
 test("mobile mailbox runner install command installs an idempotent route-scoped daemon", () => {
@@ -182,6 +201,101 @@ test("mobile mailbox runner consumes mobile outbox and publishes running plus ca
     ));
     assert.equal((resultMessage?.payload as { message?: ChatMessage }).message?.content, "fake cloud result");
     assert.equal((resultMessage?.payload as { message?: ChatMessage }).message?.participantLabel, "@codex");
+  } finally {
+    await mailbox.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("mobile mailbox runner exposes the shared App MCP tools to Codex and publishes tool messages", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-mobile-mailbox-runner-mcp-"));
+  const mailbox = createReferenceMailboxServer({ locked: true });
+  const address = await mailbox.listen();
+  const mailboxUrl = `${address.url}/v1/mailbox/events?mailboxId=runner-mcp-test`;
+  await registerTestMailbox(address.url, "runner-mcp-test");
+  try {
+    const runnerPath = path.join(directory, "mobile-runner.js");
+    const codexPath = path.join(directory, "fake-mcp-codex.js");
+    const contextSnapshot = {
+      conversationId: "conversation-1",
+      messages: [{
+        id: "message-1",
+        sequence: 0,
+        role: "user",
+        author: "User",
+        content: "previous",
+        createdAt: "2026-08-12T00:00:01.000Z",
+        status: "done",
+        metadata: { threadId: "message-1" },
+        imageAttachments: []
+      }],
+      messageWindow: { maxSequence: 0, totalMessages: 1, oldestIncludedSequence: 0 },
+      attachments: [{
+        messageId: "message-1",
+        sequence: 0,
+        author: "User",
+        threadId: "message-1",
+        attachment: {
+          id: "attachment-1",
+          filename: "pixel.png",
+          mimeType: "image/png",
+          sizeBytes: 3,
+          width: 1,
+          height: 1,
+          createdAt: "2026-08-12T00:00:01.000Z"
+        },
+        dataBase64: "cG5n"
+      }],
+      attachmentWindow: { omittedCount: 0, limit: 6 },
+      participants: [{ id: "participant-codex", handle: "codex", kind: "codex-cli", remoteExecution: "remote" }]
+    };
+    await writeFile(runnerPath, mobileMailboxRunnerScript(), { mode: 0o755 });
+    await writeFile(codexPath, fakeMcpCodexScript(), { mode: 0o755 });
+    await postJson(mailboxUrl, {
+      events: [
+        envelope(
+          "policy-event",
+          "desktop-origin",
+          1,
+          MOBILE_RUNNER_POLICY_KIND,
+          mobileMailboxRunnerPolicyFromConversation(conversation(), undefined, contextSnapshot)
+        ),
+        envelope("mobile-event", "mobile-origin", 1, "message.created", {
+          content: "@codex inspect App MCP"
+        })
+      ]
+    });
+
+    const result = await runNode(runnerPath, {
+      ACCORD_MOBILE_MAILBOX_URL: mailboxUrl,
+      ACCORD_MOBILE_RUNNER_ORIGIN_ID: "runner-origin",
+      ACCORD_MOBILE_CODEX_PATH: codexPath,
+      ACCORD_MOBILE_RUNNER_STATE: path.join(directory, "state.json"),
+      ACCORD_MOBILE_RUNNER_ONCE: "1"
+    });
+    assert.equal(result.code, 0, result.stderr);
+
+    const events = unsealEvents((await getJson(mailboxUrl)).events);
+    const toolPost = events.find((event) => {
+      const message = (event.payload as { message?: ChatMessage }).message;
+      return event.kind === "message.created" && message?.content === "fake mid-run update";
+    });
+    assert.ok(toolPost, "app_chat_send_message must append to the shared mailbox log");
+    const resultMessage = events.find((event) => {
+      const message = (event.payload as { message?: ChatMessage }).message;
+      return event.kind === "message.created" && message?.metadata?.mobileEventId === "mobile-event";
+    });
+    const report = JSON.parse((resultMessage?.payload as { message?: ChatMessage }).message?.content ?? "{}") as {
+      toolNames?: string[];
+      contextMessageIds?: string[];
+      attachmentData?: string;
+    };
+    assert.deepEqual(
+      report.toolNames,
+      REMOTE_APP_MCP_TOOL_CONTRACTS.map((contract) => contract.definition.name)
+    );
+    assert.deepEqual(report.contextMessageIds, ["message-1", "mobile-mobile-event"]);
+    assert.equal(report.attachmentData, "cG5n");
   } finally {
     await mailbox.close();
     await rm(directory, { recursive: true, force: true });
@@ -574,6 +688,45 @@ if (index >= 0 && process.argv[index + 1]) {
   fs.writeFileSync(process.argv[index + 1], "fake cloud result");
 }
 process.exit(0);
+`;
+}
+
+function fakeMcpCodexScript(): string {
+  return `#!/usr/bin/env node
+const fs = require("node:fs");
+const urlSetting = process.argv.find((arg) => arg.startsWith("mcp_servers.accord_agents.url="));
+const url = JSON.parse(urlSetting.slice("mcp_servers.accord_agents.url=".length));
+const token = process.env.ACCORD_AGENTS_MCP_TOKEN;
+let requestId = 0;
+async function rpc(method, params) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer " + token,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++requestId, method, ...(params ? { params } : {}) })
+  });
+  const body = await response.json();
+  if (body.error) { throw new Error(body.error.message); }
+  return body.result;
+}
+async function main() {
+  await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fake-codex", version: "1" } });
+  const listed = await rpc("tools/list");
+  const context = await rpc("tools/call", { name: "app_chat_get_context", arguments: {} });
+  const attachment = await rpc("tools/call", { name: "app_chat_read_attachment", arguments: { attachmentId: "attachment-1" } });
+  await rpc("tools/call", { name: "app_chat_send_message", arguments: { content: "fake mid-run update" } });
+  const parsedContext = JSON.parse(context.content[0].text);
+  const report = {
+    toolNames: listed.tools.map((tool) => tool.name),
+    contextMessageIds: parsedContext.snapshot.messages.map((message) => message.id),
+    attachmentData: attachment.content[1].data
+  };
+  const index = process.argv.indexOf("--output-last-message");
+  fs.writeFileSync(process.argv[index + 1], JSON.stringify(report));
+}
+main().catch((error) => { console.error(error.stack || String(error)); process.exit(1); });
 `;
 }
 
