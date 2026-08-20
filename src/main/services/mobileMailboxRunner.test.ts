@@ -346,6 +346,20 @@ test("mobile mailbox runner invokes mentioned remote Claude participant", async 
     );
     const argv = JSON.parse(await readFile(argvPath, "utf8")) as string[];
     assert.deepEqual(argv.slice(0, 5), ["-p", "--output-format", "json", "--permission-mode", "auto"]);
+    const mcpConfigIndex = argv.indexOf("--mcp-config");
+    assert.notEqual(mcpConfigIndex, -1);
+    const mcpConfig = JSON.parse(argv[mcpConfigIndex + 1]) as {
+      mcpServers?: { accord_agents?: { type?: string; url?: string; headers?: { Authorization?: string } } };
+    };
+    assert.equal(mcpConfig.mcpServers?.accord_agents?.type, "http");
+    assert.match(mcpConfig.mcpServers?.accord_agents?.url ?? "", /^http:\/\/127\.0\.0\.1:\d+\/mcp$/);
+    assert.match(mcpConfig.mcpServers?.accord_agents?.headers?.Authorization ?? "", /^Bearer [a-f0-9]{64}$/);
+    const allowedToolsIndex = argv.indexOf("--allowedTools");
+    assert.notEqual(allowedToolsIndex, -1);
+    assert.deepEqual(
+      argv[allowedToolsIndex + 1].split(","),
+      REMOTE_APP_MCP_TOOL_CONTRACTS.map((contract) => `mcp__accord_agents__${contract.definition.name}`)
+    );
     assert.equal((resultMessage?.payload as { message?: ChatMessage }).message?.content, "fake claude result");
     assert.equal((resultMessage?.payload as { message?: ChatMessage }).message?.participantLabel, "@claude");
   } finally {
