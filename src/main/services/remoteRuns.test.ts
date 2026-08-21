@@ -71,6 +71,7 @@ import type {
   RemoteParticipantSessionEnsureResult,
   RemoteParticipantSessionInspectRequest,
   RemoteParticipantSessionInspectResult,
+  RemoteParticipantSessionStopRequest,
   RemoteToolchainPreflightProbeRequest,
   RemoteWorkerEvent
 } from "./remoteRuns";
@@ -1916,7 +1917,7 @@ test("mirror-sync rechecks active mirrors inside the queue before destructive up
   assert.equal(mirrorSync.calls.filter((call) => call.kind === "up").length, 1);
 });
 
-test("warm participant session launches once, reuses the supervisor, and resumes the provider session", async () => {
+test("cancelling a warm participant turn preserves its supervisor and resumes the provider session", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant]);
   const worker = new FakeWarmSessionTransport();
@@ -1933,6 +1934,12 @@ test("warm participant session launches once, reuses the supervisor, and resumes
     worker: target,
     onPhase: (status) => firstPhases.push(status.phase)
   });
+  await remote.cancelDetachedRun({
+    conversationId: conversation.id,
+    runId: "warm-one",
+    worker: target,
+    reason: "Stopped by user."
+  });
   await remote.startDetachedRun({
     conversationId: conversation.id,
     runId: "warm-two",
@@ -1945,6 +1952,7 @@ test("warm participant session launches once, reuses the supervisor, and resumes
 
   assert.equal(worker.ensureCalls, 2);
   assert.equal(worker.sessionLaunches, 1);
+  assert.equal(worker.sessionStops, 0);
   assert.equal(worker.submissions.length, 2);
   assert.ok(firstPhases.includes("launching-session"));
   assert.equal(secondPhases.includes("launching-session"), false);
@@ -3493,6 +3501,7 @@ class FakeDetachedWorkerTransport implements RemoteDetachedWorkerTransport {
 class FakeWarmSessionTransport extends FakeDetachedWorkerTransport {
   ensureCalls = 0;
   sessionLaunches = 0;
+  sessionStops = 0;
   readonly submissions: RemoteDetachedWorkerLaunchRequest[] = [];
   readonly sessions = new Set<string>();
   failNextSubmissionAsStale = false;
@@ -3546,6 +3555,12 @@ class FakeWarmSessionTransport extends FakeDetachedWorkerTransport {
       },
       events: this.eventsByRun.get(request.runId) ?? []
     };
+  }
+
+  async stopParticipantSessionIfIdle(request: RemoteParticipantSessionStopRequest): Promise<boolean> {
+    this.sessionStops += 1;
+    this.sessions.delete(request.handle.sessionKey);
+    return true;
   }
 }
 

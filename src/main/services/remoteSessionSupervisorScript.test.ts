@@ -485,6 +485,91 @@ test("automatic-stop drain blocks submissions until its lease expires or the wor
   assert.equal(stopped.value.status, "stopped");
 });
 
+test("cancel-run stops only the active turn and the warm session accepts the next turn", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-session-cancel-resume-"));
+  const sessionDir = path.join(root, "sessions", "participant");
+  await mkdir(path.join(root, "sessions"), { recursive: true });
+  await writeFile(path.join(root, "session-control.js"), remoteSessionControlScript(), "utf8");
+  await writeFile(path.join(root, "session-supervisor.js"), remoteSessionSupervisorScript(), "utf8");
+  await writeFile(path.join(root, "run-worker.js"), `
+const fs = require("node:fs");
+const path = require("node:path");
+const invocation = JSON.parse(fs.readFileSync(path.join(process.cwd(), "invocation.json"), "utf8"));
+const statePath = path.join(process.cwd(), "state.json");
+const exitPath = path.join(process.cwd(), "exit.json");
+const running = {
+  runId: invocation.runId,
+  status: "running",
+  pid: process.pid,
+  pgid: process.pid,
+  processCookie: process.env.ACCORD_AGENTS_PROCESS_COOKIE
+};
+fs.writeFileSync(statePath, JSON.stringify(running));
+if (invocation.runId === "turn-one") {
+  setInterval(() => {}, 1000);
+} else {
+  setTimeout(() => {
+    const completed = { ...running, status: "completed", completedAt: new Date().toISOString() };
+    fs.writeFileSync(statePath, JSON.stringify(completed));
+    fs.writeFileSync(exitPath, JSON.stringify(completed));
+    process.exit(0);
+  }, 50);
+}
+`, "utf8");
+
+  const ensured = await runControl(root, "ensure", {
+    protocolVersion: REMOTE_SESSION_PROTOCOL_VERSION,
+    sessionKey: "participant",
+    sessionDir,
+    conversationId: "conversation",
+    participantId: "participant",
+    runtimeFingerprint: "fingerprint",
+    idleTimeoutMs: 10_000
+  });
+  assert.equal(ensured.value.status, "launched");
+  const supervisorPid = Number(ensured.value.pid);
+  const turn = (runId: string): Record<string, unknown> => ({
+    sessionDir,
+    runId,
+    runDir: path.join(root, runId),
+    prompt: `Run ${runId}.`,
+    invocation: {
+      runId,
+      conversationId: "conversation",
+      participantId: "participant"
+    },
+    contextSnapshot: null
+  });
+
+  try {
+    const first = await runControl(root, "submit", turn("turn-one"));
+    assert.equal(first.value.status, "accepted");
+    await waitFor(async () => (await state(sessionDir)).activeRunId === "turn-one");
+
+    const cancelled = await runControl(root, "cancel-run", {
+      runId: "turn-one",
+      runDir: path.join(root, "turn-one"),
+      reason: "Stopped by user."
+    });
+    assert.equal(cancelled.value.status, "cancelled");
+    await waitFor(async () => !(await state(sessionDir)).activeRunId);
+    assert.equal(processAlive(supervisorPid), true, "Stop must not terminate the participant supervisor");
+
+    const second = await runControl(root, "submit", turn("turn-two"));
+    assert.equal(second.value.status, "accepted");
+    await waitFor(async () => {
+      if ((await state(sessionDir)).activeRunId) return false;
+      const secondStatePath = path.join(root, "turn-two", "state.json");
+      if (!(await fileExists(secondStatePath))) return false;
+      const secondState = JSON.parse(await readFile(secondStatePath, "utf8")) as Record<string, unknown>;
+      return secondState.status === "completed";
+    });
+    assert.equal(Number((await state(sessionDir)).supervisorPid), supervisorPid);
+  } finally {
+    await runControl(root, "stop-session", { sessionDir, remove: true });
+  }
+});
+
 test("idle cleanup escalates a refusing supervisor and removes it only after verified exit", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "accordagents-session-stop-race-"));
   const sessionDir = path.join(root, "sessions", "participant");
