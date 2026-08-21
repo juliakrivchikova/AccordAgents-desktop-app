@@ -935,7 +935,8 @@ async function startMobileRelayControlForPairing(pairing: MobilePairingPackage):
         hasFulfilledMobileMailboxEvent(pairing, conversationId, eventId),
       tryAcquireMobileEventExecution: (event, runId) =>
         acquireDesktopMobileExecutionClaim(pairing, event.conversationId, event.eventId, runId),
-      cancelRun: (conversationId, runId) => cancelMobileChatRun(conversationId, runId)
+      cancelRun: (conversationId, runId) => cancelMobileChatRun(conversationId, runId),
+      conversationIdForRun: (runId) => chatService.conversationIdForRun(runId)
     },
     mobileRelayChatCatalog(),
     (progress) => emitReviewProgress(progress),

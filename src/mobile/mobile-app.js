@@ -1996,7 +1996,13 @@
     if (payload?.type !== "mobile.timeline.events" || !Array.isArray(payload.events)) {
       return 0;
     }
-    const conversationId = payload.conversationId || fallbackConversationId || selectedConversationId();
+    // Never the chat that happens to be open: a batch that does not say which
+    // conversation it belongs to used to be filed under whatever the user was
+    // looking at, which is how another chat's messages appeared in this one.
+    const conversationId = payload.conversationId || fallbackConversationId;
+    if (!conversationId) {
+      return 0;
+    }
     let stored = 0;
     for (const event of payload.events) {
       if (!event || typeof event !== "object") {

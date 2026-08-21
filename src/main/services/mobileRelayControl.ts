@@ -33,6 +33,11 @@ export interface MobileRelayChatSender {
   hasMobileMailboxResultForMobileEvent?(conversationId: string, eventId: string): Promise<boolean>;
   tryAcquireMobileEventExecution?(event: MobileOutboxEvent, runId: string): Promise<boolean>;
   cancelRun?(conversationId: string, runId: string): Promise<boolean> | boolean;
+  /** Which conversation a run belongs to, answered by the service that owns the
+   *  runs. Progress arrives with no conversation on it, so without this the
+   *  control has to guess — and guessing meant attributing another chat's run
+   *  to the paired one. */
+  conversationIdForRun?(runId: string): string | undefined;
 }
 
 export interface MobileRelayAcceptedResult {
@@ -196,7 +201,7 @@ export class MobileRelayControlService {
    *  Without this, dropped live frames are indistinguishable from a healthy
    *  idle channel. */
   onLiveDiagnostic?: (detail: {
-    kind: "sent" | "skipped-disconnected" | "empty-after-dedup" | "no-content";
+    kind: "sent" | "skipped-disconnected" | "empty-after-dedup" | "no-content" | "unknown-conversation";
     logicalMessageId: string;
     events: number;
     bytes: number;
@@ -296,15 +301,26 @@ export class MobileRelayControlService {
    *  and nothing again until the answer landed, so there is nothing to watch.
    *  Published live-only: it is the growing reply, not a record. */
   noteExternalChatProgress(progress: ReviewProgress): void {
-    // Scoped to the pairing's own conversation: a control never publishes text
-    // from a conversation this phone was not paired to.
-    // A pairing scoped to the whole workspace has no single conversationId, so
-    // requiring one here turned streaming off entirely for that pairing shape.
-    const conversationId = this.conversationIdByRunId.get(progress.runId) ?? this.options.conversationId;
+    const conversationId = this.conversationIdForProgress(progress.runId);
     if (!this.isActive() || !progress.agentProgress) {
       return;
     }
-    if (conversationId && !this.conversationIdByRunId.has(progress.runId)) {
+    // Progress carries no conversation of its own, so an unidentified run used
+    // to be attributed to whatever conversation this pairing was opened for —
+    // and that guess was then remembered, so every later frame of another
+    // chat's run was delivered as this chat's. Content from one chat ended up
+    // shown, and stored, inside another. An unidentified run is dropped now.
+    if (!conversationId || !this.isConversationAllowedForProgress(conversationId)) {
+      this.onLiveDiagnostic?.({
+        kind: "unknown-conversation",
+        logicalMessageId: `progress:${progress.runId}`,
+        events: 0,
+        bytes: 0,
+        rendezvousId: this.options.rendezvousId
+      });
+      return;
+    }
+    if (!this.conversationIdByRunId.has(progress.runId)) {
       this.conversationIdByRunId.set(progress.runId, conversationId);
     }
     if (!this.runStartedAtByRunId.has(progress.runId)) {
@@ -317,6 +333,26 @@ export class MobileRelayControlService {
     void this.sendTimelineProgress(progress, { liveOnly: true }).catch(() => {
       // Watching is best effort; the timeline itself is unaffected.
     });
+  }
+
+  /** Which conversation a run belongs to. Asked of the service that owns the
+   *  runs first; the pairing's own conversation is only used when the run is
+   *  already known to belong to it, or when there is no owner to ask. Never a
+   *  guess: an unidentified run returns undefined and its frames are dropped
+   *  rather than delivered to the wrong chat. */
+  private conversationIdForProgress(runId: string): string | undefined {
+    const remembered = this.conversationIdByRunId.get(runId);
+    if (remembered) {
+      return remembered;
+    }
+    const owned = this.chat.conversationIdForRun?.(runId);
+    if (owned) {
+      return owned;
+    }
+    // No owner to ask — an older host, or a test double. Fall back to the
+    // pairing's conversation only for a pairing that has one, which keeps a
+    // single-conversation pairing working exactly as before.
+    return this.chat.conversationIdForRun ? undefined : this.options.conversationId;
   }
 
   pushConversationSnapshot(conversation: Conversation): void {
@@ -525,6 +561,16 @@ export class MobileRelayControlService {
     await this.flushQueuedProgress(accepted.runIds);
   }
 
+  /** The synchronous half of the entitlement check, for the progress path.
+   *  A pairing opened for one conversation carries that conversation and
+   *  nothing else — a correctly labelled frame from another chat is still that
+   *  chat's content arriving on a route that is not entitled to it. A
+   *  workspace-scoped pairing has no single conversation and defers to the
+   *  catalog on the paths that can await it. */
+  private isConversationAllowedForProgress(conversationId: string): boolean {
+    return this.options.conversationId ? conversationId === this.options.conversationId : true;
+  }
+
   private async isConversationAllowed(conversationId: string): Promise<boolean> {
     if (this.options.conversationId) {
       return conversationId === this.options.conversationId;
@@ -709,7 +755,7 @@ export class MobileRelayControlService {
     }
     const id = agent.messageId?.trim() ||
       `${progress.runId}:${agent.participantId ?? agent.participantLabel}`;
-    const conversationId = this.conversationIdByRunId.get(progress.runId) ?? this.options.conversationId;
+    const conversationId = this.conversationIdForProgress(progress.runId);
     const timeline: MobileTimelineEvents = {
       type: "mobile.timeline.events",
       ...(conversationId ? { conversationId } : {}),
@@ -753,7 +799,7 @@ export class MobileRelayControlService {
     if (!terminal || !this.catalog) {
       return;
     }
-    const conversationId = this.conversationIdByRunId.get(progress.runId) ?? this.options.conversationId;
+    const conversationId = this.conversationIdForProgress(progress.runId);
     if (!conversationId) {
       return;
     }

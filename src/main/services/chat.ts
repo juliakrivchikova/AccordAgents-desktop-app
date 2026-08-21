@@ -18145,6 +18145,32 @@ export class ChatService {
     return true;
   }
 
+  /** Which conversation a run belongs to. Live progress carries no conversation
+   *  of its own, so whoever forwards it — the phone relay in particular — has to
+   *  ask rather than assume: attributing a run to the wrong chat puts one
+   *  chat's content inside another. Undefined means "not known here", and the
+   *  caller must drop the frame rather than pick a chat. */
+  conversationIdForRun(runId: string): string | undefined {
+    const targetRunId = runId.trim();
+    if (!targetRunId) {
+      return undefined;
+    }
+    const fromMeta = this.chatRunMeta.get(targetRunId)?.conversationId;
+    if (fromMeta) {
+      return fromMeta;
+    }
+    const fromRemote = this.remoteRunHandlesByRun.get(targetRunId)?.conversationId;
+    if (fromRemote) {
+      return fromRemote;
+    }
+    for (const [conversationId, runIds] of this.activeConversationRunIds) {
+      if (runIds.has(targetRunId)) {
+        return conversationId;
+      }
+    }
+    return undefined;
+  }
+
   hasActiveRunForConversation(conversationId: string, runId: string): boolean {
     const targetConversationId = conversationId.trim();
     const targetRunId = runId.trim();

@@ -96,6 +96,68 @@ test("MobileRelayControlService routes run.cancel.requested to the existing canc
   }
 });
 
+test("progress for a run in another chat is dropped, not delivered as this chat's", async () => {
+  // The defect: live progress carries no conversation of its own, so a run this
+  // control had not seen was attributed to the conversation the phone was
+  // paired to — and that guess was then remembered, so every later frame of the
+  // other chat's run arrived as this chat's. One chat's content ended up shown,
+  // and stored, inside another.
+  const key = Buffer.from("q".repeat(32)).toString("base64url");
+  const sent: unknown[] = [];
+  const decisions: string[] = [];
+  const service = new MobileRelayControlService(
+    {
+      relayUrl: "ws://127.0.0.1:1/v1/relay",
+      rendezvousId: "rv-leak",
+      relayCapability: "PAIRING-FINGERPRINT",
+      relaySealKeyBase64: key,
+      conversationId: "paired-conversation",
+      streamId: "route-leak:phone"
+    },
+    {
+      ...sender(sent),
+      conversationIdForRun: (runId: string) =>
+        runId === "run-in-paired-chat" ? "paired-conversation" : "some-other-conversation"
+    }
+  );
+  service.onLiveDiagnostic = (detail) => decisions.push(`${detail.kind}:${detail.logicalMessageId}`);
+
+  const progressFor = (runId: string, text: string) => ({
+    runId,
+    phase: "debate" as const,
+    message: "",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    agentProgress: {
+      participantLabel: "@someone",
+      state: "running" as const,
+      partialContent: text
+    }
+  });
+
+  try {
+    service.noteExternalChatProgress(progressFor("run-in-another-chat", "a sentence from a chat this phone is not looking at"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.deepEqual(
+      decisions,
+      ["unknown-conversation:progress:run-in-another-chat"],
+      "another conversation's run must be dropped before anything is published"
+    );
+
+    decisions.length = 0;
+    service.noteExternalChatProgress(progressFor("run-in-paired-chat", "a sentence from the chat this phone is paired to"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(
+      decisions.some((decision) => decision.startsWith("unknown-conversation")),
+      false,
+      "the paired conversation's own progress must still go through"
+    );
+  } finally {
+    service.close();
+  }
+});
+
 test("MobileRelayControlService ignores outbox events after pairing becomes inactive", async () => {
   const key = Buffer.from("n".repeat(32)).toString("base64url");
   const sent: unknown[] = [];
