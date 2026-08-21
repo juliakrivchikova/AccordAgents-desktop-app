@@ -2153,7 +2153,8 @@ export class StorageService {
   }
 
   private async queryJson<T>(sql: string): Promise<T[]> {
-    const result = await runCommand(this.sqliteExecutable ?? "sqlite3", this.sqliteArgs(["-json", this.dbPath, sql]), {
+    const result = await runCommand(this.sqliteExecutable ?? "sqlite3", this.sqliteArgs(["-json", this.dbPath]), {
+      input: sql,
       timeoutMs: SQLITE_COMMAND_TIMEOUT_MS,
       primeLoginShellEnv: false
     });
@@ -2162,7 +2163,8 @@ export class StorageService {
   }
 
   private async queryText(sql: string): Promise<string> {
-    const result = await runCommand(this.sqliteExecutable ?? "sqlite3", this.sqliteArgs(["-batch", "-noheader", this.dbPath, sql]), {
+    const result = await runCommand(this.sqliteExecutable ?? "sqlite3", this.sqliteArgs(["-batch", "-noheader", this.dbPath]), {
+      input: sql,
       timeoutMs: SQLITE_COMMAND_TIMEOUT_MS,
       primeLoginShellEnv: false
     });

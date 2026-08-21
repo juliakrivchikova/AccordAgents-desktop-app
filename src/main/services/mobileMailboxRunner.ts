@@ -4,8 +4,11 @@ import { MOBILE_MAILBOX_RUNNER_CRYPTO_SNIPPET } from "./mobileMailboxRunnerCrypt
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
+import { stableJson } from "../../shared/stableJson";
 
 export const MOBILE_RUNNER_POLICY_KIND = "mobile.runner.policy";
+export const MOBILE_RUNNER_CONTEXT_KIND = "mobile.runner.context";
+const MOBILE_RUNNER_CONTEXT_CHUNK_BYTES = 384 * 1024;
 
 export interface MobileMailboxRunnerParticipant {
   id: string;
@@ -24,19 +27,236 @@ export interface MobileMailboxRunnerPolicy {
   title: string;
   updatedAt: string;
   participants: MobileMailboxRunnerParticipant[];
-  recentMessages: Array<{
+  recentMessages?: Array<{
     role: ChatMessage["role"];
     participantId?: string;
     participantLabel?: string;
     content: string;
     createdAt: string;
   }>;
+  contextSnapshotRef?: MobileMailboxRunnerContextRef;
+  /** Kept for old policy events already resident in a mailbox. New events use
+   *  contextSnapshotRef so the snapshot is not copied into every policy. */
   contextSnapshot?: Record<string, unknown>;
   mobileAccess?: {
     originId: string;
     rendezvousId: string;
     expiresAt: string;
   };
+}
+
+export interface MobileMailboxRunnerContextRef {
+  version: 1;
+  revision: string;
+}
+
+export interface MobileMailboxRunnerContextFragment {
+  key: string;
+  part: number;
+  totalParts: number;
+  data: string;
+}
+
+export interface MobileMailboxRunnerContextChunk {
+  type: typeof MOBILE_RUNNER_CONTEXT_KIND;
+  conversationId: string;
+  revision: string;
+  header?: {
+    reset: boolean;
+    baseRevision?: string;
+    messageIds: string[];
+    messageSequences: Array<number | null>;
+    attachmentIds: string[];
+    attachmentSequences: Array<number | null>;
+    expectedRecords: string[];
+  };
+  fragments?: MobileMailboxRunnerContextFragment[];
+}
+
+export interface MobileMailboxRunnerContextDeliveryState {
+  revision: string;
+  messageHashes: Record<string, string>;
+  attachmentHashes: Record<string, string>;
+  attachmentBase64Lengths: Record<string, number>;
+  policyHash?: string;
+}
+
+export interface MobileMailboxRunnerContextDelivery {
+  ref: MobileMailboxRunnerContextRef;
+  chunks: MobileMailboxRunnerContextChunk[];
+  nextState: MobileMailboxRunnerContextDeliveryState;
+}
+
+export interface MobileMailboxRunnerLatestQueue<T> {
+  latest?: T;
+  running: Promise<void>;
+}
+
+export function enqueueLatestMobileMailboxRunnerPublish<T>(
+  queues: Map<string, MobileMailboxRunnerLatestQueue<T>>,
+  key: string,
+  value: T,
+  publish: (value: T) => Promise<void>
+): Promise<void> {
+  const existing = queues.get(key);
+  if (existing) {
+    existing.latest = value;
+    return existing.running;
+  }
+  const queue: MobileMailboxRunnerLatestQueue<T> = {
+    latest: value,
+    running: Promise.resolve()
+  };
+  queue.running = (async () => {
+    while (queue.latest !== undefined) {
+      const latest = queue.latest;
+      queue.latest = undefined;
+      await publish(latest);
+    }
+  })().finally(() => {
+    if (queues.get(key) === queue) {
+      queues.delete(key);
+    }
+  });
+  queues.set(key, queue);
+  return queue.running;
+}
+
+export function mobileMailboxRunnerContextDelivery(
+  snapshot: Record<string, unknown>,
+  previous?: MobileMailboxRunnerContextDeliveryState
+): MobileMailboxRunnerContextDelivery {
+  const conversationId = typeof snapshot.conversationId === "string" ? snapshot.conversationId.trim() : "";
+  if (!conversationId) {
+    throw new Error("Mobile mailbox runner context requires conversationId.");
+  }
+  const messages = Array.isArray(snapshot.messages)
+    ? snapshot.messages.filter(isRecord)
+    : [];
+  const attachments = Array.isArray(snapshot.attachments)
+    ? snapshot.attachments.filter(isRecord)
+    : [];
+  const base = { ...snapshot };
+  delete base.messages;
+  delete base.attachments;
+
+  const messageRecords = uniqueContextRecords(messages, (value, index) =>
+    typeof value.id === "string" && value.id.trim() ? value.id.trim() : `sequence:${String(value.sequence ?? index)}`
+  );
+  const attachmentRecords = uniqueContextRecords(attachments, (value, index) => {
+    const attachment = isRecord(value.attachment) ? value.attachment : undefined;
+    return typeof attachment?.id === "string" && attachment.id.trim()
+      ? attachment.id.trim()
+      : `attachment:${index}`;
+  });
+  const baseJson = JSON.stringify(base);
+  const baseHash = sha256Hex(stableJson(base));
+  const messageHashes = Object.fromEntries(messageRecords.map(({ id, value }) => [id, contextRecordHash(value)]));
+  const attachmentHashes = Object.fromEntries(attachmentRecords.map(({ id, value }) => [
+    id,
+    value.dataBase64Omitted === true && previous?.attachmentHashes[id]
+      ? previous.attachmentHashes[id]
+      : contextRecordHash(value)
+  ]));
+  const attachmentBase64Lengths = Object.fromEntries(attachmentRecords.map(({ id, value }) => {
+    const dataBase64 = typeof value.dataBase64 === "string" ? value.dataBase64 : undefined;
+    return [id, dataBase64?.length ?? previous?.attachmentBase64Lengths[id] ?? 0];
+  }));
+  const messageSequences = messageRecords.map(({ value }) => contextRecordSequence(value));
+  const attachmentSequences = attachmentRecords.map(({ value }) => contextRecordSequence(value));
+  const revision = sha256Hex(stableJson({
+    baseHash,
+    messages: messageRecords.map(({ id }, index) => [id, messageHashes[id], messageSequences[index]]),
+    attachments: attachmentRecords.map(({ id }, index) => [id, attachmentHashes[id], attachmentSequences[index]])
+  }));
+  const nextState: MobileMailboxRunnerContextDeliveryState = {
+    revision,
+    messageHashes,
+    attachmentHashes,
+    attachmentBase64Lengths,
+    ...(previous?.policyHash ? { policyHash: previous.policyHash } : {})
+  };
+  const ref: MobileMailboxRunnerContextRef = { version: 1, revision };
+  if (previous?.revision === revision) {
+    return { ref, chunks: [], nextState };
+  }
+
+  const records = [
+    { key: "snapshot:base", json: baseJson },
+    ...messageRecords
+      .filter(({ id }) => previous?.messageHashes[id] !== messageHashes[id])
+      .map(({ id, value }) => ({ key: `message:${id}`, json: JSON.stringify(value) })),
+    ...attachmentRecords
+      .filter(({ id, value }) => value.dataBase64Omitted !== true && previous?.attachmentHashes[id] !== attachmentHashes[id])
+      .map(({ id, value }) => ({ key: `attachment:${id}`, json: JSON.stringify(value) }))
+  ];
+  const fragments = records.flatMap(({ key, json }) => contextRecordFragments(key, json));
+  const chunks: MobileMailboxRunnerContextChunk[] = [{
+    type: MOBILE_RUNNER_CONTEXT_KIND,
+    conversationId,
+    revision,
+    header: {
+      reset: previous === undefined,
+      ...(previous ? { baseRevision: previous.revision } : {}),
+      messageIds: messageRecords.map(({ id }) => id),
+      messageSequences,
+      attachmentIds: attachmentRecords.map(({ id }) => id),
+      attachmentSequences,
+      expectedRecords: records.map(({ key }) => key)
+    }
+  }];
+  let pending: MobileMailboxRunnerContextFragment[] = [];
+  let pendingBytes = 0;
+  for (const fragment of fragments) {
+    const bytes = Buffer.byteLength(fragment.data, "utf8");
+    if (pending.length > 0 && pendingBytes + bytes > MOBILE_RUNNER_CONTEXT_CHUNK_BYTES) {
+      chunks.push({ type: MOBILE_RUNNER_CONTEXT_KIND, conversationId, revision, fragments: pending });
+      pending = [];
+      pendingBytes = 0;
+    }
+    pending.push(fragment);
+    pendingBytes += bytes;
+  }
+  if (pending.length > 0) {
+    chunks.push({ type: MOBILE_RUNNER_CONTEXT_KIND, conversationId, revision, fragments: pending });
+  }
+  return { ref, chunks, nextState };
+}
+
+function contextRecordHash(value: Record<string, unknown>): string {
+  const withoutSequence = { ...value };
+  delete withoutSequence.sequence;
+  return sha256Hex(stableJson(withoutSequence));
+}
+
+function contextRecordSequence(value: Record<string, unknown>): number | null {
+  return typeof value.sequence === "number" && Number.isFinite(value.sequence) ? value.sequence : null;
+}
+
+function uniqueContextRecords(
+  values: Record<string, unknown>[],
+  idForValue: (value: Record<string, unknown>, index: number) => string
+): Array<{ id: string; value: Record<string, unknown> }> {
+  const byId = new Map<string, Record<string, unknown>>();
+  values.forEach((value, index) => byId.set(idForValue(value, index), value));
+  return [...byId].map(([id, value]) => ({ id, value }));
+}
+
+function contextRecordFragments(key: string, json: string): MobileMailboxRunnerContextFragment[] {
+  // Base64 keeps every fragment ASCII, so the byte cap is real even when a
+  // message contains multi-byte Unicode rather than an optimistic JS length.
+  const encoded = Buffer.from(json, "utf8").toString("base64");
+  const totalParts = Math.max(1, Math.ceil(encoded.length / MOBILE_RUNNER_CONTEXT_CHUNK_BYTES));
+  return Array.from({ length: totalParts }, (_, part) => ({
+    key,
+    part,
+    totalParts,
+    data: encoded.slice(part * MOBILE_RUNNER_CONTEXT_CHUNK_BYTES, (part + 1) * MOBILE_RUNNER_CONTEXT_CHUNK_BYTES)
+  }));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 export interface MobileMailboxRunnerInstallRequest {
@@ -58,7 +278,7 @@ export interface MobileMailboxRunnerInstallRequest {
 export function mobileMailboxRunnerPolicyFromConversation(
   conversation: Conversation,
   pairing?: MobilePairingPackage,
-  contextSnapshot?: Record<string, unknown>
+  contextSnapshotRef?: MobileMailboxRunnerContextRef
 ): MobileMailboxRunnerPolicy {
   return {
     type: MOBILE_RUNNER_POLICY_KIND,
@@ -66,17 +286,18 @@ export function mobileMailboxRunnerPolicyFromConversation(
     title: conversation.title || "Chat",
     updatedAt: conversation.updatedAt,
     participants: mobileMailboxRunnerParticipants(conversation),
-    recentMessages: conversation.messages
-      .filter((message) => message.role !== "summary" && Boolean(message.content.trim()))
-      .slice(-40)
-      .map((message) => ({
-        role: message.role,
-        ...(message.participantId ? { participantId: message.participantId } : {}),
-        ...(message.participantLabel ? { participantLabel: message.participantLabel } : {}),
-        content: message.content,
-        createdAt: message.createdAt
-      })),
-    ...(contextSnapshot ? { contextSnapshot } : {}),
+    ...(contextSnapshotRef ? { contextSnapshotRef } : {
+      recentMessages: conversation.messages
+        .filter((message) => message.role !== "summary" && Boolean(message.content.trim()))
+        .slice(-40)
+        .map((message) => ({
+          role: message.role,
+          ...(message.participantId ? { participantId: message.participantId } : {}),
+          ...(message.participantLabel ? { participantLabel: message.participantLabel } : {}),
+          content: message.content,
+          createdAt: message.createdAt
+        }))
+    }),
     ...(pairing ? {
       mobileAccess: {
         originId: mobileOriginIdForPairing(pairing),
@@ -235,13 +456,22 @@ const originId = process.env.ACCORD_MOBILE_RUNNER_ORIGIN_ID || "mobile-runner-" 
 const codexPath = process.env.ACCORD_MOBILE_CODEX_PATH || "codex";
 const claudePath = process.env.ACCORD_MOBILE_CLAUDE_PATH || "claude";
 const statePath = process.env.ACCORD_MOBILE_RUNNER_STATE || path.join(os.tmpdir(), "accordagents-mobile-runner-state.json");
+const contextStatePath = process.env.ACCORD_MOBILE_RUNNER_CONTEXT_STATE || statePath + ".context";
+const mobileRunnerContextKind = ${JSON.stringify(MOBILE_RUNNER_CONTEXT_KIND)};
 const pollIntervalMs = Math.max(250, Number(process.env.ACCORD_MOBILE_RUNNER_POLL_MS || 2500));
 const once = process.env.ACCORD_MOBILE_RUNNER_ONCE === "1";
 const operationLeasePath = process.env.ACCORD_MOBILE_RUNNER_OPERATION_LEASE_PATH || "";
 const operationLeaseOwner = process.env.ACCORD_MOBILE_RUNNER_OPERATION_LEASE_OWNER || originId;
 const operationLeaseTtlMs = Math.max(5000, Number(process.env.ACCORD_MOBILE_RUNNER_OPERATION_LEASE_TTL_MS || 30000));
 const executionClaimTtlMs = Math.max(5000, Number(process.env.ACCORD_MOBILE_EVENT_CLAIM_TTL_MS || 45000));
+const maxContextDrafts = 32;
 const state = readJson(statePath, { originSeq: 1, processedEventIds: [], prevHash: undefined });
+const contextState = readJson(contextStatePath, {
+  contextSnapshotsByConversation: state.contextSnapshotsByConversation || {},
+  contextDraftsByRevision: state.contextDraftsByRevision || {}
+});
+delete state.contextSnapshotsByConversation;
+delete state.contextDraftsByRevision;
 const processed = new Set(Array.isArray(state.processedEventIds) ? state.processedEventIds : []);
 // W1 arrival cursor: the runner reads only what it has not seen, so policies
 // seen in earlier ticks are cached in state rather than re-listed each poll.
@@ -250,6 +480,12 @@ if (!Number.isFinite(state.mailboxCursor)) { state.mailboxCursor = 0; }
 if (typeof state.mailboxEpoch !== "string") { state.mailboxEpoch = ""; }
 if (!state.policiesByConversation || typeof state.policiesByConversation !== "object") {
   state.policiesByConversation = {};
+}
+if (!contextState.contextSnapshotsByConversation || typeof contextState.contextSnapshotsByConversation !== "object") {
+  contextState.contextSnapshotsByConversation = {};
+}
+if (!contextState.contextDraftsByRevision || typeof contextState.contextDraftsByRevision !== "object") {
+  contextState.contextDraftsByRevision = {};
 }
 let running = false;
 let operationLeaseTimer;
@@ -881,10 +1117,16 @@ function stopExecutionClaimRenewal() {
 function latestPolicies(events) {
   // Cursor reads only deliver each policy event once, so the latest policy
   // per conversation is cached in state and refreshed from new events.
+  const contextChanged = applyContextChunks(events);
   let changed = false;
   for (const event of events) {
     const payload = event && event.payload;
     if (event && event.kind === "mobile.runner.policy" && payload && payload.type === "mobile.runner.policy") {
+      if (payload.contextSnapshotRef && !materializeContextSnapshot(payload)) {
+        delete state.policiesByConversation[event.conversationId];
+        changed = true;
+        continue;
+      }
       state.policiesByConversation[event.conversationId] = payload;
       changed = true;
     }
@@ -894,9 +1136,156 @@ function latestPolicies(events) {
   }
   const policies = new Map();
   for (const [conversationId, payload] of Object.entries(state.policiesByConversation)) {
+    const ref = payload && payload.contextSnapshotRef;
+    if (ref && typeof ref.revision === "string") {
+      const cached = contextState.contextSnapshotsByConversation[conversationId];
+      if (!cached || cached.revision !== ref.revision) { continue; }
+      policies.set(conversationId, Object.assign({}, payload, {
+        contextSnapshot: contextSnapshotFromState(cached)
+      }));
+      continue;
+    }
     policies.set(conversationId, payload);
   }
+  // Materialization mutates contextState by promoting a complete draft to the
+  // active snapshot, so persist after policy reconstruction rather than before.
+  if (contextChanged) {
+    writeJsonAtomic(contextStatePath, contextState);
+  }
   return policies;
+}
+
+function applyContextChunks(events) {
+  let changed = false;
+  for (const event of events) {
+    const payload = event && event.payload;
+    if (!event || event.kind !== mobileRunnerContextKind || !payload || payload.type !== mobileRunnerContextKind) {
+      continue;
+    }
+    const revision = typeof payload.revision === "string" ? payload.revision : "";
+    if (!revision || event.conversationId !== payload.conversationId) { continue; }
+    const cached = contextState.contextSnapshotsByConversation[event.conversationId];
+    if (cached && cached.revision === revision) {
+      delete contextState.contextDraftsByRevision[revision];
+      changed = true;
+      continue;
+    }
+    if (payload.header && typeof payload.header === "object") {
+      for (const [draftRevision, candidate] of Object.entries(contextState.contextDraftsByRevision)) {
+        if (draftRevision !== revision && candidate && candidate.conversationId === event.conversationId) {
+          delete contextState.contextDraftsByRevision[draftRevision];
+        }
+      }
+    }
+    const draft = contextState.contextDraftsByRevision[revision] || {
+      conversationId: event.conversationId,
+      revision,
+      records: {},
+      updatedAt: 0
+    };
+    if (payload.header && typeof payload.header === "object") {
+      draft.header = payload.header;
+    }
+    if (Array.isArray(payload.fragments)) {
+      for (const fragment of payload.fragments) {
+        if (!fragment || typeof fragment.key !== "string" || !Number.isInteger(fragment.part) ||
+            !Number.isInteger(fragment.totalParts) || fragment.part < 0 || fragment.totalParts <= fragment.part ||
+            typeof fragment.data !== "string") { continue; }
+        const record = draft.records[fragment.key] || { totalParts: fragment.totalParts, parts: [] };
+        if (record.totalParts !== fragment.totalParts) { continue; }
+        record.parts[fragment.part] = fragment.data;
+        draft.records[fragment.key] = record;
+      }
+    }
+    draft.updatedAt = Date.now();
+    contextState.contextDraftsByRevision[revision] = draft;
+    changed = true;
+  }
+  const drafts = Object.entries(contextState.contextDraftsByRevision);
+  if (drafts.length > maxContextDrafts) {
+    drafts
+      .sort((left, right) => Number(right[1] && right[1].updatedAt || 0) - Number(left[1] && left[1].updatedAt || 0))
+      .slice(maxContextDrafts)
+      .forEach(([revision]) => { delete contextState.contextDraftsByRevision[revision]; });
+    changed = true;
+  }
+  return changed;
+}
+
+function materializeContextSnapshot(policy) {
+  const ref = policy && policy.contextSnapshotRef;
+  const revision = ref && typeof ref.revision === "string" ? ref.revision : "";
+  const conversationId = typeof policy.conversationId === "string" ? policy.conversationId : "";
+  if (!revision || !conversationId || ref.version !== 1) { return undefined; }
+  const current = contextState.contextSnapshotsByConversation[conversationId];
+  if (current && current.revision === revision) {
+    return contextSnapshotFromState(current);
+  }
+  const draft = contextState.contextDraftsByRevision[revision];
+  const header = draft && draft.header;
+  if (!draft || draft.conversationId !== conversationId || !header || typeof header !== "object") {
+    return undefined;
+  }
+  const reset = header.reset === true;
+  const baseRevision = typeof header.baseRevision === "string" ? header.baseRevision : "";
+  if (!reset && (!current || current.revision !== baseRevision)) {
+    return undefined;
+  }
+  const expected = Array.isArray(header.expectedRecords) ? header.expectedRecords : [];
+  const parsed = {};
+  for (const key of expected) {
+    const record = typeof key === "string" ? draft.records[key] : undefined;
+    if (!record || !Array.isArray(record.parts) || record.parts.length !== record.totalParts ||
+        record.parts.some((part) => typeof part !== "string")) {
+      return undefined;
+    }
+    try { parsed[key] = JSON.parse(Buffer.from(record.parts.join(""), "base64").toString("utf8")); } catch { return undefined; }
+  }
+  const base = parsed["snapshot:base"];
+  if (!base || typeof base !== "object" || Array.isArray(base)) { return undefined; }
+  const messagesById = reset ? {} : Object.assign({}, current.messagesById || {});
+  const attachmentsById = reset ? {} : Object.assign({}, current.attachmentsById || {});
+  for (const [key, value] of Object.entries(parsed)) {
+    if (key.startsWith("message:")) { messagesById[key.slice("message:".length)] = value; }
+    if (key.startsWith("attachment:")) { attachmentsById[key.slice("attachment:".length)] = value; }
+  }
+  const messageIds = Array.isArray(header.messageIds) ? header.messageIds.filter((id) => typeof id === "string") : [];
+  const attachmentIds = Array.isArray(header.attachmentIds) ? header.attachmentIds.filter((id) => typeof id === "string") : [];
+  if (messageIds.some((id) => !messagesById[id]) || attachmentIds.some((id) => !attachmentsById[id])) {
+    return undefined;
+  }
+  const messageSequences = Array.isArray(header.messageSequences) ? header.messageSequences : [];
+  const attachmentSequences = Array.isArray(header.attachmentSequences) ? header.attachmentSequences : [];
+  const activeMessagesById = Object.fromEntries(messageIds.map((id) => [id, messagesById[id]]));
+  const activeAttachmentsById = Object.fromEntries(attachmentIds.map((id) => [id, attachmentsById[id]]));
+  const next = {
+    revision,
+    base,
+    messageIds,
+    messageSequences,
+    attachmentIds,
+    attachmentSequences,
+    messagesById: activeMessagesById,
+    attachmentsById: activeAttachmentsById
+  };
+  contextState.contextSnapshotsByConversation[conversationId] = next;
+  delete contextState.contextDraftsByRevision[revision];
+  return contextSnapshotFromState(next);
+}
+
+function contextSnapshotFromState(cached) {
+  return Object.assign({}, cached.base || {}, {
+    messages: (cached.messageIds || []).map((id, index) => {
+      const value = cached.messagesById[id];
+      const sequence = cached.messageSequences && cached.messageSequences[index];
+      return value && Number.isFinite(sequence) ? Object.assign({}, value, { sequence }) : value;
+    }).filter(Boolean),
+    attachments: (cached.attachmentIds || []).map((id, index) => {
+      const value = cached.attachmentsById[id];
+      const sequence = cached.attachmentSequences && cached.attachmentSequences[index];
+      return value && Number.isFinite(sequence) ? Object.assign({}, value, { sequence }) : value;
+    }).filter(Boolean)
+  });
 }
 
 function mobileMessages(events) {
@@ -968,7 +1357,12 @@ function supportsCloudRun(participant) {
 }
 
 function promptFor(policy, message, participant) {
-  const recent = Array.isArray(policy.recentMessages) ? policy.recentMessages : [];
+  const snapshotMessages = policy.contextSnapshot && Array.isArray(policy.contextSnapshot.messages)
+    ? policy.contextSnapshot.messages
+    : [];
+  const recent = snapshotMessages.length > 0
+    ? snapshotMessages.slice(-40)
+    : (Array.isArray(policy.recentMessages) ? policy.recentMessages : []);
   return [
     "You are running as an AccordAgents cloud participant while the desktop is unavailable.",
     "Participant: @" + participant.handle,
@@ -976,7 +1370,7 @@ function promptFor(policy, message, participant) {
     "",
     "Recent chat context:",
     recent.map((item) => {
-      const who = item.participantLabel || item.role || "message";
+      const who = item.participantLabel || item.author || item.role || "message";
       return "[" + item.createdAt + "] " + who + ": " + item.content;
     }).join("\n"),
     "",

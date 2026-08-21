@@ -13,7 +13,10 @@ import {
   REMOTE_APP_MCP_WORKER_CONTRACT_SNIPPET
 } from "./remoteAppMcpTools.generated";
 import {
+  MOBILE_RUNNER_CONTEXT_KIND,
   MOBILE_RUNNER_POLICY_KIND,
+  enqueueLatestMobileMailboxRunnerPublish,
+  mobileMailboxRunnerContextDelivery,
   mobileMailboxRunnerInstallCommand,
   mobileMailboxRunnerPolicyFromConversation,
   mobileMailboxRunnerScript
@@ -86,7 +89,7 @@ test("mobile mailbox runner policy snapshot carries cloud participants and recen
     kind: "codex-cli",
     remoteExecution: "remote"
   }]);
-  assert.deepEqual(snapshot.recentMessages.map((message) => message.content), ["previous"]);
+  assert.deepEqual(snapshot.recentMessages?.map((message) => message.content), ["previous"]);
 });
 
 test("mobile mailbox runner embeds the generated worker App MCP contract", () => {
@@ -106,15 +109,137 @@ test("mobile mailbox runner embeds the generated worker App MCP contract", () =>
   );
 });
 
-test("mobile mailbox runner policy carries the desktop-built App MCP context snapshot", () => {
+test("mobile mailbox runner policy references chunked App MCP context without resending unchanged attachments", () => {
   const contextSnapshot = {
     conversationId: "conversation-1",
     messages: [{ id: "message-1", sequence: 0, content: "previous" }],
     attachments: [{ attachment: { id: "attachment-1" }, dataBase64: "cG5n" }]
   };
-  const snapshot = mobileMailboxRunnerPolicyFromConversation(conversation(), undefined, contextSnapshot);
+  const first = mobileMailboxRunnerContextDelivery(contextSnapshot);
+  const policy = mobileMailboxRunnerPolicyFromConversation(conversation(), undefined, first.ref);
+  const second = mobileMailboxRunnerContextDelivery(contextSnapshot, first.nextState);
+  const changed = mobileMailboxRunnerContextDelivery({
+    ...contextSnapshot,
+    messages: [...contextSnapshot.messages, { id: "message-2", sequence: 1, content: "new" }],
+    attachments: [{ attachment: { id: "attachment-1" }, dataBase64Omitted: true }]
+  }, first.nextState);
 
-  assert.equal(snapshot.contextSnapshot, contextSnapshot);
+  assert.deepEqual(policy.contextSnapshotRef, first.ref);
+  assert.equal(policy.contextSnapshot, undefined);
+  assert.equal(policy.recentMessages, undefined);
+  assert.ok(first.chunks.length >= 2);
+  assert.ok(first.chunks.every((chunk) => Buffer.byteLength(JSON.stringify(chunk), "utf8") < 512 * 1024));
+  assert.deepEqual(second.chunks, []);
+  assert.equal(changed.chunks.some((chunk) =>
+    chunk.fragments?.some((fragment) => fragment.key === "attachment:attachment-1")), false);
+  assert.equal(changed.chunks.some((chunk) =>
+    chunk.fragments?.some((fragment) => fragment.key === "message:message-2")), true);
+  assert.deepEqual(changed.nextState.attachmentBase64Lengths, { "attachment-1": 4 });
+});
+
+test("mobile mailbox policy publication coalesces queued snapshots to the newest value", async () => {
+  const queues = new Map();
+  const published: number[] = [];
+  let releaseFirst: (() => void) | undefined;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const publish = async (value: number): Promise<void> => {
+    published.push(value);
+    if (value === 1) {
+      await firstBlocked;
+    }
+  };
+
+  const first = enqueueLatestMobileMailboxRunnerPublish(queues, "conversation-1", 1, publish);
+  await new Promise((resolve) => setImmediate(resolve));
+  const second = enqueueLatestMobileMailboxRunnerPublish(queues, "conversation-1", 2, publish);
+  const third = enqueueLatestMobileMailboxRunnerPublish(queues, "conversation-1", 3, publish);
+  releaseFirst?.();
+  await Promise.all([first, second, third]);
+
+  assert.deepEqual(published, [1, 3]);
+  assert.equal(queues.size, 0);
+});
+
+test("failed mobile mailbox publication leaves delivery state uncommitted for a full retry", async () => {
+  const queues = new Map();
+  const snapshot = {
+    conversationId: "conversation-1",
+    messages: [{ id: "message-1", sequence: 0, content: "context" }],
+    attachments: [{ attachment: { id: "attachment-1" }, dataBase64: "cG5n" }]
+  };
+  let committedState: ReturnType<typeof mobileMailboxRunnerContextDelivery>["nextState"] | undefined;
+  let attempts = 0;
+  const resets: boolean[] = [];
+  const attachmentFragments: boolean[] = [];
+  const publish = async (): Promise<void> => {
+    const delivery = mobileMailboxRunnerContextDelivery(snapshot, committedState);
+    resets.push(delivery.chunks[0]?.header?.reset === true);
+    attachmentFragments.push(delivery.chunks.some((chunk) =>
+      chunk.fragments?.some((fragment) => fragment.key === "attachment:attachment-1")));
+    attempts += 1;
+    if (attempts === 1) {
+      throw new Error("mailbox unavailable");
+    }
+    committedState = delivery.nextState;
+  };
+
+  await assert.rejects(
+    enqueueLatestMobileMailboxRunnerPublish(queues, "conversation-1", snapshot, publish),
+    /mailbox unavailable/
+  );
+  assert.equal(queues.size, 0);
+  await enqueueLatestMobileMailboxRunnerPublish(queues, "conversation-1", snapshot, publish);
+
+  assert.deepEqual(resets, [true, true]);
+  assert.deepEqual(attachmentFragments, [true, true]);
+  assert.ok(committedState);
+});
+
+test("real-data-sized mailbox context keeps every event bounded and sends only the next message delta", () => {
+  const messages = Array.from({ length: 200 }, (_, sequence) => ({
+    id: `message-${sequence}`,
+    sequence,
+    role: sequence % 2 === 0 ? "user" : "participant",
+    content: `message ${sequence} ${"x".repeat(4_200)}`,
+    createdAt: "2026-08-21T00:00:00.000Z",
+    status: "done"
+  }));
+  const attachments = Array.from({ length: 6 }, (_, index) => ({
+    messageId: `message-${190 + index}`,
+    sequence: 190 + index,
+    attachment: { id: `attachment-${index}`, filename: `image-${index}.png`, mimeType: "image/png" },
+    dataBase64: Buffer.alloc(237_500, index).toString("base64")
+  }));
+  const snapshot = {
+    conversationId: "conversation-1",
+    title: "Large chat",
+    messages,
+    attachments,
+    messageWindow: { maxSequence: 199, totalMessages: 3_000, oldestIncludedSequence: 0 },
+    attachmentWindow: { omittedCount: 0, limit: 6 }
+  };
+  assert.ok(Buffer.byteLength(JSON.stringify(snapshot), "utf8") > 2_700_000);
+
+  const first = mobileMailboxRunnerContextDelivery(snapshot);
+  const policy = mobileMailboxRunnerPolicyFromConversation(conversation(), undefined, first.ref);
+  const unchanged = mobileMailboxRunnerContextDelivery(snapshot, first.nextState);
+  const shiftedMessages = messages.slice(1).map((message, sequence) => ({ ...message, sequence }));
+  const next = mobileMailboxRunnerContextDelivery({
+    ...snapshot,
+    messages: [...shiftedMessages, { ...messages[199], id: "message-200", sequence: 199, content: "new turn" }],
+    attachments: attachments.map(({ dataBase64: _dataBase64, ...attachment }) => ({
+      ...attachment,
+      dataBase64Omitted: true
+    })),
+    messageWindow: { maxSequence: 199, totalMessages: 3_001, oldestIncludedSequence: 0 }
+  }, first.nextState);
+
+  assert.ok(Buffer.byteLength(JSON.stringify(policy), "utf8") < 10_000);
+  assert.ok(first.chunks.every((chunk) => Buffer.byteLength(JSON.stringify(chunk), "utf8") < 512 * 1024));
+  assert.deepEqual(unchanged.chunks, []);
+  assert.equal(next.chunks.some((chunk) =>
+    chunk.fragments?.some((fragment) => fragment.key.startsWith("attachment:"))), false);
+  assert.ok(next.chunks.reduce((total, chunk) => total + Buffer.byteLength(JSON.stringify(chunk), "utf8"), 0) < 100_000);
 });
 
 test("mobile mailbox runner install command installs an idempotent route-scoped daemon", () => {
@@ -262,16 +387,24 @@ test("mobile mailbox runner exposes the shared App MCP tools to Codex and publis
       attachmentWindow: { omittedCount: 0, limit: 6 },
       participants: [{ id: "participant-codex", handle: "codex", kind: "codex-cli", remoteExecution: "remote" }]
     };
+    const contextDelivery = mobileMailboxRunnerContextDelivery(contextSnapshot);
     await writeFile(runnerPath, mobileMailboxRunnerScript(), { mode: 0o755 });
     await writeFile(codexPath, fakeMcpCodexScript(), { mode: 0o755 });
     await postJson(mailboxUrl, {
       events: [
+        ...contextDelivery.chunks.map((chunk, index) => envelope(
+          `context-event-${index}`,
+          "desktop-origin",
+          index + 1,
+          MOBILE_RUNNER_CONTEXT_KIND,
+          chunk
+        )),
         envelope(
           "policy-event",
           "desktop-origin",
-          1,
+          contextDelivery.chunks.length + 1,
           MOBILE_RUNNER_POLICY_KIND,
-          mobileMailboxRunnerPolicyFromConversation(conversation(), undefined, contextSnapshot)
+          mobileMailboxRunnerPolicyFromConversation(conversation(), undefined, contextDelivery.ref)
         ),
         envelope("mobile-event", "mobile-origin", 1, "message.created", {
           content: "@codex inspect App MCP"
@@ -309,6 +442,173 @@ test("mobile mailbox runner exposes the shared App MCP tools to Codex and publis
     );
     assert.deepEqual(report.contextMessageIds, ["message-1", "mobile-mobile-event"]);
     assert.equal(report.attachmentData, "cG5n");
+  } finally {
+    await mailbox.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("mobile mailbox runner materializes a delta, prunes removed records, and retains unchanged attachment bytes", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-mobile-mailbox-runner-delta-"));
+  const mailbox = createReferenceMailboxServer({ locked: true });
+  const address = await mailbox.listen();
+  const mailboxUrl = `${address.url}/v1/mailbox/events?mailboxId=runner-delta-test`;
+  const statePath = path.join(directory, "state.json");
+  await registerTestMailbox(address.url, "runner-delta-test");
+  try {
+    const runnerPath = path.join(directory, "mobile-runner.js");
+    const codexPath = path.join(directory, "fake-mcp-codex.js");
+    const initialSnapshot = {
+      conversationId: "conversation-1",
+      messages: [
+        { id: "message-removed", sequence: 0, role: "user", author: "User", content: "old", createdAt: "2026-08-12T00:00:00.000Z", status: "done" },
+        { id: "message-kept", sequence: 1, role: "user", author: "User", content: "kept", createdAt: "2026-08-12T00:00:01.000Z", status: "done" }
+      ],
+      messageWindow: { maxSequence: 1, totalMessages: 2, oldestIncludedSequence: 0 },
+      attachments: [
+        { messageId: "message-removed", sequence: 0, attachment: { id: "attachment-removed" }, dataBase64: "b2xk" },
+        { messageId: "message-kept", sequence: 1, attachment: { id: "attachment-1" }, dataBase64: "cG5n" }
+      ],
+      attachmentWindow: { omittedCount: 0, limit: 6 },
+      participants: [{ id: "participant-codex", handle: "codex", kind: "codex-cli", remoteExecution: "remote" }]
+    };
+    const initial = mobileMailboxRunnerContextDelivery(initialSnapshot);
+    await writeFile(runnerPath, mobileMailboxRunnerScript(), { mode: 0o755 });
+    await writeFile(codexPath, fakeMcpCodexScript(), { mode: 0o755 });
+    await postJson(mailboxUrl, {
+      events: [
+        ...initial.chunks.map((chunk, index) => envelope(`initial-context-${index}`, "desktop-origin", index + 1, MOBILE_RUNNER_CONTEXT_KIND, chunk)),
+        envelope("initial-policy", "desktop-origin", initial.chunks.length + 1, MOBILE_RUNNER_POLICY_KIND,
+          mobileMailboxRunnerPolicyFromConversation(conversation(), undefined, initial.ref))
+      ]
+    });
+    const first = await runNode(runnerPath, {
+      ACCORD_MOBILE_MAILBOX_URL: mailboxUrl,
+      ACCORD_MOBILE_RUNNER_ORIGIN_ID: "runner-origin",
+      ACCORD_MOBILE_CODEX_PATH: codexPath,
+      ACCORD_MOBILE_RUNNER_STATE: statePath,
+      ACCORD_MOBILE_RUNNER_ONCE: "1"
+    });
+    assert.equal(first.code, 0, first.stderr);
+
+    const nextSnapshot = {
+      ...initialSnapshot,
+      messages: [
+        { ...initialSnapshot.messages[1], sequence: 0 },
+        { id: "message-new", sequence: 1, role: "user", author: "User", content: "new", createdAt: "2026-08-12T00:00:02.000Z", status: "done" }
+      ],
+      messageWindow: { maxSequence: 1, totalMessages: 3, oldestIncludedSequence: 0 },
+      attachments: [{
+        ...initialSnapshot.attachments[1],
+        sequence: 0,
+        dataBase64: undefined,
+        dataBase64Omitted: true
+      }]
+    };
+    const delta = mobileMailboxRunnerContextDelivery(nextSnapshot, initial.nextState);
+    assert.equal(delta.chunks.some((chunk) =>
+      chunk.fragments?.some((fragment) => fragment.key.startsWith("attachment:"))), false);
+    await postJson(mailboxUrl, {
+      events: [
+        ...delta.chunks.map((chunk, index) => envelope(`delta-context-${index}`, "desktop-origin", 100 + index, MOBILE_RUNNER_CONTEXT_KIND, chunk)),
+        envelope("delta-policy", "desktop-origin", 200, MOBILE_RUNNER_POLICY_KIND,
+          mobileMailboxRunnerPolicyFromConversation(conversation(), undefined, delta.ref)),
+        envelope("delta-mobile-event", "mobile-origin", 1, "message.created", { content: "@codex inspect delta" })
+      ]
+    });
+    const second = await runNode(runnerPath, {
+      ACCORD_MOBILE_MAILBOX_URL: mailboxUrl,
+      ACCORD_MOBILE_RUNNER_ORIGIN_ID: "runner-origin",
+      ACCORD_MOBILE_CODEX_PATH: codexPath,
+      ACCORD_MOBILE_RUNNER_STATE: statePath,
+      ACCORD_MOBILE_RUNNER_ONCE: "1"
+    });
+    assert.equal(second.code, 0, second.stderr);
+
+    const events = unsealEvents((await getJson(mailboxUrl)).events);
+    const resultMessage = events.find((event) => {
+      const message = (event.payload as { message?: ChatMessage }).message;
+      return event.kind === "message.created" && message?.metadata?.mobileEventId === "delta-mobile-event";
+    });
+    const report = JSON.parse((resultMessage?.payload as { message?: ChatMessage }).message?.content ?? "{}") as {
+      contextMessages?: Array<{ id: string; sequence?: number }>;
+      contextAttachmentIds?: string[];
+      attachmentData?: string;
+    };
+    assert.deepEqual(report.contextMessages?.slice(0, 2), [
+      { id: "message-kept", sequence: 0 },
+      { id: "message-new", sequence: 1 }
+    ]);
+    assert.deepEqual(report.contextAttachmentIds, ["attachment-1"]);
+    assert.equal(report.attachmentData, "cG5n");
+    const persisted = JSON.parse(await readFile(`${statePath}.context`, "utf8")) as {
+      contextSnapshotsByConversation: Record<string, { messagesById: Record<string, unknown>; attachmentsById: Record<string, unknown> }>;
+    };
+    assert.deepEqual(Object.keys(persisted.contextSnapshotsByConversation["conversation-1"].messagesById).sort(), ["message-kept", "message-new"]);
+    assert.deepEqual(Object.keys(persisted.contextSnapshotsByConversation["conversation-1"].attachmentsById), ["attachment-1"]);
+  } finally {
+    await mailbox.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("mobile mailbox runner fails closed on incomplete context and recovers from a complete reset", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-mobile-mailbox-runner-context-recovery-"));
+  const mailbox = createReferenceMailboxServer({ locked: true });
+  const address = await mailbox.listen();
+  const mailboxUrl = `${address.url}/v1/mailbox/events?mailboxId=runner-context-recovery-test`;
+  const markerPath = path.join(directory, "codex-invoked");
+  await registerTestMailbox(address.url, "runner-context-recovery-test");
+  try {
+    const runnerPath = path.join(directory, "mobile-runner.js");
+    const codexPath = path.join(directory, "fake-codex.js");
+    const statePath = path.join(directory, "state.json");
+    const delivery = mobileMailboxRunnerContextDelivery({
+      conversationId: "conversation-1",
+      messages: [{ id: "message-1", sequence: 0, role: "user", content: "context" }],
+      attachments: []
+    });
+    assert.ok(delivery.chunks.length > 1);
+    await writeFile(runnerPath, mobileMailboxRunnerScript(), { mode: 0o755 });
+    await writeFile(codexPath, fakeCodexScript(markerPath), { mode: 0o755 });
+    await postJson(mailboxUrl, {
+      events: [
+        ...delivery.chunks.slice(0, -1).map((chunk, index) => envelope(
+          `incomplete-context-${index}`, "desktop-origin", index + 1, MOBILE_RUNNER_CONTEXT_KIND, chunk
+        )),
+        envelope("incomplete-policy", "desktop-origin", 50, MOBILE_RUNNER_POLICY_KIND,
+          mobileMailboxRunnerPolicyFromConversation(conversation(), undefined, delivery.ref)),
+        envelope("recovery-mobile-event", "mobile-origin", 1, "message.created", { content: "@codex wait for context" })
+      ]
+    });
+    const first = await runNode(runnerPath, {
+      ACCORD_MOBILE_MAILBOX_URL: mailboxUrl,
+      ACCORD_MOBILE_RUNNER_ORIGIN_ID: "runner-origin",
+      ACCORD_MOBILE_CODEX_PATH: codexPath,
+      ACCORD_MOBILE_RUNNER_STATE: statePath,
+      ACCORD_MOBILE_RUNNER_ONCE: "1"
+    });
+    assert.equal(first.code, 0, first.stderr);
+    await assert.rejects(access(markerPath));
+
+    await postJson(mailboxUrl, {
+      events: [
+        ...delivery.chunks.map((chunk, index) => envelope(
+          `complete-context-${index}`, "desktop-origin", 100 + index, MOBILE_RUNNER_CONTEXT_KIND, chunk
+        )),
+        envelope("complete-policy", "desktop-origin", 150, MOBILE_RUNNER_POLICY_KIND,
+          mobileMailboxRunnerPolicyFromConversation(conversation(), undefined, delivery.ref))
+      ]
+    });
+    const second = await runNode(runnerPath, {
+      ACCORD_MOBILE_MAILBOX_URL: mailboxUrl,
+      ACCORD_MOBILE_RUNNER_ORIGIN_ID: "runner-origin",
+      ACCORD_MOBILE_CODEX_PATH: codexPath,
+      ACCORD_MOBILE_RUNNER_STATE: statePath,
+      ACCORD_MOBILE_RUNNER_ONCE: "1"
+    });
+    assert.equal(second.code, 0, second.stderr);
+    await access(markerPath);
   } finally {
     await mailbox.close();
     await rm(directory, { recursive: true, force: true });
@@ -748,6 +1048,8 @@ async function main() {
   const report = {
     toolNames: listed.tools.map((tool) => tool.name),
     contextMessageIds: parsedContext.snapshot.messages.map((message) => message.id),
+    contextMessages: parsedContext.snapshot.messages.map((message) => ({ id: message.id, sequence: message.sequence })),
+    contextAttachmentIds: parsedContext.snapshot.attachments.map((item) => item.attachment.id),
     attachmentData: attachment.content[1].data
   };
   const index = process.argv.indexOf("--output-last-message");

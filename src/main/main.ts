@@ -87,6 +87,7 @@ import type {
 import { ARTIFACT_USER_MEMBER } from "../shared/types";
 import { artifactMembersForConversation } from "../shared/artifacts";
 import { normalizeExternalUrlForOpen } from "../shared/externalLinks";
+import { stableJson } from "../shared/stableJson";
 import { ArtifactService } from "./services/artifacts";
 import { ArtifactStore } from "./services/artifactStore";
 import { validateArtifactCreateToolRequest } from "./services/artifactToolRequest";
@@ -160,7 +161,16 @@ import { CloudRunAwsService } from "./services/cloudRunAws";
 import { AwsWorkerSetupService } from "./services/awsWorkerSetup";
 import { DebugLogService } from "./services/debugLogs";
 import { GitService } from "./services/git";
-import { MOBILE_RUNNER_POLICY_KIND, mobileMailboxRunnerInstallCommand, mobileMailboxRunnerPolicyFromConversation } from "./services/mobileMailboxRunner";
+import {
+  MOBILE_RUNNER_CONTEXT_KIND,
+  MOBILE_RUNNER_POLICY_KIND,
+  mobileMailboxRunnerContextDelivery,
+  enqueueLatestMobileMailboxRunnerPublish,
+  mobileMailboxRunnerInstallCommand,
+  mobileMailboxRunnerPolicyFromConversation,
+  type MobileMailboxRunnerContextDeliveryState,
+  type MobileMailboxRunnerLatestQueue
+} from "./services/mobileMailboxRunner";
 import { ProviderRunner } from "./services/providers";
 import { RemoteRunService } from "./services/remoteRuns";
 import { RemoteRunCoordinator } from "./services/remoteRunCoordinator";
@@ -296,6 +306,8 @@ const mobileProgressEnvelopes = new MobileProgressEnvelopeTracker();
 // removes them.
 const mobileClaimedPairingKeys = new Map<string, string>();
 const mobileMailboxRunnerStarts = new Map<string, Promise<boolean>>();
+const mobileMailboxRunnerContextStates = new Map<string, MobileMailboxRunnerContextDeliveryState>();
+const mobileMailboxRunnerPolicyQueues = new Map<string, MobileMailboxRunnerLatestQueue<Conversation>>();
 const mobilePairingExpiryTimers = new Map<string, NodeJS.Timeout>();
 const mobileRevokedPairingKeys = new Set<string>();
 let mobileMailboxOwnerActionBackoffUntil = 0;
@@ -835,6 +847,7 @@ async function handleRemoteMailboxRevoked(pairing: MobilePairingPackage): Promis
   mobileClaimedPairingKeys.delete(key);
   mobilePairingsByKey.delete(key);
   mobileMailboxCursors.delete(key);
+  clearMobileMailboxRunnerContextState(pairing);
   mobileRelayControls.get(pairing.rendezvousId)?.close();
   mobileRelayControls.delete(pairing.rendezvousId);
   const poller = mobileMailboxPollers.get(key);
@@ -1003,6 +1016,7 @@ async function revokeMobilePairingInternal(
   mobileClaimedPairingKeys.delete(key);
   mobilePairingsByKey.delete(key);
   mobileMailboxCursors.delete(key);
+  clearMobileMailboxRunnerContextState(pairing);
   mobileProgressEnvelopes.forgetPairing(key);
   mobileRelayControls.get(pairing.rendezvousId)?.close();
   mobileRelayControls.delete(pairing.rendezvousId);
@@ -1348,6 +1362,10 @@ async function ensureMobileCloudFallbackReadyForPairing(pairing: MobilePairingPa
   if (!started) {
     return;
   }
+  // A successful ensure can be the first contact with a replacement worker.
+  // Forget desktop delivery state so that worker always receives a complete
+  // reset instead of a delta based on state the replacement cannot have.
+  clearMobileMailboxRunnerContextState(pairing);
   await publishMobileRunnerPoliciesForPairing(pairing);
   await debugLogService.write("mobile.runner.ready", {
     routingId: pairing.stableRoutingId
@@ -1458,15 +1476,67 @@ async function publishMobileRunnerPolicyForPairing(
   if (!pairing.outboxUrl || !pairingCanRunCloudParticipants(pairing) || !pairingCanAccessConversation(pairing, conversation.id)) {
     return;
   }
+  const contextKey = `${mobilePairingKey(pairing)}\0${conversation.id}`;
+  // Conversation updates can arrive for every streamed frame. Keep the most
+  // recent snapshot only; publishing every intermediate state multiplies
+  // snapshot, SQLite, encryption and mailbox work without adding context.
+  return enqueueLatestMobileMailboxRunnerPublish(
+    mobileMailboxRunnerPolicyQueues,
+    contextKey,
+    conversation,
+    (latest) => publishMobileRunnerPolicyNow(pairing, latest, contextKey)
+  );
+}
+
+async function publishMobileRunnerPolicyNow(
+  pairing: MobilePairingPackage,
+  conversation: Conversation,
+  contextKey: string
+): Promise<void> {
   try {
-    const contextSnapshot = await chatService.mobileMailboxRunnerContextSnapshot(conversation);
+    const previousState = mobileMailboxRunnerContextStates.get(contextKey);
+    const contextSnapshot = await chatService.mobileMailboxRunnerContextSnapshot(
+      conversation,
+      previousState?.attachmentBase64Lengths
+    );
+    const delivery = mobileMailboxRunnerContextDelivery(
+      contextSnapshot,
+      previousState
+    );
+    const policy = mobileMailboxRunnerPolicyFromConversation(conversation, pairing, delivery.ref);
+    const { updatedAt: _updatedAt, ...semanticPolicy } = policy;
+    const policyHash = sha256Hex(JSON.stringify(semanticPolicy));
+    if (delivery.chunks.length === 0 && previousState?.policyHash === policyHash) {
+      return;
+    }
     const append = await chatEventLogService.appendLocalEvent({
       conversationId: conversation.id,
       logScopeId: conversation.id,
       kind: MOBILE_RUNNER_POLICY_KIND,
-      payload: mobileMailboxRunnerPolicyFromConversation(conversation, pairing, contextSnapshot)
+      payload: policy
     });
-    await postMailboxEvents(pairing, [append.event]);
+    // Context bodies are transport data, not durable chat history. Persisting
+    // each chunk in chat_events stored two multi-megabyte copies locally. The
+    // compact signed policy remains on the shared log; its referenced chunks
+    // travel once through the pairing's authenticated, sealed mailbox.
+    const events = [
+      ...mobileRunnerContextTransportEvents(conversation.id, delivery.chunks),
+      append.event
+    ];
+    await postMailboxEvents(pairing, events);
+    if (isMobilePairingActive(pairing) && mobilePairingsByKey.has(mobilePairingKey(pairing))) {
+      mobileMailboxRunnerContextStates.set(contextKey, {
+        ...delivery.nextState,
+        policyHash
+      });
+    }
+    await debugLogService.write("mobile.runner.policy-published", {
+      routingId: pairing.stableRoutingId,
+      conversationId: conversation.id,
+      policyBytes: Buffer.byteLength(JSON.stringify(policy), "utf8"),
+      contextEventCount: delivery.chunks.length,
+      contextBytes: delivery.chunks.reduce((total, chunk) => total + Buffer.byteLength(JSON.stringify(chunk), "utf8"), 0)
+    });
   } catch (error) {
     if (isOwnerActionMailboxError(error)) {
       recordMobileMailboxOwnerActionBackoff();
@@ -1476,6 +1546,53 @@ async function publishMobileRunnerPolicyForPairing(
       conversationId: conversation.id,
       message: error instanceof Error ? error.message : String(error)
     });
+  }
+}
+
+function mobileRunnerContextTransportEvents(
+  conversationId: string,
+  chunks: ReturnType<typeof mobileMailboxRunnerContextDelivery>["chunks"]
+): unknown[] {
+  const originId = `mobile-runner-context-${randomUUID()}`;
+  return chunks.map((payload, index) => {
+    const originSeq = index + 1;
+    const eventId = `${originId}-${originSeq}`;
+    const createdAt = new Date().toISOString();
+    const payloadHash = `sha256:${sha256Hex(stableJson(payload))}`;
+    const unsigned = {
+      eventId,
+      conversationId,
+      logScopeId: conversationId,
+      originId,
+      originSeq,
+      logicalTs: `${String(originSeq).padStart(16, "0")}:${originId}:${conversationId}`,
+      kind: MOBILE_RUNNER_CONTEXT_KIND,
+      payloadHash,
+      prevHash: null,
+      keyId: originId,
+      createdAt
+    };
+    return {
+      ...unsigned,
+      prevHash: undefined,
+      payload,
+      eventHash: `sha256:${sha256Hex(stableJson(unsigned))}`,
+      signature: "transport-sealed",
+    };
+  });
+}
+
+function clearMobileMailboxRunnerContextState(pairing: MobilePairingPackage): void {
+  const prefix = `${mobilePairingKey(pairing)}\0`;
+  for (const key of mobileMailboxRunnerContextStates.keys()) {
+    if (key.startsWith(prefix)) {
+      mobileMailboxRunnerContextStates.delete(key);
+    }
+  }
+  for (const [key, queue] of mobileMailboxRunnerPolicyQueues) {
+    if (key.startsWith(prefix)) {
+      queue.latest = undefined;
+    }
   }
 }
 

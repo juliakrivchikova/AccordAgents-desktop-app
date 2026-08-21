@@ -487,6 +487,22 @@ test("sqlite invocations bail on the first error and install the timeout and syn
   ]);
 });
 
+test("queryJson and queryText stream SQL larger than the process argument limit", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-large-query-"));
+  const storage = Object.create(StorageService.prototype) as any;
+  storage.dbPath = path.join(directory, "accordagents.sqlite3");
+  storage.sqliteExecutable = SQLITE_EXECUTABLE;
+  const content = "x".repeat(3 * 1024 * 1024);
+
+  try {
+    const jsonRows = await storage.queryJson(`select length('${content}') as bytes;`) as Array<{ bytes: number }>;
+    assert.deepEqual(jsonRows, [{ bytes: content.length }]);
+    assert.equal(await storage.queryText(`select length('${content}');`), String(content.length));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("appendChatEvent is idempotent and detects visible-scope sequence conflicts", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-events-"));
   const storage = Object.create(StorageService.prototype) as any;
