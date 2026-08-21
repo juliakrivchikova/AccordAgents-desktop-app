@@ -90,6 +90,31 @@ Conversations are append-mostly. Chat conversations store timeline messages plus
 - Strict TS everywhere; keep types explicit at IPC, service, and shared boundaries. Add new shapes to `src/shared/types.ts` rather than redefining them on either side of the bridge.
 - Do not commit provider API keys, local repo paths, generated logs, `node_modules`, or `dist`. Treat saved conversations and `debug-logs/` as sensitive — they contain prompts, diffs, and raw model responses.
 
+## MANDATORY: review before merge
+
+**Run the gstack `/review` skill on the diff before merging any pull request,
+including your own.** A merge without it is not allowed — not for a small change,
+not for a change whose author reported passing tests, not for a change you
+wrote yourself. This applies to every participant, local or in the cloud.
+
+Reading the author's summary and grepping the diff for the parts you decided
+were risky is not a review. That is exactly what was done to PR #17 on
+2026-08-21: the security surface was checked and passed, while the change
+quietly attached a full conversation snapshot to a payload that goes to SQLite
+as a command-line argument. On the User's real chat that argument is megabytes
+and the write fails; it failed 1696 times in one morning, on every message she
+sent, and nobody noticed until she said the app felt slow. The author's
+end-to-end verification was real but ran on a small conversation, so the size
+never showed.
+
+Two questions the review must answer out loud, because that defect would have
+been caught by either:
+
+- **How large does this get on the User's actual data?** This chat, thousands of
+  messages, is the case that matters — not a fixture.
+- **Where does this data end up?** A payload that grows is fine until something
+  downstream has a limit: an argument list, a request body, a column, a screen.
+
 ## The phone app is deployed separately
 
 The PWA the phone runs is not served by the desktop app. It is a Cloudflare
