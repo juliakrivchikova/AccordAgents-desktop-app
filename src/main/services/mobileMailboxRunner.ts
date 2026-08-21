@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { REMOTE_APP_MCP_WORKER_CONTRACT_SNIPPET } from "./remoteAppMcpTools.generated";
 import { MOBILE_MAILBOX_RUNNER_CRYPTO_SNIPPET } from "./mobileMailboxRunnerCrypto.generated";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
@@ -30,6 +31,7 @@ export interface MobileMailboxRunnerPolicy {
     content: string;
     createdAt: string;
   }>;
+  contextSnapshot?: Record<string, unknown>;
   mobileAccess?: {
     originId: string;
     rendezvousId: string;
@@ -55,7 +57,8 @@ export interface MobileMailboxRunnerInstallRequest {
 
 export function mobileMailboxRunnerPolicyFromConversation(
   conversation: Conversation,
-  pairing?: MobilePairingPackage
+  pairing?: MobilePairingPackage,
+  contextSnapshot?: Record<string, unknown>
 ): MobileMailboxRunnerPolicy {
   return {
     type: MOBILE_RUNNER_POLICY_KIND,
@@ -73,6 +76,7 @@ export function mobileMailboxRunnerPolicyFromConversation(
         content: message.content,
         createdAt: message.createdAt
       })),
+    ...(contextSnapshot ? { contextSnapshot } : {}),
     ...(pairing ? {
       mobileAccess: {
         originId: mobileOriginIdForPairing(pairing),
@@ -217,9 +221,12 @@ export function mobileMailboxRunnerScript(): string {
   return String.raw`#!/usr/bin/env node
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const cp = require("node:child_process");
+
+${REMOTE_APP_MCP_WORKER_CONTRACT_SNIPPET}
 
 const mailboxUrl = requiredEnv("ACCORD_MOBILE_MAILBOX_URL");
 const mailboxToken = requiredEnv("ACCORD_MOBILE_MAILBOX_TOKEN");
@@ -247,6 +254,8 @@ if (!state.policiesByConversation || typeof state.policiesByConversation !== "ob
 let running = false;
 let operationLeaseTimer;
 let executionClaimTimer;
+let appMcpServerState;
+let activeAppMcpRun;
 
 function requiredEnv(key) {
   const value = process.env[key];
@@ -435,6 +444,404 @@ async function appendMailboxEvents(events, options) {
   });
 }
 
+function toolTextResult(result) {
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(result, null, 2)
+    }]
+  };
+}
+
+function rpcResult(id, result) {
+  return { jsonrpc: "2.0", id, result };
+}
+
+function rpcError(id, code, message) {
+  return { jsonrpc: "2.0", id, error: { code, message } };
+}
+
+function readJsonBody(request) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      body += chunk;
+      if (Buffer.byteLength(body) > 1024 * 1024) {
+        reject(new Error("MCP request body is too large."));
+        request.destroy();
+      }
+    });
+    request.on("error", reject);
+    request.on("end", () => {
+      try {
+        resolve(body.trim() ? JSON.parse(body) : {});
+      } catch {
+        reject(new Error("Invalid JSON body."));
+      }
+    });
+  });
+}
+
+function appMcpContextSnapshot(run) {
+  const policy = run.policy && typeof run.policy === "object" ? run.policy : {};
+  const base = policy.contextSnapshot && typeof policy.contextSnapshot === "object"
+    ? policy.contextSnapshot
+    : {};
+  const messages = Array.isArray(base.messages)
+    ? base.messages.slice()
+    : (Array.isArray(policy.recentMessages) ? policy.recentMessages : []).map((message, sequence) => ({
+        sequence,
+        id: "mobile-policy-message-" + sequence,
+        role: message.role,
+        author: message.participantLabel || (message.role === "user" ? "User" : message.role),
+        participantId: message.participantId,
+        participantLabel: message.participantLabel,
+        content: message.content,
+        createdAt: message.createdAt,
+        status: "done",
+        metadata: {}
+      }));
+  const mobileMessageId = "mobile-" + run.event.eventId;
+  const alreadyIncluded = messages.some((message) => message && (
+    message.id === mobileMessageId ||
+    message.id === run.event.eventId ||
+    (message.metadata && message.metadata.mobileEventId === run.event.eventId)
+  ));
+  if (!alreadyIncluded) {
+    const lastSequence = messages.reduce((highest, message) =>
+      message && typeof message.sequence === "number" && isFinite(message.sequence)
+        ? Math.max(highest, message.sequence)
+        : highest, -1);
+    messages.push({
+      sequence: lastSequence + 1,
+      id: mobileMessageId,
+      role: "user",
+      author: "User",
+      content: String(run.event.payload.content || ""),
+      createdAt: run.event.createdAt || new Date().toISOString(),
+      status: "done",
+      metadata: {
+        appMessageSource: "mobile-relay",
+        mobileEventId: run.event.eventId,
+        threadId: mobileMessageId
+      },
+      imageAttachments: []
+    });
+  }
+  const maxSequence = messages.reduce((highest, message) =>
+    message && typeof message.sequence === "number" && isFinite(message.sequence)
+      ? Math.max(highest, message.sequence)
+      : highest, -1);
+  const baseWindow = base.messageWindow && typeof base.messageWindow === "object"
+    ? base.messageWindow
+    : {};
+  return Object.assign({}, base, {
+    conversationId: run.event.conversationId,
+    title: policy.title || base.title,
+    participantId: run.participant.id,
+    participantHandle: run.participant.handle,
+    triggerMessageId: mobileMessageId,
+    messages,
+    attachments: Array.isArray(base.attachments) ? base.attachments : [],
+    attachmentWindow: base.attachmentWindow && typeof base.attachmentWindow === "object"
+      ? base.attachmentWindow
+      : { omittedCount: 0 },
+    messageWindow: Object.assign({}, baseWindow, {
+      maxSequence,
+      totalMessages: Math.max(
+        messages.length,
+        typeof baseWindow.totalMessages === "number" ? baseWindow.totalMessages + (alreadyIncluded ? 0 : 1) : 0
+      ),
+      oldestIncludedSequence: messages.length > 0 ? messages[0].sequence : undefined
+    }),
+    participants: Array.isArray(base.participants) ? base.participants : (Array.isArray(policy.participants) ? policy.participants : [])
+  });
+}
+
+async function appendAppMcpChatMessage(run, content) {
+  const createdAt = new Date().toISOString();
+  const messageId = "mobile-runner-tool-message-" + crypto.randomUUID();
+  const message = {
+    id: messageId,
+    role: "participant",
+    participantId: run.participant.id,
+    participantLabel: "@" + run.participant.handle,
+    content,
+    status: "done",
+    createdAt,
+    metadata: {
+      runId: run.runId,
+      appMessageSource: "app_chat_send_message",
+      sourceMessageId: run.event.eventId,
+      threadId: "mobile-" + run.event.eventId
+    }
+  };
+  const event = nextEvent(run.event.conversationId, "message.created", { message });
+  await appendMailboxEvents([event]);
+  writeJsonAtomic(statePath, state);
+  return event;
+}
+
+async function handleAppMcpRequest(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return rpcError(null, -32600, "Invalid JSON-RPC request.");
+  }
+  const id = raw.id;
+  const method = typeof raw.method === "string" ? raw.method : "";
+  const notify = id === undefined;
+  if (method === "initialize") {
+    return notify ? undefined : rpcResult(id, {
+      protocolVersion: "2025-06-18",
+      capabilities: { tools: { listChanged: false } },
+      serverInfo: { name: "accordagents-mobile-mailbox-runner", version: "0.1.0" }
+    });
+  }
+  if (method === "notifications/initialized") {
+    return undefined;
+  }
+  if (method === "tools/list") {
+    return notify ? undefined : rpcResult(id, {
+      tools: REMOTE_APP_MCP_TOOL_CONTRACTS.map((contract) => contract.definition)
+    });
+  }
+  if (method !== "tools/call") {
+    return notify ? undefined : rpcError(id, -32601, "Unsupported MCP method: " + (method || "unknown") + ".");
+  }
+  const run = activeAppMcpRun;
+  if (!run) {
+    return notify ? undefined : rpcError(id, -32000, "No mobile mailbox participant run is active.");
+  }
+  const params = raw.params && typeof raw.params === "object" ? raw.params : {};
+  const name = params.name;
+  const args = params.arguments || {};
+  const toolHandler = REMOTE_APP_MCP_TOOL_HANDLER_BY_NAME[name];
+  if (toolHandler === "permissions-request") {
+    const requestId = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const event = nextEvent(run.event.conversationId, "mobile.runner.permission.requested", {
+      type: "mobile.runner.permission.requested",
+      requestId,
+      runId: run.runId,
+      participantId: run.participant.id,
+      triggerMessageId: run.event.eventId,
+      request: args,
+      createdAt
+    });
+    await appendMailboxEvents([event]);
+    writeJsonAtomic(statePath, state);
+    return notify ? undefined : rpcResult(id, toolTextResult({
+      ok: true,
+      status: "pending_user_approval",
+      requestId,
+      approvalId: requestId,
+      request: args,
+      updatedAt: createdAt
+    }));
+  }
+  if (toolHandler === "chat-send-message") {
+    if (notify) { return undefined; }
+    const content = typeof args.content === "string" ? args.content.trim() : "";
+    if (!content) {
+      return rpcError(id, -32602, "ChatSendMessageDenied. Problem: content was empty. Cause: a mid-run post must carry text. Fix: pass a non-empty content string.");
+    }
+    if (content.length > 20000) {
+      return rpcError(id, -32602, "ChatSendMessageDenied. Problem: content is too long for a mid-run post. Cause: the limit is 20000 characters. Fix: post a shorter update, or put the long form in an artifact when the run is over.");
+    }
+    if (args.attachments !== undefined) {
+      return rpcError(id, -32602, "ChatSendMessageDenied. Problem: attachments cannot be sent from a cloud run yet. Cause: this run posts through the shared event log, which carries text. Fix: post the text now and attach the image from a desktop turn.");
+    }
+    const event = await appendAppMcpChatMessage(run, content);
+    return rpcResult(id, toolTextResult({
+      ok: true,
+      status: "published_to_shared_log",
+      publishedAt: event.createdAt,
+      note: "The post was appended to the shared chat event log."
+    }));
+  }
+  const snapshot = appMcpContextSnapshot(run);
+  if (toolHandler === "chat-get-context") {
+    return notify ? undefined : rpcResult(id, toolTextResult({ ok: true, snapshot }));
+  }
+  if (toolHandler === "chat-get-participants") {
+    return notify ? undefined : rpcResult(id, toolTextResult({
+      ok: true,
+      participants: snapshot.participants || []
+    }));
+  }
+  if (toolHandler === "chat-read-messages") {
+    if (notify) { return undefined; }
+    const all = Array.isArray(snapshot.messages) ? snapshot.messages : [];
+    const window = snapshot.messageWindow && typeof snapshot.messageWindow === "object" ? snapshot.messageWindow : {};
+    const messageId = typeof args.messageId === "string" && args.messageId.trim() ? args.messageId.trim() : undefined;
+    const threadId = typeof args.threadId === "string" && args.threadId.trim() ? args.threadId.trim() : undefined;
+    const before = typeof args.beforeSequence === "number" && isFinite(args.beforeSequence) ? args.beforeSequence : undefined;
+    const after = typeof args.afterSequence === "number" && isFinite(args.afterSequence) ? args.afterSequence : undefined;
+    const limit = typeof args.limit === "number" && isFinite(args.limit) && args.limit > 0
+      ? Math.min(200, Math.floor(args.limit))
+      : 40;
+    const matched = all.filter((message) => {
+      if (!message || typeof message !== "object") { return false; }
+      if (messageId) { return message.id === messageId; }
+      if (threadId && (!message.metadata || message.metadata.threadId !== threadId)) { return false; }
+      const sequence = typeof message.sequence === "number" ? message.sequence : undefined;
+      if (before !== undefined && sequence !== undefined && sequence >= before) { return false; }
+      if (after !== undefined && sequence !== undefined && sequence <= after) { return false; }
+      return true;
+    });
+    const selected = after !== undefined
+      ? matched.slice(0, limit)
+      : matched.slice(Math.max(0, matched.length - limit));
+    const oldest = selected.length > 0 ? selected[0].sequence : undefined;
+    const newest = selected.length > 0 ? selected[selected.length - 1].sequence : undefined;
+    return rpcResult(id, toolTextResult({
+      ok: true,
+      conversationId: snapshot.conversationId,
+      requesterParticipantId: snapshot.participantId,
+      snapshotAtRunStart: true,
+      filters: { messageId, threadId, beforeSequence: before, afterSequence: after, limit },
+      messages: selected,
+      page: {
+        oldestSequence: oldest,
+        newestSequence: newest,
+        hasMoreBefore: oldest !== undefined
+          ? matched.some((message) => typeof message.sequence === "number" && message.sequence < oldest)
+          : false,
+        hasMoreAfter: newest !== undefined
+          ? matched.some((message) => typeof message.sequence === "number" && message.sequence > newest)
+          : false,
+        totalMessages: typeof window.totalMessages === "number" ? window.totalMessages : all.length,
+        totalMatchingMessages: matched.length,
+        oldestIncludedSequence: window.oldestIncludedSequence
+      }
+    }));
+  }
+  if (toolHandler === "chat-list-attachments" || toolHandler === "chat-read-attachment") {
+    if (notify) { return undefined; }
+    const bundled = Array.isArray(snapshot.attachments) ? snapshot.attachments : [];
+    const window = snapshot.attachmentWindow && typeof snapshot.attachmentWindow === "object" ? snapshot.attachmentWindow : {};
+    if (toolHandler === "chat-read-attachment") {
+      const attachmentId = typeof args.attachmentId === "string" ? args.attachmentId.trim() : "";
+      const found = bundled.find((item) => item && item.attachment && item.attachment.id === attachmentId);
+      if (!found) {
+        return rpcError(id, -32602, "AttachmentReadDenied. Problem: this attachment was not bundled with this run. Cause: the id is absent, belongs to another conversation, is newer than this run, or fell outside the run's attachment budget. Fix: call app_chat_list_attachments for the ids that are available.");
+      }
+      const mimeType = found.attachment && typeof found.attachment.mimeType === "string"
+        ? found.attachment.mimeType
+        : "image/png";
+      const summary = {
+        conversationId: snapshot.conversationId,
+        requesterParticipantId: snapshot.participantId,
+        messageId: found.messageId,
+        sequence: found.sequence,
+        author: found.author,
+        threadId: found.threadId,
+        attachment: found.attachment,
+        snapshotAtRunStart: true,
+        dataBase64: "[omitted: returned as MCP image content]"
+      };
+      return rpcResult(id, {
+        content: [
+          { type: "text", text: JSON.stringify(summary, null, 2) },
+          { type: "image", data: found.dataBase64, mimeType }
+        ]
+      });
+    }
+    const messageId = typeof args.messageId === "string" && args.messageId.trim() ? args.messageId.trim() : undefined;
+    const threadId = typeof args.threadId === "string" && args.threadId.trim() ? args.threadId.trim() : undefined;
+    const limit = typeof args.limit === "number" && isFinite(args.limit) && args.limit > 0
+      ? Math.min(50, Math.floor(args.limit))
+      : 20;
+    const matched = bundled.filter((item) => {
+      if (!item || typeof item !== "object") { return false; }
+      if (messageId && item.messageId !== messageId) { return false; }
+      if (threadId && item.threadId !== threadId) { return false; }
+      return true;
+    }).slice(-limit);
+    return rpcResult(id, toolTextResult({
+      ok: true,
+      conversationId: snapshot.conversationId,
+      requesterParticipantId: snapshot.participantId,
+      snapshotAtRunStart: true,
+      filters: { messageId, threadId, limit },
+      attachments: matched.map((item) => ({
+        messageId: item.messageId,
+        sequence: item.sequence,
+        author: item.author,
+        threadId: item.threadId,
+        attachment: item.attachment
+      })),
+      omittedCount: typeof window.omittedCount === "number" ? window.omittedCount : 0
+    }));
+  }
+  return notify ? undefined : rpcError(id, -32603, "Unknown worker relay tool: " + String(name || "") + ".");
+}
+
+function ensureAppMcpServer() {
+  if (appMcpServerState) {
+    return Promise.resolve(appMcpServerState);
+  }
+  return new Promise((resolve, reject) => {
+    const token = crypto.randomBytes(32).toString("hex");
+    const server = http.createServer(async (request, response) => {
+      if (request.method !== "POST" || (request.url || "").split("?")[0] !== "/mcp") {
+        response.writeHead(404, { "content-type": "text/plain" });
+        response.end("Not found");
+        return;
+      }
+      if (request.headers.authorization !== "Bearer " + token) {
+        response.writeHead(401, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: "Unauthorized" }));
+        return;
+      }
+      try {
+        const payload = await readJsonBody(request);
+        const requests = Array.isArray(payload) ? payload : [payload];
+        const results = [];
+        for (const item of requests) {
+          const result = await handleAppMcpRequest(item);
+          if (result) { results.push(result); }
+        }
+        if (results.length === 0) {
+          response.writeHead(202);
+          response.end();
+          return;
+        }
+        response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        response.end(JSON.stringify(Array.isArray(payload) ? results : results[0]));
+      } catch (error) {
+        response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        response.end(JSON.stringify(rpcError(null, -32700, error instanceof Error ? error.message : String(error))));
+      }
+    });
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = address && typeof address === "object" ? address.port : undefined;
+      if (!port) {
+        server.close();
+        reject(new Error("Mobile mailbox App MCP server did not expose a listen address."));
+        return;
+      }
+      server.unref();
+      appMcpServerState = {
+        server,
+        token,
+        url: "http://127.0.0.1:" + port + "/mcp"
+      };
+      resolve(appMcpServerState);
+    });
+  });
+}
+
+function stopAppMcpServer() {
+  activeAppMcpRun = undefined;
+  if (appMcpServerState && appMcpServerState.server) {
+    try { appMcpServerState.server.close(); } catch {}
+  }
+  appMcpServerState = undefined;
+}
+
 function mailboxClaimUrl() {
   const url = new URL(mailboxUrl);
   url.pathname = "/v1/mailbox/claims";
@@ -578,7 +985,7 @@ function promptFor(policy, message, participant) {
   ].join("\n");
 }
 
-function runCodex(prompt, runId) {
+function runCodex(prompt, runId, appMcp) {
   const finalPath = path.join(os.tmpdir(), runId + ".txt");
   const timeoutMs = Math.max(1000, Number(process.env.ACCORD_MOBILE_RUNNER_TIMEOUT_MS || 86400000));
   return new Promise((resolve) => {
@@ -591,9 +998,16 @@ function runCodex(prompt, runId) {
       "--skip-git-repo-check",
       "--output-last-message",
       finalPath,
+      "-c",
+      "approval_policy=\"never\"",
+      "-c",
+      "mcp_servers.accord_agents.url=\"" + appMcp.url + "\"",
+      "-c",
+      "mcp_servers.accord_agents.bearer_token_env_var=\"ACCORD_AGENTS_MCP_TOKEN\"",
       prompt
     ], {
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      env: Object.assign({}, process.env, { ACCORD_AGENTS_MCP_TOKEN: appMcp.token })
     });
     const timer = setTimeout(() => {
       timedOut = true;
@@ -624,7 +1038,7 @@ function runCodex(prompt, runId) {
   });
 }
 
-function runClaude(prompt, participant) {
+function runClaude(prompt, participant, appMcp) {
   const timeoutMs = Math.max(1000, Number(process.env.ACCORD_MOBILE_RUNNER_TIMEOUT_MS || 86400000));
   return new Promise((resolve) => {
     let stdout = "";
@@ -636,7 +1050,19 @@ function runClaude(prompt, participant) {
       "--output-format",
       "json",
       "--permission-mode",
-      claudePermissionMode(participant)
+      claudePermissionMode(participant),
+      "--mcp-config",
+      JSON.stringify({
+        mcpServers: {
+          accord_agents: {
+            type: "http",
+            url: appMcp.url,
+            headers: { Authorization: "Bearer " + appMcp.token }
+          }
+        }
+      }),
+      "--allowedTools",
+      REMOTE_APP_MCP_TOOL_CONTRACTS.map((contract) => "mcp__accord_agents__" + contract.definition.name).join(",")
     ];
     if (participant.model) {
       args.push("--model", String(participant.model));
@@ -701,10 +1127,10 @@ function extractClaudeText(stdout) {
   return stdout.trim();
 }
 
-function runParticipant(prompt, participant, runId) {
+function runParticipant(prompt, participant, runId, appMcp) {
   return participant.kind === "claude-code"
-    ? runClaude(prompt, participant)
-    : runCodex(prompt, runId);
+    ? runClaude(prompt, participant, appMcp)
+    : runCodex(prompt, runId, appMcp);
 }
 
 async function processMobileMessage(event, policy) {
@@ -739,7 +1165,14 @@ async function processMobileMessage(event, policy) {
         }]
       }, "mobile-runner-running-" + runKey)
     ]);
-    const result = await runParticipant(promptFor(policy, event, participant), participant, runId);
+    const appMcp = await ensureAppMcpServer();
+    activeAppMcpRun = { policy, event, participant, runId };
+    let result;
+    try {
+      result = await runParticipant(promptFor(policy, event, participant), participant, runId, appMcp);
+    } finally {
+      activeAppMcpRun = undefined;
+    }
     if (!await acquireMobileEventClaim(event, runId)) {
       return false;
     }
@@ -821,9 +1254,9 @@ async function main() {
   } while (true);
 }
 
-process.on("SIGINT", () => { stopExecutionClaimRenewal(); stopOperationLeaseRenewal(); process.exit(130); });
-process.on("SIGTERM", () => { stopExecutionClaimRenewal(); stopOperationLeaseRenewal(); process.exit(143); });
-process.on("exit", () => { stopExecutionClaimRenewal(); stopOperationLeaseRenewal(); });
+process.on("SIGINT", () => { stopExecutionClaimRenewal(); stopOperationLeaseRenewal(); stopAppMcpServer(); process.exit(130); });
+process.on("SIGTERM", () => { stopExecutionClaimRenewal(); stopOperationLeaseRenewal(); stopAppMcpServer(); process.exit(143); });
+process.on("exit", () => { stopExecutionClaimRenewal(); stopOperationLeaseRenewal(); stopAppMcpServer(); });
 
 main();
 `;

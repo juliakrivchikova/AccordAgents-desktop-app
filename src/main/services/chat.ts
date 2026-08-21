@@ -8779,9 +8779,43 @@ export class ChatService {
     return { attachments, omittedCount };
   }
 
+  async mobileMailboxRunnerContextSnapshot(conversation: Conversation): Promise<Record<string, unknown>> {
+    const triggerMessage = conversation.messages[conversation.messages.length - 1];
+    if (!triggerMessage) {
+      return {
+        conversationId: conversation.id,
+        title: conversation.title,
+        repoPath: conversation.repoPath,
+        messages: [],
+        attachments: [],
+        attachmentWindow: {
+          omittedCount: 0,
+          limit: ChatService.REMOTE_SNAPSHOT_ATTACHMENT_LIMIT
+        },
+        messageWindow: {
+          maxSequence: -1,
+          totalMessages: 0
+        },
+        participants: this.remoteRunSnapshotParticipants(conversation)
+      };
+    }
+    return this.remoteRunContextSnapshotBase(conversation, triggerMessage);
+  }
+
   private async remoteRunContextSnapshot(
     conversation: Conversation,
     participant: ChatParticipant,
+    triggerMessage: ChatMessage
+  ): Promise<Record<string, unknown>> {
+    return {
+      ...await this.remoteRunContextSnapshotBase(conversation, triggerMessage),
+      participantId: participant.id,
+      participantHandle: participant.handle
+    };
+  }
+
+  private async remoteRunContextSnapshotBase(
+    conversation: Conversation,
     triggerMessage: ChatMessage
   ): Promise<Record<string, unknown>> {
     const window = this.remoteRunSnapshotMessages(conversation, triggerMessage);
@@ -8790,8 +8824,6 @@ export class ChatService {
       conversationId: conversation.id,
       title: conversation.title,
       repoPath: conversation.repoPath,
-      participantId: participant.id,
-      participantHandle: participant.handle,
       triggerMessageId: triggerMessage.id,
       messages: window.messages,
       attachments: images.attachments,
@@ -8806,18 +8838,22 @@ export class ChatService {
           ? (window.messages[0] as { sequence?: number }).sequence
           : undefined
       },
-      participants: this.chatParticipants(conversation).map((item) => ({
-        id: item.id,
-        handle: item.handle,
-        kind: item.kind,
-        roleConfigId: item.roleConfigId,
-        model: item.model,
-        reasoningEffort: item.reasoningEffort,
-        agentMode: item.agentMode,
-        remoteExecution: item.remoteExecution,
-        skipToolchainPreflight: item.skipToolchainPreflight
-      }))
+      participants: this.remoteRunSnapshotParticipants(conversation)
     };
+  }
+
+  private remoteRunSnapshotParticipants(conversation: Conversation): Record<string, unknown>[] {
+    return this.chatParticipants(conversation).map((item) => ({
+      id: item.id,
+      handle: item.handle,
+      kind: item.kind,
+      roleConfigId: item.roleConfigId,
+      model: item.model,
+      reasoningEffort: item.reasoningEffort,
+      agentMode: item.agentMode,
+      remoteExecution: item.remoteExecution,
+      skipToolchainPreflight: item.skipToolchainPreflight
+    }));
   }
 
   private shortHash(value: string): string {

@@ -1455,11 +1455,12 @@ async function publishMobileRunnerPolicyForPairing(
     return;
   }
   try {
+    const contextSnapshot = await chatService.mobileMailboxRunnerContextSnapshot(conversation);
     const append = await chatEventLogService.appendLocalEvent({
       conversationId: conversation.id,
       logScopeId: conversation.id,
       kind: MOBILE_RUNNER_POLICY_KIND,
-      payload: mobileMailboxRunnerPolicyFromConversation(conversation, pairing)
+      payload: mobileMailboxRunnerPolicyFromConversation(conversation, pairing, contextSnapshot)
     });
     await postMailboxEvents(pairing, [append.event]);
   } catch (error) {
