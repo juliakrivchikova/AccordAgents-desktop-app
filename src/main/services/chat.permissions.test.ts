@@ -1412,6 +1412,23 @@ test("tool permission request denies and marks approval when run is cancelled", 
   assert.equal(approval.error, "Tool permission request was cancelled because the chat run stopped.");
 });
 
+test("conversation-scoped cancellation recognizes a live run before its state is persisted", () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+  const controller = new AbortController();
+  (service as any).registerTargetRun("live-mobile-run", controller, {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    participantHandle: participant.handle
+  });
+
+  assert.equal(service.hasActiveRunForConversation(conversation.id, "live-mobile-run"), true);
+  assert.equal(service.hasActiveRunForConversation("another-conversation", "live-mobile-run"), false);
+  assert.equal(service.cancelRun("live-mobile-run"), true);
+  assert.equal(controller.signal.aborted, true);
+});
+
 test("tool permission request denies and marks approval on timeout", async (t) => {
   const participant = chatParticipant("claude-code");
   const conversation = chatConversation([participant]);

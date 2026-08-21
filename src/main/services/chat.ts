@@ -5646,6 +5646,12 @@ export class ChatService {
     if (!mobileEventId) {
       return false;
     }
+    if (
+      typeof this.storage.hasChatEvent === "function" &&
+      await this.storage.hasChatEvent(conversationId, mobileEventId)
+    ) {
+      return true;
+    }
     const conversation = await this.storage.getConversation(conversationId);
     return Boolean(conversation && this.hasMobileEventMessage(conversation, mobileEventId));
   }
@@ -5660,12 +5666,11 @@ export class ChatService {
   }
 
   async acceptMobileMailboxOutboxEvent(event: ChatEventEnvelope): Promise<boolean> {
-    if (event.kind !== "message.created") {
+    if (event.kind !== "message.created" && event.kind !== "run.cancel.requested") {
       return false;
     }
-    const content = this.mobileMailboxOutboxPayload(event.payload);
     const mobileEventId = this.normalizedMobileEventId(event.eventId);
-    if (!content || !mobileEventId) {
+    if (!mobileEventId) {
       return false;
     }
     const append = await this.storage.appendChatEvent(event);
@@ -5675,6 +5680,13 @@ export class ChatService {
         eventId: event.eventId,
         conflictReason: append.conflictReason
       });
+      return false;
+    }
+    if (event.kind === "run.cancel.requested") {
+      return append.status === "appended";
+    }
+    const content = this.mobileMailboxOutboxPayload(event.payload);
+    if (!content) {
       return false;
     }
     const conversation = await this.storage.getConversation(event.conversationId);
@@ -18095,6 +18107,21 @@ export class ChatService {
       return true;
     }
     return true;
+  }
+
+  hasActiveRunForConversation(conversationId: string, runId: string): boolean {
+    const targetConversationId = conversationId.trim();
+    const targetRunId = runId.trim();
+    if (!targetConversationId || !targetRunId) {
+      return false;
+    }
+    if (this.activeConversationRunIds.get(targetConversationId)?.has(targetRunId)) {
+      return true;
+    }
+    if (this.chatRunMeta.get(targetRunId)?.conversationId === targetConversationId) {
+      return true;
+    }
+    return this.remoteRunHandlesByRun.get(targetRunId)?.conversationId === targetConversationId;
   }
 
   private async cancelStoredRun(runId: string): Promise<boolean> {

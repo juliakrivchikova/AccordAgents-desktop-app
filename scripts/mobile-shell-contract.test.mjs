@@ -33,7 +33,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v51/);
+  assert.match(worker, /accordagents-mobile-shell-v53/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -99,8 +99,8 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(headers, /X-Content-Type-Options: nosniff/);
   assert.match(headers, /Referrer-Policy: no-referrer/);
   assert.match(headers, /Permissions-Policy: camera=\(self\)/);
-  assert.match(html, /mobile-app\.css\?v=2026-08-19-failed-run-ends-its-rows-v1/);
-  assert.match(html, /mobile-app\.js\?v=2026-08-19-failed-run-ends-its-rows-v1/);
+  assert.match(html, /mobile-app\.css\?v=2026-08-20-mobile-stop-v1/);
+  assert.match(html, /mobile-app\.js\?v=2026-08-20-mobile-stop-v1/);
   assert.match(html, /data-screen-label="Mobile control"/);
   assert.match(html, /id="chats-screen"/);
   assert.match(html, />Chats</);
@@ -259,6 +259,8 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /"mobile:" \+ originId/);
   assert.match(app, /sha256Hex/);
   assert.match(app, /mobile\.timeline\.events/);
+  assert.match(app, /kind: "run\.cancel\.requested"/);
+  assert.match(app, /stopRunFromPhone/);
   assert.match(app, /pollMailboxTimeline/);
   assert.match(app, /MAILBOX_TIMELINE_POLL_MS = 2_500/);
   assert.match(app, /mobile\.chat-list\.request/);
@@ -338,6 +340,55 @@ test("mobile shell sends only sealed relay frames that the desktop can decrypt b
   } finally {
     await relay.close();
   }
+});
+
+test("mobile shell matches desktop member mention filtering and insertion", async () => {
+  await execFileAsync(process.execPath, ["scripts/build-mobile-shell.mjs"], {
+    cwd: repoRoot
+  });
+  await import(pathToFileURL(path.join(repoRoot, "dist/mobile/mobile-app.js")).toString());
+  const mobile = globalThis.AccordAgentsMobile;
+  const members = [{
+    id: "participant-taylor",
+    handle: "taylor-claude-engineer",
+    mentionHandle: "taylor-claude-engineer",
+    displayName: "@taylor-claude-engineer",
+    roleLabel: "Software Engineer"
+  }, {
+    id: "participant-assistant",
+    handle: "admin",
+    mentionHandle: "assistant",
+    displayName: "Chat Assistant",
+    roleLabel: "Administrator"
+  }];
+
+  assert.equal(mobile.activeMentionQuery("Ask @tay"), "tay");
+  assert.equal(mobile.activeMentionQuery("email@example.com"), undefined);
+  assert.deepEqual(mobile.mentionOptions("Ask @tay", members), [members[0]]);
+  assert.deepEqual(mobile.mentionOptions("Ask @chat", members), [members[1]]);
+  assert.equal(mobile.replaceActiveMention("Ask @tay", members[0].mentionHandle), "Ask @taylor-claude-engineer ");
+  assert.equal(mobile.replaceActiveMention("@adm", members[1].mentionHandle), "@assistant ");
+});
+
+test("mobile Stop is offered only for a real participant run", async () => {
+  await execFileAsync(process.execPath, ["scripts/build-mobile-shell.mjs"], {
+    cwd: repoRoot
+  });
+  await import(pathToFileURL(path.join(repoRoot, "dist/mobile/mobile-app.js")).toString());
+  const mobile = globalThis.AccordAgentsMobile;
+
+  assert.equal(mobile.isCancellableMobileRow({
+    author: "agent",
+    status: "Running",
+    runId: "mobile-ingest-placeholder",
+    cancellable: false
+  }), false);
+  assert.equal(mobile.isCancellableMobileRow({
+    author: "agent",
+    status: "Running",
+    runId: "participant-run",
+    cancellable: true
+  }), true);
 });
 
 test("mobile shell collapses duplicate terminal timeline entries by run identity", async () => {

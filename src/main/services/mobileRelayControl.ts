@@ -32,6 +32,7 @@ export interface MobileRelayChatSender {
   hasAcceptedMobileEvent?(conversationId: string, eventId: string): Promise<boolean>;
   hasMobileMailboxResultForMobileEvent?(conversationId: string, eventId: string): Promise<boolean>;
   tryAcquireMobileEventExecution?(event: MobileOutboxEvent, runId: string): Promise<boolean>;
+  cancelRun?(conversationId: string, runId: string): Promise<boolean> | boolean;
 }
 
 export interface MobileRelayAcceptedResult {
@@ -40,10 +41,10 @@ export interface MobileRelayAcceptedResult {
 }
 
 interface MobileRelayAcceptedDetail extends MobileRelayAcceptedResult {
-  outboxEvents: Array<{
-    event: MobileOutboxEvent;
-    runId: string;
-  }>;
+  outboxEvents: Array<
+    | { kind: "message"; event: MobileMessageOutboxEvent; runId: string }
+    | { kind: "cancel"; event: MobileRunCancelOutboxEvent }
+  >;
   runningBatches: MobileTimelineEvents[];
 }
 
@@ -56,6 +57,17 @@ export interface MobileRelayChatListItem {
   updatedAt: string;
   running: boolean;
   participants: string[];
+  members?: MobileRelayChatMember[];
+}
+
+export interface MobileRelayChatMember {
+  id: string;
+  handle: string;
+  mentionHandle: string;
+  displayName: string;
+  roleLabel: string;
+  kind: "claude-code" | "codex-cli" | "gemini-cli";
+  avatarId?: string;
 }
 
 export interface MobileRelayChatCatalog {
@@ -69,14 +81,27 @@ interface MobileOutboxRequest {
   events: MobileOutboxEvent[];
 }
 
-export interface MobileOutboxEvent {
+interface MobileOutboxEventBase {
   eventId: string;
   conversationId: string;
   createdAt?: string;
+}
+
+export interface MobileMessageOutboxEvent extends MobileOutboxEventBase {
+  kind?: "message.created";
   payload: {
     content: string;
   };
 }
+
+export interface MobileRunCancelOutboxEvent extends MobileOutboxEventBase {
+  kind: "run.cancel.requested";
+  payload: {
+    runId: string;
+  };
+}
+
+export type MobileOutboxEvent = MobileMessageOutboxEvent | MobileRunCancelOutboxEvent;
 
 interface MobileOutboxAck {
   type: "mobile.outbox.ack";
@@ -366,12 +391,13 @@ export class MobileRelayControlService {
       return;
     }
     const accepted = await this.prepareMobileOutboxRequest(assertMobileOutboxRequest(payload));
+    await this.deliverAcceptedCancellationEvents(accepted);
     await this.sendAck(message.logicalMessageId, accepted);
     this.markRunIdsAcked(accepted.runIds);
     await this.sendAcceptedRunningBatches(message.logicalMessageId, accepted).catch(() => {
       // The phone may have gone away after ack; durable sync remains the source of truth.
     });
-    void this.deliverAcceptedOutboxEvents(message.logicalMessageId, accepted).catch(() => {
+    void this.deliverAcceptedMessageEvents(message.logicalMessageId, accepted).catch(() => {
       // The phone may have gone away after ack; durable sync remains the source of truth.
     });
   }
@@ -385,15 +411,25 @@ export class MobileRelayControlService {
       if (!(await this.isConversationAllowed(event.conversationId))) {
         throw new Error("Mobile relay event conversationId is outside the paired scope.");
       }
-      const runId = `mobile-${event.eventId || randomUUID()}`;
       const mobileEventKey = mobileEventScopeKey(event.conversationId, event.eventId);
+      const runId = isMobileRunCancelEvent(event) ? undefined : `mobile-${event.eventId || randomUUID()}`;
       eventIds.push(event.eventId);
-      runIds.push(runId);
+      if (runId) {
+        runIds.push(runId);
+      }
       if (this.acceptedMobileEventKeys.has(mobileEventKey) || this.acceptingMobileEventKeys.has(mobileEventKey)) {
         continue;
       }
       this.acceptingMobileEventKeys.add(mobileEventKey);
       try {
+        if (isMobileRunCancelEvent(event)) {
+          this.acceptedMobileEventKeys.add(mobileEventKey);
+          outboxEvents.push({ kind: "cancel", event });
+          continue;
+        }
+        if (!runId) {
+          throw new Error("Mobile message event requires a run id.");
+        }
         if (await this.mobileEventIsAlreadyHandled(event)) {
           this.acceptedMobileEventKeys.add(mobileEventKey);
           continue;
@@ -410,7 +446,7 @@ export class MobileRelayControlService {
           conversationId: event.conversationId,
           events: [runningTimelineEventForOutbox(event, runId)]
         });
-        outboxEvents.push({ event, runId });
+        outboxEvents.push({ kind: "message", event, runId });
       } finally {
         this.acceptingMobileEventKeys.delete(mobileEventKey);
       }
@@ -422,7 +458,35 @@ export class MobileRelayControlService {
     logicalMessageId: string,
     accepted: MobileRelayAcceptedDetail
   ): Promise<void> {
+    await this.deliverAcceptedCancellationEvents(accepted);
+    await this.deliverAcceptedMessageEvents(logicalMessageId, accepted);
+  }
+
+  private async deliverAcceptedCancellationEvents(accepted: MobileRelayAcceptedDetail): Promise<void> {
+    for (const item of accepted.outboxEvents) {
+      if (item.kind !== "cancel") {
+        continue;
+      }
+      if (!this.chat.cancelRun) {
+        throw new Error("Mobile run cancellation is unavailable.");
+      }
+      try {
+        await this.chat.cancelRun(item.event.conversationId, item.event.payload.runId);
+      } catch (error) {
+        this.acceptedMobileEventKeys.delete(mobileEventScopeKey(item.event.conversationId, item.event.eventId));
+        throw error;
+      }
+    }
+  }
+
+  private async deliverAcceptedMessageEvents(
+    logicalMessageId: string,
+    accepted: MobileRelayAcceptedDetail
+  ): Promise<void> {
     for (const [index, item] of accepted.outboxEvents.entries()) {
+      if (item.kind !== "message") {
+        continue;
+      }
       try {
         if (await this.mobileEventIsAlreadyHandled(item.event)) {
           continue;
@@ -843,7 +907,18 @@ function assertMobileOutboxEvent(value: unknown): asserts value is MobileOutboxE
   if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) {
     throw new Error("Mobile relay outbox event requires payload.");
   }
-  assertNonEmptyString((event.payload as Partial<MobileOutboxEvent["payload"]>).content, "payload.content");
+  if (event.kind === "run.cancel.requested") {
+    assertNonEmptyString((event.payload as Partial<MobileRunCancelOutboxEvent["payload"]>).runId, "payload.runId");
+    return;
+  }
+  if (event.kind !== undefined && event.kind !== "message.created") {
+    throw new Error(`Mobile relay outbox event kind is unsupported: ${String(event.kind)}.`);
+  }
+  assertNonEmptyString((event.payload as Partial<MobileMessageOutboxEvent["payload"]>).content, "payload.content");
+}
+
+function isMobileRunCancelEvent(event: MobileOutboxEvent): event is MobileRunCancelOutboxEvent {
+  return event.kind === "run.cancel.requested";
 }
 
 function assertNonEmptyString(value: unknown, label: string): asserts value is string {
@@ -950,7 +1025,7 @@ function timelineEventAtOrAfter(eventCreatedAt: string, startedAt: string): bool
   return eventTime >= startTime;
 }
 
-function runningTimelineEventForOutbox(event: MobileOutboxEvent, runId: string): MobileTimelineEvent {
+function runningTimelineEventForOutbox(event: MobileMessageOutboxEvent, runId: string): MobileTimelineEvent {
   const participantLabel = participantLabelFromContent(event.payload.content);
   const id = `${runId}:${participantLabel ?? "participant"}`;
   return {
@@ -966,7 +1041,7 @@ function runningTimelineEventForOutbox(event: MobileOutboxEvent, runId: string):
   };
 }
 
-function errorTimelineEventForOutbox(event: MobileOutboxEvent, runId: string, error: unknown): MobileTimelineEvent {
+function errorTimelineEventForOutbox(event: MobileMessageOutboxEvent, runId: string, error: unknown): MobileTimelineEvent {
   const participantLabel = participantLabelFromContent(event.payload.content);
   const id = `${runId}:${participantLabel ?? "participant"}:error`;
   return {

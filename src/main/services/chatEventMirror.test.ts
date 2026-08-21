@@ -204,6 +204,42 @@ test("ChatService imports fulfilled mobile mailbox outbox events without retrigg
   }
 });
 
+test("ChatService records an acted-on mobile mailbox cancellation exactly once", async () => {
+  const { storage, cleanup } = await testStorage("accordagents-chat-mailbox-mobile-cancel-");
+  try {
+    const service = new ChatService(
+      storage,
+      {} as never,
+      {} as never,
+      testLogger() as never
+    );
+    await storage.saveConversation(basicConversation());
+    const event: ChatEventEnvelope<{ runId: string }> = {
+      eventId: "mobile-cancel-event-1",
+      conversationId: "conversation-1",
+      logScopeId: "conversation-1",
+      originId: "mobile-test",
+      originSeq: 1,
+      logicalTs: "0000000000000001:mobile-test:conversation-1",
+      kind: "run.cancel.requested",
+      payload: { runId: "participant-run-1" },
+      payloadHash: "sha256:mobile-cancel-payload",
+      eventHash: "sha256:mobile-cancel-event",
+      createdAt: "2026-08-06T00:00:05.000Z"
+    };
+
+    assert.equal(await service.hasAcceptedMobileEvent("conversation-1", event.eventId), false);
+    assert.equal(await service.acceptMobileMailboxOutboxEvent(event), true);
+    assert.equal(await service.acceptMobileMailboxOutboxEvent(event), false);
+    assert.equal(await service.hasAcceptedMobileEvent("conversation-1", event.eventId), true);
+    assert.deepEqual((await storage.listChatEvents("conversation-1", "conversation-1")).map((item) => item.eventId), [
+      "mobile-cancel-event-1"
+    ]);
+  } finally {
+    await cleanup();
+  }
+});
+
 async function testStorage(prefix: string): Promise<{ storage: StorageService; cleanup: () => Promise<void> }> {
   const directory = await mkdtemp(path.join(tmpdir(), prefix));
   const storage = Object.create(StorageService.prototype) as any;
