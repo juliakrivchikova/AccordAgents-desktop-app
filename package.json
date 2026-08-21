@@ -35,6 +35,7 @@
     "test:relay": "npm run build:main && node --test dist/main/main/services/relayProtocol.test.js && node --test scripts/relay-reference-server.test.mjs scripts/relay-tunnel-client.test.mjs scripts/cloudflare-relay-worker.test.mjs",
     "test:cloudflare-relay": "npx tsc -p cloudflare/relay/tsconfig.json && npx wrangler deploy --dry-run --config cloudflare/relay/wrangler.jsonc && node scripts/build-relay-worker.mjs && node --test --test-timeout 300000 scripts/cloudflare-relay-worker.test.mjs scripts/mailbox-contract-parity.test.mjs scripts/mailbox-ring-path.test.mjs",
     "deploy:relay": "npm run test:cloudflare-relay && npx wrangler deploy --config cloudflare/relay/wrangler.jsonc",
+    "deploy:mobile": "wrangler pages deploy dist/mobile --project-name accordagents-mobile-control-staging --branch staging --commit-dirty=true",
     "qa:mobile-control-electron-staging": "node scripts/qa-mobile-control-electron-staging.mjs",
     "qa:mobile-pwa-staging": "npm run build:main && node scripts/qa-mobile-pwa-staging.mjs",
     "qa:mobile-scroll": "npm run build:mobile && node scripts/qa-mobile-scroll.mjs",

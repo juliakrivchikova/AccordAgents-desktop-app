@@ -90,6 +90,16 @@ Conversations are append-mostly. Chat conversations store timeline messages plus
 - Strict TS everywhere; keep types explicit at IPC, service, and shared boundaries. Add new shapes to `src/shared/types.ts` rather than redefining them on either side of the bridge.
 - Do not commit provider API keys, local repo paths, generated logs, `node_modules`, or `dist`. Treat saved conversations and `debug-logs/` as sensitive — they contain prompts, diffs, and raw model responses.
 
+## The phone app is deployed separately
+
+The PWA the phone runs is not served by the desktop app. It is a Cloudflare
+Pages site at `mobile.accordagents.com`, and a change reaches the phone only
+after `npm run build:mobile && npm run deploy:mobile`. Merging and restarting the
+desktop does nothing for the phone. The project's production branch is called
+`staging`, so deploying to `main` publishes a preview that the phone never sees.
+See `docs/deploying-the-phone-app.md`, including the `ASSET_VERSION` bump that
+busts the phone's cache.
+
 ## Skill routing
 
 When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
