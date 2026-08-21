@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { StorageService } from "./storage";
+import { PREVIOUS_STORAGE_SCHEMA_VERSION, StorageService } from "./storage";
 import { resolveSqliteExecutable } from "./sqliteCli";
 import type { ChatMessage, Conversation } from "../../shared/types";
 
@@ -300,6 +300,64 @@ test("a failed statement rolls the whole save back instead of committing half of
       before,
       "nothing from the failed batch may survive, not even the statements that succeeded"
     );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("upgrading an older database leaves a copy of it next to the live one", async () => {
+  const { storage, directory } = await openStorage();
+  try {
+    // A database an older build left behind: schema 1, no body, no message rows.
+    await storage.getConversation("does-not-exist");
+    const raw = storage as unknown as { runSql(sql: string): Promise<void>; initialized: boolean };
+    await raw.runSql(`
+      update schema_meta set value = '1' where key = 'storage-schema-version';
+      insert into conversations (id, title, kind, created_at, updated_at, repo_path, payload_json)
+      values ('old-chat', 'Old', 'chat', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', null,
+        '${JSON.stringify({ ...conversation([message("old-0", "from the previous version", 0)]), id: "old-chat" }).replace(/'/g, "''")}');
+    `);
+    raw.initialized = false;
+
+    await storage.getConversation("old-chat");
+
+    const backup = path.join(directory, "accordagents.sqlite3.schema-1.bak");
+    const copied = await readFile(backup).then(() => true, () => false);
+    assert.equal(copied, true, `expected a pre-upgrade copy at ${backup}`);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a database can be put back into the shape an older version opens", async () => {
+  // Raising the schema version stops an older build from destroying this
+  // database, but it also locks that build out. This is the way back.
+  const { storage, directory } = await openStorage();
+  try {
+    const messages = Array.from({ length: 8 }, (_, index) => message(`m-${index}`, `body ${index}`, index));
+    await storage.saveConversation(conversation(messages));
+
+    const result = await storage.prepareStorageForOlderVersion();
+    assert.equal(result.schemaVersion, PREVIOUS_STORAGE_SCHEMA_VERSION);
+
+    const raw = storage as unknown as {
+      queryJson(sql: string): Promise<Array<{ payloadHex: string; storedVersion: string }>>;
+    };
+    const rows = await raw.queryJson(`
+      select hex(payload_json) as payloadHex,
+        (select value from schema_meta where key = 'storage-schema-version') as storedVersion
+      from conversations where id = 'chat-1';
+    `);
+    assert.equal(rows[0]?.storedVersion, String(PREVIOUS_STORAGE_SCHEMA_VERSION));
+    // What an older build reads is `payload_json`, and it must be the whole
+    // conversation again — in order, nothing missing.
+    const restored = JSON.parse(Buffer.from(rows[0].payloadHex, "hex").toString("utf8")) as Conversation;
+    assert.deepEqual(restored.messages.map((item) => item.id), messages.map((item) => item.id));
+    assert.equal(restored.messages[3].content, "body 3");
+    assert.equal(restored.title, "Chat");
+
+    // And the current build still reads it correctly afterwards.
+    assert.equal((await storage.getConversation("chat-1"))?.messages.length, 8);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

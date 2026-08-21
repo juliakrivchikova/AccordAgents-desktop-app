@@ -41,6 +41,8 @@ const SQLITE_COMMAND_TIMEOUT_MS = 45_000;
 const SQLITE_MIGRATION_TIMEOUT_MS = 120_000;
 const SCHEMA_META_COMPLETE = "complete";
 export const SUPPORTED_STORAGE_SCHEMA_VERSION = 2;
+/** What `prepareStorageForOlderVersion` puts the database back to. */
+export const PREVIOUS_STORAGE_SCHEMA_VERSION = 1;
 export const STORAGE_SCHEMA_VERSION_META_KEY = "storage-schema-version";
 export const CHAT_EVENT_PROJECTION_VERSION = 1;
 const CHAT_EVENT_DEVICE_IDENTITY_META_KEY = "chat-event-device-identity-v1";
@@ -382,6 +384,7 @@ export class StorageService {
     await this.ensureColumn("conversations", "body_json", "text");
     await this.ensureColumn("conversations", "save_token", "text");
     await this.backfillConversationBodiesAndMessages();
+    await this.backUpBeforeSchemaUpgrade();
     await this.setSchemaMeta(STORAGE_SCHEMA_VERSION_META_KEY, String(SUPPORTED_STORAGE_SCHEMA_VERSION));
     this.initialized = true;
     await this.normalizeInferredParticipantRequestThreads();
@@ -1654,8 +1657,51 @@ export class StorageService {
     };
   }
 
+  /** Puts this database back into the shape an older build can open: the full
+   *  conversation copy is rebuilt from the body and the message rows, and the
+   *  schema version is lowered again. Nothing is deleted — the body and the
+   *  message rows stay exactly as they are, so running the current build again
+   *  afterwards simply raises the version back. This is the supported way to go
+   *  back to a previous version of the app; without it, raising the schema
+   *  version would be a one-way door. */
+  async prepareStorageForOlderVersion(): Promise<{ conversations: number; schemaVersion: number }> {
+    await this.init();
+    const rows = await this.queryJson<{ total: number }>("select count(*) as total from conversations;");
+    await this.runSql(`
+      begin immediate;
+      update conversations
+      set payload_json = json_set(
+        coalesce(nullif(body_json, ''), payload_json),
+        '$.messages',
+        coalesce(
+          (
+            select json_group_array(json(ordered.message_json))
+            from (
+              select m.payload_json as message_json
+              from conversation_messages m
+              where m.conversation_id = conversations.id
+              order by m.sequence
+            ) as ordered
+          ),
+          json_array()
+        )
+      )
+      where json_valid(coalesce(nullif(body_json, ''), payload_json));
+      commit;
+    `, SQLITE_MIGRATION_TIMEOUT_MS);
+    await this.setSchemaMeta(STORAGE_SCHEMA_VERSION_META_KEY, String(PREVIOUS_STORAGE_SCHEMA_VERSION));
+    // Anything this process believed about the rows it wrote is meaningless to
+    // the build that opens the database next.
+    this.savedMessageStateCache = undefined;
+    return { conversations: rows[0]?.total ?? 0, schemaVersion: PREVIOUS_STORAGE_SCHEMA_VERSION };
+  }
+
   async createPreMigrationBackup(label: string): Promise<string> {
     await this.init();
+    return this.backUpDatabaseTo(label);
+  }
+
+  private async backUpDatabaseTo(label: string): Promise<string> {
     const safeLabel = label.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
     if (!safeLabel) {
       throw new Error("Pre-migration backup label is required.");
@@ -1704,6 +1750,31 @@ export class StorageService {
     const journalMode = (await this.queryText("pragma journal_mode = wal;")).toLowerCase();
     if (journalMode && journalMode !== "wal") {
       console.warn(`[StorageService] SQLite journal_mode=wal requested, got ${journalMode}.`);
+    }
+  }
+
+  /** Raising the schema version is what stops an older build from destroying
+   *  this database, but it also means that build can no longer open it. A copy
+   *  taken the moment before the version rises is the floor under that: whatever
+   *  goes wrong afterwards, the database as the previous version left it is
+   *  still on disk, next to the live one. Taken once — a second upgrade of an
+   *  already-upgraded database finds the version unchanged and does nothing. */
+  private async backUpBeforeSchemaUpgrade(): Promise<void> {
+    const storedVersion = parseStorageSchemaVersion(await this.getSchemaMeta(STORAGE_SCHEMA_VERSION_META_KEY));
+    if (storedVersion === undefined || storedVersion >= SUPPORTED_STORAGE_SCHEMA_VERSION) {
+      return;
+    }
+    try {
+      // Deliberately not `createPreMigrationBackup`: this runs from inside
+      // `init`, and that method starts by awaiting `init` itself, which would
+      // re-enter it before `initialized` is set and never return.
+      const backupPath = await this.backUpDatabaseTo(`schema-${storedVersion}`);
+      console.info(`[StorageService] Backed up the chat database before upgrading it to schema ${SUPPORTED_STORAGE_SCHEMA_VERSION}: ${backupPath}`);
+    } catch (error) {
+      // A missing backup must not stop the app from opening. It is a safety net,
+      // and the upgrade itself is not destructive — the old copy is what the
+      // user loses the option of, not their data.
+      console.warn(`[StorageService] Could not back up the chat database before the schema upgrade: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
