@@ -8731,7 +8731,8 @@ export class ChatService {
 
   private async remoteRunSnapshotAttachments(
     conversation: Conversation,
-    maxSequence: number
+    maxSequence: number,
+    knownAttachmentBase64Lengths?: Readonly<Record<string, number>>
   ): Promise<{ attachments: Record<string, unknown>[]; omittedCount: number }> {
     const records: ChatAttachmentRecord[] = [];
     conversation.messages.forEach((message, sequence) => {
@@ -8751,27 +8752,34 @@ export class ChatService {
         omittedCount += 1;
         continue;
       }
-      let dataBase64: string;
-      try {
-        dataBase64 = await this.readAttachmentBase64(conversation.id, record.attachment);
-      } catch {
-        // An unreadable attachment is not a reason to fail the run; the member
-        // simply will not see that one, and the count says so.
+      const knownLength = knownAttachmentBase64Lengths?.[record.attachment.id];
+      let dataBase64: string | undefined;
+      let dataBase64Length = Number.isFinite(knownLength) && (knownLength ?? 0) > 0
+        ? knownLength as number
+        : 0;
+      if (dataBase64Length === 0) {
+        try {
+          dataBase64 = await this.readAttachmentBase64(conversation.id, record.attachment);
+          dataBase64Length = dataBase64.length;
+        } catch {
+          // An unreadable attachment is not a reason to fail the run; the member
+          // simply will not see that one, and the count says so.
+          omittedCount += 1;
+          continue;
+        }
+      }
+      if (bytes + dataBase64Length > ChatService.REMOTE_SNAPSHOT_ATTACHMENT_BYTES) {
         omittedCount += 1;
         continue;
       }
-      if (bytes + dataBase64.length > ChatService.REMOTE_SNAPSHOT_ATTACHMENT_BYTES) {
-        omittedCount += 1;
-        continue;
-      }
-      bytes += dataBase64.length;
+      bytes += dataBase64Length;
       attachments.push({
         messageId: record.message.id,
         sequence: record.sequence,
         author: this.messageAuthor(record.message),
         threadId: record.message.metadata?.threadId,
         attachment: this.chatImageAttachmentForTool(record.attachment),
-        dataBase64
+        ...(dataBase64 ? { dataBase64 } : { dataBase64Omitted: true })
       });
     }
     // Oldest first on the wire, matching how the desktop lists them.
@@ -8779,7 +8787,10 @@ export class ChatService {
     return { attachments, omittedCount };
   }
 
-  async mobileMailboxRunnerContextSnapshot(conversation: Conversation): Promise<Record<string, unknown>> {
+  async mobileMailboxRunnerContextSnapshot(
+    conversation: Conversation,
+    knownAttachmentBase64Lengths?: Readonly<Record<string, number>>
+  ): Promise<Record<string, unknown>> {
     const triggerMessage = conversation.messages[conversation.messages.length - 1];
     if (!triggerMessage) {
       return {
@@ -8799,7 +8810,7 @@ export class ChatService {
         participants: this.remoteRunSnapshotParticipants(conversation)
       };
     }
-    return this.remoteRunContextSnapshotBase(conversation, triggerMessage);
+    return this.remoteRunContextSnapshotBase(conversation, triggerMessage, knownAttachmentBase64Lengths);
   }
 
   private async remoteRunContextSnapshot(
@@ -8816,10 +8827,15 @@ export class ChatService {
 
   private async remoteRunContextSnapshotBase(
     conversation: Conversation,
-    triggerMessage: ChatMessage
+    triggerMessage: ChatMessage,
+    knownAttachmentBase64Lengths?: Readonly<Record<string, number>>
   ): Promise<Record<string, unknown>> {
     const window = this.remoteRunSnapshotMessages(conversation, triggerMessage);
-    const images = await this.remoteRunSnapshotAttachments(conversation, window.maxSequence);
+    const images = await this.remoteRunSnapshotAttachments(
+      conversation,
+      window.maxSequence,
+      knownAttachmentBase64Lengths
+    );
     return {
       conversationId: conversation.id,
       title: conversation.title,
