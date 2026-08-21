@@ -296,10 +296,17 @@ test("normalizeInferredParticipantRequestThreads runs once and avoids blob query
   assert.equal(saved.length, 1);
   assert.equal(saved[0].messages.find((message) => message.id === "legacy-request")?.metadata?.hiddenFromTimeline, true);
   assert.equal(saved[0].messages.find((message) => message.id === "legacy-reply")?.metadata?.chatThreadRootId, "source-root");
-  assert.equal(queryJsonSql.length, 1);
+  // Two reads: the id prefilter, then that conversation's message rows. Neither
+  // pulls a conversation-sized blob through queryJson.
+  assert.equal(queryJsonSql.length, 2);
   assert.match(queryJsonSql[0], /select id from conversations/);
   assert.doesNotMatch(queryJsonSql[0], /payload_json as payloadJson/);
-  assert.ok(queryTextSql.some((sql) => sql.includes("select payload_json from conversations")));
+  // This marker lives in message metadata, so the prefilter has to look in the
+  // message rows; the body does not contain it.
+  assert.match(queryJsonSql[0], /from conversation_messages/);
+  assert.match(queryJsonSql[1], /from conversation_messages/);
+  assert.ok(queryTextSql.some((sql) => /coalesce\(nullif\(body_json/.test(sql)));
+  assert.equal(queryTextSql.some((sql) => sql.includes("select payload_json from conversations")), false);
   assert.ok(runSqlStatements.some((sql) => sql.includes("inferred-participant-request-threads-v1") && sql.includes("complete")));
 });
 
@@ -359,9 +366,13 @@ test("clearInterruptedRuns reads payloads by id and preserves local run state", 
   await (storage as any).clearInterruptedRuns();
 
   assert.equal(saved.length, 0);
-  assert.equal(queryJsonSql.length, 1);
+  // The id prefilter, then that conversation's message rows.
+  assert.equal(queryJsonSql.length, 2);
   assert.match(queryJsonSql[0], /select id from conversations/);
   assert.doesNotMatch(queryJsonSql[0], /payload_json as payloadJson/);
+  // Run state is read from the body, not from the frozen full payload.
+  assert.match(queryJsonSql[0], /coalesce\(nullif\(body_json/);
+  assert.match(queryJsonSql[1], /from conversation_messages/);
 });
 
 test("deleteConversation removes messages and conversation in one transaction", async () => {
@@ -676,10 +687,18 @@ function maintenanceStorage(options: {
   const runSqlStatements: string[] = [];
   const saved: Conversation[] = [];
   const storage = Object.create(StorageService.prototype) as any;
+  // Maintenance reads a conversation the way everything else does now: the body
+  // from the conversation row, the messages from their own rows.
   storage.queryJson = async (sql: string) => {
     queryJsonSql.push(sql);
     if (sql.includes("select id from conversations")) {
       return (options.ids ?? []).map((id) => ({ id }));
+    }
+    if (sql.includes("from conversation_messages")) {
+      const id = sql.match(/conversation_id = '([^']+)'/)?.[1];
+      const payload = id ? options.payloads?.get(id) : undefined;
+      const messages = payload ? (JSON.parse(payload) as Conversation).messages : [];
+      return messages.map((message, sequence) => ({ sequence, payloadHex: hexJson(message) }));
     }
     throw new Error(`Unexpected queryJson: ${sql}`);
   };
@@ -688,9 +707,13 @@ function maintenanceStorage(options: {
     if (sql.includes("schema_meta")) {
       return options.metaValue ?? "";
     }
-    if (sql.includes("select payload_json from conversations")) {
+    if (sql.includes("from conversations")) {
       const id = sql.match(/where id = '([^']+)'/)?.[1];
-      return id ? options.payloads?.get(id) ?? "" : "";
+      const payload = id ? options.payloads?.get(id) : undefined;
+      if (!payload) {
+        return "";
+      }
+      return JSON.stringify({ ...JSON.parse(payload) as Conversation, messages: [] });
     }
     throw new Error(`Unexpected queryText: ${sql}`);
   };

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -184,4 +184,90 @@ test("a conversation survives a save and reload unchanged", async () => {
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("a saved conversation stops carrying a second full copy of itself", async () => {
+  const { storage, directory } = await openStorage();
+  try {
+    const messages = Array.from({ length: 40 }, (_, index) =>
+      message(`m-${index}`, `a reasonably wordy message body number ${index}`, index));
+    await storage.saveConversation(conversation(messages));
+
+    const rows = await (storage as unknown as {
+      queryJson(sql: string): Promise<Array<{ payloadLength: number; bodyLength: number }>>;
+    }).queryJson(
+      `select length(payload_json) as payloadLength, length(body_json) as bodyLength
+       from conversations where id = 'chat-1';`
+    );
+    const stored = rows[0];
+    assert.ok(stored, "the conversation row must exist");
+    // The messages live in their own rows. Duplicating them in the conversation
+    // row is what made every save cost megabytes.
+    assert.equal(
+      stored.payloadLength <= stored.bodyLength,
+      true,
+      `payload_json (${stored.payloadLength}) must not exceed body_json (${stored.bodyLength})`
+    );
+    assert.equal(
+      (await storage.getConversation("chat-1"))?.messages.length,
+      40,
+      "the conversation still reads back whole"
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a conversation written before the split still reads back whole", async () => {
+  const { storage, directory } = await openStorage();
+  try {
+    // Seed the row the way an older build wrote it: everything inside
+    // payload_json, no body and no message rows at all. The first read creates
+    // the schema.
+    await storage.getConversation("does-not-exist");
+    const legacy = conversation([message("legacy-0", "written by an older build", 0)]);
+    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql(`
+      insert into conversations (id, title, kind, created_at, updated_at, repo_path, payload_json)
+      values ('legacy-chat', 'Legacy', 'chat', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+        null, '${JSON.stringify({ ...legacy, id: "legacy-chat" }).replace(/'/g, "''")}');
+    `);
+
+    const loaded = await storage.getConversation("legacy-chat");
+    assert.equal(loaded?.messages.length, 1, "the legacy payload is still the source when nothing was split out");
+    assert.equal(loaded?.messages[0].content, "written by an older build");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("no query reads the conversation payload without its body fallback", async () => {
+  // Reading `conversations.payload_json` directly means reading a copy that is
+  // no longer written, so it would act on a frozen snapshot. Conversation-level
+  // reads must go through the body, with payload only as the fallback for rows
+  // that predate the split. Per-message `conversation_messages.payload_json` is
+  // a different column and stays as it is; the backfill migration is the one
+  // sanctioned reader of the legacy payload, since converting it is its job.
+  const source = await readFile(path.join(process.cwd(), "src", "main", "services", "storage.ts"), "utf8");
+  const backfillStart = source.indexOf("private async backfillConversationBodiesAndMessages");
+  assert.ok(backfillStart > 0, "the backfill migration should still exist");
+  const backfillEnd = source.indexOf("\n  private async ", backfillStart + 1);
+  const guarded = source.slice(0, backfillStart) + source.slice(backfillEnd);
+
+  const conversationLevelReads = [
+    "select payload_json from conversations",
+    "json_extract(payload_json, '$.metadata.running')",
+    "json_extract(payload_json, '$.metadata.archived')",
+    "json_extract(payload_json, '$.metadata.participants')",
+    "json_array_length(payload_json, '$.metadata.activeRunIds')"
+  ];
+  for (const shape of conversationLevelReads) {
+    assert.equal(guarded.includes(shape), false, `storage.ts still reads the frozen payload: ${shape}`);
+  }
+
+  // A `like` prefilter over the conversation row is only allowed when it is
+  // explicitly scoped to rows that have no body yet.
+  const unguardedPrefilters = guarded.split("\n").filter((line) =>
+    /(?<!m\.)payload_json like/.test(line) && !/coalesce\(body_json, ''\) = ''/.test(line)
+  );
+  assert.deepEqual(unguardedPrefilters.map((line) => line.trim()), []);
 });

@@ -1227,11 +1227,18 @@ test("clearInterruptedRuns preserves local run metadata because storage cannot o
   let saved = false;
   const storage = Object.create(StorageService.prototype) as any;
   storage.queryJson = async (sql: string) => {
+    if (sql.includes("from conversation_messages")) {
+      return conversation.messages.map((message, sequence) => ({
+        sequence,
+        payloadHex: Buffer.from(JSON.stringify(message), "utf8").toString("hex").toUpperCase()
+      }));
+    }
     assert.match(sql, /select id from conversations/);
     assert.doesNotMatch(sql, /payload_json as payloadJson/);
     return [{ id: conversation.id }];
   };
-  storage.queryText = async () => JSON.stringify(conversation);
+  // The body carries everything but the messages; those come from their rows.
+  storage.queryText = async () => JSON.stringify({ ...conversation, messages: [] });
   storage.saveConversation = async () => {
     saved = true;
   };
@@ -1256,11 +1263,18 @@ test("clearInterruptedRuns preserves local participant compaction metadata becau
   let saved = false;
   const storage = Object.create(StorageService.prototype) as any;
   storage.queryJson = async (sql: string) => {
+    if (sql.includes("from conversation_messages")) {
+      return conversation.messages.map((message, sequence) => ({
+        sequence,
+        payloadHex: Buffer.from(JSON.stringify(message), "utf8").toString("hex").toUpperCase()
+      }));
+    }
     assert.match(sql, /select id from conversations/);
     assert.doesNotMatch(sql, /payload_json as payloadJson/);
     return [{ id: conversation.id }];
   };
-  storage.queryText = async () => JSON.stringify(conversation);
+  // The body carries everything but the messages; those come from their rows.
+  storage.queryText = async () => JSON.stringify({ ...conversation, messages: [] });
   storage.saveConversation = async () => {
     saved = true;
   };
@@ -1285,11 +1299,18 @@ test("clearInterruptedRuns does not mark local pending turns interrupted at stor
   let saved = false;
   const storage = Object.create(StorageService.prototype) as any;
   storage.queryJson = async (sql: string) => {
+    if (sql.includes("from conversation_messages")) {
+      return conversation.messages.map((message, sequence) => ({
+        sequence,
+        payloadHex: Buffer.from(JSON.stringify(message), "utf8").toString("hex").toUpperCase()
+      }));
+    }
     assert.match(sql, /select id from conversations/);
     assert.doesNotMatch(sql, /payload_json as payloadJson/);
     return [{ id: conversation.id }];
   };
-  storage.queryText = async () => JSON.stringify(conversation);
+  // The body carries everything but the messages; those come from their rows.
+  storage.queryText = async () => JSON.stringify({ ...conversation, messages: [] });
   storage.saveConversation = async () => {
     saved = true;
   };
@@ -1334,11 +1355,18 @@ test("clearInterruptedRuns preserves active remote run handles without warning",
   let saved: Conversation | undefined;
   const storage = Object.create(StorageService.prototype) as any;
   storage.queryJson = async (sql: string) => {
+    if (sql.includes("from conversation_messages")) {
+      return conversation.messages.map((message, sequence) => ({
+        sequence,
+        payloadHex: Buffer.from(JSON.stringify(message), "utf8").toString("hex").toUpperCase()
+      }));
+    }
     assert.match(sql, /select id from conversations/);
     assert.doesNotMatch(sql, /payload_json as payloadJson/);
     return [{ id: conversation.id }];
   };
-  storage.queryText = async () => JSON.stringify(conversation);
+  // The body carries everything but the messages; those come from their rows.
+  storage.queryText = async () => JSON.stringify({ ...conversation, messages: [] });
   storage.saveConversation = async (next: Conversation) => {
     saved = cloneConversation(next);
   };

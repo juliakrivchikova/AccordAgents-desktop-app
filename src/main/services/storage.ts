@@ -376,10 +376,10 @@ export class StorageService {
          created_at as createdAt,
          updated_at as updatedAt,
          repo_path as repoPath,
-         json_extract(payload_json, '$.metadata.running') as running,
-         json_extract(payload_json, '$.metadata.archived') as archived,
-         coalesce(json_array_length(payload_json, '$.metadata.activeRunIds'), 0) as activeRunIdsCount,
-         json_extract(payload_json, '$.metadata.participants') as chatParticipantsJson
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.running') as running,
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.archived') as archived,
+         coalesce(json_array_length(coalesce(nullif(body_json, ''), payload_json), '$.metadata.activeRunIds'), 0) as activeRunIdsCount,
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participants') as chatParticipantsJson
        from conversations
        order by updated_at desc;`
     );
@@ -427,7 +427,7 @@ export class StorageService {
          hex(coalesce(nullif(body_json, ''), json_set(payload_json, '$.messages', json_array()))) as bodyHex
        from conversations
        where kind = 'chat'
-         and coalesce(json_extract(payload_json, '$.metadata.archived'), 0) not in (1, '1', 'true')
+         and coalesce(json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.archived'), 0) not in (1, '1', 'true')
        order by updated_at desc
        limit ${conversationLimit};`
     );
@@ -501,16 +501,48 @@ export class StorageService {
 
   async getConversation(id: string): Promise<Conversation | undefined> {
     await this.init();
-    const payloadJson = await this.queryText(
-      `select payload_json from conversations where id = ${sqlString(id)} limit 1;`
+    return this.readWholeConversation(id);
+  }
+
+  // The conversation is assembled from its body plus its message rows. The old
+  // full `payload_json` copy is no longer written — it duplicated everything the
+  // rows already hold, and rewriting it cost megabytes on every save — so it is
+  // only read for rows that predate this change and have no body yet.
+  private async readWholeConversation(id: string): Promise<Conversation | undefined> {
+    const bodyJson = await this.queryText(
+      `select coalesce(nullif(body_json, ''), payload_json) from conversations where id = ${sqlString(id)} limit 1;`
     );
-    if (!payloadJson) {
+    if (!bodyJson) {
       return undefined;
     }
-    const conversation = JSON.parse(payloadJson) as Conversation;
+    const conversation = JSON.parse(bodyJson) as Conversation;
+    const rows = await this.readAllConversationMessages(id);
+    // No rows but the parsed copy has messages means this row still predates the
+    // split and was never backfilled — that legacy payload is then the only
+    // place the messages exist, so it wins. Anything else takes the rows.
+    const legacyPayloadIsTheOnlySource = rows.length === 0 &&
+      Array.isArray(conversation.messages) &&
+      conversation.messages.length > 0;
+    if (!legacyPayloadIsTheOnlySource) {
+      conversation.messages = rows;
+    }
     conversation.metadata = clearLegacyAccordState(conversation.metadata);
     sanitizeConversationWarnings(conversation);
     return conversation;
+  }
+
+  private async readAllConversationMessages(id: string): Promise<ChatMessage[]> {
+    const rows = await this.queryJson<{ sequence: number; payloadHex: string }>(
+      `
+        select sequence, hex(payload_json) as payloadHex
+        from conversation_messages
+        where conversation_id = ${sqlString(id)}
+        order by sequence;
+      `
+    );
+    return rows.map((row) =>
+      parseHexJson<ChatMessage>(row.payloadHex, `conversation message ${id}:${row.sequence}`)
+    );
   }
 
   async openConversation(id: string, limit?: number): Promise<ConversationOpenResult | undefined> {
@@ -659,8 +691,13 @@ export class StorageService {
     rows: SavedMessageRow[],
     token: string
   ): Promise<void> {
-    const payload = JSON.stringify(conversation);
     const bodyPayload = JSON.stringify(conversationBody(conversation));
+    // `payload_json` used to hold a second, complete copy of the conversation —
+    // every message again, megabytes of it, rewritten on every save. The body
+    // and the message rows are the record now; the column stays because it is
+    // `not null` and because rows written before this change are still read
+    // through it, but it is no longer a copy of anything.
+    const payload = bodyPayload;
     const messageRows = rows.map((row) => `
       insert into conversation_messages (conversation_id, sequence, message_id, created_at, payload_json)
       values (
@@ -706,8 +743,8 @@ export class StorageService {
     previous: SavedMessageState,
     token: string
   ): Promise<boolean> {
-    const payload = JSON.stringify(conversation);
     const bodyPayload = JSON.stringify(conversationBody(conversation));
+    const payload = bodyPayload;
     // Messages are spliced, not only appended (`chat.ts` inserts a message into
     // the middle of the array and removes pending ones), and a splice shifts
     // every later row's sequence while leaving its content identical. Comparing
@@ -1179,18 +1216,19 @@ export class StorageService {
   }
 
   private async clearInterruptedRuns(): Promise<void> {
+    // Run state lives in conversation metadata, which is what `body_json` holds.
+    // The legacy full payload is only consulted for rows written before the
+    // split; searching it for current rows would match a frozen copy and act on
+    // state that is no longer true.
+    const runMarkers = ["\"running\":true", "\"activeRunIds\":[", "\"participantCompactionsByParticipantId\":"];
     const ids = await this.queryConversationIds(
-      "payload_json like '%\"running\":true%' or payload_json like '%\"activeRunIds\":[%' or payload_json like '%\"participantCompactionsByParticipantId\":%'"
+      runMarkers.map((marker) =>
+        `coalesce(nullif(body_json, ''), payload_json) like '%${marker}%'`
+      ).join(" or ")
     );
     for (const id of ids) {
-      const payloadJson = await this.readConversationPayloadById(id);
-      if (!payloadJson) {
-        continue;
-      }
-      let conversation: Conversation;
-      try {
-        conversation = JSON.parse(payloadJson) as Conversation;
-      } catch {
+      const conversation = await this.readWholeConversation(id);
+      if (!conversation) {
         continue;
       }
       const activeRunIds = Array.isArray(conversation.metadata.activeRunIds) ? conversation.metadata.activeRunIds : [];
@@ -1221,16 +1259,19 @@ export class StorageService {
       return;
     }
 
-    const ids = await this.queryConversationIds("payload_json like '%\"source\":\"inferred\"%'");
+    // This marker sits in message metadata, not conversation metadata, so it is
+    // not in `body_json` at all — the message rows are where it has to be looked
+    // for. Rows written before the split have no body and no message rows yet,
+    // so their legacy payload is still searched.
+    const ids = await this.queryConversationIds(
+      `exists (
+        select 1 from conversation_messages m
+        where m.conversation_id = conversations.id and m.payload_json like '%"source":"inferred"%'
+      ) or (coalesce(body_json, '') = '' and payload_json like '%"source":"inferred"%')`
+    );
     for (const id of ids) {
-      const payloadJson = await this.readConversationPayloadById(id);
-      if (!payloadJson) {
-        continue;
-      }
-      let conversation: Conversation;
-      try {
-        conversation = JSON.parse(payloadJson) as Conversation;
-      } catch {
+      const conversation = await this.readWholeConversation(id);
+      if (!conversation) {
         continue;
       }
       if (!normalizeInferredParticipantRequestThreadMetadata(conversation)) {
@@ -1393,13 +1434,6 @@ export class StorageService {
       byKey.set(`${row.conversationId}:${row.sequence}`, row);
     }
     return [...byKey.values()];
-  }
-
-  private async readConversationPayloadById(id: string): Promise<string | undefined> {
-    const payloadJson = await this.queryText(
-      `select payload_json from conversations where id = ${sqlString(id)} limit 1;`
-    );
-    return payloadJson || undefined;
   }
 
   private async getSchemaMeta(key: string): Promise<string | undefined> {

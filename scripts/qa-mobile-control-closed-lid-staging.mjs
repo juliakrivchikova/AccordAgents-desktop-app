@@ -698,7 +698,9 @@ function readSqliteConversations() {
     "-cmd",
     ".timeout 5000",
     dbPath,
-    "select id || char(9) || hex(payload_json) from conversations order by updated_at desc;"
+    // body_json is the record now; payload_json only still holds anything for
+    // rows written before the conversation body and its messages were split.
+    "select id || char(9) || hex(coalesce(nullif(body_json, ''), payload_json)) from conversations order by updated_at desc;"
   ], { encoding: "utf8" });
   if (result.status !== 0) {
     if (/database is locked|SQLITE_BUSY/i.test(result.stderr || result.stdout)) {
@@ -769,7 +771,7 @@ function readSqliteConversation(conversationId) {
     "-cmd",
     ".timeout 5000",
     dbPath,
-    `select hex(payload_json) from conversations where id='${escapedConversationId}';`
+    `select hex(coalesce(nullif(body_json, ''), payload_json)) from conversations where id='${escapedConversationId}';`
   ], { encoding: "utf8" });
   if (result.status !== 0) {
     throw new Error(`sqlite3 failed: ${result.stderr || result.stdout}`);
