@@ -275,7 +275,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     };
   }, [selectedThreadRoot, viewport.viewRef]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    // Reset before descendant focus effects consume a target for the newly mounted conversation.
     setSelectedThreadRootId(undefined);
     setThreadDrafts({});
     approvalSubmission.resetSubmittingIds();

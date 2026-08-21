@@ -11,6 +11,7 @@ import type {
   ChatParticipant,
   ChatProviderKind,
   ChatPromptContextSettings,
+  ChatSearchRequest,
   ChatSavedPromptConfigUpdate,
   CloudRunsSettingsUpdate,
   CloudRunWorkerSettings,
@@ -166,6 +167,7 @@ import { RemoteRunCoordinator } from "./services/remoteRunCoordinator";
 import { LocalFileOpenerService } from "./services/localFileOpener";
 import { SettingsService } from "./services/settings";
 import { StorageService } from "./services/storage";
+import { ChatSearchService } from "./services/chatSearch";
 import {
   BundledSqliteInstallationError,
   DAMAGED_SQLITE_INSTALLATION_MESSAGE,
@@ -207,9 +209,10 @@ const sqliteExecutable = resolveSqliteExecutable({
   isPackaged: app.isPackaged
 });
 const storageService = new StorageService({ sqliteExecutable });
+const debugLogService = new DebugLogService();
+const chatSearchService = new ChatSearchService(storageService, debugLogService);
 const localFileOpenerService = new LocalFileOpenerService(storageService, settingsService);
 const providerRunner = new ProviderRunner();
-const debugLogService = new DebugLogService();
 setCommandDebugLogger(debugLogService);
 
 function runtimeErrorDetails(error: unknown): { message: string; stack?: string } {
@@ -2271,6 +2274,7 @@ function registerIpc(): void {
     return pluginService.refresh(resolved.request, resolved.skills);
   });
   ipcMain.handle("conversations:list", () => storageService.listConversations());
+  ipcMain.handle("chat-search:query", (_event, request: ChatSearchRequest) => chatSearchService.search(request));
   ipcMain.handle("conversations:list-activity", (_event, request?: ListChatActivityRequest) => storageService.listChatActivity(request));
   ipcMain.handle("conversations:get", async (_event, id: string) => {
     const conversation = await storageService.getConversation(id);

@@ -2060,6 +2060,92 @@ export interface ConversationOpenResult {
   messagePage: ConversationMessagePageInfo;
 }
 
+export type ChatSearchRequester =
+  | { kind: "user" }
+  | { kind: "participant"; conversationId: string; participantId: string };
+
+export interface ChatSearchRequest {
+  requester: ChatSearchRequester;
+  query: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface ChatSearchHighlightRange {
+  start: number;
+  end: number;
+}
+
+export interface ChatSearchMatchBase {
+  conversationId: string;
+  conversationTitle: string;
+  conversationUpdatedAt: string;
+  repoPath?: string;
+  archived: boolean;
+  rank: number;
+}
+
+export interface ChatSearchTitleMatch extends ChatSearchMatchBase {
+  kind: "title";
+  titleText: string;
+  highlightRanges: ChatSearchHighlightRange[];
+}
+
+export interface ChatSearchMessageMatch extends ChatSearchMatchBase {
+  kind: "message";
+  messageId: string;
+  threadRootId?: string;
+  role: "user" | "participant";
+  authorLabel: string;
+  createdAt: string;
+  snippetText: string;
+  highlightRanges: ChatSearchHighlightRange[];
+}
+
+export type ChatSearchMatch = ChatSearchTitleMatch | ChatSearchMessageMatch;
+
+export type ChatSearchCompleteness = "complete" | "partial" | "none";
+
+export interface ChatSearchCoverage {
+  eligibleChatCount: number;
+  searchedChatCount: number;
+  messagePeriod: { from: string; to: string } | null;
+  sourceSnapshotAt: string;
+  indexedAt?: string;
+  completeness: ChatSearchCompleteness;
+}
+
+export type ChatSearchFailureStage =
+  | "source-snapshot"
+  | "requester-scope"
+  | "index-prepare"
+  | "source-read"
+  | "index-write"
+  | "index-query";
+
+export interface ChatSearchFailureDetail {
+  stage: ChatSearchFailureStage;
+  conversationId?: string;
+}
+
+export type ChatSearchResponse =
+  | {
+      status: "ok";
+      matches: ChatSearchMatch[];
+      coverage: ChatSearchCoverage;
+      messageMatchCount: number;
+      matchedChatCount: number;
+      hasMore: boolean;
+      nextCursor?: string;
+    }
+  | {
+      status: "unavailable";
+      matches: [];
+      coverage: ChatSearchCoverage;
+      errorCode: "search-unavailable" | "requester-not-authorized" | "invalid-request";
+      failure?: ChatSearchFailureDetail;
+    };
+
 export type ChatActivityStatus = "pending" | "running" | "recent";
 
 export type ChatActivityKind =
@@ -2506,6 +2592,7 @@ export interface AppBridge {
   listPlugins(request?: PluginListRequest): Promise<PluginListResult>;
   refreshPlugins(request?: PluginListRequest): Promise<PluginListResult>;
   listConversations(): Promise<ConversationSummary[]>;
+  searchChats(request: ChatSearchRequest): Promise<ChatSearchResponse>;
   listChatActivity(request?: ListChatActivityRequest): Promise<ListChatActivityResult>;
   getConversation(id: string): Promise<Conversation | undefined>;
   openConversation(id: string, limit?: number): Promise<ConversationOpenResult | undefined>;
