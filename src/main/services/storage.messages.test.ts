@@ -148,7 +148,7 @@ test("listConversationMessages round-trips large escape-dense output across adja
     await storage.runSql(`
       create table conversations (
         id text primary key, title text not null, kind text not null, created_at text not null,
-        updated_at text not null, repo_path text, body_json text, payload_json text not null
+        updated_at text not null, repo_path text, body_json text, save_token text, payload_json text not null
       );
       create table conversation_messages (
         conversation_id text not null, sequence integer not null, message_id text not null,
@@ -408,7 +408,8 @@ test("init records the supported storage schema version for a legacy database", 
     assert.equal(storage.initialized, true);
     assert.match(runSqlStatements[0], /create table if not exists schema_meta/);
     assert.match(queryTextSql[0], new RegExp(STORAGE_SCHEMA_VERSION_META_KEY));
-    assert.deepEqual(calls, ["prune", "ensureColumn", "backfill", "normalize", "clear"]);
+    // Two columns are ensured: body_json, then save_token.
+    assert.deepEqual(calls, ["prune", "ensureColumn", "ensureColumn", "backfill", "normalize", "clear"]);
     assert.ok(runSqlStatements.some((sql) =>
       sql.includes(STORAGE_SCHEMA_VERSION_META_KEY) &&
       sql.includes(String(SUPPORTED_STORAGE_SCHEMA_VERSION))

@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { app } from "electron";
@@ -124,6 +125,23 @@ export interface ChatEventSequenceBasis {
   prevHash?: string;
 }
 
+/** One message as it is about to be written, with the hash used to decide
+ *  whether its row needs writing at all. */
+interface SavedMessageRow {
+  index: number;
+  id: string;
+  createdAt: string;
+  json: string;
+  hash: string;
+}
+
+/** What this process last committed for a conversation: the token it stamped on
+ *  the row, and the message ids and hashes in the order it wrote them. */
+interface SavedMessageState {
+  token: string;
+  rows: Array<{ id: string; hash: string }>;
+}
+
 function clearLegacyAccordState(metadata: Conversation["metadata"]): Conversation["metadata"] {
   const policies = Array.isArray(metadata.appToolApprovalPolicies)
     ? metadata.appToolApprovalPolicies.filter((policy) =>
@@ -207,6 +225,7 @@ export interface StorageServiceOptions {
 }
 
 export class StorageService {
+  private savedMessageStateCache: Map<string, SavedMessageState> | undefined;
   private readonly dbPath: string;
   private readonly sqliteExecutable: string;
   private initialized = false;
@@ -289,6 +308,7 @@ export class StorageService {
     `);
     await this.pruneStaleRunCancelRequests();
     await this.ensureColumn("conversations", "body_json", "text");
+    await this.ensureColumn("conversations", "save_token", "text");
     await this.backfillConversationBodiesAndMessages();
     await this.setSchemaMeta(STORAGE_SCHEMA_VERSION_META_KEY, String(SUPPORTED_STORAGE_SCHEMA_VERSION));
     this.initialized = true;
@@ -571,18 +591,84 @@ export class StorageService {
     };
   }
 
+  // Only ever a cache of what this process itself wrote. It is dropped whenever
+  // the database turns out to hold something else, so a wrong entry costs one
+  // full rewrite rather than a lost message. Created on demand because tests
+  // build this service through `Object.create`, which skips field initialisers.
+  private get savedMessageState(): Map<string, SavedMessageState> {
+    if (!this.savedMessageStateCache) {
+      this.savedMessageStateCache = new Map();
+    }
+    return this.savedMessageStateCache;
+  }
+
+  // A save used to delete every message row of a conversation and insert them
+  // all back. On a 2400-message chat that is ~33MB of SQL text piped into a
+  // spawned sqlite3 process, several times per turn, so the cost of saying
+  // anything grew with the length of the chat. Only the rows that actually
+  // changed are written now; the full rewrite remains as the fallback whenever
+  // this process cannot prove what the database currently holds.
   async saveConversation(conversation: Conversation): Promise<void> {
     await this.init();
+    const rows = conversation.messages.map((message, index) => {
+      const json = JSON.stringify(message);
+      return {
+        index,
+        id: message.id,
+        createdAt: message.createdAt,
+        json,
+        hash: createHash("sha1").update(json).digest("hex")
+      };
+    });
+    const previous = this.savedMessageState.get(conversation.id);
+    const nextToken = randomUUID();
+    // Another app instance can share this database. The token makes a partial
+    // save atomic against that: every message statement is gated on this
+    // process still owning the row it last wrote, so a foreign write in between
+    // turns the whole batch into a no-op instead of splicing our rows into
+    // theirs and producing a state neither instance ever held.
+    let claimed = false;
+    if (previous) {
+      try {
+        claimed = await this.writeConversationIncrementally(conversation, rows, previous, nextToken);
+      } catch (error) {
+        // A failed partial write leaves this process unable to say what the row
+        // holds, so the cache is worthless and the next save must rewrite
+        // everything.
+        this.savedMessageState.delete(conversation.id);
+        throw error;
+      }
+    }
+    if (claimed) {
+      this.savedMessageState.set(conversation.id, {
+        token: nextToken,
+        rows: rows.map((row) => ({ id: row.id, hash: row.hash }))
+      });
+      return;
+    }
+    this.savedMessageState.delete(conversation.id);
+    await this.writeConversationInFull(conversation, rows, nextToken);
+    this.savedMessageState.set(conversation.id, {
+      token: nextToken,
+      rows: rows.map((row) => ({ id: row.id, hash: row.hash }))
+    });
+  }
+
+  private async writeConversationInFull(
+    conversation: Conversation,
+    rows: SavedMessageRow[],
+    token: string
+  ): Promise<void> {
     const payload = JSON.stringify(conversation);
     const bodyPayload = JSON.stringify(conversationBody(conversation));
-    const messageRows = conversation.messages.map((message, index) => `
+    const messageRows = rows.map((row) => `
       insert into conversation_messages (conversation_id, sequence, message_id, created_at, payload_json)
       values (
         ${sqlString(conversation.id)},
-        ${index},
-        ${sqlString(message.id)},
-        ${sqlString(message.createdAt)},
-        ${sqlString(JSON.stringify(message))}
+        ${row.index},
+        ${sqlString(row.id)},
+        ${sqlString(row.createdAt)},
+        ${sqlString(row.json)}
       );
     `).join("\n");
     await this.runSql(`
@@ -604,11 +690,84 @@ export class StorageService {
         repo_path = excluded.repo_path,
         body_json = ${sqlString(bodyPayload)},
         payload_json = excluded.payload_json;
-      update conversations set body_json = ${sqlString(bodyPayload)} where id = ${sqlString(conversation.id)};
+      update conversations set body_json = ${sqlString(bodyPayload)}, save_token = ${sqlString(token)}
+        where id = ${sqlString(conversation.id)};
       delete from conversation_messages where conversation_id = ${sqlString(conversation.id)};
       ${messageRows}
       commit;
     `);
+  }
+
+  /** Returns false when this process no longer owns the row, so the caller must
+   *  fall back to a full rewrite. */
+  private async writeConversationIncrementally(
+    conversation: Conversation,
+    rows: SavedMessageRow[],
+    previous: SavedMessageState,
+    token: string
+  ): Promise<boolean> {
+    const payload = JSON.stringify(conversation);
+    const bodyPayload = JSON.stringify(conversationBody(conversation));
+    // Messages are spliced, not only appended (`chat.ts` inserts a message into
+    // the middle of the array and removes pending ones), and a splice shifts
+    // every later row's sequence while leaving its content identical. Comparing
+    // content alone would call those rows clean and leave stale sequences
+    // behind, and re-inserting a message id that still exists at another
+    // sequence would trip `unique (conversation_id, message_id)` and fail the
+    // whole transaction. So the first position whose message id differs decides:
+    // everything from there is rewritten, everything before it is touched only
+    // when its content changed. An append makes that boundary the old length; an
+    // in-place edit makes it the end.
+    const shared = Math.min(previous.rows.length, rows.length);
+    let divergence = shared;
+    for (let index = 0; index < shared; index += 1) {
+      if (previous.rows[index].id !== rows[index].id) {
+        divergence = index;
+        break;
+      }
+    }
+    const owned = `exists (select 1 from conversations where id = ${sqlString(conversation.id)}
+      and save_token = ${sqlString(previous.token)})`;
+    const statements: string[] = [];
+    statements.push(`
+      delete from conversation_messages
+      where conversation_id = ${sqlString(conversation.id)} and sequence >= ${divergence} and ${owned};
+    `);
+    for (const row of rows) {
+      const changed = row.index >= divergence || previous.rows[row.index].hash !== row.hash;
+      if (!changed) {
+        continue;
+      }
+      statements.push(`
+        insert into conversation_messages (conversation_id, sequence, message_id, created_at, payload_json)
+        select ${sqlString(conversation.id)}, ${row.index}, ${sqlString(row.id)},
+          ${sqlString(row.createdAt)}, ${sqlString(row.json)}
+        where ${owned}
+        on conflict(conversation_id, sequence) do update set
+          message_id = excluded.message_id,
+          created_at = excluded.created_at,
+          payload_json = excluded.payload_json;
+      `);
+    }
+    await this.runSql(`
+      begin immediate;
+      update conversations set
+        title = ${sqlString(conversation.title)},
+        kind = ${sqlString(conversation.kind)},
+        updated_at = ${sqlString(conversation.updatedAt)},
+        repo_path = ${sqlString(conversation.repoPath)},
+        body_json = ${sqlString(bodyPayload)},
+        payload_json = ${sqlString(payload)}
+      where id = ${sqlString(conversation.id)} and save_token = ${sqlString(previous.token)};
+      ${statements.join("\n")}
+      update conversations set save_token = ${sqlString(token)}
+        where id = ${sqlString(conversation.id)} and save_token = ${sqlString(previous.token)};
+      commit;
+    `);
+    const observed = await this.queryText(
+      `select save_token from conversations where id = ${sqlString(conversation.id)} limit 1;`
+    );
+    return observed === token;
   }
 
   async appendChatEvent(event: ChatEventEnvelope): Promise<ChatEventAppendResult> {
@@ -851,6 +1010,7 @@ export class StorageService {
       delete from conversations where id = ${sqlString(id)};
       commit;
     `);
+    this.savedMessageState.delete(id);
     return true;
   }
 
