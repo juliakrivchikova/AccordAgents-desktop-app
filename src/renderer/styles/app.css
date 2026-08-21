@@ -3,6 +3,7 @@
 @import "./app-foundation.css";
 @import "./app-theme.css";
 @import "./views/shell.css" layer(components);
+@import "./views/chat-search.css" layer(components);
 @import "./views/ui-controls.css" layer(components);
 @import "./views/review-layout.css" layer(components);
 @import "./views/chat-setup.css" layer(components);

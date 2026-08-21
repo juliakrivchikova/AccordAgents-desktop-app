@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import type {
   ChatActivityItem,
+  ChatSearchMessageMatch,
   ChatSkillMention,
   Conversation,
   PluginCatalogItem,
@@ -25,6 +26,7 @@ import { useArtifacts } from "./components/artifacts/use-artifacts";
 import { IconButton } from "./components/primitives";
 import { ChatAccordLauncherDialog } from "./components/chat/chat-accord-launcher-dialog";
 import { NewChatScreen } from "./components/chat/new-chat-screen";
+import { ChatSearchModal } from "./components/search/chat-search-modal";
 import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
 import { chatRoleLabel } from "./components/chat/chat-conversation-data";
 import { avatarForChatParticipant } from "./components/chat/chat-avatars";
@@ -40,6 +42,7 @@ import { useReviewDecisionActions } from "./app/use-review-decision-actions";
 import { useReviewPlanActions } from "./app/use-review-plan-actions";
 import { useSettingsActions } from "./app/use-settings-actions";
 import { useAppViewModel } from "./app/use-app-view-model";
+import { useChatSearch } from "./app/use-chat-search";
 import { AppNotices } from "./app/app-notices";
 import { pluginNewChatDraft, pluginNewChatMentions } from "./app/plugin-new-chat";
 import { clearActivityItem, markActivityItemRead } from "./app/activity-item-state";
@@ -49,7 +52,9 @@ import { CHAT_SPLIT_WORKSPACE_MIN_WIDTH } from "./lib/chat-split-sizing";
 import "./styles/app.css";
 function App(): JSX.Element {
   const state = useAppState();
+  const [searchOpen, setSearchOpen] = React.useState(false);
   const conversationActions = useConversationActions(state);
+  const chatSearch = useChatSearch(searchOpen);
   const chatActions = useChatActions(state, conversationActions);
   const reviewDecisionActions = useReviewDecisionActions(state, conversationActions);
   const reviewPlanActions = useReviewPlanActions(state, conversationActions);
@@ -341,6 +346,7 @@ function App(): JSX.Element {
             busy={state.busy}
             loading={state.historyLoading}
             unreadIds={state.unreadConversationIds}
+            onOpenSearch={() => setSearchOpen(true)}
             onSelect={(id) => void conversationActions.openConversation(id)}
             onNewSession={() => void conversationActions.newChatSession()}
             onNewProjectSession={(projectRepoPath) => void conversationActions.newProjectSession(projectRepoPath)}
@@ -361,6 +367,22 @@ function App(): JSX.Element {
         setError={(value) => state.setError(value)}
         setWarnings={state.setWarnings}
         setDismissedWarningKeysByScope={state.setDismissedWarningKeysByScope}
+      />
+
+      <ChatSearchModal
+        open={searchOpen}
+        query={chatSearch.query}
+        loading={chatSearch.loading}
+        loadingMore={chatSearch.loadingMore}
+        response={chatSearch.response}
+        onOpenChange={setSearchOpen}
+        onQueryChange={chatSearch.setQuery}
+        onClear={chatSearch.clear}
+        onLoadMore={chatSearch.loadMore}
+        onOpenConversation={(conversationId) => void conversationActions.openConversation(conversationId)}
+        onOpenMessage={(match: ChatSearchMessageMatch) =>
+          void conversationActions.openConversationAndFocusMessage(match)
+        }
       />
 
       {view.activeChatConversation && (

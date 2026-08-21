@@ -6,7 +6,7 @@
     "module": "ESNext",
     "moduleResolution": "Node",
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node", "vite/client"]
   },
   "include": [
     "src/renderer/components/chat/chat-active-run-popover.test.tsx",
@@ -16,7 +16,9 @@
     "src/renderer/components/artifacts/artifact-navigation.test.ts",
     "src/renderer/components/chat/chat-progress-rendering.test.tsx",
     "src/renderer/components/chat/cli-readiness-setup-panel.test.tsx",
+    "src/renderer/components/search/chat-search-escape.test.tsx",
     "src/renderer/components/settings/aws-worker-panel.test.tsx",
+    "src/renderer/components/shell/chat-search.test.tsx",
     "src/preload/global.d.ts"
   ],
   "exclude": []
