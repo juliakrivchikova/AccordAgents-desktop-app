@@ -271,3 +271,36 @@ test("no query reads the conversation payload without its body fallback", async 
   );
   assert.deepEqual(unguardedPrefilters.map((line) => line.trim()), []);
 });
+
+test("a failed statement rolls the whole save back instead of committing half of it", async () => {
+  // The sqlite3 CLI carries on past a failed statement by default and commits
+  // what the rest of the batch wrote, so a save that fails part way through
+  // would leave a half-applied conversation on disk. Verified against a real
+  // database rather than asserted from the flag.
+  const { storage, directory } = await openStorage();
+  try {
+    const messages = Array.from({ length: 5 }, (_, index) => message(`m-${index}`, `body ${index}`, index));
+    await storage.saveConversation(conversation(messages));
+    const before = await storedMessageIds(storage, "chat-1");
+
+    const raw = storage as unknown as { runSql(sql: string): Promise<void> };
+    await assert.rejects(() => raw.runSql(`
+      begin immediate;
+      insert into conversation_messages (conversation_id, sequence, message_id, created_at, payload_json)
+        values ('chat-1', 99, 'survivor', '2026-01-01T00:00:99.000Z', '{}');
+      insert into conversation_messages (conversation_id, sequence, message_id, created_at, payload_json)
+        values ('chat-1', 100, 'm-0', '2026-01-01T00:01:00.000Z', '{}');
+      insert into conversation_messages (conversation_id, sequence, message_id, created_at, payload_json)
+        values ('chat-1', 101, 'after', '2026-01-01T00:01:01.000Z', '{}');
+      commit;
+    `));
+
+    assert.deepEqual(
+      await storedMessageIds(storage, "chat-1"),
+      before,
+      "nothing from the failed batch may survive, not even the statements that succeeded"
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

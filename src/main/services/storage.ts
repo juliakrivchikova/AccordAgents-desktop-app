@@ -40,7 +40,7 @@ const SQLITE_BUSY_TIMEOUT_MS = 30_000;
 const SQLITE_COMMAND_TIMEOUT_MS = 45_000;
 const SQLITE_MIGRATION_TIMEOUT_MS = 120_000;
 const SCHEMA_META_COMPLETE = "complete";
-export const SUPPORTED_STORAGE_SCHEMA_VERSION = 1;
+export const SUPPORTED_STORAGE_SCHEMA_VERSION = 2;
 export const STORAGE_SCHEMA_VERSION_META_KEY = "storage-schema-version";
 export const CHAT_EVENT_PROJECTION_VERSION = 1;
 const CHAT_EVENT_DEVICE_IDENTITY_META_KEY = "chat-event-device-identity-v1";
@@ -1341,7 +1341,7 @@ export class StorageService {
       );
     `).join("\n");
     await this.runSql(`
-      begin;
+      begin immediate;
       insert into conversations (id, title, kind, created_at, updated_at, repo_path, payload_json)
       values (
         ${sqlString(conversation.id)},
@@ -2110,6 +2110,16 @@ export class StorageService {
     return [
       "-cmd",
       `.timeout ${SQLITE_BUSY_TIMEOUT_MS}`,
+      // Without this the sqlite3 CLI carries on after a failed statement and
+      // COMMITs whatever the rest of the batch managed to write. Verified: a
+      // three-insert transaction whose middle statement violates a unique
+      // constraint leaves two rows on disk, exit code 1 and all. Every write
+      // here is a batch inside one transaction, so that is a half-applied
+      // conversation, visible to every reader until the next save. `.bail on`
+      // makes the CLI stop at the error with the transaction still open, so it
+      // rolls back and nothing is committed. Harmless for queries.
+      "-cmd",
+      ".bail on",
       "-cmd",
       "pragma synchronous = normal;",
       ...args

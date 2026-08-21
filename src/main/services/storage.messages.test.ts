@@ -470,12 +470,16 @@ test("init refuses a database written by a newer storage schema before migration
   }
 });
 
-test("sqlite invocations install timeout and synchronous normal pragmas", () => {
+test("sqlite invocations bail on the first error and install the timeout and synchronous pragmas", () => {
   const storage = Object.create(StorageService.prototype) as any;
 
+  // `.bail on` is load-bearing, not cosmetic: without it the CLI continues past
+  // a failed statement and commits the rest of the transaction.
   assert.deepEqual(storage.sqliteArgs(["database.sqlite3", "select 1;"]), [
     "-cmd",
     ".timeout 30000",
+    "-cmd",
+    ".bail on",
     "-cmd",
     "pragma synchronous = normal;",
     "database.sqlite3",
