@@ -54,7 +54,7 @@ function truncateChatTitle(value: string): string {
 }
 
 function isUsefulAutoChatTitle(value: string): boolean {
-  if (!/[A-Za-z0-9]/.test(value)) {
+  if (!/[\p{L}\p{N}]/u.test(value)) {
     return false;
   }
   const lower = value.toLowerCase();

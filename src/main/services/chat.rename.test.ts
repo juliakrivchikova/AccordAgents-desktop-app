@@ -33,6 +33,13 @@ test("auto chat title sanitizer strips leading participant handles and slash ski
   assert.equal(sanitizeAutoChatTitleSuggestion("Codex"), undefined);
 });
 
+test("auto chat title sanitizer keeps titles that use no Latin letters", () => {
+  assert.equal(sanitizeAutoChatTitleSuggestion("Утюги в магазинах Лимассола"), "Утюги в магазинах Лимассола");
+  assert.equal(sanitizeAutoChatTitleSuggestion("@drew Роль личного кулинара"), "Роль личного кулинара");
+  assert.equal(sanitizeAutoChatTitleSuggestion("記憶の管理"), "記憶の管理");
+  assert.equal(sanitizeAutoChatTitleSuggestion("🙂 — !!"), undefined);
+});
+
 test("renameConversation updates chat title, emits a snapshot, and keeps the transcript unchanged", async () => {
   const conversation = chatConversation({ title: "Old chat" });
   const { service, storage, snapshots, historyWrites } = testService([conversation]);
@@ -159,6 +166,30 @@ test("setChatTitleFromTool applies the first eligible participant title", async 
   assert.equal(saved?.metadata.autoTitleEligibility, undefined);
   assert.equal(snapshots.at(-1)?.title, "First Agent Auto Title");
   assert.deepEqual(historyWrites, ["First Agent Auto Title"]);
+});
+
+test("setChatTitleFromTool applies a title written in a non-Latin alphabet", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation({
+    title: "Chat",
+    messages: [
+      systemMessage(),
+      userMessage("user-message-1", "@drew надо посмотреть утюги в магазинах Лимассола")
+    ],
+    metadata: {
+      participants: [participant],
+      participantSessions: [],
+      autoTitleEligibility: autoTitleEligibility(participant)
+    }
+  });
+  const { service, storage } = testService([conversation]);
+
+  const result = await service.setChatTitleFromTool(autoTitleActor(participant), {
+    title: "Утюги в магазинах Лимассола"
+  });
+
+  assert.equal(result.status, "applied");
+  assert.equal((await storage.getConversation(conversation.id))?.title, "Утюги в магазинах Лимассола");
 });
 
 test("setChatTitleFromTool ignores duplicate, invalid, and wrong-run title calls", async () => {
