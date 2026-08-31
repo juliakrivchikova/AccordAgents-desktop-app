@@ -33,7 +33,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v54/);
+  assert.match(worker, /accordagents-mobile-shell-v56/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -106,8 +106,8 @@ test("mobile shell builds static installable PWA assets", async () => {
   // nothing but this pin catches their removal.
   assert.match(html, /<meta name="viewport"[^>]*maximum-scale=1[^>]*user-scalable=no/);
   assert.match(html, /<meta name="viewport"[^>]*viewport-fit=cover/);
-  assert.match(html, /mobile-app\.css\?v=2026-08-31-viewport-lock-v1/);
-  assert.match(html, /mobile-app\.js\?v=2026-08-31-viewport-lock-v1/);
+  assert.match(html, /mobile-app\.css\?v=2026-08-31-phone-edges-v1/);
+  assert.match(html, /mobile-app\.js\?v=2026-08-31-phone-edges-v1/);
   assert.match(html, /data-screen-label="Mobile control"/);
   assert.match(html, /id="chats-screen"/);
   assert.match(html, />Chats</);
@@ -173,9 +173,47 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /dots\.className = "message-typing"/);
   assert.match(app, /aria-label", "Waiting for a reply"/);
   const css = await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8");
-  assert.match(css, /html,\n\s*body \{\n\s*height: 100%;\n\s*overflow: hidden;\n\s*overscroll-behavior: none;/);
-  assert.match(css, /\.mscroll \{\n\s*overscroll-behavior: contain;/);
-  assert.doesNotMatch(css, /width: 100vw/, "100vw can exceed the layout viewport on iOS and lets the app pan sideways");
+  // Read one selector's own declaration block. Matching across blocks with a
+  // lazy [\s\S]*? would let a declaration from a LATER rule satisfy an
+  // assertion about this one, so these pins would survive the deletion they
+  // exist to catch.
+  const cssBlock = (selector) => {
+    const open = css.indexOf(`${selector} {`);
+    assert.ok(open >= 0, `${selector} must exist in the stylesheet`);
+    const close = css.indexOf("}", open);
+    assert.ok(close > open, `${selector} must have a closing brace`);
+    return css.slice(open, close);
+  };
+  // The phone rules must key off the installed app too, not width alone: a
+  // phone held sideways is wider than the breakpoint, and the width-only form
+  // brought the desktop preview frame and the rubber-band back on rotation.
+  const phoneQuery = "@media (max-width: 620px), (display-mode: standalone) {";
+  assert.equal(css.split(phoneQuery).length - 1, 2, "both phone blocks must key off width OR standalone");
+  const lock = cssBlock("  html,\n  body");
+  assert.match(lock, /height: 100%/);
+  assert.match(lock, /overflow: hidden/);
+  assert.match(lock, /overscroll-behavior: none/);
+  assert.match(cssBlock(".mscroll"), /overscroll-behavior: contain/);
+  assert.doesNotMatch(css, /width:\s*100vw/, "100vw can exceed the layout viewport on iOS and lets the app pan sideways");
+  // The app is full-bleed on a phone, so anything touching an edge must clear
+  // the status bar and the home indicator. Dropping these puts the composer
+  // under the indicator, which is what happened the moment the shell first
+  // filled the whole screen.
+  assert.match(cssBlock(".composer"), /padding: 10px 16px calc\(14px \+ env\(safe-area-inset-bottom\)\)/);
+  assert.match(cssBlock(".mobile-chat-header"), /padding: calc\(2px \+ env\(safe-area-inset-top\)\)/);
+  assert.match(cssBlock(".mobile-chats-header"), /padding: calc\(6px \+ env\(safe-area-inset-top\)\)/);
+  assert.match(cssBlock(".mobile-chat-list"), /padding-bottom: calc\(18px \+ env\(safe-area-inset-bottom\)\)/);
+  assert.match(cssBlock(".jump-to-latest"), /bottom: calc\(78px \+ env\(safe-area-inset-bottom\)\)/);
+  assert.match(cssBlock(".stream-view-head"), /padding: calc\(8px \+ env\(safe-area-inset-top\)\)/);
+  assert.match(cssBlock(".stream-view-body"), /padding: 14px 16px calc\(24px \+ env\(safe-area-inset-bottom\)\)/);
+  // The mock status bar and home indicator must lose to the phone query, which
+  // means their display:none has to come after the rules that set display:flex.
+  // Written the other way round it silently ships 76px of scenery to the phone.
+  const statusBarRule = css.indexOf(".mobile-status-bar {");
+  assert.ok(statusBarRule > 0, "the mock status bar rule must exist");
+  const hideChrome = css.indexOf(phoneQuery, statusBarRule);
+  assert.ok(hideChrome > statusBarRule, "the mock chrome must be hidden after it is defined");
+  assert.match(css.slice(hideChrome, hideChrome + 200), /\.mobile-status-bar,\n\s*\.mobile-home-indicator \{\n\s*display: none;/);
   assert.match(css, /\.message-typing span \{/);
   assert.match(css, /@keyframes typing-pulse/);
   assert.match(
