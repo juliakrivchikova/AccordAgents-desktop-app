@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implement Change"
+  short_description: "Implement, review, and verify app changes"
+  default_prompt: "Use $implement-change to implement this request, test it, review the diff, and verify it in the real app."
