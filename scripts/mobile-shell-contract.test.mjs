@@ -33,7 +33,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v53/);
+  assert.match(worker, /accordagents-mobile-shell-v54/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -99,8 +99,15 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(headers, /X-Content-Type-Options: nosniff/);
   assert.match(headers, /Referrer-Policy: no-referrer/);
   assert.match(headers, /Permissions-Policy: camera=\(self\)/);
-  assert.match(html, /mobile-app\.css\?v=2026-08-20-mobile-stop-v1/);
-  assert.match(html, /mobile-app\.js\?v=2026-08-20-mobile-stop-v1/);
+  // The installed PWA must sit still. Without these the phone can drag the
+  // whole app off the screen — iOS rubber-bands the root scroller in standalone
+  // mode even with nothing to scroll, and pinch-zoom then lets it be panned
+  // sideways. Both are honoured on the home screen but not in a Safari tab, so
+  // nothing but this pin catches their removal.
+  assert.match(html, /<meta name="viewport"[^>]*maximum-scale=1[^>]*user-scalable=no/);
+  assert.match(html, /<meta name="viewport"[^>]*viewport-fit=cover/);
+  assert.match(html, /mobile-app\.css\?v=2026-08-31-viewport-lock-v1/);
+  assert.match(html, /mobile-app\.js\?v=2026-08-31-viewport-lock-v1/);
   assert.match(html, /data-screen-label="Mobile control"/);
   assert.match(html, /id="chats-screen"/);
   assert.match(html, />Chats</);
@@ -166,6 +173,9 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /dots\.className = "message-typing"/);
   assert.match(app, /aria-label", "Waiting for a reply"/);
   const css = await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8");
+  assert.match(css, /html,\n\s*body \{\n\s*height: 100%;\n\s*overflow: hidden;\n\s*overscroll-behavior: none;/);
+  assert.match(css, /\.mscroll \{\n\s*overscroll-behavior: contain;/);
+  assert.doesNotMatch(css, /width: 100vw/, "100vw can exceed the layout viewport on iOS and lets the app pan sideways");
   assert.match(css, /\.message-typing span \{/);
   assert.match(css, /@keyframes typing-pulse/);
   assert.match(

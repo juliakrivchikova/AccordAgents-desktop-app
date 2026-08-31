@@ -1,5 +1,5 @@
-const CACHE_NAME = "accordagents-mobile-shell-v53";
-const ASSET_VERSION = "2026-08-20-mobile-stop-v1";
+const CACHE_NAME = "accordagents-mobile-shell-v54";
+const ASSET_VERSION = "2026-08-31-viewport-lock-v1";
 const APP_SHELL = [
   "./",
   "./index.html",

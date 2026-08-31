@@ -44,14 +44,28 @@ textarea {
 }
 
 @media (max-width: 620px) {
+  /* On a phone the document itself must never be a scroller. iOS rubber-bands
+     the root scroller in a standalone PWA even when there is nothing to scroll,
+     which drags the whole app off the screen and shows the page background
+     above and below it. Pinning html/body to the viewport and turning
+     overscroll off leaves the lists inside as the only things that move. */
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
   .mobile-stage {
     padding: 0;
     align-items: stretch;
+    height: 100%;
+    min-height: 0;
   }
 
   .mobile-phone {
     width: 100%;
-    height: 100dvh;
+    height: 100%;
     border: 0;
     border-radius: 0;
     box-shadow: none;
@@ -368,6 +382,12 @@ textarea {
   min-height: 1.2em;
   font: 400 13px var(--sans);
   color: var(--mut);
+}
+
+/* A list that has hit its end must not hand the rest of the gesture to the
+   page behind it. */
+.mscroll {
+  overscroll-behavior: contain;
 }
 
 .mscroll::-webkit-scrollbar {
@@ -793,10 +813,12 @@ textarea {
     align-items: stretch;
   }
 
+  /* 100% rather than 100vw/100vh: the viewport units can resolve wider or
+     taller than the layout viewport on iOS, and the overflow that creates is
+     what lets the app be dragged sideways. */
   .mobile-phone {
-    width: 100vw;
-    height: 100vh;
-    height: 100dvh;
+    width: 100%;
+    height: 100%;
     border: 0;
     border-radius: 0;
     box-shadow: none;
