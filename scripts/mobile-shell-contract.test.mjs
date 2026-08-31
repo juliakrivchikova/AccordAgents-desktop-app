@@ -33,7 +33,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v57/);
+  assert.match(worker, /accordagents-mobile-shell-v58/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -106,8 +106,8 @@ test("mobile shell builds static installable PWA assets", async () => {
   // nothing but this pin catches their removal.
   assert.match(html, /<meta name="viewport"[^>]*maximum-scale=1[^>]*user-scalable=no/);
   assert.match(html, /<meta name="viewport"[^>]*viewport-fit=cover/);
-  assert.match(html, /mobile-app\.css\?v=2026-08-31-measured-height-v1/);
-  assert.match(html, /mobile-app\.js\?v=2026-08-31-measured-height-v1/);
+  assert.match(html, /mobile-app\.css\?v=2026-08-31-quiet-keyboard-v1/);
+  assert.match(html, /mobile-app\.js\?v=2026-08-31-quiet-keyboard-v1/);
   assert.match(html, /data-screen-label="Mobile control"/);
   assert.match(html, /id="chats-screen"/);
   assert.match(html, />Chats</);
@@ -196,9 +196,21 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(lock, /height: var\(--app-h, 100%\)/);
   assert.match(app, /function trackUsableHeight\(\)/);
   assert.match(app, /setProperty\("--app-h"/);
-  assert.match(app, /viewport\.addEventListener\("resize", apply\)/);
+  // The keyboard must not resize the app. Tracking every frame of the iOS
+  // keyboard animation made the screen jump the moment the input was tapped.
+  assert.match(app, /function composerHasFocus\(\)/);
+  assert.match(app, /if \(composerHasFocus\(\) && width === lastWidth\) \{\n\s*return;/);
+  assert.doesNotMatch(app, /viewport\.addEventListener\("resize"/);
+  assert.doesNotMatch(app, /viewport\.addEventListener\("scroll"/);
+  // One sample can land mid-animation and stick, with nothing to correct it.
+  assert.match(app, /\[150, 350, 600, 900\]\.forEach/);
+  for (const event of ["resize", "orientationchange", "pageshow"]) {
+    assert.match(app, new RegExp(`window\\.addEventListener\\("${event}", remeasure\\)`));
+  }
+  assert.match(app, /document\.addEventListener\("focusout", remeasure\)/);
+  assert.match(app, /visibilitychange/);
   // A height change that drops the reader out of the latest message would be a
-  // silent regression: the keyboard would scroll them up into history.
+  // silent regression: rotating would scroll them up into history.
   assert.match(app, /const wasAtLatest = isNearBottom\(threadSurface\(\)\)/);
   assert.match(app, /if \(wasAtLatest\) \{\n\s*scrollToLatestWhenSettled/);
   assert.match(app, /height === lastHeight/);

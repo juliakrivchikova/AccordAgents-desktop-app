@@ -3783,37 +3783,58 @@
   function trackUsableHeight() {
     const viewport = typeof window !== "undefined" ? window.visualViewport : null;
     let lastHeight = 0;
+    let lastWidth = 0;
+    function composerHasFocus() {
+      const active = document.activeElement;
+      return Boolean(active && active.id === "composer-input");
+    }
     function apply() {
+      const width = window.innerWidth;
+      // Never measure while the composer is focused: on iOS the keyboard is
+      // covering part of the screen and every frame of its animation reports a
+      // different height, so resizing on each one made the whole screen jump
+      // the moment the input was tapped. A width change is a rotation, which
+      // the keyboard cannot cause, so that one is honoured either way.
+      if (composerHasFocus() && width === lastWidth) {
+        return;
+      }
       const height = viewport ? viewport.height : window.innerHeight;
-      // visualViewport.scroll fires throughout a gesture with the height
-      // unchanged; writing the same value back would thrash layout for nothing.
-      if (height <= 0 || height === lastHeight) {
+      if (height <= 0 || (height === lastHeight && width === lastWidth)) {
         return;
       }
       lastHeight = height;
-      // The keyboard shrinks the timeline. A reader who was at the latest
-      // message must stay there, the way every chat app behaves — otherwise
-      // opening the keyboard silently scrolls them up into history.
+      lastWidth = width;
+      // A reader sitting at the latest message stays there across a rotation.
       const wasAtLatest = isNearBottom(threadSurface());
       document.documentElement.style.setProperty("--app-h", height + "px");
       if (wasAtLatest) {
         scrollToLatestWhenSettled("auto");
       }
     }
-    apply();
-    if (viewport) {
-      viewport.addEventListener("resize", apply);
-      viewport.addEventListener("scroll", apply);
-    }
-    window.addEventListener("resize", apply);
-    // The rotation is not finished when the event fires, so measure again after.
-    window.addEventListener("orientationchange", function () {
+    // A single sample can land mid-animation — the keyboard sliding away, a
+    // rotation still turning — and then stick, because nothing would come
+    // along to correct it. Sample across the whole animation instead.
+    function remeasure() {
       apply();
-      setTimeout(apply, 300);
-    });
-    // The first correct value only exists after the first frame.
+      [150, 350, 600, 900].forEach(function (delay) {
+        setTimeout(apply, delay);
+      });
+    }
+    remeasure();
+    // The height iOS reports at first paint is too tall; the real one only
+    // exists after the first frame.
     requestAnimationFrame(apply);
-    setTimeout(apply, 300);
+    window.addEventListener("resize", remeasure);
+    window.addEventListener("orientationchange", remeasure);
+    // Coming back from the background is the other moment the height can be
+    // stale with no resize to announce it.
+    window.addEventListener("pageshow", remeasure);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) {
+        remeasure();
+      }
+    });
+    document.addEventListener("focusout", remeasure);
   }
 
   if (typeof document !== "undefined") {
