@@ -1,1 +1,0 @@
-../../../.agents/skills/implementation-workflow/SKILL.md

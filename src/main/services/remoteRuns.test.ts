@@ -405,10 +405,14 @@ test("detached remote run invokes Claude Code with the worker Claude path", asyn
 });
 
 test("detached remote runs activate portable setup and apply provider invocation config", async () => {
-  const syncCalls: string[] = [];
+  const syncCalls: Array<{ host: string; codexHome?: string; claudeConfigDir?: string }> = [];
   const agentSetupSync: RemoteAgentSetupSyncRunner = {
     async sync(request) {
-      syncCalls.push(request.worker.host);
+      syncCalls.push({
+        host: request.worker.host,
+        codexHome: request.sourceEnvironment?.CODEX_HOME,
+        claudeConfigDir: request.sourceEnvironment?.CLAUDE_CONFIG_DIR
+      });
       return {
         fingerprint: "portable-fingerprint",
         codexConfigOverrides: ["features.js_repl=false"],
@@ -433,10 +437,18 @@ test("detached remote runs activate portable setup and apply provider invocation
     runId: "portable-codex-run",
     participant: participantConfig(codexParticipant),
     prompt: "Use portable setup.",
-    worker: { host: "codex.worker" }
+    worker: { host: "codex.worker" },
+    options: {
+      extraEnv: {
+        CODEX_HOME: "/Users/developer/custom-codex",
+        CLAUDE_CONFIG_DIR: "/Users/developer/custom-claude"
+      }
+    }
   });
   const codexArgs = codexWorker.launchRequests[0].invocation.args;
   assert.ok(codexArgs.some((value, index) => value === "-c" && codexArgs[index + 1] === "features.js_repl=false"));
+  assert.equal(codexWorker.launchRequests[0].invocation.env?.CODEX_HOME, undefined);
+  assert.equal(codexWorker.launchRequests[0].invocation.env?.CLAUDE_CONFIG_DIR, undefined);
 
   const claudeParticipant = { ...chatParticipant(), kind: "claude-code" as const };
   const claudeConversation = chatConversation([claudeParticipant]);
@@ -463,7 +475,14 @@ test("detached remote runs activate portable setup and apply provider invocation
   };
   assert.deepEqual(settings, { enabledPlugins: { "portable@example": true } });
   assert.deepEqual(Object.keys(mcpConfig.mcpServers).sort(), ["accord_agents", "docs"]);
-  assert.deepEqual(syncCalls, ["codex.worker", "claude.worker"]);
+  assert.deepEqual(syncCalls, [
+    {
+      host: "codex.worker",
+      codexHome: "/Users/developer/custom-codex",
+      claudeConfigDir: "/Users/developer/custom-claude"
+    },
+    { host: "claude.worker", codexHome: undefined, claudeConfigDir: undefined }
+  ]);
 });
 
 test("remote Claude auto mode keeps Bash available for provider-owned approval", async () => {
@@ -2888,6 +2907,8 @@ test("forwardedDesktopEnvironment strips machine-specific vars and keeps the res
     ACCORD_AGENTS_MCP_TOKEN: "internal",
     GH_TOKEN: "gh-secret",
     GITHUB_TOKEN: "gh-secret-2",
+    CODEX_HOME: "/Users/dev/.codex-custom",
+    CLAUDE_CONFIG_DIR: "/Users/dev/.claude-custom",
     AWS_PROFILE: "work",
     MY_PROJECT_FLAG: "on"
   });
@@ -2928,6 +2949,8 @@ test("detached run forwards desktop env with app-MCP token precedence", async ()
           AA_TEST_MANUAL_SECRET: "manual-secret",
           GH_TOKEN: "gh-secret",
           GITHUB_TOKEN: "github-secret",
+          CODEX_HOME: "/Users/dev/.codex-override",
+          CLAUDE_CONFIG_DIR: "/Users/dev/.claude-override",
           PATH: "/manual/bin",
           ACCORD_AGENTS_INTERNAL: "must-not-forward"
         },
@@ -2952,6 +2975,8 @@ test("detached run forwards desktop env with app-MCP token precedence", async ()
   assert.equal(env.ACCORD_AGENTS_INTERNAL, undefined);
   assert.equal(env.PATH, undefined);
   assert.equal(env.HOME, undefined);
+  assert.equal(env.CODEX_HOME, undefined);
+  assert.equal(env.CLAUDE_CONFIG_DIR, undefined);
 });
 
 test("real remote codex run falls back to parsed stdout when final output is missing", async () => {

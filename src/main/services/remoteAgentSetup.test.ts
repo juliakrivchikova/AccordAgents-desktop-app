@@ -18,18 +18,25 @@ test("portable bundle materializes global skills and excludes machine state", as
   const root = await mkdtemp(path.join(tmpdir(), "accordagents-portable-setup-test-"));
   const homeDir = path.join(root, "home");
   const externalSkill = path.join(root, "external-skill");
+  const externalNonSkill = path.join(root, "external-non-skill");
   const externalSecret = path.join(root, "outside-secret.txt");
   await mkdir(path.join(homeDir, ".codex", "skills"), { recursive: true });
   await mkdir(path.join(homeDir, ".codex", "rules"), { recursive: true });
   await mkdir(path.join(homeDir, ".claude"), { recursive: true });
   await mkdir(path.join(homeDir, ".gemini", "config", "skills", "gemini-skill"), { recursive: true });
   await mkdir(externalSkill, { recursive: true });
+  await mkdir(externalNonSkill, { recursive: true });
   await writeFile(path.join(externalSkill, "SKILL.md"), "# Portable skill\n");
+  await mkdir(path.join(externalSkill, "tests", "fixtures"), { recursive: true });
+  await writeFile(path.join(externalSkill, "tests", "fixtures", "payload.txt"), "fixture\n");
+  await writeFile(path.join(externalSkill, ".template"), "hidden asset\n");
   await writeFile(path.join(externalSkill, "auth.json"), "secret");
   await writeFile(path.join(externalSkill, "native-tool"), Buffer.from([0xcf, 0xfa, 0xed, 0xfe, 0x00]));
   await writeFile(externalSecret, "outside secret");
+  await writeFile(path.join(externalNonSkill, "id_rsa"), "private key");
   await symlink(externalSecret, path.join(externalSkill, "outside-secret.txt"));
   await symlink(externalSkill, path.join(homeDir, ".codex", "skills", "linked-skill"));
+  await symlink(externalNonSkill, path.join(homeDir, ".codex", "skills", "not-a-skill"));
   await writeFile(path.join(homeDir, ".codex", "AGENTS.md"), "Global instructions\n");
   await writeFile(path.join(homeDir, ".codex", "rules", "default.rules"), "prefix_rule(pattern=[\"npm\"])\n");
   await writeFile(path.join(homeDir, ".claude", "CLAUDE.md"), "Claude instructions\n");
@@ -61,9 +68,21 @@ test("portable bundle materializes global skills and excludes machine state", as
   const bundle = await buildPortableAgentSetupBundle({ homeDir, tempDir: root });
   try {
     assert.equal(await readFile(path.join(bundle.localPath, "codex", "skills", "linked-skill", "SKILL.md"), "utf8"), "# Portable skill\n");
+    assert.equal(
+      await readFile(path.join(bundle.localPath, "codex", "skills", "linked-skill", "tests", "fixtures", "payload.txt"), "utf8"),
+      "fixture\n"
+    );
+    assert.equal(
+      await readFile(path.join(bundle.localPath, "codex", "skills", "linked-skill", ".template"), "utf8"),
+      "hidden asset\n"
+    );
+    assert.deepEqual(
+      await readFile(path.join(bundle.localPath, "codex", "skills", "linked-skill", "native-tool")),
+      Buffer.from([0xcf, 0xfa, 0xed, 0xfe, 0x00])
+    );
     await assert.rejects(readFile(path.join(bundle.localPath, "codex", "skills", "linked-skill", "auth.json")));
-    await assert.rejects(readFile(path.join(bundle.localPath, "codex", "skills", "linked-skill", "native-tool")));
     await assert.rejects(readFile(path.join(bundle.localPath, "codex", "skills", "linked-skill", "outside-secret.txt")));
+    await assert.rejects(readFile(path.join(bundle.localPath, "codex", "skills", "not-a-skill", "id_rsa")));
     assert.ok(bundle.codexConfigOverrides?.includes("mcp_servers.docs.url=\"https://example.test/mcp\""));
     assert.ok(bundle.codexConfigOverrides?.includes("plugins.\"portable@example\".enabled=true"));
     assert.deepEqual(bundle.claudeSettings, { enabledPlugins: { "portable@example": true } });
@@ -188,7 +207,10 @@ test("portable config sanitizers keep declarations but not secrets or local path
     environmentMap: { command: "npx", env: { API_KEY: "${DOCS_TOKEN}" } },
     environmentToken: { command: "npx", args: ["server", "--token", "${DOCS_TOKEN}"] },
     local: { command: "./local-server" },
+    homePath: { command: "/home/alice/bin/server" },
+    homebrewPath: { command: "/opt/homebrew/bin/server" },
     rawArgument: { command: "npx", args: ["server", "--token", "raw-secret"] },
+    rawCredential: { command: "npx", args: ["server", "sk-live-private-value"] },
     rawHeader: { url: "https://example.test", headers: { Authorization: "Bearer secret" } },
     rawUrl: { url: "https://example.test/mcp?token=raw-secret" }
   }), {
@@ -248,6 +270,43 @@ test("remote activation replaces managed setup reversibly and restores stale tar
     await activate(remoteBundle, remoteState, workerHome);
     assert.equal((await lstat(workerSkillPath)).isDirectory(), true);
     assert.equal(await readFile(path.join(workerSkillPath, "SKILL.md"), "utf8"), "worker-original\n");
+  } finally {
+    await second.cleanup();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("remote activation preserves an unmanaged dangling skill symlink", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-portable-dangling-link-test-"));
+  const sourceHome = path.join(root, "source-home");
+  const workerHome = path.join(root, "worker-home");
+  const remoteBundle = path.join(root, "remote", "bundle");
+  const remoteState = path.join(root, "remote", "state.json");
+  const sourceSkill = path.join(sourceHome, ".codex", "skills", "review");
+  const workerSkill = path.join(workerHome, ".codex", "skills", "review");
+  const originalTarget = path.join(workerHome, "missing-skill");
+  await mkdir(sourceSkill, { recursive: true });
+  await mkdir(path.dirname(workerSkill), { recursive: true });
+  await writeFile(path.join(sourceSkill, "SKILL.md"), "portable\n");
+  await symlink(originalTarget, workerSkill);
+
+  const first = await buildPortableAgentSetupBundle({ homeDir: sourceHome, tempDir: root });
+  try {
+    await cp(first.localPath, remoteBundle, { recursive: true });
+    await activate(remoteBundle, remoteState, workerHome);
+    assert.equal(await readFile(path.join(workerSkill, "SKILL.md"), "utf8"), "portable\n");
+  } finally {
+    await first.cleanup();
+  }
+
+  await rm(sourceSkill, { recursive: true, force: true });
+  const second = await buildPortableAgentSetupBundle({ homeDir: sourceHome, tempDir: root });
+  try {
+    await rm(remoteBundle, { recursive: true, force: true });
+    await cp(second.localPath, remoteBundle, { recursive: true });
+    await activate(remoteBundle, remoteState, workerHome);
+    assert.equal((await lstat(workerSkill)).isSymbolicLink(), true);
+    assert.equal(await readlink(workerSkill), originalTarget);
   } finally {
     await second.cleanup();
     await rm(root, { recursive: true, force: true });

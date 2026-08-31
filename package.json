@@ -53,7 +53,7 @@
     "benchmark:chat-search": "npm run build:main && node dist/main/main/services/chatSearch.benchmark.js",
     "test:sidebar-widths": "npm run build:main && node --test dist/main/main/services/sidebarWidths.test.js",
     "test:chat-compact": "npm run build:main && node --test dist/main/main/services/chat.compact.test.js dist/main/main/services/chatParticipantStatus.test.js dist/main/main/services/chatRosterStatus.test.js",
-    "test:user-skills": "npm run build:main && node --test dist/main/main/services/userSkills.test.js dist/main/main/services/chat.userSkills.test.js dist/main/main/services/repoSkillParity.test.js",
+    "test:user-skills": "npm run build:main && node --test dist/main/main/services/userSkills.test.js dist/main/main/services/chat.userSkills.test.js dist/main/main/services/remoteAgentSetup.test.js",
     "test:plugins": "npm run build:main && node --test dist/main/main/services/plugins.test.js",
     "test:accord": "npm run build:main && node --test dist/main/main/services/accordLauncherPreferences.test.js",
     "test:avatar-contract": "node --test scripts/avatar-contract.test.mjs",

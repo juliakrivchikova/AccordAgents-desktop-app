@@ -116,7 +116,7 @@ const REMOTE_ENV_DENYLIST_EXACT = new Set([
   "COMMAND_MODE", "SECURITYSESSIONID", "MANPATH", "INFOPATH", "CDPATH",
   "TMUX", "TMUX_PANE", "JAVA_HOME", "ANDROID_HOME", "SDKROOT",
   "DEVELOPER_DIR", "VIRTUAL_ENV", "GOPATH", "GOROOT", "CARGO_HOME",
-  "RUSTUP_HOME", "ORIGINAL_XDG_CURRENT_DESKTOP"
+  "RUSTUP_HOME", "ORIGINAL_XDG_CURRENT_DESKTOP", "CODEX_HOME", "CLAUDE_CONFIG_DIR"
 ]);
 const REMOTE_ENV_DENYLIST_PREFIXES = [
   "LC_", "DYLD_", "XPC_", "__", "Apple_", "ELECTRON_", "CHROME_", "NODE_",
@@ -178,6 +178,17 @@ export function forwardedDesktopEnvironment(base?: NodeJS.ProcessEnv): NodeJS.Pr
       continue;
     }
     result[key] = value;
+  }
+  return result;
+}
+
+function remoteAgentEnvironment(extraEnv: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
+  const result = {
+    ...forwardedDesktopEnvironment(),
+    ...filterAllowedAgentEnvironment(extraEnv)
+  };
+  for (const key of ["CODEX_HOME", "CLAUDE_CONFIG_DIR"]) {
+    delete result[key];
   }
   return result;
 }
@@ -780,10 +791,7 @@ export class RemoteRunService {
       options: {
         ...request.options,
         persistSession: true,
-        extraEnv: {
-          ...forwardedDesktopEnvironment(),
-          ...filterAllowedAgentEnvironment(request.options?.extraEnv)
-        }
+        extraEnv: remoteAgentEnvironment(request.options?.extraEnv)
       }
     });
 
@@ -909,7 +917,11 @@ export class RemoteRunService {
     let portableSetup: PortableAgentSetupInvocation | undefined;
     if (this.agentSetupSync) {
       await this.emitDetachedPhase(runId, request, "preparing-worker", "Preparing user agent setup");
-      portableSetup = await this.agentSetupSync.sync({ worker: request.worker, signal: request.signal });
+      portableSetup = await this.agentSetupSync.sync({
+        worker: request.worker,
+        sourceEnvironment: request.options?.extraEnv,
+        signal: request.signal
+      });
       markStage("agent-setup");
     }
     const runtimeFingerprint = remoteParticipantRuntimeFingerprint({
@@ -974,10 +986,7 @@ export class RemoteRunService {
         ...request.options,
         persistSession: true,
         remoteSandbox,
-        extraEnv: {
-          ...forwardedDesktopEnvironment(),
-          ...filterAllowedAgentEnvironment(request.options?.extraEnv)
-        }
+        extraEnv: remoteAgentEnvironment(request.options?.extraEnv)
       }
     });
 

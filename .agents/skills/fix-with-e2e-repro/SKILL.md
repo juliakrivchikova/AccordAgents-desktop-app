@@ -1,1 +1,0 @@
-../../../.claude/skills/fix-with-e2e-repro/SKILL.md

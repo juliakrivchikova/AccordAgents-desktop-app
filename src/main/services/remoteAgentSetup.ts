@@ -5,7 +5,6 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  open,
   readFile,
   readdir,
   realpath,
@@ -29,24 +28,6 @@ const PORTABLE_SETUP_MAX_FILE_BYTES = 32 * 1024 * 1024;
 const PORTABLE_SETUP_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
 const PORTABLE_SETUP_MAX_INVOCATION_CONFIG_BYTES = 64 * 1024;
 const PORTABLE_SETUP_SYNC_TIMEOUT_MS = 10 * 60_000;
-const PORTABLE_SETUP_EXCLUDED_NAMES = new Set([
-  ".DS_Store",
-  ".cache",
-  ".git",
-  ".system",
-  "__pycache__",
-  "auth.json",
-  "cache",
-  "credentials.json",
-  "history.jsonl",
-  "logs",
-  "node_modules",
-  "sessions",
-  "test",
-  "tests",
-  "tmp"
-]);
-
 export interface PortableAgentSetupInvocation {
   fingerprint: string;
   codexConfigOverrides?: string[];
@@ -56,6 +37,7 @@ export interface PortableAgentSetupInvocation {
 
 export interface RemoteAgentSetupSyncRequest {
   worker: RemoteRunWorkerTarget;
+  sourceEnvironment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
 }
 
@@ -158,7 +140,7 @@ export class DefaultRemoteAgentSetupSync implements RemoteAgentSetupSyncRunner {
     workerKey: string,
     request: RemoteAgentSetupSyncRequest
   ): Promise<PortableAgentSetupInvocation> {
-    const roots = resolvePortableAgentSetupRoots(this.options);
+    const roots = resolvePortableAgentSetupRoots(this.options, request.sourceEnvironment);
     const sourceFingerprint = await computePortableAgentSetupSourceFingerprint(roots);
     const completed = this.completedByWorker.get(workerKey);
     if (completed?.sourceFingerprint === sourceFingerprint) {
@@ -221,8 +203,6 @@ export class DefaultRemoteAgentSetupSync implements RemoteAgentSetupSyncRunner {
     }
   }
 }
-
-export const defaultRemoteAgentSetupSync = new DefaultRemoteAgentSetupSync();
 
 export async function buildPortableAgentSetupBundle(
   options: PortableAgentSetupBuildOptions = {}
@@ -566,10 +546,9 @@ async function copyPortableLinkedDirectoryEntries(
 ): Promise<void> {
   const entries = await readdir(sourceRoot, { withFileTypes: true }).catch(() => []);
   entries.sort((left, right) => left.name.localeCompare(right.name));
-  const candidates: Array<{ name: string; sourcePath: string }> = [];
-  const allowedRoots: string[] = [];
+  const discovered: Array<{ name: string; sourcePath: string; allowedRoot: string; definitionPath?: string }> = [];
   for (const entry of entries) {
-    if (isExcludedPortableName(entry.name) || skippedNames?.has(entry.name)) {
+    if (isExcludedPortableRootName(entry.name) || skippedNames?.has(entry.name)) {
       continue;
     }
     const sourcePath = path.join(sourceRoot, entry.name);
@@ -581,9 +560,23 @@ async function copyPortableLinkedDirectoryEntries(
     if (!resolvedSource) {
       continue;
     }
-    candidates.push({ name: entry.name, sourcePath });
-    allowedRoots.push(resolvedSource);
+    const definitionPath = directoriesOnly
+      ? await realpath(path.join(resolvedSource, "SKILL.md")).catch(() => undefined)
+      : undefined;
+    const definitionStats = definitionPath
+      ? await stat(definitionPath).catch(() => undefined)
+      : undefined;
+    discovered.push({
+      name: entry.name,
+      sourcePath,
+      allowedRoot: resolvedSource,
+      ...(definitionStats?.isFile() ? { definitionPath } : {})
+    });
   }
+  const candidates = directoriesOnly
+    ? portableSkillCandidates(discovered)
+    : discovered;
+  const allowedRoots = candidates.map((candidate) => candidate.allowedRoot);
   for (const candidate of candidates) {
     const { name, sourcePath } = candidate;
     const destinationPath = path.join(destinationRoot, name);
@@ -597,6 +590,31 @@ async function copyPortableLinkedDirectoryEntries(
       target: `${targetPrefix}/${name}`
     });
   }
+}
+
+function portableSkillCandidates<T extends { allowedRoot: string; definitionPath?: string }>(
+  discovered: T[]
+): T[] {
+  const approvedRoots = new Set(
+    discovered
+      .filter((candidate) => candidate.definitionPath && isPortablePathInside(candidate.allowedRoot, candidate.definitionPath))
+      .map((candidate) => candidate.allowedRoot)
+  );
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const candidate of discovered) {
+      if (
+        !approvedRoots.has(candidate.allowedRoot) &&
+        candidate.definitionPath &&
+        [...approvedRoots].some((root) => isPortablePathInside(root, candidate.definitionPath as string))
+      ) {
+        approvedRoots.add(candidate.allowedRoot);
+        changed = true;
+      }
+    }
+  }
+  return discovered.filter((candidate) => approvedRoots.has(candidate.allowedRoot));
 }
 
 async function copyPortableLinkedFile(
@@ -666,7 +684,7 @@ async function copyPortableResolvedEntry(
     const entries = await readdir(sourcePath, { withFileTypes: true });
     entries.sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
-      if (isExcludedPortableName(entry.name)) {
+      if (isExcludedPortableNestedName(entry.name)) {
         continue;
       }
       await copyPortableResolvedEntry(
@@ -681,9 +699,6 @@ async function copyPortableResolvedEntry(
     return true;
   }
   if (!sourceLstat.isFile()) {
-    return false;
-  }
-  if (await isNativeExecutable(sourcePath)) {
     return false;
   }
   assertPortableCopyBudget(sourcePath, sourceLstat.size, budget);
@@ -725,28 +740,15 @@ function assertPortableCopyBudget(sourcePath: string, size: number, budget: Port
   }
 }
 
-function isExcludedPortableName(name: string): boolean {
-  return name.startsWith(".") || PORTABLE_SETUP_EXCLUDED_NAMES.has(name);
+function isExcludedPortableRootName(name: string): boolean {
+  return name.startsWith(".");
 }
 
-async function isNativeExecutable(filePath: string): Promise<boolean> {
-  const handle = await open(filePath, "r");
-  try {
-    const header = Buffer.alloc(4);
-    const { bytesRead } = await handle.read(header, 0, header.length, 0);
-    if (bytesRead < 2) {
-      return false;
-    }
-    const magic = header.readUInt32BE(0);
-    return magic === 0x7f454c46 ||
-      magic === 0xfeedface ||
-      magic === 0xfeedfacf ||
-      magic === 0xcefaedfe ||
-      magic === 0xcffaedfe ||
-      header.subarray(0, 2).toString("ascii") === "MZ";
-  } finally {
-    await handle.close();
-  }
+function isExcludedPortableNestedName(name: string): boolean {
+  const normalized = name.toLowerCase();
+  return name === ".DS_Store" || name === ".git" ||
+    normalized === ".env" || normalized.startsWith(".env.") ||
+    normalized === "auth.json" || normalized === "credentials.json";
 }
 
 async function hashPortableBundle(bundleRoot: string): Promise<string> {
@@ -757,12 +759,17 @@ async function hashPortableBundle(bundleRoot: string): Promise<string> {
 }
 
 function resolvePortableAgentSetupRoots(
-  options: Pick<PortableAgentSetupBuildOptions, "homeDir" | "codexHomeDir" | "claudeConfigDir" | "geminiConfigDir">
+  options: Pick<PortableAgentSetupBuildOptions, "homeDir" | "codexHomeDir" | "claudeConfigDir" | "geminiConfigDir">,
+  sourceEnvironment?: NodeJS.ProcessEnv
 ): PortableAgentSetupRoots {
   const homeDir = path.resolve(options.homeDir ?? homedir());
   const useAmbientProviderHomes = options.homeDir === undefined;
-  const ambientCodexHome = useAmbientProviderHomes ? process.env.CODEX_HOME?.trim() : undefined;
-  const ambientClaudeConfig = useAmbientProviderHomes ? process.env.CLAUDE_CONFIG_DIR?.trim() : undefined;
+  const ambientCodexHome = useAmbientProviderHomes
+    ? sourceEnvironment?.CODEX_HOME?.trim() || process.env.CODEX_HOME?.trim()
+    : undefined;
+  const ambientClaudeConfig = useAmbientProviderHomes
+    ? sourceEnvironment?.CLAUDE_CONFIG_DIR?.trim() || process.env.CLAUDE_CONFIG_DIR?.trim()
+    : undefined;
   return {
     homeDir,
     codexHomeDir: path.resolve(options.codexHomeDir ?? ambientCodexHome ?? path.join(homeDir, ".codex")),
@@ -792,7 +799,8 @@ async function computePortableAgentSetupSourceFingerprint(roots: PortableAgentSe
       entry.source,
       entry.logical,
       hash,
-      new Set()
+      new Set(),
+      true
     );
   }
   for (const entry of files) {
@@ -822,7 +830,8 @@ async function hashPortableSourceEntry(
   sourcePath: string,
   logicalPath: string,
   hash: ReturnType<typeof createHash>,
-  activeDirectories: Set<string>
+  activeDirectories: Set<string>,
+  rootEntries = false
 ): Promise<void> {
   const sourceLstat = await lstat(sourcePath).catch(() => undefined);
   if (!sourceLstat) {
@@ -835,7 +844,7 @@ async function hashPortableSourceEntry(
       hash.update(`broken-link\0${logicalPath}\0`);
       return;
     }
-    await hashPortableSourceEntry(resolved, logicalPath, hash, activeDirectories);
+    await hashPortableSourceEntry(resolved, logicalPath, hash, activeDirectories, rootEntries);
     return;
   }
   if (sourceLstat.isDirectory()) {
@@ -849,12 +858,16 @@ async function hashPortableSourceEntry(
     const entries = await readdir(sourcePath, { withFileTypes: true }).catch(() => []);
     entries.sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
-      if (!isExcludedPortableName(entry.name)) {
+      const excluded = rootEntries
+        ? isExcludedPortableRootName(entry.name)
+        : isExcludedPortableNestedName(entry.name);
+      if (!excluded) {
         await hashPortableSourceEntry(
           path.join(sourcePath, entry.name),
           `${logicalPath}/${entry.name}`,
           hash,
-          activeDirectories
+          activeDirectories,
+          false
         );
       }
     }
@@ -1072,7 +1085,8 @@ function containsMachineSpecificPath(value: unknown): boolean {
   if (typeof value !== "string") {
     return false;
   }
-  return /(?:^|["'\s=])(?:\/(?:Users|private|Applications|Volumes)\/|[A-Za-z]:[\\/])/.test(value) ||
+  return /(?:^|["'\s=])\/(?!usr\/bin\/env(?:["'\s]|$))/.test(value) ||
+    /(?:^|["'\s=])[A-Za-z]:[\\/]/.test(value) ||
     /(?:^|["'\s=])(?:~\/|\.\.?\/)/.test(value) ||
     /\.app\/Contents\//.test(value);
 }
@@ -1080,7 +1094,8 @@ function containsMachineSpecificPath(value: unknown): boolean {
 function containsEmbeddedSecret(value: string): boolean {
   return /https?:\/\/[^/"'\s]+:[^@/"'\s]+@/i.test(value) ||
     /(?:bearer\s+[A-Za-z0-9]|(?:api[_-]?key|password|secret|token)[=:]\s*["']?(?!\$\{?)[^\s"'}]+)/i.test(value) ||
-    /--(?:api[_-]?key|password|secret|token)(?:=|["'\s])/i.test(value);
+    /--(?:api[_-]?key|password|secret|token)(?:=|["'\s])/i.test(value) ||
+    /\b(?:sk-[A-Za-z0-9_-]{12,}|github_pat_[A-Za-z0-9_]{12,}|gh[pousr]_[A-Za-z0-9]{12,}|AKIA[A-Z0-9]{12,}|xox[baprs]-[A-Za-z0-9-]{12,})\b/.test(value);
 }
 
 function containsEmbeddedSecretValue(value: unknown): boolean {
@@ -1281,6 +1296,10 @@ for (const old of previousLinks.values()) {
 fs.mkdirSync(backupRoot, { recursive: true, mode: 0o700 });
 const temporary = statePath + ".tmp-" + process.pid;
 const undo = [];
+const pathEntryExists = (target) => {
+  try { fs.lstatSync(target); return true; }
+  catch (error) { if (error.code !== "ENOENT") { throw error; } return false; }
+};
 const unlinkIfPresent = (target) => {
   try { fs.unlinkSync(target); return true; } catch (error) { if (error.code !== "ENOENT") { throw error; } return false; }
 };
@@ -1291,7 +1310,7 @@ try {
     if (unlinkIfPresent(old.target)) {
       undo.push(() => fs.symlinkSync(old.source, old.target, fs.statSync(old.source).isDirectory() ? "dir" : "file"));
     }
-    if (old.backup && fs.existsSync(old.backup) && !fs.existsSync(old.target)) {
+    if (old.backup && pathEntryExists(old.backup) && !pathEntryExists(old.target)) {
       fs.mkdirSync(path.dirname(old.target), { recursive: true, mode: 0o700 });
       fs.renameSync(old.backup, old.target);
       undo.push(() => fs.renameSync(old.target, old.backup));
@@ -1301,9 +1320,9 @@ try {
   for (const link of planned) {
     const old = previousLinks.get(link.target);
     let backup = old && old.backup;
-    if (!old && fs.existsSync(link.target)) {
+    if (!old && pathEntryExists(link.target)) {
       backup = path.join(backupRoot, crypto.createHash("sha256").update(link.target).digest("hex"));
-      if (fs.existsSync(backup)) { throw new Error("portable-setup-backup-conflict:" + backup); }
+      if (pathEntryExists(backup)) { throw new Error("portable-setup-backup-conflict:" + backup); }
       fs.mkdirSync(path.dirname(backup), { recursive: true, mode: 0o700 });
       fs.renameSync(link.target, backup);
       undo.push(() => fs.renameSync(backup, link.target));

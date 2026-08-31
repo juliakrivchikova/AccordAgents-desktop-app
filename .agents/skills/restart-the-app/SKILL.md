@@ -1,1 +1,0 @@
-../../../.claude/skills/restart-the-app/SKILL.md
