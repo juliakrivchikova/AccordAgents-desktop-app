@@ -60,12 +60,26 @@ In AccordAgents Chat, use the repo-local `/electron-desktop-qa` skill for this w
 
 If live desktop inspection cannot be completed after following that workflow, stop and ask the user how to proceed instead of silently substituting a browser/Vite check. Offer concrete options, such as relaunching Electron with the debug port, using a renderer mock/browser fixture as a limited fallback, or skipping visual verification.
 
-## MANDATORY: review before merge
+## MANDATORY: a change is done only after end-to-end QA and review
 
-**Run the gstack `/review` skill on the diff before merging any pull request,
-including your own.** A merge without it is not allowed — not for a small change,
-not for a change whose author reported passing tests, not for a change you
-wrote yourself. This applies to every participant, local or in the cloud.
+**When the User asks for a change, it is not done until it has been verified
+end to end through the real surface the User touches, and reviewed with the gstack
+`/review` skill.** Both, every time. Not only before a merge, and not only for
+a pull request — a commit straight to a branch, a deploy, or a report that it
+builds and the tests pass is an unfinished change without them. This holds for
+a one-line fix, for a change whose author reported passing tests, for a change
+you wrote yourself, and for every participant, local or in the cloud.
+
+End to end means the real thing: the running Electron app for desktop
+behavior, the installed PWA on the phone for phone behavior, against the real
+services involved. A unit test, a headless-browser measurement or a mocked
+event is supporting evidence, never the proof. When the real check is
+genuinely impossible, say so plainly and name what is missing — never
+substitute a weaker check and call it verified.
+
+That is not hypothetical. On 2026-08-31 a phone-app fix went through tests, a
+Chromium measurement and a deploy with neither step run; it shipped a second
+defect straight to the User's phone, and the User found it.
 
 Reading the author's summary and grepping the diff for the parts you decided
 were risky is not a review. That is exactly what was done to PR #17 on
