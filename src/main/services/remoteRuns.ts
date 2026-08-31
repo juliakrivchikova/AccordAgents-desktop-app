@@ -37,6 +37,7 @@ import {
 } from "./codexExec";
 import type { CodexExecOptions, CodexExecInvocation, CodexExecRemoteSandboxOptions } from "./codexExec";
 import { REMOTE_APP_MCP_WORKER_CONTRACT_SNIPPET } from "./remoteAppMcpTools.generated";
+import type { PortableAgentSetupInvocation, RemoteAgentSetupSyncRunner } from "./remoteAgentSetup";
 import {
   REMOTE_MIRROR_DIRNAME,
   REMOTE_MIRROR_FINGERPRINT_VERSION,
@@ -317,6 +318,7 @@ export interface RemoteRunServiceOptions {
   codexExecutor?: RemoteCodexExecutor;
   detachedWorkerTransport?: RemoteDetachedWorkerTransport;
   mirrorSync?: RemoteMirrorSyncRunner;
+  agentSetupSync?: RemoteAgentSetupSyncRunner;
   syncLogger?: (event: string, payload: Record<string, unknown>) => void;
   remoteGitDirProbe?: (worker: RemoteRunWorkerTarget, gitDirPath: string, signal?: AbortSignal) => Promise<boolean>;
   remoteMirrorProbe?: (worker: RemoteRunWorkerTarget, remotePath: string, expectGit: boolean, signal?: AbortSignal) => Promise<boolean>;
@@ -696,6 +698,7 @@ export class RemoteRunService {
   private readonly detachedWorkerByRun = new Map<string, RemoteRunWorkerTarget>();
   private readonly detachedContextByRun = new Map<string, { conversationId: string; participantId: string }>();
   private readonly mirrorSync: RemoteMirrorSyncRunner;
+  private readonly agentSetupSync?: RemoteAgentSetupSyncRunner;
   private readonly syncLogger?: (event: string, payload: Record<string, unknown>) => void;
   private readonly remoteGitDirProbe: (worker: RemoteRunWorkerTarget, gitDirPath: string, signal?: AbortSignal) => Promise<boolean>;
   private readonly remoteMirrorProbe: (worker: RemoteRunWorkerTarget, remotePath: string, expectGit: boolean, signal?: AbortSignal) => Promise<boolean>;
@@ -725,6 +728,7 @@ export class RemoteRunService {
     this.codexExecutor = options.codexExecutor ?? defaultRemoteCodexExecutor;
     this.detachedWorkerTransport = options.detachedWorkerTransport ?? new SshDetachedWorkerTransport();
     this.mirrorSync = options.mirrorSync ?? defaultRemoteMirrorSync;
+    this.agentSetupSync = options.agentSetupSync;
     this.syncLogger = options.syncLogger;
     this.remoteGitDirProbe = options.remoteGitDirProbe ?? defaultRemoteGitDirProbe;
     this.remoteMirrorProbe = options.remoteMirrorProbe ?? defaultRemoteMirrorProbe;
@@ -887,13 +891,6 @@ export class RemoteRunService {
       state: "started"
     });
 
-    const runtimeFingerprint = remoteParticipantRuntimeFingerprint({
-      participant: request.participant,
-      repoPath: request.repoPath ?? request.sync?.localPath,
-      kind: request.kind ?? "chat",
-      options: request.options,
-      codexPath: remoteAgentExecutablePath(request.participant.kind, request.worker)
-    });
     // Per-stage timings for the wait a user sees before their agent starts
     // talking. Cheap (a Date.now() per stage) and the only way to attribute that
     // wait without guessing which SSH round trip is the expensive one.
@@ -909,6 +906,20 @@ export class RemoteRunService {
       });
       stageMark = now;
     };
+    let portableSetup: PortableAgentSetupInvocation | undefined;
+    if (this.agentSetupSync) {
+      await this.emitDetachedPhase(runId, request, "preparing-worker", "Preparing user agent setup");
+      portableSetup = await this.agentSetupSync.sync({ worker: request.worker, signal: request.signal });
+      markStage("agent-setup");
+    }
+    const runtimeFingerprint = remoteParticipantRuntimeFingerprint({
+      participant: request.participant,
+      repoPath: request.repoPath ?? request.sync?.localPath,
+      kind: request.kind ?? "chat",
+      options: request.options,
+      codexPath: remoteAgentExecutablePath(request.participant.kind, request.worker),
+      agentSetupFingerprint: portableSetup?.fingerprint
+    });
     let participantSession: RemoteParticipantSessionEnsureResult | undefined;
     if (this.detachedWorkerTransport.ensureParticipantSession) {
       participantSession = await this.prepareWarmParticipantSession(runId, request, runtimeFingerprint);
@@ -958,6 +969,7 @@ export class RemoteRunService {
       diffMode: request.diffMode,
       kind: request.kind ?? "chat",
       worker: request.worker,
+      portableSetup,
       options: {
         ...request.options,
         persistSession: true,
@@ -3191,6 +3203,7 @@ interface BuildRemoteAgentInvocationRequest {
   repoPath?: string;
   diffMode?: GitDiffMode;
   kind: ConversationKind;
+  portableSetup?: PortableAgentSetupInvocation;
   options?: CodexExecOptions;
 }
 
@@ -3210,6 +3223,7 @@ function buildRemoteAgentInvocation(request: BuildRemoteAgentInvocationRequest):
       executablePath: remoteAgentExecutablePath("codex-cli", request.worker),
       remoteCwd
     });
+    applyPortableCodexConfig(invocation.args, Boolean(request.options?.sessionId), request.portableSetup?.codexConfigOverrides);
     return {
       ...invocation
     };
@@ -3266,8 +3280,12 @@ function buildRemoteClaudeInvocation(request: BuildRemoteAgentInvocationRequest)
   if (toolConfig.disallowedTools.length > 0) {
     args.push("--disallowedTools", toolConfig.disallowedTools.join(","));
   }
-  if (toolConfig.askTools.length > 0) {
-    args.push("--settings", JSON.stringify({ permissions: { ask: toolConfig.askTools } }));
+  const portableSettings = request.portableSetup?.claudeSettings;
+  if (portableSettings || toolConfig.askTools.length > 0) {
+    args.push("--settings", JSON.stringify({
+      ...(portableSettings ?? {}),
+      ...(toolConfig.askTools.length > 0 ? { permissions: { ask: toolConfig.askTools } } : {})
+    }));
   }
   if (options.sessionId) {
     args.push("--resume", options.sessionId);
@@ -3290,8 +3308,8 @@ function buildRemoteClaudeInvocation(request: BuildRemoteAgentInvocationRequest)
       }
     }), "--agent", role.name);
   }
-  if (options.appMcp) {
-    args.push("--mcp-config", remoteClaudeMcpConfigJson(options.appMcp));
+  if (options.appMcp || request.portableSetup?.claudeMcpServers) {
+    args.push("--mcp-config", remoteClaudeMcpConfigJson(options.appMcp, request.portableSetup?.claudeMcpServers));
     if (request.kind !== "chat") {
       args.push("--strict-mcp-config");
     }
@@ -3437,18 +3455,36 @@ function remoteAppMcpToolNames(options: CodexExecOptions): string[] {
     : [];
 }
 
-function remoteClaudeMcpConfigJson(appMcp: NonNullable<CodexExecOptions["appMcp"]>): string {
+function remoteClaudeMcpConfigJson(
+  appMcp: CodexExecOptions["appMcp"],
+  portableServers: Record<string, unknown> | undefined
+): string {
   return JSON.stringify({
     mcpServers: {
-      accord_agents: {
-        type: "http",
-        url: appMcp.url,
-        headers: {
-          Authorization: `Bearer ${appMcp.token}`
+      ...(portableServers ?? {}),
+      ...(appMcp ? {
+        accord_agents: {
+          type: "http",
+          url: appMcp.url,
+          headers: {
+            Authorization: `Bearer ${appMcp.token}`
+          }
         }
-      }
+      } : {})
     }
   });
+}
+
+function applyPortableCodexConfig(
+  args: string[],
+  resuming: boolean,
+  overrides: string[] | undefined
+): void {
+  if (!overrides || overrides.length === 0) {
+    return;
+  }
+  const promptIndex = resuming ? Math.max(args.length - 2, 2) : Math.max(args.length - 1, 1);
+  args.splice(promptIndex, 0, ...overrides.flatMap((override) => ["-c", override]));
 }
 
 function remoteClaudeBashPermissionRule(rule: ChatShellPermissionRule): string {

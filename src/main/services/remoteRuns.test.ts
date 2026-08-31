@@ -43,6 +43,7 @@ import {
   remoteMirrorSlug
 } from "./remoteMirrorSync";
 import type { RemoteMirrorSyncRequest, RemoteMirrorSyncRunner } from "./remoteMirrorSync";
+import type { RemoteAgentSetupSyncRunner } from "./remoteAgentSetup";
 import {
   forwardedDesktopEnvironment,
   MAX_MIRROR_SYNC_STATE_ENTRIES,
@@ -401,6 +402,68 @@ test("detached remote run invokes Claude Code with the worker Claude path", asyn
     "default"
   ]);
   assert.equal(launch.invocation.args.includes("/opt/codex/bin/codex"), false);
+});
+
+test("detached remote runs activate portable setup and apply provider invocation config", async () => {
+  const syncCalls: string[] = [];
+  const agentSetupSync: RemoteAgentSetupSyncRunner = {
+    async sync(request) {
+      syncCalls.push(request.worker.host);
+      return {
+        fingerprint: "portable-fingerprint",
+        codexConfigOverrides: ["features.js_repl=false"],
+        claudeSettings: { enabledPlugins: { "portable@example": true } },
+        claudeMcpServers: {
+          docs: { type: "http", url: "https://example.test/mcp" }
+        }
+      };
+    }
+  };
+
+  const codexParticipant = chatParticipant();
+  const codexConversation = chatConversation([codexParticipant]);
+  const codexWorker = new FakeDetachedWorkerTransport();
+  const { remote: codexRemote } = await testRemoteRun({
+    conversation: codexConversation,
+    detachedWorkerTransport: codexWorker,
+    agentSetupSync
+  });
+  await codexRemote.startDetachedRun({
+    conversationId: codexConversation.id,
+    runId: "portable-codex-run",
+    participant: participantConfig(codexParticipant),
+    prompt: "Use portable setup.",
+    worker: { host: "codex.worker" }
+  });
+  const codexArgs = codexWorker.launchRequests[0].invocation.args;
+  assert.ok(codexArgs.some((value, index) => value === "-c" && codexArgs[index + 1] === "features.js_repl=false"));
+
+  const claudeParticipant = { ...chatParticipant(), kind: "claude-code" as const };
+  const claudeConversation = chatConversation([claudeParticipant]);
+  const claudeWorker = new FakeDetachedWorkerTransport();
+  const { remote: claudeRemote } = await testRemoteRun({
+    conversation: claudeConversation,
+    detachedWorkerTransport: claudeWorker,
+    agentSetupSync
+  });
+  await claudeRemote.startDetachedRun({
+    conversationId: claudeConversation.id,
+    runId: "portable-claude-run",
+    participant: participantConfig(claudeParticipant),
+    prompt: "Use portable setup.",
+    worker: { host: "claude.worker" },
+    options: {
+      appMcp: { url: "http://127.0.0.1:1234/mcp", token: "run-token" }
+    }
+  });
+  const claudeArgs = claudeWorker.launchRequests[0].invocation.args;
+  const settings = JSON.parse(claudeArgs[claudeArgs.indexOf("--settings") + 1]) as Record<string, unknown>;
+  const mcpConfig = JSON.parse(claudeArgs[claudeArgs.indexOf("--mcp-config") + 1]) as {
+    mcpServers: Record<string, unknown>;
+  };
+  assert.deepEqual(settings, { enabledPlugins: { "portable@example": true } });
+  assert.deepEqual(Object.keys(mcpConfig.mcpServers).sort(), ["accord_agents", "docs"]);
+  assert.deepEqual(syncCalls, ["codex.worker", "claude.worker"]);
 });
 
 test("remote Claude auto mode keeps Bash available for provider-owned approval", async () => {
@@ -3134,6 +3197,7 @@ async function testRemoteRun(options: {
   codexExecutor?: RemoteCodexExecutor;
   detachedWorkerTransport?: RemoteDetachedWorkerTransport;
   mirrorSync?: RemoteMirrorSyncRunner;
+  agentSetupSync?: RemoteAgentSetupSyncRunner;
   remoteGitDirProbe?: (worker: unknown, gitDirPath: string) => Promise<boolean>;
   remoteMirrorProbe?: (worker: unknown, remotePath: string, expectGit: boolean) => Promise<boolean>;
   enumerateWorkerMirrors?: (worker: unknown, mirrorsDir: string) => Promise<any[]>;
@@ -3211,6 +3275,7 @@ async function testRemoteRun(options: {
     codexExecutor: options.codexExecutor,
     detachedWorkerTransport: options.detachedWorkerTransport,
     mirrorSync: options.mirrorSync,
+    agentSetupSync: options.agentSetupSync,
     remoteGitDirProbe: options.remoteGitDirProbe as never,
     // A worker only holds what was actually put there. Defaulting this to "yes,
     // it is there" made every first run look like a re-run, which hid the fact

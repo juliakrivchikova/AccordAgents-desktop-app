@@ -119,6 +119,7 @@ export function remoteParticipantRuntimeFingerprint(input: {
   kind?: string;
   options?: CodexExecOptions;
   codexPath?: string;
+  agentSetupFingerprint?: string;
 }): string {
   const options = input.options ?? {};
   const environment = Object.entries(options.extraEnv ?? {})
@@ -134,6 +135,7 @@ export function remoteParticipantRuntimeFingerprint(input: {
     repoPath: input.repoPath,
     kind: input.kind,
     codexPath: input.codexPath,
+    agentSetupFingerprint: input.agentSetupFingerprint,
     role: options.role?.instructions,
     agentMode: options.agentMode,
     permissions: options.permissions,

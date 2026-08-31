@@ -22,6 +22,7 @@ test("portable bundle materializes global skills and excludes machine state", as
   await mkdir(path.join(homeDir, ".codex", "skills"), { recursive: true });
   await mkdir(path.join(homeDir, ".codex", "rules"), { recursive: true });
   await mkdir(path.join(homeDir, ".claude"), { recursive: true });
+  await mkdir(path.join(homeDir, ".gemini", "config", "skills", "gemini-skill"), { recursive: true });
   await mkdir(externalSkill, { recursive: true });
   await writeFile(path.join(externalSkill, "SKILL.md"), "# Portable skill\n");
   await writeFile(path.join(externalSkill, "auth.json"), "secret");
@@ -32,6 +33,10 @@ test("portable bundle materializes global skills and excludes machine state", as
   await writeFile(path.join(homeDir, ".codex", "AGENTS.md"), "Global instructions\n");
   await writeFile(path.join(homeDir, ".codex", "rules", "default.rules"), "prefix_rule(pattern=[\"npm\"])\n");
   await writeFile(path.join(homeDir, ".claude", "CLAUDE.md"), "Claude instructions\n");
+  await writeFile(
+    path.join(homeDir, ".gemini", "config", "skills", "gemini-skill", "SKILL.md"),
+    "# Gemini portable skill\n"
+  );
   await writeFile(path.join(homeDir, ".claude", "settings.json"), JSON.stringify({
     enabledPlugins: { "portable@example": true },
     theme: "dark"
@@ -66,6 +71,11 @@ test("portable bundle materializes global skills and excludes machine state", as
       docs: { type: "http", url: "https://example.test/mcp", headers: { Authorization: "${DOCS_TOKEN}" } }
     });
     assert.ok(bundle.manifest.links.some((link) => link.root === "codex" && link.target === "skills/linked-skill"));
+    assert.ok(bundle.manifest.links.some((link) => link.root === "gemini" && link.target === "skills/gemini-skill"));
+    assert.equal(
+      await readFile(path.join(bundle.localPath, "gemini", "skills", "gemini-skill", "SKILL.md"), "utf8"),
+      "# Gemini portable skill\n"
+    );
     assert.ok(bundle.manifest.totalBytes < 100 * 1024 * 1024);
   } finally {
     await bundle.cleanup();
@@ -78,21 +88,30 @@ test("portable bundle follows custom provider homes without copying their paths"
   const homeDir = path.join(root, "home");
   const codexHomeDir = path.join(root, "custom-codex");
   const claudeConfigDir = path.join(root, "custom-claude");
+  const geminiConfigDir = path.join(root, "custom-gemini");
   await mkdir(path.join(codexHomeDir, "skills", "codex-custom"), { recursive: true });
   await mkdir(path.join(claudeConfigDir, "skills", "claude-custom"), { recursive: true });
   await mkdir(path.join(codexHomeDir, "skills", "gstack"), { recursive: true });
   await mkdir(path.join(claudeConfigDir, "skills", "gstack"), { recursive: true });
   await mkdir(path.join(claudeConfigDir, "skills", "gstack-wrapper"), { recursive: true });
+  await mkdir(path.join(geminiConfigDir, "skills", "gemini-custom"), { recursive: true });
   await writeFile(path.join(codexHomeDir, "skills", "codex-custom", "SKILL.md"), "codex\n");
   await writeFile(path.join(claudeConfigDir, "skills", "claude-custom", "SKILL.md"), "claude\n");
   await writeFile(path.join(codexHomeDir, "skills", "gstack", "SKILL.md"), "codex gstack\n");
   await writeFile(path.join(claudeConfigDir, "skills", "gstack", "SKILL.md"), "claude gstack\n");
+  await writeFile(path.join(geminiConfigDir, "skills", "gemini-custom", "SKILL.md"), "gemini\n");
   await symlink(
     path.join(claudeConfigDir, "skills", "gstack", "SKILL.md"),
     path.join(claudeConfigDir, "skills", "gstack-wrapper", "SKILL.md")
   );
 
-  const bundle = await buildPortableAgentSetupBundle({ homeDir, codexHomeDir, claudeConfigDir, tempDir: root });
+  const bundle = await buildPortableAgentSetupBundle({
+    homeDir,
+    codexHomeDir,
+    claudeConfigDir,
+    geminiConfigDir,
+    tempDir: root
+  });
   try {
     assert.equal(
       await readFile(path.join(bundle.localPath, "codex", "skills", "codex-custom", "SKILL.md"), "utf8"),
@@ -113,6 +132,10 @@ test("portable bundle follows custom provider homes without copying their paths"
     assert.equal(
       await readFile(path.join(bundle.localPath, "claude", "skills", "gstack-wrapper", "SKILL.md"), "utf8"),
       "claude gstack\n"
+    );
+    assert.equal(
+      await readFile(path.join(bundle.localPath, "gemini", "skills", "gemini-custom", "SKILL.md"), "utf8"),
+      "gemini\n"
     );
     assert.doesNotMatch(JSON.stringify(bundle.manifest), new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
@@ -136,6 +159,8 @@ test("portable config sanitizers keep declarations but not secrets or local path
     "url = \"https://example.test/mcp\"",
     "[mcp_servers.environment_header.env_http_headers]",
     "Authorization = \"DOCS_TOKEN\"",
+    "[mcp_servers.accord_agents]",
+    "url = \"https://wrong.example.test/mcp\"",
     "[mcp_servers.raw_header_table]",
     "url = \"https://example.test/mcp\"",
     "[mcp_servers.raw_header_table.http_headers]",
@@ -152,7 +177,7 @@ test("portable config sanitizers keep declarations but not secrets or local path
   assert.match(codex, /mcp_servers\.safe/);
   assert.match(codex, /environment_header\.env_http_headers/);
   assert.match(codex, /\[features\]/);
-  assert.doesNotMatch(codex, /API_KEY|secret_header|inline_header|raw_header_table|multiline|marketplaces\.local|Bearer secret/);
+  assert.doesNotMatch(codex, /API_KEY|secret_header|inline_header|raw_header_table|multiline|marketplaces\.local|wrong\.example|Bearer secret/);
 
   assert.deepEqual(
     sanitizeClaudePortableSettings({ enabledPlugins: { yes: true, no: false, invalid: "true" }, model: "ignored" }),
@@ -225,6 +250,29 @@ test("remote activation replaces managed setup reversibly and restores stale tar
     assert.equal(await readFile(path.join(workerSkillPath, "SKILL.md"), "utf8"), "worker-original\n");
   } finally {
     await second.cleanup();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("remote activation installs Gemini skills under its native global root", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-portable-gemini-activation-test-"));
+  const sourceHome = path.join(root, "source-home");
+  const workerHome = path.join(root, "worker-home");
+  const remoteBundle = path.join(root, "remote", "bundle");
+  const remoteState = path.join(root, "remote", "state.json");
+  const sourceSkill = path.join(sourceHome, ".gemini", "config", "skills", "qa-proof");
+  const workerSkill = path.join(workerHome, ".gemini", "config", "skills", "qa-proof");
+  await mkdir(sourceSkill, { recursive: true });
+  await writeFile(path.join(sourceSkill, "SKILL.md"), "gemini portable\n");
+
+  const bundle = await buildPortableAgentSetupBundle({ homeDir: sourceHome, tempDir: root });
+  try {
+    await cp(bundle.localPath, remoteBundle, { recursive: true });
+    await activate(remoteBundle, remoteState, workerHome);
+    assert.equal((await lstat(workerSkill)).isSymbolicLink(), true);
+    assert.equal(await readFile(path.join(workerSkill, "SKILL.md"), "utf8"), "gemini portable\n");
+  } finally {
+    await bundle.cleanup();
     await rm(root, { recursive: true, force: true });
   }
 });

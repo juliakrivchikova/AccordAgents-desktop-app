@@ -65,7 +65,7 @@ export interface RemoteAgentSetupSyncRunner {
 
 export interface PortableAgentSetupManifestLink {
   source: string;
-  root: "codex" | "agents" | "claude";
+  root: "codex" | "agents" | "claude" | "gemini";
   target: string;
 }
 
@@ -87,6 +87,7 @@ interface PortableAgentSetupBuildOptions {
   homeDir?: string;
   codexHomeDir?: string;
   claudeConfigDir?: string;
+  geminiConfigDir?: string;
   tempDir?: string;
 }
 
@@ -94,6 +95,7 @@ interface PortableAgentSetupRoots {
   homeDir: string;
   codexHomeDir: string;
   claudeConfigDir: string;
+  geminiConfigDir: string;
   agentsHomeDir: string;
 }
 
@@ -112,6 +114,7 @@ interface DefaultRemoteAgentSetupSyncOptions {
   homeDir?: string;
   codexHomeDir?: string;
   claudeConfigDir?: string;
+  geminiConfigDir?: string;
   tempDir?: string;
   mirrorSync?: RemoteMirrorSyncRunner;
   commandRunner?: PortableCommandRunner;
@@ -165,6 +168,7 @@ export class DefaultRemoteAgentSetupSync implements RemoteAgentSetupSyncRunner {
       homeDir: roots.homeDir,
       codexHomeDir: roots.codexHomeDir,
       claudeConfigDir: roots.claudeConfigDir,
+      geminiConfigDir: roots.geminiConfigDir,
       tempDir: this.options.tempDir
     });
     const invocation = portableInvocationFromBundle(bundle);
@@ -265,6 +269,15 @@ export async function buildPortableAgentSetupBundle(
       path.join(bundleRoot, "claude", "skills"),
       "claude/skills",
       "claude",
+      "skills",
+      links,
+      budget
+    );
+    await copyPortableSkillRoot(
+      path.join(roots.geminiConfigDir, "skills"),
+      path.join(bundleRoot, "gemini", "skills"),
+      "gemini/skills",
+      "gemini",
       "skills",
       links,
       budget
@@ -377,6 +390,9 @@ export function sanitizeCodexPortableConfig(contents: string): string {
       continue;
     }
     const tableName = unquoteTomlTableHeader(header);
+    if (/^mcp_servers\.(?:accord_agents|"accord_agents")(?:\.|$)/.test(tableName)) {
+      continue;
+    }
     const family = tomlPortableFamily(header, namespace);
     if (namespace === "mcp_servers" && /\.env$/.test(tableName)) {
       continue;
@@ -741,7 +757,7 @@ async function hashPortableBundle(bundleRoot: string): Promise<string> {
 }
 
 function resolvePortableAgentSetupRoots(
-  options: Pick<PortableAgentSetupBuildOptions, "homeDir" | "codexHomeDir" | "claudeConfigDir">
+  options: Pick<PortableAgentSetupBuildOptions, "homeDir" | "codexHomeDir" | "claudeConfigDir" | "geminiConfigDir">
 ): PortableAgentSetupRoots {
   const homeDir = path.resolve(options.homeDir ?? homedir());
   const useAmbientProviderHomes = options.homeDir === undefined;
@@ -751,6 +767,7 @@ function resolvePortableAgentSetupRoots(
     homeDir,
     codexHomeDir: path.resolve(options.codexHomeDir ?? ambientCodexHome ?? path.join(homeDir, ".codex")),
     claudeConfigDir: path.resolve(options.claudeConfigDir ?? ambientClaudeConfig ?? path.join(homeDir, ".claude")),
+    geminiConfigDir: path.resolve(options.geminiConfigDir ?? path.join(homeDir, ".gemini", "config")),
     agentsHomeDir: path.join(homeDir, ".agents")
   };
 }
@@ -762,6 +779,7 @@ async function computePortableAgentSetupSourceFingerprint(roots: PortableAgentSe
     { source: path.join(roots.codexHomeDir, "skills"), logical: "codex/skills" },
     { source: path.join(roots.agentsHomeDir, "skills"), logical: "agents/skills" },
     { source: path.join(roots.claudeConfigDir, "skills"), logical: "claude/skills" },
+    { source: path.join(roots.geminiConfigDir, "skills"), logical: "gemini/skills" },
     { source: path.join(roots.codexHomeDir, "rules"), logical: "codex/rules" },
     { source: path.join(roots.claudeConfigDir, "rules"), logical: "claude/rules" }
   ];
@@ -1212,7 +1230,8 @@ const home = os.homedir();
 const roots = {
   codex: path.resolve(process.env.CODEX_HOME || path.join(home, ".codex")),
   agents: path.resolve(path.join(home, ".agents")),
-  claude: path.resolve(process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude"))
+  claude: path.resolve(process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude")),
+  gemini: path.resolve(path.join(home, ".gemini", "config"))
 };
 const setupRoot = path.dirname(statePath);
 const backupRoot = path.join(setupRoot, "backups");
