@@ -3773,8 +3773,52 @@
     savePairing
   };
 
+  // iOS reports a height at first paint that is taller than what you can
+  // actually see, so the composer starts half off the bottom of the screen —
+  // and the page is deliberately unscrollable now, so nothing brings it back
+  // until the keyboard opens and closes and forces a re-measure. Measure the
+  // usable height ourselves instead of letting CSS inherit that first value.
+  // Tracking visualViewport also means the composer rides above the keyboard
+  // rather than sitting behind it.
+  function trackUsableHeight() {
+    const viewport = typeof window !== "undefined" ? window.visualViewport : null;
+    let lastHeight = 0;
+    function apply() {
+      const height = viewport ? viewport.height : window.innerHeight;
+      // visualViewport.scroll fires throughout a gesture with the height
+      // unchanged; writing the same value back would thrash layout for nothing.
+      if (height <= 0 || height === lastHeight) {
+        return;
+      }
+      lastHeight = height;
+      // The keyboard shrinks the timeline. A reader who was at the latest
+      // message must stay there, the way every chat app behaves — otherwise
+      // opening the keyboard silently scrolls them up into history.
+      const wasAtLatest = isNearBottom(threadSurface());
+      document.documentElement.style.setProperty("--app-h", height + "px");
+      if (wasAtLatest) {
+        scrollToLatestWhenSettled("auto");
+      }
+    }
+    apply();
+    if (viewport) {
+      viewport.addEventListener("resize", apply);
+      viewport.addEventListener("scroll", apply);
+    }
+    window.addEventListener("resize", apply);
+    // The rotation is not finished when the event fires, so measure again after.
+    window.addEventListener("orientationchange", function () {
+      apply();
+      setTimeout(apply, 300);
+    });
+    // The first correct value only exists after the first frame.
+    requestAnimationFrame(apply);
+    setTimeout(apply, 300);
+  }
+
   if (typeof document !== "undefined") {
     document.addEventListener("DOMContentLoaded", function () {
+      trackUsableHeight();
       init().catch(function (error) {
         const state = document.getElementById("connection-state");
         if (state) {

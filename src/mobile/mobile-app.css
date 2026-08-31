@@ -65,9 +65,15 @@ textarea {
      which drags the whole app off the screen and shows the page background
      above and below it. Pinning html/body to the viewport and turning
      overscroll off leaves the lists inside as the only things that move. */
+  /* --app-h is the height the phone can actually show, measured in JS on every
+     frame that changes it. The 100% fallback only covers the moment before the
+     script runs. */
   html,
   body {
-    height: 100%;
+    height: var(--app-h, 100%);
+    /* The base rule's min-height: 100vh would otherwise hold the body at the
+       full screen height and make the measured height do nothing. */
+    min-height: 0;
     overflow: hidden;
     overscroll-behavior: none;
   }

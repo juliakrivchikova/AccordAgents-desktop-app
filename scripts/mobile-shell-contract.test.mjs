@@ -33,7 +33,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v56/);
+  assert.match(worker, /accordagents-mobile-shell-v57/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -106,8 +106,8 @@ test("mobile shell builds static installable PWA assets", async () => {
   // nothing but this pin catches their removal.
   assert.match(html, /<meta name="viewport"[^>]*maximum-scale=1[^>]*user-scalable=no/);
   assert.match(html, /<meta name="viewport"[^>]*viewport-fit=cover/);
-  assert.match(html, /mobile-app\.css\?v=2026-08-31-phone-edges-v1/);
-  assert.match(html, /mobile-app\.js\?v=2026-08-31-phone-edges-v1/);
+  assert.match(html, /mobile-app\.css\?v=2026-08-31-measured-height-v1/);
+  assert.match(html, /mobile-app\.js\?v=2026-08-31-measured-height-v1/);
   assert.match(html, /data-screen-label="Mobile control"/);
   assert.match(html, /id="chats-screen"/);
   assert.match(html, />Chats</);
@@ -190,7 +190,19 @@ test("mobile shell builds static installable PWA assets", async () => {
   const phoneQuery = "@media (max-width: 620px), (display-mode: standalone) {";
   assert.equal(css.split(phoneQuery).length - 1, 2, "both phone blocks must key off width OR standalone");
   const lock = cssBlock("  html,\n  body");
-  assert.match(lock, /height: 100%/);
+  // The height must be measured, not inherited: iOS hands the shell a stale,
+  // too-tall height at first paint, which puts the composer half off the
+  // bottom of a page that can no longer be scrolled.
+  assert.match(lock, /height: var\(--app-h, 100%\)/);
+  assert.match(app, /function trackUsableHeight\(\)/);
+  assert.match(app, /setProperty\("--app-h"/);
+  assert.match(app, /viewport\.addEventListener\("resize", apply\)/);
+  // A height change that drops the reader out of the latest message would be a
+  // silent regression: the keyboard would scroll them up into history.
+  assert.match(app, /const wasAtLatest = isNearBottom\(threadSurface\(\)\)/);
+  assert.match(app, /if \(wasAtLatest\) \{\n\s*scrollToLatestWhenSettled/);
+  assert.match(app, /height === lastHeight/);
+  assert.match(app, /trackUsableHeight\(\);\n\s*init\(\)/);
   assert.match(lock, /overflow: hidden/);
   assert.match(lock, /overscroll-behavior: none/);
   assert.match(cssBlock(".mscroll"), /overscroll-behavior: contain/);
