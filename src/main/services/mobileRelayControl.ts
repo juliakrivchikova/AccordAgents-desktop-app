@@ -115,11 +115,26 @@ interface MobileOutboxAck {
   runIds: string[];
 }
 
+/** Metadata only. The bytes are deliberately absent: a screenshot is hundreds of
+ *  kilobytes, this projection re-sends the last forty rows on every batch, and
+ *  the payload reaches the phone through the sealed relay. Carrying the image
+ *  here would multiply every timeline delivery by the size of its pictures. The
+ *  phone asks for the bytes once, by id, and keeps them. */
+export interface MobileTimelineAttachment {
+  id: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  width: number;
+  height: number;
+}
+
 interface MobileTimelineEvent {
   id: string;
   role: "you" | "participant" | "system";
   participantLabel?: string;
   content: string;
+  attachments?: MobileTimelineAttachment[];
   status: "pending" | "done" | "error";
   createdAt: string;
   runId?: string;
@@ -977,10 +992,10 @@ function mobileEventScopeKey(conversationId: string, eventId: string): string {
   return `${conversationId}\0${eventId}`;
 }
 
-function timelineEventsFromConversation(conversation: Conversation): MobileTimelineEvent[] {
+export function timelineEventsFromConversation(conversation: Conversation): MobileTimelineEvent[] {
   const threadRoots = chatParticipantRequestReplyRootMap(conversation);
   return conversation.messages
-    .filter((message) => message.role !== "summary" && message.role !== "user" && Boolean(message.content.trim()))
+    .filter((message) => message.role !== "summary" && message.role !== "user" && messageIsVisibleOnPhone(message))
     .slice(-40)
     // Each message falls back to its OWN id, never to the sending run's. Lending
     // one run's identity to forty unrelated history rows made every one of them
@@ -992,12 +1007,38 @@ function timelineEventsFromConversation(conversation: Conversation): MobileTimel
     .map((message) => timelineEventFromMessage(message, message.id, conversation, threadRoots));
 }
 
-function timelineEventsFromSnapshot(conversation: Conversation): MobileTimelineEvent[] {
+export function timelineEventsFromSnapshot(conversation: Conversation): MobileTimelineEvent[] {
   const threadRoots = chatParticipantRequestReplyRootMap(conversation);
   return conversation.messages
-    .filter((message) => message.role !== "summary" && Boolean(message.content.trim()))
+    .filter((message) => message.role !== "summary" && messageIsVisibleOnPhone(message))
     .slice(-40)
     .map((message) => timelineEventFromMessage(message, message.id, conversation, threadRoots));
+}
+
+/** An image with no caption is still a message. Requiring non-empty text hid it
+ *  from the phone completely, so a screenshot sent from the desktop simply never
+ *  arrived there. */
+function messageIsVisibleOnPhone(message: ChatMessage): boolean {
+  return Boolean(message.content.trim()) || timelineAttachmentsFromMessage(message).length > 0;
+}
+
+function timelineAttachmentsFromMessage(message: ChatMessage): MobileTimelineAttachment[] {
+  const attachments = message.metadata?.imageAttachments;
+  if (!Array.isArray(attachments)) {
+    return [];
+  }
+  return attachments
+    .filter((attachment) => attachment && typeof attachment.id === "string" && attachment.id.trim().length > 0)
+    // storageKey stays on the desktop: it is a local path, and the phone has no
+    // use for one.
+    .map((attachment) => ({
+      id: attachment.id,
+      filename: attachment.filename,
+      mimeType: attachment.mimeType,
+      sizeBytes: attachment.sizeBytes,
+      width: attachment.width,
+      height: attachment.height
+    }));
 }
 
 function timelineEventFromMessage(
@@ -1012,12 +1053,14 @@ function timelineEventFromMessage(
   const threadRootId = conversation
     ? chatMessageVisualThreadRootId(conversation, message, threadRoots)
     : undefined;
+  const attachments = timelineAttachmentsFromMessage(message);
   return {
     id: message.id,
     ...(threadRootId && threadRootId !== message.id ? { threadRootId } : {}),
     role: message.role === "participant" ? "participant" : message.role === "system" ? "system" : "you",
     ...(message.participantLabel ? { participantLabel: message.participantLabel } : {}),
     content: message.content,
+    ...(attachments.length > 0 ? { attachments } : {}),
     status: message.status ?? "done",
     createdAt: message.createdAt,
     runId,

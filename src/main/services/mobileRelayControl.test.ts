@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import type { Conversation, StartReviewResult } from "../../shared/types";
 import { RelayTunnelClient } from "./relayTunnelClient";
-import { MobileRelayControlService, type MobileRelayChatSender, type MobileTimelineEvents } from "./mobileRelayControl";
+import { MobileRelayControlService, timelineEventsFromSnapshot, type MobileRelayChatSender, type MobileTimelineEvents } from "./mobileRelayControl";
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
 
 const requireScript = createRequire(__filename);
@@ -2496,4 +2496,90 @@ test("MobileRelayControlService strips partial text from the durable copy and ke
     desktop.close();
     await relay.close();
   }
+});
+
+// The phone never received an image at all: the projection required non-empty
+// text, so a screenshot with no caption was filtered out, and even a captioned
+// one arrived with no sign that a picture existed.
+test("the phone timeline carries image attachments as metadata, and a caption-less image is not dropped", () => {
+  const conversation = {
+    id: "conversation-attachments",
+    kind: "chat" as const,
+    title: "Attachments",
+    createdAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:00:02.000Z",
+    messages: [
+      {
+        id: "message-with-caption",
+        role: "participant" as const,
+        participantId: "participant-1",
+        participantLabel: "@drew",
+        content: "here is the screen",
+        createdAt: "2026-09-01T00:00:01.000Z",
+        status: "done" as const,
+        metadata: {
+          imageAttachments: [{
+            id: "attachment-1",
+            filename: "shot.png",
+            mimeType: "image/png" as const,
+            sizeBytes: 597423,
+            width: 1206,
+            height: 2622,
+            storageKey: "attachments/attachment-1.png",
+            createdAt: "2026-09-01T00:00:01.000Z"
+          }]
+        }
+      },
+      {
+        id: "message-image-only",
+        role: "participant" as const,
+        participantId: "participant-1",
+        participantLabel: "@drew",
+        content: "",
+        createdAt: "2026-09-01T00:00:02.000Z",
+        status: "done" as const,
+        metadata: {
+          imageAttachments: [{
+            id: "attachment-2",
+            filename: "second.png",
+            mimeType: "image/png" as const,
+            sizeBytes: 1024,
+            width: 10,
+            height: 20,
+            storageKey: "attachments/attachment-2.png",
+            createdAt: "2026-09-01T00:00:02.000Z"
+          }]
+        }
+      },
+      {
+        id: "message-empty",
+        role: "participant" as const,
+        participantId: "participant-1",
+        participantLabel: "@drew",
+        content: "   ",
+        createdAt: "2026-09-01T00:00:03.000Z",
+        status: "done" as const
+      }
+    ],
+    findings: [],
+    metadata: {}
+  };
+
+  const events = timelineEventsFromSnapshot(conversation as never);
+  assert.deepEqual(events.map((event) => event.id), ["message-with-caption", "message-image-only"]);
+  assert.deepEqual(events[0].attachments, [{
+    id: "attachment-1",
+    filename: "shot.png",
+    mimeType: "image/png",
+    sizeBytes: 597423,
+    width: 1206,
+    height: 2622
+  }]);
+  // The bytes and the desktop-only storage path must not travel to the phone:
+  // this projection re-sends the last forty rows on every batch.
+  const serialized = JSON.stringify(events);
+  assert.doesNotMatch(serialized, /storageKey/);
+  assert.doesNotMatch(serialized, /dataBase64/);
+  assert.equal(events[1].content, "");
+  assert.equal(events[1].attachments?.[0].id, "attachment-2");
 });
