@@ -1200,6 +1200,36 @@
     return prefix + leadingSpace + "@" + handle + " ";
   }
 
+  function mentionShortcutEdit(value, selectionStart, selectionEnd) {
+    const source = String(value || "");
+    const rawStart = Number.isFinite(selectionStart) ? selectionStart : source.length;
+    const rawEnd = Number.isFinite(selectionEnd) ? selectionEnd : rawStart;
+    const start = Math.max(0, Math.min(source.length, Math.min(rawStart, rawEnd)));
+    const end = Math.max(start, Math.min(source.length, Math.max(rawStart, rawEnd)));
+    const before = source.slice(0, start);
+    const trigger = before && !/\s$/.test(before) ? " @" : "@";
+    return {
+      value: before + trigger + source.slice(end),
+      caret: before.length + trigger.length
+    };
+  }
+
+  function replaceMentionAtCaret(value, handle, caret) {
+    const source = String(value || "");
+    const position = Number.isFinite(caret)
+      ? Math.max(0, Math.min(source.length, caret))
+      : source.length;
+    const replacedBefore = replaceActiveMention(source.slice(0, position), handle);
+    const after = source.slice(position);
+    const suffix = replacedBefore.endsWith(" ") && after.startsWith(" ")
+      ? after.slice(1)
+      : after;
+    return {
+      value: replacedBefore + suffix,
+      caret: replacedBefore.length
+    };
+  }
+
   function selectedConversationMembers() {
     const conversationId = selectedConversationId();
     const chat = loadChats().find(function (item) {
@@ -3591,6 +3621,12 @@
     if (form && input) {
       let mentionIndex = 0;
       const mentionMenu = document.getElementById("mention-menu");
+      const mentionButton = document.getElementById("mention-button");
+
+      function mentionValueBeforeCaret() {
+        const caret = typeof input.selectionStart === "number" ? input.selectionStart : input.value.length;
+        return input.value.slice(0, caret);
+      }
 
       function closeMentionMenu() {
         if (mentionMenu) {
@@ -3602,18 +3638,20 @@
       }
 
       function insertMention(member) {
-        input.value = replaceActiveMention(input.value, member.mentionHandle);
+        const caret = typeof input.selectionStart === "number" ? input.selectionStart : input.value.length;
+        const edit = replaceMentionAtCaret(input.value, member.mentionHandle, caret);
+        input.value = edit.value;
         mentionIndex = 0;
         closeMentionMenu();
         input.focus();
-        input.setSelectionRange(input.value.length, input.value.length);
+        input.setSelectionRange(edit.caret, edit.caret);
       }
 
       function renderMentionMenu() {
         if (!mentionMenu) {
           return [];
         }
-        const options = mentionOptions(input.value, selectedConversationMembers());
+        const options = mentionOptions(mentionValueBeforeCaret(), selectedConversationMembers());
         mentionMenu.textContent = "";
         if (options.length === 0) {
           closeMentionMenu();
@@ -3661,8 +3699,28 @@
         mentionIndex = 0;
         renderMentionMenu();
       });
+      document.addEventListener("selectionchange", function () {
+        if (document.activeElement === input && mentionMenu && !mentionMenu.hidden) {
+          renderMentionMenu();
+        }
+      });
+      if (mentionButton) {
+        // Keep the textarea as the pointer focus target so tapping this while
+        // typing does not dismiss the iOS keyboard before the click arrives.
+        mentionButton.addEventListener("pointerdown", function (event) {
+          event.preventDefault();
+        });
+        mentionButton.addEventListener("click", function () {
+          const edit = mentionShortcutEdit(input.value, input.selectionStart, input.selectionEnd);
+          input.value = edit.value;
+          input.focus();
+          input.setSelectionRange(edit.caret, edit.caret);
+          mentionIndex = 0;
+          renderMentionMenu();
+        });
+      }
       input.addEventListener("keydown", function (event) {
-        const options = mentionOptions(input.value, selectedConversationMembers());
+        const options = mentionOptions(mentionValueBeforeCaret(), selectedConversationMembers());
         if (options.length > 0 && event.key === "ArrowDown") {
           event.preventDefault();
           mentionIndex = (mentionIndex + 1) % options.length;
@@ -3752,6 +3810,8 @@
     activeMentionQuery,
     mentionOptions,
     replaceActiveMention,
+    mentionShortcutEdit,
+    replaceMentionAtCaret,
     isCancellableMobileRow,
     requestChatListViaRelay,
     requestTimelineViaRelay,

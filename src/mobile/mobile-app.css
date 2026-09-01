@@ -757,8 +757,8 @@ textarea {
    right-hand "@" — focused the field by label activation rather than by
    touching it. iOS shows a caret and the form accessory bar for that, but does
    not raise the keyboard, which reads as a field you cannot type into. The pill
-   is now a plain container and the textarea fills it, so every tap inside the
-   pill lands on the textarea itself. */
+   is now a plain container and the textarea fills it. The only overlay is the
+   intentional mention button, whose pointer handler preserves textarea focus. */
 .composer-input-wrap {
   flex: 1;
   min-width: 0;
@@ -780,7 +780,7 @@ textarea {
   resize: none;
   border: 0;
   /* Padding lives on the field, not on the pill, so the whole pill is tappable
-     field. The right padding leaves room for the "@" hint. */
+     field. The right padding leaves room for the "@" control. */
   padding: 12px 49px 0 16px;
   background: transparent;
   color: var(--fg1);
@@ -793,21 +793,33 @@ textarea {
   opacity: 1;
 }
 
-.composer-input-wrap > span {
+.composer .composer-mention-button {
   position: absolute;
-  right: 8px;
+  right: 1px;
   top: 50%;
   transform: translateY(-50%);
-  width: 32px;
-  height: 32px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
+  border: 0;
   font: 600 15px var(--mono);
-  color: var(--mut);
-  /* A hint, never a tap target: a tap here must reach the field beneath it. */
-  pointer-events: none;
+  color: var(--fg1);
+  background: transparent;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.composer .composer-mention-button:active {
+  background: rgba(22, 25, 31, 0.08);
+}
+
+.composer .composer-mention-button:focus-visible {
+  outline: 2px solid var(--fg1);
+  outline-offset: 1px;
 }
 
 .composer button {
