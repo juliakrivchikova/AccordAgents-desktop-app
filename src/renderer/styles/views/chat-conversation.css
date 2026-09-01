@@ -4868,9 +4868,10 @@ button.composer-active-run-row-main:focus-visible {
 /* The picture fits the dialog. Capping only the width left a portrait photo
    taller than the frame, so opening one meant scrolling to see it. */
 .chat-image-preview-frame {
-  display: grid;
-  place-items: center;
-  height: 72vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-height: 70vh;
   overflow: hidden;
   border: 1px solid var(--app-border);
   border-radius: var(--radius-control);
@@ -4878,8 +4879,11 @@ button.composer-active-run-row-main:focus-visible {
 }
 
 .chat-image-preview-frame img {
+  /* Viewport units, not percentages: a percentage height here depends on the
+     dialog's own layout resolving a definite height for this box, which it does
+     not, so a tall photo was shown full width and simply clipped. */
   max-width: 100%;
-  max-height: 100%;
+  max-height: 70vh;
   width: auto;
   height: auto;
   object-fit: contain;
