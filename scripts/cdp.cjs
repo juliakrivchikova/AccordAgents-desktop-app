@@ -136,6 +136,35 @@ async function attach({
     })()`);
   };
 
+  const touchStart = async (selector) => {
+    await waitForSelector(selector);
+    const result = await evaluate(`(() => {
+      const selector = ${JSON.stringify(selector)};
+      const element = document.querySelector(selector);
+      if (!element) throw new Error("Selector not found: " + selector);
+      element.scrollIntoView({ block: "center", inline: "center" });
+      const rect = element.getBoundingClientRect();
+      const point = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      if (rect.width <= 0 || rect.height <= 0 || point.x < 0 || point.y < 0 ||
+          point.x > window.innerWidth || point.y > window.innerHeight) {
+        throw new Error("Touch target is not visible: " + selector);
+      }
+      return point;
+    })()`);
+    const point = result.result.value;
+    await send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+    await send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ ...point, radiusX: 1, radiusY: 1, force: 1 }]
+    });
+    return point;
+  };
+
+  const touchEnd = async () => {
+    await send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await send("Emulation.setTouchEmulationEnabled", { enabled: false, maxTouchPoints: 1 });
+  };
+
   const fill = async (selector, value) => {
     await waitForSelector(selector);
     await evaluate(`(() => {
@@ -182,6 +211,8 @@ async function attach({
     waitForEvent,
     waitForSelector,
     click,
+    touchStart,
+    touchEnd,
     fill,
     screenshot,
     close: () => ws.close()

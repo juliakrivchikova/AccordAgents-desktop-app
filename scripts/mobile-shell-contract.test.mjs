@@ -33,7 +33,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v58/);
+  assert.match(worker, /accordagents-mobile-shell-v59/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -106,8 +106,11 @@ test("mobile shell builds static installable PWA assets", async () => {
   // nothing but this pin catches their removal.
   assert.match(html, /<meta name="viewport"[^>]*maximum-scale=1[^>]*user-scalable=no/);
   assert.match(html, /<meta name="viewport"[^>]*viewport-fit=cover/);
-  assert.match(html, /mobile-app\.css\?v=2026-08-31-quiet-keyboard-v1/);
-  assert.match(html, /mobile-app\.js\?v=2026-08-31-quiet-keyboard-v1/);
+  const assetVersion = /const ASSET_VERSION = "([^"]+)"/.exec(worker)?.[1];
+  assert.ok(assetVersion, "service worker must declare an asset version");
+  const htmlAssetVersions = [...html.matchAll(/(?:mobile-app\.css|jsqr\.js|mobile-app\.js)\?v=([^"']+)/g)]
+    .map((match) => match[1]);
+  assert.deepEqual(htmlAssetVersions, [assetVersion, assetVersion, assetVersion]);
   assert.match(html, /data-screen-label="Mobile control"/);
   assert.match(html, /id="chats-screen"/);
   assert.match(html, />Chats</);
@@ -122,6 +125,14 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(html, /<div class="composer-input-wrap">/);
   assert.doesNotMatch(html, /<label class="composer-input-wrap"/);
   assert.match(html, /<textarea id="composer-input"[^>]*aria-label="Message the room"/);
+  const mentionButtonMarkup = /<button\b[^>]*\bid="mention-button"[^>]*>/.exec(html)?.[0] ?? "";
+  assert.ok(mentionButtonMarkup, "the composer must render a mention button");
+  assert.match(mentionButtonMarkup, /\btype="button"/);
+  assert.match(mentionButtonMarkup, /\baria-label="Mention a member"/);
+  assert.match(mentionButtonMarkup, /\baria-controls="mention-menu"/);
+  assert.doesNotMatch(mentionButtonMarkup, /\baria-expanded=/);
+  assert.doesNotMatch(mentionButtonMarkup, /\baria-haspopup=/);
+  assert.doesNotMatch(html, /<span aria-hidden="true">@<\/span>/);
   // W-M: the live reply opens in its own view, and only a row that can actually
   // be followed advertises itself as openable.
   assert.match(html, /id="stream-view"/);
@@ -224,6 +235,11 @@ test("mobile shell builds static installable PWA assets", async () => {
   // under the indicator, which is what happened the moment the shell first
   // filled the whole screen.
   assert.match(cssBlock(".composer"), /padding: 10px 16px calc\(14px \+ env\(safe-area-inset-bottom\)\)/);
+  assert.match(cssBlock(".composer-input-wrap"), /height: 46px/);
+  assert.match(cssBlock(".composer .composer-mention-button"), /width: 44px/);
+  assert.match(cssBlock(".composer .composer-mention-button"), /height: 44px/);
+  assert.match(cssBlock(".composer .composer-mention-button"), /color: var\(--fg1\)/);
+  assert.match(cssBlock(".composer .composer-mention-button:active"), /background: rgba\(22, 25, 31, 0\.08\)/);
   assert.match(cssBlock(".mobile-chat-header"), /padding: calc\(2px \+ env\(safe-area-inset-top\)\)/);
   assert.match(cssBlock(".mobile-chats-header"), /padding: calc\(6px \+ env\(safe-area-inset-top\)\)/);
   assert.match(cssBlock(".mobile-chat-list"), /padding-bottom: calc\(18px \+ env\(safe-area-inset-bottom\)\)/);
@@ -440,6 +456,21 @@ test("mobile shell matches desktop member mention filtering and insertion", asyn
   assert.deepEqual(mobile.mentionOptions("Ask @chat", members), [members[1]]);
   assert.equal(mobile.replaceActiveMention("Ask @tay", members[0].mentionHandle), "Ask @taylor-claude-engineer ");
   assert.equal(mobile.replaceActiveMention("@adm", members[1].mentionHandle), "@assistant ");
+
+  assert.deepEqual(mobile.mentionShortcutEdit("", 0, 0), { value: "@", caret: 1 });
+  assert.deepEqual(
+    mobile.mentionShortcutEdit("Draft text", 5, 5),
+    { value: "Draft @ text", caret: 7 }
+  );
+  assert.deepEqual(
+    mobile.mentionShortcutEdit("Draft text", 6, 10),
+    { value: "Draft @", caret: 7 },
+    "the shortcut follows editor convention by replacing selected text"
+  );
+  assert.deepEqual(
+    mobile.replaceMentionAtCaret("Draft @ text", members[0].mentionHandle, 7),
+    { value: "Draft @taylor-claude-engineer text", caret: 30 }
+  );
 });
 
 test("mobile Stop is offered only for a real participant run", async () => {

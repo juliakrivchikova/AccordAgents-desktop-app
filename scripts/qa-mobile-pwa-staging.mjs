@@ -16,6 +16,7 @@ const relayUrl = process.env.ACCORDAGENTS_MOBILE_RELAY_URL || "wss://relay.accor
 const staticOriginUrl = normalizeTrailingSlash(process.env.ACCORDAGENTS_MOBILE_STATIC_ORIGIN_URL || "https://mobile.accordagents.com/");
 const mailboxUrl = process.env.ACCORDAGENTS_MOBILE_MAILBOX_URL || managedMailboxUrlFromRelayUrl(relayUrl);
 const outboxUrl = process.env.ACCORDAGENTS_MOBILE_OUTBOX_URL || managedOutboxUrlFromRelayUrl(relayUrl);
+const mentionShortcutOnly = process.env.QA_MOBILE_MENTION_ONLY === "1";
 
 const { RelayTunnelClient } = await import("../dist/main/main/services/relayTunnelClient.js");
 const { sealMobileRelayPayload, openMobileRelayPayload } = await import("../dist/main/main/services/mobileRelaySealing.js");
@@ -90,6 +91,7 @@ try {
       ui: failure
     }, null, 2)}`);
   });
+  const mentionShortcut = await assertMentionShortcut(cdp);
 
   const receivedMessage = nextMessage(desktop);
   await cdp.fill("#composer-input", "browser staging relay QA");
@@ -129,98 +131,137 @@ try {
       ui: failure
     }, null, 2)}`);
   });
-  const runningTimelinePayload = {
-    type: "mobile.timeline.events",
-    conversationId,
-    events: [{
-      id: `participant-running-${opened.events[0].eventId}`,
-      role: "participant",
-      participantLabel: "@cloud-staging",
-      content: "@cloud-staging is running...",
-      status: "pending",
-      createdAt: new Date(Date.now() + 500).toISOString(),
-      runId: "cloud-run-staging-qa",
-      messageId: `message-running-${opened.events[0].eventId}`,
-      mobileEventId: opened.events[0].eventId
-    }]
-  };
-  await desktop.sendCiphertext({
-    logicalMessageId: `timeline-running:${opened.events[0].eventId}`,
-    ciphertext: await sealMobileRelayPayload(runningTimelinePayload, pairing.relaySealKeyBase64),
-    cursor: `${desktopMessage.logicalMessageId}:ack`
-  });
-  const stableRunning = await waitForStableRunningRow(cdp, runningTimelinePayload);
-  const stableTerminal = waitForStableParticipantResultRow(cdp, participantResultText);
-  const timeline = await sealMobileRelayPayload({
-    type: "mobile.timeline.events",
-    conversationId,
-    events: [{
-      id: `participant-${opened.events[0].eventId}`,
-      role: "participant",
-      participantLabel: "@cloud-staging",
-      content: participantResultText,
-      status: "done",
-      createdAt: new Date(Date.now() + 1000).toISOString(),
-      runId: "cloud-run-staging-qa",
-      messageId: `message-${opened.events[0].eventId}`,
-      mobileEventId: opened.events[0].eventId
-    }, {
-      id: `participant-markdown-${opened.events[0].eventId}`,
-      role: "participant",
-      participantLabel: "@cloud-staging",
-      content: markdownResultText,
-      status: "done",
-      createdAt: new Date(Date.now() + 1500).toISOString(),
-      runId: "cloud-run-staging-markdown-qa",
-      messageId: `message-markdown-${opened.events[0].eventId}`
-    }]
-  }, pairing.relaySealKeyBase64);
-  await desktop.sendCiphertext({
-    logicalMessageId: `timeline:${opened.events[0].eventId}`,
-    ciphertext: timeline,
-    cursor: `${desktopMessage.logicalMessageId}:ack`
-  });
-  const stableParticipantResult = await stableTerminal;
-  await waitForTimelineResult(cdp, participantResultText);
-  await waitForRenderedMarkdown(cdp);
-  const ui = await readUiState(cdp);
-  assert.equal(ui.connectionState, "Synced");
-  assert.equal(ui.outboxStatuses.length, 1);
-  assert.equal(ui.outboxStatuses[0], "acked");
-  assert.equal(ui.activeScreenLabel, "Chat timeline");
-  assert.ok(ui.rows.some((row) =>
-    row.author === "you" &&
-    row.content === "browser staging relay QA" &&
-    row.status === "Sent"
-  ), "PWA must show the phone-originated command as sent.");
-  assert.ok(ui.rows.some((row) =>
-    row.author === "agent" &&
-    row.handle === "@cloud-staging" &&
-    row.content === participantResultText &&
-    row.status === "Done"
-  ), "PWA must show the cloud participant result from the relay timeline.");
+  if (mentionShortcutOnly) {
+    await cdp.fill("#composer-input", "Mention ");
+    await cdp.touchStart("#mention-button");
+    const pointerFocus = await cdp.evaluate(`document.activeElement?.id`);
+    assert.equal(pointerFocus.result.value, "composer-input");
+    await cdp.touchEnd();
+    const screenshotState = await cdp.evaluate(`(() => ({
+      value: document.querySelector("#composer-input")?.value,
+      menuHidden: document.querySelector("#mention-menu")?.hidden,
+      optionCount: document.querySelectorAll("#mention-menu .mobile-mention-option").length
+    }))()`);
+    assert.deepEqual(screenshotState.result.value, {
+      value: "Mention @",
+      menuHidden: false,
+      optionCount: 2
+    });
+    await cdp.evaluate(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+    const screenshot = await cdp.screenshot({ timeoutMs: 10_000 });
+    const screenshotPath = path.join(os.tmpdir(), `accordagents-mobile-mention-staging-${Date.now()}.png`);
+    await writeFile(screenshotPath, screenshot.data);
+    console.log(JSON.stringify({
+      status: "PASS",
+      mode: "mention-shortcut",
+      relayUrl,
+      staticOriginUrl,
+      rendezvousId: pairing.rendezvousId,
+      messageId: opened.events[0].eventId,
+      relayRoundTrip: true,
+      mentionShortcut,
+      screenshotState: screenshotState.result.value,
+      composerGeometry: {
+        height: mentionShortcut.composerHeight,
+        padding: mentionShortcut.composerPadding
+      },
+      screenshotPath
+    }, null, 2));
+  } else {
+    const runningTimelinePayload = {
+      type: "mobile.timeline.events",
+      conversationId,
+      events: [{
+        id: `participant-running-${opened.events[0].eventId}`,
+        role: "participant",
+        participantLabel: "@cloud-staging",
+        content: "@cloud-staging is running...",
+        status: "pending",
+        createdAt: new Date(Date.now() + 500).toISOString(),
+        runId: "cloud-run-staging-qa",
+        messageId: `message-running-${opened.events[0].eventId}`,
+        mobileEventId: opened.events[0].eventId
+      }]
+    };
+    await desktop.sendCiphertext({
+      logicalMessageId: `timeline-running:${opened.events[0].eventId}`,
+      ciphertext: await sealMobileRelayPayload(runningTimelinePayload, pairing.relaySealKeyBase64),
+      cursor: `${desktopMessage.logicalMessageId}:ack`
+    });
+    const stableRunning = await waitForStableRunningRow(cdp, runningTimelinePayload);
+    const stableTerminal = waitForStableParticipantResultRow(cdp, participantResultText);
+    const timeline = await sealMobileRelayPayload({
+      type: "mobile.timeline.events",
+      conversationId,
+      events: [{
+        id: `participant-${opened.events[0].eventId}`,
+        role: "participant",
+        participantLabel: "@cloud-staging",
+        content: participantResultText,
+        status: "done",
+        createdAt: new Date(Date.now() + 1000).toISOString(),
+        runId: "cloud-run-staging-qa",
+        messageId: `message-${opened.events[0].eventId}`,
+        mobileEventId: opened.events[0].eventId
+      }, {
+        id: `participant-markdown-${opened.events[0].eventId}`,
+        role: "participant",
+        participantLabel: "@cloud-staging",
+        content: markdownResultText,
+        status: "done",
+        createdAt: new Date(Date.now() + 1500).toISOString(),
+        runId: "cloud-run-staging-markdown-qa",
+        messageId: `message-markdown-${opened.events[0].eventId}`
+      }]
+    }, pairing.relaySealKeyBase64);
+    await desktop.sendCiphertext({
+      logicalMessageId: `timeline:${opened.events[0].eventId}`,
+      ciphertext: timeline,
+      cursor: `${desktopMessage.logicalMessageId}:ack`
+    });
+    const stableParticipantResult = await stableTerminal;
+    await waitForTimelineResult(cdp, participantResultText);
+    await waitForRenderedMarkdown(cdp);
+    const ui = await readUiState(cdp);
+    assert.equal(ui.connectionState, "Synced");
+    assert.equal(ui.outboxStatuses.length, 1);
+    assert.equal(ui.outboxStatuses[0], "acked");
+    assert.equal(ui.activeScreenLabel, "Chat timeline");
+    assert.ok(ui.rows.some((row) =>
+      row.author === "you" &&
+      row.content === "browser staging relay QA" &&
+      row.status === "Sent"
+    ), "PWA must show the phone-originated command as sent.");
+    assert.ok(ui.rows.some((row) =>
+      row.author === "agent" &&
+      row.handle === "@cloud-staging" &&
+      row.content === participantResultText &&
+      row.status === "Done"
+    ), "PWA must show the cloud participant result from the relay timeline.");
 
-  const offlineRetry = await runOfflineRetryScenario(cdp, conversationId);
+    const offlineRetry = await runOfflineRetryScenario(cdp, conversationId);
 
-  const screenshot = await cdp.screenshot({ timeoutMs: 10_000 });
-  const screenshotPath = path.join(os.tmpdir(), `accordagents-mobile-pwa-staging-${Date.now()}.png`);
-  await writeFile(screenshotPath, screenshot.data);
-  const designContract = await assertMobilePwaDesignContract(cdp);
+    const screenshot = await cdp.screenshot({ timeoutMs: 10_000 });
+    const screenshotPath = path.join(os.tmpdir(), `accordagents-mobile-pwa-staging-${Date.now()}.png`);
+    await writeFile(screenshotPath, screenshot.data);
+    const designContract = await assertMobilePwaDesignContract(cdp);
 
-  console.log(JSON.stringify({
-    status: "PASS",
-    relayUrl,
-    staticOriginUrl,
-    rendezvousId: pairing.rendezvousId,
-    messageId: opened.events[0].eventId,
-    offlineRetry,
-    participantResultText,
-    stableRunning,
-    stableParticipantResult,
-    markdownRendered: true,
-    designContract,
-    screenshotPath
-  }, null, 2));
+    console.log(JSON.stringify({
+      status: "PASS",
+      relayUrl,
+      staticOriginUrl,
+      rendezvousId: pairing.rendezvousId,
+      messageId: opened.events[0].eventId,
+      offlineRetry,
+      participantResultText,
+      stableRunning,
+      stableParticipantResult,
+      markdownRendered: true,
+      mentionShortcut,
+      designContract,
+      screenshotPath
+    }, null, 2));
+  }
 } finally {
   cdp?.close();
   desktop?.close();
@@ -228,7 +269,114 @@ try {
     chrome.kill("SIGTERM");
     await waitForProcessExit(chrome, 5_000);
   }
-  await rm(profileDir, { recursive: true, force: true });
+  await rm(profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+}
+
+async function assertMentionShortcut(client) {
+  const composerBefore = await client.evaluate(`(() => {
+    const composer = document.querySelector("#composer-form");
+    const wrap = document.querySelector(".composer-input-wrap");
+    const input = document.querySelector("#composer-input");
+    const button = document.querySelector("#mention-button");
+    input.value = "";
+    input.focus();
+    input.setSelectionRange(0, 0);
+    return {
+      height: composer.getBoundingClientRect().height,
+      padding: getComputedStyle(composer).padding,
+      wrapHeight: wrap.getBoundingClientRect().height,
+      inputHeight: input.getBoundingClientRect().height,
+      buttonHeight: button.getBoundingClientRect().height
+    };
+  })()`);
+  assert.equal(composerBefore.result.value.wrapHeight, 46);
+  assert.equal(composerBefore.result.value.inputHeight, 44);
+  assert.equal(composerBefore.result.value.buttonHeight, 44);
+  await client.touchStart("#mention-button");
+  const emptyPointerFocus = await client.evaluate(`document.activeElement?.id`);
+  assert.equal(emptyPointerFocus.result.value, "composer-input");
+  await client.touchEnd();
+  const empty = await client.evaluate(`(() => ({
+    activeElement: document.activeElement?.id,
+    buttonTag: document.querySelector("#mention-button")?.tagName,
+    buttonLabel: document.querySelector("#mention-button")?.getAttribute("aria-label"),
+    inputValue: document.querySelector("#composer-input")?.value,
+    caret: document.querySelector("#composer-input")?.selectionStart,
+    menuHidden: document.querySelector("#mention-menu")?.hidden,
+    optionCount: document.querySelectorAll("#mention-menu .mobile-mention-option").length
+  }))()`);
+  assert.equal(empty.result.value.activeElement, "composer-input");
+  assert.equal(empty.result.value.buttonTag, "BUTTON");
+  assert.equal(empty.result.value.buttonLabel, "Mention a member");
+  assert.equal(empty.result.value.inputValue, "@");
+  assert.equal(empty.result.value.caret, 1);
+  assert.equal(empty.result.value.menuHidden, false);
+  assert.ok(empty.result.value.optionCount >= 2);
+  await client.touchStart("#mention-option-0");
+  const emptyOptionPointerFocus = await client.evaluate(`document.activeElement?.id`);
+  assert.equal(emptyOptionPointerFocus.result.value, "composer-input");
+  await client.touchEnd();
+  const emptySelection = await client.evaluate(`(() => ({
+    activeElement: document.activeElement?.id,
+    inputValue: document.querySelector("#composer-input")?.value
+  }))()`);
+  assert.equal(emptySelection.result.value.activeElement, "composer-input");
+  assert.match(emptySelection.result.value.inputValue, /^@[^ ]+ $/);
+
+  await client.evaluate(`(() => {
+    const input = document.querySelector("#composer-input");
+    input.value = "Draft text";
+    input.focus();
+    input.setSelectionRange(5, 5);
+  })()`);
+  await client.touchStart("#mention-button");
+  const existingPointerFocus = await client.evaluate(`document.activeElement?.id`);
+  assert.equal(existingPointerFocus.result.value, "composer-input");
+  await client.touchEnd();
+  const existing = await client.evaluate(`(() => ({
+    activeElement: document.activeElement?.id,
+    inputValue: document.querySelector("#composer-input")?.value,
+    caret: document.querySelector("#composer-input")?.selectionStart,
+    menuHidden: document.querySelector("#mention-menu")?.hidden
+  }))()`);
+  assert.deepEqual(existing.result.value, {
+    activeElement: "composer-input",
+    inputValue: "Draft @ text",
+    caret: 7,
+    menuHidden: false
+  });
+  await client.touchStart("#mention-option-0");
+  await client.touchEnd();
+  const selected = await client.evaluate(`(() => {
+    const composer = document.querySelector("#composer-form");
+    const input = document.querySelector("#composer-input");
+    const value = {
+      activeElement: document.activeElement?.id,
+      inputValue: input.value,
+      caret: input.selectionStart,
+      height: composer.getBoundingClientRect().height,
+      padding: getComputedStyle(composer).padding
+    };
+    input.value = "";
+    return value;
+  })()`);
+  assert.equal(selected.result.value.activeElement, "composer-input");
+  const selectedMatch = /^Draft @([^ ]+) text$/.exec(selected.result.value.inputValue);
+  assert.ok(selectedMatch, "member selection must preserve text after the caret");
+  assert.equal(selected.result.value.caret, "Draft @".length + selectedMatch[1].length + 1);
+  assert.equal(selected.result.value.height, composerBefore.result.value.height);
+  assert.equal(selected.result.value.padding, composerBefore.result.value.padding);
+  return {
+    emptyOptions: empty.result.value.optionCount,
+    focusPreserved: [
+      emptyPointerFocus.result.value,
+      emptyOptionPointerFocus.result.value,
+      existingPointerFocus.result.value
+    ].every((id) => id === "composer-input"),
+    existingTextInsertion: selected.result.value.inputValue,
+    composerHeight: selected.result.value.height,
+    composerPadding: selected.result.value.padding
+  };
 }
 
 async function runOfflineRetryScenario(client, conversationId) {
