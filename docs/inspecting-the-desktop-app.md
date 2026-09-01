@@ -69,12 +69,9 @@ The `npm run dev` (and `make dev`) flow does **not** enable CDP by default. Two 
 
 ### Option A — one-shot relaunch with the debug flag
 
-If the app isn't already running with port 9222 open and you are not using the current Electron instance as your AccordAgents Chat host, quit the existing instance for this repo and start fresh:
+If the app isn't already running with port 9222 open and you are not using the current Electron instance as your AccordAgents Chat host, identify the existing instance by its repo path and stop only that exact PID. Never use a broad `pkill -f electron`: it can kill the app hosting the current chat.
 
 ```bash
-# Quit the current instance (if any) — find by repo path
-pkill -f "electron .*accordagents" 2>/dev/null
-
 # Relaunch with the debug port
 cd /path/to/AccordAgents
 npx concurrently -k \
@@ -215,6 +212,45 @@ Screenshots → `screenshots/<descriptive-name>.png` in the repo root. `screensh
 - It is fine to seed saved participants or fixture data through app APIs when setup would otherwise be noisy, but the behavior under test should still be driven through visible UI controls.
 - Slash skill discovery is async. After typing `/name`, wait until the picker has a matching option or an explicit empty/error state before asserting that no skill appeared. Early DOM reads can see an empty picker before `skills:search` returns.
 
+## Validate Electron in a worktree
+
+Before launching from a fresh worktree, verify that npm actually installed the
+Electron binary:
+
+```bash
+test -f node_modules/electron/path.txt
+test -x node_modules/electron/dist/Electron.app/Contents/MacOS/Electron
+codesign --verify --deep --strict --verbose=2 \
+  node_modules/electron/dist/Electron.app
+```
+
+With npm 11, `npm rebuild electron` can print `rebuilt dependencies
+successfully` while also warning that Electron is not covered by
+`allowScripts`; in that case the postinstall did not run. Run the repair once,
+with foreground output, and repeat all three checks:
+
+```bash
+npm rebuild electron --foreground-scripts --dangerously-allow-all-scripts
+```
+
+This command is scoped to the installed `electron` package and does not add an
+`allowScripts` policy to the repository. Do not accept the success line as
+proof: the file and signature checks are the completion gate.
+
+If the worktree copy is still incomplete, do not keep repeating the install.
+Use `node_modules/electron/cli.js` from another AccordAgents checkout only after
+confirming both checkouts resolve the exact same Electron version:
+
+```bash
+FALLBACK_REPO=/path/to/known-good/AccordAgents
+test "$(node -p "require('./node_modules/electron/package.json').version")" = \
+  "$(cd "$FALLBACK_REPO" && node -p "require('./node_modules/electron/package.json').version")"
+ELECTRON_CLI="$FALLBACK_REPO/node_modules/electron/cli.js"
+```
+
+The fallback supplies only the Electron runtime; the final app path passed to
+Electron must still be the worktree under test.
+
 ## Isolated-instance screenshots (backgrounded window throttling)
 
 When the live app is the AccordAgents Chat host you must not disturb, QA a **separate** isolated
@@ -240,6 +276,69 @@ VITE_DEV_SERVER_URL=http://127.0.0.1:5173 \
 - Stop **only your own** instance when done: match by your unique `--user-data-dir`/port
   (`pgrep -f "user-data-dir=/tmp/accord-qa"`) and `kill` those pids. Never `pkill -f electron` — that kills the
   chat host you are talking through.
+
+## Detached macOS instance for the user
+
+Use this when the user asks for a test instance that must remain open after the
+agent shell exits. `nohup` is not sufficient under provider session cleanup.
+Launch a named `launchd` job with an absolute Node executable, a dedicated
+profile, a unique CDP port, and explicit logs:
+
+```bash
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+QA_DIR="$(mktemp -d /private/tmp/accordagents-qa.XXXXXX)"
+QA_PORT=9340 # Choose a port not used by any existing AccordAgents instance.
+QA_LABEL="com.accordagents.qa-$QA_PORT"
+QA_LOG="$QA_DIR/electron.log"
+NODE_BIN="$(command -v node)"
+ELECTRON_CLI="${ELECTRON_CLI:-$REPO_ROOT/node_modules/electron/cli.js}"
+test -f "$ELECTRON_CLI"
+```
+
+Before submitting, confirm that both the port and label are unused. If either
+command succeeds, choose another port and label; never remove a job you did not
+start:
+
+```bash
+curl -fsS --max-time 2 "http://127.0.0.1:$QA_PORT/json/version"
+launchctl print "gui/$(id -u)/$QA_LABEL"
+```
+
+Both checks should fail with connection-refused/not-found. Then submit the job:
+
+```bash
+launchctl submit -l "$QA_LABEL" -o "$QA_LOG" -e "$QA_LOG" -- \
+  /usr/bin/env ACCORDAGENTS_USER_DATA_DIR="$QA_DIR" \
+  "$NODE_BIN" "$ELECTRON_CLI" \
+  --remote-debugging-port="$QA_PORT" "$REPO_ROOT" \
+  --user-data-dir="$QA_DIR" \
+  --disable-backgrounding-occluded-windows \
+  --disable-renderer-backgrounding \
+  --disable-background-timer-throttling
+```
+
+Do not pass `node_modules/.bin/electron` to `launchctl`: that wrapper uses
+`#!/usr/bin/env node`, while a submitted job normally has only
+`/usr/bin:/bin:/usr/sbin:/sbin` in `PATH`, so it exits `127` with
+`env: node: No such file or directory`.
+
+Verify both the job and the real renderer before reporting success:
+
+```bash
+launchctl print "gui/$(id -u)/$QA_LABEL" | rg "state =|pid =|last exit code"
+curl -sS --retry 10 --retry-connrefused --retry-delay 1 --max-time 2 \
+  "http://127.0.0.1:$QA_PORT/json/version"
+curl -sS --max-time 2 "http://127.0.0.1:$QA_PORT/json" | \
+  jq -r '.[] | select(.type=="page") | .title'
+```
+
+Report the label, PID, port, profile directory, and log path. Leave the job
+running when the user asked to use it; for a temporary QA job, stop only the
+exact label and confirm its CDP port is closed:
+
+```bash
+launchctl remove "$QA_LABEL"
+```
 
 ## Sanity check
 
