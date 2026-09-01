@@ -454,7 +454,7 @@ function normalizedExtraReadableDirs(dirs: string[] | undefined): string[] {
   return normalized;
 }
 
-function insertCodexOptionBeforePrompt(args: string[], resuming: boolean, ...items: string[]): void {
+export function insertCodexOptionBeforePrompt(args: string[], resuming: boolean, ...items: string[]): void {
   const promptIndex = resuming ? Math.max(args.length - 2, 2) : Math.max(args.length - 1, 1);
   args.splice(promptIndex, 0, ...items);
 }

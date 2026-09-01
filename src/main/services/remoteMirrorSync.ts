@@ -28,6 +28,8 @@ export const DEFAULT_MIRROR_EXCLUDES = [
 const ANY_DEPTH_MIRROR_EXCLUDE_SET = new Set<string>(ANY_DEPTH_MIRROR_EXCLUDES);
 const TOP_LEVEL_MIRROR_EXCLUDE_SET = new Set<string>(TOP_LEVEL_MIRROR_EXCLUDES);
 const UP_SYNC_EXCLUDE_ARGS = [
+  "--include=/.agents/skills/***",
+  "--include=/.claude/skills/***",
   ...ANY_DEPTH_MIRROR_EXCLUDES.map((entry) => `--exclude=${entry}`),
   ...TOP_LEVEL_MIRROR_EXCLUDES.map((entry) => `--exclude=/${entry}/***`)
 ];
@@ -51,6 +53,7 @@ export interface RemoteMirrorSyncRequest {
   remotePath: string;
   signal?: AbortSignal;
   timeoutMs?: number;
+  contentMode?: "repository" | "exact";
   onProgress?: (progress: RemoteMirrorSyncProgress) => void | Promise<void>;
 }
 
@@ -223,7 +226,8 @@ export const defaultRemoteMirrorSync: RemoteMirrorSyncRunner = {
         progressArgs,
         rshCommand: rsyncRshCommand(sshArgs),
         source: `${localDir}/`,
-        destination: `${target}:${escapeRemoteRsyncPath(request.remotePath)}/`
+        destination: `${target}:${escapeRemoteRsyncPath(request.remotePath)}/`,
+        contentMode: request.contentMode
       }), {
         timeoutMs: request.timeoutMs ?? REMOTE_MIRROR_SYNC_TIMEOUT_MS,
         signal: request.signal,
@@ -418,6 +422,13 @@ function decodeIndexV4RemoveCount(
 }
 
 function isMirrorEntryExcluded(relativeDir: string, name: string): boolean {
+  const candidate = relativeDir ? `${relativeDir}/${name}` : name;
+  if (
+    candidate === ".agents/skills" || candidate.startsWith(".agents/skills/") ||
+    candidate === ".claude/skills" || candidate.startsWith(".claude/skills/")
+  ) {
+    return false;
+  }
   return ANY_DEPTH_MIRROR_EXCLUDE_SET.has(name) ||
     (!relativeDir && TOP_LEVEL_MIRROR_EXCLUDE_SET.has(name));
 }
@@ -448,7 +459,7 @@ async function assertRemoteMirrorHasSpace(
   target: string,
   sshArgs: string[]
 ): Promise<void> {
-  const localBytes = await estimateLocalMirrorPayloadBytes(localDir);
+  const localBytes = await estimateLocalMirrorPayloadBytes(localDir, request.contentMode ?? "repository");
   if (localBytes === undefined) {
     return;
   }
@@ -468,7 +479,10 @@ async function assertRemoteMirrorHasSpace(
   }));
 }
 
-async function estimateLocalMirrorPayloadBytes(localDir: string): Promise<number | undefined> {
+async function estimateLocalMirrorPayloadBytes(
+  localDir: string,
+  contentMode: "repository" | "exact"
+): Promise<number | undefined> {
   let total = 0;
   const stack = [localDir];
   try {
@@ -476,7 +490,7 @@ async function estimateLocalMirrorPayloadBytes(localDir: string): Promise<number
       const current = stack.pop() as string;
       for (const entry of await fs.promises.readdir(current, { withFileTypes: true })) {
         const relativeDir = path.relative(localDir, current).split(path.sep).join("/");
-        if (isMirrorEntryExcluded(relativeDir, entry.name)) {
+        if (contentMode === "repository" && isMirrorEntryExcluded(relativeDir, entry.name)) {
           continue;
         }
         const fullPath = path.join(current, entry.name);
@@ -647,7 +661,19 @@ export function buildMirrorUpSyncRsyncArgs(params: {
   rshCommand: string;
   source: string;
   destination: string;
+  contentMode?: "repository" | "exact";
 }): string[] {
+  if (params.contentMode === "exact") {
+    return [
+      "-az",
+      "--delete",
+      ...params.progressArgs,
+      "-e",
+      params.rshCommand,
+      params.source,
+      params.destination
+    ];
+  }
   return [
     "-az",
     "--delete",

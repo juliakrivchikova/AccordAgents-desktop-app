@@ -43,6 +43,7 @@ import {
   remoteMirrorSlug
 } from "./remoteMirrorSync";
 import type { RemoteMirrorSyncRequest, RemoteMirrorSyncRunner } from "./remoteMirrorSync";
+import type { RemoteAgentSetupSyncRunner } from "./remoteAgentSetup";
 import {
   forwardedDesktopEnvironment,
   MAX_MIRROR_SYNC_STATE_ENTRIES,
@@ -401,6 +402,142 @@ test("detached remote run invokes Claude Code with the worker Claude path", asyn
     "default"
   ]);
   assert.equal(launch.invocation.args.includes("/opt/codex/bin/codex"), false);
+});
+
+test("detached remote runs activate portable setup and apply provider invocation config", async () => {
+  const syncCalls: Array<{ host: string; codexHome?: string; claudeConfigDir?: string }> = [];
+  const agentSetupSync: RemoteAgentSetupSyncRunner = {
+    async sync(request) {
+      syncCalls.push({
+        host: request.worker.host,
+        codexHome: request.sourceEnvironment?.CODEX_HOME,
+        claudeConfigDir: request.sourceEnvironment?.CLAUDE_CONFIG_DIR
+      });
+      return {
+        fingerprint: "portable-fingerprint",
+        codexConfigOverrides: ["features.js_repl=false"],
+        claudeMcpServers: {
+          docs: { type: "http", url: "https://example.test/mcp" }
+        }
+      };
+    }
+  };
+
+  const codexParticipant = chatParticipant();
+  const codexConversation = chatConversation([codexParticipant]);
+  const codexWorker = new FakeDetachedWorkerTransport();
+  const { remote: codexRemote } = await testRemoteRun({
+    conversation: codexConversation,
+    detachedWorkerTransport: codexWorker,
+    agentSetupSync
+  });
+  await codexRemote.startDetachedRun({
+    conversationId: codexConversation.id,
+    runId: "portable-codex-run",
+    participant: participantConfig(codexParticipant),
+    prompt: "Use portable setup.",
+    worker: { host: "codex.worker" },
+    options: {
+      extraEnv: {
+        CODEX_HOME: "/Users/developer/custom-codex",
+        CLAUDE_CONFIG_DIR: "/Users/developer/custom-claude"
+      }
+    }
+  });
+  const codexArgs = codexWorker.launchRequests[0].invocation.args;
+  assert.ok(codexArgs.some((value, index) => value === "-c" && codexArgs[index + 1] === "features.js_repl=false"));
+  assert.equal(codexWorker.launchRequests[0].invocation.env?.CODEX_HOME, undefined);
+  assert.equal(codexWorker.launchRequests[0].invocation.env?.CLAUDE_CONFIG_DIR, undefined);
+
+  const claudeParticipant = { ...chatParticipant(), kind: "claude-code" as const };
+  const claudeConversation = chatConversation([claudeParticipant]);
+  const claudeWorker = new FakeDetachedWorkerTransport();
+  const { remote: claudeRemote } = await testRemoteRun({
+    conversation: claudeConversation,
+    detachedWorkerTransport: claudeWorker,
+    agentSetupSync
+  });
+  await claudeRemote.startDetachedRun({
+    conversationId: claudeConversation.id,
+    runId: "portable-claude-run",
+    participant: participantConfig(claudeParticipant),
+    prompt: "Use portable setup.",
+    worker: { host: "claude.worker" },
+    options: {
+      appMcp: { url: "http://127.0.0.1:1234/mcp", token: "run-token" }
+    }
+  });
+  const claudeArgs = claudeWorker.launchRequests[0].invocation.args;
+  const mcpConfig = JSON.parse(claudeArgs[claudeArgs.indexOf("--mcp-config") + 1]) as {
+    mcpServers: Record<string, unknown>;
+  };
+  assert.equal(claudeArgs.includes("--settings"), false);
+  assert.deepEqual(Object.keys(mcpConfig.mcpServers).sort(), ["accord_agents", "docs"]);
+  assert.deepEqual(syncCalls, [
+    {
+      host: "codex.worker",
+      codexHome: "/Users/developer/custom-codex",
+      claudeConfigDir: "/Users/developer/custom-claude"
+    },
+    { host: "claude.worker", codexHome: undefined, claudeConfigDir: undefined }
+  ]);
+});
+
+test("portable setup advisories are visible and setup failure does not trigger a worker retry", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const worker = new FakeDetachedWorkerTransport();
+  const advisories: string[] = [];
+  const { remote } = await testRemoteRun({
+    conversation,
+    detachedWorkerTransport: worker,
+    agentSetupSync: {
+      async sync() {
+        throw new Error("setup transport unavailable");
+      }
+    }
+  });
+
+  const state = await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "portable-setup-advisory-run",
+    participant: participantConfig(participant),
+    prompt: "Continue with a visible setup advisory.",
+    worker: { host: "worker.example" },
+    onAgentSetupAdvisory: (message) => advisories.push(message)
+  });
+
+  assert.equal(state.status, "running");
+  assert.equal(worker.launches, 1);
+  assert.equal(advisories.length, 1);
+  assert.match(advisories[0], /setup transport unavailable/);
+});
+
+test("portable setup cancellation aborts before remote launch", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const worker = new FakeDetachedWorkerTransport();
+  const controller = new AbortController();
+  controller.abort(new Error("cancel setup"));
+  const { remote } = await testRemoteRun({
+    conversation,
+    detachedWorkerTransport: worker,
+    agentSetupSync: {
+      async sync() {
+        throw new DOMException("cancel setup", "AbortError");
+      }
+    }
+  });
+
+  await assert.rejects(remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "portable-setup-cancelled-run",
+    participant: participantConfig(participant),
+    prompt: "Cancel before launch.",
+    worker: { host: "worker.example" },
+    signal: controller.signal
+  }), /cancel setup/);
+  assert.equal(worker.launches, 0);
 });
 
 test("remote Claude auto mode keeps Bash available for provider-owned approval", async () => {
@@ -2825,6 +2962,8 @@ test("forwardedDesktopEnvironment strips machine-specific vars and keeps the res
     ACCORD_AGENTS_MCP_TOKEN: "internal",
     GH_TOKEN: "gh-secret",
     GITHUB_TOKEN: "gh-secret-2",
+    CODEX_HOME: "/Users/dev/.codex-custom",
+    CLAUDE_CONFIG_DIR: "/Users/dev/.claude-custom",
     AWS_PROFILE: "work",
     MY_PROJECT_FLAG: "on"
   });
@@ -2865,6 +3004,8 @@ test("detached run forwards desktop env with app-MCP token precedence", async ()
           AA_TEST_MANUAL_SECRET: "manual-secret",
           GH_TOKEN: "gh-secret",
           GITHUB_TOKEN: "github-secret",
+          CODEX_HOME: "/Users/dev/.codex-override",
+          CLAUDE_CONFIG_DIR: "/Users/dev/.claude-override",
           PATH: "/manual/bin",
           ACCORD_AGENTS_INTERNAL: "must-not-forward"
         },
@@ -2889,6 +3030,8 @@ test("detached run forwards desktop env with app-MCP token precedence", async ()
   assert.equal(env.ACCORD_AGENTS_INTERNAL, undefined);
   assert.equal(env.PATH, undefined);
   assert.equal(env.HOME, undefined);
+  assert.equal(env.CODEX_HOME, undefined);
+  assert.equal(env.CLAUDE_CONFIG_DIR, undefined);
 });
 
 test("real remote codex run falls back to parsed stdout when final output is missing", async () => {
@@ -3134,6 +3277,7 @@ async function testRemoteRun(options: {
   codexExecutor?: RemoteCodexExecutor;
   detachedWorkerTransport?: RemoteDetachedWorkerTransport;
   mirrorSync?: RemoteMirrorSyncRunner;
+  agentSetupSync?: RemoteAgentSetupSyncRunner;
   remoteGitDirProbe?: (worker: unknown, gitDirPath: string) => Promise<boolean>;
   remoteMirrorProbe?: (worker: unknown, remotePath: string, expectGit: boolean) => Promise<boolean>;
   enumerateWorkerMirrors?: (worker: unknown, mirrorsDir: string) => Promise<any[]>;
@@ -3211,6 +3355,7 @@ async function testRemoteRun(options: {
     codexExecutor: options.codexExecutor,
     detachedWorkerTransport: options.detachedWorkerTransport,
     mirrorSync: options.mirrorSync,
+    agentSetupSync: options.agentSetupSync,
     remoteGitDirProbe: options.remoteGitDirProbe as never,
     // A worker only holds what was actually put there. Defaulting this to "yes,
     // it is there" made every first run look like a re-run, which hid the fact

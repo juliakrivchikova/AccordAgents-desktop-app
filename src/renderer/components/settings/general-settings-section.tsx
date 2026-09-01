@@ -418,6 +418,15 @@ function CloudRunsControl(props: {
         </div>
       </div>
       <div className="gen-card-divider" />
+      <div className="gen-row gen-row-stack">
+        <div className="gen-row-text">
+          <div className="gen-row-title">Portable user setup</div>
+          <div className="gen-row-desc">
+            Qualifying global skills, their scripts and assets, global rules, and safe MCP/feature declarations are staged in the OS temporary directory, then copied to the worker at {draft.mode === "aws" ? "~/.accordagents/remote-runs/agent-setup" : "<worker root>/agent-setup"}. Replaced snapshots and unclaimed collision backups are retained for eight days; backups of replaced worker files remain until their managed link is removed. Known auth files, .env files, provider session state, and unsafe config declarations are excluded, but other files inside a skill are copied verbatim, so do not store secrets in skill directories.
+          </div>
+        </div>
+      </div>
+      <div className="gen-card-divider" />
       {draft.mode === "aws" ? (
         <SharedAwsWorkerPanel
           settings={draft}

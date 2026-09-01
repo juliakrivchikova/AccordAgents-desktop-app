@@ -173,6 +173,7 @@ import {
 } from "./services/mobileMailboxRunner";
 import { ProviderRunner } from "./services/providers";
 import { RemoteRunService } from "./services/remoteRuns";
+import { DefaultRemoteAgentSetupSync } from "./services/remoteAgentSetup";
 import { RemoteRunCoordinator } from "./services/remoteRunCoordinator";
 import { LocalFileOpenerService } from "./services/localFileOpener";
 import { SettingsService } from "./services/settings";
@@ -337,6 +338,11 @@ function emitReviewProgress(progress: ReviewProgress): void {
 }
 
 const remoteRunService = new RemoteRunService(chatService, {
+  agentSetupSync: new DefaultRemoteAgentSetupSync({
+    logger: (event, payload) => {
+      void debugLogService.write(event, payload);
+    }
+  }),
   syncLogger: (event, payload) => {
     void debugLogService.write(event, payload);
   }
