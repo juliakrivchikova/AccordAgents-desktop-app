@@ -33,7 +33,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v61/);
+  assert.match(worker, /accordagents-mobile-shell-v62/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -211,8 +211,15 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /function timelineAttachmentsFromEvent\(event\)/);
   assert.match(app, /if \(!content && attachments\.length === 0\)/);
   assert.match(app, /type: "mobile\.attachment\.request"/);
-  assert.match(app, /attachmentDataUrls\.set\(attachment\.id, result\)/);
+  assert.match(app, /function rememberAttachmentResult\(attachmentId, result\)/);
   assert.match(css, /\.message-image \{/);
+  // A replaced element renders no pseudo-element, so the failure reason has to
+  // live in its own node or the reader is shown an empty box.
+  assert.match(css, /\.message-image-note \{/);
+  assert.doesNotMatch(css, /\.message-image\[data-state="[a-z-]+"\]::after/);
+  assert.match(app, /function applyAttachmentResult\(image, result\)/);
+  assert.match(app, /ATTACHMENT_CACHE_MAX_ENTRIES/);
+  assert.match(app, /MOBILE_UPLOAD_MAX_TOTAL_BYTES/);
   // Sending a picture from the phone: the limits are enforced where the picture
   // is chosen, and a picture with no caption is a message on its own.
   assert.match(html, /id="composer-image-input"[^>]*accept="image\/png,image\/jpeg,image\/webp"/);

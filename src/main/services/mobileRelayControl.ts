@@ -225,6 +225,16 @@ const MOBILE_ATTACHMENT_MAX_BYTES = 4 * 1024 * 1024;
  *  rather than deeper in, where the error would reach nobody. */
 const MOBILE_UPLOAD_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const MOBILE_UPLOAD_MAX_IMAGES = 5;
+/** Five 4 MB pictures would be a 27 MB base64 payload sitting in the phone's
+ *  IndexedDB and going through the relay in one frame. The batch is bounded as
+ *  well as each picture. */
+const MOBILE_UPLOAD_MAX_TOTAL_BYTES = 8 * 1024 * 1024;
+const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
+
+function base64DecodedBytes(value: string): number {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return Math.floor((value.length * 3) / 4) - padding;
+}
 
 export class MobileRelayControlService {
   private readonly client: RelayTunnelClient;
@@ -586,7 +596,7 @@ export class MobileRelayControlService {
         const result = await this.chat.sendMessage(
           {
             conversationId: item.event.conversationId,
-            content: item.event.payload.content,
+            content: typeof item.event.payload.content === "string" ? item.event.payload.content : "",
             ...(imageAttachments.length > 0 ? { imageAttachments } : {}),
             runId: item.runId,
             mobileEventId: item.event.eventId
@@ -1002,6 +1012,9 @@ function timelineEventDeliverySignature(event: MobileTimelineEvent): string {
     role: event.role,
     participantLabel: event.participantLabel ?? "",
     content: event.content,
+    // Without this, a picture arriving on an otherwise unchanged row is
+    // suppressed as already delivered and never reaches the phone.
+    attachments: (event.attachments ?? []).map((attachment) => attachment.id),
     status: event.status,
     runId: event.runId ?? ""
   });
@@ -1022,23 +1035,36 @@ function mobileUploadImages(
   if (!Array.isArray(attachments)) {
     return [];
   }
-  return attachments
-    .filter((attachment) =>
-      Boolean(attachment) &&
-      typeof attachment.dataBase64 === "string" &&
-      attachment.dataBase64.length > 0 &&
-      typeof attachment.mimeType === "string" &&
-      MOBILE_UPLOAD_MIME_TYPES.has(attachment.mimeType) &&
-      // base64 is 4 characters per 3 bytes, so this bounds the decoded size.
-      attachment.dataBase64.length <= Math.ceil(MOBILE_ATTACHMENT_MAX_BYTES / 3) * 4)
-    .slice(0, MOBILE_UPLOAD_MAX_IMAGES)
-    .map((attachment) => ({
+  const accepted: Array<{ filename?: string; mimeType: string; dataBase64: string }> = [];
+  let totalBytes = 0;
+  for (const attachment of attachments) {
+    if (accepted.length >= MOBILE_UPLOAD_MAX_IMAGES) {
+      break;
+    }
+    if (!attachment || typeof attachment.mimeType !== "string" || !MOBILE_UPLOAD_MIME_TYPES.has(attachment.mimeType)) {
+      continue;
+    }
+    const dataBase64 = attachment.dataBase64;
+    // Length alone is not enough: a payload of the right size full of the wrong
+    // characters would reach the decoder before anything noticed.
+    if (typeof dataBase64 !== "string" || dataBase64.length === 0 || dataBase64.length % 4 !== 0 ||
+      !BASE64_PATTERN.test(dataBase64)) {
+      continue;
+    }
+    const bytes = base64DecodedBytes(dataBase64);
+    if (bytes <= 0 || bytes > MOBILE_ATTACHMENT_MAX_BYTES || totalBytes + bytes > MOBILE_UPLOAD_MAX_TOTAL_BYTES) {
+      continue;
+    }
+    totalBytes += bytes;
+    accepted.push({
       ...(typeof attachment.filename === "string" && attachment.filename.trim()
         ? { filename: attachment.filename.trim() }
         : {}),
       mimeType: attachment.mimeType,
-      dataBase64: attachment.dataBase64
-    }));
+      dataBase64
+    });
+  }
+  return accepted;
 }
 
 function isMobileAttachmentRequest(value: unknown): value is MobileAttachmentRequest {
@@ -1089,7 +1115,17 @@ function assertMobileOutboxEvent(value: unknown): asserts value is MobileOutboxE
   if (event.kind !== undefined && event.kind !== "message.created") {
     throw new Error(`Mobile relay outbox event kind is unsupported: ${String(event.kind)}.`);
   }
-  assertNonEmptyString((event.payload as Partial<MobileMessageOutboxEvent["payload"]>).content, "payload.content");
+  const payload = event.payload as Partial<MobileMessageOutboxEvent["payload"]>;
+  // A picture on its own is a message. Demanding text here rejected exactly the
+  // sends the phone's own composer now allows, and the phone would retry them
+  // forever because a rejected event is never acked.
+  if (mobileUploadImages(payload.attachments).length > 0) {
+    if (payload.content !== undefined && typeof payload.content !== "string") {
+      throw new Error("Mobile relay outbox event requires payload.content.");
+    }
+    return;
+  }
+  assertNonEmptyString(payload.content, "payload.content");
 }
 
 function isMobileRunCancelEvent(event: MobileOutboxEvent): event is MobileRunCancelOutboxEvent {

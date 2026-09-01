@@ -510,20 +510,17 @@ textarea {
   border-style: dashed;
 }
 
-.message-image[data-state="unavailable"]::after {
-  content: "Image unavailable";
-}
-
-.message-image[data-state="too-large"]::after {
-  content: "Too large for the phone — open it on the desktop";
-}
-
-.message-image[data-state="unavailable"],
-.message-image[data-state="too-large"] {
-  display: block;
-  padding: 12px 14px;
+/* An <img> renders no pseudo-element, so the reason lives in its own node. */
+.message-image-note {
+  padding: 10px 12px;
+  border: 1px dashed var(--bd);
+  border-radius: 12px;
   font: 400 13px var(--sans);
   color: var(--mut);
+}
+
+.message-image-note[hidden] {
+  display: none;
 }
 
 /* A list that has hit its end must not hand the rest of the gesture to the

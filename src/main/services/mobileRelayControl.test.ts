@@ -2732,3 +2732,90 @@ test("images sent from the phone reach sendMessage, and unusable ones are droppe
   ]);
   service.close();
 });
+
+// Both halves of the caption-less case. The phone's own composer allows a
+// picture with no text, so the desktop validator must too — otherwise the send
+// is rejected, never acked, and the phone retries it forever.
+test("a picture with no caption is accepted from the phone, and a changed picture is not suppressed as already delivered", async () => {
+  const key = Buffer.from("k".repeat(32)).toString("base64url");
+  const sent: SendChatMessageRequest[] = [];
+  const service = new MobileRelayControlService(
+    {
+      relayUrl: "ws://127.0.0.1:1/v1/relay",
+      rendezvousId: "rv-caption-less",
+      relayCapability: "PAIRING-FINGERPRINT",
+      relaySealKeyBase64: key,
+      conversationId: "conversation-1",
+      streamId: "route-caption-less:phone"
+    },
+    {
+      async sendMessage(request: SendChatMessageRequest) {
+        sent.push(request);
+        return {
+          conversation: {
+            id: request.conversationId,
+            kind: "chat" as const,
+            title: "t",
+            createdAt: "2026-09-01T00:00:00.000Z",
+            updatedAt: "2026-09-01T00:00:00.000Z",
+            messages: [],
+            findings: [],
+            metadata: {}
+          },
+          warnings: []
+        } as never;
+      }
+    } as never
+  );
+
+  const accepted = await service.acceptSealedMobileOutbox(await sealMobileRelayPayload({
+    type: "mobile.outbox.events",
+    events: [{
+      eventId: "event-picture-only",
+      conversationId: "conversation-1",
+      payload: {
+        content: "",
+        attachments: [{ filename: "shot.png", mimeType: "image/png", dataBase64: "cG5n" }]
+      }
+    }]
+  }, key));
+  assert.deepEqual(accepted.eventIds, ["event-picture-only"]);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].content, "");
+  assert.equal(sent[0].imageAttachments?.length, 1);
+
+  // Base64 that is the right length but not base64 must not reach the decoder.
+  await assert.rejects(service.acceptSealedMobileOutbox(await sealMobileRelayPayload({
+    type: "mobile.outbox.events",
+    events: [{
+      eventId: "event-not-base64",
+      conversationId: "conversation-1",
+      payload: { content: "", attachments: [{ mimeType: "image/png", dataBase64: "!!!!" }] }
+    }]
+  }, key)));
+
+  // The delivery signature has to notice a picture that appeared on a row whose
+  // text and status never changed.
+  const base = {
+    id: "message-1",
+    role: "participant" as const,
+    content: "same text",
+    status: "done" as const,
+    createdAt: "2026-09-01T00:00:00.000Z"
+  };
+  const withImage = {
+    ...base,
+    attachments: [{ id: "a1", filename: "f.png", mimeType: "image/png", sizeBytes: 3, width: 1, height: 1 }]
+  };
+  assert.notEqual(
+    JSON.stringify(timelineEventsFromSnapshot({
+      id: "c", kind: "chat", title: "t", createdAt: base.createdAt, updatedAt: base.createdAt,
+      messages: [{ ...base, metadata: { imageAttachments: withImage.attachments } }], findings: [], metadata: {}
+    } as never)),
+    JSON.stringify(timelineEventsFromSnapshot({
+      id: "c", kind: "chat", title: "t", createdAt: base.createdAt, updatedAt: base.createdAt,
+      messages: [base], findings: [], metadata: {}
+    } as never))
+  );
+  service.close();
+});

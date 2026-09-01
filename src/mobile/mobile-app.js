@@ -1444,6 +1444,7 @@
   const MOBILE_UPLOAD_MIME_TYPES = ["image/png", "image/jpeg", "image/webp"];
   const MOBILE_UPLOAD_MAX_IMAGES = 5;
   const MOBILE_UPLOAD_MAX_BYTES = 4 * 1024 * 1024;
+  const MOBILE_UPLOAD_MAX_TOTAL_BYTES = 8 * 1024 * 1024;
   let pendingAttachments = [];
 
   function readFileAsBase64(file) {
@@ -1474,6 +1475,15 @@
       }
       if (file.size > MOBILE_UPLOAD_MAX_BYTES) {
         rejected.push(file.name + " — larger than 4 MB");
+        continue;
+      }
+      // Five 4 MB pictures would be a 27 MB base64 payload in IndexedDB and one
+      // relay frame. The batch is bounded as well as each picture.
+      const pendingBytes = pendingAttachments.reduce(function (total, item) {
+        return total + Math.floor((item.dataBase64.length * 3) / 4);
+      }, 0);
+      if (pendingBytes + file.size > MOBILE_UPLOAD_MAX_TOTAL_BYTES) {
+        rejected.push(file.name + " — over the 8 MB total");
         continue;
       }
       try {
@@ -2150,6 +2160,19 @@
   // put the picture through the relay again and again.
   const attachmentDataUrls = new Map();
   const attachmentFetches = new Map();
+  const ATTACHMENT_CACHE_MAX_ENTRIES = 24;
+
+  function rememberAttachmentResult(attachmentId, result) {
+    // Oldest out first. Without a bound, scrolling a long history keeps every
+    // picture ever opened in memory for the life of the session.
+    if (attachmentDataUrls.size >= ATTACHMENT_CACHE_MAX_ENTRIES) {
+      const oldest = attachmentDataUrls.keys().next();
+      if (!oldest.done) {
+        attachmentDataUrls.delete(oldest.value);
+      }
+    }
+    attachmentDataUrls.set(attachmentId, result);
+  }
 
   async function requestAttachmentViaRelay(pairing, conversationId, attachmentId) {
     return sendRelayPayload(pairing, "attachment-" + attachmentId + "-" + createEventId(), {
@@ -2162,8 +2185,7 @@
   function loadAttachmentInto(image, conversationId, attachment) {
     const cached = attachmentDataUrls.get(attachment.id);
     if (cached) {
-      image.src = cached;
-      image.dataset.state = cached === "unavailable" ? "unavailable" : "ready";
+      applyAttachmentResult(image, cached);
       return;
     }
     if (!attachmentFetches.has(attachment.id)) {
@@ -2178,24 +2200,41 @@
         // so instead of spinning forever.
         return payload && typeof payload.reason === "string" ? payload.reason : "unavailable";
       })().catch(function () {
-        return "unavailable";
+        // A dropped connection is not an answer: leave it uncached so opening
+        // the chat again retries instead of showing a permanent failure.
+        return "retry";
       }).then(function (result) {
-        attachmentDataUrls.set(attachment.id, result);
+        if (result !== "retry") {
+          rememberAttachmentResult(attachment.id, result);
+        }
         attachmentFetches.delete(attachment.id);
-        return result;
+        return result === "retry" ? "unavailable" : result;
       }));
     }
     attachmentFetches.get(attachment.id).then(function (result) {
-      if (!image.isConnected) {
-        return;
-      }
-      if (result && result.indexOf("data:") === 0) {
-        image.src = result;
-        image.dataset.state = "ready";
-      } else {
-        image.dataset.state = result === "too-large" ? "too-large" : "unavailable";
+      if (image.isConnected) {
+        applyAttachmentResult(image, result);
       }
     });
+  }
+
+  function applyAttachmentResult(image, result) {
+    if (result && result.indexOf("data:") === 0) {
+      image.src = result;
+      image.dataset.state = "ready";
+      return;
+    }
+    // A replaced element renders no pseudo-element, so the reason goes in a
+    // sibling the reader can actually see.
+    image.dataset.state = result === "too-large" ? "too-large" : "unavailable";
+    image.hidden = true;
+    const note = image.nextElementSibling;
+    if (note && note.classList.contains("message-image-note")) {
+      note.textContent = result === "too-large"
+        ? "Too large for the phone — open it on the desktop"
+        : "Image unavailable";
+      note.hidden = false;
+    }
   }
 
   function renderAttachmentsInto(container, entry) {
@@ -2223,7 +2262,10 @@
         image.width = attachment.width;
         image.height = attachment.height;
       }
-      container.append(image);
+      const note = document.createElement("div");
+      note.className = "message-image-note";
+      note.hidden = true;
+      container.append(image, note);
       loadAttachmentInto(image, entry.conversationId, attachment);
     }
   }
