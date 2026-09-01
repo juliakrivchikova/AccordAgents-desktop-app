@@ -100,6 +100,14 @@ builds and the tests pass is an unfinished change without them. This holds for
 a one-line fix, for a change whose author reported passing tests, for a change
 you wrote yourself, and for every participant, local or in the cloud.
 
+Route every such request through the `implement-change` skill. There is no
+threshold below which it is skipped: a CSS tweak, a copy change, a config
+value and a rename all go through it, and so does the second and third attempt
+at the same defect. "It is one line", "it is only CSS", "I can see it is right
+by reading it" and "the User is waiting" are not reasons — the first three have
+each shipped broken work here, and the fourth is a trade the User gets to make,
+not one to make silently by skipping the step.
+
 End to end means the real thing: the running Electron app for desktop
 behavior, the installed PWA on the phone for phone behavior, against the real
 services involved. A unit test, a headless-browser measurement or a mocked
