@@ -2279,6 +2279,11 @@
   }
 
   function loadAttachmentInto(image, conversationId, attachment) {
+    if (attachment.dataBase64) {
+      // Already in hand — a picture queued on this phone, not yet echoed back.
+      applyAttachmentResult(image, "data:" + attachment.mimeType + ";base64," + attachment.dataBase64);
+      return;
+    }
     const cached = attachmentDataUrls.get(attachment.id);
     if (cached) {
       applyAttachmentResult(image, cached);
@@ -2970,7 +2975,10 @@
         });
         const avatars = document.createElement("div");
         avatars.className = "mobile-chat-avatars";
-        const participants = chat.participants.length > 0 ? chat.participants : [chat.title];
+        // A chat row that arrives without a participants array must not take
+        // the whole list down with it.
+        const chatParticipants = Array.isArray(chat.participants) ? chat.participants : [];
+        const participants = chatParticipants.length > 0 ? chatParticipants : [chat.title];
         participants.slice(0, 2).forEach(function (participant, index) {
           const avatar = document.createElement("span");
           avatar.className = "mobile-chat-avatar";
@@ -3382,8 +3390,21 @@
       return {
         rowKey: "outbox\0" + entry.eventId,
         id: entry.eventId,
+        conversationId: entry.conversationId,
         author: "you",
         content: entry.payload.content,
+        // A picture just sent from this phone shows in its own pending row
+        // rather than only after the desktop echoes it back.
+        attachments: Array.isArray(entry.payload.attachments)
+          ? entry.payload.attachments.map(function (attachment, index) {
+            return {
+              id: "outbox:" + entry.eventId + ":" + index,
+              filename: attachment.filename || "image",
+              mimeType: attachment.mimeType,
+              dataBase64: attachment.dataBase64
+            };
+          })
+          : undefined,
         status: statusText(entry.status),
         createdAt: entry.createdAt
       };
@@ -3391,6 +3412,11 @@
       return {
         rowKey: timelineRenderRowKey(entry),
         id: entry.id,
+        conversationId: entry.conversationId,
+        // The stored entry and the rendered row are different shapes. Carrying
+        // this across is what makes a picture appear at all: it was stored and
+        // then dropped here, so a message with an image rendered as text.
+        attachments: entry.attachments,
         author: entry.role === "you" ? "you" : entry.role === "system" ? "system" : "agent",
         // The desktop publishes the in-progress row the moment it accepts the
         // message, before routing has picked anyone, and can only guess a

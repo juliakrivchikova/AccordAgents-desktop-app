@@ -253,6 +253,49 @@ test("mention shortcut opens the wired menu without taking pointer focus", async
       longEdge: 2576,
       aspectKept: 1.33
     });
+
+    // A message that carries a picture must actually show one on the phone.
+    // The projection, the ingestion and the row rendering are three separate
+    // places this can be lost, so the check goes through the app's own
+    // ingestion and then looks at the rendered DOM.
+    assert.deepEqual(await evaluate(`(async () => {
+      await globalThis.AccordAgentsMobile.handleRelayTimelinePayload({
+        type: "mobile.timeline.events",
+        conversationId: "mention-qa",
+        events: [{
+          id: "picture-row",
+          role: "participant",
+          participantLabel: "@taylor-claude-engineer",
+          content: "",
+          status: "done",
+          createdAt: new Date().toISOString(),
+          attachments: [{
+            id: "attachment-render-check",
+            filename: "shot.png",
+            mimeType: "image/png",
+            sizeBytes: 3,
+            width: 40,
+            height: 20
+          }]
+        }]
+      }, "mention-qa");
+      const stored = await globalThis.AccordAgentsMobile.listTimelineEntries("mention-qa");
+      const row = stored.find((entry) => entry.sourceId === "picture-row");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const images = document.querySelectorAll(".message-images .message-image");
+      return {
+        // A caption-less picture is a message, so the row must survive storage.
+        storedAttachments: row?.attachments?.length ?? 0,
+        renderedImages: images.length,
+        reservedBox: images[0] ? images[0].getAttribute("width") + "x" + images[0].getAttribute("height") : ""
+      };
+    })()`), {
+      storedAttachments: 1,
+      renderedImages: 1,
+      // The box is reserved from the real dimensions so the list does not jump
+      // when the bytes land.
+      reservedBox: "40x20"
+    });
   } finally {
     app?.close();
     chrome.kill("SIGKILL");

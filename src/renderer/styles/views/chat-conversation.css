@@ -4865,11 +4865,13 @@ button.composer-active-run-row-main:focus-visible {
   max-width: min(92vw, 1100px);
 }
 
+/* The picture fits the dialog. Capping only the width left a portrait photo
+   taller than the frame, so opening one meant scrolling to see it. */
 .chat-image-preview-frame {
   display: grid;
   place-items: center;
-  max-height: 72vh;
-  overflow: auto;
+  height: 72vh;
+  overflow: hidden;
   border: 1px solid var(--app-border);
   border-radius: var(--radius-control);
   background: var(--app-surface-subtle);
@@ -4877,7 +4879,10 @@ button.composer-active-run-row-main:focus-visible {
 
 .chat-image-preview-frame img {
   max-width: 100%;
+  max-height: 100%;
+  width: auto;
   height: auto;
+  object-fit: contain;
 }
 
 .chat-mobile-pairing-dialog {

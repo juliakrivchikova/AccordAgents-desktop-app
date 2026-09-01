@@ -33,7 +33,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v64/);
+  assert.match(worker, /accordagents-mobile-shell-v65/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -237,6 +237,9 @@ test("mobile shell builds static installable PWA assets", async () => {
   // Without it the first tap only puts the iOS keyboard away and the button
   // appears to do nothing.
   assert.match(app, /function keepFieldFocusedOnTap\(element\)/);
+  // The stored entry and the rendered row are different shapes; the picture was
+  // stored and then dropped on the way to the row.
+  assert.match(app, /attachments: entry\.attachments,/);
   assert.match(app, /keepFieldFocusedOnTap\(attachButton\)/);
   assert.match(app, /keepFieldFocusedOnTap\(document\.getElementById\("send-button"\)\)/);
   // JPEG has no transparency, so a PNG or WebP must not silently become one.
