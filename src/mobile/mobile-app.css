@@ -405,6 +405,58 @@ textarea {
   color: var(--mut);
 }
 
+/* Pictures in the timeline. The box is reserved from the attachment's real
+   dimensions before the bytes arrive, so the list does not jump under the
+   reader when an image lands. */
+.message-images {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.message-images[hidden] {
+  display: none;
+}
+
+.message-image {
+  width: 100%;
+  height: auto;
+  max-height: 60vh;
+  object-fit: contain;
+  border-radius: 12px;
+  border: 1px solid var(--bd);
+  background: var(--s2);
+}
+
+.message-image[data-state="loading"] {
+  min-height: 120px;
+}
+
+/* An answer, not a spinner: the reader is told why there is no picture. */
+.message-image[data-state="unavailable"],
+.message-image[data-state="too-large"] {
+  min-height: 0;
+  height: auto;
+  border-style: dashed;
+}
+
+.message-image[data-state="unavailable"]::after {
+  content: "Image unavailable";
+}
+
+.message-image[data-state="too-large"]::after {
+  content: "Too large for the phone — open it on the desktop";
+}
+
+.message-image[data-state="unavailable"],
+.message-image[data-state="too-large"] {
+  display: block;
+  padding: 12px 14px;
+  font: 400 13px var(--sans);
+  color: var(--mut);
+}
+
 /* A list that has hit its end must not hand the rest of the gesture to the
    page behind it. */
 .mscroll {

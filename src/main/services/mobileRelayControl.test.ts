@@ -2583,3 +2583,93 @@ test("the phone timeline carries image attachments as metadata, and a caption-le
   assert.equal(events[1].content, "");
   assert.equal(events[1].attachments?.[0].id, "attachment-2");
 });
+
+// The timeline carries only metadata, so this request is the only way a picture
+// reaches the phone at all.
+test("the phone can ask for one image by id, and an oversized one answers with a reason instead of the bytes", async () => {
+  const key = Buffer.from("i".repeat(32)).toString("base64url");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  const reads: Array<{ conversationId: string; attachmentId: string }> = [];
+  const desktop = new MobileRelayControlService(
+    {
+      relayUrl: address.url,
+      rendezvousId: "rv-attachment",
+      relayCapability: "PAIRING-FINGERPRINT",
+      relaySealKeyBase64: key,
+      conversationId: "conversation-1",
+      streamId: "route-attachment:phone"
+    },
+    {
+      async sendMessage() {
+        throw new Error("not used");
+      },
+      async readChatAttachment(request: { conversationId: string; attachmentId: string }) {
+        reads.push(request);
+        if (request.attachmentId === "attachment-huge") {
+          return {
+            attachment: { id: request.attachmentId, mimeType: "image/png", sizeBytes: 9 * 1024 * 1024 },
+            dataBase64: "should-not-be-sent"
+          };
+        }
+        if (request.attachmentId === "attachment-missing") {
+          throw new Error("no such attachment");
+        }
+        return {
+          attachment: { id: request.attachmentId, mimeType: "image/png", sizeBytes: 3 },
+          dataBase64: "cG5n"
+        };
+      }
+    } as never
+  );
+  const phone = new RelayTunnelClient({
+    relayUrl: address.url,
+    rendezvousId: "rv-attachment",
+    role: "phone",
+    capability: "PAIRING-FINGERPRINT",
+    streamId: "route-attachment:phone"
+  });
+  try {
+    const answers = nextMessages(phone, 3);
+    await desktop.connect();
+    await phone.connect();
+    for (const attachmentId of ["attachment-1", "attachment-huge", "attachment-missing"]) {
+      await phone.sendCiphertext({
+        logicalMessageId: `ask-${attachmentId}`,
+        ciphertext: await sealMobileRelayPayload({
+          type: "mobile.attachment.request",
+          conversationId: "conversation-1",
+          attachmentId
+        }, key)
+      });
+    }
+    const payloads = [] as Array<Record<string, unknown>>;
+    for (const message of await answers) {
+      payloads.push(await openMobileRelayPayload<Record<string, unknown>>(message.ciphertext, key));
+    }
+    const byId = new Map(payloads.map((payload) => [payload.attachmentId as string, payload]));
+
+    assert.deepEqual(byId.get("attachment-1"), {
+      type: "mobile.attachment",
+      conversationId: "conversation-1",
+      attachmentId: "attachment-1",
+      mimeType: "image/png",
+      dataBase64: "cG5n"
+    });
+    // Ten megabytes through a phone's relay connection is not a picture, it is
+    // a hang. The reason travels; the bytes do not.
+    assert.equal(byId.get("attachment-huge")?.reason, "too-large");
+    assert.equal(byId.get("attachment-huge")?.dataBase64, undefined);
+    // A deleted id is an ordinary answer, so the phone stops waiting.
+    assert.equal(byId.get("attachment-missing")?.reason, "unavailable");
+    assert.deepEqual(reads.map((read) => read.attachmentId).sort(), [
+      "attachment-1",
+      "attachment-huge",
+      "attachment-missing"
+    ]);
+  } finally {
+    phone.close();
+    desktop.close();
+    await relay.close();
+  }
+});

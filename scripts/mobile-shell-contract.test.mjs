@@ -33,7 +33,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v59/);
+  assert.match(worker, /accordagents-mobile-shell-v60/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -206,6 +206,13 @@ test("mobile shell builds static installable PWA assets", async () => {
   // bottom of a page that can no longer be scrolled.
   assert.match(lock, /height: var\(--app-h, 100%\)/);
   assert.match(app, /function trackUsableHeight\(\)/);
+  // A picture with no caption used to vanish on both sides of the relay, and
+  // the timeline carries metadata only, so the bytes are asked for by id once.
+  assert.match(app, /function timelineAttachmentsFromEvent\(event\)/);
+  assert.match(app, /if \(!content && attachments\.length === 0\)/);
+  assert.match(app, /type: "mobile\.attachment\.request"/);
+  assert.match(app, /attachmentDataUrls\.set\(attachment\.id, result\)/);
+  assert.match(css, /\.message-image \{/);
   assert.match(app, /setProperty\("--app-h"/);
   // The keyboard must not resize the app. Tracking every frame of the iOS
   // keyboard animation made the screen jump the moment the input was tapped.

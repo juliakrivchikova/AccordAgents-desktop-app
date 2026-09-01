@@ -2022,6 +2022,119 @@
     return saveChats(payload.chats);
   }
 
+  function timelineAttachmentsFromEvent(event) {
+    if (!event || !Array.isArray(event.attachments)) {
+      return [];
+    }
+    return event.attachments
+      .filter(function (attachment) {
+        return attachment && typeof attachment.id === "string" && attachment.id.trim();
+      })
+      .map(function (attachment) {
+        return {
+          id: attachment.id,
+          filename: typeof attachment.filename === "string" ? attachment.filename : "image",
+          mimeType: typeof attachment.mimeType === "string" ? attachment.mimeType : "image/png",
+          width: Number.isFinite(attachment.width) ? attachment.width : undefined,
+          height: Number.isFinite(attachment.height) ? attachment.height : undefined
+        };
+      });
+  }
+
+  // Bytes arrive once per image and stay for the session. The timeline re-sends
+  // the last forty rows constantly; refetching a screenshot on every batch would
+  // put the picture through the relay again and again.
+  const attachmentDataUrls = new Map();
+  const attachmentFetches = new Map();
+
+  async function requestAttachmentViaRelay(pairing, conversationId, attachmentId) {
+    return sendRelayPayload(pairing, "attachment-" + attachmentId + "-" + createEventId(), {
+      type: "mobile.attachment.request",
+      conversationId,
+      attachmentId
+    });
+  }
+
+  function loadAttachmentInto(image, conversationId, attachment) {
+    const cached = attachmentDataUrls.get(attachment.id);
+    if (cached) {
+      image.src = cached;
+      image.dataset.state = cached === "unavailable" ? "unavailable" : "ready";
+      return;
+    }
+    if (!attachmentFetches.has(attachment.id)) {
+      const pairing = loadPairing();
+      attachmentFetches.set(attachment.id, (async function () {
+        const payload = await requestAttachmentViaRelay(pairing, conversationId, attachment.id);
+        if (payload && payload.type === "mobile.attachment" && typeof payload.dataBase64 === "string") {
+          const mimeType = typeof payload.mimeType === "string" ? payload.mimeType : attachment.mimeType;
+          return "data:" + mimeType + ";base64," + payload.dataBase64;
+        }
+        // "too-large" and "unavailable" are answers, not failures: the row says
+        // so instead of spinning forever.
+        return payload && typeof payload.reason === "string" ? payload.reason : "unavailable";
+      })().catch(function () {
+        return "unavailable";
+      }).then(function (result) {
+        attachmentDataUrls.set(attachment.id, result);
+        attachmentFetches.delete(attachment.id);
+        return result;
+      }));
+    }
+    attachmentFetches.get(attachment.id).then(function (result) {
+      if (!image.isConnected) {
+        return;
+      }
+      if (result && result.indexOf("data:") === 0) {
+        image.src = result;
+        image.dataset.state = "ready";
+      } else {
+        image.dataset.state = result === "too-large" ? "too-large" : "unavailable";
+      }
+    });
+  }
+
+  function renderAttachmentsInto(container, entry) {
+    const attachments = Array.isArray(entry.attachments) ? entry.attachments : [];
+    const signature = attachments.map(function (attachment) { return attachment.id; }).join(",");
+    if (container.dataset.attachmentSignature === signature) {
+      return;
+    }
+    container.dataset.attachmentSignature = signature;
+    container.textContent = "";
+    if (attachments.length === 0) {
+      container.hidden = true;
+      return;
+    }
+    container.hidden = false;
+    for (const attachment of attachments) {
+      const image = document.createElement("img");
+      image.className = "message-image";
+      image.alt = attachment.filename;
+      image.dataset.state = "loading";
+      image.loading = "lazy";
+      if (attachment.width && attachment.height) {
+        // Reserve the real box before the bytes land, so the timeline does not
+        // jump under the reader when the picture appears.
+        image.width = attachment.width;
+        image.height = attachment.height;
+      }
+      container.append(image);
+      loadAttachmentInto(image, entry.conversationId, attachment);
+    }
+  }
+
+  function attachmentsNodeFor(parent) {
+    let node = parent.querySelector(".message-images");
+    if (!node) {
+      node = document.createElement("div");
+      node.className = "message-images";
+      node.hidden = true;
+      parent.append(node);
+    }
+    return node;
+  }
+
   async function handleRelayTimelinePayload(payload, fallbackConversationId, options) {
     if (payload?.type !== "mobile.timeline.events" || !Array.isArray(payload.events)) {
       return 0;
@@ -2040,7 +2153,9 @@
       }
       const id = typeof event.id === "string" && event.id.trim() ? event.id : createEventId();
       const content = typeof event.content === "string" ? event.content.trim() : "";
-      if (!content) {
+      const attachments = timelineAttachmentsFromEvent(event);
+      // A picture with no caption is still a message. Requiring text dropped it.
+      if (!content && attachments.length === 0) {
         continue;
       }
       const status = event.status === "error" ? "error" : event.status === "done" ? "done" : "pending";
@@ -2070,6 +2185,7 @@
         role,
         participantLabel: typeof event.participantLabel === "string" ? event.participantLabel : undefined,
         content,
+        attachments: attachments.length > 0 ? attachments : undefined,
         status,
         createdAt,
         runId,
@@ -3273,6 +3389,9 @@
       identified: entry.identified,
       scaffolding: entry.scaffolding,
       content: entry.content,
+      attachments: Array.isArray(entry.attachments)
+        ? entry.attachments.map(function (attachment) { return attachment.id; })
+        : undefined,
       status: entry.status,
       runId: entry.runId,
       stopRequested: entry.stopRequested
@@ -3451,6 +3570,7 @@
       meta.append(handle, status);
       syncMessageStopButton(meta, entry);
       copy.append(meta, content);
+      renderAttachmentsInto(attachmentsNodeFor(copy), entry);
       item.append(avatar, copy);
     } else {
       const bubble = document.createElement("div");
@@ -3462,6 +3582,7 @@
       meta.className = "message-status";
       meta.textContent = entry.status;
       bubble.append(content, meta);
+      renderAttachmentsInto(attachmentsNodeFor(bubble), entry);
       item.append(bubble);
     }
     appendThreadChip(item, entry);
@@ -3520,6 +3641,7 @@
       }
       syncMessageStopButton(meta, entry);
       renderMessageContentIfChanged(content, entry.content);
+      renderAttachmentsInto(attachmentsNodeFor(content.parentElement || item), entry);
       return true;
     }
     const status = item.querySelector(".message-status");
@@ -3529,6 +3651,7 @@
     }
     status.textContent = entry.status;
     renderMessageContentIfChanged(content, entry.content);
+    renderAttachmentsInto(attachmentsNodeFor(content.parentElement || item), entry);
     return true;
   }
 
@@ -3830,6 +3953,7 @@
     loadPairing,
     connectionStatusText,
     renderMessageContent,
+    timelineAttachmentsFromEvent,
     savePairing
   };
 

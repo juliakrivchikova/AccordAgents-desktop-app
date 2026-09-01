@@ -38,6 +38,12 @@ export interface MobileRelayChatSender {
    *  control has to guess — and guessing meant attributing another chat's run
    *  to the paired one. */
   conversationIdForRun?(runId: string): string | undefined;
+  /** Bytes for one image, asked for by id. The timeline carries only metadata,
+   *  so this is how a picture actually reaches the phone. */
+  readChatAttachment?(request: { conversationId: string; attachmentId: string }): Promise<{
+    attachment: { id: string; mimeType: string; sizeBytes: number };
+    dataBase64: string;
+  }>;
 }
 
 export interface MobileRelayAcceptedResult {
@@ -185,10 +191,32 @@ interface MobileTimelineRequest {
   conversationId: string;
 }
 
+interface MobileAttachmentRequest {
+  type: "mobile.attachment.request";
+  conversationId: string;
+  attachmentId: string;
+}
+
+/** One image, answered on demand. `dataBase64` is absent when `reason` is set:
+ *  the phone then shows why rather than an endless spinner. */
+interface MobileAttachmentResponse {
+  type: "mobile.attachment";
+  conversationId: string;
+  attachmentId: string;
+  mimeType?: string;
+  dataBase64?: string;
+  reason?: "unavailable" | "too-large";
+}
+
 interface MobileChatListResponse {
   type: "mobile.chat-list";
   chats: MobileRelayChatListItem[];
 }
+
+/** A phone on a hotel connection should not be handed ten megabytes through the
+ *  relay. Anything above this answers with a reason instead, and the desktop
+ *  stays the place to open it. */
+const MOBILE_ATTACHMENT_MAX_BYTES = 4 * 1024 * 1024;
 
 export class MobileRelayControlService {
   private readonly client: RelayTunnelClient;
@@ -441,6 +469,10 @@ export class MobileRelayControlService {
       await this.sendConversationTimeline(payload.conversationId, `${message.logicalMessageId}:timeline`);
       return;
     }
+    if (isMobileAttachmentRequest(payload)) {
+      await this.sendAttachment(payload, `${message.logicalMessageId}:attachment`);
+      return;
+    }
     const accepted = await this.prepareMobileOutboxRequest(assertMobileOutboxRequest(payload));
     await this.deliverAcceptedCancellationEvents(accepted);
     await this.sendAck(message.logicalMessageId, accepted);
@@ -637,6 +669,42 @@ export class MobileRelayControlService {
       events: this.catalog ? await this.catalog.listTimeline(conversationId) : []
     };
     const ciphertext = await sealMobileRelayPayload(timeline, this.options.relaySealKeyBase64);
+    await this.client.sendCiphertext({ logicalMessageId, ciphertext });
+  }
+
+  private async sendAttachment(request: MobileAttachmentRequest, logicalMessageId: string): Promise<void> {
+    if (!this.isActive()) {
+      return;
+    }
+    if (!(await this.isConversationAllowed(request.conversationId))) {
+      throw new Error("Mobile relay attachment request is outside the paired scope.");
+    }
+    const answer = async (): Promise<MobileAttachmentResponse> => {
+      if (!this.chat.readChatAttachment) {
+        return { type: "mobile.attachment", conversationId: request.conversationId, attachmentId: request.attachmentId, reason: "unavailable" };
+      }
+      let read;
+      try {
+        read = await this.chat.readChatAttachment({
+          conversationId: request.conversationId,
+          attachmentId: request.attachmentId
+        });
+      } catch {
+        // A deleted or unknown id is an ordinary answer, not a relay failure.
+        return { type: "mobile.attachment", conversationId: request.conversationId, attachmentId: request.attachmentId, reason: "unavailable" };
+      }
+      if (read.attachment.sizeBytes > MOBILE_ATTACHMENT_MAX_BYTES) {
+        return { type: "mobile.attachment", conversationId: request.conversationId, attachmentId: request.attachmentId, reason: "too-large" };
+      }
+      return {
+        type: "mobile.attachment",
+        conversationId: request.conversationId,
+        attachmentId: request.attachmentId,
+        mimeType: read.attachment.mimeType,
+        dataBase64: read.dataBase64
+      };
+    };
+    const ciphertext = await sealMobileRelayPayload(await answer(), this.options.relaySealKeyBase64);
     await this.client.sendCiphertext({ logicalMessageId, ciphertext });
   }
 
@@ -932,6 +1000,13 @@ function timelineEventDeliverySignature(event: MobileTimelineEvent): string {
 function isMobileChatListRequest(value: unknown): value is MobileChatListRequest {
   return Boolean(value && typeof value === "object" && !Array.isArray(value) &&
     (value as Partial<MobileChatListRequest>).type === "mobile.chat-list.request");
+}
+
+function isMobileAttachmentRequest(value: unknown): value is MobileAttachmentRequest {
+  return Boolean(value && typeof value === "object" &&
+    (value as Partial<MobileAttachmentRequest>).type === "mobile.attachment.request" &&
+    typeof (value as Partial<MobileAttachmentRequest>).conversationId === "string" &&
+    typeof (value as Partial<MobileAttachmentRequest>).attachmentId === "string");
 }
 
 function isMobileTimelineRequest(value: unknown): value is MobileTimelineRequest {
