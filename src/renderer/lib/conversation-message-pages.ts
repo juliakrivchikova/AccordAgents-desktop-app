@@ -4,16 +4,12 @@ import type {
   ConversationMessagePage,
   ConversationMessagePageInfo
 } from "../../shared/types";
+import { CONVERSATION_UPDATE_TAIL_SIZE, fullListMessagePageInfo } from "../../shared/conversationUpdates";
 
-export const CONVERSATION_MESSAGE_PAGE_SIZE = 80;
+export const CONVERSATION_MESSAGE_PAGE_SIZE = CONVERSATION_UPDATE_TAIL_SIZE;
 
 export function fullConversationMessagePageInfo(conversation: Conversation): ConversationMessagePageInfo {
-  return {
-    oldestSequence: conversation.messages.length > 0 ? 0 : undefined,
-    newestSequence: conversation.messages.length > 0 ? conversation.messages.length - 1 : undefined,
-    hasMoreBefore: false,
-    totalMessages: conversation.messages.length
-  };
+  return fullListMessagePageInfo(conversation.messages.length);
 }
 
 export function prependMissingMessages(currentMessages: ChatMessage[], olderMessages: ChatMessage[]): ChatMessage[] {

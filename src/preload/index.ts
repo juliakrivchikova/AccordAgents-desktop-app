@@ -42,6 +42,7 @@ import type {
   ContinueReviewRequest,
   ConversationMessagePageRequest,
   Conversation,
+  ConversationUpdate,
   CreateChatConversationRequest,
   DeleteChatConversationRequest,
   DismissConversationWarningsRequest,
@@ -209,8 +210,8 @@ const bridge: AppBridge = {
     ipcRenderer.on("conversations:review-progress", listener);
     return () => ipcRenderer.removeListener("conversations:review-progress", listener);
   },
-  onConversationUpdated: (callback: (conversation: Conversation) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, conversation: Conversation) => callback(conversation);
+  onConversationUpdated: (callback: (conversation: ConversationUpdate) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, conversation: ConversationUpdate) => callback(conversation);
     ipcRenderer.on("conversations:updated", listener);
     return () => ipcRenderer.removeListener("conversations:updated", listener);
   }

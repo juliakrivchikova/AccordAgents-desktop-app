@@ -133,7 +133,10 @@ export interface ChatEventSequenceBasis {
 
 /** One message as it is about to be written, with the hash used to decide
  *  whether its row needs writing at all. */
-interface SavedMessageRow {
+/** A message as storage writes it: its position, id, creation time, the JSON
+ *  that goes into the row and the sha1 of that JSON, which is what decides
+ *  whether the row changed since the last save. */
+export interface SavedMessageRow {
   index: number;
   id: string;
   createdAt: string;
@@ -1275,18 +1278,24 @@ export class StorageService {
   // anything grew with the length of the chat. Only the rows that actually
   // changed are written now; the full rewrite remains as the fallback whenever
   // this process cannot prove what the database currently holds.
-  async saveConversation(conversation: Conversation): Promise<void> {
+  /** Saves the conversation and returns the token stamped on its row. A caller
+   *  that already serialized and hashed the messages for this exact snapshot
+   *  passes them as `rows`; they are used only when they line up with the
+   *  messages one to one, otherwise the messages are serialized here. */
+  async saveConversation(conversation: Conversation, options: { rows?: SavedMessageRow[] } = {}): Promise<string> {
     await this.init();
-    const rows = conversation.messages.map((message, index) => {
-      const json = JSON.stringify(message);
-      return {
-        index,
-        id: message.id,
-        createdAt: message.createdAt,
-        json,
-        hash: createHash("sha1").update(json).digest("hex")
-      };
-    });
+    const rows: SavedMessageRow[] = rowsMatchMessages(options.rows, conversation.messages)
+      ? options.rows
+      : conversation.messages.map((message, index) => {
+        const json = JSON.stringify(message);
+        return {
+          index,
+          id: message.id,
+          createdAt: message.createdAt,
+          json,
+          hash: createHash("sha1").update(json).digest("hex")
+        };
+      });
     const previous = this.savedMessageState.get(conversation.id);
     const nextToken = randomUUID();
     // Another app instance can share this database. The token makes a partial
@@ -1311,7 +1320,7 @@ export class StorageService {
         token: nextToken,
         rows: rows.map((row) => ({ id: row.id, hash: row.hash }))
       });
-      return;
+      return nextToken;
     }
     this.savedMessageState.delete(conversation.id);
     await this.writeConversationInFull(conversation, rows, nextToken);
@@ -1319,6 +1328,23 @@ export class StorageService {
       token: nextToken,
       rows: rows.map((row) => ({ id: row.id, hash: row.hash }))
     });
+    return nextToken;
+  }
+
+  /** True while the conversation row still carries `token`, the value a
+   *  particular `saveConversation` call returned. Every save — from any
+   *  instance or any caller in this process — stamps a new token, so a match
+   *  proves nothing has written the conversation since that save and storage
+   *  holds exactly the snapshot it persisted. */
+  async isConversationSaveOwned(conversationId: string, token: string): Promise<boolean> {
+    if (!token) {
+      return false;
+    }
+    await this.init();
+    const observed = await this.queryText(
+      `select save_token from conversations where id = ${sqlString(conversationId)} limit 1;`
+    );
+    return observed === token;
   }
 
   private async writeConversationInFull(
@@ -2231,6 +2257,18 @@ function conversationBody(conversation: Conversation): Conversation {
     ...conversation,
     messages: []
   };
+}
+
+function rowsMatchMessages(rows: SavedMessageRow[] | undefined, messages: ChatMessage[]): rows is SavedMessageRow[] {
+  if (!rows || rows.length !== messages.length) {
+    return false;
+  }
+  for (let index = 0; index < rows.length; index += 1) {
+    if (rows[index].index !== index || rows[index].id !== messages[index].id) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function messagePageInfo(page: ConversationMessagePage): ConversationMessagePageInfo {

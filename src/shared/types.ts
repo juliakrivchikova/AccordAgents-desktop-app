@@ -2060,6 +2060,22 @@ export interface ConversationOpenResult {
   messagePage: ConversationMessagePageInfo;
 }
 
+/** How `conversations:updated` describes a large chat without resending every
+ *  message. `messages` then holds only the messages that changed since the
+ *  previous update plus the newest `tailCount` messages (the last `tailCount`
+ *  entries, in conversation order); `removedIds` names messages that no longer
+ *  exist. The receiver merges these into the messages it already holds. Absent
+ *  on legacy and first-time updates, which carry the full message list. */
+export interface ConversationMessageDelta {
+  totalMessages: number;
+  tailCount: number;
+  removedIds: string[];
+}
+
+export interface ConversationUpdate extends Conversation {
+  messageDelta?: ConversationMessageDelta;
+}
+
 export type ChatSearchRequester =
   | { kind: "user" }
   | { kind: "participant"; conversationId: string; participantId: string };
@@ -2645,5 +2661,5 @@ export interface AppBridge {
   publishArtifact(request: PublishArtifactRequest): Promise<ArtifactResult<PublishedArtifactReadResult>>;
   onArtifactsUpdated(callback: (event: ArtifactsUpdatedEvent) => void): () => void;
   onReviewProgress(callback: (progress: ReviewProgress) => void): () => void;
-  onConversationUpdated(callback: (conversation: Conversation) => void): () => void;
+  onConversationUpdated(callback: (conversation: ConversationUpdate) => void): () => void;
 }

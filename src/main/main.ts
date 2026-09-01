@@ -312,8 +312,12 @@ const mobileMailboxRunnerPolicyQueues = new Map<string, MobileMailboxRunnerLates
 const mobilePairingExpiryTimers = new Map<string, NodeJS.Timeout>();
 const mobileRevokedPairingKeys = new Set<string>();
 let mobileMailboxOwnerActionBackoffUntil = 0;
-const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation) => {
-  sendToMainWindow("conversations:updated", conversation);
+const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation, update) => {
+  // The renderer receives the delta form — the messages that changed plus the
+  // newest window — because on a chat with thousands of messages the full
+  // snapshot is tens of megabytes per update. The phone paths keep the full
+  // snapshot they were written against.
+  sendToMainWindow("conversations:updated", update);
   for (const control of mobileRelayControls.values()) {
     control.pushConversationSnapshot(conversation);
   }
@@ -2417,9 +2421,29 @@ function registerIpc(): void {
     // restore the windowed messages captured before hydration.
     const windowedMessages = result.conversation.messages;
     const hydrated = await chatService.hydrateContextUsage(result.conversation);
+    if (hydrated.messages.length < result.messagePage.totalMessages) {
+      // Hydration did not load the full history (non-chat kinds); keep the
+      // window storage read.
+      return {
+        ...result,
+        conversation: { ...hydrated, messages: windowedMessages }
+      };
+    }
+    // Hydration can change or add messages (stale runs recovered, orphaned
+    // requests marked). Later delta updates only describe changes after the
+    // snapshot hydration emitted, so the window handed back is cut from the
+    // hydrated history rather than the pre-hydration read.
+    const total = hydrated.messages.length;
+    const messages = hydrated.messages.slice(Math.max(0, total - Math.max(1, windowedMessages.length)));
     return {
       ...result,
-      conversation: { ...hydrated, messages: windowedMessages }
+      conversation: { ...hydrated, messages },
+      messagePage: {
+        totalMessages: total,
+        oldestSequence: messages.length > 0 ? total - messages.length : undefined,
+        newestSequence: messages.length > 0 ? total - 1 : undefined,
+        hasMoreBefore: messages.length < total
+      }
     };
   });
   ipcMain.handle("conversations:list-messages", (_event, request: ConversationMessagePageRequest) => storageService.listConversationMessages(request));

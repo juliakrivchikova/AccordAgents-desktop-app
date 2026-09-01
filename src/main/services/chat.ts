@@ -4,6 +4,7 @@ import { copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, 
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { app } from "electron";
+import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
 import type {
   AgentContextUsage,
   AgentHealth,
@@ -77,6 +78,7 @@ import type {
   ChatToolPermissionRequest,
   CompactChatParticipantRequest,
   Conversation,
+  ConversationUpdate,
   CloudRunsSettings,
   CloudRunStatus,
   CloudRunWorkerDoctorReport,
@@ -669,8 +671,30 @@ interface CloudRunDoctorProbe {
   ): Promise<CloudRunWorkerDoctorReport>;
 }
 
+/** Copy for values adopted out of a stored snapshot into the live
+ *  conversation, so in-place edits of the live object never reach the snapshot
+ *  (see readStoredChatStateForRefresh). */
+function cloneJsonValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
 export class ChatService {
   private readonly saveQueues = new Map<string, Promise<void>>();
+  // Serialized message rows of the last snapshot emitted per conversation. The
+  // next snapshot reuses the rows of unchanged messages instead of re-parsing
+  // every one, tells the renderer which messages changed, and hands storage
+  // pre-hashed rows. Bounded to the most recently active chats.
+  private readonly snapshotRowStates = new Map<string, SnapshotMessageRow[]>();
+  // The snapshot this process last persisted per tracked conversation, with the
+  // save token that persist returned. While the database row still carries that
+  // token, refreshStoredChatState reads this instead of re-reading every
+  // message row through the sqlite3 CLI.
+  private readonly lastSavedSnapshots = new Map<string, { snapshot: Conversation; token: string }>();
+  // Tracked chats are bounded by count and by retained serialized bytes; chats
+  // with a run in flight are evicted last, so a settings sweep over many chats
+  // does not make the chat the user is working in pay for a full re-emission.
+  private static readonly SNAPSHOT_STATE_LIMIT = 32;
+  private static readonly SNAPSHOT_STATE_BYTES_LIMIT = 256 * 1024 * 1024;
   private readonly runQueues = new Map<string, Promise<void>>();
   private readonly activeRunIds = new Set<string>();
   private readonly activeConversationRunIds = new Map<string, Set<string>>();
@@ -711,7 +735,7 @@ export class ChatService {
     private readonly cliRunner: CliAgentRunner,
     private readonly debugLogs: DebugLogService,
     private readonly appMcp?: ChatAppMcpGateway,
-    private readonly onConversationSnapshot?: (conversation: Conversation) => void,
+    private readonly onConversationSnapshot?: (conversation: Conversation, update: ConversationUpdate) => void,
     private readonly userSkills?: UserSkillsService,
     private readonly onReviewProgress?: ProgressCallback,
     private readonly chatEventMirror?: ChatEventMirrorService,
@@ -1094,6 +1118,8 @@ export class ChatService {
         throw new Error("Chat cannot be deleted while members are running.");
       }
       this.deletedConversationIds.add(conversation.id);
+      this.snapshotRowStates.delete(conversation.id);
+      this.lastSavedSnapshots.delete(conversation.id);
       try {
         await (this.chatMutationQueues.get(conversation.id) ?? Promise.resolve()).catch(() => undefined);
         await this.waitForQueuedSave(conversation.id);
@@ -1370,7 +1396,6 @@ export class ChatService {
       };
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
       if (autoWatchChanged && request.autoWatch === true) {
         this.scheduleAutoWatchEvaluation(conversation.id, "toggle-on");
       }
@@ -1415,7 +1440,6 @@ export class ChatService {
       this.cleanupRemovedParticipantState(conversation, target, now);
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
       return conversation;
     });
   }
@@ -1462,7 +1486,6 @@ export class ChatService {
             ));
             conversation.updatedAt = new Date().toISOString();
             await this.saveConversation(conversation);
-            this.queueSnapshot(conversation);
           });
           return { conversation, participant, session: sessionState.session, runStarted: false };
         }
@@ -1569,7 +1592,6 @@ export class ChatService {
         }
         conversation.updatedAt = new Date().toISOString();
         await this.saveConversation(conversation);
-        this.queueSnapshot(conversation);
       });
       this.emitProgress(runId, progress, result.ok ? "done" : "error", result.ok ? `Compacted @${participant.handle}.` : `Could not compact @${participant.handle}.`, {
         participantLabel: `@${participant.handle}`
@@ -1811,7 +1833,6 @@ export class ChatService {
       }));
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
       return {
         ok: true,
         status: "auto_applied",
@@ -1836,7 +1857,6 @@ export class ChatService {
     }));
     conversation.updatedAt = new Date().toISOString();
     await this.saveConversation(conversation);
-    this.queueSnapshot(conversation);
     return {
       ok: true,
       status: "pending_user_approval",
@@ -1859,7 +1879,6 @@ export class ChatService {
     const applied = await this.applyPermissionChangeRequestFromTool(conversation, requester, actor, rawRequest);
     if (applied.mutated) {
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
     }
     return applied.result;
   }
@@ -2230,7 +2249,6 @@ export class ChatService {
       }
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
     });
   }
 
@@ -2255,7 +2273,6 @@ export class ChatService {
         }
         conversation.updatedAt = new Date().toISOString();
         await this.saveConversation(conversation);
-        this.queueSnapshot(conversation);
       });
       this.queueParticipantRequestAutoResumes(conversation.id, Array.from(autoResumeRequestMessageIds));
     }
@@ -2333,7 +2350,6 @@ export class ChatService {
           beforeMetadata !== this.stableJson(conversation.metadata);
         conversation.updatedAt = new Date().toISOString();
         await this.saveConversation(conversation);
-        this.queueSnapshot(conversation);
         return;
       }
       nextHandle = this.mergeRemoteRunHandleState(current, state);
@@ -2363,7 +2379,6 @@ export class ChatService {
       }
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
     });
     if (nextHandle) {
       this.registerRemoteRunHandle(nextHandle);
@@ -2411,7 +2426,6 @@ export class ChatService {
       conversation.metadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata, undefined, handle.runId);
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
     });
     this.registerRemoteRunHandle({ ...handle, providerOutputMessageId });
   }
@@ -3281,7 +3295,6 @@ export class ChatService {
         ));
         conversation.updatedAt = new Date().toISOString();
         await this.saveConversation(conversation);
-        this.queueSnapshot(conversation);
         return { prepared, route: "created", approval };
       });
     } catch (error) {
@@ -3389,7 +3402,6 @@ export class ChatService {
     }
     conversation.updatedAt = new Date().toISOString();
     await this.saveConversation(conversation);
-    this.emitConversationSnapshot(conversation);
 
     const hasRunningTargets = prepared.batch.items.some((item) => item.status === "running");
     if (!hasRunningTargets) {
@@ -3502,7 +3514,6 @@ export class ChatService {
       this.upsertAppToolApproval(conversation, approval);
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
-      this.emitConversationSnapshot(conversation);
       return {
         ok: true,
         status: "pending_user_approval",
@@ -3515,7 +3526,6 @@ export class ChatService {
     this.recordSelfCompactionRequested(conversation, requester.id, new Date().toISOString());
     conversation.updatedAt = new Date().toISOString();
     await this.saveConversation(conversation);
-    this.emitConversationSnapshot(conversation);
     this.startQueuedSelfCompaction(conversation.id, requester, request, runId);
     return {
       ok: true,
@@ -3740,7 +3750,6 @@ export class ChatService {
       ));
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
       return {
         ok: true,
         status: "auto_applied",
@@ -3773,7 +3782,6 @@ export class ChatService {
     }));
     conversation.updatedAt = new Date().toISOString();
     await this.saveConversation(conversation);
-    this.queueSnapshot(conversation);
     return {
       ok: true,
       status: "pending_user_approval",
@@ -3825,7 +3833,6 @@ export class ChatService {
         ));
         conversation.updatedAt = new Date().toISOString();
         await this.saveConversation(conversation);
-        this.queueSnapshot(conversation);
         return {
           ok: true,
           status: "auto_applied",
@@ -3847,7 +3854,6 @@ export class ChatService {
       }));
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
       return {
         ok: true,
         status: "pending_user_approval",
@@ -3879,7 +3885,6 @@ export class ChatService {
       ));
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
       return {
         ok: true,
         status: "auto_applied",
@@ -3903,7 +3908,6 @@ export class ChatService {
     }));
     conversation.updatedAt = new Date().toISOString();
     await this.saveConversation(conversation);
-    this.queueSnapshot(conversation);
     return {
       ok: true,
       status: "pending_user_approval",
@@ -4446,7 +4450,6 @@ export class ChatService {
       });
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
       applied = true;
       result = {
         ok: true,
@@ -4664,7 +4667,6 @@ export class ChatService {
       this.upsertAppToolApproval(conversation, decidedApproval);
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
     });
 
     if (!decidedApproval || !decision) {
@@ -5058,7 +5060,6 @@ export class ChatService {
         this.upsertAppToolApproval(conversation, approval);
         conversation.updatedAt = now;
         await this.saveConversation(conversation);
-        this.queueSnapshot(conversation);
       });
       return codexApprovalCancellationResult(prepared.request.method);
     }
@@ -5141,7 +5142,6 @@ export class ChatService {
         this.upsertAppToolApproval(conversation, approval);
         conversation.updatedAt = now;
         await this.saveConversation(conversation);
-        this.queueSnapshot(conversation);
       });
       void this.debugLogs.write("chat.codex-approval.requested", {
         conversationId: conversation.id,
@@ -5183,7 +5183,6 @@ export class ChatService {
         });
         conversation.updatedAt = now;
         await this.saveConversation(conversation);
-        this.queueSnapshot(conversation);
         throw new Error("The Codex app-server connection that requested this approval is no longer active.");
       }
       if (resolver.submitted) {
@@ -5222,7 +5221,6 @@ export class ChatService {
       this.upsertAppToolApproval(conversation, completed);
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
       return { approval: completed, option, response, resolver, method: approval.request.method };
     });
     selected.resolver.resolve(selected.response);
@@ -5490,7 +5488,6 @@ export class ChatService {
         }
         conversation.updatedAt = new Date().toISOString();
         await this.saveConversation(conversation);
-        this.queueSnapshot(conversation);
       });
     });
   }
@@ -5515,7 +5512,6 @@ export class ChatService {
       });
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
     });
   }
 
@@ -5605,7 +5601,6 @@ export class ChatService {
         this.advanceAutoWatchCursorForDirectTargets(conversation, [updatedFacilitator], userMessage);
         conversation.updatedAt = nowIso;
         await this.saveConversation(conversation);
-        this.queueSnapshot(conversation);
         prepared = { conversation, facilitator: updatedFacilitator, userMessage };
       });
       return prepared;
@@ -5727,7 +5722,6 @@ export class ChatService {
       }
       conversation.updatedAt = this.maxIsoTimestamp(conversation.updatedAt, createdAt, event.createdAt);
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
       return true;
     });
   }
@@ -5763,7 +5757,6 @@ export class ChatService {
       }
       conversation.updatedAt = this.maxIsoTimestamp(conversation.updatedAt, message.createdAt, event.createdAt);
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
       return true;
     });
   }
@@ -8089,7 +8082,6 @@ export class ChatService {
       }
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
     });
   }
 
@@ -9170,7 +9162,8 @@ export class ChatService {
   }
 
   private async refreshStoredChatState(conversation: Conversation): Promise<void> {
-    const stored = await this.storage.getConversation(conversation.id);
+    const read = await this.readStoredChatStateForRefresh(conversation.id);
+    const stored = read.stored;
     if (!stored || stored.kind !== "chat") {
       return;
     }
@@ -9178,11 +9171,30 @@ export class ChatService {
     // sends, where two batches can land at the same length+timestamp with different
     // message ids. The merge is O(n) and id-keyed, so a no-op when storage matches.
     const title = this.mergeStoredChatTitle(stored, conversation);
-    conversation.messages = this.mergeStoredChatMessages(stored.messages, conversation.messages);
+    conversation.messages = this.mergeStoredChatMessages(stored.messages, conversation.messages, read.shared);
     conversation.metadata = this.mergeStoredChatMetadata(stored.metadata, conversation.metadata);
     conversation.title = title;
     this.applyRemovedChatMessageTombstones(conversation);
     conversation.updatedAt = stored.updatedAt > conversation.updatedAt ? stored.updatedAt : conversation.updatedAt;
+  }
+
+  // While the conversation row still carries the token of this process's last
+  // save, storage holds exactly that saved snapshot, so it is read from memory:
+  // the body is copied (callers merge into it) and the messages are shared,
+  // with `shared` telling the merge to copy anything it adopts. Re-reading
+  // every message row of a large chat through the sqlite3 CLI instead took over
+  // a second per mutation and blocked the main thread for a third of it.
+  private async readStoredChatStateForRefresh(
+    conversationId: string
+  ): Promise<{ stored: Conversation | undefined; shared: boolean }> {
+    const lastSaved = this.lastSavedSnapshots.get(conversationId);
+    if (lastSaved && await this.storage.isConversationSaveOwned(conversationId, lastSaved.token)) {
+      return {
+        stored: { ...cloneConversationBody(lastSaved.snapshot), messages: lastSaved.snapshot.messages },
+        shared: true
+      };
+    }
+    return { stored: await this.storage.getConversation(conversationId), shared: false };
   }
 
   private mergeStoredChatTitle(stored: Conversation, current: Conversation): string {
@@ -9200,11 +9212,15 @@ export class ChatService {
     return (storedTitle?.appliedAt ?? "") > (currentTitle?.appliedAt ?? "") ? stored.title : current.title;
   }
 
-  private mergeStoredChatMessages(storedMessages: ChatMessage[], currentMessages: ChatMessage[]): ChatMessage[] {
+  private mergeStoredChatMessages(storedMessages: ChatMessage[], currentMessages: ChatMessage[], shared = false): ChatMessage[] {
     const currentById = new Map(currentMessages.map((message) => [message.id, message]));
+    // Stored messages read from the last saved snapshot are shared with it (see
+    // readStoredChatStateForRefresh); anything adopted into the live
+    // conversation is copied first so later in-place edits stay out of it.
+    const adopt = (message: ChatMessage): ChatMessage => (shared ? cloneJsonValue(message) : message);
     const merged = storedMessages.map((message) => {
       const current = currentById.get(message.id);
-      return current ? this.mergeStoredChatMessage(message, current) : message;
+      return current ? this.mergeStoredChatMessage(message, current, adopt) : adopt(message);
     });
     const storedIds = new Set(storedMessages.map((message) => message.id));
     for (const message of currentMessages) {
@@ -9215,8 +9231,13 @@ export class ChatService {
     return merged;
   }
 
-  private mergeStoredChatMessage(stored: ChatMessage, current: ChatMessage): ChatMessage {
-    const preferred = this.preferredChatMessageForRefresh(stored, current);
+  private mergeStoredChatMessage(
+    stored: ChatMessage,
+    current: ChatMessage,
+    adopt: (message: ChatMessage) => ChatMessage = (message) => message
+  ): ChatMessage {
+    const chosen = this.preferredChatMessageForRefresh(stored, current);
+    const preferred = chosen === stored ? adopt(stored) : chosen;
     const metadata = this.mergeStoredChatMessageMetadata(stored.metadata, current.metadata);
     if (metadata) {
       preferred.metadata = metadata;
@@ -9264,41 +9285,41 @@ export class ChatService {
       ...currentMetadata
     };
     if (storedMetadata?.reactions) {
-      merged.reactions = storedMetadata.reactions;
+      merged.reactions = cloneJsonValue(storedMetadata.reactions);
     } else {
       delete merged.reactions;
     }
     const pendingMentions = this.mergeStoredPendingMentions(storedMetadata?.pendingMentions, currentMetadata?.pendingMentions);
     if (pendingMentions) {
-      merged.pendingMentions = pendingMentions;
+      merged.pendingMentions = cloneJsonValue(pendingMentions);
     } else {
       delete merged.pendingMentions;
     }
     const pendingChoice = this.mergeStoredPendingChoice(storedMetadata?.pendingChoice, currentMetadata?.pendingChoice);
     if (pendingChoice) {
-      merged.pendingChoice = pendingChoice;
+      merged.pendingChoice = cloneJsonValue(pendingChoice);
     } else {
       delete merged.pendingChoice;
     }
     const participantRequest = this.mergeStoredParticipantRequest(storedMetadata?.participantRequest, currentMetadata?.participantRequest);
     if (participantRequest) {
-      merged.participantRequest = participantRequest;
+      merged.participantRequest = cloneJsonValue(participantRequest);
     } else {
       delete merged.participantRequest;
     }
     if (storedMetadata?.queuedBehind) {
-      merged.queuedBehind = storedMetadata.queuedBehind;
+      merged.queuedBehind = cloneJsonValue(storedMetadata.queuedBehind);
     } else {
       delete merged.queuedBehind;
     }
     if (storedMetadata?.activityEvents?.length && !currentMetadata?.activityEvents?.length) {
-      merged.activityEvents = storedMetadata.activityEvents;
+      merged.activityEvents = cloneJsonValue(storedMetadata.activityEvents);
     }
     if (storedMetadata?.processingTranscript && !currentMetadata?.processingTranscript) {
-      merged.processingTranscript = storedMetadata.processingTranscript;
+      merged.processingTranscript = cloneJsonValue(storedMetadata.processingTranscript);
     }
     if (storedMetadata?.remoteRunStatus && !currentMetadata?.remoteRunStatus) {
-      merged.remoteRunStatus = storedMetadata.remoteRunStatus;
+      merged.remoteRunStatus = cloneJsonValue(storedMetadata.remoteRunStatus);
     }
     return Object.keys(merged).length > 0 ? merged : undefined;
   }
@@ -10348,7 +10369,6 @@ export class ChatService {
             conversation.metadata = this.metadataWithParticipantWatchers(conversation.metadata, watchers);
             conversation.updatedAt = now;
             await this.saveConversation(conversation);
-            this.queueSnapshot(conversation);
             return;
           }
           const latest = messages[messages.length - 1];
@@ -10369,7 +10389,6 @@ export class ChatService {
           conversation.messages.push(triggerMessage);
           conversation.updatedAt = now;
           await this.saveConversation(conversation);
-          this.queueSnapshot(conversation);
           prepared = { conversation, participant, triggerMessage, runId, latestMessageId: latest.id };
         });
       });
@@ -10432,7 +10451,6 @@ export class ChatService {
       conversation.metadata = this.metadataWithParticipantWatchers(conversation.metadata, watchers);
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
     });
   }
 
@@ -10463,7 +10481,6 @@ export class ChatService {
       conversation.metadata = this.metadataWithParticipantWatchers(conversation.metadata, watchers);
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
     });
   }
 
@@ -12579,7 +12596,6 @@ export class ChatService {
       }));
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
     });
   }
 
@@ -17165,7 +17181,6 @@ export class ChatService {
       conversation.metadata = nextMetadata;
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
     });
   }
 
@@ -18101,11 +18116,11 @@ export class ChatService {
     if (this.deletedConversationIds.has(conversation.id)) {
       return;
     }
-    const snapshot = this.emitConversationSnapshot(conversation);
+    const { snapshot, rows } = this.buildAndEmitSnapshot(conversation);
     const previous = this.saveQueues.get(conversation.id) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
-      .then(() => this.persistConversationSnapshot(snapshot))
+      .then(() => this.persistConversationSnapshot(snapshot, rows))
       .catch((error) => {
         void this.debugLogs.write("chat.persistence.error", {
           conversationId: conversation.id,
@@ -18121,9 +18136,50 @@ export class ChatService {
   }
 
   private emitConversationSnapshot(conversation: Conversation): Conversation {
-    const snapshot = this.clone(conversation);
-    this.onConversationSnapshot?.(snapshot);
-    return snapshot;
+    return this.buildAndEmitSnapshot(conversation).snapshot;
+  }
+
+  private buildAndEmitSnapshot(conversation: Conversation): { snapshot: Conversation; rows: SnapshotMessageRow[] } {
+    const built = buildConversationSnapshot(conversation, this.snapshotRowStates.get(conversation.id));
+    this.rememberSnapshotRows(conversation.id, built.rows);
+    this.onConversationSnapshot?.(built.snapshot, built.update);
+    return { snapshot: built.snapshot, rows: built.rows };
+  }
+
+  private rememberSnapshotRows(conversationId: string, rows: SnapshotMessageRow[]): void {
+    this.snapshotRowStates.delete(conversationId);
+    this.snapshotRowStates.set(conversationId, rows);
+    let retainedBytes = 0;
+    for (const tracked of this.snapshotRowStates.values()) {
+      retainedBytes += snapshotRowsBytes(tracked);
+    }
+    const overLimit = (): boolean =>
+      this.snapshotRowStates.size > ChatService.SNAPSHOT_STATE_LIMIT ||
+      retainedBytes > ChatService.SNAPSHOT_STATE_BYTES_LIMIT;
+    // Oldest first, idle chats before chats with a run in flight; the chat just
+    // remembered is never evicted.
+    for (const evictActiveToo of [false, true]) {
+      for (const staleId of [...this.snapshotRowStates.keys()]) {
+        if (!overLimit() || staleId === conversationId) {
+          break;
+        }
+        const hasActiveRun = (this.activeConversationRunIds.get(staleId)?.size ?? 0) > 0;
+        if (hasActiveRun && !evictActiveToo) {
+          continue;
+        }
+        retainedBytes -= snapshotRowsBytes(this.snapshotRowStates.get(staleId) ?? []);
+        this.snapshotRowStates.delete(staleId);
+        this.lastSavedSnapshots.delete(staleId);
+      }
+    }
+  }
+
+  private rememberLastSavedSnapshot(snapshot: Conversation, token: string | undefined): void {
+    // A storage that does not report the token it stamped (test doubles) never
+    // enables the in-memory refresh; only tracked chats keep their snapshot.
+    if (typeof token === "string" && token && this.snapshotRowStates.has(snapshot.id)) {
+      this.lastSavedSnapshots.set(snapshot.id, { snapshot, token });
+    }
   }
 
   cancelRun(runId: string): boolean {
@@ -18279,7 +18335,6 @@ export class ChatService {
       }
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
     });
     if (!this.chatHasLiveWork(conversation.id)) {
       this.scheduleAutoWatchEvaluation(conversation.id, "stored-remote-run-cancelled");
@@ -18328,7 +18383,6 @@ export class ChatService {
       }
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
-      this.queueSnapshot(conversation);
     });
     if (!this.chatHasLiveWork(conversation.id)) {
       this.scheduleAutoWatchEvaluation(conversation.id, "stored-orphaned-run-cancelled");
@@ -18842,23 +18896,27 @@ export class ChatService {
     if (pending) {
       await pending.catch(() => undefined);
     }
-    const snapshot = this.clone(conversation);
-    await this.persistConversationSnapshot(snapshot);
-    this.onConversationSnapshot?.(snapshot);
+    const built = buildConversationSnapshot(conversation, this.snapshotRowStates.get(conversation.id));
+    // Rows are remembered before the save so a snapshot queued while this one
+    // is in flight diffs against them, and so the saved snapshot is kept for
+    // refreshStoredChatState (only tracked chats keep it).
+    this.rememberSnapshotRows(conversation.id, built.rows);
+    await this.persistConversationSnapshot(built.snapshot, built.rows);
+    this.onConversationSnapshot?.(built.snapshot, built.update);
   }
 
-  private async persistConversationSnapshot(snapshot: Conversation): Promise<void> {
+  private async persistConversationSnapshot(snapshot: Conversation, rows?: SnapshotMessageRow[]): Promise<void> {
     if (!this.chatEventMirror?.isEnabled()) {
-      await this.storage.saveConversation(snapshot);
+      this.rememberLastSavedSnapshot(snapshot, await this.storage.saveConversation(snapshot, { rows }));
       return;
     }
     const previous = await this.storage.getConversation(snapshot.id);
-    await this.storage.saveConversation(snapshot);
+    this.rememberLastSavedSnapshot(snapshot, await this.storage.saveConversation(snapshot, { rows }));
     await this.chatEventMirror.mirrorSavedConversation(previous, snapshot);
   }
 
   private clone(conversation: Conversation): Conversation {
-    return JSON.parse(JSON.stringify(conversation)) as Conversation;
+    return cloneJsonValue(conversation);
   }
 
   private stableJson(value: unknown): string {

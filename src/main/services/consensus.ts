@@ -3461,7 +3461,9 @@ export class ConsensusService {
     const previous = this.conversationSaveQueues.get(conversation.id) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
-      .then(() => this.storage.saveConversation(snapshot))
+      .then(async () => {
+        await this.storage.saveConversation(snapshot);
+      })
       .catch((error) => {
         void this.debugLogs.write("persistence.error", {
           conversationId: conversation.id,

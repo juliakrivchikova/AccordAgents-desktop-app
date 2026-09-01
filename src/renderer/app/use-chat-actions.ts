@@ -13,6 +13,7 @@ import {
   chatParticipants
 } from "../components/chat/chat-conversation-data";
 import { chatParticipantMentionHandle } from "../components/conversation/conversation-display";
+import { applyConversationUpdate, messagePageAfterUpdate } from "../../shared/conversationUpdates";
 import type { ChatParticipantDraft } from "../components/chat/chat-participant-drafts";
 import {
   activeChatRoleConfigs,
@@ -324,11 +325,16 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         parentMessageId: options.parentMessageId,
         chatThreadRootId: options.chatThreadRootId
       });
-      state.setConversation((current) =>
-        current && current.id === result.conversation.id
-          ? mergeProgressIntoConversation(result.conversation, state.progressLogRef.current.filter((item) => item.runId === runId))
-          : current
-      );
+      state.setConversation((current) => {
+        if (!current || current.id !== result.conversation.id) {
+          return current;
+        }
+        // The reply carries the whole history; keep the window the user had
+        // loaded instead of turning it into every message of the chat.
+        const applied = applyConversationUpdate(current, result.conversation);
+        state.setMessagePage((previous) => messagePageAfterUpdate(previous, applied));
+        return mergeProgressIntoConversation(applied.conversation, state.progressLogRef.current.filter((item) => item.runId === runId));
+      });
       if (result.warnings.length > 0) {
         state.setWarnings(result.warnings);
       }
