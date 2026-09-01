@@ -33,7 +33,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v63/);
+  assert.match(worker, /accordagents-mobile-shell-v64/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -233,6 +233,12 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /MOBILE_UPLOAD_MAX_EDGE = 2576/);
   // A phone whose WebKit cannot do that must still be able to send a picture.
   assert.match(app, /function decodeOrientedImage\(file\)/);
+  // Every control in the composer row must keep the field focused on tap.
+  // Without it the first tap only puts the iOS keyboard away and the button
+  // appears to do nothing.
+  assert.match(app, /function keepFieldFocusedOnTap\(element\)/);
+  assert.match(app, /keepFieldFocusedOnTap\(attachButton\)/);
+  assert.match(app, /keepFieldFocusedOnTap\(document\.getElementById\("send-button"\)\)/);
   // JPEG has no transparency, so a PNG or WebP must not silently become one.
   assert.match(app, /sourceMimeType === "image\/jpeg" \? "image\/jpeg" : "image\/png"/);
   assert.match(app, /if \(\(!content && pendingAttachments\.length === 0\) \|\| !conversationId\)/);

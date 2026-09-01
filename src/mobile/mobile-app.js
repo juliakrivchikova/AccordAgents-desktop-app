@@ -4069,12 +4069,23 @@
           renderMentionMenu();
         }
       });
-      if (mentionButton) {
-        // Keep the textarea as the pointer focus target so tapping this while
-        // typing does not dismiss the iOS keyboard before the click arrives.
-        mentionButton.addEventListener("pointerdown", function (event) {
-          event.preventDefault();
+      // Every control in the composer row needs this, not just the mention one.
+      // A tap on a button moves focus off the textarea, iOS puts the keyboard
+      // away, and the click only lands afterwards — so the first tap looks like
+      // it just closed the keyboard and did nothing.
+      function keepFieldFocusedOnTap(element) {
+        if (!element) {
+          return;
+        }
+        element.addEventListener("pointerdown", function (event) {
+          if (document.activeElement === input) {
+            event.preventDefault();
+          }
         });
+      }
+
+      if (mentionButton) {
+        keepFieldFocusedOnTap(mentionButton);
         mentionButton.addEventListener("click", function () {
           const edit = mentionShortcutEdit(input.value, input.selectionStart, input.selectionEnd);
           input.value = edit.value;
@@ -4086,6 +4097,8 @@
       }
       const attachButton = document.getElementById("attach-button");
       const imageInput = document.getElementById("composer-image-input");
+      keepFieldFocusedOnTap(attachButton);
+      keepFieldFocusedOnTap(document.getElementById("send-button"));
       if (attachButton && imageInput) {
         attachButton.addEventListener("click", function () {
           imageInput.click();
