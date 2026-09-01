@@ -20,6 +20,12 @@
 > - **P-11 identity** and **P-12 live update** move from `CODE-OK` to `VERIFIED`; both were reading-the-source guesses and both were wrong. Live update never worked at all — the phone stringified binary frames and dropped every one.
 > - Method note worth keeping: a scenario is only evidence once it has been **proven red on the build before the fix**. One of the twelve passed on both builds until its message was made realistically tall.
 >
+> ### Skill parity evidence (live AWS worker, 2026-09-01)
+> - A Codex 0.145.0 cloud CLI auto-fired natural requests for user-global and repo-local proof skills and completed their scripts/assets (`CODEX_GLOBAL_SKILL_OK_91A4`, `CODEX_REPO_SKILL_OK_8D13`); explicit `$aa-cloud-global-proof-codex` also resolved.
+> - A Claude 2.1.232 cloud CLI did the same (`CLAUDE_GLOBAL_SKILL_OK_2C7E`, `CLAUDE_REPO_SKILL_OK_7F5B`); explicit `/aa-cloud-global-proof-claude` also resolved.
+> - These were native CLI child runs on the live Linux worker. A fresh desktop-originated launch was not rerun, and Gemini could not be exercised because Cloud Runs has no Gemini invocation, worker executable setting, or worker authentication flow.
+> - A local-vs-cloud global-skill edit while one run remained in flight was not timing-tested. The implementation deliberately maintains one shared provider skill home, matching local behavior, and unit coverage verifies that a subsequent setup replaces the shared link without freezing an earlier per-run home.
+>
 > ### Stale entries corrected 2026-08-19
 > Three statuses in this document were not merely unproven but **wrong**, and each was believed for weeks. Re-read the source before planning against any row here.
 > - **B6/B7 cleared** — Chrome, xvfb and sqlite3 are provisioned.
@@ -30,7 +36,7 @@
 > 1. **Run the app itself on the worker**: sync the repo, `npm ci`, `xvfb-run electron . --remote-debugging-port=9222`, then drive a real flow over CDP. Only the app-specific build remains unproven.
 > 2. **Have a cloud member do it unattended** and report findings as its reply (that path works today — `provider_result`, not `app_chat_send_message`).
 > 3. **Work the `CODE-OK` cases** in §5–§8 — cheapest way to find where the source reading is wrong.
-> 4. **SK-02 / B5** — global skills never reach the worker. Needs a scope and secrets decision before any sync.
+> 4. **SK-02 follow-up** — repeat the live Codex/Claude evidence through a fresh desktop-originated launch and add Gemini once Cloud Runs supports it.
 > 5. **B2** — worker relay is 3 tools. Blocks accords and mid-run posts.
 >
 > ### Standing constraints
@@ -64,7 +70,7 @@ Re-verified on this branch. Two entries changed since the earlier version of thi
 | **B2** | **Worker App MCP surface is 3 tools** | STANDS | `remoteRuns.ts:3348` — `app_permissions_request_change`, `app_chat_get_context`, `app_chat_get_participants`. Everything else → `Unknown worker relay tool` (`:4450`). A cloud member cannot send chat messages, read messages, touch artifacts, or request another participant. |
 | **B3** | **PWA has no approve / choice / artifact / Stop surface** | STANDS | `src/mobile/index.html` and `mobile-app.js` contain chat list, timeline, and composer only. Grep for approval/choice/permission/artifact/Stop returns nothing. |
 | **B4** | **Beta release cannot run on a worker** | STANDS, and is structural | `scripts/signed-mac-arm64.mjs:157-189` requires darwin + arm64 + Xcode CLT + `notarytool` + a local `Developer ID Application` identity. Workers are Ubuntu x86_64. |
-| **B5** | **User-global skills never reach the worker** | STANDS — newly identified | Skill roots are `~/.agents/skills`, `~/.claude/skills`, `repo/.agents/skills`, `repo/.claude/skills` (`userSkills.ts:567-609`). Mirror sync copies **only** the repo (`remoteMirrorSync.ts:82`), and `HOME` is on the env-forwarding denylist (`remoteRuns.ts:108`). So a cloud member gets repo-local skills and **none** of your global ones — including the app-generated `accordagents-accord` and `accordagents-app-chat-request` bridge skills. |
+| **B5** | **User-global skills never reach the worker** | **CLEARED in code; Codex/Claude live-worker QA passed 2026-09-01** | `remoteAgentSetup.ts` snapshots qualifying global skill directories with scripts/assets, syncs them exactly to a content-addressed worker bundle, and atomically links them into each provider's native global root. Codex and Claude natural and explicit invocations passed on the live Linux worker; Gemini remains unverified because Cloud Runs cannot launch it. |
 | **B6** | **No browser QA capability on the worker** | **CLEARED** — provisioning changed since this was written | `awsWorkerProvisioning.ts:286` installs Google Chrome from Google's `.deb`, chosen over the snap-backed `chromium` package precisely because it works headless on a bare EC2 box. |
 | **B7** | **No Electron QA capability on the worker** | **CLEARED** — same change | `xvfb` and `sqlite3` are in the package list (`:274-276`), and the Chrome `.deb` pulls the GTK/NSS/ALSA libraries Electron needs, so one install covers both browser and Electron QA. The xvfb comment states the intent outright: "a worker without Xvfb cannot start the app at all." |
 
@@ -133,14 +139,14 @@ Your ask: global skills should work in the cloud the way they work locally.
 
 | ID | Scenario | Must be true | Status |
 |---|---|---|---|
-| SK-01 | Repo-local skills work remotely | `.agents/skills/*` and `.claude/skills/*` resolve on the box. | CODE-OK — they ride inside the synced repo mirror |
-| SK-02 | **User-global skills work remotely** | `~/.claude/skills` and `~/.agents/skills` are available to a cloud member exactly as to a local one. | **REAL-WORK (B5)** — nothing syncs them today. Needs a decision on scope (all skills? a chosen set?), a sync path with its own change detection, and a rule for skills that shell out to Mac-only tools |
-| SK-03 | App-generated bridge skills work remotely | `accordagents-accord`, `accordagents-app-chat-request`, `accordagents-app-chat-reply` are present on the box. | REAL-WORK (B5 + B2) — they live in `~/.claude/skills` **and** they call tools the worker relay does not expose. Both must be fixed or a cloud member can never facilitate an accord |
-| SK-04 | Skill invocability, not just discovery | A skill on the box is `invocable`, not `discovery-only`. | CODE-OK — capability depends on the run root matching the repo path (`userSkills.ts:468-487`); verify against the mirror path, which is not the local path |
+| SK-01 | Repo-local skills work remotely | `.agents/skills/*` and `.claude/skills/*` resolve on the box. | **VERIFIED for Codex and Claude (2026-09-01)** — natural requests auto-fired repo-local proof skills and completed scripts/assets (`CODEX_REPO_SKILL_OK_8D13`, `CLAUDE_REPO_SKILL_OK_7F5B`). Gemini is unverified: no Cloud Runs Gemini launch path exists. |
+| SK-02 | **User-global skills work remotely** | Provider-native global skill roots are available to a cloud member exactly as to a local one. | **VERIFIED for Codex and Claude (2026-09-01)** — natural requests auto-fired global proof skills and completed scripts/assets (`CODEX_GLOBAL_SKILL_OK_91A4`, `CLAUDE_GLOBAL_SKILL_OK_2C7E`). Gemini is code-covered at `~/.gemini/config/skills` but not live-verifiable through Cloud Runs. |
+| SK-03 | App-generated bridge skills work remotely | `accordagents-accord`, `accordagents-app-chat-request`, `accordagents-app-chat-reply` are present on the box. | CODE-OK for transport; still blocked by B2 where a bridge calls a worker relay tool that is not exposed. |
+| SK-04 | Skill invocability, not just discovery | A skill on the box is `invocable`, not `discovery-only`. | **VERIFIED for Codex and Claude (2026-09-01)** — explicit `$aa-cloud-global-proof-codex` and `/aa-cloud-global-proof-claude` resolved and completed. |
 | SK-05 | `/implementation-workflow` from a cloud member | Resolves and runs. | CODE-OK for a Codex member (it is in `.agents/skills`); **SMALL-FIX** for a Claude member, since there is no `.claude/skills/implementation-workflow` |
 | SK-06 | Skills that shell out to Mac-only tools | A global skill calling `osascript`, `xcrun`, or `codesign`. | SMALL-FIX — must fail with a clear "not available on this worker" message, not a confusing shell error |
-| SK-07 | Skill drift between Mac and worker | Edit a global skill locally, then run a cloud member. | REAL-WORK (B5) — whatever sync lands needs change detection, or a member will silently run an old skill |
-| SK-08 | Secrets in global skills | A global skill containing a token or private path. | REAL-WORK — a sync path that ships `~/.claude` to EC2 needs an explicit exclusion policy and a user-visible statement of what is copied |
+| SK-07 | Skill drift between Mac and worker | Edit a global skill locally, then run a cloud member. | CODE-OK — source fingerprinting re-probes worker state and atomically replaces shared provider-home links. Same-size edits with restored mtime and deletions are regression-tested; a local/cloud edit timed while one run remained in flight was not proven live. |
+| SK-08 | Secrets and scale in global skills | A large global skill tree containing auth files, raw secrets, or private paths. | CODE-OK + measured — known auth/session filenames, `.env*`, and unsafe config declarations are excluded; other skill files are copied verbatim, and Settings warns not to store secrets there while disclosing staging, worker destination and eight-day retention. The final real-data run measured 1,605 files / 33,336,106 bytes (largest file 9.6 MiB) and rebuilt in 3.05 s at 77,480 KB peak RSS; skill payloads are not silently truncated, and ≥50,000 files or ≥256 MiB raises a visible upload advisory. |
 
 ---
 
@@ -189,7 +195,7 @@ New on this branch. Nothing here is QA-proven beyond Drew's single live PASS, an
 | CL-04 | Auth on the box | Per-machine login; no credential copying; refresh works with the desktop offline. | CODE-OK for login; REAL-WORK for the offline-refresh soak (same as CR-23) |
 | CL-05 | Permission prompts | The `--permission-prompt-tool` bridge works across the relay, or the divergence is documented and visible per CLAUDE.md. | REAL-WORK — the worker relay exposes `app_permissions_request_change` but not `app_tool_permission` (`remoteRuns.ts:3348`) |
 | CL-06 | Auto mode | Native classifier decides native actions; no second app gate. Cold, warm, and retry launches. | CODE-OK |
-| CL-07 | Skills | Repo-local and **global** skills resolve; `/implementation-workflow` is invocable. | REAL-WORK (B5) for global; SMALL-FIX for the missing `.claude/skills/implementation-workflow` |
+| CL-07 | Skills | Repo-local and **global** skills resolve and execute. | **VERIFIED for natural and explicit proof skills (2026-09-01)** on Claude 2.1.232; `/implementation-workflow` itself was not used as the proof fixture. |
 | CL-08 | Compaction | `/compact` completes and the context indicator moves; matches local behavior. | CODE-OK |
 | CL-09 | Stop | Settles promptly; preserves an already-emitted final message. | CODE-OK |
 | CL-10 | **Parity audit** | Same task run local vs remote, compared across streaming, approvals, permissions, sandboxing, errors, cancellation, compaction, skills, MCPs, user controls. Any mismatch is a bug. | REAL-WORK — this is the acceptance test for B1 and has not been run |
@@ -528,7 +534,7 @@ Pick a genuinely small, user-visible task with one regression criterion. The poi
 1. **Harness (E-01…E-09).** Nothing below is trustworthy without it.
 2. **Everything marked `CODE-OK` in CR, W, S.** This is the cheapest way to find out how much of the reading is wrong, and it covers your two live complaints — repeated slow sync (S-01) and worker disk (W-15…W-19).
 3. **CL-10, the Claude parity audit.** B1 just cleared on one live PASS; the parity invariant deserves a real audit before it is treated as done.
-4. **BQA + EQA + SK.** Roughly three days of `SMALL-FIX` work unlocks autonomous browser and Linux-Electron QA. SK-02 is the exception — global-skill sync is `REAL-WORK` and needs a scope and secrets decision first.
+4. **BQA + EQA + SK.** Roughly three days of `SMALL-FIX` work unlocks autonomous browser and Linux-Electron QA. SK-02 follow-up is a fresh desktop-originated Codex/Claude pass plus Gemini when Cloud Runs can launch it.
 5. **B2 — the worker tool surface.** The single highest-leverage item: it blocks every accord case, most of the E2E flow, and screenshot-back-to-chat.
 6. **B3 — phone approvals and choices.** Required before "lid closed" is honestly true.
 7. **X, continuously.** These are the regression guards.

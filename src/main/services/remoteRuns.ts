@@ -33,7 +33,8 @@ import {
   createCodexLineHandler,
   emitCodexLiveOutput,
   extractCodexSessionId,
-  extractCodexText
+  extractCodexText,
+  insertCodexOptionBeforePrompt
 } from "./codexExec";
 import type { CodexExecOptions, CodexExecInvocation, CodexExecRemoteSandboxOptions } from "./codexExec";
 import { REMOTE_APP_MCP_WORKER_CONTRACT_SNIPPET } from "./remoteAppMcpTools.generated";
@@ -397,6 +398,7 @@ export interface RemoteRunDetachedStartRequest extends RemoteRunRealStartRequest
   sync?: { localPath: string };
   onPhase?: (status: ChatRemoteRunStatus) => void;
   onToolchainAdvisory?: (message: string) => void;
+  onAgentSetupAdvisory?: (message: string) => void;
 }
 
 export interface RemoteRunDetachedPollRequest {
@@ -917,11 +919,23 @@ export class RemoteRunService {
     let portableSetup: PortableAgentSetupInvocation | undefined;
     if (this.agentSetupSync) {
       await this.emitDetachedPhase(runId, request, "preparing-worker", "Preparing user agent setup");
-      portableSetup = await this.agentSetupSync.sync({
-        worker: request.worker,
-        sourceEnvironment: request.options?.extraEnv,
-        signal: request.signal
-      });
+      try {
+        portableSetup = await this.agentSetupSync.sync({
+          worker: request.worker,
+          sourceEnvironment: request.options?.extraEnv,
+          signal: request.signal
+        });
+      } catch (error) {
+        if (request.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+          throw error;
+        }
+        const advisory = `User agent setup could not be prepared on the worker: ${errorMessage(error)}`;
+        request.onAgentSetupAdvisory?.(advisory);
+        await this.emitDetachedPhase(runId, request, "preparing-worker", "Preparing user agent setup", advisory);
+      }
+      for (const advisory of portableSetup?.advisories ?? []) {
+        request.onAgentSetupAdvisory?.(advisory);
+      }
       markStage("agent-setup");
     }
     const runtimeFingerprint = remoteParticipantRuntimeFingerprint({
@@ -3289,11 +3303,9 @@ function buildRemoteClaudeInvocation(request: BuildRemoteAgentInvocationRequest)
   if (toolConfig.disallowedTools.length > 0) {
     args.push("--disallowedTools", toolConfig.disallowedTools.join(","));
   }
-  const portableSettings = request.portableSetup?.claudeSettings;
-  if (portableSettings || toolConfig.askTools.length > 0) {
+  if (toolConfig.askTools.length > 0) {
     args.push("--settings", JSON.stringify({
-      ...(portableSettings ?? {}),
-      ...(toolConfig.askTools.length > 0 ? { permissions: { ask: toolConfig.askTools } } : {})
+      permissions: { ask: toolConfig.askTools }
     }));
   }
   if (options.sessionId) {
@@ -3492,8 +3504,11 @@ function applyPortableCodexConfig(
   if (!overrides || overrides.length === 0) {
     return;
   }
-  const promptIndex = resuming ? Math.max(args.length - 2, 2) : Math.max(args.length - 1, 1);
-  args.splice(promptIndex, 0, ...overrides.flatMap((override) => ["-c", override]));
+  insertCodexOptionBeforePrompt(
+    args,
+    resuming,
+    ...overrides.flatMap((override) => ["-c", override])
+  );
 }
 
 function remoteClaudeBashPermissionRule(rule: ChatShellPermissionRule): string {

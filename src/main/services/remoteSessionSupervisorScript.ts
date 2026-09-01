@@ -789,7 +789,7 @@ function registeredWorkAt(registeredRoot) {
   }
   for (const name of listFiles(registeredRoot)) {
     if (
-      ["devices", "sessions", "mirrors", "operations", "lifecycle.lock", "protocol-install.lock"].includes(name) ||
+      ["agent-setup", "devices", "sessions", "mirrors", "operations", "lifecycle.lock", "protocol-install.lock"].includes(name) ||
       name.startsWith("lifecycle.lock.reclaimed.") ||
       name.startsWith("protocol-install.lock.reclaimed.") ||
       name.startsWith("session-") ||

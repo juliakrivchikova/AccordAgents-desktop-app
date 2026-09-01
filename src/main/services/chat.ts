@@ -6961,7 +6961,16 @@ export class ChatService {
               skip: participant.skipToolchainPreflight === true
             },
             onToolchainAdvisory: (message) => {
-              options.warnings.push(`@${participant.handle}: ${message}`);
+              const warning = `@${participant.handle}: ${message}`;
+              if (!options.warnings.includes(warning)) {
+                options.warnings.push(warning);
+              }
+            },
+            onAgentSetupAdvisory: (message) => {
+              const warning = `@${participant.handle}: ${message}`;
+              if (!options.warnings.includes(warning)) {
+                options.warnings.push(warning);
+              }
             },
             options: {
               persistSession: true,

@@ -416,7 +416,6 @@ test("detached remote runs activate portable setup and apply provider invocation
       return {
         fingerprint: "portable-fingerprint",
         codexConfigOverrides: ["features.js_repl=false"],
-        claudeSettings: { enabledPlugins: { "portable@example": true } },
         claudeMcpServers: {
           docs: { type: "http", url: "https://example.test/mcp" }
         }
@@ -469,11 +468,10 @@ test("detached remote runs activate portable setup and apply provider invocation
     }
   });
   const claudeArgs = claudeWorker.launchRequests[0].invocation.args;
-  const settings = JSON.parse(claudeArgs[claudeArgs.indexOf("--settings") + 1]) as Record<string, unknown>;
   const mcpConfig = JSON.parse(claudeArgs[claudeArgs.indexOf("--mcp-config") + 1]) as {
     mcpServers: Record<string, unknown>;
   };
-  assert.deepEqual(settings, { enabledPlugins: { "portable@example": true } });
+  assert.equal(claudeArgs.includes("--settings"), false);
   assert.deepEqual(Object.keys(mcpConfig.mcpServers).sort(), ["accord_agents", "docs"]);
   assert.deepEqual(syncCalls, [
     {
@@ -483,6 +481,63 @@ test("detached remote runs activate portable setup and apply provider invocation
     },
     { host: "claude.worker", codexHome: undefined, claudeConfigDir: undefined }
   ]);
+});
+
+test("portable setup advisories are visible and setup failure does not trigger a worker retry", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const worker = new FakeDetachedWorkerTransport();
+  const advisories: string[] = [];
+  const { remote } = await testRemoteRun({
+    conversation,
+    detachedWorkerTransport: worker,
+    agentSetupSync: {
+      async sync() {
+        throw new Error("setup transport unavailable");
+      }
+    }
+  });
+
+  const state = await remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "portable-setup-advisory-run",
+    participant: participantConfig(participant),
+    prompt: "Continue with a visible setup advisory.",
+    worker: { host: "worker.example" },
+    onAgentSetupAdvisory: (message) => advisories.push(message)
+  });
+
+  assert.equal(state.status, "running");
+  assert.equal(worker.launches, 1);
+  assert.equal(advisories.length, 1);
+  assert.match(advisories[0], /setup transport unavailable/);
+});
+
+test("portable setup cancellation aborts before remote launch", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant]);
+  const worker = new FakeDetachedWorkerTransport();
+  const controller = new AbortController();
+  controller.abort(new Error("cancel setup"));
+  const { remote } = await testRemoteRun({
+    conversation,
+    detachedWorkerTransport: worker,
+    agentSetupSync: {
+      async sync() {
+        throw new DOMException("cancel setup", "AbortError");
+      }
+    }
+  });
+
+  await assert.rejects(remote.startDetachedRun({
+    conversationId: conversation.id,
+    runId: "portable-setup-cancelled-run",
+    participant: participantConfig(participant),
+    prompt: "Cancel before launch.",
+    worker: { host: "worker.example" },
+    signal: controller.signal
+  }), /cancel setup/);
+  assert.equal(worker.launches, 0);
 });
 
 test("remote Claude auto mode keeps Bash available for provider-owned approval", async () => {
