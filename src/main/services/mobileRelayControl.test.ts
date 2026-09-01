@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
-import type { Conversation, StartReviewResult } from "../../shared/types";
+import type { Conversation, SendChatMessageRequest, StartReviewResult } from "../../shared/types";
 import { RelayTunnelClient } from "./relayTunnelClient";
 import { MobileRelayControlService, timelineEventsFromSnapshot, type MobileRelayChatSender, type MobileTimelineEvents } from "./mobileRelayControl";
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
@@ -2672,4 +2672,63 @@ test("the phone can ask for one image by id, and an oversized one answers with a
     desktop.close();
     await relay.close();
   }
+});
+
+// A phone can put anything in a payload, so what becomes a message is checked
+// first: known image types, bounded count, bounded size — and an unusable one
+// is dropped rather than failing the send, so the text still arrives.
+test("images sent from the phone reach sendMessage, and unusable ones are dropped without losing the text", async () => {
+  const key = Buffer.from("j".repeat(32)).toString("base64url");
+  const sent: SendChatMessageRequest[] = [];
+  const service = new MobileRelayControlService(
+    {
+      relayUrl: "ws://127.0.0.1:1/v1/relay",
+      rendezvousId: "rv-upload",
+      relayCapability: "PAIRING-FINGERPRINT",
+      relaySealKeyBase64: key,
+      conversationId: "conversation-1",
+      streamId: "route-upload:phone"
+    },
+    {
+      async sendMessage(request: SendChatMessageRequest) {
+        sent.push(request);
+        return {
+          conversation: {
+            id: request.conversationId,
+            kind: "chat" as const,
+            title: "t",
+            createdAt: "2026-09-01T00:00:00.000Z",
+            updatedAt: "2026-09-01T00:00:00.000Z",
+            messages: [],
+            findings: [],
+            metadata: {}
+          },
+          warnings: []
+        } as never;
+      }
+    } as never
+  );
+  const oversized = "A".repeat(Math.ceil((4 * 1024 * 1024) / 3) * 4 + 4);
+  await service.acceptSealedMobileOutbox(await sealMobileRelayPayload({
+    type: "mobile.outbox.events",
+    events: [{
+      eventId: "event-upload",
+      conversationId: "conversation-1",
+      payload: {
+        content: "look at this",
+        attachments: [
+          { filename: "shot.png", mimeType: "image/png", dataBase64: "cG5n" },
+          { filename: "notes.pdf", mimeType: "application/pdf", dataBase64: "cGRm" },
+          { filename: "huge.png", mimeType: "image/png", dataBase64: oversized }
+        ]
+      }
+    }]
+  }, key));
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].content, "look at this");
+  assert.deepEqual(sent[0].imageAttachments, [
+    { filename: "shot.png", mimeType: "image/png", dataBase64: "cG5n" }
+  ]);
+  service.close();
 });

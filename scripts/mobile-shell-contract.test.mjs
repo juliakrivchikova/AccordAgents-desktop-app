@@ -33,7 +33,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v60/);
+  assert.match(worker, /accordagents-mobile-shell-v61/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -213,6 +213,13 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /type: "mobile\.attachment\.request"/);
   assert.match(app, /attachmentDataUrls\.set\(attachment\.id, result\)/);
   assert.match(css, /\.message-image \{/);
+  // Sending a picture from the phone: the limits are enforced where the picture
+  // is chosen, and a picture with no caption is a message on its own.
+  assert.match(html, /id="composer-image-input"[^>]*accept="image\/png,image\/jpeg,image\/webp"/);
+  assert.match(html, /id="attach-button"/);
+  assert.match(app, /if \(\(!content && pendingAttachments\.length === 0\) \|\| !conversationId\)/);
+  assert.match(app, /MOBILE_UPLOAD_MAX_BYTES = 4 \* 1024 \* 1024/);
+  assert.match(css, /\.composer-attachment-thumb \{/);
   assert.match(app, /setProperty\("--app-h"/);
   // The keyboard must not resize the app. Tracking every frame of the iOS
   // keyboard animation made the screen jump the moment the input was tapped.

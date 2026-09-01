@@ -1438,6 +1438,110 @@
     };
   }
 
+  // Pictures chosen on the phone, waiting for the next send. Same limits the
+  // desktop composer enforces, checked here so the refusal is visible where the
+  // picture was chosen rather than deep in the relay.
+  const MOBILE_UPLOAD_MIME_TYPES = ["image/png", "image/jpeg", "image/webp"];
+  const MOBILE_UPLOAD_MAX_IMAGES = 5;
+  const MOBILE_UPLOAD_MAX_BYTES = 4 * 1024 * 1024;
+  let pendingAttachments = [];
+
+  function readFileAsBase64(file) {
+    return new Promise(function (resolve, reject) {
+      const reader = new FileReader();
+      reader.onerror = function () {
+        reject(new Error("read-failed"));
+      };
+      reader.onload = function () {
+        const result = String(reader.result || "");
+        const comma = result.indexOf(",");
+        resolve(comma >= 0 ? result.slice(comma + 1) : "");
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function addPendingAttachments(files) {
+    const rejected = [];
+    for (const file of Array.from(files || [])) {
+      if (pendingAttachments.length >= MOBILE_UPLOAD_MAX_IMAGES) {
+        rejected.push(file.name + " — too many pictures");
+        continue;
+      }
+      if (MOBILE_UPLOAD_MIME_TYPES.indexOf(file.type) < 0) {
+        rejected.push(file.name + " — not a PNG, JPEG or WebP");
+        continue;
+      }
+      if (file.size > MOBILE_UPLOAD_MAX_BYTES) {
+        rejected.push(file.name + " — larger than 4 MB");
+        continue;
+      }
+      try {
+        const dataBase64 = await readFileAsBase64(file);
+        if (!dataBase64) {
+          rejected.push(file.name + " — could not be read");
+          continue;
+        }
+        pendingAttachments.push({
+          id: createEventId(),
+          filename: file.name || "image",
+          mimeType: file.type,
+          dataBase64
+        });
+      } catch {
+        rejected.push(file.name + " — could not be read");
+      }
+    }
+    return rejected;
+  }
+
+  function renderPendingAttachments() {
+    const strip = document.getElementById("composer-attachments");
+    if (!strip) {
+      return;
+    }
+    strip.textContent = "";
+    if (pendingAttachments.length === 0) {
+      strip.hidden = true;
+      return;
+    }
+    strip.hidden = false;
+    for (const attachment of pendingAttachments) {
+      const chip = document.createElement("div");
+      chip.className = "composer-attachment-chip";
+      const thumb = document.createElement("img");
+      thumb.className = "composer-attachment-thumb";
+      thumb.alt = attachment.filename;
+      thumb.src = "data:" + attachment.mimeType + ";base64," + attachment.dataBase64;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "composer-attachment-remove";
+      remove.setAttribute("aria-label", "Remove " + attachment.filename);
+      remove.textContent = "×";
+      remove.addEventListener("click", function () {
+        pendingAttachments = pendingAttachments.filter(function (item) {
+          return item.id !== attachment.id;
+        });
+        renderPendingAttachments();
+      });
+      chip.append(thumb, remove);
+      strip.append(chip);
+    }
+  }
+
+  function takePendingAttachments() {
+    const taken = pendingAttachments.map(function (attachment) {
+      return {
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+        dataBase64: attachment.dataBase64
+      };
+    });
+    pendingAttachments = [];
+    renderPendingAttachments();
+    return taken;
+  }
+
   function enqueueMessage(input) {
     return createOutboxEvent(input).then(function (entry) {
       return putOutboxEntry(entry).then(function () {
@@ -3842,6 +3946,25 @@
           renderMentionMenu();
         });
       }
+      const attachButton = document.getElementById("attach-button");
+      const imageInput = document.getElementById("composer-image-input");
+      if (attachButton && imageInput) {
+        attachButton.addEventListener("click", function () {
+          imageInput.click();
+        });
+        imageInput.addEventListener("change", async function () {
+          const rejected = await addPendingAttachments(imageInput.files);
+          // Clearing lets the same file be picked again after removing it.
+          imageInput.value = "";
+          renderPendingAttachments();
+          if (rejected.length > 0) {
+            const state = document.getElementById("connection-state");
+            if (state) {
+              state.textContent = "Not attached: " + rejected.join("; ");
+            }
+          }
+        });
+      }
       input.addEventListener("keydown", function (event) {
         const options = mentionOptions(mentionValueBeforeCaret(), selectedConversationMembers());
         if (options.length > 0 && event.key === "ArrowDown") {
@@ -3872,11 +3995,17 @@
         event.preventDefault();
         const content = input.value.trim();
         const conversationId = selectedConversationId();
-        if (!content || !conversationId) {
+        // A picture on its own is a message.
+        if ((!content && pendingAttachments.length === 0) || !conversationId) {
           return;
         }
         input.value = "";
-        await enqueueMessage({ content, conversationId });
+        const attachments = takePendingAttachments();
+        await enqueueMessage({
+          content,
+          conversationId,
+          ...(attachments.length > 0 ? { payload: { content, attachments } } : {})
+        });
         await render();
         // Sending is a deliberate action, so following it is expected.
         scrollToLatestWhenSettled("auto");
@@ -3954,6 +4083,8 @@
     connectionStatusText,
     renderMessageContent,
     timelineAttachmentsFromEvent,
+    addPendingAttachments,
+    takePendingAttachments,
     savePairing
   };
 

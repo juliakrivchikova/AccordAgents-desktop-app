@@ -7,7 +7,7 @@
     <title>AccordAgents</title>
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="assets/accordagents-mark.png" />
-    <link rel="stylesheet" href="mobile-app.css?v=2026-09-01-timeline-images-v1" />
+    <link rel="stylesheet" href="mobile-app.css?v=2026-09-01-phone-pictures-v1" />
   </head>
   <body>
     <div class="mobile-stage">
@@ -83,6 +83,13 @@
           </button>
           <form id="composer-form" class="composer">
             <div id="mention-menu" class="mobile-mention-menu" role="listbox" aria-label="Members" hidden></div>
+            <div id="composer-attachments" class="composer-attachments" aria-label="Attached pictures" hidden></div>
+            <input id="composer-image-input" class="composer-image-input" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden />
+            <button id="attach-button" class="composer-attach-button" type="button" aria-label="Attach a picture">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 5v14M5 12h14"></path>
+              </svg>
+            </button>
             <div class="composer-input-wrap">
               <textarea id="composer-input" name="message" rows="1" placeholder="Message the room..." aria-label="Message the room" aria-autocomplete="list" aria-controls="mention-menu" aria-expanded="false" autocomplete="off"></textarea>
               <button id="mention-button" class="composer-mention-button" type="button" aria-label="Mention a member" aria-controls="mention-menu">@</button>
@@ -97,7 +104,7 @@
         <div class="mobile-home-indicator" aria-hidden="true"><span></span></div>
       </main>
     </div>
-    <script src="jsqr.js?v=2026-09-01-timeline-images-v1" defer></script>
-    <script src="mobile-app.js?v=2026-09-01-timeline-images-v1" defer></script>
+    <script src="jsqr.js?v=2026-09-01-phone-pictures-v1" defer></script>
+    <script src="mobile-app.js?v=2026-09-01-phone-pictures-v1" defer></script>
   </body>
 </html>

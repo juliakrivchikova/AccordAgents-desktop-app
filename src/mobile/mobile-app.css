@@ -405,6 +405,75 @@ textarea {
   color: var(--mut);
 }
 
+/* Picking a picture. The attach control matches the send button's size so the
+   composer keeps the height the phone shell was just fixed for. */
+.composer-attach-button {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--s2);
+  color: var(--fg1);
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.composer-attach-button:active {
+  background: var(--bd);
+}
+
+.composer-attachments {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: calc(100% + 6px);
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 6px;
+  border: 1px solid var(--bd);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(22, 25, 31, 0.16);
+}
+
+.composer-attachments[hidden] {
+  display: none;
+}
+
+.composer-attachment-chip {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.composer-attachment-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid var(--bd);
+}
+
+.composer-attachment-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--bd);
+  border-radius: 50%;
+  background: #fff;
+  color: var(--fg1);
+  font: 600 14px var(--sans);
+  line-height: 1;
+  cursor: pointer;
+}
+
 /* Pictures in the timeline. The box is reserved from the attachment's real
    dimensions before the bytes arrive, so the list does not jump under the
    reader when an image lands. */

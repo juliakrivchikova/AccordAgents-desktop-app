@@ -102,6 +102,9 @@ export interface MobileMessageOutboxEvent extends MobileOutboxEventBase {
   kind?: "message.created";
   payload: {
     content: string;
+    /** Pictures taken or picked on the phone. The relay is the only path they
+     *  have, so they arrive inline here rather than by reference. */
+    attachments?: Array<{ filename?: string; mimeType: string; dataBase64: string }>;
   };
 }
 
@@ -217,6 +220,11 @@ interface MobileChatListResponse {
  *  relay. Anything above this answers with a reason instead, and the desktop
  *  stays the place to open it. */
 const MOBILE_ATTACHMENT_MAX_BYTES = 4 * 1024 * 1024;
+
+/** Same shapes the desktop composer accepts. Anything else is refused here
+ *  rather than deeper in, where the error would reach nobody. */
+const MOBILE_UPLOAD_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const MOBILE_UPLOAD_MAX_IMAGES = 5;
 
 export class MobileRelayControlService {
   private readonly client: RelayTunnelClient;
@@ -574,10 +582,12 @@ export class MobileRelayControlService {
         if (await this.mobileEventIsAlreadyHandled(item.event)) {
           continue;
         }
+        const imageAttachments = mobileUploadImages(item.event.payload.attachments);
         const result = await this.chat.sendMessage(
           {
             conversationId: item.event.conversationId,
             content: item.event.payload.content,
+            ...(imageAttachments.length > 0 ? { imageAttachments } : {}),
             runId: item.runId,
             mobileEventId: item.event.eventId
           },
@@ -1000,6 +1010,35 @@ function timelineEventDeliverySignature(event: MobileTimelineEvent): string {
 function isMobileChatListRequest(value: unknown): value is MobileChatListRequest {
   return Boolean(value && typeof value === "object" && !Array.isArray(value) &&
     (value as Partial<MobileChatListRequest>).type === "mobile.chat-list.request");
+}
+
+/** A phone can put anything in a payload, so the bytes are checked before they
+ *  become a message: known image types only, a bounded count, and a bounded
+ *  size each. An oversized or unknown one is dropped rather than failing the
+ *  whole send, so the text still arrives. */
+function mobileUploadImages(
+  attachments: MobileMessageOutboxEvent["payload"]["attachments"]
+): Array<{ filename?: string; mimeType: string; dataBase64: string }> {
+  if (!Array.isArray(attachments)) {
+    return [];
+  }
+  return attachments
+    .filter((attachment) =>
+      Boolean(attachment) &&
+      typeof attachment.dataBase64 === "string" &&
+      attachment.dataBase64.length > 0 &&
+      typeof attachment.mimeType === "string" &&
+      MOBILE_UPLOAD_MIME_TYPES.has(attachment.mimeType) &&
+      // base64 is 4 characters per 3 bytes, so this bounds the decoded size.
+      attachment.dataBase64.length <= Math.ceil(MOBILE_ATTACHMENT_MAX_BYTES / 3) * 4)
+    .slice(0, MOBILE_UPLOAD_MAX_IMAGES)
+    .map((attachment) => ({
+      ...(typeof attachment.filename === "string" && attachment.filename.trim()
+        ? { filename: attachment.filename.trim() }
+        : {}),
+      mimeType: attachment.mimeType,
+      dataBase64: attachment.dataBase64
+    }));
 }
 
 function isMobileAttachmentRequest(value: unknown): value is MobileAttachmentRequest {
