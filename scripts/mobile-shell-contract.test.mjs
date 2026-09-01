@@ -33,7 +33,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v62/);
+  assert.match(worker, /accordagents-mobile-shell-v63/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -223,7 +223,18 @@ test("mobile shell builds static installable PWA assets", async () => {
   // Sending a picture from the phone: the limits are enforced where the picture
   // is chosen, and a picture with no caption is a message on its own.
   assert.match(html, /id="composer-image-input"[^>]*accept="image\/png,image\/jpeg,image\/webp"/);
-  assert.match(html, /id="attach-button"/);
+  // Slack's shape: the controls live on a row inside the input box, with send at
+  // the far end of that row — not icons floating beside the box.
+  assert.match(html, /<div class="composer-toolbar">[\s\S]*id="attach-button"[\s\S]*id="mention-button"[\s\S]*id="send-button"[\s\S]*<\/div>/);
+  assert.match(css, /\.composer-toolbar \{/);
+  assert.doesNotMatch(css, /composer-attach-button|composer-mention-button/);
+  // Models read no image metadata, so orientation has to be in the pixels.
+  assert.match(app, /imageOrientation: "from-image"/);
+  assert.match(app, /MOBILE_UPLOAD_MAX_EDGE = 2576/);
+  // A phone whose WebKit cannot do that must still be able to send a picture.
+  assert.match(app, /function decodeOrientedImage\(file\)/);
+  // JPEG has no transparency, so a PNG or WebP must not silently become one.
+  assert.match(app, /sourceMimeType === "image\/jpeg" \? "image\/jpeg" : "image\/png"/);
   assert.match(app, /if \(\(!content && pendingAttachments\.length === 0\) \|\| !conversationId\)/);
   assert.match(app, /MOBILE_UPLOAD_MAX_BYTES = 4 \* 1024 \* 1024/);
   assert.match(css, /\.composer-attachment-thumb \{/);
@@ -256,11 +267,16 @@ test("mobile shell builds static installable PWA assets", async () => {
   // under the indicator, which is what happened the moment the shell first
   // filled the whole screen.
   assert.match(cssBlock(".composer"), /padding: 10px 16px calc\(14px \+ env\(safe-area-inset-bottom\)\)/);
-  assert.match(cssBlock(".composer-input-wrap"), /height: 46px/);
-  assert.match(cssBlock(".composer .composer-mention-button"), /width: 44px/);
-  assert.match(cssBlock(".composer .composer-mention-button"), /height: 44px/);
-  assert.match(cssBlock(".composer .composer-mention-button"), /color: var\(--fg1\)/);
-  assert.match(cssBlock(".composer .composer-mention-button:active"), /background: rgba\(22, 25, 31, 0\.08\)/);
+  // The pill is two rows now — field on top, controls beneath — so it has no
+  // fixed height; what must hold is that the field owns the full width and
+  // nothing is layered over it, which is what broke the keyboard before.
+  assert.match(cssBlock(".composer-input-wrap"), /flex-direction: column/);
+  assert.match(cssBlock(".composer textarea"), /width: 100%/);
+  assert.doesNotMatch(cssBlock(".composer textarea"), /position: absolute/);
+  assert.match(cssBlock(".composer .composer-tool"), /width: 44px/);
+  assert.match(cssBlock(".composer .composer-send"), /width: 44px/);
+  assert.match(cssBlock(".composer .composer-tool:active"), /background: rgba\(22, 25, 31, 0\.08\)/);
+  assert.match(cssBlock(".composer .composer-send"), /margin-left: auto/);
   assert.match(cssBlock(".mobile-chat-header"), /padding: calc\(2px \+ env\(safe-area-inset-top\)\)/);
   assert.match(cssBlock(".mobile-chats-header"), /padding: calc\(6px \+ env\(safe-area-inset-top\)\)/);
   assert.match(cssBlock(".mobile-chat-list"), /padding-bottom: calc\(18px \+ env\(safe-area-inset-bottom\)\)/);
@@ -305,7 +321,6 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /border-radius: 44px;/);
   assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /background: #eceef2;/);
   assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /border-radius: 18px 18px 6px 18px;/);
-  assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /height: 46px;/);
   assert.match(app, /indexedDB\.open\(DB_NAME, DB_VERSION\)/);
   assert.match(app, /ackedEventIds\.includes\(entry\.eventId\)/);
   assert.match(app, /\/v1\/mailbox\/events/);

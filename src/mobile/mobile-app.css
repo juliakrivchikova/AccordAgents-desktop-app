@@ -407,26 +407,6 @@ textarea {
 
 /* Picking a picture. The attach control matches the send button's size so the
    composer keeps the height the phone shell was just fixed for. */
-.composer-attach-button {
-  flex-shrink: 0;
-  width: 36px;
-  height: 36px;
-  border: 0;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--s2);
-  color: var(--fg1);
-  cursor: pointer;
-  touch-action: manipulation;
-  -webkit-tap-highlight-color: transparent;
-}
-
-.composer-attach-button:active {
-  background: var(--bd);
-}
-
 .composer-attachments {
   position: absolute;
   left: 16px;
@@ -790,7 +770,7 @@ textarea {
 .mobile-mention-menu {
   position: absolute;
   left: 16px;
-  right: 70px;
+  right: 16px;
   bottom: calc(100% + 6px);
   z-index: 6;
   max-height: min(320px, 42vh);
@@ -877,72 +857,80 @@ textarea {
    not raise the keyboard, which reads as a field you cannot type into. The pill
    is now a plain container and the textarea fills it. The only overlay is the
    intentional mention button, whose pointer handler preserves textarea focus. */
+/* Slack's shape: one rounded box holding the field, with its controls on a row
+   underneath — not icons floating beside the box. */
 .composer-input-wrap {
   flex: 1;
   min-width: 0;
-  height: 46px;
-  border-radius: 23px;
+  border-radius: 20px;
   background: var(--s2);
   border: 1px solid var(--bd);
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 0;
   padding: 0;
   position: relative;
 }
 
 .composer textarea {
-  flex: 1;
+  width: 100%;
   min-width: 0;
-  height: 44px;
+  min-height: 40px;
+  max-height: 120px;
   resize: none;
   border: 0;
-  /* Padding lives on the field, not on the pill, so the whole pill is tappable
-     field. The right padding leaves room for the "@" control. */
-  padding: 12px 49px 0 16px;
+  /* The whole width is field now; the controls sit on their own row below, so
+     nothing overlaps the text. */
+  padding: 11px 14px 2px;
   background: transparent;
   color: var(--fg1);
   outline: none;
   font: 400 15.5px var(--sans);
 }
 
-.composer textarea::placeholder {
-  color: var(--mut);
-  opacity: 1;
+.composer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 6px 6px;
 }
 
-.composer .composer-mention-button {
-  position: absolute;
-  right: 1px;
-  top: 50%;
-  transform: translateY(-50%);
+/* 44px is the smallest target a finger hits reliably; the glyph inside is
+   smaller, the tappable box is not. */
+.composer .composer-tool {
   width: 44px;
   height: 44px;
+  flex-shrink: 0;
+  border: 0;
   border-radius: 50%;
+  background: transparent;
+  color: var(--mut);
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 0;
-  font: 600 15px var(--mono);
-  color: var(--fg1);
-  background: transparent;
   cursor: pointer;
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
 }
 
-.composer .composer-mention-button:active {
+.composer .composer-tool-glyph {
+  font: 600 16px var(--mono);
+}
+
+.composer .composer-tool:active {
   background: rgba(22, 25, 31, 0.08);
 }
 
-.composer .composer-mention-button:focus-visible {
+.composer .composer-tool:focus-visible {
   outline: 2px solid var(--fg1);
   outline-offset: 1px;
 }
 
-.composer button {
-  width: 46px;
-  height: 46px;
+/* Send sits at the far end of the same row, the way Slack puts it. */
+.composer .composer-send {
+  margin-left: auto;
+  width: 44px;
+  height: 44px;
   flex-shrink: 0;
   border: 0;
   border-radius: 50%;
@@ -952,6 +940,11 @@ textarea {
   align-items: center;
   justify-content: center;
   cursor: pointer;
+}
+
+.composer textarea::placeholder {
+  color: var(--mut);
+  opacity: 1;
 }
 
 .composer button:disabled {

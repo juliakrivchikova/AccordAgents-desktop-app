@@ -187,9 +187,19 @@ test("mention shortcut opens the wired menu without taking pointer focus", async
         caret: input.selectionStart,
         activeElement: document.activeElement?.id,
         inputExpanded: input.getAttribute("aria-expanded"),
-        wrapHeight: document.querySelector(".composer-input-wrap").getBoundingClientRect().height,
-        inputHeight: input.getBoundingClientRect().height,
-        buttonHeight: document.querySelector("#mention-button").getBoundingClientRect().height,
+        // The pill is two rows now — field above, controls below — so pin the
+        // relationships that matter rather than a fixed height: the field spans
+        // the pill's width, and no control is layered over it. An overlay on the
+        // field is what stopped the iOS keyboard appearing once already.
+        fieldSpansPill: (() => {
+          const field = input.getBoundingClientRect();
+          const pill = document.querySelector(".composer-input-wrap").getBoundingClientRect();
+          // Within the pill's 1px border on each side.
+          return Math.abs(field.left - pill.left) <= 2 && Math.abs(pill.right - field.right) <= 2;
+        })(),
+        controlsBelowField: document.querySelector(".composer-toolbar").getBoundingClientRect().top >=
+          input.getBoundingClientRect().bottom,
+        sendIsLast: document.querySelector(".composer-toolbar").lastElementChild?.id,
         padding: getComputedStyle(composer).padding
       };
     })()`), {
@@ -197,10 +207,51 @@ test("mention shortcut opens the wired menu without taking pointer focus", async
       caret: 27,
       activeElement: "composer-input",
       inputExpanded: "false",
-      wrapHeight: 46,
-      inputHeight: 44,
-      buttonHeight: 44,
+      fieldSpansPill: true,
+      controlsBelowField: true,
+      sendIsLast: "send-button",
       padding: "10px 16px 14px"
+    });
+
+    // A picture is prepared on the way into the queue, not merely somewhere in
+    // the file. Source pins alone would pass with the preparation removed from
+    // this path, which is the whole point of doing it in the browser.
+    assert.deepEqual(await evaluate(`(async () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 4000;
+      canvas.height = 3000;
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#123456";
+      context.fillRect(0, 0, 4000, 3000);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+      const file = new File([blob], "wide.PNG", { type: "image/png" });
+      const rejected = await globalThis.AccordAgentsMobile.addPendingAttachments([file]);
+      const queued = globalThis.AccordAgentsMobile.takePendingAttachments();
+      // The origin's CSP has no data: in connect-src, so the bytes are decoded
+      // here rather than fetched back as a data URL.
+      const binary = atob(queued[0].dataBase64);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+      const decoded = await createImageBitmap(new Blob([bytes], { type: queued[0].mimeType }));
+      return {
+        rejected: rejected.length,
+        queued: queued.length,
+        mimeType: queued[0].mimeType,
+        filename: queued[0].filename,
+        longEdge: Math.max(decoded.width, decoded.height),
+        aspectKept: Math.round((decoded.width / decoded.height) * 100) / 100
+      };
+    })()`), {
+      rejected: 0,
+      queued: 1,
+      // A PNG stays a PNG: JPEG would drop transparency, and the extension has
+      // to follow the bytes rather than the original name.
+      mimeType: "image/png",
+      filename: "wide.png",
+      longEdge: 2576,
+      aspectKept: 1.33
     });
   } finally {
     app?.close();
