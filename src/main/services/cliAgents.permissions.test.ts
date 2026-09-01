@@ -218,6 +218,15 @@ test("parseClaudeModelPickerOutput recognizes a single picker with fragmented bo
   assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), ["haiku"]);
 });
 
+test("macOS Claude model discovery uses a full-height, system-expect-compatible PTY", () => {
+  const script = (makeRunner() as any).claudeModelProbeExpectScript() as string;
+
+  assert.match(script, /set stty_init "rows 40 columns 120"/);
+  assert.match(script, /spawn \$env\(ACCORD_AGENTS_CLAUDE_EXECUTABLE\) --safe-mode --no-chrome/);
+  assert.doesNotMatch(script, /spawn --/);
+  assert.ok(script.indexOf("set stty_init") < script.indexOf("spawn $env"));
+});
+
 test("Windows Claude model discovery drives only the non-persistent interactive model picker", async () => {
   const writes: string[] = [];
   let launch: { executable: string; args: string[]; cwd: string; env: Record<string, string> } | undefined;

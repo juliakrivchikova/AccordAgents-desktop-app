@@ -1254,8 +1254,9 @@ export class CliAgentRunner {
   private claudeModelProbeExpectScript(): string {
     return [
       "set timeout 8",
+      "set stty_init \"rows 40 columns 120\"",
       "log_user 1",
-      `spawn -- $env(${CLAUDE_EXECUTABLE_ENV}) --safe-mode --no-chrome`,
+      `spawn $env(${CLAUDE_EXECUTABLE_ENV}) --safe-mode --no-chrome`,
       "expect {",
       "  -re \".\" {}",
       "  timeout { exit 124 }",
