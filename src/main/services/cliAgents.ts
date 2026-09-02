@@ -498,6 +498,11 @@ interface ClaudeModelProbeExpectOptions {
   maxOutputBytes?: number;
 }
 
+interface CliAgentRunnerOptions {
+  codexExecutable?: string;
+  electronAppPath?: string;
+}
+
 class CliGeminiResumeMissError extends Error {
   constructor(status: string, response: string | undefined) {
     super(`Antigravity CLI could not resume the conversation (status ${status})${response ? `: ${response.slice(0, 200)}` : "."}`);
@@ -865,11 +870,16 @@ export async function syncGeminiMcpConfig(
 ): Promise<void> {
   let config: Record<string, unknown>;
   try {
-    const parsed = JSON.parse(await readFile(configPath, "utf8")) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("Antigravity MCP config must contain a JSON object.");
+    const contents = await readFile(configPath, "utf8");
+    if (!contents.trim()) {
+      config = {};
+    } else {
+      const parsed = JSON.parse(contents) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Antigravity MCP config must contain a JSON object.");
+      }
+      config = parsed as Record<string, unknown>;
     }
-    config = parsed as Record<string, unknown>;
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
       throw error;
@@ -905,6 +915,8 @@ export function geminiMcpProxyLaunchArgs(
 
 export class CliAgentRunner {
   private readonly readiness: CliReadinessService;
+  private readonly codexExecutable: string;
+  private readonly electronAppPath: string | undefined;
   private readonly warmAgents = new Map<string, WarmAgentEntry>();
   private readonly warmUnsupportedLogged = new Set<ParticipantConfig["kind"]>();
   private readonly modelCatalogs = new Map<ChatProviderKind, CachedModelCatalog>();
@@ -920,10 +932,15 @@ export class CliAgentRunner {
   constructor(
     private readonly debugLogs?: CliAgentDebugLogger,
     manualReadinessEnvironment?: () => Promise<{ env: NodeJS.ProcessEnv }>,
-    private readonly codexExecutable = "codex",
+    codexExecutableOrOptions: string | CliAgentRunnerOptions = "codex",
     private readonly claudeModelProbePtySpawn?: ClaudeModelProbePtySpawn,
     private readonly claudeModelProbeExpectSpawn: ClaudeModelProbeExpectSpawn = spawnCommand
   ) {
+    const options = typeof codexExecutableOrOptions === "string"
+      ? { codexExecutable: codexExecutableOrOptions }
+      : codexExecutableOrOptions;
+    this.codexExecutable = options.codexExecutable ?? "codex";
+    this.electronAppPath = options.electronAppPath ?? process.argv[1];
     this.readiness = new CliReadinessService(debugLogs, {
       manualEnvironment: async () => (await manualReadinessEnvironment?.())?.env ?? {}
     });
@@ -2190,7 +2207,7 @@ export class CliAgentRunner {
         const configPath = path.join(configDir, "mcp_config.json");
         await syncGeminiMcpConfig(configPath, {
           command: process.execPath,
-          args: geminiMcpProxyLaunchArgs()
+          args: geminiMcpProxyLaunchArgs(Boolean(process.defaultApp), this.electronAppPath)
         });
         return undefined;
       } catch (error) {

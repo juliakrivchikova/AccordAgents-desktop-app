@@ -351,6 +351,30 @@ test("syncGeminiMcpConfig: malformed existing config remains byte-for-byte uncha
   }
 });
 
+test("syncGeminiMcpConfig: empty existing config is initialized without a warning", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accordagents-gemini-config-empty-"));
+  try {
+    for (const [name, original] of [["empty", ""], ["whitespace", " \n\t"]] as const) {
+      const configPath = path.join(dir, `${name}.json`);
+      await writeFile(configPath, original, "utf8");
+      await syncGeminiMcpConfig(configPath, {
+        command: "/Applications/AccordAgents.app/Contents/MacOS/AccordAgents",
+        args: ["--accordagents-gemini-mcp-proxy"]
+      });
+      assert.deepEqual(JSON.parse(await readFile(configPath, "utf8")), {
+        mcpServers: {
+          accord_agents: {
+            command: "/Applications/AccordAgents.app/Contents/MacOS/AccordAgents",
+            args: ["--accordagents-gemini-mcp-proxy"]
+          }
+        }
+      });
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("syncGeminiMcpConfig: preserves foreign keys and servers while installing the packaged launcher", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accordagents-gemini-config-merge-"));
   const configPath = path.join(dir, "mcp_config.json");
@@ -379,6 +403,10 @@ test("geminiMcpProxyLaunchArgs: packaged and default-app launches use the dedica
   assert.deepEqual(geminiMcpProxyLaunchArgs(false, "/repo"), ["--accordagents-gemini-mcp-proxy"]);
   assert.deepEqual(geminiMcpProxyLaunchArgs(true, "/repo"), [path.resolve("/repo"), "--accordagents-gemini-mcp-proxy"]);
   assert.deepEqual(geminiMcpProxyLaunchArgs(true, "."), [path.resolve("."), "--accordagents-gemini-mcp-proxy"]);
+  assert.deepEqual(
+    geminiMcpProxyLaunchArgs(true, "/private/tmp/accordagents-worktree"),
+    ["/private/tmp/accordagents-worktree", "--accordagents-gemini-mcp-proxy"]
+  );
 });
 
 test("compactGeminiSession: aborts when resume recovery started a fresh conversation", async () => {
