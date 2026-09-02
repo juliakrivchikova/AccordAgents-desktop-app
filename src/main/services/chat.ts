@@ -253,6 +253,7 @@ interface ChatPromptSectionSizes {
   promptContext: number;
   trigger: number;
   addressee: number;
+  mentionTrigger: number;
   skills: number;
   mentions: number;
   attachments: number;
@@ -7415,6 +7416,7 @@ export class ChatService {
     ].join("\n\n");
     const promptContextBlock = options.promptContextBlock ?? "";
     const addresseeBlock = this.multiParticipantAddresseePromptSection(conversation, triggerMessage);
+    const mentionTriggerBlock = this.mentionTriggerPromptSection(conversation);
     const skillsBlock = this.skillMentionsPromptSection(triggerMessage, participant.kind);
     const mentionsBlock = this.repoFileMentionsPromptSection(
       triggerMessage,
@@ -7443,6 +7445,7 @@ export class ChatService {
       promptContextBlock,
       triggerBlock,
       addresseeBlock,
+      mentionTriggerBlock,
       skillsBlock,
       mentionsBlock,
       attachmentsBlock,
@@ -7461,6 +7464,7 @@ export class ChatService {
         promptContext: promptContextBlock.length,
         trigger: triggerBlock.length,
         addressee: addresseeBlock.length,
+        mentionTrigger: mentionTriggerBlock.length,
         skills: skillsBlock.length,
         mentions: mentionsBlock.length,
         attachments: attachmentsBlock.length,
@@ -7544,6 +7548,17 @@ export class ChatService {
       "",
       "Reply only \"Noted\" if:",
       "- the message is addressed to another participant, even if my handle appears inside the requested action."
+    ].join("\n");
+  }
+
+  private mentionTriggerPromptSection(conversation: Conversation): string {
+    if (this.chatParticipants(conversation).length <= 1) {
+      return "";
+    }
+    return [
+      "Writing another participant's handle:",
+      "- An @handle in your message is a request for that participant to run, not a reference to them.",
+      "- To name a participant without asking them to run, use their plain name or wrap the handle in backticks."
     ].join("\n");
   }
 

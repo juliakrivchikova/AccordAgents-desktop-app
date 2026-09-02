@@ -255,6 +255,48 @@ test("buildPrompt addressee guidance ignores non-participant mentions and select
   assert.match(prompt, /Selected skills for this turn/);
 });
 
+test("buildPrompt warns that writing a handle triggers that participant", () => {
+  const drew = chatParticipant({}, { id: "participant-drew", handle: "drew" });
+  const taylor = chatParticipant({}, { id: "participant-taylor", handle: "taylor" });
+  const conversation = chatConversation([drew, taylor], "/repo");
+  const triggerMessage = userMessage("trigger-1", "@drew what do you think?");
+  conversation.messages.push(triggerMessage);
+  const service = testService({ canRequestPermissions: true }).service as any;
+  const prompt = service.buildPrompt(conversation, drew, chatSession(drew), triggerMessage, "/workspace", false, {
+    includeRoleInstructions: false,
+    agentMode: "default",
+    permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
+  }) as string;
+
+  assert.match(prompt, /Writing another participant's handle:/);
+  assert.match(prompt, /is a request for that participant to run, not a reference to them/);
+  assert.match(prompt, /use their plain name or wrap the handle in backticks/);
+
+  // The block rides along on every participant turn, so it has to stay small.
+  const parts = service.buildPromptParts(conversation, drew, chatSession(drew), triggerMessage, "/workspace", false, {
+    includeRoleInstructions: false,
+    agentMode: "default",
+    permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
+  }) as { sections: { mentionTrigger: number } };
+  assert.ok(parts.sections.mentionTrigger > 0, "mentionTrigger section should be measured");
+  assert.ok(parts.sections.mentionTrigger < 260, `mentionTrigger section too large: ${parts.sections.mentionTrigger}`);
+});
+
+test("buildPrompt omits handle-trigger guidance when nobody else can be triggered", () => {
+  const drew = chatParticipant({}, { id: "participant-drew", handle: "drew" });
+  const conversation = chatConversation([drew], "/repo");
+  const triggerMessage = userMessage("trigger-1", "@drew what do you think?");
+  conversation.messages.push(triggerMessage);
+  const service = testService({ canRequestPermissions: true }).service as any;
+  const prompt = service.buildPrompt(conversation, drew, chatSession(drew), triggerMessage, "/workspace", false, {
+    includeRoleInstructions: false,
+    agentMode: "default",
+    permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
+  }) as string;
+
+  assert.doesNotMatch(prompt, /Writing another participant's handle:/);
+});
+
 test("sendMessage clears running and emits terminal error when participant run fails", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant], "/repo");
