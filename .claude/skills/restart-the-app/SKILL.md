@@ -48,9 +48,9 @@ Then prove that exactly one current Electron main process exists, started after
 the request and detached from the agent process tree:
 
 ```bash
-APP_BIN="/Users/ysvetlichnaya/IdeaProjects/AccordAgents/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
-APP_PATTERN="^${APP_BIN//./\\.}( |$)"
-APP_PIDS=$(pgrep -f "$APP_PATTERN" || true)
+REPO=$(git rev-parse --show-toplevel)
+APP_BIN="$REPO/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+APP_PIDS=$(ps -axo pid=,command= | awk -v bin="$APP_BIN" '$2 == bin { print $1 }')
 set -- $APP_PIDS
 if [ "$#" -ne 1 ]; then
   echo "ERROR: expected one Electron process, found $#"
