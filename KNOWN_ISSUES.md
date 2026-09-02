@@ -10,7 +10,7 @@
 
 ## Automatic chat titles reject Cyrillic-only text
 
-- **Status:** Open
+- **Status:** Fixed, verified 2026-09-02
 - **Observed:** 2026-08-19. Calling `app_chat_set_title` with `Почему греется компьютер` returned `ignored: invalid_title`, leaving the title as `Chat`.
-- **Cause:** `isUsefulAutoChatTitle` in `src/shared/chatTitles.ts` requires at least one ASCII letter or digit via `/[A-Za-z0-9]/`, so valid titles written only in Cyrillic or other non-Latin scripts are rejected.
-- **Next step:** Validate useful titles with Unicode letters/numbers and add coverage for Cyrillic and other supported scripts while preserving generic-title and provider-name rejection.
+- **Cause:** `isUsefulAutoChatTitle` in `src/shared/chatTitles.ts` required at least one ASCII letter or digit via `/[A-Za-z0-9]/`, so valid titles written only in Cyrillic or other non-Latin scripts were rejected.
+- **Fix:** `isUsefulAutoChatTitle` now accepts any Unicode letter or number (`/[\p{L}\p{N}]/u`). Checked against the built module on 2026-09-02: `Почему греется компьютер` is kept, while generic titles and provider names such as `Claude` are still rejected.
