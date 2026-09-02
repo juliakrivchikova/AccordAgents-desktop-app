@@ -154,7 +154,11 @@ const chatSearchService = new ChatSearchService(storageService, debugLogService)
 const localFileOpenerService = new LocalFileOpenerService(storageService, settingsService);
 const providerRunner = new ProviderRunner();
 setCommandDebugLogger(debugLogService);
-const cliAgentRunner = new CliAgentRunner(debugLogService, () => settingsService.getManualAgentEnvironment());
+const cliAgentRunner = new CliAgentRunner(
+  debugLogService,
+  () => settingsService.getManualAgentEnvironment(),
+  { electronAppPath: app.getAppPath() }
+);
 void settingsService.getCliAgentRunTimeoutMs()
   .then((timeoutMs) => cliAgentRunner.setRunTimeoutMs(timeoutMs))
   .catch((error) => {

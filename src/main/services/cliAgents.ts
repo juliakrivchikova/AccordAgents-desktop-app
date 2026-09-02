@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants, type Dirent } from "node:fs";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import type {
@@ -82,6 +82,7 @@ const MODEL_CATALOG_CACHE_MS = 5 * 60_000;
 const MODEL_CATALOG_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_TIMEOUT_MS = 8_000;
 const CLAUDE_WINDOWS_MODEL_PROBE_TIMEOUT_MS = 12_000;
+const CLAUDE_MODEL_PROBE_MAX_OUTPUT_BYTES = 256 * 1024;
 const CLAUDE_EXECUTABLE_ENV = "ACCORD_AGENTS_CLAUDE_EXECUTABLE";
 const ANTIGRAVITY_EXECUTABLE_ENV = "ACCORD_AGENTS_ANTIGRAVITY_EXECUTABLE";
 const NATIVE_GOAL_IDLE_WARNING_MS = 5 * 60_000;
@@ -117,7 +118,8 @@ const ANTIGRAVITY_GOAL_CANCEL_GRACE_MS = 2_500;
 const ANTIGRAVITY_CONVERSATION_RE = /agy --conversation=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 // eslint-disable-next-line no-control-regex
 const ANSI_ESCAPE_RE = /[\u001b\u009b][[\]()#;?]*(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*)?\u0007|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
-const ANTIGRAVITY_EXPECT_PROGRAM = `
+export function antigravityExpectProgram(): string {
+  return `
   set timeout -1
   set goal $env(${ANTIGRAVITY_GOAL_ENV})
   set args {}
@@ -126,7 +128,7 @@ const ANTIGRAVITY_EXPECT_PROGRAM = `
     lappend args $env($key)
   }
   set stty_init "rows 40 columns 120"
-  spawn -noecho -- $env(${ANTIGRAVITY_EXECUTABLE_ENV}) {*}$args -i $goal
+  spawn -noecho $env(${ANTIGRAVITY_EXECUTABLE_ENV}) {*}$args -i $goal
   set child $spawn_id
   log_user 0
   fconfigure stdin -translation binary -encoding binary -blocking 0
@@ -149,6 +151,9 @@ const ANTIGRAVITY_EXPECT_PROGRAM = `
   set result [wait -i $child]
   exit [lindex $result 3]
 `;
+}
+
+const ANTIGRAVITY_EXPECT_PROGRAM = antigravityExpectProgram();
 
 export function resolveCodexCompactTimeoutMs(requestedTimeoutMs: number | undefined): number {
   return typeof requestedTimeoutMs === "number" && requestedTimeoutMs > 0
@@ -468,6 +473,8 @@ type ClaudeModelProbePtySpawn = (
   options: { name: string; cols: number; rows: number; cwd: string; env: Record<string, string> }
 ) => ClaudeModelProbePty;
 
+type ClaudeModelProbeExpectSpawn = typeof spawnCommand;
+
 interface ClaudeModelProbePtyOptions {
   executable: string;
   env: NodeJS.ProcessEnv;
@@ -477,6 +484,23 @@ interface ClaudeModelProbePtyOptions {
   initialDelayMs?: number;
   pickerSettleDelayMs?: number;
   exitDelayMs?: number;
+  maxOutputBytes?: number;
+}
+
+interface ClaudeModelProbeExpectOptions {
+  executable: string;
+  env: NodeJS.ProcessEnv;
+  cwd: string;
+  expectScript: string;
+  spawnExpect?: ClaudeModelProbeExpectSpawn;
+  expectCommand?: string;
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+}
+
+interface CliAgentRunnerOptions {
+  codexExecutable?: string;
+  electronAppPath?: string;
 }
 
 class CliGeminiResumeMissError extends Error {
@@ -572,6 +596,106 @@ export function parseClaudeModelPickerOutput(output: string): ProviderModel[] {
   return dedupeProviderModels(models);
 }
 
+export function claudeModelProbeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const probeEnv: NodeJS.ProcessEnv = {
+    ...env,
+    [CLAUDE_CODE_SKIP_PROMPT_HISTORY_ENV]: "1"
+  };
+  delete probeEnv[CLAUDE_CODE_FORCE_SESSION_PERSISTENCE_ENV];
+  return probeEnv;
+}
+
+export async function resolveClaudeModelProbeCwd(probeCwd?: string): Promise<string> {
+  const candidate = probeCwd?.trim();
+  if (!candidate) {
+    return process.cwd();
+  }
+  const info = await stat(candidate).catch(() => undefined);
+  return info?.isDirectory() ? candidate : process.cwd();
+}
+
+export function runClaudeModelProbeWithExpect({
+  executable,
+  env,
+  cwd,
+  expectScript,
+  spawnExpect = spawnCommand,
+  expectCommand = "expect",
+  timeoutMs = CLAUDE_MODEL_PROBE_TIMEOUT_MS,
+  maxOutputBytes = CLAUDE_MODEL_PROBE_MAX_OUTPUT_BYTES
+}: ClaudeModelProbeExpectOptions): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const child = spawnExpect(expectCommand, ["-c", expectScript], {
+      cwd,
+      env: {
+        ...claudeModelProbeEnv(env),
+        [CLAUDE_EXECUTABLE_ENV]: executable
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+
+    let output = "";
+    let stderr = "";
+    let capturedBytes = 0;
+    let finished = false;
+
+    const finish = (error?: Error): void => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      clearTimeout(timeout);
+      if (!child.killed && child.exitCode === null) {
+        child.kill("SIGTERM");
+      }
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(output);
+    };
+
+    const capture = (chunk: unknown, destination: "output" | "stderr"): void => {
+      const value = String(chunk);
+      capturedBytes += Buffer.byteLength(value);
+      if (capturedBytes > maxOutputBytes) {
+        finish(new Error(`Claude model picker probe exceeded ${maxOutputBytes} bytes of output.`));
+        return;
+      }
+      if (destination === "output") {
+        output += value;
+      } else {
+        stderr += value;
+      }
+    };
+
+    const timeout = setTimeout(() => {
+      if (parseClaudeModelPickerOutput(output).length > 0) {
+        finish();
+        return;
+      }
+      finish(new Error(`Claude model picker probe timed out${stderr.trim() ? `: ${stderr.trim().slice(0, MAX_CLI_ERROR_CHARS)}` : ""}`));
+    }, timeoutMs);
+    timeout.unref();
+
+    child.stdout.on("data", (chunk) => capture(chunk, "output"));
+    child.stderr.on("data", (chunk) => capture(chunk, "stderr"));
+    child.once("error", (error) => finish(error));
+    child.once("exit", (code) => {
+      if (finished) {
+        return;
+      }
+      if (code === 0) {
+        finish();
+        return;
+      }
+      finish(new Error(`Claude model picker probe exited with code ${code ?? "unknown"}${stderr.trim() ? `: ${stderr.trim().slice(0, MAX_CLI_ERROR_CHARS)}` : ""}`));
+    });
+  });
+}
+
 export function runClaudeModelProbeInPty({
   executable,
   env,
@@ -580,10 +704,12 @@ export function runClaudeModelProbeInPty({
   timeoutMs = CLAUDE_WINDOWS_MODEL_PROBE_TIMEOUT_MS,
   initialDelayMs = 1_500,
   pickerSettleDelayMs = 750,
-  exitDelayMs = 250
+  exitDelayMs = 250,
+  maxOutputBytes = CLAUDE_MODEL_PROBE_MAX_OUTPUT_BYTES
 }: ClaudeModelProbePtyOptions): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     let output = "";
+    let capturedBytes = 0;
     let modelCommandScheduled = false;
     let pickerObserved = false;
     let pickerClosed = false;
@@ -601,8 +727,7 @@ export function runClaudeModelProbeInPty({
 
     let terminal: ClaudeModelProbePty;
     try {
-      const probeEnv: NodeJS.ProcessEnv = { ...env, [CLAUDE_CODE_SKIP_PROMPT_HISTORY_ENV]: "1" };
-      delete probeEnv[CLAUDE_CODE_FORCE_SESSION_PERSISTENCE_ENV];
+      const probeEnv = claudeModelProbeEnv(env);
       terminal = spawnPty(executable, ["--safe-mode", "--no-chrome"], {
         name: "xterm-256color",
         cols: 120,
@@ -649,6 +774,11 @@ export function runClaudeModelProbeInPty({
     timers.add(timeout);
 
     dataSubscription = terminal.onData((data) => {
+      capturedBytes += Buffer.byteLength(data);
+      if (capturedBytes > maxOutputBytes) {
+        finish(new Error(`Claude model picker probe exceeded ${maxOutputBytes} bytes of output.`));
+        return;
+      }
       output += data;
       const plainOutput = stripAnsi(output);
       if (/Quick\s+safety\s+check|Yes,?\s+I\s+trust\s+this\s+folder/i.test(plainOutput)) {
@@ -740,11 +870,16 @@ export async function syncGeminiMcpConfig(
 ): Promise<void> {
   let config: Record<string, unknown>;
   try {
-    const parsed = JSON.parse(await readFile(configPath, "utf8")) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("Antigravity MCP config must contain a JSON object.");
+    const contents = await readFile(configPath, "utf8");
+    if (!contents.trim()) {
+      config = {};
+    } else {
+      const parsed = JSON.parse(contents) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Antigravity MCP config must contain a JSON object.");
+      }
+      config = parsed as Record<string, unknown>;
     }
-    config = parsed as Record<string, unknown>;
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
       throw error;
@@ -780,6 +915,8 @@ export function geminiMcpProxyLaunchArgs(
 
 export class CliAgentRunner {
   private readonly readiness: CliReadinessService;
+  private readonly codexExecutable: string;
+  private readonly electronAppPath: string | undefined;
   private readonly warmAgents = new Map<string, WarmAgentEntry>();
   private readonly warmUnsupportedLogged = new Set<ParticipantConfig["kind"]>();
   private readonly modelCatalogs = new Map<ChatProviderKind, CachedModelCatalog>();
@@ -795,9 +932,15 @@ export class CliAgentRunner {
   constructor(
     private readonly debugLogs?: CliAgentDebugLogger,
     manualReadinessEnvironment?: () => Promise<{ env: NodeJS.ProcessEnv }>,
-    private readonly codexExecutable = "codex",
-    private readonly claudeModelProbePtySpawn?: ClaudeModelProbePtySpawn
+    codexExecutableOrOptions: string | CliAgentRunnerOptions = "codex",
+    private readonly claudeModelProbePtySpawn?: ClaudeModelProbePtySpawn,
+    private readonly claudeModelProbeExpectSpawn: ClaudeModelProbeExpectSpawn = spawnCommand
   ) {
+    const options = typeof codexExecutableOrOptions === "string"
+      ? { codexExecutable: codexExecutableOrOptions }
+      : codexExecutableOrOptions;
+    this.codexExecutable = options.codexExecutable ?? "codex";
+    this.electronAppPath = options.electronAppPath ?? process.argv[1];
     this.readiness = new CliReadinessService(debugLogs, {
       manualEnvironment: async () => (await manualReadinessEnvironment?.())?.env ?? {}
     });
@@ -1187,75 +1330,31 @@ export class CliAgentRunner {
     await ensureLoginShellEnvPrimed();
     const env = commandEnvironment(undefined, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
     const claudeExecutable = await resolveCommandPath("claude", env);
+    const cwd = await resolveClaudeModelProbeCwd(probeCwd);
     if (process.platform === "win32") {
       const spawnPty = this.claudeModelProbePtySpawn ?? (await import("node-pty")).spawn;
       return runClaudeModelProbeInPty({
         executable: claudeExecutable,
         env,
-        cwd: probeCwd?.trim() || process.cwd(),
+        cwd,
         spawnPty
       });
     }
-    return new Promise<string>((resolve, reject) => {
-      const child = spawnCommand("expect", ["-c", this.claudeModelProbeExpectScript()], {
-        env: { ...env, [CLAUDE_EXECUTABLE_ENV]: claudeExecutable },
-        stdio: ["pipe", "pipe", "pipe"]
-      });
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-
-      let output = "";
-      let stderr = "";
-      let finished = false;
-
-      const finish = (error?: Error): void => {
-        if (finished) {
-          return;
-        }
-        finished = true;
-        clearTimeout(timeout);
-        if (!child.killed && child.exitCode === null) {
-          child.kill("SIGTERM");
-        }
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(output);
-      };
-
-      const timeout = setTimeout(() => {
-        finish(new Error(`Claude model picker probe timed out${stderr.trim() ? `: ${this.errorText(stderr)}` : ""}`));
-      }, CLAUDE_MODEL_PROBE_TIMEOUT_MS);
-      timeout.unref();
-
-      child.stdout.on("data", (chunk) => {
-        output += String(chunk);
-      });
-      child.stderr.on("data", (chunk) => {
-        stderr += String(chunk);
-      });
-      child.once("error", (error) => finish(error));
-      child.once("exit", (code) => {
-        if (finished) {
-          return;
-        }
-        if (code === 0) {
-          finish();
-          return;
-        }
-        if (code !== 0) {
-          finish(new Error(`Claude model picker probe exited with code ${code ?? "unknown"}${stderr.trim() ? `: ${this.errorText(stderr)}` : ""}`));
-        }
-      });
+    return runClaudeModelProbeWithExpect({
+      executable: claudeExecutable,
+      env,
+      cwd,
+      expectScript: this.claudeModelProbeExpectScript(),
+      spawnExpect: this.claudeModelProbeExpectSpawn
     });
   }
 
-  private claudeModelProbeExpectScript(): string {
+  private claudeModelProbeExpectScript(spawnArguments = "--safe-mode --no-chrome"): string {
     return [
       "set timeout 8",
+      "set stty_init \"rows 40 columns 120\"",
       "log_user 1",
-      `spawn -- $env(${CLAUDE_EXECUTABLE_ENV}) --safe-mode --no-chrome`,
+      `spawn $env(${CLAUDE_EXECUTABLE_ENV}) ${spawnArguments}`,
       "expect {",
       "  -re \".\" {}",
       "  timeout { exit 124 }",
@@ -1271,6 +1370,7 @@ export class CliAgentRunner {
       "send \"\\033\"",
       "after 250",
       "send \"/exit\\r\"",
+      "set timeout 2",
       "expect {",
       "  eof {}",
       "  timeout { exit 0 }",
@@ -2107,7 +2207,7 @@ export class CliAgentRunner {
         const configPath = path.join(configDir, "mcp_config.json");
         await syncGeminiMcpConfig(configPath, {
           command: process.execPath,
-          args: geminiMcpProxyLaunchArgs()
+          args: geminiMcpProxyLaunchArgs(Boolean(process.defaultApp), this.electronAppPath)
         });
         return undefined;
       } catch (error) {
