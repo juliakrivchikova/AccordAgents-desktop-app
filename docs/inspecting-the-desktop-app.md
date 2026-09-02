@@ -224,18 +224,16 @@ codesign --verify --deep --strict --verbose=2 \
   node_modules/electron/dist/Electron.app
 ```
 
-With npm 11, `npm rebuild electron` can print `rebuilt dependencies
-successfully` while also warning that Electron is not covered by
-`allowScripts`; in that case the postinstall did not run. Run the repair once,
-with foreground output, and repeat all three checks:
+An npm 11 `allowScripts` warning is advisory; it does not prove that Electron's
+postinstall was skipped. When the binary is missing or incomplete, rebuild once
+with foreground output and repeat all three checks:
 
 ```bash
-npm rebuild electron --foreground-scripts --dangerously-allow-all-scripts
+npm rebuild electron --foreground-scripts
 ```
 
-This command is scoped to the installed `electron` package and does not add an
-`allowScripts` policy to the repository. Do not accept the success line as
-proof: the file and signature checks are the completion gate.
+Do not accept the success line as proof: the file and signature checks are the
+completion gate.
 
 If the worktree copy is still incomplete, do not keep repeating the install.
 Use `node_modules/electron/cli.js` from another AccordAgents checkout only after
@@ -333,8 +331,9 @@ curl -sS --max-time 2 "http://127.0.0.1:$QA_PORT/json" | \
 ```
 
 Report the label, PID, port, profile directory, and log path. Leave the job
-running when the user asked to use it; for a temporary QA job, stop only the
-exact label and confirm its CDP port is closed:
+running when the user asked to use it. Because `launchctl submit` can respawn a
+process after the app is closed or killed, neither action stops the job. For a
+temporary QA job, stop only the exact label and confirm its CDP port is closed:
 
 ```bash
 launchctl remove "$QA_LABEL"

@@ -99,12 +99,12 @@ codesign --verify --deep --strict --verbose=2 \
   node_modules/electron/dist/Electron.app
 ```
 
-On npm 11, plain `npm rebuild electron` can report success while warning that
-the postinstall is not covered by `allowScripts`. Repair once with visible
-script output, then repeat all three checks:
+An npm 11 `allowScripts` warning is advisory; it does not prove that Electron's
+postinstall was skipped. When the binary is missing or incomplete, rebuild once
+with visible script output, then repeat all three checks:
 
 ```bash
-npm rebuild electron --foreground-scripts --dangerously-allow-all-scripts
+npm rebuild electron --foreground-scripts
 ```
 
 Do not trust the success line without the file and signature checks. If the
@@ -154,8 +154,10 @@ Never pass `node_modules/.bin/electron` to `launchctl`: its
 is also not sufficient under provider session cleanup.
 
 Verify `launchctl print "gui/$(id -u)/$QA_LABEL"`, the CDP version endpoint,
-and an `AccordAgents` page target before reporting success. Stop a temporary
-job with `launchctl remove "$QA_LABEL"`; never use broad Electron kills.
+and an `AccordAgents` page target before reporting success. A submitted job can
+respawn after its process is closed or killed, so those actions do not stop it.
+Stop a temporary job only with `launchctl remove "$QA_LABEL"`; never use broad
+Electron kills.
 
 ## Blocked Standard
 
