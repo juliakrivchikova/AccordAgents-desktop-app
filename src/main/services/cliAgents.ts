@@ -118,7 +118,8 @@ const ANTIGRAVITY_GOAL_CANCEL_GRACE_MS = 2_500;
 const ANTIGRAVITY_CONVERSATION_RE = /agy --conversation=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 // eslint-disable-next-line no-control-regex
 const ANSI_ESCAPE_RE = /[\u001b\u009b][[\]()#;?]*(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*)?\u0007|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
-const ANTIGRAVITY_EXPECT_PROGRAM = `
+export function antigravityExpectProgram(): string {
+  return `
   set timeout -1
   set goal $env(${ANTIGRAVITY_GOAL_ENV})
   set args {}
@@ -127,7 +128,7 @@ const ANTIGRAVITY_EXPECT_PROGRAM = `
     lappend args $env($key)
   }
   set stty_init "rows 40 columns 120"
-  spawn -noecho -- $env(${ANTIGRAVITY_EXECUTABLE_ENV}) {*}$args -i $goal
+  spawn -noecho $env(${ANTIGRAVITY_EXECUTABLE_ENV}) {*}$args -i $goal
   set child $spawn_id
   log_user 0
   fconfigure stdin -translation binary -encoding binary -blocking 0
@@ -150,6 +151,9 @@ const ANTIGRAVITY_EXPECT_PROGRAM = `
   set result [wait -i $child]
   exit [lindex $result 3]
 `;
+}
+
+const ANTIGRAVITY_EXPECT_PROGRAM = antigravityExpectProgram();
 
 export function resolveCodexCompactTimeoutMs(requestedTimeoutMs: number | undefined): number {
   return typeof requestedTimeoutMs === "number" && requestedTimeoutMs > 0

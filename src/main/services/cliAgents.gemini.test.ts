@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { ParticipantConfig } from "../../shared/types";
 import {
+  antigravityExpectProgram,
   antigravityInteractiveGoalAtPrompt,
   antigravityInteractivePermissionPrompt,
   CliAgentRunner,
@@ -229,6 +230,69 @@ test("Antigravity native goal recognizes the read-only TUI permission dialog", (
     antigravityInteractivePermissionPrompt("Requesting permission for:\n pwd\nDo you want to proceed?"),
     true
   );
+});
+
+test("Antigravity native goal executes its generated program through system Expect", { timeout: 10_000 }, async (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("macOS system Expect integration");
+    return;
+  }
+  try {
+    await access("/usr/bin/expect");
+  } catch {
+    t.skip("/usr/bin/expect is unavailable");
+    return;
+  }
+
+  const script = antigravityExpectProgram();
+  assert.match(script, /spawn -noecho \$env\(ACCORD_AGENTS_ANTIGRAVITY_EXECUTABLE\)/);
+  assert.doesNotMatch(script, /spawn -noecho --/);
+
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-antigravity-goal-"));
+  const stubPath = path.join(fixtureDir, "agy-stub.sh");
+  try {
+    await writeFile(stubPath, `#!/bin/sh
+if test -t 0; then printf 'STUB_TTY=yes\\r\\n'; else printf 'STUB_TTY=no\\r\\n'; fi
+printf 'STUB_SIZE=%s\\r\\n' "$(stty size 2>/dev/null)"
+printf 'STUB_ARGS=%s\\r\\n' "$*"
+printf 'Generating...\\r\\nFINAL\\r\\n? for shortcuts\\r\\n'
+`, "utf8");
+
+    const child = spawn("/usr/bin/expect", ["-c", script], {
+      cwd: fixtureDir,
+      env: {
+        ...process.env,
+        ACCORD_AGENTS_ANTIGRAVITY_EXECUTABLE: "/bin/sh",
+        ACCORD_AGENTS_NATIVE_GOAL_PROMPT: "verify goal",
+        ACCORD_AGENTS_NATIVE_GOAL_ARG_COUNT: "1",
+        ACCORD_AGENTS_NATIVE_GOAL_ARG_0: stubPath,
+        TERM: "xterm-256color"
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let output = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { output += chunk; });
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, 5_000);
+    const [code] = await once(child, "close") as [number | null, NodeJS.Signals | null];
+    clearTimeout(timeout);
+
+    assert.equal(timedOut, false);
+    assert.equal(code, 0, stderr);
+    assert.match(output, /STUB_TTY=yes/);
+    assert.match(output, /STUB_SIZE=40 120/);
+    assert.match(output, /STUB_ARGS=-i verify goal/);
+    assert.match(output, /Generating\.\.\.[\s\S]*FINAL[\s\S]*\? for shortcuts/);
+  } finally {
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
 });
 
 test("extractGeminiLogConversationId reads interactive PTY conversation creation", () => {
